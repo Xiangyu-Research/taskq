@@ -1,6 +1,6 @@
 #!/bin/bash
 # 大批数据从 box 传到 lab：box 临时开一个 Cloudflare 隧道，lab 用 curl 并行下载（约 25 MB/s；普通 ssh 只有 1–2 MB/s）。
-# 数据会经过 Cloudflare：每次使用前都要用户明确同意。
+# 数据会经过 Cloudflare：每次使用前确认。
 #
 # 在 box 上运行（会跑几十分钟，放在 tmux 里或后台）：
 #   scripts/sync/tunnel_to_lab.sh <box 上的源目录> <lab 上的目标目录（相对 home）> <子目录>...
