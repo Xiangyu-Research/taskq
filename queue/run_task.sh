@@ -75,7 +75,7 @@ while true; do
     if ! gpu_free; then
         log "卡 $GPU 被占，5 分钟后再看"; sleep 300 & wait $!; continue
     fi
-    bash "$TRAIN" "$FOLD" "$TRAINER" < /dev/null &
+    RQ1_DATASET=$DS bash "$TRAIN" "$FOLD" "$TRAINER" < /dev/null &
     pid=$!
     log "开始 / 接着训：$JOB（进程 $pid）"
     e0= t0=$(stat -c %Y "$CK" 2> /dev/null || echo 0) why=

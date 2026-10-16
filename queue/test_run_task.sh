@@ -11,6 +11,7 @@ cat > "$T/train.sh" << EOF2
 #!/bin/bash
 # 假训练：从上次的 epoch 接着训，到 \${FAKE_EPOCHS:-1000} 个训完
 mkdir -p $OUT; L=$OUT/training_log_\$(date +%s%N).txt
+echo "\$RQ1_DATASET" > $T/dataset
 e=\$(cat $OUT/epoch 2> /dev/null || echo 0)
 while (( e < \${FAKE_EPOCHS:-1000} )); do
     echo "x: Epoch \$e " >> \$L; e=\$((e + 1)); sleep 0.1
@@ -27,6 +28,7 @@ run() { bash "$HERE/train_task.sh" 999 0 "$@" > "$T/log" 2>&1; }
 
 echo 1200 > "$T/clock"; run --epochs 25; rc=$?
 check "训满 25 个 epoch 后存盘停" 75 $rc '(( $(cat $OUT/epoch) >= 25 && $(cat $OUT/epoch) <= 40 ))'
+check "数据集编号传给训练脚本（RQ1_DATASET）" 75 $rc '[[ $(cat $T/dataset) == 999 ]]'
 echo 1000 > "$T/clock"; run --window night; check "夜班任务白天不开始" 75 $?
 echo 0300 > "$T/clock"; ( sleep 2; echo 0945 > "$T/clock" ) & e0=$(cat $OUT/epoch); run --window night; rc=$?
 check "夜班 09:40 后存盘停" 75 $rc "(( \$(cat $OUT/epoch) > $e0 )) && grep -q 存盘后停 $T/log"
