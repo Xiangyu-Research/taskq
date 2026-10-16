@@ -21,6 +21,7 @@
   事件类（任务失败）推送一次；状态类（盘、卡住、连不上……）恢复后再推送一次"已恢复"。
 文件：~/.config/phd-health/ntfy_topic（ntfy 频道名，不进仓库）、~/.cache/phd-health/state.json（问题和推送记录，
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
+训练机的卡快空了时自动从待办里补任务（scripts/queue/refill.py），补了什么作为事件推送。
 另外给每台训练机（角色 train）写 ~/.cache/phd/claimed_elsewhere.txt：别的机器在训的折、别的 Slurm 集群上排着的折，
   每行"key<TAB>机器"，开训前读（scripts/queue/train_task.sh、research/RQ1/nnunet/train_folds.sbatch），防止同一折两处训练。
 """
@@ -38,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
 sys.path.insert(0, os.path.join(REPO, "envs"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
 import make_registry as mr  # noqa: E402  收集各机器训练状态的函数、SPEC、DS
 
@@ -53,7 +55,7 @@ PAUSED_OK = ("Failed (75)",)  # train_task.sh 训满 N 个 epoch 停了、还没
 STOPPED = ("Failed (143)", "Killed")  # 手动停的：只记进登记表，不推送
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
-SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r'; echo '=====';"
+SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y'; echo '=====';"
                " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
 
 
@@ -64,6 +66,8 @@ def probe_script(m):
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
+    if "train" in m["roles"]:  # 已经有哪些预处理好的数据集（scripts/queue/refill.py 判断要不要先传数据）
+        lines.append(f'echo "PREP|$(ls {m["data"]}/nnUNet/preprocessed 2>/dev/null | tr \'\\n\' \' \')"')
     if "autopull" in m["roles"]:
         lines.append('echo "GITOK|$(cat ~/.cache/phd/git_pull_ok 2>/dev/null)"')
         lines.append('echo "GITLOG|$(tail -1 ~/git_pull.log 2>/dev/null)"')
@@ -124,7 +128,7 @@ def gather():
             ok = rc == 0 and "=====" in out
             if ok:
                 q, a = out.split("=====", 1)
-                s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 4],
+                s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 5],  # 作业名、号、状态、已跑、原因、Nice
                                         sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
         else:
             rc, out = run_on(m, probe_script(m))
@@ -175,7 +179,7 @@ def check(s):
     # --- Slurm ---
     jk = job_keys()
     for name, d in s["slurm"].items():
-        for jname, jid, st, el, why in d["squeue"]:
+        for jname, jid, st, el, why, *_ in d["squeue"]:
             key = jk.get(jname)
             if not key:
                 continue
@@ -414,13 +418,21 @@ def main():
         return
     s = gather()
     P, claims = check(s)
+    import refill  # scripts/queue/refill.py：训练机的卡快空了就自动补任务
+    events, filled = refill.run_all(s, dry=a.dry_run)
+    if not a.dry_run:
+        for i, msg in enumerate(events):
+            P[f"refill:{s['now']:%m%d%H%M}:{i}"] = dict(msg=msg, level="normal", kind="event", after=0)
+        for pid in [k for k in P if k.startswith("idle:") and k.split(":")[1] in filled]:
+            del P[pid]
     update(P, s["now"], dry=a.dry_run)
     if a.dry_run:
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
         for n, items in claims.items():
-            print(f"\n写给 {n} 的清单（这里不训）：{items}")
+            print(f"\n写给 {n} 的清单（这里不训）：{len(items)} 折")
+        print("\n自动补任务：" + "；".join(events))
         return
     for n, items in claims.items():
         write_claims(n, items, s["now"])
