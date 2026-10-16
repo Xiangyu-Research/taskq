@@ -6,7 +6,15 @@
 set -euo pipefail
 P=~/.local/bin/pueue
 [[ -x $P ]] || bash "$(dirname "$0")/install_pueue.sh"
-$P status > /dev/null 2>&1 || { setsid -f ~/.local/bin/pueued -d > /dev/null 2>&1 < /dev/null; sleep 2; }
+# socket 固定放在 ~/.local/share/pueue（默认跟着 XDG_RUNTIME_DIR 走：ssh 登录时是 /run/user/<uid>，cron 里没有这个变量，
+# 两边会对不上；lab 没开 linger，/run/user/<uid> 在所有登录都结束后还会被删掉）
+D=$HOME/.local/share/pueue CFG=~/.config/pueue/pueue.yml
+mkdir -p "$D" "$(dirname "$CFG")"
+if [[ -f $CFG ]]; then sed -i "s|^  runtime_directory: .*|  runtime_directory: $D|" "$CFG"; else printf 'shared:\n  runtime_directory: %s\n' "$D" > "$CFG"; fi
+if ! $P status > /dev/null 2>&1; then
+    rm -f "$D/pueue_$(whoami).socket"  # 过渡用的链接（指向旧位置）或上次留下的
+    setsid -f ~/.local/bin/pueued -d > /dev/null 2>&1 < /dev/null; sleep 2
+fi
 case $(hostname -s) in
     hub-host) groups="gpu:1 cpu:2 wait:8" ;;
     lab-host*) groups="gpu1:1 gpu0:1 cpu:1 wait:4" ;;
