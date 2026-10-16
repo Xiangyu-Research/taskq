@@ -28,6 +28,10 @@ case $WIN in
 esac
 REPO=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 source "$REPO/envs/nnunet_paths.sh"
+# 只给 test_train_task.sh 用：假的 nvidia-smi 和训练脚本，结果写到临时目录
+if [[ -n ${QUEUE_TEST_DIR:-} ]]; then export PATH=$QUEUE_TEST_DIR/bin:$PATH nnUNet_results=$QUEUE_TEST_DIR nnUNet_preprocessed=$QUEUE_TEST_DIR; fi
+TRAIN=${QUEUE_TEST_TRAIN:-$REPO/research/RQ1/nnunet/train_folds.sbatch}
+POLL=${QUEUE_TEST_POLL:-10}
 GPU=${CUDA_VISIBLE_DEVICES:?要先设 CUDA_VISIBLE_DEVICES（用 q 加任务会自动设）}
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
@@ -71,7 +75,7 @@ while true; do
     if ! gpu_free; then
         log "卡 $GPU 被占，5 分钟后再看"; sleep 300 & wait $!; continue
     fi
-    bash "$REPO/research/RQ1/nnunet/train_folds.sbatch" "$FOLD" "$TRAINER" < /dev/null &
+    bash "$TRAIN" "$FOLD" "$TRAINER" < /dev/null &
     pid=$!
     log "开始 / 接着训：$JOB（进程 $pid）"
     e0= t0=$(stat -c %Y "$CK" 2> /dev/null || echo 0) why=
@@ -82,9 +86,9 @@ while true; do
         if [[ $t1 != "$t0" ]]; then  # 刚存完盘
             t0=$t1 e=$(last_epoch)
             if [[ -n $N && -n $e0 && -n $e ]] && (( e - e0 >= N )); then why="训满 $N 个 epoch"; elif soft_due; then why="到 $SOFT"; fi
-            if [[ -n $why ]]; then sleep 20; stop_train $pid; log "存盘后停（$why，第 $e0 → $e 个 epoch）"; exit 75; fi
+            if [[ -n $why ]]; then sleep "${QUEUE_TEST_SAVE_WAIT:-20}"; stop_train $pid; log "存盘后停（$why，第 $e0 → $e 个 epoch）"; exit 75; fi
         fi
-        sleep 10 & wait $!
+        sleep "$POLL" & wait $!
     done
     wait $pid; rc=$?; pid=
     done_ && { log "训完：$JOB"; exit 0; }
