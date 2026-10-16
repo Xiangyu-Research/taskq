@@ -29,6 +29,12 @@ run() { bash "$HERE/train_task.sh" 999 0 "$@" > "$T/log" 2>&1; }
 echo 1200 > "$T/clock"; run --epochs 25; rc=$?
 check "训满 25 个 epoch 后存盘停" 75 $rc '(( $(cat $OUT/epoch) >= 25 && $(cat $OUT/epoch) <= 40 ))'
 check "数据集编号传给训练脚本（RQ1_DATASET）" 75 $rc '[[ $(cat $T/dataset) == 999 ]]'
+export QUEUE_DICC_ACTIVE=$T/dicc_active.txt
+printf '# test\nDataset999_test/nnUNetTrainer_save10/0\n' > "$QUEUE_DICC_ACTIVE"
+echo 1200 > "$T/clock"; run --epochs 5; check "DICC 上排着这一折时不训（退出码 3）" 3 $? "grep -q 先取消 $T/log"
+touch -d '3 hours ago' "$QUEUE_DICC_ACTIVE"
+echo 1200 > "$T/clock"; run --epochs 5; check "DICC 清单过期时照常训，日志里警告" 75 $? "grep -q 警告 $T/log"
+rm -f "$QUEUE_DICC_ACTIVE"
 echo 1000 > "$T/clock"; run --window night; check "夜班任务白天不开始" 75 $?
 echo 0300 > "$T/clock"; ( sleep 2; echo 0945 > "$T/clock" ) & e0=$(cat $OUT/epoch); run --window night; rc=$?
 check "夜班 09:40 后存盘停" 75 $rc "(( \$(cat $OUT/epoch) > $e0 )) && grep -q 存盘后停 $T/log"

@@ -6,7 +6,9 @@
 #   --window night：lab 0 号卡夜班。09:40–20:00 之间存盘后停，10:00 还没停就直接停；白天被启动时不训，直接退出 75。
 #   --window day：0 号卡白天加跑（每次单独确认）。19:30 后存盘后停，19:55 直接停，不挡夜班。
 # 退出码：0 训完（有 checkpoint_final.pth 和验证结果）；75 按规则停了、还没训完（夜班任务由 gpu0_gate.sh 晚上放回队列）；
+#   3 = DICC 上排着或在训这一折（同一折不在两处训，要在这里训先取消 DICC 的作业）；
 #   其他 = 出错（训练连续出错 3 次才算，每次隔 5 分钟）。
+# DICC 上排着或在训的折由 scripts/monitor/health.py 每 30 分钟写到 ~/.cache/phd/dicc_active.txt；文件超过 2 小时没更新时照常训，只在日志里警告。
 # 停这个任务用 pueue kill -s SIGTERM <任务号>：会先停训练（最多丢 10 个 epoch）再退出。
 set -u
 DS=${1:?用法：train_task.sh <数据集编号> <fold> [训练器] [--epochs N] [--window night|day]} FOLD=${2:?} ; shift 2
@@ -64,6 +66,13 @@ last_epoch() {  # 本次启动后新写的训练日志里最后一个 epoch 编�
     [[ -n $L ]] && grep -oE ": Epoch [0-9]+ *$" "$L" | tail -1 | grep -oE "[0-9]+"
 }
 
+ACTIVE=${QUEUE_DICC_ACTIVE:-$HOME/.cache/phd/dicc_active.txt}
+KEY=$(basename "$DIR")/$TRAINER/$FOLD
+on_dicc() {  # DICC 上排着或在训这一折
+    [[ -f $ACTIVE ]] || return 1
+    if [[ -z $(find "$ACTIVE" -mmin -120) ]]; then log "警告：$ACTIVE 超过 2 小时没更新，不能确认 DICC 上有没有这一折"; return 1; fi
+    grep -qxF "$KEY" "$ACTIVE"
+}
 JOB="数据集 $DS fold $FOLD $TRAINER（卡 $GPU${N:+，训 $N 个 epoch}${WIN:+，$WIN}）"
 done_ && { log "已经训完：$JOB"; exit 0; }
 MARK=$(mktemp); trap 'rm -f "$MARK"' EXIT
@@ -72,6 +81,7 @@ trap '[[ -n $pid ]] && { log "收到停止信号，停训练"; stop_train $pid; 
 errors=0
 while true; do
     soft_due && { log "已到 $SOFT，不开始：$JOB"; exit 75; }
+    on_dicc && { log "DICC 上排着或在训这一折（$KEY，见 $ACTIVE），不在这里训；要在这里训，先取消 DICC 的作业"; exit 3; }
     if ! gpu_free; then
         log "卡 $GPU 被占，5 分钟后再看"; sleep 300 & wait $!; continue
     fi
