@@ -41,12 +41,18 @@ def task(i, group, status, cmd, label="", start=NOW - timedelta(hours=3), end=No
 
 
 def snap(**kw):
-    s = dict(now=NOW, dicc_ok=True, lab_ok=True, squeue=[], sacct=[], box_free=500e9,
-             lab={"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "GITOK": str(int((NOW - timedelta(minutes=20)).timestamp())), "GITLOG": ""},
-             src={"box": {"folds": {}}, "lab": {"folds": {}}, "DICC": {"folds": {}}},
+    s = dict(now=NOW, ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=[], sacct=[])},
+             probe={"box": {"DISK": str(int(500e9)), "BOOT": "2026-10-01 08:00:00|"},
+                    "lab": {"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "BOOT": "2026-10-01 08:00:00|",
+                            "GITOK": str(int((NOW - timedelta(minutes=20)).timestamp())), "GITLOG": ""}},
+             src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {}}},
              pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": []}})
     s.update(kw)
     return s
+
+
+def sq(*rows):
+    return {"dicc": dict(squeue=[list(r) for r in rows], sacct=[])}
 
 
 def ids(s):
@@ -61,64 +67,86 @@ s = snap(pueue={"box": {"groups": {}, "tasks": [
     task(2, "cpu", "DependencyFailed", "python y", "oof_a", end=NOW - timedelta(hours=1)),
     task(3, "gpu", "Failed (1)", "bash z", "old", end=NOW - timedelta(hours=30)),
     task(4, "cpu", "Failed (143)", "bash w", "stopped", end=NOW - timedelta(hours=1))]},
-    "lab": {"groups": {}, "tasks": [task(5, "gpu0", "Failed (75)", "bash scripts/queue/train_task.sh 101 0 nnUNetTrainer_UMambaEnc --window night", "umamba_f0", end=NOW - timedelta(hours=2))]}})
-P, _, lab_active = H.check(s)
+    "lab": {"groups": {}, "tasks": [task(5, "gpu1", "Failed (75)", "bash scripts/queue/train_task.sh 101 0 nnUNetTrainer_UMambaEnc --epochs 50", "umamba_f0", end=NOW - timedelta(hours=2))]}})
+P, claims = H.check(s)
 ok("任务失败、依赖失败都报", any(p.startswith("pueue:box:1:") for p in P) and any(p.startswith("pueue:box:2:") for p in P))
 ok("24 小时前的失败不再报", not any(p.startswith("pueue:box:3:") for p in P))
 ok("手动停的（143）只记不推", [p["level"] for k, p in P.items() if k.startswith("pueue:box:4:")] == ["info"])
-ok("夜班按规则停（75）不报，并算作 lab 在训", not any(k.startswith("pueue:lab") for k in P)
-   and "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/0" in lab_active)
+ok("训满 N 个 epoch 停的（75）不报，也不算在训", not any(k.startswith("pueue:lab") for k in P)
+   and not any(k == "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/0" for k, _ in claims["dicc"]))
 
-s = snap(squeue=[["rq1_t3met_f2", "486189_1", "RUNNING", "3:00:00", "None"]],
-         src={"box": {"folds": {}}, "lab": {"folds": {}}, "DICC": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
+s = snap(slurm=sq(["rq1_t3met_f2", "486189_1", "RUNNING", "3:00:00", "None"]),
+         src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
 ok("DICC 在跑但 90 分钟没有新 epoch → 卡住", "stuck:dicc:486189_1" in ids(s))
-s["squeue"][0][3] = "40:00"
+s["slurm"]["dicc"]["squeue"][0][3] = "40:00"
 ok("刚开始不到 1 小时的不算卡住", "stuck:dicc:486189_1" not in ids(s))
-s = snap(squeue=[["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"]],
-         src={"box": {"folds": {}}, "lab": {"folds": {}}, "DICC": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
-ok("DICC 排队的折也写给 lab（要在 lab 训先取消 DICC 作业）", MET2 in H.check(s)[1])
-s = snap(sacct=[["486300_1", "rq1_t14met_f0", "FAILED", "2026-10-16T11:00:00", "1:0"]])
+s = snap(slurm=sq(["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"]),
+         src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
+ok("DICC 排队的折也写给 lab（要在 lab 训先取消 DICC 作业）", (MET2, "DICC") in H.check(s)[1]["lab"])
+ok("DICC 自己的清单里没有自己排着的折", H.check(s)[1]["dicc"] == [])
+s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "rq1_t14met_f0", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
 ok("DICC 作业失败", "dicc:486300_1" in ids(s))
 
 lab_train = task(7, "gpu1", "Running", "bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470", "t15men_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
-         src={"box": {"folds": {}}, "DICC": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
+ok("lab 在训的折写给 DICC", (MEN0, "lab") in H.check(s)[1]["dicc"])
 s["src"]["lab"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 
 fetch = task(9, "wait", "Running", "bash scripts/queue/fetch_fold.sh dicc Dataset116_METrq1/nnUNetTrainer_save10__nnUNetResEncUNetMPlans__3d_fullres 2", "fetch_t3met_f2")
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}})
 ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
-s["squeue"] = [["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"]]
+s["slurm"] = sq(["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"])
 ok("在等的折在 DICC 排着 → 不报", f"orphan:{MET2}" not in ids(s))
-s["dicc_ok"] = False
-ok("DICC 连不上时不判断是否在排队", f"orphan:{MET2}" not in ids(s) and "down:dicc" in ids(s))
+s["slurm"], s["ok"]["dicc"] = {}, False
+ok("DICC 连不上时不判断是否在排队，也不写清单", f"orphan:{MET2}" not in ids(s) and "down:dicc" in ids(s) and H.check(s)[1] == {})
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}},
-         src={"box": {"folds": {}}, "lab": {"folds": {}}, "DICC": {"folds": {MET2: fold(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
+         src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
 ok("训完 90 分钟还没拉回 → 报", f"fetch:{MET2}" in ids(s))
 
-s = snap(squeue=[["rq1_t15men_f0", "486202_1", "PENDING", "0:00", "Priority"]],
+s = snap(slurm=sq(["rq1_t15men_f0", "486202_1", "PENDING", "0:00", "Priority"]),
          pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
-         src={"box": {"folds": {}}, "DICC": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
+         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
 P = H.check(s)[0]
 ok("同一折 DICC 排队 + lab 在训 → 报（不紧急）", P.get(f"dup:{MEN0}", {}).get("level") == "normal")
-s["squeue"][0][2:4] = ["RUNNING", "2:00:00"]
-s["src"]["DICC"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
+s["slurm"]["dicc"]["squeue"][0][2:4] = ["RUNNING", "2:00:00"]
+s["src"]["dicc"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
 ok("同一折两边都在训 → 紧急", H.check(s)[0].get(f"dup:{MEN0}", {}).get("level") == "urgent")
 
 s = snap()
-s["lab"]["DISK"] = str(int(10e9))
-ok("lab 盘不到 15 GB → 紧急", H.check(s)[0]["disk:lab"]["level"] == "urgent")
-s["lab"]["GPULOG"] = ts(NOW - timedelta(minutes=30))
-s["lab"]["GITOK"] = str(int((NOW - timedelta(hours=3)).timestamp()))
-ok("GPU 记录停了、代码没同步 → 报", {"gpulog:lab", "git:lab"} <= ids(s))
+s["probe"]["lab"]["DISK"] = str(int(10e9))
+s["probe"]["box"]["DISK"] = str(int(50e9))
+P = H.check(s)[0]
+ok("lab 盘不到 15 GB → 紧急；box 盘不到 100 GB → 提醒", P["disk:lab"]["level"] == "urgent" and P["disk:box"]["level"] == "normal")
+s["probe"]["lab"]["GPULOG"] = ts(NOW - timedelta(minutes=30))
+s["probe"]["lab"]["GITOK"] = str(int((NOW - timedelta(hours=3)).timestamp()))
+ok("GPU 记录停了、代码没同步 → 报（只查表里有的机器）", {"gpulog:lab", "git:lab"} <= ids(s) and "git:box" not in ids(s))
 
-s = snap(box_boot=ts(NOW - timedelta(hours=2)), box_bootlog=["2026-10-16 10:01:00 开机：放回队列 3 4"], board_pending=["data/rq1_v50.json"])
-s["lab"]["BOOT"] = "2026-10-01 08:00:00|"
+s = snap(board_pending=["data/rq1_v50.json"])
+s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00 开机：放回队列 3 4"
 P = H.check(s)[0]
 ok("box 重启过 → 报（带上放回的任务），lab 很久前重启的不报", [p["msg"] for k, p in P.items() if k.startswith("boot:")] == ["box 10-16 10:00 重启过：开机：放回队列 3 4"])
 ok("看板有结果等确认 → 报", "board" in P)
+
+# ---------------- 第四台机器：只在表里加一项 ----------------
+H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
+                            groups={"gpu0": (1, "0", {})}, roles=("train", "autopull"), disk=("/data", 50, 10), gpu_log=False)
+fk = task(3, "gpu0", "Running", "bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470", "t15men_f0_fake")
+s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
+         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "fake": {"folds": {}},
+              "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
+s["ok"]["fake"] = True
+s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|", "GITOK": "", "GITLOG": ""}
+P, claims = H.check(s)
+ok("第四台机器：同一折和 lab 两边都在训 → 紧急", P.get(f"dup:{MEN0}", {}).get("level") == "urgent")
+ok("第四台机器：清单互相写、DICC 收到两台的", (MEN0, "lab") in claims["fake"] and (MEN0, "fake") in claims["lab"]
+   and {(MEN0, "lab"), (MEN0, "fake")} <= set(claims["dicc"]))
+ok("第四台机器：盘、代码同步按表里的字段查", P["disk:fake"]["level"] == "urgent" and "git:fake" in P and "gpulog:fake" not in P)
+s["ok"]["fake"] = False
+ok("第四台机器连不上：报，且不写清单", "down:fake" in ids(s) and H.check(s)[1] == {})
+del H.M.MACHINES["fake"]
 
 # ---------------- 推送规则 ----------------
 d = tempfile.mkdtemp()

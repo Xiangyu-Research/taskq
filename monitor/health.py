@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""box、lab、DICC 的健康检查（2026-10-16）：box 上 cron 每 30 分钟跑一次，发现问题推送到手机（ntfy），
+"""各台机器（envs/machines.py）的健康检查（2026-10-16）：box 上 cron 每 30 分钟跑一次，发现问题推送到手机（ntfy），
 同时记进状态文件，make_registry.py 把当前的问题放在实验登记表最上面（"需要处理"）。
 
     python3 scripts/monitor/health.py              检查、推送、更新状态
@@ -7,27 +7,26 @@
     python3 scripts/monitor/health.py --test       推送一条测试消息
 
 查什么（每项一个问题编号，同一个问题只推送一次）：
-  - pueue：box、lab 的常驻进程连不上；任务失败或因依赖失败没跑（按规则停的退出码 75、手动停的 143 / Killed 不算）。
-  - DICC：过去 24 小时 FAILED / OUT_OF_MEMORY / NODE_FAIL 的作业（到时限停的段不算）；连续 1 小时连不上。
-  - 训练卡住：DICC 在跑的作业、lab 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
-  - 拉回：box 上在等的折既没训完、也不在 DICC 或 lab 上排队 / 训练；或者训完 90 分钟了还没拉回。
-  - 同一折两处：同一折在 DICC 上排队 / 在跑、同时在 lab 的队列里。两边都已经开训（或有段间、夜班间的进度）算紧急。
-  - 盘：lab /mnt/disk1 剩不到 40 GB（不到 15 GB 紧急），box 数据盘剩不到 100 GB。
-  - lab：GPU 使用记录（scripts/monitor/gpu_log.sh，0 号卡夜班开关靠它）10 分钟没有新记录；代码自动同步 2 小时没成功。
-  - box、lab 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
+  - 连不上：ssh 不通（pueue 机器 30 分钟、Slurm 集群 1 小时后才报）。
+  - pueue：常驻进程连不上；任务失败或因依赖失败没跑（训满 N 个 epoch 停的退出码 75、手动停的 143 / Killed 不算）。
+  - Slurm：过去 24 小时 FAILED / OUT_OF_MEMORY / NODE_FAIL 的作业（到时限停的段不算）。
+  - 训练卡住：Slurm 在跑的作业、pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
+  - 拉回：box 上在等的折既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
+  - 同一折两处：同一折在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
+  - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
+  - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；代码自动同步（角色 autopull）2 小时没成功。
+  - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
 提醒：22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时和每日汇总一起发（每天一条，没有问题也发，说明检查本身在跑）。
   事件类（任务失败）推送一次；状态类（盘、卡住、连不上……）恢复后再推送一次"已恢复"。
 文件：~/.config/phd-health/ntfy_topic（ntfy 频道名，不进仓库）、~/.cache/phd-health/state.json（问题和推送记录，
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
-另外把"正在训练"的清单写到对方机器上，开训前读（防止同一折两处训练）：
-  lab ~/.cache/phd/dicc_active.txt（DICC 上排队或在跑的折：要在 lab 训，先取消 DICC 的作业）← scripts/queue/train_task.sh 读
-  DICC ~/.cache/phd/lab_active.txt（lab 在跑、或夜班停着等晚上接着训的折）← research/RQ1/nnunet/train_folds.sbatch 读
+另外给每台训练机（角色 train）写 ~/.cache/phd/claimed_elsewhere.txt：别的机器在训的折、别的 Slurm 集群上排着的折，
+  每行"key<TAB>机器"，开训前读（scripts/queue/train_task.sh、research/RQ1/nnunet/train_folds.sbatch），防止同一折两处训练。
 """
 import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -37,29 +36,37 @@ from datetime import datetime, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
+sys.path.insert(0, os.path.join(REPO, "envs"))
+import machines as M  # noqa: E402
 import make_registry as mr  # noqa: E402  收集各机器训练状态的函数、SPEC、DS
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
 LOG = os.path.expanduser("~/.cache/phd-health/health.log")
 TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
-PRUNE_LOG = os.path.expanduser("~/prune_lab.log")
+PRUNE_LOG = os.path.expanduser("~/archive_prune.log")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
-BT = os.environ.get("BRAIN_TUMOR", "/data/others/BRAIN_TUMOR")
+CLAIMS = "~/.cache/phd/claimed_elsewhere.txt"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
-PAUSED_OK = ("Failed (75)",)  # train_task.sh 按规则停了、还没训完
+PAUSED_OK = ("Failed (75)",)  # train_task.sh 训满 N 个 epoch 停了、还没训完
 STOPPED = ("Failed (143)", "Killed")  # 手动停的：只记进登记表，不推送
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
-LAB_PROBE = r"""
-echo "DISK|$(df -B1 --output=avail /mnt/disk1 | tail -1 | tr -d ' ')"
-echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"
-echo "GITOK|$(cat ~/.cache/phd/git_pull_ok 2>/dev/null)"
-echo "GITLOG|$(tail -1 ~/git_pull.log 2>/dev/null)"
-echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"
-"""
-DICC_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r'; echo '=====';"
-              " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
+SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r'; echo '=====';"
+               " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
+
+
+def probe_script(m):
+    """pueue 机器上要查的东西（按表里的字段），每行"项|值"。"""
+    lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"']
+    if m["disk"]:
+        lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
+    if m["gpu_log"]:
+        lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
+    if "autopull" in m["roles"]:
+        lines.append('echo "GITOK|$(cat ~/.cache/phd/git_pull_ok 2>/dev/null)"')
+        lines.append('echo "GITLOG|$(tail -1 ~/git_pull.log 2>/dev/null)"')
+    return "\n".join(lines) + "\n"
 
 
 def sh(cmd, inp=None, timeout=120):
@@ -70,9 +77,13 @@ def sh(cmd, inp=None, timeout=120):
         return 1, str(e)
 
 
+def run_on(m, script, timeout=120):
+    return sh(["bash", "-s"] if m["ssh"] is None else SSH + [m["ssh"], "bash -s"], inp=script, timeout=timeout)
+
+
 # ---------------- 收集 ----------------
 def job_keys():
-    """DICC 作业名 → key（数据集/训练器/fold），按 make_registry.SPEC。"""
+    """Slurm 作业名 → key（数据集/训练器/fold），按 make_registry.SPEC。"""
     out = {}
     for _, _, _, dsid, tr, folds, tag in mr.SPEC:
         for f in folds:
@@ -96,35 +107,34 @@ def task_key(cmd):
     m = re.search(r"train_task\.sh\s+(\d+)\s+(\S+)(?:\s+(?!--)(\S+))?", cmd)
     if m and int(m.group(1)) in mr.DS:
         return "train", f"{mr.DS[int(m.group(1))]}/{m.group(3) or 'nnUNetTrainer_save10'}/{m.group(2)}"
-    m = re.search(r"fetch_fold\.sh\s+(dicc|lab)\s+(\S+)/(\S+?)__\S+\s+(\S+)", cmd)
+    m = re.search(r"fetch_fold\.sh\s+(\S+)\s+(\S+)/(\S+?)__\S+\s+(\S+)", cmd)
     if m:
         return "fetch:" + m.group(1), f"{m.group(2)}/{m.group(3)}/{m.group(4)}"
     return None, None
 
 
 def gather():
-    s = dict(now=datetime.now())
+    s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={})
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
-    s["pueue"] = json.loads(out) if rc == 0 else {"box": {"error": out}, "lab": {"error": out}}
-    rc, out = sh(SSH + ["dicc", DICC_PROBE])
-    s["dicc_ok"] = rc == 0 and "=====" in out
-    s["squeue"], s["sacct"] = [], []
-    if s["dicc_ok"]:
-        q, a = out.split("=====", 1)
-        s["squeue"] = [ln.split("|") for ln in q.splitlines() if ln.count("|") == 4]
-        s["sacct"] = [ln.split("|") for ln in a.splitlines() if ln.count("|") == 4]
-    rc, out = sh(SSH + ["lab", "bash -s"], inp=LAB_PROBE)
-    s["lab_ok"] = rc == 0 and "DISK|" in out
-    s["lab"] = dict(ln.split("|", 1) for ln in out.splitlines() if "|" in ln) if s["lab_ok"] else {}
-    s["src"] = {"box": mr.collect(os.path.join(BT, "nnUNet", "results"))}
-    for host, root in [("lab", "~/BRAIN_TUMOR/nnUNet/results"), ("DICC", "~/st/BRAIN_TUMOR/nnUNet/results")]:
-        ok = s["lab_ok"] if host == "lab" else s["dicc_ok"]
-        r = mr.remote_collect(host.lower(), root) if ok else None
-        if r:
-            s["src"][host] = r
-    s["box_free"] = shutil.disk_usage(BT).free
-    s["box_boot"] = subprocess.run(["uptime", "-s"], capture_output=True, text=True).stdout.strip()
-    s["box_bootlog"] = open(os.path.expanduser("~/on_boot.log")).read().splitlines()[-1:] if os.path.exists(os.path.expanduser("~/on_boot.log")) else []
+    s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
+    for name, m in M.MACHINES.items():
+        if m["scheduler"] == "slurm":
+            rc, out = run_on(m, SLURM_PROBE)
+            ok = rc == 0 and "=====" in out
+            if ok:
+                q, a = out.split("=====", 1)
+                s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 4],
+                                        sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
+        else:
+            rc, out = run_on(m, probe_script(m))
+            ok = rc == 0 and "BOOT|" in out
+            if ok:
+                s["probe"][name] = dict(ln.split("|", 1) for ln in out.splitlines() if "|" in ln)
+        s["ok"][name] = ok
+        if ok:
+            r = mr.collect(M.expand(M.results(name))) if m["ssh"] is None else mr.remote_collect(m["ssh"], M.results(name))
+            if r:
+                s["src"][name] = r
     s["board_pending"] = open(H_PENDING).read().split() if os.path.exists(H_PENDING) else []
     return s
 
@@ -143,124 +153,134 @@ def fold_info(s, key):
 
 # ---------------- 检查 ----------------
 def check(s):
-    """→ {问题编号: dict(msg, level=urgent|normal|info, kind=event|state, after=持续多少分钟才算)}，
-    以及写给对方机器的清单 dicc_active、lab_active（None = 这次没收集到，不写）。"""
+    """→ ({问题编号: dict(msg, level=urgent|normal|info, kind=event|state, after=持续多少分钟才算)},
+    {训练机: [(key, 在哪台机器)]，写给它的清单；这次没收集全（有训练机连不上）时不在里面})。"""
     now, P = s["now"], {}
+    L = lambda n: M.MACHINES[n]["label"]  # noqa: E731
 
     def add(pid, msg, level="normal", kind="state", after=0):
         P[pid] = dict(msg=msg, level=level, kind=kind, after=after)
 
+    claims = {}  # key → {机器: [描述]}（排队或在训）
+    busy = {}  # key → {机器}：在训，或段间等待（有进度、下一段在排队）
+    queued_slurm = {}  # key → {Slurm 机器}：排着（还没开始也算，要在别处训先取消）
+
+    def claim(key, name, desc):
+        claims.setdefault(key, {}).setdefault(name, []).append(desc)
+
+    for name, m in M.MACHINES.items():
+        if not s["ok"].get(name):
+            add(f"down:{name}", f"{L(name)} 连不上（ssh {m['ssh']}）", after=60 if m["scheduler"] == "slurm" else 30)
+    # --- Slurm ---
     jk = job_keys()
-    # --- DICC ---
-    dicc_claim, dicc_busy = {}, set()  # busy：在跑，或段间等待（有进度、下一段排队）
-    for name, jid, st, el, why in s["squeue"]:
-        key = jk.get(name)
-        if not key:
-            continue
-        dicc_claim.setdefault(key, []).append(f"{jid}（{st}）")
-        info = fold_info(s, key).get("DICC")
-        if st == "RUNNING":
-            dicc_busy.add(key)
-            last = info[2] if info else None
-            if minutes(el) > 60 and (not last or now - last > timedelta(minutes=90)):
-                add(f"stuck:dicc:{jid}", f"DICC {jid}（{key}）开始 {minutes(el) / 60:.1f} 小时，"
-                    f"{'训练日志 90 分钟没有新 epoch' if last else '还没有训练日志'}")
-        elif st == "PENDING" and info and info[1] > 0 and not info[0]:
-            dicc_busy.add(key)
-    if not s["dicc_ok"]:
-        add("down:dicc", "DICC 连不上（ssh dicc）", after=60)
-    for jid, name, st, end, code in s["sacct"]:
-        add(f"dicc:{jid}", f"DICC 作业 {jid} {name} {st}（{end}，退出码 {code}）", kind="event")
+    for name, d in s["slurm"].items():
+        for jname, jid, st, el, why in d["squeue"]:
+            key = jk.get(jname)
+            if not key:
+                continue
+            claim(key, name, f"{jid}（{st}）")
+            queued_slurm.setdefault(key, set()).add(name)
+            info = fold_info(s, key).get(name)
+            if st == "RUNNING":
+                busy.setdefault(key, set()).add(name)
+                last = info[2] if info else None
+                if minutes(el) > 60 and (not last or now - last > timedelta(minutes=90)):
+                    add(f"stuck:{name}:{jid}", f"{L(name)} {jid}（{key}）开始 {minutes(el) / 60:.1f} 小时，"
+                        f"{'训练日志 90 分钟没有新 epoch' if last else '还没有训练日志'}")
+            elif st == "PENDING" and info and info[1] > 0 and not info[0]:
+                busy.setdefault(key, set()).add(name)
+        for jid, jname, st, end, code in d["sacct"]:
+            add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
 
     # --- pueue ---
-    lab_claim, lab_active, waits = {}, set(), []
-    for host in ("box", "lab"):
-        d = s["pueue"].get(host) or {"error": "没有结果"}
+    waits = []
+    for name in M.names("pueue"):
+        if not s["ok"].get(name):
+            continue
+        d = s["pueue"].get(name) or {"error": "没有结果"}
         if "error" in d:
-            if host == "lab" and not s["lab_ok"]:
-                add("down:lab", "lab 连不上（ssh lab）", after=30)
-            else:
-                add(f"pueued:{host}", f"{host} 的 pueue 没有响应：{d['error'][:120]}")
+            add(f"pueued:{name}", f"{L(name)} 的 pueue 没有响应：{d['error'][:120]}")
             continue
         for t in d["tasks"]:
             kind, key = task_key(t["command"])
-            name = t["label"] or f"#{t['id']}"
+            tname = t["label"] or f"#{t['id']}"
             st = t["status"]
-            if host == "lab" and kind == "train":
+            if kind == "train":
                 if st in LIVE:
-                    lab_claim.setdefault(key, []).append(f"任务 {t['id']} {name}（{st}）")
+                    claim(key, name, f"任务 {t['id']} {tname}（{st}）")
                 if st == "Running":
-                    lab_active.add(key)
-                    info = fold_info(s, key).get("lab")
+                    busy.setdefault(key, set()).add(name)
+                    info = fold_info(s, key).get(name)
                     start = mr_time(t["start"])
                     if start and now - start > timedelta(minutes=60) and \
                             (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
-                        add(f"stuck:lab:{t['id']}", f"lab 任务 {t['id']} {name}：90 分钟没有新 epoch（在等卡，或训练卡住）")
-                elif st in PAUSED_OK and t["group"] == "gpu0" and not name.startswith("day"):
-                    lab_active.add(key)  # 夜班停着，晚上由 gpu0_gate.sh 放回队列
-                    lab_claim.setdefault(key, []).append(f"任务 {t['id']} {name}（夜班停着）")
-            if host == "box" and kind and kind.startswith("fetch") and st == "Running":
-                waits.append((t, key, "DICC" if kind == "fetch:dicc" else "lab"))
+                        add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
+            if kind and kind.startswith("fetch:") and st == "Running":
+                waits.append((name, t, key, kind[6:]))
             if st in LIVE or st == "Success" or st in PAUSED_OK:
                 continue
             end = mr_time(t["end"])
             if end and now - end > timedelta(hours=24):
                 continue
-            add(f"pueue:{host}:{t['id']}:{t['end']}", f"{host} 任务 {t['id']} {name} {st}",
+            add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if st in STOPPED else "normal", kind="event")
 
     # --- 拉回 ---
-    for t, key, src in waits:
+    for host, t, key, src in waits:
         start = mr_time(t["start"])
-        if not start or now - start < timedelta(minutes=60):
+        if not start or now - start < timedelta(minutes=60) or src not in M.MACHINES:
             continue
         fin = fold_info(s, key).get(src)
         if fin and fin[0]:
             if fin[2] and now - fin[2] > timedelta(minutes=90):
-                add(f"fetch:{key}", f"{key} 在 {src} 上训完了，box 还没拉回（任务 {t['id']}）")
-        elif s["dicc_ok"] and s["lab_ok"] and key not in dicc_claim and key not in lab_claim:
-            add(f"orphan:{key}", f"box 在等 {key} 训完再拉回（任务 {t['id']}），但它不在 DICC 或 lab 上排队、训练")
+                add(f"fetch:{key}", f"{key} 在 {L(src)} 上训完了，{L(host)} 还没拉回（任务 {t['id']}）")
+        elif s["ok"].get(src) and src not in claims.get(key, {}):
+            add(f"orphan:{key}", f"{L(host)} 在等 {key} 在 {L(src)} 上训完再拉回（任务 {t['id']}），但它不在 {L(src)} 上排队、训练")
 
     # --- 同一折两处 ---
-    if s["dicc_ok"] and s["lab_ok"]:
-        for key in sorted(set(dicc_claim) & set(lab_claim)):
-            both = key in dicc_busy and key in lab_active
-            add(f"dup:{key}", f"同一折在两处：{key}，DICC {'、'.join(dicc_claim[key])}；lab {'、'.join(lab_claim[key])}"
-                + ("（两边都在训或有进度，同步时会互相覆盖存档）" if both else "（还没同时开训，取消一边前要确认作业号）"),
-                level="urgent" if both else "normal")
+    for key in sorted(k for k, v in claims.items() if len(v) >= 2):
+        both = len(busy.get(key, ())) >= 2
+        add(f"dup:{key}", f"同一折在两处：{key}，" + "；".join(f"{L(n)} {'、'.join(v)}" for n, v in claims[key].items())
+            + ("（两边都在训或有进度，同步时会互相覆盖存档）" if both else "（还没同时开训，取消一边前要确认作业号）"),
+            level="urgent" if both else "normal")
 
-    # --- 盘、lab ---
-    if s["lab_ok"]:
-        free = int(s["lab"].get("DISK") or 0) / 1e9
-        if free < 40:
-            add("disk:lab", f"lab /mnt/disk1 只剩 {free:.0f} GB", level="urgent" if free < 15 else "normal")
-        last = s["lab"].get("GPULOG", "")
-        try:
-            age = now - datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            age = None
-        if age is None or age > timedelta(minutes=10):
-            add("gpulog:lab", f"lab GPU 使用记录停了（最后一条 {last or '没有'}），0 号卡夜班开关会一直不开")
-        ok = s["lab"].get("GITOK", "").strip()
-        if not ok.isdigit() or now - datetime.fromtimestamp(int(ok)) > timedelta(hours=2):
-            add("git:lab", f"lab 代码 2 小时没有同步成功：{s['lab'].get('GITLOG', '')[:150] or '没有同步记录'}")
-    boots = [("box", s.get("box_boot", ""), " ".join(s.get("box_bootlog", [])))]
-    if s["lab_ok"]:
-        b = s["lab"].get("BOOT", "").split("|", 1)
-        boots.append(("lab", b[0], b[1] if len(b) > 1 else ""))
-    for host, boot, line in boots:
+    # --- 盘、GPU 记录、代码同步、重启 ---
+    for name, pr in s["probe"].items():
+        m = M.MACHINES[name]
+        if m["disk"] and pr.get("DISK", "").strip().isdigit():
+            free, warn, urgent = int(pr["DISK"]) / 1e9, m["disk"][1], m["disk"][2]
+            if free < warn:
+                add(f"disk:{name}", f"{L(name)} {m['disk'][0]} 只剩 {free:.0f} GB", level="urgent" if urgent and free < urgent else "normal")
+        if m["gpu_log"]:
+            last = pr.get("GPULOG", "")
+            try:
+                age = now - datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                age = None
+            if age is None or age > timedelta(minutes=10):
+                add(f"gpulog:{name}", f"{L(name)} GPU 使用记录停了（最后一条 {last or '没有'}）")
+        if "autopull" in m["roles"]:
+            ok = pr.get("GITOK", "").strip()
+            if not ok.isdigit() or now - datetime.fromtimestamp(int(ok)) > timedelta(hours=2):
+                add(f"git:{name}", f"{L(name)} 代码 2 小时没有同步成功：{pr.get('GITLOG', '')[:150] or '没有同步记录'}")
+        boot, _, line = pr.get("BOOT", "").partition("|")
         try:
             t = datetime.strptime(boot, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
         if now - t < timedelta(hours=24):
-            add(f"boot:{host}:{boot}", f"{host} {t:%m-%d %H:%M} 重启过：{line[20:] or '没有开机记录（on_boot.sh 没跑？）'}", kind="event")
+            add(f"boot:{name}:{boot}", f"{L(name)} {t:%m-%d %H:%M} 重启过：{line[20:] or '没有开机记录（on_boot.sh 没跑？）'}", kind="event")
     if s.get("board_pending"):
         add("board", f"看板有新结果等确认后发布（{len(s['board_pending'])} 个文件：{'、'.join(s['board_pending'][:4])}）")
-    if s["box_free"] / 1e9 < 100:
-        add("disk:box", f"box 数据盘只剩 {s['box_free'] / 1e9:.0f} GB")
 
-    return P, (sorted(dicc_claim) if s["dicc_ok"] else None), (sorted(lab_active) if s["lab_ok"] else None)
+    # --- 写给训练机的清单：别的机器在训的折 + 别的 Slurm 集群上排着的折 ---
+    out = {}
+    train = M.names("train")
+    if all(s["ok"].get(n) for n in train):
+        for n in train:
+            out[n] = sorted({(k, L(o)) for k, v in busy.items() for o in v if o != n} |
+                            {(k, L(o)) for k, v in queued_slurm.items() for o in v if o != n})
+    return P, out
 
 
 def mr_time(x):
@@ -350,14 +370,19 @@ def digest(cur, resolved, prune_pos, now):
             f.seek(prune_pos if prune_pos <= os.path.getsize(PRUNE_LOG) else 0)
             pr = [ln.strip() for ln in f if ln.strip()]
         if pr:
-            lines.append(f"lab 清理 {len(pr)} 条：" + "；".join(pr[-5:]))
+            lines.append(f"归档清理 {len(pr)} 条：" + "；".join(pr[-5:]))
     return "\n".join(lines)
 
 
-def write_active(host, name, keys, now):
-    body = f"# health.py {now:%F %T}（{'DICC' if host == 'lab' else 'lab'} 上排着或正在训练、这里不能同时训的折）\n" + "".join(k + "\n" for k in keys)
-    f = f"~/.cache/phd/{name}"
-    sh(SSH + [host, f"mkdir -p ~/.cache/phd && cat > {f}.tmp && mv {f}.tmp {f}"], inp=body)
+def write_claims(name, items, now):
+    m = M.MACHINES[name]
+    body = (f"# health.py {now:%F %T}：别的机器在训、或 Slurm 上排着的折，{m['label']} 上不训（key<TAB>机器）\n"
+            + "".join(f"{k}\t{w}\n" for k, w in items))
+    cmd = f"mkdir -p ~/.cache/phd && cat > {CLAIMS}.tmp && mv {CLAIMS}.tmp {CLAIMS}"
+    if m["scheduler"] == "slurm":
+        # 10/16 之前提交的作业复制了旧版 train_folds.sbatch，读 lab_active.txt（每行一个 key）；这批作业跑完后去掉
+        cmd += " && cut -f1 " + CLAIMS + " | grep -v '^#' > ~/.cache/phd/lab_active.txt"
+    sh(["bash", "-c", cmd] if m["ssh"] is None else SSH + [m["ssh"], cmd], inp=body)
 
 
 def main():
@@ -370,18 +395,17 @@ def main():
         print("已推送测试消息")
         return
     s = gather()
-    P, dicc_active, lab_active = check(s)
-    msgs, resolved, _ = update(P, s["now"], dry=a.dry_run)
+    P, claims = check(s)
+    update(P, s["now"], dry=a.dry_run)
     if a.dry_run:
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print(f"\nDICC 排队 / 在跑（写给 lab）：{dicc_active}\nlab 在训（写给 DICC）：{lab_active}")
+        for n, items in claims.items():
+            print(f"\n写给 {n} 的清单（这里不训）：{items}")
         return
-    if dicc_active is not None:
-        write_active("lab", "dicc_active.txt", dicc_active, s["now"])
-    if lab_active is not None:
-        write_active("dicc", "lab_active.txt", lab_active, s["now"])
+    for n, items in claims.items():
+        write_claims(n, items, s["now"])
 
 
 if __name__ == "__main__":

@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""查看 box 和 lab 的 pueue 队列（2026-10-16）：每个任务一行，按机器、组排列；已结束的只列最近 24 小时的。
+"""查看各 pueue 机器（envs/machines.py）的队列（2026-10-16）：每个任务一行，按机器、组排列；已结束的只列最近 24 小时的。
 
-    scripts/queue/qs            两台都看（在 box 上运行；lab 经 ssh）
-    scripts/queue/qs box|lab    只看一台
-    scripts/queue/qs --json     机器 → 任务列表（make_registry.py、scripts/monitor/health.py 用）
+    scripts/queue/qs            都看（在 box 上运行；别的机器经 ssh）
+    scripts/queue/qs <机器>     只看一台（如 qs lab）
+    scripts/queue/qs --json     机器 → 任务列表（scripts/monitor/health.py 用）
 wait 组里在跑的任务（等训完再拉回）下面多一行：输出的最后一行（fetch_fold.sh 每小时记远端训到第几个 epoch）。
-单个任务的输出：pueue log <编号>（lab 上：ssh lab ~/.local/bin/pueue log <编号>）。
+单个任务的输出：pueue log <编号>（别的机器上：ssh lab ~/.local/bin/pueue log <编号>）。
 """
 import datetime as dt
 import json
 import os
-import socket
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))), "envs"))
+import machines as M  # noqa: E402
+
 PUEUE = os.path.expanduser("~/.local/bin/pueue")
-HOSTS = {"box": "hub-host", "lab": "lab-host"}
+ME = M.whoami()
 
 
 def status(machine):
-    local = socket.gethostname().startswith(HOSTS[machine])
-    cmd = [PUEUE, "status", "--json"] if local else ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                                                     machine, "~/.local/bin/pueue status --json"]
+    cmd = [PUEUE, "status", "--json"] if machine == ME else ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+                                                             M.MACHINES[machine]["ssh"], "~/.local/bin/pueue status --json"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode:
         raise RuntimeError(r.stderr.strip() or "pueue 没有响应")
@@ -33,8 +34,8 @@ def last_lines(machine, ids):
     if not ids:
         return {}
     cmd = [PUEUE, "log", "--json", "-l", "1", *map(str, ids)]
-    if not socket.gethostname().startswith(HOSTS[machine]):
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", machine, " ".join(["~/.local/bin/pueue"] + cmd[1:])]
+    if machine != ME:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", M.MACHINES[machine]["ssh"], " ".join(["~/.local/bin/pueue"] + cmd[1:])]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         return {int(k): (v.get("output") or "").strip().splitlines()[-1:] for k, v in json.loads(r.stdout).items()}
@@ -62,7 +63,8 @@ def tasks(d):
 def main():
     args = sys.argv[1:]
     as_json = "--json" in args
-    machines = [a for a in args if a in HOSTS] or list(HOSTS)
+    hosts = M.names("pueue")
+    machines = [a for a in args if a in hosts] or hosts
     out = {}
     for m in machines:
         try:

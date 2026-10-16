@@ -1,33 +1,24 @@
 #!/bin/bash
 # pueue 里的训练任务（2026-10-16）：训一折（research/RQ1/nnunet/train_folds.sbatch，--c 从存档接着训），
-# 卡被占时等着；按需要训满 N 个 epoch 或到规定时间后，在下一次存盘（每 10 个 epoch 一次）后停。
-#   train_task.sh <数据集编号> <fold> [训练器，默认 nnUNetTrainer_save10] [--epochs N] [--window night|day]
+# 卡被占时等着；给了 --epochs N 时训满 N 个 epoch 后，在下一次存盘（每 10 个 epoch 一次）后停。
+#   train_task.sh <数据集编号> <fold> [训练器，默认 nnUNetTrainer_save10] [--epochs N]
 # 用哪张卡由 CUDA_VISIBLE_DEVICES 决定（q 按组设好）。
-#   --window night：lab 0 号卡夜班。09:40–20:00 之间存盘后停，10:00 还没停就直接停；白天被启动时不训，直接退出 75。
-#   --window day：0 号卡白天加跑（每次单独确认）。19:30 后存盘后停，19:55 直接停，不挡夜班。
-# 退出码：0 训完（有 checkpoint_final.pth 和验证结果）；75 按规则停了、还没训完（夜班任务由 gpu0_gate.sh 晚上放回队列）；
-#   3 = DICC 上排着或在训这一折（同一折不在两处训，要在这里训先取消 DICC 的作业）；
+# 退出码（scripts/queue/README.md 的"约定"）：0 训完（有 checkpoint_final.pth 和验证结果）；75 训满 N 个 epoch 停了、还没训完；
+#   3 = 别的机器在训这一折，或 Slurm 上排着（同一折不在两处训，要在这里训先停掉那边的）；
 #   其他 = 出错（训练连续出错 3 次才算，每次隔 5 分钟）。
-# DICC 上排着或在训的折由 scripts/monitor/health.py 每 30 分钟写到 ~/.cache/phd/dicc_active.txt；文件超过 2 小时没更新时照常训，只在日志里警告。
+# 别的机器在训的折由 scripts/monitor/health.py 每 30 分钟写到 ~/.cache/phd/claimed_elsewhere.txt；文件超过 2 小时没更新时照常训，只在日志里警告。
 # 停这个任务用 pueue kill -s SIGTERM <任务号>：会先停训练（最多丢 10 个 epoch）再退出。
 set -u
-DS=${1:?用法：train_task.sh <数据集编号> <fold> [训练器] [--epochs N] [--window night|day]} FOLD=${2:?} ; shift 2
+DS=${1:?用法：train_task.sh <数据集编号> <fold> [训练器] [--epochs N]} FOLD=${2:?} ; shift 2
 TRAINER=nnUNetTrainer_save10
 [[ ${1:-} && $1 != --* ]] && { TRAINER=$1; shift; }
-N= WIN=
+N=
 while (( $# )); do
     case $1 in
         --epochs) N=$2; shift 2 ;;
-        --window) WIN=$2; shift 2 ;;
         *) echo "不认识的参数 $1" >&2; exit 2 ;;
     esac
 done
-case $WIN in
-    night) SOFT=${NIGHT_SOFT_STOP:-0940} HARD=${NIGHT_STOP:-1000} END=${NIGHT_START:-2000} ;;
-    day) SOFT=${DAY_SOFT_STOP:-1930} HARD=${DAY_STOP:-1955} END=2400 ;;
-    '') ;;
-    *) echo "--window 只能是 night 或 day" >&2; exit 2 ;;
-esac
 REPO=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 source "$REPO/envs/nnunet_paths.sh"
 # 只给 test_train_task.sh 用：假的 nvidia-smi 和训练脚本，结果写到临时目录
@@ -38,10 +29,6 @@ GPU=${CUDA_VISIBLE_DEVICES:?要先设 CUDA_VISIBLE_DEVICES（用 q 加任务会�
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 log() { echo "$(date '+%F %T') $*"; }
-now() { if [[ -n ${QUEUE_FAKE_CLOCK:-} ]]; then cat "$QUEUE_FAKE_CLOCK"; else date +%H%M; fi; }  # 假时钟只用于测试
-t_in() { local t; t=$((10#$(now))); (( t >= 10#$1 && t < 10#$2 )); }  # 现在是否在 [$1, $2) 里
-soft_due() { [[ -n $WIN ]] && t_in "$SOFT" "$END"; }
-hard_due() { [[ -n $WIN ]] && t_in "$HARD" "$END"; }
 gpu_free() {
     [[ -z $(nvidia-smi -i "$GPU" --query-compute-apps=pid --format=csv,noheader 2> /dev/null | tr -d ' ') ]] &&
         (( $(nvidia-smi -i "$GPU" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ') <= 500 ))
@@ -50,7 +37,7 @@ DIR=$(ls -d "$nnUNet_preprocessed/Dataset${DS}_"* 2> /dev/null | head -1)
 [[ -n $DIR ]] || { echo "没有预处理好的数据集 Dataset${DS}_*" >&2; exit 1; }
 OUT=$nnUNet_results/$(basename "$DIR")/${TRAINER}__nnUNetResEncUNetMPlans__3d_fullres/fold_$FOLD
 CK=$OUT/checkpoint_latest.pth
-done_() { [[ ( -f $OUT/checkpoint_final.pth || -f $OUT/ARCHIVED ) && -f $OUT/validation/summary.json ]]; }  # ARCHIVED：训完、大文件已归档（archive_lab_fold.sh）
+done_() { [[ ( -f $OUT/checkpoint_final.pth || -f $OUT/ARCHIVED ) && -f $OUT/validation/summary.json ]]; }  # ARCHIVED：训完、大文件已归档（archive_fold.sh）
 alive() { local st; st=$(ps -o stat= -p "$1" 2> /dev/null | tr -d ' '); [[ -n $st && $st != Z* ]]; }  # 僵尸不算
 tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; echo "$c"; done; }  # 某进程的所有子孙
 stop_train() {  # 停训练（train_folds.sbatch → python → 数据增强子进程），不停本脚本
@@ -66,37 +53,36 @@ last_epoch() {  # 本次启动后新写的训练日志里最后一个 epoch 编�
     [[ -n $L ]] && grep -oE ": Epoch [0-9]+ *$" "$L" | tail -1 | grep -oE "[0-9]+"
 }
 
-ACTIVE=${QUEUE_DICC_ACTIVE:-$HOME/.cache/phd/dicc_active.txt}
+CLAIMS=${QUEUE_CLAIMS:-$HOME/.cache/phd/claimed_elsewhere.txt}
 KEY=$(basename "$DIR")/$TRAINER/$FOLD
-on_dicc() {  # DICC 上排着或在训这一折
-    [[ -f $ACTIVE ]] || return 1
-    if [[ -z $(find "$ACTIVE" -mmin -120) ]]; then log "警告：$ACTIVE 超过 2 小时没更新，不能确认 DICC 上有没有这一折"; return 1; fi
-    grep -qxF "$KEY" "$ACTIVE"
+elsewhere() {  # 别的机器在训这一折（或 Slurm 上排着）：输出那台机器的名字
+    [[ -f $CLAIMS ]] || return 1
+    if [[ -z $(find "$CLAIMS" -mmin -120) ]]; then log "警告：$CLAIMS 超过 2 小时没更新，不能确认别的机器上有没有这一折" >&2; return 1; fi
+    awk -F'\t' -v k="$KEY" '$1 == k {print $2; f = 1} END {exit !f}' "$CLAIMS"
 }
-JOB="数据集 $DS fold $FOLD $TRAINER（卡 $GPU${N:+，训 $N 个 epoch}${WIN:+，$WIN}）"
+JOB="数据集 $DS fold $FOLD $TRAINER（卡 $GPU${N:+，训 $N 个 epoch}）"
 done_ && { log "已经训完：$JOB"; exit 0; }
 MARK=$(mktemp); trap 'rm -f "$MARK"' EXIT
 pid=
 trap '[[ -n $pid ]] && { log "收到停止信号，停训练"; stop_train $pid; }; exit 143' TERM INT
 errors=0
 while true; do
-    soft_due && { log "已到 $SOFT，不开始：$JOB"; exit 75; }
-    on_dicc && { log "DICC 上排着或在训这一折（$KEY，见 $ACTIVE），不在这里训；要在这里训，先取消 DICC 的作业"; exit 3; }
+    if where=$(elsewhere); then log "$where 上在训或排着这一折（$KEY，见 $CLAIMS），不在这里训；要在这里训，先停掉那边的"; exit 3; fi
     if ! gpu_free; then
         log "卡 $GPU 被占，5 分钟后再看"; sleep 300 & wait $!; continue
     fi
     RQ1_DATASET=$DS bash "$TRAIN" "$FOLD" "$TRAINER" < /dev/null &
     pid=$!
     log "开始 / 接着训：$JOB（进程 $pid）"
-    e0= t0=$(stat -c %Y "$CK" 2> /dev/null || echo 0) why=
+    e0= t0=$(stat -c %Y "$CK" 2> /dev/null || echo 0)
     while alive $pid; do
         [[ -z $e0 ]] && e0=$(last_epoch)
-        if hard_due; then stop_train $pid; log "到 $HARD 直接停（第 $(last_epoch) 个 epoch）"; exit 75; fi
         t1=$(stat -c %Y "$CK" 2> /dev/null || echo 0)
-        if [[ $t1 != "$t0" ]]; then  # 刚存完盘
+        if [[ -n $N && $t1 != "$t0" ]]; then  # 刚存完盘
             t0=$t1 e=$(last_epoch)
-            if [[ -n $N && -n $e0 && -n $e ]] && (( e - e0 >= N )); then why="训满 $N 个 epoch"; elif soft_due; then why="到 $SOFT"; fi
-            if [[ -n $why ]]; then sleep "${QUEUE_TEST_SAVE_WAIT:-20}"; stop_train $pid; log "存盘后停（$why，第 $e0 → $e 个 epoch）"; exit 75; fi
+            if [[ -n $e0 && -n $e ]] && (( e - e0 >= N )); then
+                sleep "${QUEUE_TEST_SAVE_WAIT:-20}"; stop_train $pid; log "存盘后停（训满 $N 个 epoch，第 $e0 → $e 个 epoch）"; exit 75
+            fi
         fi
         sleep "$POLL" & wait $!
     done
