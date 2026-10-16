@@ -1,0 +1,21 @@
+#!/bin/bash
+# 往 pueue 队列里加一个任务（2026-10-16）：按组设好用哪张卡，工作目录是仓库根目录。
+#   q <组> [pueue add 的选项，如 --after 12、--label 名字、--stashed] -- '<命令>'
+# 组（scripts/queue/setup.sh 建的）：
+#   box：gpu（4070，推理）、cpu（分析）、wait（等别的机器训完 + 拉回，可以同时很多个）
+#   lab：gpu1（1 号卡，常规训练）、gpu0（0 号卡，夜班；白天加跑每次单独确认）、cpu、wait
+# gpu 组的任务设 CUDA_VISIBLE_DEVICES 为对应的卡；其他组设为空（看不到卡）。box 的 gpu 组另设 RQ1_WAIT_GPU=600
+# （4070 和 immich 共用，被占时等，最多 10 小时）。
+# 例：q gpu1 --label t15men_f0 -- 'bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470'
+set -euo pipefail
+G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
+REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+case $G in
+    gpu1) export CUDA_VISIBLE_DEVICES=1 ;;
+    gpu0) export CUDA_VISIBLE_DEVICES=0 ;;
+    gpu) export CUDA_VISIBLE_DEVICES=0 RQ1_WAIT_GPU=${RQ1_WAIT_GPU:-600} ;;
+    cpu | wait) export CUDA_VISIBLE_DEVICES= ;;
+    *) echo "没有这个组：$G" >&2; exit 2 ;;
+esac
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"
