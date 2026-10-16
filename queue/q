@@ -4,7 +4,7 @@
 # 组（scripts/queue/setup.sh 建的）：
 #   box：gpu（4070，推理）、cpu（分析）、wait（等别的机器训完 + 拉回，可以同时很多个）
 #   lab：gpu1（1 号卡，常规训练）、gpu0（0 号卡，夜班；白天加跑每次单独确认）、cpu、wait
-# gpu 组的任务设 CUDA_VISIBLE_DEVICES 为对应的卡；其他组设为空（看不到卡）。box 的 gpu 组另设 RQ1_WAIT_GPU=600
+# 每个任务都带上 envs/nnunet_paths.sh 设的数据路径。gpu 组的任务设 CUDA_VISIBLE_DEVICES 为对应的卡；其他组设为空（看不到卡）。box 的 gpu 组另设 RQ1_WAIT_GPU=600
 # （4070 和 immich 共用，被占时等，最多 10 小时）。
 # 例：q gpu1 --label t15men_f0 -- 'bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470'
 set -euo pipefail
@@ -18,4 +18,5 @@ case $G in
     *) echo "没有这个组：$G" >&2; exit 2 ;;
 esac
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
+source "$REPO/envs/nnunet_paths.sh"  # 数据目录、nnUNet_raw / preprocessed / results：直接调 python 的分析任务也要用
 exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"
