@@ -13,6 +13,7 @@
   - 训练卡住：Slurm 在跑的作业、pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
   - 拉回：box 上在等的折既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
   - 同一折两处：同一折在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
+  - 训练机的卡快空了：pueue 训练机（角色 train）上有卡的组里，排着的训练任务没有了（只剩在训的一个，或者全空），该补任务了。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
   - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；代码自动同步（角色 autopull）2 小时没成功。
   - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
@@ -193,7 +194,7 @@ def check(s):
             add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
 
     # --- pueue ---
-    waits = []
+    waits, train_q = [], {}
     for name in M.names("pueue"):
         if not s["ok"].get(name):
             continue
@@ -217,6 +218,8 @@ def check(s):
                         add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
             if kind and kind.startswith("fetch:") and st == "Running":
                 waits.append((name, t, key, kind[6:]))
+            if kind == "train" and st in ("Running", "Queued"):
+                train_q.setdefault((name, t["group"]), []).append((st, tname))
             if st in LIVE or st == "Success" or st in PAUSED_OK:
                 continue
             end = mr_time(t["end"])
@@ -224,6 +227,21 @@ def check(s):
                 continue
             add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if st in STOPPED else "normal", kind="event")
+
+    # --- 训练机的卡快空了 ---
+    for name in M.names("pueue"):
+        m = M.MACHINES[name]
+        if "train" not in m["roles"] or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
+            continue
+        for g, (_, gpu, _) in m["groups"].items():
+            if gpu is None:
+                continue
+            ts = train_q.get((name, g), [])
+            run = [n for st, n in ts if st == "Running"]
+            if not ts:
+                add(f"idle:{name}:{g}", f"{L(name)} {g} 组没有训练任务，{gpu} 号卡空着，该补任务了")
+            elif len(ts) == len(run):
+                add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练，该补任务了")
 
     # --- 拉回 ---
     for host, t, key, src in waits:

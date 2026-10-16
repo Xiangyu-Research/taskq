@@ -40,13 +40,19 @@ def task(i, group, status, cmd, label="", start=NOW - timedelta(hours=3), end=No
                 end=pt(end) if end else None, command=cmd)
 
 
+LAB_BUSY = {"groups": {}, "tasks": [dict(id=90, group="gpu1", status="Running", label="busy_a", deps=[], start=None, end=None,
+                                         command="bash scripts/queue/train_task.sh 101 2 nnUNetTrainer_save10"),
+                                    dict(id=91, group="gpu1", status="Queued", label="busy_b", deps=[], start=None, end=None,
+                                         command="bash scripts/queue/train_task.sh 101 3 nnUNetTrainer_save10")]}
+
+
 def snap(**kw):
     s = dict(now=NOW, ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=[], sacct=[])},
              probe={"box": {"DISK": str(int(500e9)), "BOOT": "2026-10-01 08:00:00|"},
                     "lab": {"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "BOOT": "2026-10-01 08:00:00|",
                             "GITOK": str(int((NOW - timedelta(minutes=20)).timestamp())), "GITLOG": ""}},
              src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {}}},
-             pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": []}})
+             pueue={"box": {"groups": {}, "tasks": []}, "lab": LAB_BUSY})
     s.update(kw)
     return s
 
@@ -83,7 +89,7 @@ ok("刚开始不到 1 小时的不算卡住", "stuck:dicc:486189_1" not in ids(s
 s = snap(slurm=sq(["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"]),
          src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
 ok("DICC 排队的折也写给 lab（要在 lab 训先取消 DICC 作业）", (MET2, "DICC") in H.check(s)[1]["lab"])
-ok("DICC 自己的清单里没有自己排着的折", H.check(s)[1]["dicc"] == [])
+ok("DICC 自己的清单里没有自己排着的折", not any(k == MET2 for k, _ in H.check(s)[1]["dicc"]))
 s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "rq1_t14met_f0", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
 ok("DICC 作业失败", "dicc:486300_1" in ids(s))
 
@@ -129,6 +135,16 @@ s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00
 P = H.check(s)[0]
 ok("box 重启过 → 报（带上放回的任务），lab 很久前重启的不报", [p["msg"] for k, p in P.items() if k.startswith("boot:")] == ["box 10-16 10:00 重启过：开机：放回队列 3 4"])
 ok("看板有结果等确认 → 报", "board" in P)
+
+s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [
+    dict(id=1, group="gpu1", status="Stashed", label="umamba_f0", deps=[], start=None, end=None, command="bash scripts/queue/train_task.sh 101 0 nnUNetTrainer_UMambaEnc")]}})
+s["pueue"]["lab"]["tasks"] = s["pueue"]["lab"]["tasks"][:1]
+ok("lab 1 号卡没有训练任务（暂存的不算）→ 报", "idle:lab:gpu1" in ids(s))
+s["pueue"]["lab"]["tasks"].append(dict(id=2, group="gpu1", status="Running", label="t15men_f4", deps=[], start=None, end=None,
+                                       command="bash scripts/queue/train_task.sh 111 4 nnUNetTrainer_save10_n470"))
+P = H.check(s)[0]
+ok("只剩在训的一个 → 报快空了", "只剩在训的 t15men_f4" in P.get("idle:lab:gpu1", {}).get("msg", ""))
+ok("还有排着的 → 不报", "idle:lab:gpu1" not in ids(snap()))
 
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
