@@ -50,7 +50,7 @@ DIR=$(ls -d "$nnUNet_preprocessed/Dataset${DS}_"* 2> /dev/null | head -1)
 [[ -n $DIR ]] || { echo "没有预处理好的数据集 Dataset${DS}_*" >&2; exit 1; }
 OUT=$nnUNet_results/$(basename "$DIR")/${TRAINER}__nnUNetResEncUNetMPlans__3d_fullres/fold_$FOLD
 CK=$OUT/checkpoint_latest.pth
-done_() { [[ -f $OUT/checkpoint_final.pth && -f $OUT/validation/summary.json ]]; }
+done_() { [[ ( -f $OUT/checkpoint_final.pth || -f $OUT/ARCHIVED ) && -f $OUT/validation/summary.json ]]; }  # ARCHIVED：训完、大文件已归档（archive_lab_fold.sh）
 alive() { local st; st=$(ps -o stat= -p "$1" 2> /dev/null | tr -d ' '); [[ -n $st && $st != Z* ]]; }  # 僵尸不算
 tree() { local c; for c in $(pgrep -P "$1"); do tree "$c"; echo "$c"; done; }  # 某进程的所有子孙
 stop_train() {  # 停训练（train_folds.sbatch → python → 数据增强子进程），不停本脚本
