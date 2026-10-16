@@ -6,7 +6,7 @@
 set -euo pipefail
 P=~/.local/bin/pueue
 [[ -x $P ]] || bash "$(dirname "$0")/install_pueue.sh"
-$P status > /dev/null 2>&1 || { ~/.local/bin/pueued -d > /dev/null 2>&1 < /dev/null; sleep 2; }
+$P status > /dev/null 2>&1 || { setsid -f ~/.local/bin/pueued -d > /dev/null 2>&1 < /dev/null; sleep 2; }
 case $(hostname -s) in
     hub-host) groups="gpu:1 cpu:2 wait:8" ;;
     lab-host*) groups="gpu1:1 gpu0:1 cpu:1 wait:4" ;;
