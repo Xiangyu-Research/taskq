@@ -159,9 +159,11 @@ def q(name, args, run=sh):
     """在某台 pueue 机器上用 scripts/queue/q 加任务 → 任务号。"""
     m = M.MACHINES[name]
     rc, out = run(f"cd {m['repo']} && scripts/queue/q {args}", m["ssh"])
-    if rc or not out.strip().splitlines()[-1].isdigit():
+    # 带 -p 时只输出任务号，不带时是"New task added (id 118)."（10/17 改成两种都认）
+    hit = re.fullmatch(r"(?:New task added \(id )?(\d+)\)?\.?", out.strip().splitlines()[-1].strip()) if out.strip() else None
+    if rc or not hit:
         raise RuntimeError(f"{name} 上加任务失败：{out[-200:]}")
-    return int(out.strip().splitlines()[-1])
+    return int(hit.group(1))
 
 
 def execute(p, name, run=sh):

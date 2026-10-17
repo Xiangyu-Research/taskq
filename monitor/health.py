@@ -420,6 +420,8 @@ def main():
     P, claims = check(s)
     import refill  # scripts/queue/refill.py：训练机的卡快空了就自动补任务
     events, filled = refill.run_all(s, dry=a.dry_run)
+    import companion  # scripts/queue/companion.py：DICC 上每个在训的作业同卡附加一折（10/17）
+    events += companion.run_all(s, dry=a.dry_run)
     if not a.dry_run:
         for i, msg in enumerate(events):
             P[f"refill:{s['now']:%m%d%H%M}:{i}"] = dict(msg=msg, level="normal", kind="event", after=0)
@@ -432,7 +434,7 @@ def main():
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
         for n, items in claims.items():
             print(f"\n写给 {n} 的清单（这里不训）：{len(items)} 折")
-        print("\n自动补任务：" + "；".join(events))
+        print("\n自动补任务、附加训练：" + "；".join(events))
         return
     for n, items in claims.items():
         write_claims(n, items, s["now"])
