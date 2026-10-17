@@ -209,7 +209,10 @@ def check(s):
                 while len(p_) < 3:
                     p_.insert(0, 0)
                 return (int(d_ or 0) * 24 + p_[0]) * 60 + p_[1]
-            run = [r for r in d["squeue"] if r[0].startswith("rq1_") and r[2] == "RUNNING" and mins(r[3]) >= 30]
+            # 按原来的做法训自己那一折的作业（开关打开前就开始的）不算空着：它名下那一折正在训
+            training = {t["key"] for t in tq["tasks"] if t["state"] in ("claimed", "busy")}
+            run = [r for r in d["squeue"] if r[0].startswith("rq1_") and r[2] == "RUNNING" and mins(r[3]) >= 30
+                   and jk.get(r[0]) not in training]
             workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
