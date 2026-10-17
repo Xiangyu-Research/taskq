@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -42,6 +43,7 @@ sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
 import make_registry as mr  # noqa: E402  收集各机器训练状态的函数、SPEC、DS
+import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
 LOG = os.path.expanduser("~/.cache/phd-health/health.log")
@@ -119,7 +121,7 @@ def task_key(cmd):
 
 
 def gather():
-    s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={})
+    s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={})
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
     for name, m in M.MACHINES.items():
@@ -130,6 +132,8 @@ def gather():
                 q, a = out.split("=====", 1)
                 s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 5],  # 作业名、号、状态、已跑、原因、Nice
                                         sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
+                if "train" in m["roles"]:
+                    s["taskq"][name] = taskq.remote_status(name)
         else:
             rc, out = run_on(m, probe_script(m))
             ok = rc == 0 and "BOOT|" in out
@@ -179,6 +183,50 @@ def check(s):
     # --- Slurm ---
     jk = job_keys()
     for name, d in s["slurm"].items():
+        tq = s.get("taskq", {}).get(name)
+        if tq and tq["enabled"]:
+            # 任务队列开着时，作业名不再对应训哪一折：排队、在训都看队列（scripts/queue/taskq.py）
+            for t in tq["tasks"]:
+                key, st = t["key"], t["state"]
+                if st in ("free", "stale", "claimed", "busy"):
+                    claim(key, name, "队列" if st in ("free", "stale") else f"在训（{t['note']}）")
+                    queued_slurm.setdefault(key, set()).add(name)
+                if st in ("claimed", "busy"):
+                    busy.setdefault(key, set()).add(name)
+                if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (t["log_age"] is None or t["log_age"] > 5400):
+                    add(f"stuck:{name}:{key}", f"{L(name)} 作业 {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
+                        f"{'训练日志 90 分钟没有新 epoch' if t['log_age'] is not None else '还没有训练日志'}")
+                if t["failures"]:
+                    add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 训练失败 {t['failures']} 次"
+                        + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
+            if tq.get("paused"):
+                add(f"tqpause:{name}", f"{L(name)} 任务队列 3 小时内失败 {tq.get('recent_failures')} 次，暂停领任务，"
+                    "作业空着卡在等（看 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
+            # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
+            def mins(el):
+                d_, _, hms = el.rpartition("-")
+                p_ = [int(x) for x in hms.split(":")]
+                while len(p_) < 3:
+                    p_.insert(0, 0)
+                return (int(d_ or 0) * 24 + p_[0]) * 60 + p_[1]
+            run = [r for r in d["squeue"] if r[0].startswith("rq1_") and r[2] == "RUNNING" and mins(r[3]) >= 30]
+            workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
+            if len(run) > len(workers):
+                add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
+                    "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
+            # 队列里还有没训完的任务，但 Slurm 上已经没有这一种（nnunet / swin …）的作业了：要补交作业
+            kinds = {taskq.kind_of(jk[r[0]].split("/")[1]) for r in d["squeue"] if r[0] in jk}
+            left = {}
+            for t in tq["tasks"]:
+                if t["state"] in ("free", "stale") and t["kind"] not in kinds:
+                    left[t["kind"]] = left.get(t["kind"], 0) + 1
+            for k, n in left.items():
+                add(f"tqorphan:{name}:{k}", f"{L(name)} 任务队列里还有 {n} 个 {k} 任务没训完，但已经没有排着或在跑的 {k} 作业，要补交作业")
+            for jid, jname, st, end, code in d["sacct"]:
+                add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
+            continue
+        if name in s.get("taskq", {}) and tq is None:
+            add(f"taskq:{name}", f"{L(name)} 读不到任务队列（~/.cache/phd/taskq/）")
         for jname, jid, st, el, why, *_ in d["squeue"]:
             key = jk.get(jname)
             if not key:
@@ -420,8 +468,6 @@ def main():
     P, claims = check(s)
     import refill  # scripts/queue/refill.py：训练机的卡快空了就自动补任务
     events, filled = refill.run_all(s, dry=a.dry_run)
-    import companion  # scripts/queue/companion.py：DICC 上每个在训的作业同卡附加一折（10/17）
-    events += companion.run_all(s, dry=a.dry_run)
     if not a.dry_run:
         for i, msg in enumerate(events):
             P[f"refill:{s['now']:%m%d%H%M}:{i}"] = dict(msg=msg, level="normal", kind="event", after=0)
@@ -434,7 +480,7 @@ def main():
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
         for n, items in claims.items():
             print(f"\n写给 {n} 的清单（这里不训）：{len(items)} 折")
-        print("\n自动补任务、附加训练：" + "；".join(events))
+        print("\n自动补任务：" + "；".join(events))
         return
     for n, items in claims.items():
         write_claims(n, items, s["now"])

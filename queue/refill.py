@@ -69,6 +69,9 @@ def candidates(s, name):
                if t["status"] in LIVE and "train_task.sh" in t["command"]}  # 暂存的那份按暂存任务算，不重复从 Slurm 取
     out = []
     for host, d in s["slurm"].items():
+        tq = s.get("taskq", {})
+        if host in tq and (tq[host] is None or tq[host].get("enabled")):
+            continue  # 这台 Slurm 机器开着自己的任务队列（10/17），或者读不到队列：从队列里取的做法还没写，先不从这里取
         rows = {}
         for jname, jid, st, _, why, *nice in d["squeue"]:
             key = jk.get(jname)
