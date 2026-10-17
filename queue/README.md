@@ -26,8 +26,8 @@ box 和 lab 上的训练、推理、分析都用 [pueue](https://github.com/Nuke
 | `refill.py` | 训练机自动补任务：卡快空了就按档位从待办（DICC 上排着、从没开始过的折 + 这台机器上暂存的训练任务）取同一个实验的下一批，需要时先传数据集，box 上排好拉回、推理、归档；由健康检查每 30 分钟调用，`python3 scripts/queue/refill.py` 只看会补什么。规则见 `admin/作业.md` 的优先级一节 |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把重启时被打断的任务（连同因此"依赖失败"的下游）原地放回队列；表里 `gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（所有 pueue 机器 `on_boot.sh`；角色 autopull 的代码同步 `scripts/sync/git_pull_cron.sh`；hub 的健康检查和登记表 / 看板更新 `scripts/monitor/auto_refresh.sh`） |
-| `companion.py` | DICC 同卡附加训练：每个在训 nnU-Net 的作业同一张卡上再训一折待办里的 nnU-Net 折（最多 2 个训练，离时限不到 3 小时不附加），box 上排好拉回、推理；包装脚本意外死掉时替它 release。由健康检查每 30 分钟调用，`python3 scripts/queue/companion.py` 只看会附加什么。规则见 `admin/作业.md` 的优先级一节 |
-| `dicc_companion.sh` | 在 DICC 登录节点上跑的包装脚本：hold 附加折自己的作业 → `srun --overlap -J rq1c_<数组作业号>` 进宿主作业训 → 停下后 release |
+| `companion.py` | DICC 同卡附加训练：每个在训 nnU-Net 的作业同一张卡上再训一折待办里的 nnU-Net 折（最多 2 个训练，离时限不到 3 小时不附加），box 上排好拉回、推理；包装脚本意外死掉时删掉它的标记。由健康检查每 30 分钟调用，`python3 scripts/queue/companion.py` 只看会附加什么。规则见 `admin/作业.md` 的优先级一节 |
+| `dicc_companion.sh` | 在 DICC 登录节点上跑的包装脚本：确认附加折自己的作业在排队 → `srun --overlap -J rq1c_<数组作业号>` 进宿主作业训（附加折自己的作业开始时由 `envs/nnunet_paths.sh` 停掉这个步骤） |
 | `test_train_task.sh`、`test_refill.py` | `train_task.sh`、`refill.py` 的测试（假训练、假队列，不连任何机器） |
 
 ## 约定
