@@ -201,7 +201,7 @@ def check(s):
                         + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
             if tq.get("paused"):
                 add(f"tqpause:{name}", f"{L(name)} 任务队列 3 小时内失败 {tq.get('recent_failures')} 次，暂停领任务，"
-                    "作业空着卡在等（看 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
+                    "作业空等 40 分钟就结束，排队的作业会一个个用掉（看 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
             # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
             def mins(el):
                 d_, _, hms = el.rpartition("-")

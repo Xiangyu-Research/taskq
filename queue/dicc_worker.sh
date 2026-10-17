@@ -7,11 +7,13 @@
 #   bash dicc_worker.sh <本作业的训练器> <本作业的 fold> <本作业的数据集编号>     （由 nnunet_paths.sh 调用）
 # 出问题时不让排队的作业空跑掉（10/17）：
 #   - 本作业训练失败 2 次（或开训前就出错）就不再领新的，也不重领自己失败过的；
-#   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业不退出，空着等（健康检查提醒），免得后面排队的作业一个个
+#   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业先空着等（健康检查提醒），免得后面排队的作业一个个
 #     领不到任务就结束；
 #   - 队列本身出错（taskq.py 读写不了）连续 10 分钟、手上又没有在训的：改回原来的做法，训本作业自己那一折
 #     （已训完、或日志 15 分钟内更新过、或在队列里被领了的就不训，直接结束）；
 #   - 查不到作业的结束时间时当作时间还多，之后每轮再查。
+# 不管什么原因，手上没有在训的连续 40 分钟就结束作业、把卡还回去：DICC gpu-a100 分区 GPU 使用率连续 1 小时低于 40%
+# 会被自动取消（10/17 的新规定）。正常训练没有这个问题（以前的记录里连续低于 40% 最长 19 分钟）。
 # 每个任务的日志和 train_folds.sbatch 的分段日志同一格式（作业号 = 本作业的实际作业号，第 1 段），登记表照常认。
 # WORKER_TEST_CMD 只给测试用：代替 python 训练命令（会在后面加上 "数据集编号 fold"）；TASKQ_* 环境变量也只给测试用。
 set -uo pipefail
@@ -34,6 +36,7 @@ fi
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-1200}        # 开始后最多等这么久，给排在前面、刚停下的折留位置
 ERR_FALLBACK=${TASKQ_ERR_FALLBACK:-600} # 队列连续出错这么久就改回训自己那一折
+IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
 MAX_OWN_FAIL=2
 DA=$(( NCPU / SLOTS - 2 )); (( DA > 30 )) && DA=30; (( DA < 1 )) && DA=1
 PLANS=nnUNetResEncUNetMPlans
@@ -153,6 +156,7 @@ trap on_term TERM INT
 last_beat=$(date +%s)
 ERRF=$(mktemp)
 err_since=0   # 队列从什么时候开始连续出错
+idle_since=$T0  # 从什么时候开始手上没有在训的（0 = 有在训的）
 while true; do
     # 收训完的
     for p in "${!KEY[@]}"; do
@@ -192,7 +196,10 @@ while true; do
                 why=error; break ;;
         esac
     done
-    if (( ${#KEY[@]} == 0 )); then
+    if (( ${#KEY[@]} > 0 )); then
+        idle_since=0
+    else
+        (( idle_since )) || idle_since=$now
         if (( OWN_FAILS >= MAX_OWN_FAIL )); then
             echo "$(ts) 本作业失败太多次，作业结束"; break
         elif (( $(left) <= MIN_LEFT )); then
@@ -205,9 +212,12 @@ while true; do
             kill_tree "$GPUMON"
             echo "$(ts) 作业结束（退出码 $rc）"
             exit $rc
+        elif (( now - idle_since >= IDLE_MAX )); then
+            echo "$(ts) 手上没有在训的已经 $(( (now - idle_since) / 60 )) 分钟（$why），结束作业、把卡还回去（DICC：GPU 使用率连续 1 小时低于 40% 会被取消）"
+            break
         fi
-        # wait（等前面刚停下的折）、paused（队列暂停）、error（还没到改回的时候）：空着等，不退出
-        [[ $why == paused && ${said_paused:-} != 1 ]] && { echo "$(ts) 队列暂停领任务（3 小时内失败太多次），空着等，不退出"; said_paused=1; }
+        # wait（等前面刚停下的折）、paused（队列暂停）、error（还没到改回的时候）：先空着等，最多 IDLE_MAX
+        [[ $why == paused && ${said_paused:-} != 1 ]] && { echo "$(ts) 队列暂停领任务（3 小时内失败太多次），空着等，最多 $(( IDLE_MAX / 60 )) 分钟"; said_paused=1; }
         [[ $why == wait && ${said_wait:-} != 1 ]] && { echo "$(ts) 排在前面的折刚停下，等它（最多到开始后 $(( PATIENCE / 60 )) 分钟）"; said_wait=1; }
     fi
     sleep "${TASKQ_POLL:-30}" & wait $!
