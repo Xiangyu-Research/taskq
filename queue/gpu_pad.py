@@ -1,25 +1,12 @@
 #!/usr/bin/env python3
-"""DICC GPU 作业显存填充（2026-10-17）：DICC 的 gpu-a100 作业要求显存占用 >= 40GB。
+"""DICC 显存填充：gpu-a100 作业要求显存占用 >= 40GB，这里只占显存、不做计算。
 
-只占显存，不做训练/推理：每张卡分配一组 CUDA 张量，按 nvidia-smi 的 memory.used 动态调整。
-  - 低于 target（默认 42000 MiB，> 40GiB 和 40GB 两种口径）就补；
-  - 高于 high（默认 62000 MiB）就一次释放到 high - hysteresis 以下；
-  - 给训练留至少 min_free（默认 8000 MiB）。
-不分模型（10/18 改）：先让训练把显存用起来，等它稳定了再补。
-  - 训练占了多少 = memory.used - 本进程 torch 保留的显存；不到 min_train（默认 2000 MiB）算没有训练，全部释放；
-  - 训练占的显存 settle 秒（默认 120）内变化不超过 1 GiB 才算稳定，稳定了才补；
-  - 要开始新训练时，dicc_worker.sh 先 touch <base>.start：pad 下一轮（interval 默认 10 秒）全部释放，
-    等新训练起来（训练占的显存比放掉前多出 min_train）并稳定后再补；start_hold（默认 900 秒）内一直没起来也照常补。
-    这样不管什么模型，启动时都有整张卡可用。
-  - 本进程占着多少写在 <base>.mib（dicc_worker.sh 判断能不能再加一个训练时减掉它）。
-  <base> 默认 /tmp/gpu_pad_<作业号>，可用 $RQ1_GPU_PAD_BASE 改。
+每 10 秒按 nvidia-smi 调整：低于 42000 MiB 就补，高于 62000 MiB 就放，给训练至少留 8000 MiB。
+训练的显存稳定 2 分钟后才补；没有训练就全部放掉。
+dicc_worker.sh 要开始新训练时 touch <base>.start，这里全部放掉，等新训练起来再补。
+自己占了多少写在 <base>.mib，dicc_worker.sh 判断能不能再领一个时减掉它。
 
-由 scripts/queue/gpu_pad_start.sh 在 Slurm GPU 作业里启动（worker.sbatch，和经 envs/nnunet_paths.sh 的旧按折作业）；
-要求空卡的脚本（run_gpu_smoke.sh、predict.sh、run_predict_eval.sh 等）自己设 RQ1_GPU_PAD=0。总开关是 ~/.cache/phd/gpu_pad/DISABLED。
-日志由启动脚本重定向到 <数据目录>/logs/workers/gpu_pad_<作业号>.log（10/18 前在 nnUNet/results/logs/）。
-
-测试：python3 scripts/queue/test_gpu_pad.py（假 backend，不需要 GPU）。
-手动试：python3 scripts/queue/gpu_pad.py --dry-run --iterations 2
+由 gpu_pad_start.sh 启动；总开关 ~/.cache/phd/gpu_pad/DISABLED。测试：test_gpu_pad.py。
 """
 import argparse
 import os
@@ -33,7 +20,7 @@ from dataclasses import dataclass
 MIB = 1024 * 1024
 STABLE_TOL_MIB = 1024  # 训练占的显存变化在这以内算没变
 FALLBACK_TARGET_MARGIN_MIB = 1500  # nvidia-smi 失败、退回 mem_get_info 时多留一点
-HEARTBEAT = 600
+HEARTBEAT = 600  # 每张卡多久记一行状态
 
 
 def env_int(name, default):
@@ -85,7 +72,7 @@ class TorchBackend:
     """真实的 GPU 操作：nvidia-smi 看 used/total，torch 分配/释放。"""
 
     def __init__(self, device=None):
-        import torch  # 延迟导入：测试和 --help 不需要 torch
+        import torch  # 测试不需要 torch
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA 不可用")
         self.torch = torch
@@ -120,11 +107,11 @@ class TorchBackend:
             return int((total - free) // MIB), int(total // MIB), True
 
     def pad_mib(self, dev):
-        """本进程占着的显存：torch 保留的（含还没还给驱动的缓存）。"""
+        """本进程占着的显存（含 torch 的缓存）。"""
         return int(self.torch.cuda.memory_reserved(dev) // MIB)
 
     def alloc(self, dev, mib):
-        # zeros 会真正写入显存，确保 nvidia-smi 立刻看到；u8 每 MiB 只占 1 MiB。
+        # zeros 真正写入显存，nvidia-smi 马上看得到
         return self.torch.zeros(int(mib) * MIB, dtype=self.torch.uint8, device=dev)
 
     def empty_cache(self, dev):
@@ -137,7 +124,7 @@ def log(msg):
 
 
 def visible_devices_ok(cuda_visible, count):
-    """没有 CUDA_VISIBLE_DEVICES 时只允许单卡，避免 pad 碰到别人的卡。"""
+    """没有 CUDA_VISIBLE_DEVICES 时只允许单卡，免得碰到别人的卡。"""
     return bool(cuda_visible) or count <= 1
 
 
@@ -155,7 +142,7 @@ class Pad:
         self.train_ref = {d: 0 for d in self.devices}      # 上次变化时训练占的显存
         self.changed = {d: self.start for d in self.devices}  # 训练占的显存上次变化的时刻
         self.seen_start = self._start_mtime()
-        self.wait_new = {}  # 收到 <base>.start 后：dev → (放掉前训练占的显存, 时刻)，等新训练起来
+        self.wait_new = {}  # dev → (放掉前训练占的显存, 时刻)：等新训练起来
         self.stopped = False
         self._steps = 0
         self.initial_ppid = os.getppid()
@@ -267,7 +254,7 @@ class Pad:
         return used
 
     def _release(self, dev, limit, reason="", used=None):
-        """把 used 降到 limit 以下：算好要放几块，一次放掉再 empty_cache 一次。返回估计的 used。"""
+        """把显存降到 limit 以下，返回估计的 used。"""
         chunks = self.chunks[dev]
         if not chunks:
             return used
@@ -282,7 +269,7 @@ class Pad:
         n, freed = 0, 0
         while chunks and (excess is None or freed < excess):
             _tensor, mib = chunks.pop()
-            del _tensor  # 不留引用，empty_cache 前就真正释放
+            del _tensor
             freed += mib
             n += 1
         self.b.empty_cache(dev)
@@ -298,7 +285,7 @@ class Pad:
             return False
         now = time.time()
         st = self._start_mtime()
-        if st > self.seen_start:  # 要开始新训练：全部放掉，等新训练稳定后再补
+        if st > self.seen_start:  # 要开始新训练
             self.seen_start = st
             for dev in self.devices:
                 self._release(dev, 0, reason="要开始新训练")
