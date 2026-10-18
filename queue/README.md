@@ -64,7 +64,7 @@
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（所有 pueue 机器 `on_boot.sh`；角色 autopull 的代码同步 `scripts/sync/git_pull_cron.sh`；hub 的健康检查和登记表 / 看板更新 `scripts/monitor/auto_refresh.sh`） |
 | `taskq.py` | 训练的任务队列（在 DICC 的 `~/.cache/phd/taskq/`）：DICC 作业领任务（`next`；10/19 前开始的作业用旧的 `claim`）、心跳（`beat`）、交还（`release`）；box 替 lab 领指定的一个（`take`）；加任务（`add --exp`、`add --recipe`、`add <key>…`）、改参数（`set`）、改先后（`set-nice`）、看说明（`show`）；`status` 看队列。命令的完整说明在文件开头，规则见 `admin/作业.md` |
 | `worker.sbatch` | DICC 的训练作业（作业名 `train_worker`）：只负责领到一张卡，开始后交给 `dicc_worker.sh`；不限并发的数组，由 `refill.py` 自动补交。手动交：`cd scripts/queue && sbatch --array=1-10 worker.sbatch`（long、每段 36 小时） |
-| `dicc_worker.sh` | 从队列领本机有环境的任务，用 `run_task.sh` 在后台跑；先训 1 个，最近一个开始 15 分钟后、近 10 分钟 GPU 使用率低于 80%、除去填充还空着一半显存时再加 1 个（最多 2 个），训完再领，领不到就退出；快到时限时把没训完的交还。10/17 前交的按折作业由 `envs/nnunet_paths.sh` 转过来（兼容层，这批作业用完约 2027-03 后删） |
+| `dicc_worker.sh` | 从队列领本机有环境的任务，用 `run_task.sh` 在后台跑；先训 1 个，最近一个开始 15 分钟后、近 10 分钟 GPU 使用率低于 90%、除去填充还空着一半显存时再加 1 个（最多 2 个），训完再领，领不到就退出；快到时限时把没训完的交还。10/17 前交的按折作业由 `envs/nnunet_paths.sh` 转过来（兼容层，这批作业用完约 2027-03 后删） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | DICC GPU 作业显存填充：只占显存、不训练不推理，按 nvidia-smi 的 `memory.used` 维持 42GB、封顶 62GB；`gpu_pad_start.sh` 在 Slurm GPU 作业里启动它（`worker.sbatch` 和 `envs/nnunet_paths.sh` 都调用），见下面"显存填充" |
 | `test_spec.py`、`test_run_task.sh`、`test_refill.py`、`test_taskq.py`、`test_advance.py`、`test_dicc_worker.sh` | 各脚本的测试（假训练、假队列、假快照，不连任何机器、不用 GPU）；`test_taskq.py` 里有"旧 worker 的调用方式"一组，改 `taskq.py` 后都要跑过 |
 | `test_gpu_pad.py`、`test_gpu_pad_launcher.sh`、`test_gpu_pad_integration.sh` | `gpu_pad.py` 的假 backend、启动逻辑、box 真卡测试 |
