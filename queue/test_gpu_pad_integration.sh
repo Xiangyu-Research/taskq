@@ -1,8 +1,4 @@
 #!/bin/bash
-# box 上的真卡集成测试（2026-10-17；10/18 改成不分模型的版本，用一个占 2GB 的假训练）：用真实 envs/nnunet_paths.sh、真实 GPU、真实 torch/nvidia-smi 跑 gpu_pad.py。
-# 不连 DICC，不提交任何作业。为了不把 12GB 的卡占满，目标降到 8GB。
-#   bash scripts/queue/test_gpu_pad_integration.sh      （最好排进 box 的 gpu 组：q gpu --label test_gpu_pad -- 'bash …'）
-# 卡上有别的 CUDA 进程时跳过；测试中途出现别的进程（比如推理开始了）就立刻停掉 pad、中止测试，不让推理 OOM。
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
@@ -20,10 +16,8 @@ cleanup() {
     [[ -n ${PARENT_SUP:-} ]] && kill "$PARENT_SUP" 2> /dev/null
     rm -rf "$T"
 }
-# pad 用测试目录里的副本启动，命令行里带 $T，才能和别的 python 进程分开（只杀自己的）。
 mkdir -p "$T/pad"
 cp "$HERE/gpu_pad.py" "$T/pad/"
-# 假训练：占 2000MiB 显存后睡着（命令行里带 $T，算本测试自己的进程）
 cat > "$T/pad/fake_train.py" << 'EOF'
 import sys, time, torch
 x = torch.zeros(int(sys.argv[1]) * 1024 * 1024, dtype=torch.uint8, device=0)
@@ -37,7 +31,6 @@ start_train() { python3 "$T/pad/fake_train.py" 2000 & TRAINPID=$!; sleep 6; }
 trap cleanup EXIT
 
 command -v nvidia-smi > /dev/null || { echo "这台机器没有 nvidia-smi，跳过"; exit 0; }
-# 卡上不是本测试 pad 的 CUDA 进程
 foreign() {
     local ours p
     ours=" $(our_pids | tr '\n' ' ') "
@@ -59,7 +52,6 @@ python3 -c "import torch" 2> /dev/null || { echo "python3 没有 torch（envs/ma
 used() { nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' '; }
 BASE=$(used)
 
-# 全程看着：一出现别的 CUDA 进程就停掉 pad，测试中止
 (
     while sleep 0.5; do
         F=$(foreign)
@@ -95,7 +87,6 @@ export RQ1_GPU_PAD_INTERVAL=1
 export RQ1_GPU_PAD_CHUNK_MIB=256
 PADLOG=$BRAIN_TUMOR/nnUNet/results/logs/gpu_pad_999001.log
 
-# 1. 没有训练时不填；训练来了、稳定 4 秒后补到约 8GB
 source "$REPO/envs/nnunet_paths.sh"
 SUP=$!
 sleep 4
@@ -111,8 +102,6 @@ check "训练稳定后补到约 8GB（现在 ${U}MiB）" test "$U" -ge 7000
 check "没有把卡占满" test "$U" -le 10000
 check "<base>.mib 写了 pad 的大小" bash -c "test \$(cat '$T/padsig.mib') -ge 4000"
 
-# 2. 要开始新训练（touch <base>.start）：全部放掉，<base>.mib 变成 0；假训练的显存没涨（像新训练还没起来），
-#    等满 start_hold（这里 6 秒）后照常补
 touch "$T/padsig.start"
 sleep 2
 U=$(used)
@@ -125,13 +114,11 @@ sleep 6
 aborted
 check "等满 start_hold 后又补上（现在 $(used)MiB）" test "$(used)" -ge 7000
 
-# 3. 训练没了：释放
 stop_train
 sleep 2
 aborted
 check "训练结束后释放（现在 $(used)MiB，开始时 ${BASE}MiB）" test "$(used)" -le $(( BASE + 800 ))
 
-# 4. DISABLED：释放并退出
 start_train; sleep 4
 touch "$T/switch"
 sleep 3
@@ -142,7 +129,6 @@ check "DISABLED 后释放、缓存也还了（现在 ${U}MiB，开始时 ${BASE}
 check "DISABLED 后 pad 退出" bash -c "! pgrep -f '$T/pad/gpu_pad.py' > /dev/null"
 kill "$SUP" 2> /dev/null; SUP=
 
-# 5. RQ1_GPU_PAD=0：不启动
 rm -f "$T/switch"
 unset RQ1_GPU_PAD_STARTED
 export SLURM_JOB_ID=999002 RQ1_GPU_PAD=0
@@ -151,7 +137,6 @@ sleep 2
 check "RQ1_GPU_PAD=0 不启动" test ! -e "$BRAIN_TUMOR/nnUNet/results/logs/gpu_pad_999002.log"
 unset RQ1_GPU_PAD RQ1_GPU_PAD_STARTED
 
-# 6. DISABLED 开关在启动前就不启动
 touch "$T/switch"
 export SLURM_JOB_ID=999003
 source "$REPO/envs/nnunet_paths.sh"
@@ -160,7 +145,6 @@ check "DISABLED 开关在启动前生效" test ! -e "$BRAIN_TUMOR/nnUNet/results
 rm -f "$T/switch"
 unset RQ1_GPU_PAD_STARTED
 
-# 7. 父进程退出：pad 释放并退出（用 bash -c，让 $$ 就是它自己的 PID，和真实批处理一样）
 export SLURM_JOB_ID=999005 RQ1_GPU_PAD_BASE=$T/padsig5
 start_train
 bash -c '

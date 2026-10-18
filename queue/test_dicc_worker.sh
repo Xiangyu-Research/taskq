@@ -87,7 +87,6 @@ EOF
 SLURM_JOB_ID=900005 WORKER_TEST_GPU="50 10 50000 81920" timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2b.out" 2>&1
 check "显存不够：一次 1 个" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]]'
 
-# 2c. 开始训练前通知显存填充放掉：假 pad 看到 <base>.start 后把 <base>.mib 改成 0
 reset
 table << EOF
 t/a nnunet

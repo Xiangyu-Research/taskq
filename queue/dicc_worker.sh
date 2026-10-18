@@ -3,11 +3,10 @@
 # 每个任务交给 scripts/queue/run_task.sh 跑（环境、命令、怎么算训完都在任务说明里，见 scripts/queue/recipes.py）。
 # 只领本机有环境的任务（envs/machines.py 的 envs）。
 # 一张卡训几个看实际情况：先训 1 个；最近一个训练开始 15 分钟以后，如果近 10 分钟 GPU 平均使用率低于 90%（10/18 前 80%）、
-# 除去显存填充还空着一半显存，再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。
+# 还空着一半显存，再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。
 # CPU 跟不上的训练（nnU-Net）会变成 2 个，GPU 跑满的（SwinUNETR、U-Mamba）自然只训 1 个。训完一个再领下一个；
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的就退出。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
-# 开始每个训练前先让显存填充全部放掉（最多等 30 秒）。
 #   bash dicc_worker.sh                     （不带折的作业 scripts/queue/worker.sbatch）
 #   bash dicc_worker.sh <训练器> <fold> <数据集编号>   （10/17 前交的按折作业，由 envs/nnunet_paths.sh 转过来；参数只记日志）
 # 出问题时不让排队的作业空跑掉：
@@ -36,7 +35,7 @@ else
 fi
 ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过这么久才判断要不要再加一个
 UTIL_MAX=${TASKQ_UTIL_MAX:-90}          # 近 10 分钟 GPU 平均使用率低于这个才加
-PADBASE=${RQ1_GPU_PAD_BASE:-/tmp/gpu_pad_$W}  # 和 gpu_pad.py 交换信号的文件前缀
+PADBASE=${RQ1_GPU_PAD_BASE:-/tmp/gpu_pad_$W}
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-1200}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
@@ -77,7 +76,7 @@ declare -A KEY=()         # 训练的 pid → key
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
-pad_make_room() {  # 通知显存填充全部放掉，等它放完（没有填充时立刻返回）
+pad_make_room() {
     [[ -f $PADBASE.mib ]] || return 0
     touch "$PADBASE.start"
     local i
@@ -95,7 +94,7 @@ gpu_stats() {  # 近 10 分钟的 GPU 平均使用率、样本数；现在的显
     mem=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2> /dev/null | head -1 | tr -d ' ' | tr ',' ' ')
     echo "$ut ${mem:-0 0}"
 }
-pad_now() {  # 显存填充占着多少 MiB；60 秒没更新算 0
+pad_now() {
     local v
     v=$(cat "$PADBASE.mib" 2> /dev/null)
     [[ $v =~ ^[0-9]+$ ]] && (( $(date +%s) - $(stat -c %Y "$PADBASE.mib") <= 60 )) && echo "$v" || echo 0

@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""DICC 显存填充：gpu-a100 作业要求显存占用 >= 40GB，这里只占显存、不做计算。
-
-每 10 秒按 nvidia-smi 调整：低于 42000 MiB 就补，高于 62000 MiB 就放，给训练至少留 8000 MiB。
-训练的显存稳定 2 分钟后才补；没有训练就全部放掉。
-dicc_worker.sh 要开始新训练时 touch <base>.start，这里全部放掉，等新训练起来再补。
-自己占了多少写在 <base>.mib，dicc_worker.sh 判断能不能再领一个时减掉它。
-
-由 gpu_pad_start.sh 启动；总开关 ~/.cache/phd/gpu_pad/DISABLED。测试：test_gpu_pad.py。
-"""
 import argparse
 import os
 import signal
@@ -18,9 +9,9 @@ import time
 from dataclasses import dataclass
 
 MIB = 1024 * 1024
-STABLE_TOL_MIB = 1024  # 训练占的显存变化在这以内算没变
-FALLBACK_TARGET_MARGIN_MIB = 1500  # nvidia-smi 失败、退回 mem_get_info 时多留一点
-HEARTBEAT = 600  # 每张卡多久记一行状态
+STABLE_TOL_MIB = 1024
+FALLBACK_TARGET_MARGIN_MIB = 1500
+HEARTBEAT = 600
 
 
 def env_int(name, default):
@@ -69,10 +60,9 @@ class Config:
 
 
 class TorchBackend:
-    """真实的 GPU 操作：nvidia-smi 看 used/total，torch 分配/释放。"""
 
     def __init__(self, device=None):
-        import torch  # 测试不需要 torch
+        import torch
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA 不可用")
         self.torch = torch
@@ -107,11 +97,9 @@ class TorchBackend:
             return int((total - free) // MIB), int(total // MIB), True
 
     def pad_mib(self, dev):
-        """本进程占着的显存（含 torch 的缓存）。"""
         return int(self.torch.cuda.memory_reserved(dev) // MIB)
 
     def alloc(self, dev, mib):
-        # zeros 真正写入显存，nvidia-smi 马上看得到
         return self.torch.zeros(int(mib) * MIB, dtype=self.torch.uint8, device=dev)
 
     def empty_cache(self, dev):
@@ -124,7 +112,6 @@ def log(msg):
 
 
 def visible_devices_ok(cuda_visible, count):
-    """没有 CUDA_VISIBLE_DEVICES 时只允许单卡，免得碰到别人的卡。"""
     return bool(cuda_visible) or count <= 1
 
 
@@ -139,10 +126,10 @@ class Pad:
         self.last_heartbeat = {d: 0.0 for d in self.devices}
         self.next_try = {d: 0.0 for d in self.devices}
         self.skip_total = set()
-        self.train_ref = {d: 0 for d in self.devices}      # 上次变化时训练占的显存
-        self.changed = {d: self.start for d in self.devices}  # 训练占的显存上次变化的时刻
+        self.train_ref = {d: 0 for d in self.devices}
+        self.changed = {d: self.start for d in self.devices}
         self.seen_start = self._start_mtime()
-        self.wait_new = {}  # dev → (放掉前训练占的显存, 时刻)：等新训练起来
+        self.wait_new = {}
         self.stopped = False
         self._steps = 0
         self.initial_ppid = os.getppid()
@@ -190,7 +177,7 @@ class Pad:
     def _step_dev(self, dev, now):
         try:
             used, total, fallback = self.b.mem(dev)
-        except Exception as e:  # noqa: BLE001  读不到就下一轮再试，不让 pad 退出
+        except Exception as e:
             self.log(f"dev {dev}: 读取显存失败（{e}）")
             return
         if total < self.c.min_total_mib:
@@ -204,11 +191,10 @@ class Pad:
             self.last_heartbeat[dev] = now
 
     def _decide(self, dev, used, total, fallback, now):
-        """调整一张卡，返回（状态说明, 调整后的 used）。"""
         train = max(0, used - self.b.pad_mib(dev))
         if abs(train - self.train_ref[dev]) > STABLE_TOL_MIB:
             self.train_ref[dev], self.changed[dev] = train, now
-        if dev in self.wait_new:  # 等的时候旧训练结束了：按降下来的值算
+        if dev in self.wait_new:
             self.wait_new[dev] = (min(self.wait_new[dev][0], train), self.wait_new[dev][1])
         if train < self.c.min_train_mib:
             if self.chunks[dev]:
@@ -245,7 +231,7 @@ class Pad:
                 return used
             try:
                 self.chunks[dev].append((self.b.alloc(dev, mib), mib))
-            except Exception as e:  # noqa: BLE001  OOM 等：回退，60 秒后再试
+            except Exception as e:
                 self.log(f"dev {dev}: 分配 {mib}MiB 失败（{e}），60 秒后再试")
                 self.next_try[dev] = time.time() + 60
                 return used
@@ -254,14 +240,13 @@ class Pad:
         return used
 
     def _release(self, dev, limit, reason="", used=None):
-        """把显存降到 limit 以下，返回估计的 used。"""
         chunks = self.chunks[dev]
         if not chunks:
             return used
         if used is None:
             try:
                 used = self.b.mem(dev)[0]
-            except Exception:  # noqa: BLE001  读不到就全部释放
+            except Exception:
                 used = None
         excess = None if used is None or limit <= 0 else used - limit
         if excess is not None and excess <= 0:
@@ -285,7 +270,7 @@ class Pad:
             return False
         now = time.time()
         st = self._start_mtime()
-        if st > self.seen_start:  # 要开始新训练
+        if st > self.seen_start:
             self.seen_start = st
             for dev in self.devices:
                 self._release(dev, 0, reason="要开始新训练")
@@ -321,16 +306,13 @@ def parse_args(argv=None):
     p.add_argument("--high-mib", type=int, default=env_int("RQ1_GPU_PAD_HIGH_MIB", 62000))
     p.add_argument("--chunk-mib", type=int, default=env_int("RQ1_GPU_PAD_CHUNK_MIB", 1024))
     p.add_argument("--interval", type=float, default=env_float("RQ1_GPU_PAD_INTERVAL", 10.0))
-    p.add_argument("--settle", type=float, default=env_float("RQ1_GPU_PAD_SETTLE", 120.0),
-                   help="训练占的显存这么多秒没变（±1GiB）才补")
-    p.add_argument("--start-hold", type=float, default=env_float("RQ1_GPU_PAD_START_HOLD", 900.0),
-                   help="收到 <base>.start 后最多等新训练起来这么多秒")
+    p.add_argument("--settle", type=float, default=env_float("RQ1_GPU_PAD_SETTLE", 120.0))
+    p.add_argument("--start-hold", type=float, default=env_float("RQ1_GPU_PAD_START_HOLD", 900.0))
     p.add_argument("--min-free-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_FREE_MIB", 8000))
     p.add_argument("--min-total-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_TOTAL_MIB", 60000))
     p.add_argument("--release-hysteresis-mib", type=int, default=env_int("RQ1_GPU_PAD_HYSTERESIS_MIB", 2048))
-    p.add_argument("--min-train-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_TRAIN_MIB", 2000),
-                   help="训练占的显存不到这么多算没有训练，不填")
-    p.add_argument("--base", default=default_base(), help="和 dicc_worker.sh 交换信号的文件前缀（<base>.start、<base>.mib）")
+    p.add_argument("--min-train-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_TRAIN_MIB", 2000))
+    p.add_argument("--base", default=default_base())
     p.add_argument("--switch", default=os.environ.get("RQ1_GPU_PAD_SWITCH",
                                                       os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")))
     p.add_argument("--parent-pid", type=int, default=None)
@@ -352,7 +334,7 @@ def main(argv=None):
         log("dry-run：只读显存，不分配")
     try:
         backend = TorchBackend(device=a.device)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log(f"初始化 GPU 失败：{e}")
         return 1
     if backend.device_count() <= 0:

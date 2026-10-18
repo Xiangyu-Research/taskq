@@ -1,13 +1,11 @@
 #!/bin/bash
-# 测 envs/nnunet_paths.sh 里的显存填充启动逻辑（2026-10-17）：假 nvidia-smi、假 pad、假 Slurm 环境，不连 GPU、不连 DICC。
-#   bash scripts/queue/test_gpu_pad_launcher.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
 T=$(mktemp -d)
 trap 'stop_pads; rm -rf "$T"' EXIT
 fails=0
-check() {  # check <说明> <条件命令…>
+check() {
     if "${@:2}"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi
 }
 
@@ -31,8 +29,7 @@ if os.environ.get("FAKE_PAD_FAIL_ONCE") == "1" and not os.path.exists(os.environ
 time.sleep(60)
 EOF
 
-# 用真实 nnunet_paths.sh 启动；PATH 里只放测试自己的 bin，确保找不到真的 nvidia-smi。
-source_it() {  # source_it <PATH> [KEY=VALUE …]
+source_it() {
     local path=$1; shift
     (
         export PATH=$path BRAIN_TUMOR=$T/bt RQ1_GPU_PAD_SCRIPT=$T/fake_pad.py \
@@ -62,7 +59,6 @@ stop_pads() {
 lines() { if [[ -f $T/args ]]; then wc -l < "$T/args"; else echo 0; fi; }
 reset() { stop_pads; rm -f "$T/args" "$T/failed" "$T/switch"; }
 
-# 1. 正常：Slurm + GPU + nnU-Net
 reset
 source_it "$T/bin" SLURM_JOB_ID=1001 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
 sleep 0.5
@@ -70,13 +66,11 @@ check "正常启动一个 pad" test "$(lines)" -eq 1
 check "不传训练器（pad 不分模型）" bash -c "! grep -q -- '--trainer' '$T/args'"
 check "传了 parent-pid 和 supervisor-pid" bash -c "grep -q 'parent-pid [0-9]*' '$T/args' && grep -q 'supervisor-pid [0-9]*' '$T/args'"
 
-# 2. 没有 TRAINER（不带折的 worker 作业）也能启动
 reset
 source_it "$T/bin" SLURM_JOB_ID=1002 CUDA_VISIBLE_DEVICES=0
 sleep 0.5
 check "没有 TRAINER 也能启动" bash -c "test \$(wc -l < '$T/args') -eq 1"
 
-# 2b. 新起的 bash 换了 PATH（DICC 上 ~/.bashrc 的 conda 初始化会这样，10/18）：仍用启动时的 python3
 reset
 mkdir -p "$T/badbin"
 printf '#!/bin/bash\necho bad >> "%s/badpy"\nexit 1\n' "$T" > "$T/badbin/python3"
@@ -87,7 +81,6 @@ sleep 0.5
 check "子 bash 换了 PATH 也用启动时的 python3" bash -c "test \$(wc -l < '$T/args') -eq 1 && test ! -e '$T/badpy'"
 unset BASH_ENV
 
-# 3. 不应该启动的情况
 reset; source_it "$T/bin" CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
 sleep 0.3; check "没有 SLURM_JOB_ID：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/bin" SLURM_JOB_ID=1003 TRAINER=nnunet
@@ -106,19 +99,16 @@ sleep 0.3; check "DISABLED 开关：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/nobin" SLURM_JOB_ID=1009 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
 sleep 0.3; check "没有 nvidia-smi：不启动" test "$(lines)" -eq 0
 
-# 4. 重复 source 只启动一次
 reset
 source_it_twice
 sleep 0.5
 check "重复 source 只启动一次" test "$(lines)" -eq 1
 
-# 5. supervisor 在 pad 失败后重启一次
 reset
 source_it "$T/bin" SLURM_JOB_ID=1010 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet FAKE_PAD_FAIL_ONCE=1
 sleep 1
 check "pad 失败一次后 supervisor 重启" test "$(lines)" -eq 2
 
-# 6. 要求空卡、或自己做推理 / 分析的脚本显式关掉 pad
 for f in research/RQ1/nnunet/smoke/run_gpu_smoke.sh research/RQ1/nnunet/predict.sh research/RQ1/analysis/run_predict_eval.sh \
          research/RQ1/probe/p1_predict.sh research/RQ1/probe/run_p2.sh research/RQ2/quickcheck/run_p4.sh \
          research/RQ1/analysis/run_sensitivity.sh; do
