@@ -224,8 +224,7 @@ class Pad:
         while used < target:
             if time.time() < self.next_try[dev]:
                 return used
-            need = target - used
-            mib = min(self.c.chunk_mib, need)
+            mib = self.c.chunk_mib
             if total - used - mib < self.c.min_free_mib:
                 self.log(f"dev {dev}: 再补 {mib}MiB 会少于 min_free={self.c.min_free_mib}MiB，停")
                 return used

@@ -80,16 +80,20 @@ def pad_of(b, **kw):
     return G.Pad(b, cfg(**kw), logger=logs.append), logs
 
 
+def filled(used, target=42000):
+    return target <= used < target + 1024
+
+
 b = FakeBackend()
 p, logs = pad_of(b)
 p.step()
-ok("补到 42000 MiB", b.used() == 42000 and b.live[0] == 33000)
+ok("补到 42000 MiB 以上、不到一块的余量，都是整块", filled(b.used()) and b.live[0] == 33 * 1024)
 ok("日志里有启动和补显存", any("启动" in x for x in logs) and any("补 " in x for x in logs))
 
 b = FakeBackend(training=3000)
 p, _ = pad_of(b, target_mib=5500, high_mib=9000, chunk_mib=1024)
 p.step()
-ok("最后一块按剩余大小补（2500）", b.live[0] == 2500)
+ok("只补整块（差 2500 补 3 块）", b.live[0] == 3 * 1024)
 
 b = FakeBackend()
 p, _ = pad_of(b)
@@ -109,7 +113,7 @@ p.step()
 ok("没有训练：不填", b.live[0] == 0 and any("没有训练" in x for x in logs))
 b.training[0] = 9000
 p.step()
-ok("训练来了：补到 42GB", b.used() == 42000)
+ok("训练来了：补到 42GB", filled(b.used()))
 b.training[0] = 500
 p.step()
 ok("训练没了：全部释放，缓存也还给 GPU", b.live[0] == 0 and b.cache[0] == 0 and b.used() == 500)
@@ -126,9 +130,9 @@ ok("60 秒后显存还在涨：不补", b.live[0] == 0)
 t[0] += 60; b.training[0] = 20500; p.step()
 ok("又 60 秒，变化 < 1GiB 但离上次大变化才 60 秒：不补", b.live[0] == 0)
 t[0] += 50; p.step()
-ok("稳定 110 秒：补到 42GB", b.used() == 42000)
+ok("稳定 110 秒：补到 42GB", filled(b.used()))
 t[0] += 10; b.training[0] = 25000; p.step()
-ok("补完后训练又涨 4.5GB（没超过 high）：不放、也不再补", b.live[0] == 21500)
+ok("补完后训练又涨 4.5GB（没超过 high）：不放、也不再补", b.live[0] == 21 * 1024)
 G.time.time = time.time
 
 with tempfile.TemporaryDirectory() as d:
@@ -139,8 +143,8 @@ with tempfile.TemporaryDirectory() as d:
     G.time.time = lambda: t[0]
     p.changed[0], p.train_ref[0] = 0, 9000
     p.step()
-    ok("稳定的训练：补到 42GB", b.used() == 42000)
-    ok("<base>.mib 写了 pad 的大小", open(base + ".mib").read().strip() == "33000")
+    ok("稳定的训练：补到 42GB", filled(b.used()))
+    ok("<base>.mib 写了 pad 的大小", open(base + ".mib").read().strip() == str(33 * 1024))
     open(base + ".start", "w").close()
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
     t[0] += 10; p.step()
@@ -149,7 +153,7 @@ with tempfile.TemporaryDirectory() as d:
     t[0] += 50; b.training[0] = 18000; p.step()
     ok("新训练还没稳定：不补", b.live[0] == 0)
     t[0] += 110; p.step()
-    ok("新训练稳定后：补到 42GB", b.used() == 42000)
+    ok("新训练稳定后：补到 42GB", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
     t[0] += 10; p.step()
     ok("7b 第二次信号：释放", b.live[0] == 0)
@@ -158,22 +162,22 @@ with tempfile.TemporaryDirectory() as d:
     t[0] += 300; b.training[0] = 30000; p.step()
     ok("7b 新训练起来了：先等它稳定", b.live[0] == 0)
     t[0] += 110; p.step()
-    ok("7b 稳定后补上", b.used() == 42000)
+    ok("7b 稳定后补上", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
     t[0] += 10; p.step()
     t[0] += 950; p.step()
-    ok("7b 等了 start_hold（900 秒）新训练还没起来：照常补", b.used() == 42000)
+    ok("7b 等了 start_hold（900 秒）新训练还没起来：照常补", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
     t[0] += 10; b.training[0] = 1000; p.step()
     t[0] += 60; b.training[0] = 20000; p.step()
     t[0] += 110; p.step()
-    ok("7c 旧训练结束后新训练起来（比原来少）：稳定后补上", b.used() == 42000)
+    ok("7c 旧训练结束后新训练起来（比原来少）：稳定后补上", filled(b.used()))
     G.time.time = time.time
 
 b = FakeBackend(fallback=True)
 p, _ = pad_of(b)
 p.step()
-ok("退回 mem_get_info 时目标多 1500MiB", b.used() == 43500)
+ok("退回 mem_get_info 时目标多 1500MiB", filled(b.used(), 43500))
 
 b = FakeBackend(total=32000)
 p, logs = pad_of(b)
@@ -188,7 +192,7 @@ ok("分配失败不抛异常、不占显存", b.live[0] == 0 and any("失败" in
 b.fail_alloc = set()
 p.next_try[0] = 0
 p.step()
-ok("恢复后能补上", b.used() == 42000)
+ok("恢复后能补上", filled(b.used()))
 
 b = FakeBackend(training=70000)
 p, _ = pad_of(b, target_mib=76000, high_mib=79000, min_free_mib=8000)
@@ -217,7 +221,7 @@ b = FakeBackend(devices=2)
 b.training[0] = 0
 p, _ = pad_of(b)
 p.step()
-ok("多卡分别处理", b.live[0] == 0 and b.used(1) == 42000)
+ok("多卡分别处理", b.live[0] == 0 and filled(b.used(1)))
 
 b = FakeBackend()
 p, _ = pad_of(b, iterations=2)
@@ -260,7 +264,7 @@ b = FakeBackend(devices=2)
 b.fail_alloc = {0}
 p, logs = pad_of(b)
 p.step()
-ok("dev 0 分配失败不影响 dev 1", b.live[0] == 0 and b.used(1) == 42000)
+ok("dev 0 分配失败不影响 dev 1", b.live[0] == 0 and filled(b.used(1)))
 ok("两张卡都写心跳", any("心跳 dev 0" in x for x in logs) and any("心跳 dev 1" in x for x in logs))
 
 if fails:

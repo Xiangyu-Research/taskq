@@ -71,7 +71,7 @@
 
 ## 显存填充
 
-DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pad.py` 只占显存，不做训练/推理：按 nvidia-smi 的 `memory.used` 把每张卡维持在 **42000 MiB**、封顶 **62000 MiB**，给训练留至少 8GB；总显存 <60GB 时跳过（不是 80GB A100）。不分模型（10/18 改）：训练占的显存（`memory.used` 减去 pad 自己保留的）不到 2000 MiB 算没有训练，不填、已填的放掉；训练占的显存 120 秒内变化不超过 1 GiB 才补。要开始新训练时 `dicc_worker.sh` touch `/tmp/gpu_pad_<作业号>.start`，pad 下一轮（10 秒）全部放掉，worker 等 `/tmp/gpu_pad_<作业号>.mib`（pad 现在占多少）变成 0 再开训（最多等 30 秒）；新训练占上显存（比放掉前多出 2000 MiB；等的时候旧训练结束了，按降下来的值算）并稳定后再补，最多等 900 秒（`--start-hold`）。超过 62000 MiB 时一次算好要放几块、一起释放。
+DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pad.py` 只占显存，不做训练/推理：按 nvidia-smi 的 `memory.used` 把每张卡维持在 **42000 MiB** 以上、封顶 **62000 MiB**，每次补、放都是整块 1GB（10/18 起，补完会多出不到 1GB），给训练留至少 8GB；总显存 <60GB 时跳过（不是 80GB A100）。不分模型（10/18 改）：训练占的显存（`memory.used` 减去 pad 自己保留的）不到 2000 MiB 算没有训练，不填、已填的放掉；训练占的显存 120 秒内变化不超过 1 GiB 才补。要开始新训练时 `dicc_worker.sh` touch `/tmp/gpu_pad_<作业号>.start`，pad 下一轮（10 秒）全部放掉，worker 等 `/tmp/gpu_pad_<作业号>.mib`（pad 现在占多少）变成 0 再开训（最多等 30 秒）；新训练占上显存（比放掉前多出 2000 MiB；等的时候旧训练结束了，按降下来的值算）并稳定后再补，最多等 900 秒（`--start-hold`）。超过 62000 MiB 时一次算好要放几块、一起释放。
 
 - **默认开启**：`gpu_pad_start.sh`（`worker.sbatch` 直接调用，其他作业经 `envs/nnunet_paths.sh`）在所有 Slurm GPU 作业里启动它（不管作业名；不是 `SLURM_STEP_ID`、不是测试环境、有 `CUDA_VISIBLE_DEVICES`、有 `nvidia-smi`）。排队中的作业开训时会读这个文件，所以不用重新提交。
 - **日志**：`<数据目录>/logs/workers/gpu_pad_<作业号>.log`（10/18 前在 `nnUNet/results/logs/`）。
