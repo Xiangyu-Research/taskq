@@ -4,9 +4,8 @@
 #   train_task.sh <数据集编号> <fold> [训练器，默认 nnUNetTrainer_save10] [--epochs N]
 # 用哪张卡由 CUDA_VISIBLE_DEVICES 决定（q 按组设好）。
 # 退出码（scripts/queue/README.md 的"约定"）：0 训完（有 checkpoint_final.pth 和验证结果）；75 训满 N 个 epoch 停了、还没训完；
-#   3 = 别的机器在训这一折，或 Slurm 上排着（同一折不在两处训，要在这里训先停掉那边的）；
 #   其他 = 出错（训练连续出错 3 次才算，每次隔 5 分钟）。
-# 别的机器在训的折由 scripts/monitor/health.py 每 30 分钟写到 ~/.cache/phd/claimed_elsewhere.txt；文件超过 2 小时没更新时照常训，只在日志里警告。
+# 同一折不在两处训：自动加的训练任务由 box 先在 DICC 的任务队列里领到这一折（scripts/queue/refill.py）再加（10/18 起）。
 # 停这个任务用 pueue kill -s SIGTERM <任务号>：会先停训练（最多丢 10 个 epoch）再退出。
 set -u
 DS=${1:?用法：train_task.sh <数据集编号> <fold> [训练器] [--epochs N]} FOLD=${2:?} ; shift 2
@@ -53,13 +52,6 @@ last_epoch() {  # 本次启动后新写的训练日志里最后一个 epoch 编�
     [[ -n $L ]] && grep -oE ": Epoch [0-9]+ *$" "$L" | tail -1 | grep -oE "[0-9]+"
 }
 
-CLAIMS=${QUEUE_CLAIMS:-$HOME/.cache/phd/claimed_elsewhere.txt}
-KEY=$(basename "$DIR")/$TRAINER/$FOLD
-elsewhere() {  # 别的机器在训这一折（或 Slurm 上排着）：输出那台机器的名字
-    [[ -f $CLAIMS ]] || return 1
-    if [[ -z $(find "$CLAIMS" -mmin -120) ]]; then log "警告：$CLAIMS 超过 2 小时没更新，不能确认别的机器上有没有这一折" >&2; return 1; fi
-    awk -F'\t' -v k="$KEY" '$1 == k {print $2; f = 1} END {exit !f}' "$CLAIMS"
-}
 JOB="数据集 $DS fold $FOLD $TRAINER（卡 $GPU${N:+，训 $N 个 epoch}）"
 done_ && { log "已经训完：$JOB"; exit 0; }
 MARK=$(mktemp); trap 'rm -f "$MARK"' EXIT
@@ -67,7 +59,6 @@ pid=
 trap '[[ -n $pid ]] && { log "收到停止信号，停训练"; stop_train $pid; }; exit 143' TERM INT
 errors=0
 while true; do
-    if where=$(elsewhere); then log "$where 上在训或排着这一折（$KEY，见 $CLAIMS），不在这里训；要在这里训，先停掉那边的"; exit 3; fi
     if ! gpu_free; then
         log "卡 $GPU 被占，5 分钟后再看"; sleep 300 & wait $!; continue
     fi

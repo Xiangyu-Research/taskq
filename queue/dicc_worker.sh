@@ -1,10 +1,15 @@
 #!/bin/bash
 # DICC 训练作业的任务队列 worker（2026-10-17）：作业开始后，envs/nnunet_paths.sh 在 ~/.cache/phd/taskq/ENABLED 存在时
-# exec 到这里，不再训作业名对应的那一折，而是从 scripts/queue/taskq.py 的队列里按顺序领任务：同一张卡同时训
-# 2 个（nnU-Net 类，并且作业有 ≥ 24 个 CPU、≥ 56G 内存；SwinUNETR、U-Mamba、STU-Net 1 个），训完一个再领下一个；
+# exec 到这里，不再训作业名对应的那一折，而是从 scripts/queue/taskq.py 的队列里按顺序领任务，什么模型都领（10/18 起，
+# 不分种类）。一张卡训几个看实际情况：先训 1 个；最近一个训练开始 15 分钟以后，如果近 10 分钟 GPU 平均使用率低于 80%、
+# 除去显存填充还空着一半显存（当时用 nvidia-smi 读），再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。nnU-Net 这类
+# CPU 跟不上的会变成 2 个，SwinUNETR、U-Mamba 这类 GPU 跑满的自然只训 1 个。训完一个再领下一个；
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的就退出。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训（最多丢 10 个 epoch）。
-#   bash dicc_worker.sh <本作业的训练器> <本作业的 fold> <本作业的数据集编号>     （由 nnunet_paths.sh 调用）
+# 开始每个训练前先通知显存填充（gpu_pad.py）全部放掉（touch <base>.start，等 <base>.mib 变成 0，最多 30 秒），
+# 新训练启动时整张卡都能用。每个任务按训练器换环境（~/envs/swinunetr、~/envs/umamba，同 train_folds.sbatch）。
+#   bash dicc_worker.sh <本作业的训练器> <本作业的 fold> <本作业的数据集编号>     （由 nnunet_paths.sh 调用，10/17 前交的作业）
+#   bash dicc_worker.sh                                                             （不带折的作业 research/RQ1/nnunet/worker.sbatch）
 # 出问题时不让排队的作业空跑掉（10/17）：
 #   - 本作业训练失败 2 次（或开训前就出错）就不再领新的，也不重领自己失败过的；
 #   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业先空着等（健康检查提醒），免得后面排队的作业一个个
@@ -17,22 +22,22 @@
 # 每个任务的日志和 train_folds.sbatch 的分段日志同一格式（作业号 = 本作业的实际作业号，第 1 段），登记表照常认。
 # WORKER_TEST_CMD 只给测试用：代替 python 训练命令（会在后面加上 "数据集编号 fold"）；TASKQ_* 环境变量也只给测试用。
 set -uo pipefail
-OWN_TRAINER=${1:?本作业的训练器} OWN_FOLD=${2:-} OWN_DS=${3:-101}
+OWN_TRAINER=${1:-} OWN_FOLD=${2:-} OWN_DS=${3:-101}  # 只在队列出错、改回训自己那一折时用
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
 TQPY="python3 $HERE/taskq.py"
 TQDIR=${TASKQ_DIR:-$HOME/.cache/phd/taskq}
 W=${SLURM_JOB_ID:?只在 Slurm 作业里用}
-case ${OWN_TRAINER,,} in
-    *swin*) KIND=swin ;; *umamba*) KIND=umamba ;; *stunet*) KIND=stunet ;; *) KIND=nnunet ;;
-esac
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
-if [[ $KIND == nnunet ]] && (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
-    SLOTS=${TASKQ_SLOTS:-2}
+if (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
+    SLOTS=${TASKQ_SLOTS:-2}   # 最多同时训几个
 else
     SLOTS=${TASKQ_SLOTS:-1}
 fi
+ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过这么久才判断要不要再加一个
+UTIL_MAX=${TASKQ_UTIL_MAX:-80}          # 近 10 分钟 GPU 平均使用率低于这个才加
+PADBASE=${RQ1_GPU_PAD_BASE:-/tmp/gpu_pad_$W}  # 和 gpu_pad.py 交换信号的文件前缀
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-1200}        # 开始后最多等这么久，给排在前面、刚停下的折留位置
 ERR_FALLBACK=${TASKQ_ERR_FALLBACK:-600} # 队列连续出错这么久就改回训自己那一折
@@ -61,7 +66,7 @@ get_end() {
 }
 get_end
 left() { (( END == 0 )) && echo 999999 || echo $(( END - $(date +%s) )); }
-echo "$(ts) 任务队列 worker：作业 $W @ $(hostname -s)，种类 $KIND，同时 $SLOTS 个，CPU $NCPU，内存 ${MEMMB}M（每个训练 $DA 个数据增强进程），" \
+echo "$(ts) 任务队列 worker：作业 $W @ $(hostname -s)，最多同时 $SLOTS 个，CPU $NCPU，内存 ${MEMMB}M（每个训练 $DA 个数据增强进程），" \
      "时限 $( (( END )) && date -d @"$END" '+%F %T' || echo 查不到，之后再查)，代码 $COMMIT"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
 
@@ -70,14 +75,60 @@ GPUCSV=$LOGDIR/worker_${W}_gpu.csv
 GPUMON=$!
 
 declare -A KEY=() FD=()   # 训练的 pid → key、这一折的结果目录
+CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
 FB_PID=                   # 改回训自己那一折时的训练 pid
+pad_make_room() {  # 通知显存填充全部放掉，等它放完（没有填充时立刻返回）
+    [[ -f $PADBASE.mib ]] || return 0
+    touch "$PADBASE.start"
+    local i
+    for i in $(seq 30); do
+        [[ $(cat "$PADBASE.mib" 2> /dev/null) == 0 ]] && return 0
+        sleep 1
+    done
+    echo "$(ts) 显存填充 30 秒内没放掉（$PADBASE.mib = $(cat "$PADBASE.mib" 2> /dev/null)），照样开始"
+}
+gpu_stats() {  # 近 10 分钟的 GPU 平均使用率、样本数；现在的显存已用、总量（MiB）
+    if [[ -n ${WORKER_TEST_GPU:-} ]]; then echo "$WORKER_TEST_GPU"; return; fi
+    local ut mem
+    ut=$(tail -n 10 "$GPUCSV" 2> /dev/null | awk -F', *' '{gsub(/[^0-9]/, "", $5); if ($5 != "") { u += $5; n++ } }
+        END { if (n) printf "%d %d\n", u / n, n; else print "0 0" }')
+    mem=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2> /dev/null | head -1 | tr -d ' ' | tr ',' ' ')
+    echo "$ut ${mem:-0 0}"
+}
+pad_now() {  # 显存填充现在占着多少 MiB；<base>.mib 超过 60 秒没更新（填充已经不在了）算 0
+    local v
+    v=$(cat "$PADBASE.mib" 2> /dev/null)
+    [[ $v =~ ^[0-9]+$ ]] && (( $(date +%s) - $(stat -c %Y "$PADBASE.mib") <= 60 )) && echo "$v" || echo 0
+}
+can_add() {  # 手上有训练时，还能不能再加一个；不能时 why_not 里写原因
+    local n=${#KEY[@]} util cnt used total pad
+    why_not=
+    (( n == 0 )) && return 0
+    (( n >= SLOTS )) && { why_not="已经 $n 个"; return 1; }
+    (( $(date +%s) - CHANGED >= ADD_AFTER )) || { why_not="刚开始，先看看"; return 1; }
+    read -r util cnt used total <<< "$(gpu_stats)"
+    pad=$(pad_now)
+    (( cnt >= 5 && total > 0 )) || { why_not="GPU 记录不够"; return 1; }
+    (( util < UTIL_MAX )) || { why_not="GPU 使用率 $util%"; return 1; }
+    (( total - used + pad >= total / 2 )) || { why_not="显存不够（训练占 $(( used - pad ))MiB / ${total}MiB）"; return 1; }
+    echo "$(ts) GPU 使用率 $util%、训练占 $(( used - pad ))MiB / ${total}MiB，再领一个"
+    return 0
+}
 run_one() {  # 数据集编号 训练器 fold 日志
     local dsid=$1 tr=$2 fold=$3 log=$4 rc
     export nnUNet_n_proc_DA=$DA PYTHONUNBUFFERED=1
+    pad_make_room
+    # 按训练器换环境（同 train_folds.sbatch；在后台的子 shell 里，不影响别的任务）。先退出作业启动时带进来的 venv
+    # （旧的 SwinUNETR / U-Mamba 作业是在 venv 里开始的），基于 nnU-Net 的训练器用 conda 的默认环境。
+    if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi
+    case $tr in
+        *SwinUNETR*) source ~/envs/swinunetr/bin/activate || return 1 ;;
+        *UMamba*) source ~/envs/umamba/bin/activate || return 1 ;;
+    esac
     if [[ -n ${WORKER_TEST_CMD:-} ]]; then
-        $WORKER_TEST_CMD "$dsid" "$fold" >> "$log" 2>&1
+        WORKER_TEST_TR=$tr $WORKER_TEST_CMD "$dsid" "$fold" >> "$log" 2>&1
         return
     fi
     train() { python -c "from nnunetv2.run.run_training import run_training_entry; run_training_entry()" \
@@ -110,6 +161,7 @@ start() {  # key 数据集编号 训练器 fold
     echo "作业 ${W}_1 @ $(hostname)，数据集=$dsname，训练器=$tr，fold=$fold，第 1 段（任务队列），代码 $COMMIT，$(ts)" >> "$log"
     run_one "$dsid" "$tr" "$fold" "$log" &
     KEY[$!]=$key
+    CHANGED=$(date +%s)
     FD[$!]=$nnUNet_results/$dsname/${tr}__${PLANS}__3d_fullres/fold_$fold
     echo "$(ts) 开训 $key（pid $!，日志 $(basename "$log")）"
 }
@@ -149,6 +201,7 @@ on_term() {
     done
     (( ${#KEY[@]} )) && $TQPY release --worker "$W" "${KEY[@]}"
     kill_tree "$GPUMON"
+    rm -f "$ERRF"
     exit 143
 }
 trap on_term TERM INT
@@ -182,9 +235,11 @@ while true; do
         last_beat=$now
     fi
     # 领新的
-    why=
-    while (( ${#KEY[@]} < SLOTS && $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )); do
-        t=$($TQPY claim --worker "$W" --kind "$KIND" --free-slots $(( SLOTS - ${#KEY[@]} )) \
+    why= tried=0
+    while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && can_add; do
+        tried=1
+        # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的折留位置
+        t=$($TQPY claim --worker "$W" --kind any --free-slots 1 \
                         --patience-until $(( T0 + PATIENCE )) --exclude ${EXCL[@]+"${EXCL[@]}"} 2> "$ERRF")
         rc=$?
         case $rc in
@@ -196,6 +251,9 @@ while true; do
                 why=error; break ;;
         esac
     done
+    (( tried )) || err_since=0  # 这一轮没去领（手上满了）：之前的出错不接着算
+    if [[ -n $why_not && $why_not != "${last_why:-}" ]]; then echo "$(ts) 先不再加训练：$why_not"; fi
+    last_why=$why_not
     if (( ${#KEY[@]} > 0 )); then
         idle_since=0
     else
@@ -209,7 +267,7 @@ while true; do
         elif [[ $why == error ]] && (( now - err_since >= ERR_FALLBACK )); then
             fallback_own; rc=$?
             (( rc == 200 )) && rc=0  # 自己那一折不用训，和 train_folds.sbatch 一样正常结束
-            kill_tree "$GPUMON"
+            kill_tree "$GPUMON"; rm -f "$ERRF"
             echo "$(ts) 作业结束（退出码 $rc）"
             exit $rc
         elif (( now - idle_since >= IDLE_MAX )); then
@@ -223,4 +281,5 @@ while true; do
     sleep "${TASKQ_POLL:-30}" & wait $!
 done
 kill_tree "$GPUMON"
+rm -f "$ERRF"
 exit 0

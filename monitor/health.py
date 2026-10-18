@@ -13,7 +13,7 @@
   - 训练卡住：Slurm 在跑的作业、pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
   - 拉回：box 上在等的折既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
   - 同一折两处：同一折在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
-  - 训练机的卡快空了：pueue 训练机（角色 train）上有卡的组里，排着的训练任务没有了（只剩在训的一个，或者全空），该补任务了。
+  - 训练机的卡空了：pueue 训练机（角色 train）上有卡的组里没有排着的训练任务（只剩在训的一个，或者全空），这次也没领到新的。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
   - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；代码自动同步（角色 autopull）2 小时没成功。
   - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
@@ -21,9 +21,9 @@
   事件类（任务失败）推送一次；状态类（盘、卡住、连不上……）恢复后再推送一次"已恢复"。
 文件：~/.config/phd-health/ntfy_topic（ntfy 频道名，不进仓库）、~/.cache/phd-health/state.json（问题和推送记录，
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
-训练机的卡快空了时自动从待办里补任务（scripts/queue/refill.py），补了什么作为事件推送。
-另外给每台训练机（角色 train）写 ~/.cache/phd/claimed_elsewhere.txt：别的机器在训的折、别的 Slurm 集群上排着的折，
-  每行"key<TAB>机器"，开训前读（scripts/queue/train_task.sh、research/RQ1/nnunet/train_folds.sbatch），防止同一折两处训练。
+每次检查后还做两件事（10/18 起）：
+  - scripts/queue/refill.py：替 lab 从 DICC 的任务队列领任务、续上、交还；领了什么作为事件推送，停住等人处理的报成问题。
+  - scripts/queue/advance.py：box 上按每一折的状态排下一步（拉回 → 推理 → 评测 → 五折分析）；失败停住的报成问题。
 """
 import argparse
 import json
@@ -50,7 +50,6 @@ LOG = os.path.expanduser("~/.cache/phd-health/health.log")
 TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
 PRUNE_LOG = os.path.expanduser("~/archive_prune.log")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
-CLAIMS = "~/.cache/phd/claimed_elsewhere.txt"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
 PAUSED_OK = ("Failed (75)",)  # train_task.sh 训满 N 个 epoch 停了、还没训完
@@ -69,7 +68,9 @@ def probe_script(m):
     if m["gpu_log"]:
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
     if "train" in m["roles"]:  # 已经有哪些预处理好的数据集（scripts/queue/refill.py 判断要不要先传数据）
-        lines.append(f'echo "PREP|$(ls {m["data"]}/nnUNet/preprocessed 2>/dev/null | tr \'\\n\' \' \')"')
+        # 带 .incomplete 的是 tunnel_push.sh 没传完的，不算
+        lines.append(f'echo "PREP|$(cd {m["data"]}/nnUNet/preprocessed 2>/dev/null && for d in */; do '
+                     f'[[ -d $d && ! -e $d.incomplete ]] && printf "%s " "${{d%/}}"; done)"')
     if "autopull" in m["roles"]:
         lines.append('echo "GITOK|$(cat ~/.cache/phd/git_pull_ok 2>/dev/null)"')
         lines.append('echo "GITLOG|$(tail -1 ~/git_pull.log 2>/dev/null)"')
@@ -162,8 +163,7 @@ def fold_info(s, key):
 
 # ---------------- 检查 ----------------
 def check(s):
-    """→ ({问题编号: dict(msg, level=urgent|normal|info, kind=event|state, after=持续多少分钟才算)},
-    {训练机: [(key, 在哪台机器)]，写给它的清单；这次没收集全（有训练机连不上）时不在里面})。"""
+    """→ {问题编号: dict(msg, level=urgent|normal|info, kind=event|state, after=持续多少分钟才算)}。"""
     now, P = s["now"], {}
     L = lambda n: M.MACHINES[n]["label"]  # noqa: E731
 
@@ -172,7 +172,6 @@ def check(s):
 
     claims = {}  # key → {机器: [描述]}（排队或在训）
     busy = {}  # key → {机器}：在训，或段间等待（有进度、下一段在排队）
-    queued_slurm = {}  # key → {Slurm 机器}：排着（还没开始也算，要在别处训先取消）
 
     def claim(key, name, desc):
         claims.setdefault(key, {}).setdefault(name, []).append(desc)
@@ -186,17 +185,19 @@ def check(s):
         tq = s.get("taskq", {}).get(name)
         if tq and tq["enabled"]:
             # 任务队列开着时，作业名不再对应训哪一折：排队、在训都看队列（scripts/queue/taskq.py）
+            pueue_workers = set(M.names("pueue"))
             for t in tq["tasks"]:
                 key, st = t["key"], t["state"]
+                if t.get("worker") in pueue_workers and st in ("claimed", "stale"):
+                    continue  # lab 领的（box 替它领）：在训看 lab 的 pueue（下面），续上、交还由 refill.py 管
                 if st in ("free", "stale", "claimed", "busy"):
                     claim(key, name, "队列" if st in ("free", "stale") else f"在训（{t['note']}）")
-                    queued_slurm.setdefault(key, set()).add(name)
                 if st in ("claimed", "busy"):
                     busy.setdefault(key, set()).add(name)
                 if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (t["log_age"] is None or t["log_age"] > 5400):
                     add(f"stuck:{name}:{key}", f"{L(name)} 作业 {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
                         f"{'训练日志 90 分钟没有新 epoch' if t['log_age'] is not None else '还没有训练日志'}")
-                if t["failures"]:
+                if t["failures"] and st != "done":  # 后来训完了就不再报
                     add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 训练失败 {t['failures']} 次"
                         + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
             if tq.get("paused"):
@@ -210,21 +211,18 @@ def check(s):
                     p_.insert(0, 0)
                 return (int(d_ or 0) * 24 + p_[0]) * 60 + p_[1]
             # 按原来的做法训自己那一折的作业（开关打开前就开始的）不算空着：它名下那一折正在训
-            training = {t["key"] for t in tq["tasks"] if t["state"] in ("claimed", "busy")}
+            training = {t["key"] for t in tq["tasks"] if t["state"] in ("claimed", "busy") and t.get("worker") not in pueue_workers}
             run = [r for r in d["squeue"] if r[0].startswith("rq1_") and r[2] == "RUNNING" and mins(r[3]) >= 30
                    and jk.get(r[0]) not in training]
-            workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
+            workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed" and t.get("worker") not in pueue_workers}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
                     "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
-            # 队列里还有没训完的任务，但 Slurm 上已经没有这一种（nnunet / swin …）的作业了：要补交作业
-            kinds = {taskq.kind_of(jk[r[0]].split("/")[1]) for r in d["squeue"] if r[0] in jk}
-            left = {}
-            for t in tq["tasks"]:
-                if t["state"] in ("free", "stale") and t["kind"] not in kinds:
-                    left[t["kind"]] = left.get(t["kind"], 0) + 1
-            for k, n in left.items():
-                add(f"tqorphan:{name}:{k}", f"{L(name)} 任务队列里还有 {n} 个 {k} 任务没训完，但已经没有排着或在跑的 {k} 作业，要补交作业")
+            # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了（作业什么任务都领）：要交 worker.sbatch
+            left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
+            if left and not any(r[0].startswith("rq1_") for r in d["squeue"]):
+                add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业，"
+                    "要交 research/RQ1/nnunet/worker.sbatch")
             for jid, jname, st, end, code in d["sacct"]:
                 add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
             continue
@@ -235,7 +233,6 @@ def check(s):
             if not key:
                 continue
             claim(key, name, f"{jid}（{st}）")
-            queued_slurm.setdefault(key, set()).add(name)
             info = fold_info(s, key).get(name)
             if st == "RUNNING":
                 busy.setdefault(key, set()).add(name)
@@ -283,7 +280,9 @@ def check(s):
             add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if st in STOPPED else "normal", kind="event")
 
-    # --- 训练机的卡快空了 ---
+    # --- 训练机的卡空了 ---
+    qh = next((n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"]), None)
+    holding = {t.get("worker") for t in (s.get("taskq", {}).get(qh) or {}).get("tasks", []) if t.get("state") != "done"}
     for name in M.names("pueue"):
         m = M.MACHINES[name]
         if "train" not in m["roles"] or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
@@ -294,9 +293,11 @@ def check(s):
             ts = train_q.get((name, g), [])
             run = [n for st, n in ts if st == "Running"]
             if not ts:
-                add(f"idle:{name}:{g}", f"{L(name)} {g} 组没有训练任务，{gpu} 号卡空着，该补任务了")
+                if name not in holding:  # 领着折时（在传数据、或停了等人处理）refill.py 另外报
+                    add(f"idle:{name}:{g}", f"{L(name)} {g} 组没有训练任务，{gpu} 号卡空着（任务队列里没有能领的？看 ~/refill.log）")
             elif len(ts) == len(run):
-                add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练，该补任务了")
+                add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练（训完后由 refill.py 领下一折）",
+                    level="info")
 
     # --- 拉回 ---
     for host, t, key, src in waits:
@@ -346,21 +347,15 @@ def check(s):
     if s.get("board_pending"):
         add("board", f"看板有新结果等确认后发布（{len(s['board_pending'])} 个文件：{'、'.join(s['board_pending'][:4])}）")
 
-    # --- 写给训练机的清单：别的机器在训的折 + 别的 Slurm 集群上排着的折 ---
-    out = {}
-    train = M.names("train")
-    if all(s["ok"].get(n) for n in train):
-        for n in train:
-            out[n] = sorted({(k, L(o)) for k, v in busy.items() for o in v if o != n} |
-                            {(k, L(o)) for k, v in queued_slurm.items() for o in v if o != n})
-    return P, out
+    return P
 
 
 def mr_time(x):
-    """pueue 的时间（带时区、纳秒）→ 本地 naive datetime。"""
+    """pueue 的时间（带时区；秒的小数部分可能是 0、3、6、9 位）→ 本地 naive datetime。"""
     if not x:
         return None
-    return datetime.fromisoformat(x[:26] + x[-6:]).astimezone().replace(tzinfo=None)
+    m = re.fullmatch(r"(.+T\d\d:\d\d:\d\d)(\.\d+)?(.*)", x)
+    return datetime.fromisoformat(m.group(1) + (m.group(2) or "")[:7] + m.group(3)).astimezone().replace(tzinfo=None)
 
 
 # ---------------- 推送和状态 ----------------
@@ -447,17 +442,6 @@ def digest(cur, resolved, prune_pos, now):
     return "\n".join(lines)
 
 
-def write_claims(name, items, now):
-    m = M.MACHINES[name]
-    body = (f"# health.py {now:%F %T}：别的机器在训、或 Slurm 上排着的折，{m['label']} 上不训（key<TAB>机器）\n"
-            + "".join(f"{k}\t{w}\n" for k, w in items))
-    cmd = f"mkdir -p ~/.cache/phd && cat > {CLAIMS}.tmp && mv {CLAIMS}.tmp {CLAIMS}"
-    if m["scheduler"] == "slurm":
-        # 10/16 之前提交的作业复制了旧版 train_folds.sbatch，读 lab_active.txt（每行一个 key）；这批作业跑完后去掉
-        cmd += " && cut -f1 " + CLAIMS + " | grep -v '^#' > ~/.cache/phd/lab_active.txt"
-    sh(["bash", "-c", cmd] if m["ssh"] is None else SSH + [m["ssh"], cmd], inp=body)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -468,9 +452,20 @@ def main():
         print("已推送测试消息")
         return
     s = gather()
-    P, claims = check(s)
-    import refill  # scripts/queue/refill.py：训练机的卡快空了就自动补任务
-    events, filled = refill.run_all(s, dry=a.dry_run)
+    P = check(s)
+    # 这两步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
+    try:
+        import refill  # scripts/queue/refill.py：替 lab 从任务队列领任务、续上、交还
+        events, stuck, filled = refill.run_all(s, dry=a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        events, stuck, filled = [], {"refill:error": f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}, set()
+    try:
+        import advance  # scripts/queue/advance.py：box 上按状态排下一步
+        done, stuck2 = advance.run(s, dry=a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        done, stuck2 = [], {"advance:error": f"scripts/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
+    for pid, msg in {**stuck, **stuck2}.items():
+        P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
     if not a.dry_run:
         for i, msg in enumerate(events):
             P[f"refill:{s['now']:%m%d%H%M}:{i}"] = dict(msg=msg, level="normal", kind="event", after=0)
@@ -481,12 +476,8 @@ def main():
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        for n, items in claims.items():
-            print(f"\n写给 {n} 的清单（这里不训）：{len(items)} 折")
-        print("\n自动补任务：" + "；".join(events))
-        return
-    for n, items in claims.items():
-        write_claims(n, items, s["now"])
+        print("\nlab 领任务：" + "；".join(events))
+        print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
 
 
 if __name__ == "__main__":

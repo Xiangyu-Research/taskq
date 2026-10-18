@@ -29,12 +29,6 @@ run() { bash "$HERE/train_task.sh" 999 0 "$@" > "$T/log" 2>&1; }
 run --epochs 25; rc=$?
 check "训满 25 个 epoch 后存盘停" 75 $rc '(( $(cat $OUT/epoch) >= 25 && $(cat $OUT/epoch) <= 40 ))'
 check "数据集编号传给训练脚本（RQ1_DATASET）" 75 $rc '[[ $(cat $T/dataset) == 999 ]]'
-export QUEUE_CLAIMS=$T/claims.txt
-printf '# test\nDataset999_test/nnUNetTrainer_save10/0\tDICC\n' > "$QUEUE_CLAIMS"
-run --epochs 5; check "别的机器在训或 Slurm 上排着这一折时不训（退出码 3）" 3 $? "grep -q 'DICC 上在训或排着' $T/log"
-touch -d '3 hours ago' "$QUEUE_CLAIMS"
-run --epochs 5; check "清单过期时照常训，日志里警告" 75 $? "grep -q 警告 $T/log"
-rm -f "$QUEUE_CLAIMS"
 FAKE_EPOCHS=200 run; check "训完退出 0" 0 $? "[[ -f $OUT/checkpoint_final.pth ]]"
 run; check "已经训完的直接退出 0" 0 $? "grep -q 已经训完 $T/log"
 (( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; cat "$T/log"; exit 1; }
