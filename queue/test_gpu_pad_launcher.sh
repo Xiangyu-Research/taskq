@@ -76,6 +76,17 @@ source_it "$T/bin" SLURM_JOB_ID=1002 CUDA_VISIBLE_DEVICES=0
 sleep 0.5
 check "没有 TRAINER 也能启动" bash -c "test \$(wc -l < '$T/args') -eq 1"
 
+# 2b. 新起的 bash 换了 PATH（DICC 上 ~/.bashrc 的 conda 初始化会这样，10/18）：仍用启动时的 python3
+reset
+mkdir -p "$T/badbin"
+printf '#!/bin/bash\necho bad >> "%s/badpy"\nexit 1\n' "$T" > "$T/badbin/python3"
+chmod +x "$T/badbin/python3"
+printf 'PATH=%s/badbin:$PATH\n' "$T" > "$T/bashenv"
+source_it "$T/bin" SLURM_JOB_ID=1003 CUDA_VISIBLE_DEVICES=0 BASH_ENV="$T/bashenv"
+sleep 0.5
+check "子 bash 换了 PATH 也用启动时的 python3" bash -c "test \$(wc -l < '$T/args') -eq 1 && test ! -e '$T/badpy'"
+unset BASH_ENV
+
 # 3. 不应该启动的情况
 reset; source_it "$T/bin" CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
 sleep 0.3; check "没有 SLURM_JOB_ID：不启动" test "$(lines)" -eq 0
