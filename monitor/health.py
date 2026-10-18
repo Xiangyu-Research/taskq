@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -42,7 +43,9 @@ sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
 sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
-import make_registry as mr  # noqa: E402  收集各机器训练状态的函数、SPEC、DS
+import make_registry as mr  # noqa: E402  要登记的任务、训练命令 → key
+import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
+import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
 import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
@@ -60,17 +63,31 @@ SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y'; echo '=====';"
                " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
 
 
-def probe_script(m):
-    """pueue 机器上要查的东西（按表里的字段），每行"项|值"。"""
+WORKER_JOBS = ("rq1_", "train_worker")  # DICC 上训练作业的名字：10/18 前交的按折作业 rq1_*，不带折的 worker.sbatch
+
+
+def is_worker_job(name):
+    return name.startswith(WORKER_JOBS)
+
+
+def data_candidates(queue=()):
+    """训练要用的数据（相对数据目录）：实验表里所有任务、加上队列里的任务（queue：taskq 状态里的任务列表）的 data。"""
+    out = {p for t in E.tasks().values() for p in t["spec"].get("data") or []}
+    out |= {p for t in queue for p in (t.get("spec") or {}).get("data") or []}
+    return sorted(out)
+
+
+def probe_script(m, paths=()):
+    """pueue 机器上要查的东西（按表里的字段），每行"项|值"。paths：训练机上要看在不在的数据（相对数据目录）。"""
     lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"']
     if m["disk"]:
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
-    if "train" in m["roles"]:  # 已经有哪些预处理好的数据集（scripts/queue/refill.py 判断要不要先传数据）
-        # 带 .incomplete 的是 tunnel_push.sh 没传完的，不算
-        lines.append(f'echo "PREP|$(cd {m["data"]}/nnUNet/preprocessed 2>/dev/null && for d in */; do '
-                     f'[[ -d $d && ! -e $d.incomplete ]] && printf "%s " "${{d%/}}"; done)"')
+    if "train" in m["roles"] and paths:  # 训练要用的数据哪些已经在了（scripts/queue/refill.py 判断要不要先传）
+        # 里面有 .incomplete 的是 tunnel_push.sh 没传完的，不算
+        lines.append(f'echo "HAVE|$(cd {m["data"]} 2>/dev/null && for p in {" ".join(shlex.quote(p) for p in paths)}; do '
+                     f'[[ -e $p && ! -e $p/.incomplete ]] && printf "%s " "$p"; done)"')
     if "autopull" in m["roles"]:
         lines.append('echo "GITOK|$(cat ~/.cache/phd/git_pull_ok 2>/dev/null)"')
         lines.append('echo "GITLOG|$(tail -1 ~/git_pull.log 2>/dev/null)"')
@@ -91,12 +108,12 @@ def run_on(m, script, timeout=120):
 
 # ---------------- 收集 ----------------
 def job_keys():
-    """Slurm 作业名 → key（数据集/训练器/fold），按 make_registry.SPEC。"""
+    """10/18 前交的按折 Slurm 作业名 rq1_<实验 id>_f<fold>（fold all 是 rq1_<实验 id>）→ key，按实验表。"""
     out = {}
-    for _, _, _, dsid, tr, folds, tag in mr.SPEC:
-        for f in folds:
-            if tag:
-                out[f"rq1_{tag}_f{f}" if f != "all" else f"rq1_{tag}"] = f"{mr.DS[dsid]}/{tr}/{f}"
+    for key, t in E.tasks().items():
+        f = t.get("fold")
+        if f is not None:
+            out[f"rq1_{t['exp']}_f{f}" if f != "all" else f"rq1_{t['exp']}"] = key
     return out
 
 
@@ -110,11 +127,15 @@ def minutes(elapsed):
 
 
 def task_key(cmd):
-    """pueue 任务命令 → (种类, key)：train_task.sh <数据集> <fold> [训练器]、fetch_fold.sh <机器> <模型文件夹> <fold>。"""
+    """pueue 任务命令 → (种类, key)：训练（run_task.sh <做法> k=v…，10/18 前的 train_task.sh，见 make_registry.train_key）、
+    拉回（fetch_task.sh <机器> <key>，10/18 前的 fetch_fold.sh <机器> <模型文件夹> <fold>）。"""
+    key = mr.train_key(cmd)
+    if key:
+        return "train", key
     cmd = cmd.replace("'", " ").replace('"', " ")
-    m = re.search(r"train_task\.sh\s+(\d+)\s+(\S+)(?:\s+(?!--)(\S+))?", cmd)
-    if m and int(m.group(1)) in mr.DS:
-        return "train", f"{mr.DS[int(m.group(1))]}/{m.group(3) or 'nnUNetTrainer_save10'}/{m.group(2)}"
+    m = re.search(r"fetch_task\.sh\s+(\S+)\s+(\S+)", cmd)
+    if m:
+        return "fetch:" + m.group(1), m.group(2)
     m = re.search(r"fetch_fold\.sh\s+(\S+)\s+(\S+)/(\S+?)__\S+\s+(\S+)", cmd)
     if m:
         return "fetch:" + m.group(1), f"{m.group(2)}/{m.group(3)}/{m.group(4)}"
@@ -125,7 +146,11 @@ def gather():
     s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={})
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
-    for name, m in M.MACHINES.items():
+    # 先查 Slurm 集群（任务队列在那里）：收集训练状态、查训练机上的数据都要用队列里的任务
+    order = sorted(M.MACHINES, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
+    queue = []
+    for name in order:
+        m = M.MACHINES[name]
         if m["scheduler"] == "slurm":
             rc, out = run_on(m, SLURM_PROBE)
             ok = rc == 0 and "=====" in out
@@ -135,14 +160,18 @@ def gather():
                                         sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
                 if "train" in m["roles"]:
                     s["taskq"][name] = taskq.remote_status(name)
+                    queue += (s["taskq"][name] or {}).get("tasks", [])
         else:
-            rc, out = run_on(m, probe_script(m))
+            rc, out = run_on(m, probe_script(m, data_candidates(queue)))
             ok = rc == 0 and "BOOT|" in out
             if ok:
                 s["probe"][name] = dict(ln.split("|", 1) for ln in out.splitlines() if "|" in ln)
         s["ok"][name] = ok
-        if ok:
-            r = mr.collect(M.expand(M.results(name))) if m["ssh"] is None else mr.remote_collect(m["ssh"], M.results(name))
+    specs = mr.task_specs(queue)
+    for name in order:  # 各机器上每个任务的训练状态（spec.collect）
+        m = M.MACHINES[name]
+        if s["ok"][name]:
+            r = spec.collect(specs, M.expand(m["data"])) if m["ssh"] is None else spec.remote_collect(m["ssh"], specs, m["data"])
             if r:
                 s["src"][name] = r
     s["board_pending"] = open(H_PENDING).read().split() if os.path.exists(H_PENDING) else []
@@ -212,7 +241,7 @@ def check(s):
                 return (int(d_ or 0) * 24 + p_[0]) * 60 + p_[1]
             # 按原来的做法训自己那一折的作业（开关打开前就开始的）不算空着：它名下那一折正在训
             training = {t["key"] for t in tq["tasks"] if t["state"] in ("claimed", "busy") and t.get("worker") not in pueue_workers}
-            run = [r for r in d["squeue"] if r[0].startswith("rq1_") and r[2] == "RUNNING" and mins(r[3]) >= 30
+            run = [r for r in d["squeue"] if is_worker_job(r[0]) and r[2] == "RUNNING" and mins(r[3]) >= 30
                    and jk.get(r[0]) not in training]
             workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed" and t.get("worker") not in pueue_workers}
             if len(run) > len(workers):
@@ -220,7 +249,7 @@ def check(s):
                     "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
             # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了：refill.py 应该已经补交了 worker.sbatch
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
-            if left and not any(r[0].startswith("rq1_") for r in d["squeue"]):
+            if left and not any(is_worker_job(r[0]) for r in d["squeue"]):
                 add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
                     "（box 上补作业的开关 ~/.cache/phd/taskq/DICC 没开？看 ~/refill.log）", after=60)
             for jid, jname, st, end, code in d["sacct"]:

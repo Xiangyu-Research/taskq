@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 """按状态推进训练完以后的事（2026-10-18）：box 上的健康检查（scripts/monitor/health.py，每 30 分钟）调用。
-每次对每一折看文件，算出它走到了哪一步，下一步没在跑就在 box 的 pueue 里启动它；不提前排链（不用 --after）。
+每次对每个任务看文件，算出它走到了哪一步，下一步没在跑就在 box 的 pueue 里启动它；不提前排链（不用 --after）。
+步骤和判断都从实验表（research/*/experiments.py，经 scripts/queue/experiments.py 读）和任务说明（scripts/queue/spec.py）来，
+这里不认识具体模型。
 
-一折的几步（都在 box 上，看 box 上的文件判断做没做完）：
-  fetch    别的机器上训完了（checkpoint_final 或 ARCHIVED + validation/summary.json），box 上还没有
-           → scripts/queue/fetch_fold.sh <机器>（wait 组）。训完才排，所以一开始就能拉。
-  archive  pueue 训练机（lab）训的折拉回 box 以后，那边还有大文件 → scripts/queue/archive_fold.sh <机器>
-           （wait 组：备份到 DICC、核对后删那边的；T0 nnU-Net 五折在 lab 上的副本删不删没定，不排）
-  infer    box 上有了，推理没做完（predictions/…/fold_k/MANIFEST.json 里还没有概率图稀疏化的记录）
-           → run_predict_eval.sh --stage infer（gpu 组）
-  eval     推理做完了，评测没做完（RQ1/analysis/…/fold_k/report/report.run.json 不是 ok）→ --stage eval（cpu 组）
-一个实验（数据集 + 训练器）五折都到了以后（cpu 组，每次只排当前缺的那一步）：
-  oof      T3 / T14 / T15（数据集在 research/RQ1/splits/t3_splits.json 里）：五折都在 box 上 → oof_eval.py
-  paired   oof 做完 → paired_compare.py 和 T0 五折集成配对（oof/paired/）
-  ens      T3、T15 以外的五折实验（含 T14）：五折推理都做完 → run_predict_eval.sh <模型> "0 1 2 3 4"（用单折的概率图集成，纯 CPU）
-  compare_all  上面任何一项的结果比 compare/all/ 新 → compare_all.py（所有实验一起，同时只排一个）
-fold all（T0b）只拉回，不推理。
+每个任务（实验表里的，加上队列里不属于任何实验的）：
+  fetch    别的机器上训完了（说明里的 done），box 上还没有 → scripts/queue/fetch_task.sh <机器> <key>（wait 组）。
+  archive  pueue 训练机（lab）上训完、拉回 box 以后，那边还没归档（没有 ARCHIVED），做法有 archive、实验没写 archive=False
+           → scripts/queue/archive_task.sh <机器> <key>（wait 组：备份、核对后删那边的大文件）
+  after    实验表里每折的步骤（RQ1：推理 → 评测），按顺序做第一个没做完的
+一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤> 的要每折都做完那一步）。
+最后：FINAL 的步骤（RQ1：compare_all）。有 rerun_if_newer 的，在列出的步骤有比它开始时更新的结果、实验一级的步骤都没有在排 / 在跑时重跑。
+队列里不属于任何实验的任务只拉回、归档。
 
-在不在跑：box pueue 里活着的任务（排着 / 在跑），按命令认出是哪一步、哪一折（不靠标签；以前手动排的也认得）。
-失败过的不自动重排：pueue 里这一步最后一次成功之后有失败 / 被停掉的任务，或者成功跑完了但结果还是不对（compare_all 除外），
+在不在跑：box pueue 里的任务，按命令或标签认出是哪一步、哪个任务：拉回、归档按命令（带源机器）；其他步骤的命令和这里会生成的
+  一样、或者标签一样就算；10/18 前的写法（fetch_fold.sh、archive_fold.sh、不带 --stage 的 run_predict_eval.sh 等）也认得。
+失败过的不自动重排：pueue 里这一步最后一次成功之后有失败 / 被停掉的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排。
   拉回按源机器认：以前预先排的、在等另一台机器的拉回任务不算，报出来（可以删掉）。
 影子模式：没有 ~/.cache/phd/advance/LIVE 时只把"会排什么"写进 ~/advance.log，不真排。
-任务的标签：<步骤>:<实验标签>_f<fold>，如 infer:t14met_f3；实验一级的是 <步骤>:<实验标签>。
+任务的标签：每折 <步骤>:<实验 id>_f<fold>（如 infer:t14met_f3），实验一级 <步骤>:<实验 id>，最后的 <步骤>；
+  不属于实验的任务 <步骤>:<key>。
 
     python3 scripts/queue/advance.py           看现在会排什么（不改任何东西）
 """
-import glob
 import json
 import os
 import shlex
@@ -36,22 +33,16 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "envs"))
-sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "analysis"))
 import machines as M  # noqa: E402
-import write_manifest as wm  # noqa: E402
-import make_registry as mr  # noqa: E402
+import spec as S  # noqa: E402
+import experiments as E  # noqa: E402
 
-PLANS = "nnUNetResEncUNetMPlans__3d_fullres"
-F5 = ["0", "1", "2", "3", "4"]
 STATE_DIR = os.path.expanduser("~/.cache/phd/advance")
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
 LIVE_ST = ("Running", "Queued", "Stashed", "Paused", "Locked")
-OOF_DS = set(json.load(open(os.path.join(REPO, "research", "RQ1", "splits", "t3_splits.json"))))
-T0_ENS = f"Dataset101_GLIrq1/nnUNetTrainer_save10__{PLANS}/folds_0-1-2-3-4"
 ARCHIVE_FROM = [n for n in M.names("pueue") if "train" in M.MACHINES[n]["roles"]]  # 训完要备份、删大文件的机器（lab）
-GROUP = dict(fetch="wait", archive="wait", infer="gpu", eval="cpu", oof="cpu", paired="cpu", ens="cpu", compare_all="cpu")
+NO_NICE = 10 ** 6
 
 
 def bt():
@@ -63,18 +54,10 @@ def python():
     return f"{M.expand(base)}/envs/{env}/bin/python"
 
 
-def experiments():
-    """[dict(exp, tag, ds, tr, folds, nice)]：make_registry.SPEC 里的每个实验。"""
-    out = []
-    for exp, desc, model, dsid, tr, fs, tag in mr.SPEC:
-        out.append(dict(exp=exp, desc=desc, tag=tag or exp.lower(), ds=mr.DS[dsid], tr=tr, folds=fs))
-    return out
-
-
 # ---------------- 认命令 ----------------
 def step_of(cmd):
-    """pueue 任务的命令 → [(步骤, key)]：key 是一折（数据集/训练器/fold）、一个实验（数据集/训练器）或 "all"。认不出 → []。
-    拉回的步骤带源机器：fetch@<机器>。"""
+    """pueue 任务的命令 → [(步骤, key)]：拉回、归档（fetch_task.sh、archive_task.sh），和 10/18 前的写法。认不出 → []。
+    拉回的步骤带源机器：fetch@<机器>。10/18 前的实验一级步骤（oof、paired、ens）的 key 是 "数据集/训练器"，plan() 再换成实验 id。"""
     try:
         tok = shlex.split(cmd)
     except ValueError:
@@ -90,8 +73,11 @@ def step_of(cmd):
     for i, t in enumerate(tok):
         b = os.path.basename(t)
         rest = tok[i + 1:]
+        if b in ("fetch_task.sh", "archive_task.sh") and len(rest) >= 2:
+            return [(f"fetch@{rest[0]}" if b == "fetch_task.sh" else "archive", rest[1])]
+        # 以下是 10/18 前的写法（box pueue 里的旧任务）
         if b in ("fetch_fold.sh", "archive_fold.sh") and len(rest) >= 3:
-            mk = model_key(rest[1])  # 拉回认到源机器（fetch@dicc）：从别的机器拉同一折的旧任务不算
+            mk = model_key(rest[1])
             step = f"fetch@{rest[0]}" if b == "fetch_fold.sh" else "archive"
             return [(step, f"{mk[0]}/{mk[1]}/{rest[2]}")] if mk else []
         if b == "archive_lab_fold.sh" and len(rest) >= 2:  # 10/16 前的写法
@@ -120,89 +106,88 @@ def step_of(cmd):
     return []
 
 
-# ---------------- 看文件 ----------------
-def run_ok(path, legacy=None):
-    """结果做完了：runlog 的记录（<脚本>.run.json）是 ok；10/16 用 runlog 之前的结果没有记录，有 legacy 这个输出文件就算。"""
-    if os.path.exists(path):
+# ---------------- 候选步骤 ----------------
+def candidates(root, py, queue_tasks):
+    """所有任务、所有步骤（不管现在该不该做）→ (任务列表, 实验列表, 最后的步骤, {命令: (步骤, key)}, {标签: (步骤, key)},
+    {"数据集/训练器": 实验 id})。任务：dict(key, exp, e, spec, names, lab)；不属于实验的 e = None。"""
+    exps, final = E.load()
+    table = E.tasks()
+    tasks = []
+    for key, t in table.items():
+        e = E.experiment(t["exp"])
+        lab = f"{e['id']}_f{t['fold']}" if t["fold"] is not None else e["id"]
+        tasks.append(dict(key=key, exp=t["exp"], e=e, spec=t["spec"], names=E.task_names(t, root, py), lab=lab))
+    for q in queue_tasks:
+        if q["key"] in table or not q.get("recipe"):
+            continue
         try:
-            return json.load(open(path)).get("status") == "ok"
-        except (OSError, ValueError):
-            return False
-    return bool(legacy) and os.path.exists(os.path.join(os.path.dirname(path), legacy))
-
-
-def mtime(path):
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0
-
-
-def started(path):
-    """runlog 记录里这次运行开始的时刻（读的是开始时的输入；跑的过程中新出的结果不算它用过）；没有就用修改时间。"""
-    try:
-        return datetime.fromisoformat(json.load(open(path))["start"]).timestamp()
-    except (OSError, ValueError, KeyError, TypeError):
-        return mtime(path)
-
-
-class Box:
-    """box 上的文件：训练结果、推理、分析。"""
-
-    def __init__(self, root):
-        self.res = os.path.join(root, "nnUNet", "results")
-        self.pred = os.path.join(root, "predictions")
-        self.an = os.path.join(root, "RQ1", "analysis")
-
-    def model(self, ds, tr):
-        return f"{ds}/{tr}__{PLANS}"
-
-    def trained(self, ds, tr, f):
-        fd = os.path.join(self.res, self.model(ds, tr), f"fold_{f}")
-        return (os.path.exists(os.path.join(fd, "checkpoint_final.pth")) or os.path.exists(os.path.join(fd, "ARCHIVED"))) \
-            and os.path.exists(os.path.join(fd, "validation", "summary.json"))
-
-    def inferred(self, ds, tr, f):
-        """推理做完了：MANIFEST 里每个测试集的分割、概率图、输入病例数都对得上，概率图已稀疏化。"""
-        return wm.incomplete(os.path.join(self.pred, self.model(ds, tr), f"fold_{f}", "MANIFEST.json")) is None
-
-    def evaluated(self, ds, tr, tag):
-        return run_ok(os.path.join(self.an, self.model(ds, tr), tag, "report", "report.run.json"), "report.md")
-
-    def oof(self, ds, tr):
-        return os.path.join(self.an, self.model(ds, tr), "oof", "oof_eval.run.json")
-
-    def paired(self, ds, tr):
-        return os.path.join(self.an, self.model(ds, tr), "oof", "paired", "paired_compare.run.json")
-
-    def ens(self, ds, tr):
-        return os.path.join(self.an, self.model(ds, tr), "folds_0-1-2-3-4", "report", "report.run.json")
-
-    def compare_all(self):
-        return os.path.join(self.an, "compare", "all", "compare_all.run.json")
+            s = q.get("spec") or E.resolve_task(q["recipe"], q.get("params") or {}, q.get("exp"))
+        except S.SpecError:
+            continue
+        tasks.append(dict(key=q["key"], exp=None, e=None, spec=s, names=dict(s["names"], data=root, python=py), lab=q["key"]))
+    by_cmd, by_label, legacy = {}, {}, {}
+    for t in tasks:
+        for st in (t["e"] or {}).get("after", []):
+            by_cmd[S.fill(st["cmd"], t["names"], keep=())] = (st["name"], t["key"])
+            by_label[f"{st['name']}:{t['lab']}"] = (st["name"], t["key"])
+    groups = {}
+    for e in exps:
+        if not e.get("group_after"):
+            continue
+        names = E.group_names(e, root, py)
+        groups[e["id"]] = names
+        if "dataset" in names and "trainer" in names:
+            legacy[f"{names['dataset']}/{names['trainer']}"] = e["id"]
+        for chain in e["group_after"]:
+            for st in chain:
+                by_cmd[S.fill(st["cmd"], names, keep=())] = (st["name"], e["id"])
+                by_label[f"{st['name']}:{e['id']}"] = (st["name"], e["id"])
+    for f in final:
+        by_cmd[S.fill(f["cmd"], dict(data=root, python=py), keep=())] = (f["name"], "all")
+        by_label[f["name"]] = (f["name"], "all")
+    return tasks, groups, final, by_cmd, by_label, legacy
 
 
 # ---------------- 算下一步 ----------------
 def plan(s, root=None):
     """→ (要排的 [dict(step, key, group, label, cmd, nice)], 卡住的 {问题编号: 说明})。"""
-    box = Box(root or bt())
+    root = root or bt()
     hub = M.hub()
-    tasks = (s["pueue"].get(hub) or {}).get("tasks")
-    if tasks is None:
+    ptasks = (s["pueue"].get(hub) or {}).get("tasks")
+    if ptasks is None:
         return [], {}  # box 的 pueue 读不到：这次什么都不做
+    queue_tasks = [t for tq in (s.get("taskq") or {}).values() if tq for t in tq.get("tasks", [])]
+    nice = {t["key"]: t["nice"] for t in queue_tasks}
+    py = python()
+    tasks, groups, final, by_cmd, by_label, legacy = candidates(root, py, queue_tasks)
+
+    def recognise(t):
+        sks = step_of(t["command"])
+        if sks:
+            out = []
+            for st, k in sks:
+                if st in ("oof", "paired", "ens") and k in legacy:  # 10/18 前的实验一级步骤：数据集/训练器 → 实验 id
+                    k = legacy[k]
+                out.append((st, k))
+            return out
+        hit = by_cmd.get(t["command"].strip()) or by_label.get(t.get("label") or "")
+        return [hit] if hit else []
+
     live, done = set(), {}
-    for t in tasks:
-        for sk in step_of(t["command"]):
+    live_fetch = {}  # 任务 → [(源机器, 任务号)]：活着的拉回任务
+    for t in ptasks:
+        for sk in recognise(t):
             if t["status"] in LIVE_ST:
                 live.add(sk)
+                if sk[0].startswith("fetch@"):
+                    live_fetch.setdefault(sk[1], []).append((sk[0][6:], t["id"]))
             else:
                 done.setdefault(sk, []).append(t)
-    nice = {t["key"]: t["nice"] for tq in (s.get("taskq") or {}).values() if tq for t in tq["tasks"]}
     remote = {h: d["folds"] for h, d in s.get("src", {}).items() if h != hub}
-    py = python()
+    rerun = {f["name"] for f in final if f.get("rerun_if_newer")}
     todo, stuck = [], {}
 
-    def want(step, key, label, cmd, n=10 ** 6, src=None):
+    def want(step, key, label, cmd, group, n=NO_NICE, src=None):
         sk = (f"{step}@{src}" if src else step, key)
         if sk in live:
             return
@@ -210,22 +195,15 @@ def plan(s, root=None):
         last_ok = max((i for i, t in enumerate(prev) if t["status"] == "Success"), default=-1)
         # 只看最后一次成功之后的；依赖失败的没跑过，原因在前一步
         bad = [t for t in prev[last_ok + 1:] if t["status"] not in ("Success", "DependencyFailed")]
-        # 成功跑完却还没有结果：报出来，不每 30 分钟重跑（compare_all 有新结果就要重跑，不算）
-        ok_empty = last_ok >= 0 and step != "compare_all"
+        # 成功跑完却还没有结果：报出来，不每 30 分钟重跑（有新结果就要重跑的不算）
+        ok_empty = last_ok >= 0 and step not in rerun
         if bad or ok_empty:
             t = bad[-1] if bad else prev[last_ok]
             why = f"任务 {t['id']} {t['status']}" if bad else f"任务 {t['id']} 成功跑完，但结果还是不全"
             stuck[f"advance:{step}:{key}"] = (f"{step} {key}：{why}，不再自动重排（看 pueue log {t['id']}；处理好以后 "
                                               f"pueue remove {t['id']}，下一次检查会重排）")
             return
-        todo.append(dict(step=step, key=key, group=GROUP[step], label=label, cmd=cmd, nice=n))
-
-    live_fetch = {}  # 一折 → [(源机器, 任务号)]：活着的拉回任务
-    for t in tasks:
-        if t["status"] in LIVE_ST:
-            for st, k in step_of(t["command"]):
-                if st.startswith("fetch@"):
-                    live_fetch.setdefault(k, []).append((st[6:], t["id"]))
+        todo.append(dict(step=step, key=key, group=group, label=label, cmd=cmd, nice=n))
 
     def stale_fetch(key, src):
         """活着、但等的不是 src 的拉回任务（以前预先排的链在等另一台机器）：报出来。"""
@@ -235,55 +213,61 @@ def plan(s, root=None):
                                                            f"{'在 ' + src + ' 训完了' if src else '已经在 box 上了'}；"
                                                            f"不用了：pueue kill {i} 后 pueue remove {i}")
 
-    newest_exp = 0  # 实验一级结果里最新的修改时间（决定要不要重跑 compare_all）
-    for e in experiments():
-        ds, tr, model = e["ds"], e["tr"], box.model(e["ds"], e["tr"])
-        mpath = os.path.join(box.res, model)
-        five = e["folds"] == F5
-        for f in e["folds"]:
-            key, n = f"{ds}/{tr}/{f}", nice.get(f"{ds}/{tr}/{f}", 10 ** 6)
-            lab = f"{e['tag']}_f{f}"
-            if not box.trained(ds, tr, f):
-                src = next((h for h in sorted(remote) if (remote[h].get(key) or {}).get("final")), None)
-                if src:
-                    want("fetch", key, f"fetch:{lab}", f"bash scripts/queue/fetch_fold.sh {src} {model} {f}", n, src=src)
-                    stale_fetch(key, src)
-                continue
-            stale_fetch(key, None)
-            # pueue 训练机（lab）上训完的折拉回后备份到 DICC、删掉那边的大文件。
-            # T0 nnU-Net 五折在 lab 上的副本（验证集概率图是原始精度，和 box 上稀疏化过的不一致）删不删还没定，不自动归档
-            t0_nnunet = e["exp"] == "T0" and tr == "nnUNetTrainer_save10"
+    trained, after_ok = {}, {}  # 任务 → box 上训完没；(任务, 步骤) → 做完没
+    for t in tasks:
+        key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
+        trained[key] = S.is_done(sp, root)
+        if not trained[key]:
+            src = next((h for h in sorted(remote) if (remote[h].get(key) or {}).get("final")), None)
+            if src:
+                want("fetch", key, f"fetch:{t['lab']}", f"bash scripts/queue/fetch_task.sh {src} {key}", "wait", n, src=src)
+                stale_fetch(key, src)
+            continue
+        stale_fetch(key, None)
+        if sp.get("archive") and (t["e"] or {}).get("archive", True) is not False:
             for h in ARCHIVE_FROM:
                 cp = (remote.get(h) or {}).get(key)
-                if cp and cp.get("final") and cp.get("archived") is False and not t0_nnunet:
-                    want("archive", key, f"archive:{lab}", f"bash scripts/queue/archive_fold.sh {h} {model} {f}", n)
-            if not five:
-                continue
-            if not box.inferred(ds, tr, f):
-                want("infer", key, f"infer:{lab}",
-                     f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer {mpath} {f}", n)
-            elif not box.evaluated(ds, tr, f"fold_{f}"):
-                want("eval", key, f"eval:{lab}", f"bash research/RQ1/analysis/run_predict_eval.sh --stage eval {mpath} {f}", n)
-        if not five:  # fold all（T0b）只拉回
+                if cp and cp.get("final") and cp.get("archived") is False:
+                    want("archive", key, f"archive:{t['lab']}", f"bash scripts/queue/archive_task.sh {h} {key}", "wait", n)
+        blocked = False
+        for st in (t["e"] or {}).get("after", []):
+            ok = st["done"].ok(root, t["names"])
+            after_ok[(key, st["name"])] = ok
+            if not ok and not blocked:
+                want(st["name"], key, f"{st['name']}:{t['lab']}", S.fill(st["cmd"], t["names"], keep=()), st["group"], n)
+                blocked = True
+
+    newest = 0  # rerun_if_newer 列出的步骤里最新的结果（决定要不要重跑最后的步骤）
+    watch = {name for f in final for name in f.get("rerun_if_newer", [])}
+    group_steps = set()
+    for e in E.load()[0]:
+        if e["id"] not in groups:
             continue
-        ekey, n = f"{ds}/{tr}", min([nice.get(f"{ds}/{tr}/{f}", 10 ** 6) for f in F5])
-        if ds in OOF_DS and all(box.trained(ds, tr, f) for f in F5):
-            if not run_ok(box.oof(ds, tr), "check.txt"):
-                want("oof", ekey, f"oof:{e['tag']}", f"{py} research/RQ1/analysis/oof_eval.py {mpath}", n)
-            elif not run_ok(box.paired(ds, tr), "paired.csv"):
-                want("paired", ekey, f"paired:{e['tag']}",
-                     f"{py} research/RQ1/analysis/paired_compare.py --ref {box.an}/{T0_ENS} "
-                     f"--cmp {e['exp']}={box.an}/{model}/oof/eval --out {box.an}/{model}/oof/paired", n)
-            else:
-                newest_exp = max(newest_exp, mtime(box.paired(ds, tr)) or mtime(os.path.join(os.path.dirname(box.paired(ds, tr)), "paired.csv")))
-        if e["exp"] not in ("T3", "T15") and all(box.inferred(ds, tr, f) for f in F5):
-            if not run_ok(box.ens(ds, tr), "report.md"):
-                want("ens", ekey, f"ens:{e['tag']}", f"ENSEMBLE_ONLY=1 bash research/RQ1/analysis/run_predict_eval.sh {mpath} " + shlex.quote(" ".join(F5)), n)
-            else:
-                newest_exp = max(newest_exp, mtime(box.ens(ds, tr)) or mtime(os.path.join(os.path.dirname(box.ens(ds, tr)), "report.md")))
-    if newest_exp > started(box.compare_all()) and not any(t["group"] == "cpu" and t["step"] in ("oof", "paired", "ens") for t in todo) \
-            and not any(sk[0] in ("oof", "paired", "ens") for sk in live):
-        want("compare_all", "all", "compare_all", f"{py} research/RQ1/analysis/compare_all.py")
+        mine = [t for t in tasks if t["exp"] == e["id"]]
+        names = groups[e["id"]]
+        n = min([nice.get(t["key"], NO_NICE) for t in mine] or [NO_NICE])
+        for chain in e["group_after"]:
+            for st in chain:
+                group_steps.add(st["name"])
+            if not all(trained.get(t["key"]) for t in mine):
+                continue
+            for st in chain:
+                if st.get("needs") and not all(after_ok.get((t["key"], st["needs"])) for t in mine):
+                    break
+                if not st["done"].ok(root, names):
+                    want(st["name"], e["id"], f"{st['name']}:{e['id']}", S.fill(st["cmd"], names, keep=()), st["group"], n)
+                    break
+                if st["name"] in watch:
+                    newest = max(newest, st["done"].mtime(root, names))
+    pending = any(t["step"] in group_steps for t in todo) or any(sk[0] in group_steps for sk in live)
+    for f in final:
+        names = dict(data=root, python=py)
+        cmd = S.fill(f["cmd"], names, keep=())
+        if f.get("rerun_if_newer"):
+            if newest > f["done"].started(root, names) and not pending:
+                want(f["name"], "all", f["name"], cmd, f["group"])
+        elif not f["done"].ok(root, names):
+            want(f["name"], "all", f["name"], cmd, f["group"])
     todo.sort(key=lambda t: (t["nice"], t["key"]))
     return todo, stuck
 

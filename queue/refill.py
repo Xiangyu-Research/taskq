@@ -15,17 +15,17 @@
   2. 卡空了（训练组里没有活着的训练任务）就领下一折：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
      取第一个。训练没开始就失败、又没有进度（多半是这台机器放不下这个模型）时用 release --skip 交还：记在 skips/，
      这台机器以后不再领它，不算队列的失败，不用事先按模型分类。24 小时内这样跳过 2 个就先不领、报出来（多半是环境坏了）。
-     taskq.py take 成功后：这台机器上有预处理好的数据集就直接在 pueue
-     的训练组里加 train_task.sh；没有就先用 scripts/sync/tunnel_push.sh 传（box 的 wait 组），下次检查时数据到了再加训练任务。
-     传完后盘上剩不到"表里 disk 的提醒线 + 10 GB（训练输出）"的数据集跳过；make_registry.DS 里没有的数据集不领。
+     taskq.py take 成功后：任务说明里的 data（scripts/queue/spec.py）这台机器上都有，就直接在 pueue 的训练组里加
+     run_task.sh；缺的先用 scripts/sync/tunnel_push.sh 传（box 的 wait 组），下次检查时数据到了再加训练任务。
+     传完后盘上剩不到"表里 disk 的提醒线 + 10 GB（训练输出）"的任务跳过；这台机器没有任务要的环境（machines.py 的 envs）不领。
   拉回、推理、评测不在这里排：box 上的 scripts/queue/advance.py 按状态推进。
-  自动传过去的数据集记在 ~/.cache/phd/refill.json，这台机器上用它的训练和 box 上的拉回、归档都做完后删掉（Dataset101 不删）。
+  自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json，这台机器上用它的训练和 box 上的拉回、归档都做完后删掉（Dataset101 不删）。
 开关：box 上 ~/.cache/phd/taskq/LAB 不存在时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
 DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
 
 DICC 补作业：每个 QOS（表里 qos 字段：QOS → 每段时限）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
-没设时按 SUBMIT_CAP）、任务队列里还有没人领的任务时，交 research/RQ1/nnunet/worker.sbatch 补满（一个不限并发的数组，
+没设时按 SUBMIT_CAP）、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（一个不限并发的数组，
 同时跑几个由 QOS 的 GPU 上限管）。空出一个补一个，作业的排队时间分从交上去开始累积。
 开关：box 上 ~/.cache/phd/taskq/DICC，不存在时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
@@ -42,14 +42,13 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "envs"))
-sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
 sys.path.insert(0, HERE)
 import machines as M  # noqa: E402
-import make_registry as mr  # noqa: E402
+import experiments as E  # noqa: E402
+import spec as S  # noqa: E402
 import taskq  # noqa: E402
 
-PLANS = "nnUNetResEncUNetMPlans__3d_fullres"
 TTL = 86400  # lab 的领取多久不续就过期（秒）
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
 SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，就先停止替这台机器领（多半是环境坏了）
@@ -71,12 +70,22 @@ def gpu_group(m):
     return next(g for g, (_, gpu, _) in m["groups"].items() if gpu is not None)
 
 
-def parse(key):
-    """key → dict(ds, dsid, tr, fold, model, tag)。"""
-    ds, tr, f = key.split("/")
-    dsid = int(re.match(r"Dataset(\d+)_", ds).group(1))
-    tag = next((t or e.lower() for e, _, _, d, trr, _, t in mr.SPEC if d == dsid and trr == tr), ds)
-    return dict(ds=ds, dsid=dsid, tr=tr, fold=f, model=f"{ds}/{tr}__{PLANS}", tag=tag)
+def info(tq, key):
+    """队列里的任务 → dict(recipe, params, spec)；队列状态里没有说明时从实验表找。"""
+    t = next((t for t in (tq or {}).get("tasks", []) if t["key"] == key), {})
+    if t.get("spec"):
+        return dict(recipe=t.get("recipe"), params=t.get("params") or {}, spec=t["spec"])
+    e = E.tasks().get(key)
+    return dict(recipe=e["recipe"], params=e["params"], spec=e["spec"]) if e else dict(recipe=None, params={}, spec={})
+
+
+def run_cmd(f):
+    return "bash scripts/queue/run_task.sh " + " ".join(shlex.quote(a) for a in S.kv_args(f["recipe"], f["params"]))
+
+
+def tag(path):
+    """数据路径 → 传数据任务的标签后缀（最后一级目录名）。"""
+    return os.path.basename(path.rstrip("/"))
 
 
 def progress(s, key, host=None):
@@ -119,11 +128,15 @@ def plan(s, name):
     if "recent_skips" not in tq:  # 10/18 前的 taskq.py 不认 take、ttl、--skip
         return [], {}, f"{host} 上的 taskq.py 还是旧版（先在 {host} 上 git pull）"
     tt_all, (sync, sync_bad) = train_tasks(s, name), syncing(s, name)
-    have = set(s["probe"].get(name, {}).get("PREP", "").split())
+    have = set(s["probe"].get(name, {}).get("HAVE", "").split())
     acts, stuck = [], {}
     mine = [t for t in tq["tasks"] if t.get("worker") == name]
     for t in mine:
-        key, f = t["key"], parse(t["key"])
+        key, f = t["key"], info(tq, t["key"])
+        data = f["spec"].get("data") or []
+        need = [p for p in data if p not in have]
+        insync = [p for p in data if tag(p) in sync]
+        bad = [p for p in data if tag(p) in sync_bad]  # 传了一半出错时文件夹可能已经在了，所以看全部 data
         # 只看这次领取之后开始的训练任务（以前训过、停掉的旧任务不算）；还没开始的（排着）都算
         since = datetime.fromtimestamp(t["since"] - 60) if t.get("since") else datetime.min
         tt = {key: [(i, st) for i, st, beg in tt_all.get(key, []) if beg is None or beg >= since]}
@@ -135,25 +148,25 @@ def plan(s, name):
             acts.append(dict(op="keep", key=key))
         elif live:
             acts.append(dict(op="beat", key=key))
-        elif f["ds"] in sync:
+        elif bad:  # 传出错了：数据可能只传了一半，不能当成"数据在"
             acts.append(dict(op="beat", key=key))
-        elif f["ds"] in sync_bad:  # 传出错了：数据可能只传了一半，不能当成"数据在"
+            b = sync_bad[tag(bad[0])]
+            stuck[f"labsync:{tag(bad[0])}"] = (f"给 {M.MACHINES[name]['label']} 传 {bad[0]} 的 box 任务 {b['id']} 出错了（{b['status']}），"
+                                               f"领的 {key} 在等；看 pueue log {b['id']}，处理后 pueue remove {b['id']}（下次检查会重传）")
+        elif insync:
             acts.append(dict(op="beat", key=key))
-            b = sync_bad[f["ds"]]
-            stuck[f"labsync:{f['ds']}"] = (f"给 {M.MACHINES[name]['label']} 传 {f['ds']} 的 box 任务 {b['id']} 出错了（{b['status']}），"
-                                           f"领的 {key} 在等；看 pueue log {b['id']}，处理后 pueue remove {b['id']}（下次检查会重传）")
-        elif f["ds"] not in have and not tt[key]:
+        elif need and not tt[key]:
             acts.append(dict(op="beat", key=key))  # 刚领、数据还没开始传
-            acts.append(dict(op="transfer", key=key, ds=f["ds"]))
-        elif f["ds"] in have and not tt[key]:
+            acts.append(dict(op="transfer", key=key, paths=need))
+        elif not need and not tt[key]:
             acts.append(dict(op="beat", key=key))
             acts.append(dict(op="start", key=key))  # 数据传完了，开始训
         elif progress(s, key, name):
             last = tt[key][-1]
             acts.append(dict(op="beat", key=key))
             stuck[f"labclaim:{key}"] = (f"{M.MACHINES[name]['label']} 领的 {key} 训练任务 {last[0]} 停了（{last[1]}），没训完、有进度，"
-                                        f"领取保留；接着训：q {gpu_group(m)} -- 'bash scripts/queue/train_task.sh {f['dsid']} {f['fold']}"
-                                        f"{'' if f['tr'] == 'nnUNetTrainer_save10' else ' ' + f['tr']}'；放弃：taskq.py release --worker {name} {key}")
+                                        f"领取保留；接着训：q {gpu_group(m)} --label train:{key} -- {shlex.quote(run_cmd(f))}；"
+                                        f"放弃：taskq.py release --worker {name} {key}")
         elif tt[key][-1][1].startswith("Failed") and tt[key][-1][1] not in ("Failed (75)", "Failed (137)", "Failed (143)"):
             # 没开始就失败（多半是这台机器放不下这个模型）：交还，记在 skips/（这台机器以后不再领它；不算队列的失败）
             acts.append(dict(op="release", key=key, skip=f"训练任务 {tt[key][-1][0]} {tt[key][-1][1]}",
@@ -173,26 +186,28 @@ def plan(s, name):
     pr = s["probe"].get(name, {})
     free = int(pr["DISK"]) / 1e9 if pr.get("DISK", "").isdigit() else None
     warn = (m["disk"][1] if m["disk"] else 0) + TRAIN_OUT_GB
-    cands = [t for t in tq["tasks"] if t["state"] == "free" and parse(t["key"])["dsid"] in mr.DS
+    envs = set(m.get("envs") or {})
+    cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
     cands.sort(key=lambda t: (t["nice"], t["order"]))
     for t in cands:
-        f = parse(t["key"])
-        if f["ds"] not in have:
-            gb = dataset_gb(f["ds"])
+        need = [p for p in info(tq, t["key"])["spec"].get("data") or [] if p not in have]
+        if need:
+            gb = data_gb(need)
             if gb is None or free is None or free - gb < warn:
                 continue
-        acts.append(dict(op="take", key=t["key"], nice=t["nice"], transfer=f["ds"] not in have))
+        acts.append(dict(op="take", key=t["key"], nice=t["nice"], paths=need))
         return acts, stuck, ""
-    return acts, stuck, "队列里没有能领的折" if not cands else f"队列里的数据集都放不下（{name} 盘剩 {free:.0f} GB）" if free is not None else "不知道盘还剩多少"
+    return acts, stuck, "队列里没有能领的折" if not cands else f"队列里的任务要的数据都放不下（{name} 盘剩 {free:.0f} GB）" if free is not None else "不知道盘还剩多少"
 
 
-def dataset_gb(ds):
-    p = os.path.join(M.expand(M.MACHINES[M.hub()]["data"]), "nnUNet", "preprocessed", ds)
-    if not os.path.isdir(p):
+def data_gb(paths):
+    """box 上这些数据（相对数据目录）一共多大；有一个不在 → None。"""
+    ps = [os.path.join(M.expand(M.MACHINES[M.hub()]["data"]), p) for p in paths]
+    if not all(os.path.exists(p) for p in ps):
         return None
-    r = subprocess.run(["du", "-sbL", p], capture_output=True, text=True)
-    return int(r.stdout.split()[0]) / 1e9 if r.returncode == 0 else None
+    r = subprocess.run(["du", "-sbLc"] + ps, capture_output=True, text=True)
+    return int(r.stdout.strip().splitlines()[-1].split()[0]) / 1e9 if r.returncode == 0 else None
 
 
 # ---------------- 执行 ----------------
@@ -217,31 +232,34 @@ def q(name, args, run=sh):
     return int(hit.group(1))
 
 
-def start(name, key, run=sh):
-    f = parse(key)
-    tr = "" if f["tr"] == "nnUNetTrainer_save10" else " " + f["tr"]
-    cmd = f"bash scripts/queue/train_task.sh {f['dsid']} {f['fold']}{tr}"
-    return q(name, f"{gpu_group(M.MACHINES[name])} -p --label train:{f['tag']}_f{f['fold']} -- {shlex.quote(cmd)}", run)
+def start(name, key, run=sh, tq=None):
+    return q(name, f"{gpu_group(M.MACHINES[name])} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run)
 
 
-def transfer(name, ds, run=sh):
-    rel = M.MACHINES[name]["data"].replace("~/", "", 1) + "/nnUNet/preprocessed"
-    src = M.expand(M.MACHINES[M.hub()]["data"]) + "/nnUNet/preprocessed"
-    tid = q(M.hub(), f"wait -p --label sync_{name}_{ds} -- " + shlex.quote(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {ds}"), run)
+def transfer(name, paths, run=sh):
+    """把 box 上的这些数据（相对数据目录）传到这台机器 → [box 任务号]。"""
+    tids = []
     st = json.load(open(STATE)) if os.path.exists(STATE) else {}
     lst = st.setdefault("transferred", {}).setdefault(name, [])
-    if ds not in lst:
-        lst.append(ds)
+    for p in paths:
+        parent = os.path.dirname(p.rstrip("/"))
+        rel = M.MACHINES[name]["data"].replace("~/", "", 1) + (f"/{parent}" if parent else "")
+        src = M.expand(M.MACHINES[M.hub()]["data"]) + (f"/{parent}" if parent else "")
+        tids.append(q(M.hub(), f"wait -p --label sync_{name}_{tag(p)} -- "
+                      + shlex.quote(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}"), run))
+        if p not in lst:
+            lst.append(p)
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     json.dump(st, open(STATE, "w"), indent=1)
-    return tid
+    return tids
 
 
-def execute(acts, name, remote=None, run=sh, ok=None):
+def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
     """按动作做 → [说明]。出错的那一步写进说明，后面的照做。ok（set）：记下领到或开始训的 key。"""
     ok = set() if ok is None else ok
     host = queue_host()
     remote = remote or (lambda a: taskq.remote(host, a))
+    tq = tq or {}
     L, msgs = M.MACHINES[name]["label"], []
     beats = [a["key"] for a in acts if a["op"] in ("beat", "keep")]
     if beats:
@@ -255,20 +273,20 @@ def execute(acts, name, remote=None, run=sh, ok=None):
                 r = remote(f"release --worker {name} {k}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
                 msgs.append(f"{L} 交还 {k}：{a['why']}" if r and r[0] == 0 else f"{L} 交还 {k} 出错：{(r or ['', 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "start":
-                msgs.append(f"{L} 开始训 {k}（任务 {start(name, k, run)}）")
+                msgs.append(f"{L} 开始训 {k}（任务 {start(name, k, run, tq)}）")
                 ok.add(k)
             elif a["op"] == "transfer":
-                msgs.append(f"{L} 领的 {k} 要先传 {a['ds']}（box 任务 {transfer(name, a['ds'], run)}）")
+                msgs.append(f"{L} 领的 {k} 要先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
             elif a["op"] == "take":
                 r = remote(f"take --worker {name} --ttl {TTL} {k}")
                 if r is None or r[0]:
                     msgs.append(f"{L} 没领到 {k}：{(r or ['', 'ssh 不通'])[1].strip()[-150:]}")
                     continue
                 ok.add(k)
-                if a["transfer"]:
-                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），先传 {parse(k)['ds']}（box 任务 {transfer(name, parse(k)['ds'], run)}）")
+                if a["paths"]:
+                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
                 else:
-                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（任务 {start(name, k, run)}）")
+                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（任务 {start(name, k, run, tq)}）")
         except Exception as e:  # noqa: BLE001
             msgs.append(f"{L} {a['op']} {k} 出错：{e}")
     return msgs
@@ -284,21 +302,23 @@ def cleanup(s, name, run=sh, fresh=()):
     box = s["pueue"].get(M.hub()) or {"error": 1}
     if "error" in box:
         return []
-    claimed = {t["key"].split("/")[0] for t in (s.get("taskq", {}).get(queue_host()) or {}).get("tasks", []) if t.get("worker") == name}
-    claimed |= {k.split("/")[0] for k in fresh}  # 这次刚领的（快照里还没有）
+    tq = s.get("taskq", {}).get(queue_host()) or {}
+    uses = lambda key: set(info(tq, key)["spec"].get("data") or [])  # noqa: E731
+    claimed = set().union(*[uses(t["key"]) for t in tq.get("tasks", []) if t.get("worker") == name], *[uses(k) for k in fresh])
     msgs = []
-    for ds in list(lst):
-        if not re.fullmatch(r"Dataset\d+_\w+", ds) or ds.startswith("Dataset101_") or ds in claimed:
+    for p in list(lst):
+        p = p if "/" in p else f"nnUNet/preprocessed/{p}"  # 10/18 前只记数据集名
+        if ".." in p.split("/") or tag(p).startswith("Dataset101_") or p in claimed:
             continue
-        busy = any(t["status"] in LIVE and (task_key(t["command"])[1] or "").startswith(ds + "/") for t in s["pueue"][name]["tasks"])
-        busy |= any(t["status"] in LIVE and ds in t["command"] and f" {name} " in f" {t['command']} " for t in box["tasks"])
-        busy |= any(k.startswith(ds + "/") and not f.get("archived") for k, f in s["src"].get(name, {}).get("folds", {}).items() if f.get("final"))
+        busy = any(t["status"] in LIVE and p in uses(task_key(t["command"])[1] or "") for t in s["pueue"][name]["tasks"])
+        busy |= any(t["status"] in LIVE and tag(p) in t["command"] and f" {name} " in f" {t['command']} " for t in box["tasks"])
+        busy |= any(p in uses(k) and not f.get("archived") for k, f in s["src"].get(name, {}).get("folds", {}).items() if f.get("final"))
         if busy:
             continue
-        rc, out = run(f"rm -rf {M.MACHINES[name]['data']}/nnUNet/preprocessed/{ds}", M.MACHINES[name]["ssh"])
+        rc, out = run(f"rm -rf {M.MACHINES[name]['data']}/{shlex.quote(p)}", M.MACHINES[name]["ssh"])
         if rc == 0:
-            lst.remove(ds)
-            msgs.append(f"{M.MACHINES[name]['label']} 上自动传过去的 {ds} 用完了，已删掉（box 上有完整的一份）")
+            lst[:] = [x for x in lst if x not in (p, tag(p))]
+            msgs.append(f"{M.MACHINES[name]['label']} 上自动传过去的 {p} 用完了，已删掉（box 上有完整的一份）")
     json.dump(st, open(STATE, "w"), indent=1)
     return msgs
 
@@ -345,7 +365,7 @@ def run_all(s, dry=False):
                 shadow_log(name, f"（开关没开）{name} 会：{desc}")
             continue
         ok = set()
-        msgs = execute(acts, name, ok=ok)
+        msgs = execute(acts, name, ok=ok, tq=s.get("taskq", {}).get(queue_host()))
         msgs += cleanup(s, name, fresh=ok)
         log(msgs)
         events += msgs
@@ -405,7 +425,7 @@ def topup(s, name, dry=False, run=None):
         return [], {}
     msgs, stuck = [], {}
     for q, t, n in subs:
-        rc, out = run(f"cd {m['repo']}/research/RQ1/nnunet && sbatch --parsable --qos={q} --time={t} --array=1-{n} worker.sbatch", m["ssh"])
+        rc, out = run(f"cd {m['repo']}/scripts/queue && sbatch --parsable --qos={q} --time={t} --array=1-{n} worker.sbatch", m["ssh"])
         if rc == 0:
             msgs.append(f"{m['label']} {q} 空出 {n} 个位置，交了 worker 作业 {out.strip().splitlines()[-1]}（{n} 段，每段 {t}）")
         else:

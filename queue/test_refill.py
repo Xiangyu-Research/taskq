@@ -15,8 +15,11 @@ fails = 0
 D = tempfile.mkdtemp()
 R.LOG, R.STATE, R.SWITCH, R.DICC_SWITCH = f"{D}/refill.log", f"{D}/refill.json", f"{D}/LAB", f"{D}/DICC"
 R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")  # run_all 里补作业那一步
-R.dataset_gb = lambda ds: {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0}.get(ds, 10.0)
+GB = {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0, "stuff": 1.0}
+R.data_gb = lambda paths: sum(GB.get(R.tag(p), 10.0) for p in paths)
 NN, UM = "nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc"
+DS = {101: "Dataset101_GLIrq1", 103: "Dataset103_GLIrq1_t1c", 111: "Dataset111_MENrq1"}
+PP = "nnUNet/preprocessed/"
 
 
 def ok(what, cond):
@@ -30,7 +33,8 @@ def task(i, group, status, cmd, label=""):
 
 
 def train(i, ds, f, status="Running", tr=""):
-    return task(i, "gpu1", status, f"bash scripts/queue/train_task.sh {ds} {f}{' ' + tr if tr else ''}", f"x{i}")
+    extra = f" trainer={tr}" + (" env=umamba" if tr == UM else "") if tr else ""
+    return task(i, "gpu1", status, f"bash scripts/queue/run_task.sh nnunet dataset={DS[ds]} fold={f}{extra}", f"x{i}")
 
 
 def tq(key, nice, order, state="free", worker=None, skipped_by=()):
@@ -44,9 +48,9 @@ QUEUE = [tq(K_T14, 0, 1), tq(K_UM, 50, 2), tq(K_T1C[0], 50, 3), tq(K_T1C[1], 50,
 SQ = [["rq1_t1c_f0", "485145_1", "PENDING", "0:00", "Priority", "50"]]  # DICC 上只有 nnunet 的作业
 
 
-def snap(lab_tasks=(), queue=QUEUE, prep="Dataset101_GLIrq1 Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_folds=None, enabled=True, skips=None):
+def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_folds=None, enabled=True, skips=None):
     return dict(ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=copy.deepcopy(SQ), sacct=[])},
-                probe={"lab": {"DISK": str(int(disk)), "PREP": prep}},
+                probe={"lab": {"DISK": str(int(disk)), "HAVE": prep}},
                 src={"box": {"folds": {}}, "lab": {"folds": lab_folds or {}}, "dicc": {"folds": {}}},
                 taskq={"dicc": dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {})},
                 pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": {}, "tasks": list(lab_tasks)}})
@@ -60,7 +64,7 @@ def ops(acts):
 acts, _, why = R.plan(snap([train(1, 111, 0)]), "lab")
 ok("卡上有训练任务：不领", acts == [] and "训练任务" in why)
 acts, _, _ = R.plan(snap(), "lab")
-ok("卡空：①档放不下就跳过，按（档位，先后）取", ops(acts) == [("take", K_UM)] and not acts[0]["transfer"])
+ok("卡空：①档放不下就跳过，按（档位，先后）取", ops(acts) == [("take", K_UM)] and not acts[0]["paths"])
 qf = [dict(t, skipped_by=["lab"]) if t["key"] == K_UM else t for t in QUEUE]
 ok("lab 跳过的（多半放不下）不再领；别的机器跳过的照领",
    ops(R.plan(snap(queue=qf), "lab")[0]) == [("take", K_T1C[0])]
@@ -72,7 +76,7 @@ del s["src"]["dicc"]
 ok("DICC 的训练进度读不到：什么都不做", R.plan(s, "lab")[0] == [] and R.plan(s, "lab")[2] == "连不上")
 q2 = [t for t in QUEUE if t["key"] != K_UM]
 acts, _, _ = R.plan(snap(queue=q2), "lab")
-ok("数据集不在 lab 上要先传", ops(acts) == [("take", K_T1C[0])] and acts[0]["transfer"])
+ok("数据集不在 lab 上要先传", ops(acts) == [("take", K_T1C[0])] and acts[0]["paths"] == [PP + "Dataset103_GLIrq1_t1c"])
 acts, _, why = R.plan(snap(queue=q2, disk=43e9), "lab")
 ok("盘不够：都跳过，说明原因", acts == [] and "放不下" in why)
 s = snap(queue=q2)
@@ -85,7 +89,7 @@ ok("队列没开 / 读不到：什么都不做", R.plan(snap(enabled=False), "la
 s = snap()
 s["ok"]["lab"] = False
 ok("lab 连不上：什么都不做（不续、不交还）", R.plan(s, "lab")[0] == [])
-SQW = [["rq1_worker", "490000_1", "PENDING", "0:00", "Priority", "0"]]
+SQW = [["train_worker", "490000_1", "PENDING", "0:00", "Priority", "0"]]
 s = snap(queue=q2[1:] + [tq(K_UM, 50, 9)])
 s["slurm"]["dicc"]["squeue"] = SQW
 ok("DICC 有不带折的 worker 作业（什么都能领）：只按先后", ops(R.plan(s, "lab")[0]) == [("take", K_T1C[0])])
@@ -93,7 +97,14 @@ s = snap()
 del s["taskq"]["dicc"]["recent_skips"]
 acts, _, why = R.plan(s, "lab")
 ok("DICC 上的 taskq.py 还是旧版（状态里没有 recent_skips）：什么都不做", acts == [] and "旧版" in why)
-ok("make_registry.DS 里没有的数据集不领", ops(R.plan(snap(queue=[tq("Dataset999_X/nnUNetTrainer_save10/0", -1, 0)] + QUEUE), "lab")[0]) == [("take", K_UM)])
+ok("实验表里没有、队列状态里也没有说明的任务不领", ops(R.plan(snap(queue=[tq("Dataset999_X/nnUNetTrainer_save10/0", -1, 0)] + QUEUE), "lab")[0]) == [("take", K_UM)])
+HD = dict(tq("hdbet/x", -1, 0), recipe="command", params={}, spec=dict(key="hdbet/x", env="hdbet", data=[]))
+ok("lab 没有任务要的环境（hdbet）：不领", ops(R.plan(snap(queue=[HD] + QUEUE), "lab")[0]) == [("take", K_UM)])
+ok("队列标成有问题（bad）的任务不领", ops(R.plan(snap(queue=[dict(t, bad="x") if t["key"] == K_UM else t for t in QUEUE]), "lab")[0]) == [("take", K_T1C[0])])
+CMD = dict(tq("misc/a", -1, 0), recipe="command", params={"key": "misc/a", "cmd": "python x.py", "env": "nnunet"},
+           spec=dict(key="misc/a", env="nnunet", data=["other/stuff"]))
+acts, _, _ = R.plan(snap(queue=[CMD] + QUEUE), "lab")
+ok("任意做法的任务：按说明里的 data 判断要传什么", ops(acts) == [("take", "misc/a")] and acts[0]["paths"] == ["other/stuff"])
 ok("要传的数据集：再给训练输出留 10 GB（盘剩 52 GB、数据 4 GB、提醒线 40 GB：不领）",
    R.plan(snap(queue=q2, disk=52e9), "lab")[0] == [] and ops(R.plan(snap(queue=q2, disk=55e9), "lab")[0]) == [("take", K_T1C[0])])
 
@@ -112,16 +123,16 @@ acts, _, _ = R.plan(snap([train(5, 101, 1, "Failed (1)", UM)], queue=mine), "lab
 ok("训练失败、没进度：交还并记跳过（不记失败）", ops(acts)[0] == ("release", K_UM) and "Failed (1)" in acts[0]["skip"] and "failed" not in acts[0])
 old = dict(train(5, 101, 1, "Failed (1)", UM), start="2026-10-10T10:00:00.000000000+08:00")
 mine_new = [dict(t, since=1792303200) if t["key"] == K_UM else t for t in mine]  # 2026-10-18 领的
-acts, _, _ = R.plan(snap([old], queue=mine_new, prep="Dataset101_GLIrq1"), "lab")
+acts, _, _ = R.plan(snap([old], queue=mine_new, prep=PP + "Dataset101_GLIrq1"), "lab")
 ok("领取之前的旧训练任务不算：当成刚领，开始训", ops(acts) == [("beat", K_UM), ("start", K_UM)])
-acts, _, _ = R.plan(snap([dict(old, status="Running")], queue=mine_new, prep="Dataset101_GLIrq1"), "lab")
+acts, _, _ = R.plan(snap([dict(old, status="Running")], queue=mine_new, prep=PP + "Dataset101_GLIrq1"), "lab")
 ok("领取之前开始、还活着的任务（比如恢复的）：算在训，只续，不重复开始", ops(acts) == [("beat", K_UM)])
 acts, _, _ = R.plan(snap([train(5, 101, 1, "Failed (137)", UM)], queue=mine), "lab")
 ok("被杀掉（Failed (137)）、没进度：交还队列，不记跳过", ops(acts)[0] == ("release", K_UM) and not acts[0].get("skip"))
 prog = {K_UM: dict(final=False, runs=[dict(start="", end="2026-10-18 09:00:00", epochs_done=300, tl=[])])}
 acts, stuck, _ = R.plan(snap([train(5, 101, 1, "Failed (1)", UM)], queue=mine, lab_folds=prog), "lab")
 ok("任务失败、lab 上有进度：领取保留（续上）、报出来、不领新的", ops(acts) == [("beat", K_UM)] and f"labclaim:{K_UM}" in stuck
-   and "train_task.sh 101 1 nnUNetTrainer_UMambaEnc" in stuck[f"labclaim:{K_UM}"])
+   and "run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=1" in stuck[f"labclaim:{K_UM}"])
 mine2 = [dict(t, state="claimed", worker="lab") if t["key"] == K_T1C[0] else t for t in QUEUE]
 acts, _, why = R.plan(snap(queue=mine2), "lab")
 ok("刚领、数据不在 lab 上：传数据，不再领", ops(acts) == [("beat", K_T1C[0]), ("transfer", K_T1C[0])])
@@ -130,12 +141,12 @@ acts, _, _ = R.plan(snap(queue=mine2, box_tasks=[sync]), "lab")
 ok("数据在传：续上，不重复传，不领", ops(acts) == [("beat", K_T1C[0])])
 acts, stuck, _ = R.plan(snap(queue=mine2, box_tasks=[dict(sync, status="Failed (1)")]), "lab")
 ok("传数据出错：不重传，报出来", ops(acts) == [("beat", K_T1C[0])] and "labsync:Dataset103_GLIrq1_t1c" in stuck)
-acts, stuck, _ = R.plan(snap(queue=mine2, prep="Dataset101_GLIrq1 Dataset103_GLIrq1_t1c", box_tasks=[dict(sync, status="Failed (1)")]), "lab")
+acts, stuck, _ = R.plan(snap(queue=mine2, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset103_GLIrq1_t1c", box_tasks=[dict(sync, status="Failed (1)")]), "lab")
 ok("传了一半出错（lab 上有这个文件夹）：也不开始训", ops(acts) == [("beat", K_T1C[0])] and "labsync:Dataset103_GLIrq1_t1c" in stuck)
-acts, _, _ = R.plan(snap(queue=mine2, prep="Dataset101_GLIrq1 Dataset103_GLIrq1_t1c",
+acts, _, _ = R.plan(snap(queue=mine2, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset103_GLIrq1_t1c",
                          box_tasks=[dict(sync, status="Failed (1)"), dict(sync, id=32, status="Success")]), "lab")
 ok("出错后重传成功了：看最新的那次，开始训", ops(acts) == [("beat", K_T1C[0]), ("start", K_T1C[0])])
-acts, _, _ = R.plan(snap(queue=mine2, prep="Dataset101_GLIrq1 Dataset103_GLIrq1_t1c", box_tasks=[dict(sync, status="Success")]), "lab")
+acts, _, _ = R.plan(snap(queue=mine2, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset103_GLIrq1_t1c", box_tasks=[dict(sync, status="Success")]), "lab")
 ok("数据传完了：开始训", ops(acts) == [("beat", K_T1C[0]), ("start", K_T1C[0])])
 
 # ---------------- 执行 ----------------
@@ -158,7 +169,7 @@ acts, _, _ = R.plan(snap(), "lab")
 msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("领：take --worker lab --ttl 86400，成功后在 lab gpu1 加训练任务（不暂存、不带优先级）",
    rem == [f"take --worker lab --ttl 86400 {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
-   and "gpu1 -p --label train:umamba_f1 -- 'bash scripts/queue/train_task.sh 101 1 nnUNetTrainer_UMambaEnc'" in cmds[0][1]
+   and f"gpu1 -p --label train:{K_UM} -- 'bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=1'" in cmds[0][1]
    and "--stashed" not in cmds[0][1] and "priority" not in cmds[0][1] and "领了" in msgs[0])
 cmds.clear(), rem.clear()
 msgs = R.execute(acts, "lab", remote=fake_remote(10, "刚被别人领走"), run=fake_run)
@@ -173,7 +184,7 @@ acts, _, _ = R.plan(snap(queue=q2), "lab")
 R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("领了要传数据的：box 上加传数据任务（不预排训练），记下传过去的数据集",
    len(cmds) == 1 and cmds[0][0] == "box" and "sync_lab_Dataset103_GLIrq1_t1c" in cmds[0][1] and "tunnel_push.sh lab" in cmds[0][1]
-   and "Dataset103_GLIrq1_t1c" in open(R.STATE).read())
+   and PP + "Dataset103_GLIrq1_t1c" in open(R.STATE).read())
 cmds.clear(), rem.clear()
 acts, _, _ = R.plan(snap([train(5, 101, 1, "Killed", UM)], queue=mine), "lab")
 R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
@@ -216,6 +227,11 @@ ok("lab 上还有训完没归档的折：不删", R.cleanup(snap(lab_folds={K_T1
 ok("lab 还领着这个数据集的折：不删", R.cleanup(snap(queue=mine2), "lab", run=fake_run) == [] and not cmds)
 out = R.cleanup(snap(), "lab", run=fake_run)
 ok("都用完了：删掉自动传过去的数据集", len(out) == 1 and cmds[-1][1] == "rm -rf ~/BRAIN_TUMOR/nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
+import json  # noqa: E402
+json.dump({"transferred": {"lab": ["Dataset103_GLIrq1_t1c"]}}, open(R.STATE, "w"))
+out = R.cleanup(snap(), "lab", run=fake_run)
+ok("10/18 前只记了数据集名的：照样认、删掉后从记录里去掉", len(out) == 1 and cmds[-1][1].endswith("nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
+   and json.load(open(R.STATE))["transferred"]["lab"] == [])
 
 # ---------------- DICC 补作业 ----------------
 QOS = {"long": "1-12:00:00", "normal": "08:00:00"}
@@ -255,7 +271,7 @@ ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交
 open(R.DICC_SWITCH, "w").close()
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关开着：交 worker.sbatch（long，1 段，不限并发），记日志、不推送",
-   sub == [("dicc", "cd ~/Projects/PhD/research/RQ1/nnunet && sbatch --parsable --qos=long --time=1-12:00:00 --array=1-1 worker.sbatch")]
+   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=1-12:00:00 --array=1-1 worker.sbatch")]
    and ev == [] and not st and "交了 worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE, sbatch_rc=1))

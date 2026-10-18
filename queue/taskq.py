@@ -1,37 +1,44 @@
 #!/usr/bin/env python3
-"""训练任务队列（2026-10-17，在 DICC 上）：Slurm 上排着的作业只负责申卡，开始后由 scripts/queue/dicc_worker.sh 从这里
-按顺序领任务（GPU 不忙、显存够时一张卡同时训 2 个），训完一个再领下一个，没有能领的就退出；lab 由 box 上的
-scripts/queue/refill.py 替它领。Slurm 作业名不再决定训哪一折。
+"""训练任务队列（2026-10-17 起，在 DICC 上；10/18 起任务不限于 nnU-Net）：Slurm 上排着的作业只负责申卡，开始后由
+scripts/queue/dicc_worker.sh 从这里按顺序领任务（GPU 不忙、显存够时一张卡同时训 2 个），训完一个再领下一个，没有能领的就退出；
+lab 由 box 上的 scripts/queue/refill.py 替它领。
+
+每个任务 = 做法 + 参数（scripts/queue/recipes.py，解析在 scripts/queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
+任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。
 
 队列目录（DICC 上，家目录各节点共用）：~/.cache/phd/taskq/
-  tasks.tsv     任务：顺序、档位（Nice，越小越先）、key（数据集/训练器/fold）、数据集编号、训练器、fold、种类
-                （第 7 列只给 10/18 前启动的旧 worker 用，新任务写 "-"，见下面 --kind）
+  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}
+                （10/18 前的 tasks.tsv 第一次读时自动转过来，原文件改名 tasks.tsv.bak）
   claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号，或 lab）、主机、领取和最近一次心跳的时间，
                 可选 ttl（心跳多久不更新算过期，默认 20 分钟；box 替 lab 领的是 24 小时，见 scripts/queue/refill.py）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
   skips/<key>   某台机器训不了的任务（release --skip，现在只有 lab 用）：这台机器不再领它，别的机器照常领；不算失败
   released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
-  ENABLED       总开关：有这个文件时作业才按队列领任务；删掉后作业照旧训自己那一折
+  ENABLED       总开关：有这个文件时 10/17 前交的按折作业才按队列领任务
   lock          改队列时的锁（mkdir）
-不领的任务：已经训完（checkpoint_final 或 ARCHIVED，并且有 validation/summary.json）；别处正在训（claims 里有、心跳
-  在 ttl 内，或者这一折的训练日志 15 分钟内更新过）。10/16–10/18 健康检查写的 ~/.cache/phd/claimed_elsewhere.txt 已不再写，
-  超过 2 小时没更新的清单不起作用。
+不领的任务：已经训完（任务说明的 done）；别处正在训（claims 里有、心跳在 ttl 内，或者训练日志 15 分钟内更新过）；
+  说明解析不了的（参数写错，status 里显示 bad）。
 
 DICC 上（worker 调用）：
-    taskq.py claim --worker <作业号> --kind any [--free-slots N] [--patience-until 时间] [--exclude key...]
-        领一个 → 打印 "key 数据集编号 训练器 fold"，退出码 0。没有能领的退出码 10；排在前面的折刚停下、还在等它
-        （--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；其他退出码都是队列本身出错
-        （包括没有 tasks.tsv：退出码 2）。
+    taskq.py next --worker <作业号> --envs <环境,…> [--free-slots N] [--patience-until 时间] [--exclude key...]
+        领一个本机有环境的 → 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
+        排在前面的刚停下、还在等它（--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；
+        其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
-    --kind 除了 any 以外只给 10/18 前启动的 dicc_worker.sh 用：只领第 7 列等于它的任务。10/18 起不分模型种类，新加的
-    任务第 7 列写 "-"（列数不能改，旧 worker 读列数不对的行会跳过）。
-box 上（本机没有 tasks.tsv 时自动经 ssh 在 DICC 上跑，2026-10-18）：
-    taskq.py take --worker lab --ttl 86400 <key>        领指定的一折（box 替 lab 领）：领到退出码 0，领不到 10
-    taskq.py add --nice <档位> <key>...                 加新任务（key = 数据集文件夹/训练器/fold），已有的跳过
-    taskq.py set-nice --nice <档位> <key>...            调先后顺序
-    taskq.py status               打印队列（DICC 上直接读；box 上 ssh 过去读）
+    taskq.py claim --worker <作业号> --kind any [...]   10/19 前开始的 dicc_worker.sh 用：参数同 next（--kind 不再起作用），
+        打印 "key 数据集编号 训练器 fold"，只发它会跑的任务（做法 nnunet、默认 plans 和配置、环境和训练器名对得上）。约 10/21 删。
+box 上（本机没有队列时自动经 ssh 在 DICC 上跑）：
+    taskq.py add --nice <档位> --exp <实验 id> [--folds 0 1 …]     从实验表加（已有的跳过）
+    taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
+    taskq.py add --nice <档位> <key>...                             按 key 加：实验表里有的照表，没有的按 nnunet 做法
+                                                                    （key = 数据集/训练器/fold）
+    taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
+    taskq.py set-nice --nice <档位> <key>...
+    taskq.py show [--json] <key>      任务的完整说明和状态
+    taskq.py take --worker lab --ttl 86400 <key>        领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
+    taskq.py status                   打印队列
 """
 import argparse
 import glob
@@ -45,50 +52,57 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(REPO, "envs"))
+import spec as S  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", "~/.cache/phd/taskq"))  # TASKQ_DIR 只给测试用
-CLAIMS_ELSEWHERE = os.path.expanduser(os.environ.get("RQ1_CLAIMS", "~/.cache/phd/claimed_elsewhere.txt"))
-PLANS = "nnUNetResEncUNetMPlans__3d_fullres"
-FIELDS = ["order", "nice", "key", "dsid", "trainer", "fold", "kind"]  # kind 只给旧 worker 用（见开头）
+TASKS = "tasks.jsonl"
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
-NOTHING, WAIT, PAUSED = 10, 11, 12   # claim 的退出码
+NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
+safe = S.safe
 
 
+def tasks_path():
+    return os.path.join(TQ, TASKS)
 
 
-def safe(key):
-    return key.replace("/", "__")
+def have_queue():
+    return os.path.exists(tasks_path()) or os.path.exists(os.path.join(TQ, "tasks.tsv"))
 
 
 # ---------------- 文件 ----------------
 def read_tasks(path=None):
-    path = path or os.path.join(TQ, "tasks.tsv")
+    path = path or tasks_path()
     out = []
     if not os.path.exists(path):
         return out
     for ln in open(path, encoding="utf-8"):
         if ln.startswith("#") or not ln.strip():
             continue
-        p = ln.rstrip("\n").split("\t")
-        if len(p) == len(FIELDS):
-            t = dict(zip(FIELDS, p))
+        try:
+            t = json.loads(ln)
             t["order"], t["nice"] = int(t["order"]), int(t["nice"])
+            t.setdefault("exp", None)
+            t.setdefault("params", {})
             out.append(t)
+        except (ValueError, KeyError):
+            continue
     return sorted(out, key=lambda t: (t["nice"], t["order"]))
 
 
 def write_tasks(tasks, path=None):
-    path = path or os.path.join(TQ, "tasks.tsv")
+    path = path or tasks_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write("# " + "\t".join(FIELDS) + f"\t（taskq.py，{time.strftime('%F %T')}）\n")
-        for t in tasks:
-            f.write("\t".join(str(t[k]) for k in FIELDS) + "\n")
+        for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
+            f.write(json.dumps({k: t.get(k) for k in ("order", "nice", "key", "exp", "recipe", "params")}, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
 
 
@@ -120,37 +134,89 @@ class Lock:
             pass
 
 
+# ---------------- 任务说明 ----------------
+def env_guess(trainer):
+    """10/18 前按训练器名字选环境的规则：只用来把旧任务表转过来、判断旧 worker 能不能跑。"""
+    return "swinunetr" if "SwinUNETR" in trainer else "umamba" if "UMamba" in trainer else "nnunet"
+
+
+def from_key(key):
+    """key → 任务（exp、recipe、params）：实验表里有的照表，没有的按 nnunet 做法（数据集/训练器/fold）。"""
+    import experiments as E
+    t = E.tasks().get(key)
+    if t:
+        return dict(key=key, exp=t["exp"], recipe=t["recipe"], params=dict(t["params"]))
+    m = re.fullmatch(r"(Dataset\d+_[^/]+)/([^/]+)/(\w+)", key)
+    if not m:
+        raise SystemExit(f"实验表里没有 {key}，也不是 数据集/训练器/fold 的格式（别的做法用 add --recipe）")
+    p = dict(dataset=m.group(1), trainer=m.group(2), fold=m.group(3))
+    if env_guess(p["trainer"]) != "nnunet":
+        p["env"] = env_guess(p["trainer"])
+    return dict(key=key, exp=None, recipe="nnunet", params=p)
+
+
+_specs = {}
+
+
+def spec_of(t):
+    """任务 → 说明；解析不了时 → None（错误记在 t["bad"]）。"""
+    k = json.dumps([t.get("recipe"), t.get("params"), t.get("exp")], sort_keys=True)
+    if k not in _specs:
+        import experiments as E
+        try:
+            _specs[k] = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
+        except (S.SpecError, KeyError) as e:
+            _specs[k] = None
+            t["bad"] = str(e)
+    s = _specs[k]
+    if s is not None and s["key"] != t["key"]:
+        t["bad"] = f"参数算出的任务名是 {s['key']}，和记录的 {t['key']} 不一致"
+        return None
+    return s
+
+
+def migrate():
+    """10/18 前的 tasks.tsv（7 列）→ tasks.jsonl：顺序、档位不变，按 key 找实验表。原文件改名 tasks.tsv.bak。"""
+    old = os.path.join(TQ, "tasks.tsv")
+    if os.path.exists(tasks_path()) or not os.path.exists(old):
+        return 0
+    out = []
+    for ln in open(old, encoding="utf-8"):
+        if ln.startswith("#") or not ln.strip():
+            continue
+        p = ln.rstrip("\n").split("\t")
+        if len(p) != 7:
+            continue
+        out.append(dict(from_key(p[2]), order=int(p[0]), nice=int(p[1])))
+    write_tasks(out)
+    os.replace(old, old + ".bak")
+    print(f"tasks.tsv → {TASKS}：{len(out)} 个任务（原文件留在 tasks.tsv.bak）", file=sys.stderr)
+    return len(out)
+
+
+def ensure_migrated():
+    if not os.path.exists(tasks_path()) and os.path.exists(os.path.join(TQ, "tasks.tsv")):
+        with Lock():
+            migrate()
+
+
+def data_root():
+    """本机的数据目录：BRAIN_TUMOR（envs/nnunet_paths.sh 设的）> nnUNet_results 的上两级 > envs/machines.py。"""
+    if os.environ.get("BRAIN_TUMOR"):
+        return os.environ["BRAIN_TUMOR"]
+    if os.environ.get("nnUNet_results"):
+        return os.path.dirname(os.path.dirname(os.environ["nnUNet_results"].rstrip("/")))
+    import machines as M
+    me = M.whoami()
+    return M.expand(M.MACHINES[me]["data"]) if me else os.path.expanduser("~/st/BRAIN_TUMOR")
+
+
+# ---------------- 状态 ----------------
 def claim_info(key):
-    p = os.path.join(TQ, "claims", safe(key), "info")
     try:
-        return json.load(open(p))
+        return json.load(open(os.path.join(TQ, "claims", safe(key), "info")))
     except Exception:  # noqa: BLE001
         return None
-
-
-def fold_dir(results, t):
-    ds = glob.glob(os.path.join(results, f"Dataset{t['dsid']}_*"))
-    return os.path.join(ds[0], f"{t['trainer']}__{PLANS}", f"fold_{t['fold']}") if ds else None
-
-
-def is_done(fd):
-    return bool(fd) and (os.path.exists(os.path.join(fd, "checkpoint_final.pth")) or os.path.exists(os.path.join(fd, "ARCHIVED"))) \
-        and os.path.exists(os.path.join(fd, "validation", "summary.json"))
-
-
-def log_age(fd):
-    logs = glob.glob(os.path.join(fd, "training_log_*.txt")) if fd else []
-    return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
-
-
-def elsewhere():
-    """别的机器在训的 key（健康检查写的清单；超过 2 小时没更新时照常领，和 train_folds.sbatch 一样）。"""
-    try:
-        if time.time() - os.path.getmtime(CLAIMS_ELSEWHERE) > 7200:
-            return set()
-        return {ln.split("\t")[0] for ln in open(CLAIMS_ELSEWHERE) if ln.strip() and not ln.startswith("#")}
-    except OSError:
-        return set()
 
 
 def failures(key):
@@ -191,13 +257,15 @@ def recent_failures(window=PAUSE_WINDOW):
     return n
 
 
-def state(t, results, other):
-    """→ (状态, 说明)：done / claimed / busy / elsewhere / failed / free / stale（领取过期，可以重新领）。"""
-    fd = fold_dir(results, t)
-    if is_done(fd):
+def state(t, root):
+    """→ (状态, 说明)：done / claimed / busy / failed / free / stale（领取过期，可以重新领）/ bad（说明解析不了）。"""
+    s = spec_of(t)
+    if s is None:
+        return "bad", t.get("bad", "")
+    if S.is_done(s, root):
         return "done", ""
     ci = claim_info(t["key"])
-    age = log_age(fd)
+    age = S.log_age(s, root)
     if ci:
         if time.time() - ci.get("beat", 0) < ci.get("ttl", STALE_BEAT) or (age is not None and age < FRESH_LOG):
             return "claimed", f"作业 {ci.get('worker')} @ {ci.get('host')}"
@@ -206,35 +274,51 @@ def state(t, results, other):
         rel = released_at(t["key"])
         if rel is None or time.time() - age > rel + 5:  # 交还之后日志又更新过（或从没交还过）：队列外有人在训
             return "busy", f"训练日志 {age / 60:.0f} 分钟前更新过"
-    if t["key"] in other:
-        return "elsewhere", "别的机器在训"
     if failures(t["key"]) >= MAX_FAIL:
         return "failed", f"失败 {failures(t['key'])} 次"
     return "free", ""
 
 
+def legacy_args(t):
+    """10/19 前开始的 dicc_worker.sh 能跑的任务 → "key 数据集编号 训练器 fold"；不能 → None。
+    它自己拼 nnU-Net 命令、按训练器名字选环境，所以只发默认 plans / 配置 / 训练器目录、环境对得上的 nnunet 任务。"""
+    import recipes as R
+    s = spec_of(t)
+    if s is None or t["recipe"] != "nnunet" or any(k not in R.RECIPES["nnunet"]["params"] for k in t["params"]):
+        return None
+    n, d = s["names"], R.RECIPES["nnunet"]["params"]
+    m = re.match(r"Dataset(\d+)_", n["dataset"])
+    if not m or n["plans"] != d["plans"] or n["config"] != d["config"] or n["code"] != d["code"] or n["env"] != env_guess(n["trainer"]):
+        return None
+    return f"{t['key']} {m.group(1)} {n['trainer']} {n['fold']}"
+
+
 # ---------------- DICC 上：领、心跳、交还 ----------------
-def cmd_claim(a):
-    results = os.environ.get("nnUNet_results") or sys.exit("没有 nnUNet_results（先 source envs/nnunet_paths.sh）")
-    if not os.path.exists(os.path.join(TQ, "tasks.tsv")):
+def _claim(a, pick):
+    """按顺序领第一个 pick(t) 不为 None 的 free / stale 任务 → (退出码, pick 的结果)。"""
+    if not have_queue():
         # 不能当成"没有任务"（退出码 10）：那样每个开始的作业都会马上结束，排队的作业几分钟内全部用掉
-        print(f"没有 {os.path.join(TQ, 'tasks.tsv')}", file=sys.stderr)
-        return 2
-    other = elsewhere()
+        print(f"没有 {tasks_path()}", file=sys.stderr)
+        return 2, None
+    ensure_migrated()
+    root = data_root()
     if recent_failures() >= PAUSE_N:
-        return PAUSED
-    busy_ahead = 0  # 排在前面、刚停下（日志 15 分钟内更新过、没人领）的折
+        return PAUSED, None
+    busy_ahead = 0  # 排在前面、刚停下（日志 15 分钟内更新过、没人领）的
     with Lock():
         for t in read_tasks():
-            if (a.kind != "any" and t["kind"] != a.kind) or t["key"] in a.exclude:
+            if t["key"] in a.exclude:
                 continue
-            st, _ = state(t, results, other)
+            st, _ = state(t, root)
             if st == "busy":
                 busy_ahead += 1
             if st not in ("free", "stale"):
                 continue
+            out = pick(t)
+            if out is None:
+                continue
             if busy_ahead >= a.free_slots and time.time() < a.patience_until:
-                return WAIT  # 给排在前面的留着位置，等它的日志过了 15 分钟再领
+                return WAIT, None  # 给排在前面的留着位置，等它的日志过了 15 分钟再领
             d = os.path.join(TQ, "claims", safe(t["key"]))
             if st == "stale":
                 gone = f"{d}.old{os.getpid()}"
@@ -250,9 +334,29 @@ def cmd_claim(a):
                 continue
             now = time.time()
             json.dump(dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now), open(os.path.join(d, "info"), "w"))
-            print(t["key"], t["dsid"], t["trainer"], t["fold"])
-            return 0
-    return NOTHING
+            return 0, out
+    return NOTHING, None
+
+
+def cmd_claim(a):
+    rc, out = _claim(a, legacy_args)
+    if rc == 0:
+        print(out)
+    return rc
+
+
+def cmd_next(a):
+    envs = set(e for e in a.envs.split(",") if e)
+
+    def pick(t):
+        s = spec_of(t)
+        if s["env"] not in envs:
+            return None
+        return t["key"] + "\n" + " ".join(shlex.quote(x) for x in S.kv_args(t["recipe"], t["params"]))
+    rc, out = _claim(a, pick)
+    if rc == 0:
+        print(out)
+    return rc
 
 
 def cmd_beat(a):
@@ -287,8 +391,9 @@ def cmd_release(a):
 
 
 def cmd_take(a):
-    """领指定的一折（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。"""
-    results = os.environ.get("nnUNet_results") or sys.exit("没有 nnUNet_results（先 source envs/nnunet_paths.sh）")
+    """领指定的一个（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。"""
+    ensure_migrated()
+    root = data_root()
     with Lock():
         t = next((t for t in read_tasks() if t["key"] == a.key), None)
         if t is None:
@@ -296,7 +401,7 @@ def cmd_take(a):
             return NOTHING
         ci = claim_info(a.key)
         mine = bool(ci) and str(ci.get("worker")) == str(a.worker)
-        st, note = state(t, results, elsewhere())
+        st, note = state(t, root)
         if st == "done" or (not mine and st not in ("free", "stale")):
             print(f"{a.key}：{st} {note}")
             return NOTHING
@@ -312,62 +417,128 @@ def cmd_take(a):
         now = time.time()
         json.dump(dict(worker=a.worker, host=a.host or a.worker, since=ci.get("since", now) if mine else now, beat=now, ttl=a.ttl),
                   open(os.path.join(d, "info"), "w"))
-        print(t["key"], t["dsid"], t["trainer"], t["fold"])
+        print(t["key"])
         return 0
 
 
-def parse_key(key):
-    """key（数据集文件夹/训练器/fold）→ 任务的 dict（order、nice 由调用方填）。"""
-    m = re.fullmatch(r"Dataset(\d+)_[^/]+/([^/]+)/(\w+)", key)
-    if not m:
-        raise SystemExit(f"key 格式不对：{key}（要 DatasetNNN_xxx/训练器/fold）")
-    return dict(key=key, dsid=m.group(1), trainer=m.group(2), fold=m.group(3), kind="-")
-
-
-def cmd_add(a):
+# ---------------- 加、改 ----------------
+def _insert(new, nice):
+    """把新任务（dict(key, exp, recipe, params)）加进队列，已有的跳过。先解析一遍，写错参数的不加。"""
+    import experiments as E
     with Lock():
         tasks = read_tasks()
         have = {t["key"] for t in tasks}
         order = max([t["order"] for t in tasks] or [0])
-        for key in a.keys:
-            t = parse_key(key)
-            if key in have:
-                print(f"已有，跳过：{key}")
+        for t in new:
+            s = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
+            if s["key"] in have:
+                print(f"已有，跳过：{s['key']}")
                 continue
             order += 1
-            tasks.append(dict(t, order=order, nice=a.nice))
-            have.add(key)
-            print(f"加入：{a.nice:>5} {key}")
-        write_tasks(sorted(tasks, key=lambda t: (t["nice"], t["order"])))
+            tasks.append(dict(t, key=s["key"], order=order, nice=nice))
+            have.add(s["key"])
+            print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {s['env']}）")
+        write_tasks(tasks)
+    return 0
+
+
+def cmd_add(a):
+    import experiments as E
+    ensure_migrated()
+    try:
+        if a.exp:
+            e = E.experiment(a.exp) or sys.exit(f"实验表里没有 {a.exp}（有：{', '.join(x['id'] for x in E.load()[0])}）")
+            new = [dict(exp=t["exp"], recipe=t["recipe"], params=t["params"]) for t in E.expand(e, a.folds)]
+        elif a.recipe:
+            new = [dict(exp=None, recipe=a.recipe, params=S.parse_kv(a.args))]
+        else:
+            if not a.args:
+                sys.exit("要给 --exp、--recipe 或 key")
+            new = [from_key(k) for k in a.args]
+        return _insert(new, a.nice)
+    except S.SpecError as e:
+        print(f"加不进去：{e}")
+        return 2
+
+
+def cmd_set(a):
+    import experiments as E
+    ensure_migrated()
+    with Lock():
+        tasks = read_tasks()
+        t = next((t for t in tasks if t["key"] == a.key), None)
+        if t is None:
+            print(f"队列里没有 {a.key}")
+            return 1
+        p = dict(t["params"])
+        for k, v in S.parse_kv(a.kv).items():
+            if v == "":
+                p.pop(k, None)
+            else:
+                p[k] = v
+        try:
+            s = E.resolve_task(t["recipe"], p, t.get("exp"))
+        except S.SpecError as e:
+            print(f"改不了：{e}")
+            return 2
+        if s["key"] != t["key"]:
+            print(f"改了以后任务名会变成 {s['key']}（领取记录、结果都按任务名）：改成新任务用 add，再把这个删掉")
+            return 2
+        print(f"{t['key']}：{json.dumps(t['params'], ensure_ascii=False)} → {json.dumps(p, ensure_ascii=False)}")
+        t["params"] = p
+        write_tasks(tasks)
     return 0
 
 
 def cmd_set_nice(a):
+    ensure_migrated()
     with Lock():
         tasks = read_tasks()
-        hit = 0
         for t in tasks:
             if t["key"] in a.keys:
                 print(f"{t['key']}：{t['nice']} → {a.nice}")
                 t["nice"] = a.nice
-                hit += 1
-        write_tasks(sorted(tasks, key=lambda t: (t["nice"], t["order"])))
+        write_tasks(tasks)
     missing = set(a.keys) - {t["key"] for t in tasks}
     for k in sorted(missing):
         print(f"队列里没有：{k}")
     return 0 if not missing else 1
 
 
+def cmd_show(a):
+    ensure_migrated()
+    t = next((t for t in read_tasks() if t["key"] == a.key), None)
+    if t is None:
+        print(f"队列里没有 {a.key}")
+        return 1
+    s = spec_of(t)
+    if a.json:
+        if s is None:
+            print(t.get("bad"), file=sys.stderr)
+            return 2
+        print(json.dumps(s, ensure_ascii=False))
+        return 0
+    st, note = state(t, data_root())
+    print(f"{t['key']}：档位 {t['nice']}，{st} {note}；实验 {t.get('exp') or '（不在实验表里）'}")
+    print(f"  run_task.sh {' '.join(shlex.quote(x) for x in S.kv_args(t['recipe'], t['params']))}")
+    if s:
+        for k in ("env", "cmd", "out", "done", "data"):
+            print(f"  {k:5} {s[k]}")
+    return 0
+
+
 # ---------------- 状态（DICC 上直接读，box 上 ssh 过去） ----------------
 def local_status():
-    results = os.environ.get("nnUNet_results") or os.path.expanduser("~/st/BRAIN_TUMOR/nnUNet/results")
-    other = elsewhere()
+    ensure_migrated()
+    root = data_root()
     out = []
     for t in read_tasks():
-        st, note = state(t, results, other)
+        st, note = state(t, root)
+        s = spec_of(t)
         ci = claim_info(t["key"]) or {}
-        out.append(dict(t, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"), beat=ci.get("beat"),
-                        log_age=log_age(fold_dir(results, t)), failures=failures(t["key"]), skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
+        out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
+                        beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None, failures=failures(t["key"]),
+                        skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
     return dict(enabled=os.path.exists(os.path.join(TQ, "ENABLED")), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,
@@ -375,8 +546,7 @@ def local_status():
 
 
 def remote_status(host):
-    """box 上：ssh 到 host、跑那边仓库里的本脚本 --json-status → dict 或 None。
-    （10/18 前是把本文件经 stdin 传过去跑；本文件 import 同目录的模块时那样跑会找不到。）"""
+    """box 上：ssh 到 host、跑那边仓库里的本脚本 --json-status → dict 或 None。"""
     r = remote(host, "--json-status", timeout=180)
     if r is None:
         return None
@@ -390,13 +560,12 @@ def remote_status(host):
 
 def remote(host, args, timeout=120):
     """box 上：在 host（DICC）的仓库里跑 taskq.py <args> → (退出码, 输出)，ssh 不通时 None。"""
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "envs"))
     import machines as M
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split()  # TASKQ_SSH 只给测试用
     try:
         r = subprocess.run(ssh + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", m["ssh"],
-                                  f"cd {m['repo']} && nnUNet_results={M.results(host)} python3 scripts/queue/taskq.py {args}"],
+                                  f"cd {m['repo']} && BRAIN_TUMOR={m['data']} nnUNet_results={M.results(host)} python3 scripts/queue/taskq.py {args}"],
                            capture_output=True, text=True, timeout=timeout)
         return (None if r.returncode == 255 else (r.returncode, r.stdout + r.stderr))
     except Exception:  # noqa: BLE001
@@ -404,7 +573,7 @@ def remote(host, args, timeout=120):
 
 
 def cmd_status(a):
-    s = local_status() if os.path.isdir(TQ) and os.path.exists(os.path.join(TQ, "tasks.tsv")) else remote_status(a.host)
+    s = local_status() if have_queue() else remote_status(a.host)
     if s is None:
         print("读不到队列")
         return 1
@@ -414,18 +583,18 @@ def cmd_status(a):
     for t in s["tasks"]:
         n[t["state"]] = n.get(t["state"], 0) + 1
         if t["state"] not in ("done",):
-            print(f"  {t['nice']:>5} {t['key']:60} {t['state']} {t['note']}")
+            env = (t.get("spec") or {}).get("env", "?")
+            print(f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}")
     print("；".join(f"{k} {v}" for k, v in sorted(n.items())))
     return 0
 
 
 def main(argv):
     if argv[:1] == ["--json-status"]:
-        print(json.dumps(local_status()))
+        print(json.dumps(local_status(), ensure_ascii=False))
         return 0
-    if argv[:1] and argv[0] in ("add", "set-nice", "take") and not os.path.exists(os.path.join(TQ, "tasks.tsv")):
+    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show", "migrate") and not have_queue():
         # box 上：本机没有队列，转到 DICC 上那份去改（不在 box 上另建一份）
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "envs"))
         import machines as M
         host = next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
         r = remote(host, " ".join(shlex.quote(x) for x in argv))
@@ -436,12 +605,16 @@ def main(argv):
         return r[0]
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("claim")
-    p.add_argument("--worker", required=True)
-    p.add_argument("--kind", required=True)
-    p.add_argument("--free-slots", type=int, default=1)
-    p.add_argument("--patience-until", type=float, default=0)
-    p.add_argument("--exclude", nargs="*", default=[])
+    for name in ("claim", "next"):
+        p = sub.add_parser(name)
+        p.add_argument("--worker", required=True)
+        p.add_argument("--free-slots", type=int, default=1)
+        p.add_argument("--patience-until", type=float, default=0)
+        p.add_argument("--exclude", nargs="*", default=[])
+        if name == "claim":
+            p.add_argument("--kind", default="any", help="不再起作用（10/18 前的 worker 会传）")
+        else:
+            p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
     p = sub.add_parser("beat")
     p.add_argument("--worker", required=True)
     p.add_argument("keys", nargs="+")
@@ -457,15 +630,28 @@ def main(argv):
     p.add_argument("key")
     p = sub.add_parser("add")
     p.add_argument("--nice", type=int, required=True)
-    p.add_argument("keys", nargs="+")
+    p.add_argument("--exp")
+    p.add_argument("--folds", nargs="*")
+    p.add_argument("--recipe")
+    p.add_argument("args", nargs="*", help="--recipe 时是 k=v，否则是 key")
+    p = sub.add_parser("set")
+    p.add_argument("key")
+    p.add_argument("kv", nargs="+")
     p = sub.add_parser("set-nice")
     p.add_argument("--nice", type=int, required=True)
     p.add_argument("keys", nargs="+")
+    p = sub.add_parser("show")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("key")
+    sub.add_parser("migrate")
     p = sub.add_parser("status")
     p.add_argument("--host", default="dicc")
     a = ap.parse_args(argv)
-    return dict(claim=cmd_claim, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set_nice=cmd_set_nice,
-                status=cmd_status)[a.cmd.replace("-", "_")](a)
+    if a.cmd == "migrate":
+        with Lock():
+            return 0 if migrate() >= 0 else 1
+    return dict(claim=cmd_claim, next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
+                set_nice=cmd_set_nice, show=cmd_show, status=cmd_status)[a.cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""taskq.py 的测试（2026-10-17）：临时目录里的假队列、假训练结果，不连任何机器。  python3 scripts/queue/test_taskq.py"""
+"""taskq.py 的测试（2026-10-17，10/18 改成任务说明）：临时目录里的假队列、假训练结果，不连任何机器。  python3 scripts/queue/test_taskq.py"""
 import glob
 import json
 import os
@@ -10,8 +10,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 T = tempfile.mkdtemp()
-TQ, RES = os.path.join(T, "taskq"), os.path.join(T, "results")
-ENV = dict(os.environ, TASKQ_DIR=TQ, nnUNet_results=RES, RQ1_CLAIMS=os.path.join(T, "claims_elsewhere.txt"))
+TQ, DATA = os.path.join(T, "taskq"), os.path.join(T, "data")
+RES = os.path.join(DATA, "nnUNet", "results")
+ENV = dict(os.environ, TASKQ_DIR=TQ, BRAIN_TUMOR=DATA)
+ENV.pop("nnUNet_results", None)
 sys.path.insert(0, HERE)
 os.environ.update(TASKQ_DIR=TQ)
 import taskq  # noqa: E402
@@ -36,12 +38,21 @@ def fold(ds, tr, f):
     return d
 
 
+def write_tsv(path, rows):
+    """10/18 前的 tasks.tsv（7 列）。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("# order\tnice\tkey\tdsid\ttrainer\tfold\tkind\t（taskq.py）\n")
+        for r in rows:
+            f.write("\t".join(str(r[k]) for k in ("order", "nice", "key", "dsid", "trainer", "fold", "kind")) + "\n")
+
+
 tasks = [dict(order=10, nice=0, key="Dataset121_X/nnUNetTrainer_save10/0", dsid=121, trainer="nnUNetTrainer_save10", fold="0", kind="nnunet"),
          dict(order=11, nice=0, key="Dataset121_X/nnUNetTrainer_save10/1", dsid=121, trainer="nnUNetTrainer_save10", fold="1", kind="nnunet"),
          dict(order=5, nice=50, key="Dataset103_Y/nnUNetTrainer_save10/0", dsid=103, trainer="nnUNetTrainer_save10", fold="0", kind="nnunet"),
          dict(order=1, nice=2000, key="Dataset101_Z/nnUNetTrainer_SwinUNETR/0", dsid=101, trainer="nnUNetTrainer_SwinUNETR", fold="0", kind="swin"),
          dict(order=12, nice=0, key="Dataset121_X/nnUNetTrainer_save10/2", dsid=121, trainer="nnUNetTrainer_save10", fold="2", kind="nnunet")]
-taskq.write_tasks(tasks, os.path.join(TQ, "tasks.tsv"))
+write_tsv(os.path.join(TQ, "tasks.tsv"), tasks)
 for t in tasks:
     fold(t["key"].split("/")[0], t["trainer"], t["fold"])
 
@@ -57,10 +68,18 @@ rc, out = tq("claim", "--worker", "100", "--kind", "nnunet")
 check("按档位先领、跳过训完的和日志刚更新的：领到 fold 2", rc == 0 and out.startswith("Dataset121_X/nnUNetTrainer_save10/2 121"))
 rc, out = tq("claim", "--worker", "101", "--kind", "nnunet")
 check("已经被领的不再领：下一个是档位 50 的", rc == 0 and out.startswith("Dataset103_Y/"))
+check("第一次读时 tasks.tsv 自动转成 tasks.jsonl（原文件留 .bak）",
+      os.path.exists(os.path.join(TQ, "tasks.jsonl")) and os.path.exists(os.path.join(TQ, "tasks.tsv.bak"))
+      and not os.path.exists(os.path.join(TQ, "tasks.tsv")))
+ts = taskq.read_tasks(os.path.join(TQ, "tasks.jsonl"))
+sw = next(t for t in ts if "SwinUNETR" in t["key"])
+check("转过来顺序、档位不变；SwinUNETR 的写明 env=swinunetr",
+      [t["order"] for t in ts] == [10, 11, 12, 5, 1] and sw["recipe"] == "nnunet" and sw["params"]["env"] == "swinunetr"
+      and sw["params"]["dataset"] == "Dataset101_Z")
+rc, out = tq("claim", "--worker", "103", "--kind", "swin")
+check("--kind 不再起作用：照顺序领（SwinUNETR，环境对得上，旧 worker 能跑）", rc == 0 and out.startswith("Dataset101_Z/nnUNetTrainer_SwinUNETR/0 101"))
 rc, out = tq("claim", "--worker", "102", "--kind", "nnunet")
 check("没有能领的：退出码 10", rc == 10 and out == "")
-rc, out = tq("claim", "--worker", "103", "--kind", "swin")
-check("只领自己种类的", rc == 0 and out.startswith("Dataset101_Z/nnUNetTrainer_SwinUNETR/0"))
 
 # 领取过期（心跳 30 分钟前、日志也没更新）→ 可以重新领
 p = os.path.join(TQ, "claims", taskq.safe("Dataset103_Y/nnUNetTrainer_save10/0"), "info")
@@ -94,7 +113,7 @@ rc, _ = tq("release", "--worker", "100", key2, "--failed", "退出码 1")
 check("交还后领取记录删掉、失败记一次", not os.path.exists(p2) and taskq.failures(key2) == 1)
 tq("release", "--worker", "104", "Dataset103_Y/nnUNetTrainer_save10/0", "--failed", "退出码 1")
 tq("release", "--worker", "104", "Dataset103_Y/nnUNetTrainer_save10/0", "--failed", "退出码 1")
-rc, _ = tq("claim", "--worker", "110", "--kind", "swin")
+rc, _ = tq("claim", "--worker", "110", "--kind", "any")
 check("3 小时内失败 3 次：整个队列暂停领任务（退出码 12）", rc == 12)
 for fp in glob.glob(os.path.join(TQ, "failures", "*")):  # 把失败记录改成 4 小时前
     old = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 4 * 3600))
@@ -134,17 +153,13 @@ check("等待时间过了：领后面的", rc == 0 and out.startswith("Dataset10
 tq("release", "--worker", "131", "Dataset103_Y/nnUNetTrainer_save10/0")
 os.remove(os.path.join(fold("Dataset121_X", "nnUNetTrainer_save10", "1"), "training_log_x.txt"))
 
-# 别的机器在训
-open(ENV["RQ1_CLAIMS"], "w").write(f"# x\n{key2}\tlab\n")
 for f in os.listdir(fold("Dataset121_X", "nnUNetTrainer_save10", "2")):
     os.utime(os.path.join(fold("Dataset121_X", "nnUNetTrainer_save10", "2"), f), (time.time() - 3600,) * 2)
 rc, out = tq("claim", "--worker", "107", "--kind", "nnunet")
-check("别的机器在训的不领：跳过 fold 2，领下一个", rc == 0 and out.startswith("Dataset121_X/nnUNetTrainer_save10/1 "))
+check("照顺序领 fold 1", rc == 0 and out.startswith("Dataset121_X/nnUNetTrainer_save10/1 "))
 rc, out = tq("claim", "--worker", "108", "--kind", "nnunet")
-check("再下一个是档位 50 的", rc == 0 and out.startswith("Dataset103_Y/"))
-
+check("再下一个是 fold 2（日志 1 小时前更新过，没人领）", rc == 0 and out.startswith(key2))
 # 并发领：同时起 6 个，只有 1 个领到
-os.remove(ENV["RQ1_CLAIMS"])
 procs = [subprocess.Popen([sys.executable, os.path.join(HERE, "taskq.py"), "claim", "--worker", f"2{i}", "--kind", "nnunet"],
                           env=ENV, stdout=subprocess.PIPE, text=True) for i in range(6)]
 outs = [p.communicate()[0].strip() for p in procs]
@@ -167,18 +182,19 @@ open(os.path.join(TQ2, "tasks.tsv"), "w").write(
     "486191\t0\tDataset116_METrq1/nnUNetTrainer_save10/4\t116\tnnUNetTrainer_save10\t4\tnnunet\n"
     "486300\t2000\tDataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0\t101\tnnUNetTrainer_SwinUNETR\t0\tswin\n")
 os.environ["TASKQ_DIR"] = TQ2
-check("10/17 生成的任务表原样能读", [t["order"] for t in taskq.read_tasks(os.path.join(TQ2, "tasks.tsv"))] == [486191, 486300])
+check("10/17 生成的任务表（表头带说明）也能转", [t["order"] for t in taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))] == []
+      and tq2("status")[0] == 0 and [t["order"] for t in taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))] == [486191, 486300])
 rc, out = tq2("add", "--nice", "50", "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/0", "Dataset116_METrq1/nnUNetTrainer_save10/4")
-ts = taskq.read_tasks(os.path.join(TQ2, "tasks.tsv"))
-check("add：新任务按档位排进去、第 7 列写 -（不分种类）、已有的跳过",
+ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
+um = ts[1]
+check("add key：实验表里有的照表（U-Mamba：环境 umamba、实验 umamba），按档位排进去，已有的跳过",
       rc == 0 and [t["key"].split("/")[1] for t in ts] == ["nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc", "nnUNetTrainer_SwinUNETR"]
-      and ts[1]["kind"] == "-" and ts[1]["order"] == 486301 and "已有，跳过" in out)
-check("add 之后每行仍是 7 列", all(len(ln.rstrip("\n").split("\t")) == 7 for ln in open(os.path.join(TQ2, "tasks.tsv")) if not ln.startswith("#")))
+      and um["exp"] == "umamba" and um["params"]["env"] == "umamba" and um["order"] == 486301 and "已有，跳过" in out)
 rc, out = tq2("add", "--nice", "0", "Dataset101_GLIrq1/badkey")
 check("add：key 格式不对报错", rc != 0)
 rc, out = tq2("set-nice", "--nice", "100", "Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0")
-ts = taskq.read_tasks(os.path.join(TQ2, "tasks.tsv"))
-check("set-nice：改档位后重新排序", rc == 0 and ts[2]["trainer"] == "nnUNetTrainer_SwinUNETR" and ts[2]["nice"] == 100)
+ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
+check("set-nice：改档位后重新排序", rc == 0 and "SwinUNETR" in ts[2]["key"] and ts[2]["nice"] == 100)
 rc, out = tq2("set-nice", "--nice", "1", "Dataset101_GLIrq1/nnUNetTrainer_save10/9")
 check("set-nice：没有的 key 退出码 1", rc == 1)
 
@@ -248,7 +264,7 @@ NOQ = os.path.join(T, "no_tasks")
 os.makedirs(NOQ)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "claim", "--worker", "506", "--kind", "nnunet"],
                    env=dict(ENV, TASKQ_DIR=NOQ), capture_output=True, text=True)
-check("没有 tasks.tsv：claim 退出码 2（出错，不是 10「没有任务」，作业不会因此提前结束）", r.returncode == 2)
+check("没有任务表：claim 退出码 2（出错，不是 10「没有任务」，作业不会因此提前结束）", r.returncode == 2)
 
 # box 上读远端状态：在 DICC 仓库里跑 taskq.py（假 ssh：把命令放到本机跑）
 fake = os.path.join(T, "fakessh")
@@ -263,15 +279,75 @@ check("remote_status：在远端仓库里跑", st is not None and len(st["tasks"
 rc_out = taskq.remote("dicc", f"take --worker lab --ttl 86400 {UM}")
 ci4 = json.load(open(os.path.join(TQ2, "claims", taskq.safe(UM), "info")))
 check("remote：take 经 ssh 跑、领到，记下 worker=lab、ttl", rc_out is not None and rc_out[0] == 0 and ci4["worker"] == "lab" and ci4["ttl"] == 86400)
-EMPTY = os.path.join(T, "box_tq")  # box 上：只有 LAB 开关，没有 tasks.tsv
+EMPTY = os.path.join(T, "box_tq")  # box 上：只有 LAB 开关，没有任务表
 os.makedirs(EMPTY)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "Dataset113_PEDsrq1/nnUNetTrainer_save10/0"],
                    env=dict(os.environ, TASKQ_DIR=EMPTY), capture_output=True, text=True)
 check("box 上没有队列时 add 转到 DICC 那份（不在本机另建）", r.returncode == 0 and "加入" in r.stdout
-      and not os.path.exists(os.path.join(EMPTY, "tasks.tsv")) and "Dataset113_PEDsrq1" in open(os.path.join(TQ2, "tasks.tsv")).read())
+      and not os.path.exists(os.path.join(EMPTY, "tasks.jsonl")) and "Dataset113_PEDsrq1" in open(os.path.join(TQ2, "tasks.jsonl")).read())
 os.environ["TASKQ_SSH"] = "false"
 check("ssh 不通（退出码非 0）：remote_status 返回 None", taskq.remote_status("dicc") is None)
 del os.environ["TASKQ_SSH"]
+
+
+# ---------------- 10/18：任务说明（next、set、show、add --exp / --recipe、旧 claim 只发旧 worker 能跑的） ----------------
+TQ3 = os.path.join(T, "taskq3")
+ENV3 = dict(ENV, TASKQ_DIR=TQ3)
+
+
+def tq3(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=ENV3, capture_output=True, text=True)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+os.makedirs(TQ3)
+open(os.path.join(TQ3, "tasks.jsonl"), "w").close()
+rc, out, _ = tq3("add", "--nice", "0", "--exp", "t15men", "--folds", "1", "2")
+ts = taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))
+check("add --exp --folds：从实验表展开、记下实验 id", rc == 0 and [t["key"] for t in ts] ==
+      ["Dataset111_MENrq1/nnUNetTrainer_save10_n470/1", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/2"] and ts[0]["exp"] == "t15men")
+rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=rstats", "out=toy/a", 'done=["DONE"]')
+check("add --recipe：实验表以外的任务", rc == 0 and "toy/a" in out and "环境 rstats" in out)
+rc, out, _ = tq3("add", "--nice", "5", "--recipe", "nnunet", "dataset=Dataset101_GLIrq1", "fold=0", "trainr=x")
+check("add --recipe：写错参数名报错、不加", rc == 2 and "trainr" in out and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
+rc, out, _ = tq3("next", "--worker", "700", "--envs", "nnunet,swinunetr")
+lines = out.splitlines()
+check("next：打印 key 和 run_task.sh 的参数", rc == 0 and lines[0] == "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1"
+      and lines[1] == "nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=1")
+rc, out, _ = tq3("next", "--worker", "701", "--envs", "nnunet,swinunetr")
+rc2, out2, _ = tq3("next", "--worker", "702", "--envs", "nnunet")
+check("next：本机没有的环境（rstats）不领", rc == 0 and rc2 == 10)
+rc, out, _ = tq3("next", "--worker", "703", "--envs", "rstats")
+check("next：有这个环境的机器领得到；JSON 值原样带上", rc == 0 and out.splitlines()[1] == "command key=toy/a 'cmd=python3 -c 1' env=rstats out=toy/a 'done=[\"DONE\"]'")
+tq3("release", "--worker", "700", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1")
+rc, out, _ = tq3("set", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1", "env=umamba")
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))}
+check("set：改单个任务的参数", rc == 0 and ts["Dataset111_MENrq1/nnUNetTrainer_save10_n470/1"]["params"]["env"] == "umamba")
+rc, out, _ = tq3("claim", "--worker", "704", "--kind", "any")
+check("旧 claim：环境和训练器名对不上的（旧 worker 会用错环境）不发", rc == 10)
+rc, out, _ = tq3("next", "--worker", "705", "--envs", "umamba")
+check("next：改了环境以后按新环境领", rc == 0 and out.startswith("Dataset111_MENrq1/nnUNetTrainer_save10_n470/1"))
+tq3("release", "--worker", "705", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1")
+rc, out, _ = tq3("set", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1", "env=")
+rc, out, _ = tq3("claim", "--worker", "706", "--kind", "any")
+check("set k=（空值）删掉参数、回到默认；旧 claim 又能发", rc == 0 and out == "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1 111 nnUNetTrainer_save10_n470 1")
+rc, out, _ = tq3("set", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1", "fold=3")
+check("set：会改变任务名的不让改", rc == 2)
+rc, out, _ = tq3("show", "--json", "toy/a")
+check("show --json：完整说明", rc == 0 and json.loads(out)["out"] == "toy/a" and json.loads(out)["env"] == "rstats")
+rc, out, _ = tq3("show", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/2")
+check("show：说明、状态、run_task.sh 的写法", rc == 0 and "claimed" in out and "run_task.sh nnunet" in out and "train.sh" in out)
+d = os.path.join(DATA, "toy", "a")
+os.makedirs(d)
+open(os.path.join(d, "DONE"), "w").close()
+s3 = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV3, capture_output=True, text=True).stdout)
+st3 = {t["key"]: t for t in s3["tasks"]}
+check("--json-status：带说明；command 任务按 done 判断训完", st3["toy/a"]["state"] == "done" and st3["toy/a"]["spec"]["recipe"] == "command"
+      and st3["Dataset111_MENrq1/nnUNetTrainer_save10_n470/2"]["spec"]["out"].startswith("nnUNet/results/Dataset111_MENrq1/"))
+with open(os.path.join(TQ3, "tasks.jsonl"), "a") as f:
+    f.write(json.dumps(dict(order=99, nice=1, key="bad/x", exp=None, recipe="nnunet", params=dict(fold="0"))) + "\n")
+rc, out, _ = tq3("status")
+check("解析不了的任务显示 bad、不影响别的", rc == 0 and "bad" in out)
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

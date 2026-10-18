@@ -144,7 +144,43 @@ s["slurm"] = sq()
 ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "taskq/DICC" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
 s["slurm"] = sq(["rq1_swin_v2_f0", "486300_1", "PENDING", "0:00", "Priority", "2000"])
 ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
+s["slurm"] = sq(["train_worker", "487000_1", "PENDING", "0:00", "Priority", "0"])
+ok("排着不带折的 train_worker 作业也算：不提醒", "tqorphan:dicc" not in H.check(s))
+s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "claimed", "lab", since=old)]
+s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
+ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
 H.time.time = time_orig
+
+# ---------------- 通用的任务（10/18）：run_task.sh、fetch_task.sh、数据清单 ----------------
+ok("run_task.sh 的训练命令 → key", H.task_key("bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 "
+                                              "trainer=nnUNetTrainer_save10_n470 fold=0") == ("train", MEN0))
+ok("q 加的、整条命令包在引号里的 run_task.sh 也认", H.task_key("bash -c 'bash scripts/queue/run_task.sh nnunet "
+                                                           "dataset=Dataset116_METrq1 fold=2'") == ("train", MET2))
+ok("command 做法的任务 → 它自己给的 key", H.task_key("bash scripts/queue/run_task.sh command key=x/y cmd=true env=nnunet "
+                                                     "out=runs/x done=ok") == ("train", "x/y"))
+ok("10/18 前的 train_task.sh 照样认", H.task_key("bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470") == ("train", MEN0))
+ok("参数写错的 run_task.sh 不当成训练", H.task_key("bash scripts/queue/run_task.sh nnunet datset=x fold=0") == (None, None))
+ok("fetch_task.sh <机器> <key> → 拉回", H.task_key(f"bash scripts/queue/fetch_task.sh dicc {MET2}") == ("fetch:dicc", MET2))
+lab_rt = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0",
+              "train:" + MEN0)
+s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
+         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
+ok("lab 上 run_task.sh 的训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
+cand = H.data_candidates([dict(key="x/y", spec=dict(data=["other/stuff"]))])
+ok("要查的数据：实验表里的 + 队列里临时任务的", "nnUNet/preprocessed/Dataset111_MENrq1" in cand and "other/stuff" in cand)
+ps = H.probe_script(H.M.MACHINES["lab"], ["nnUNet/preprocessed/Dataset111_MENrq1", "a b"])
+ok("训练机的探查脚本按清单查数据（HAVE），带空格的路径加引号", "HAVE|" in ps and "'a b'" in ps and "PREP" not in ps)
+ok("非训练机不查数据", "HAVE" not in H.probe_script(H.M.MACHINES["box"], ["x"]))
+import subprocess  # noqa: E402
+d = tempfile.mkdtemp()
+for p_ in ("nnUNet/preprocessed/A", "nnUNet/preprocessed/B", "C"):
+    os.makedirs(os.path.join(d, p_))
+open(os.path.join(d, "nnUNet/preprocessed/B/.incomplete"), "w").close()
+fake = dict(H.M.MACHINES["lab"], data=d, disk=None, gpu_log=False, roles=("train",))
+out = subprocess.run(["bash", "-s"], input=H.probe_script(fake, ["nnUNet/preprocessed/A", "nnUNet/preprocessed/B", "C", "D"]),
+                     capture_output=True, text=True).stdout
+have = next(ln for ln in out.splitlines() if ln.startswith("HAVE|"))[5:].split()
+ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", have == ["nnUNet/preprocessed/A", "C"])
 
 s = snap()
 s["probe"]["lab"]["DISK"] = str(int(10e9))
