@@ -218,11 +218,11 @@ def check(s):
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
                     "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
-            # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了（作业什么任务都领）：要交 worker.sbatch
+            # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了：refill.py 应该已经补交了 worker.sbatch
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
             if left and not any(r[0].startswith("rq1_") for r in d["squeue"]):
-                add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业，"
-                    "要交 research/RQ1/nnunet/worker.sbatch")
+                add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
+                    "（box 上补作业的开关 ~/.cache/phd/taskq/DICC 没开？看 ~/refill.log）", after=60)
             for jid, jname, st, end, code in d["sacct"]:
                 add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
             continue
@@ -476,7 +476,7 @@ def main():
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\nlab 领任务：" + "；".join(events))
+        print("\n补任务（lab 领任务、DICC 补作业）：" + "；".join(events))
         print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
 
 

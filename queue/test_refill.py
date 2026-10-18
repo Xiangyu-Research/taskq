@@ -13,7 +13,8 @@ import refill as R  # noqa: E402
 
 fails = 0
 D = tempfile.mkdtemp()
-R.LOG, R.STATE, R.SWITCH = f"{D}/refill.log", f"{D}/refill.json", f"{D}/LAB"
+R.LOG, R.STATE, R.SWITCH, R.DICC_SWITCH = f"{D}/refill.log", f"{D}/refill.json", f"{D}/LAB", f"{D}/DICC"
+R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")  # run_all 里补作业那一步
 R.dataset_gb = lambda ds: {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0}.get(ds, 10.0)
 NN, UM = "nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc"
 
@@ -215,6 +216,57 @@ ok("lab 上还有训完没归档的折：不删", R.cleanup(snap(lab_folds={K_T1
 ok("lab 还领着这个数据集的折：不删", R.cleanup(snap(queue=mine2), "lab", run=fake_run) == [] and not cmds)
 out = R.cleanup(snap(), "lab", run=fake_run)
 ok("都用完了：删掉自动传过去的数据集", len(out) == 1 and cmds[-1][1] == "rm -rf ~/BRAIN_TUMOR/nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
+
+# ---------------- DICC 补作业 ----------------
+QOS = {"long": "1-12:00:00", "normal": "08:00:00"}
+p, why = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 216), "normal": (10, 138)}, QOS)
+ok("现在：旧作业远超上限，不补", p == [] and "排满" in why)
+p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 9), "normal": (10, 3)}, QOS)
+ok("long 空 1 个、normal 空 7 个：各补满", p == [("long", "1-12:00:00", 1), ("normal", "08:00:00", 7)])
+p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (None, 4), "normal": (10, 10)}, QOS)
+ok("QOS 没设排队上限：按 SUBMIT_CAP", p == [("long", "1-12:00:00", R.SUBMIT_CAP - 4)])
+done_q = [tq(K_T14, 0, 1, "done"), tq(K_UM, 50, 2, "claimed", "486191")]
+ok("队列里没有没人领的任务：不补", R.topup_plan(snap(queue=done_q)["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
+ok("领取过期的（stale）也算没人领", R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "stale")])["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 10)}, QOS)[0] != [])
+ok("总开关不在：不补", R.topup_plan(snap(enabled=False)["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
+paused = snap()["taskq"]["dicc"] | {"paused": True}
+ok("队列暂停：不补", R.topup_plan(paused, {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
+ok("读不到某个 QOS 的作业数：都不补", R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 0)}, QOS)[0] == [])
+
+sub = []
+
+
+def topup_run(probe_out, sbatch_rc=0):
+    def run(cmd, host=None, timeout=0):
+        if cmd.startswith("set -e"):
+            return 0, probe_out
+        sub.append((host, cmd))
+        return sbatch_rc, "487001" if sbatch_rc == 0 else "sbatch: error: QOSMaxSubmitJobPerUserLimit"
+    return run
+
+
+PROBE = "QOS|long|10|9\nQOS|normal|10|10\n"
+if os.path.exists(R.DICC_SWITCH):
+    os.remove(R.DICC_SWITCH)
+ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
+ok("开关（DICC）没开：只记'会交什么'，不交", not sub and ev == [] and "会：交 long 1 段" in open(R.LOG).read())
+ev, st = R.topup(snap(), "dicc", dry=True, run=topup_run(PROBE))
+ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交 long 1 段"])
+open(R.DICC_SWITCH, "w").close()
+ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
+ok("开关开着：交 worker.sbatch（long，1 段，不限并发），记日志、不推送",
+   sub == [("dicc", "cd ~/Projects/PhD/research/RQ1/nnunet && sbatch --parsable --qos=long --time=1-12:00:00 --array=1-1 worker.sbatch")]
+   and ev == [] and not st and "交了 worker 作业 487001" in open(R.LOG).read())
+sub.clear()
+ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE, sbatch_rc=1))
+ok("交不上：报成问题", list(st) == ["topup:dicc:long"] and "QOSMaxSubmit" in st["topup:dicc:long"])
+sub.clear()
+ev, st = R.topup(snap(), "dicc", run=lambda c, host=None, timeout=0: (255, "ssh 不通"))
+ok("查作业数时连不上：什么都不做", not sub and ev == [] and not st)
+ev, st = R.topup(snap(), "dicc", run=topup_run("QOS|long|10|\nQOS|normal|10|1\n"))
+ok("作业数读不出来：不补（不按 0 算）", ev == [] and not st and not any("long" in c for _, c in sub))
+sub.clear()
+os.remove(R.DICC_SWITCH)
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

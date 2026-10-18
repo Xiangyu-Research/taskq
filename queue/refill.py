@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""给 pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，现在是 lab）从 DICC 的任务队列领任务（2026-10-18）。
+"""给训练机补活（2026-10-18）：pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，现在是 lab）从 DICC 的
+任务队列领任务；Slurm 训练机（DICC）排着的作业不够时补交 worker 作业（最后一节）。
 由 box 上的健康检查（scripts/monitor/health.py，每 30 分钟）调用。lab 连不上 DICC，所以由 box 替它领、续、交还。
 
 待办只有一份：DICC 上的 ~/.cache/phd/taskq/tasks.tsv（scripts/queue/taskq.py）；谁在训哪一折只看 claims/。
@@ -22,6 +23,11 @@
 开关：box 上 ~/.cache/phd/taskq/LAB 不存在时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
 DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
+
+DICC 补作业：每个 QOS（表里 qos 字段：QOS → 每段时限）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
+没设时按 SUBMIT_CAP）、任务队列里还有没人领的任务时，交 research/RQ1/nnunet/worker.sbatch 补满（一个不限并发的数组，
+同时跑几个由 QOS 的 GPU 上限管）。空出一个补一个，作业的排队时间分从交上去开始累积。
+开关：box 上 ~/.cache/phd/taskq/DICC，不存在时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
     python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
 """
@@ -49,6 +55,8 @@ TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练�
 SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，就先停止替这台机器领（多半是环境坏了）
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
 SWITCH = os.path.expanduser("~/.cache/phd/taskq/LAB")
+DICC_SWITCH = os.path.expanduser("~/.cache/phd/taskq/DICC")
+SUBMIT_CAP = 10  # QOS 没设排队上限时，每个 QOS 最多排这么多段
 LOG = os.path.expanduser("~/refill.log")
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
@@ -315,6 +323,11 @@ def shadow_log(name, line):
 def run_all(s, dry=False):
     """health.py 调用：→ (事件说明列表, 卡住的 {问题编号: 说明}, 这次领了任务的机器)。"""
     events, stuck, filled = [], {}, set()
+    for name in M.names("slurm"):
+        if "train" in M.MACHINES[name]["roles"] and M.MACHINES[name].get("qos"):
+            ev, st = topup(s, name, dry=dry)
+            events += ev
+            stuck.update(st)
     live = os.path.exists(SWITCH) and not dry
     for name in M.names("pueue"):
         if "train" not in M.MACHINES[name]["roles"]:
@@ -339,6 +352,66 @@ def run_all(s, dry=False):
         if ok:
             filled.add(name)
     return events, stuck, filled
+
+
+# ---------------- Slurm 训练机补作业 ----------------
+def topup_probe(qos):
+    """每个 QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"；有一条命令出错就整个出错（不按 0 算）。"""
+    return "set -e; for q in " + " ".join(qos) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
+        "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done"
+
+
+def topup_plan(tq, counts, qos):
+    """→ ([(QOS, 每段时限, 补几段)], 不补的原因)。counts：{QOS: (排队上限或 None, 现有段数)}。"""
+    if not tq:
+        return [], "读不到任务队列"
+    if not tq.get("enabled"):
+        return [], "任务队列的总开关不在"
+    if tq.get("paused"):
+        return [], "任务队列失败太多、暂停中"
+    if not any(t["state"] in ("free", "stale") for t in tq["tasks"]):
+        return [], "队列里没有没人领的任务"
+    out = []
+    for q, t in qos.items():
+        if q not in counts:
+            return [], f"读不到 {q} 的作业数"
+        lim, n = counts[q]
+        if (lim or SUBMIT_CAP) > n:
+            out.append((q, t, (lim or SUBMIT_CAP) - n))
+    return out, "" if out else "各 QOS 都排满了"
+
+
+def topup(s, name, dry=False, run=None):
+    """→ (dry 时的说明, 出错的 {问题编号: 说明})。交上去的作业只记日志、不推送。"""
+    run = run or sh
+    m, tq = M.MACHINES[name], s.get("taskq", {}).get(name)
+    if not s["ok"].get(name) or not tq:
+        return [], {}
+    rc, out = run(topup_probe(m["qos"]), m["ssh"])
+    if rc:
+        return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
+    counts = {}
+    for ln in out.splitlines():
+        p = ln.split("|")
+        if len(p) == 4 and p[0] == "QOS" and p[3].isdigit():
+            counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]))
+    subs, why = topup_plan(tq, counts, m["qos"])
+    desc = "；".join(f"交 {q} {n} 段" for q, _, n in subs) or f"不交（{why}）"
+    if dry:
+        return [f"{name}：会 {desc}" if subs else f"{name}：{desc}"], {}
+    if not os.path.exists(DICC_SWITCH):
+        if subs:
+            shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
+        return [], {}
+    msgs, stuck = [], {}
+    for q, t, n in subs:
+        rc, out = run(f"cd {m['repo']}/research/RQ1/nnunet && sbatch --parsable --qos={q} --time={t} --array=1-{n} worker.sbatch", m["ssh"])
+        if rc == 0:
+            msgs.append(f"{m['label']} {q} 空出 {n} 个位置，交了 worker 作业 {out.strip().splitlines()[-1]}（{n} 段，每段 {t}）")
+        else:
+            stuck[f"topup:{name}:{q}"] = f"{m['label']} {q} 补交 worker.sbatch 出错：{out[-200:]}"
+    log(msgs)
+    return [], stuck
 
 
 if __name__ == "__main__":

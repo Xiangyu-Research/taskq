@@ -10,9 +10,10 @@
 #SBATCH --output=%x_%A_%a.out
 # DICC 上不带折的训练作业（2026-10-18）：作业只负责领到一张卡，开始后从任务队列（scripts/queue/taskq.py）里按顺序领任务，
 # 什么模型都领（scripts/queue/dicc_worker.sh：先训 1 个，GPU 不忙、显存够时再加 1 个；显存填充等训练稳定后再补）。
-# 到时限时没训完的任务交还队列，下一个作业从存档接着训。数组的每个任务是一段，%1 让一次只跑一段：
-#   cd research/RQ1/nnunet && sbatch --array=1-10%1 worker.sbatch
-# 默认 long QOS、每段 36 小时（10/18 定）；交到 normal QOS 时：sbatch --qos=normal --time=08:00:00 --array=1-20%1 worker.sbatch
+# 到时限时没训完的任务交还队列，下一个作业从存档接着训。数组不限并发：每一段都自己去队列领任务，同时跑几个由 QOS 的 GPU 上限管。
+# 平时由 box 上的 scripts/queue/refill.py 自动补交（每个 QOS 排着的不到上限就补满，QOS 和每段时限在 envs/machines.py）；手动交：
+#   cd research/RQ1/nnunet && sbatch --array=1-10 worker.sbatch                                   （默认 long、每段 36 小时，10/18 定）
+#   cd research/RQ1/nnunet && sbatch --qos=normal --time=08:00:00 --array=1-10 worker.sbatch
 # 队列的总开关 ~/.cache/phd/taskq/ENABLED 不在时什么都不做（这种作业没有自己那一折可以训）。
 set -uo pipefail
 REPO=$(git -C "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}" rev-parse --show-toplevel)

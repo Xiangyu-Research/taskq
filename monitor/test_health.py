@@ -141,7 +141,7 @@ s["pueue"]["lab"]["tasks"] = []
 ok("在跑的 DICC 作业没领到任务：lab 领的不算 DICC 作业", "tqidle:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None, since=old)]
 s["slurm"] = sq()
-ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒交 worker.sbatch", "worker.sbatch" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
+ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "taskq/DICC" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
 s["slurm"] = sq(["rq1_swin_v2_f0", "486300_1", "PENDING", "0:00", "Priority", "2000"])
 ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
 H.time.time = time_orig
