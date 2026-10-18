@@ -14,9 +14,9 @@
   - 本进程占着多少写在 <base>.mib（dicc_worker.sh 判断能不能再加一个训练时减掉它）。
   <base> 默认 /tmp/gpu_pad_<作业号>，可用 $RQ1_GPU_PAD_BASE 改。
 
-由 envs/nnunet_paths.sh 在 Slurm GPU 作业里启动；要求空卡的脚本（run_gpu_smoke.sh、predict.sh、
-run_predict_eval.sh 等）自己设 RQ1_GPU_PAD=0。总开关是 ~/.cache/phd/gpu_pad/DISABLED。
-日志由启动脚本重定向到 $nnUNet_results/logs/gpu_pad_<作业号>.log。
+由 scripts/queue/gpu_pad_start.sh 在 Slurm GPU 作业里启动（worker.sbatch，和经 envs/nnunet_paths.sh 的旧按折作业）；
+要求空卡的脚本（run_gpu_smoke.sh、predict.sh、run_predict_eval.sh 等）自己设 RQ1_GPU_PAD=0。总开关是 ~/.cache/phd/gpu_pad/DISABLED。
+日志由启动脚本重定向到 <数据目录>/logs/workers/gpu_pad_<作业号>.log（10/18 前在 nnUNet/results/logs/）。
 
 测试：python3 scripts/queue/test_gpu_pad.py（假 backend，不需要 GPU）。
 手动试：python3 scripts/queue/gpu_pad.py --dry-run --iterations 2
