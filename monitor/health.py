@@ -494,7 +494,8 @@ def main():
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"scripts/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
     for pid, msg in {**stuck, **stuck2}.items():
-        P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
+        # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
+        P[pid] = dict(msg=msg, level="normal", kind="state", after=30 if pid.startswith("advance:stale_fetch:") else 0)
     if not a.dry_run:
         for i, msg in enumerate(events):
             P[f"refill:{s['now']:%m%d%H%M}:{i}"] = dict(msg=msg, level="normal", kind="event", after=0)
