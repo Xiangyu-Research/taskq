@@ -147,6 +147,7 @@ on_term() {
 }
 trap on_term TERM INT
 
+why_not=
 last_beat=$(date +%s)
 ERRF=$(mktemp)
 err_since=0   # 队列从什么时候开始连续出错
