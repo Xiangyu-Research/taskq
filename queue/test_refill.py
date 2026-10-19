@@ -271,7 +271,7 @@ ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交
 open(R.DICC_SWITCH, "w").close()
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关开着：交 worker.sbatch（long，1 段，不限并发），记日志、不推送",
-   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=1-12:00:00 --array=1-1 worker.sbatch")]
+   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=3-00:00:00 --array=1-1 worker.sbatch")]
    and ev == [] and not st and "交了 worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE, sbatch_rc=1))
