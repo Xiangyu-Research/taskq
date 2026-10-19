@@ -12,7 +12,8 @@
      - 任务没了、没训完：这台机器上一点进度都没有 → 交还，回到队列；有进度 → 领取保留、报出来（存档在这台，只让它接着训）；
      - 传数据出错 → 领取保留、报出来（数据可能只传了一半，不开始训）。
      这台机器、box 或任何一台训练机连不上时什么都不动（领取 24 小时内有效，过期后 DICC 才能领）。
-  2. 卡空了（训练组里没有活着的训练任务）就领下一折：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
+  2. 卡空了（有卡的组里没有活着的训练任务、也没有领着没训完的折）就给这个组领下一折（10/19 起每个有卡的组各领各的；
+     只在一段时间里用的组（machines.py 的 shifts）停着时不领，由 scripts/queue/shift_gate.sh 打开）：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
      取第一个。训练没开始就失败、又没有进度（多半是这台机器放不下这个模型）时用 release --skip 交还：记在 skips/，
      这台机器以后不再领它，不算队列的失败，不用事先按模型分类。24 小时内这样跳过 2 个就先不领、报出来（多半是环境坏了）。
      taskq.py take 成功后：任务说明里的 data（scripts/queue/spec.py）这台机器上都有，就直接在 pueue 的训练组里加
@@ -66,8 +67,46 @@ def queue_host():
     return next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
 
 
+def gpu_groups(m):
+    return [g for g, (_, gpu, _) in m["groups"].items() if gpu is not None]
+
+
 def gpu_group(m):
-    return next(g for g, (_, gpu, _) in m["groups"].items() if gpu is not None)
+    return gpu_groups(m)[0]
+
+
+def open_group(s, name, g):
+    """这个组现在能不能开始训练：pueue 里组是 Running。读不到组的状态时：平时用的组算开着，夜班的组算停着。"""
+    st = ((s["pueue"].get(name) or {}).get("groups") or {}).get(g)
+    return st == "Running" if st or g in M.shift_groups(name) else True
+
+
+def task_groups(s, name):
+    """这台机器 pueue 里每一折的训练任务在哪个组 → {key: 组}：有活着的任务看活着的，否则看最新的。"""
+    from health import task_key
+    out = {}
+    for t in sorted((s["pueue"].get(name) or {}).get("tasks", []), key=lambda t: t["id"]):
+        kind, key = task_key(t["command"])
+        if kind == "train" and t.get("group") and (key not in out or t["status"] in LIVE or out[key][1] not in LIVE):
+            out[key] = (t["group"], t["status"])
+    return {k: g for k, (g, _) in out.items()}
+
+
+def slots(name):
+    """领的时候给每一折定的组（数据还要先传的折，开始训时按这个放）→ {key: 组}。"""
+    st = json.load(open(STATE)) if os.path.exists(STATE) else {}
+    return st.get("slot", {}).get(name, {})
+
+
+def set_slot(name, key, group):
+    st = json.load(open(STATE)) if os.path.exists(STATE) else {}
+    d = st.setdefault("slot", {}).setdefault(name, {})
+    if group is None:
+        d.pop(key, None)
+    else:
+        d[key] = group
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    json.dump(st, open(STATE, "w"), indent=1)
 
 
 def info(tq, key):
@@ -128,6 +167,8 @@ def plan(s, name):
     if "recent_skips" not in tq:  # 10/18 前的 taskq.py 不认 take、ttl、--skip
         return [], {}, f"{host} 上的 taskq.py 还是旧版（先在 {host} 上 git pull）"
     tt_all, (sync, sync_bad) = train_tasks(s, name), syncing(s, name)
+    tgroup, slot = task_groups(s, name), slots(name)
+    held_g = set()  # 领着没训完的折占着的组
     have = set(s["probe"].get(name, {}).get("HAVE", "").split())
     acts, stuck = [], {}
     mine = [t for t in tq["tasks"] if t.get("worker") == name]
@@ -141,6 +182,8 @@ def plan(s, name):
         since = datetime.fromtimestamp(t["since"] - 60) if t.get("since") else datetime.min
         tt = {key: [(i, st) for i, st, beg in tt_all.get(key, []) if beg is None or beg >= since]}
         live = [st for _, st, _ in tt_all.get(key, []) if st in LIVE]  # 活着的任务不看开始时间（恢复的旧任务也算）
+        g = tgroup.get(key) or slot.get(key) or gpu_group(m)
+        n_act = len(acts)
         if t["state"] == "done":
             acts.append(dict(op="release", key=key, why="训完了，DICC 上有了存档"))
         elif s["src"].get(name, {}).get("folds", {}).get(key, {}).get("final"):
@@ -160,12 +203,12 @@ def plan(s, name):
             acts.append(dict(op="transfer", key=key, paths=need))
         elif not need and not tt[key]:
             acts.append(dict(op="beat", key=key))
-            acts.append(dict(op="start", key=key))  # 数据传完了，开始训
+            acts.append(dict(op="start", key=key, group=g))  # 数据传完了，开始训
         elif progress(s, key, name):
             last = tt[key][-1]
             acts.append(dict(op="beat", key=key))
             stuck[f"labclaim:{key}"] = (f"{M.MACHINES[name]['label']} 领的 {key} 训练任务 {last[0]} 停了（{last[1]}），没训完、有进度，"
-                                        f"领取保留；接着训：q {gpu_group(m)} --label train:{key} -- {shlex.quote(run_cmd(f))}；"
+                                        f"领取保留；接着训：q {g} --label train:{key} -- {shlex.quote(run_cmd(f))}；"
                                         f"放弃：taskq.py release --worker {name} {key}")
         elif tt[key][-1][1].startswith("Failed") and tt[key][-1][1] not in ("Failed (75)", "Failed (137)", "Failed (143)"):
             # 没开始就失败（多半是这台机器放不下这个模型）：交还，记在 skips/（这台机器以后不再领它；不算队列的失败）
@@ -173,11 +216,13 @@ def plan(s, name):
                              why=f"训练任务 {tt[key][-1][0]} 失败了（{tt[key][-1][1]}），{name} 上没有进度，交还，{name} 不再领它"))
         else:
             acts.append(dict(op="release", key=key, why=f"训练任务 {tt[key][-1][0]} 停了（{tt[key][-1][1]}），{name} 上没有进度，交还队列"))
-    g = gpu_group(m)
+        if any(a["op"] == "beat" for a in acts[n_act:]):  # 领着、没训完的折（在训、在传数据、刚开始、停了等人处理）；keep 的不算
+            held_g.add(g)
     busy = [k for k, ts in tt_all.items() if any(st in LIVE for _, st, _ in ts)]
-    held = {a["key"] for a in acts if a["op"] == "beat"}  # 领着、没训完的折（在训、在传数据、刚开始、停了等人处理）；keep 的不算
-    if busy or held:
-        return acts, stuck, "卡上有训练任务" if busy else "还领着没训完的折"
+    busy_g = {tgroup.get(k) for k in busy}
+    free_g = [g for g in gpu_groups(m) if g not in busy_g and g not in held_g and open_group(s, name, g)]
+    if not free_g:
+        return acts, stuck, "卡上有训练任务" if busy else "还领着没训完的折" if held_g else "有卡的组都停着（夜班还没开）"
     nskip = (tq.get("recent_skips") or {}).get(name, 0)
     if nskip >= SKIP_BREAK:
         stuck[f"labskip:{name}"] = (f"{M.MACHINES[name]['label']} 24 小时内有 {nskip} 个领到的任务没开始就失败了，先不再领；"
@@ -190,13 +235,21 @@ def plan(s, name):
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
     cands.sort(key=lambda t: (t["nice"], t["order"]))
-    for t in cands:
-        need = [p for p in info(tq, t["key"])["spec"].get("data") or [] if p not in have]
-        if need:
-            gb = data_gb(need)
-            if gb is None or free is None or free - gb < warn:
+    took = set()
+    for g in free_g:  # 每个空着的组领一折
+        for t in cands:
+            if t["key"] in took:
                 continue
-        acts.append(dict(op="take", key=t["key"], nice=t["nice"], paths=need))
+            need = [p for p in info(tq, t["key"])["spec"].get("data") or [] if p not in have]
+            if need:
+                gb = data_gb(need)
+                if gb is None or free is None or free - gb < warn:
+                    continue
+                free -= gb
+            acts.append(dict(op="take", key=t["key"], nice=t["nice"], paths=need, group=g))
+            took.add(t["key"])
+            break
+    if took:
         return acts, stuck, ""
     return acts, stuck, "队列里没有能领的折" if not cands else f"队列里的任务要的数据都放不下（{name} 盘剩 {free:.0f} GB）" if free is not None else "不知道盘还剩多少"
 
@@ -232,8 +285,9 @@ def q(name, args, run=sh):
     return int(hit.group(1))
 
 
-def start(name, key, run=sh, tq=None):
-    return q(name, f"{gpu_group(M.MACHINES[name])} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run)
+def start(name, key, run=sh, tq=None, group=None):
+    g = group or gpu_group(M.MACHINES[name])
+    return q(name, f"{g} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run)
 
 
 def transfer(name, paths, run=sh):
@@ -271,9 +325,11 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
         try:
             if a["op"] == "release":
                 r = remote(f"release --worker {name} {k}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
+                if r and r[0] == 0:
+                    set_slot(name, k, None)
                 msgs.append(f"{L} 交还 {k}：{a['why']}" if r and r[0] == 0 else f"{L} 交还 {k} 出错：{(r or ['', 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "start":
-                msgs.append(f"{L} 开始训 {k}（任务 {start(name, k, run, tq)}）")
+                msgs.append(f"{L} 开始训 {k}（{a.get('group') or gpu_group(M.MACHINES[name])} 组，任务 {start(name, k, run, tq, a.get('group'))}）")
                 ok.add(k)
             elif a["op"] == "transfer":
                 msgs.append(f"{L} 领的 {k} 要先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
@@ -283,10 +339,13 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
                     msgs.append(f"{L} 没领到 {k}：{(r or ['', 'ssh 不通'])[1].strip()[-150:]}")
                     continue
                 ok.add(k)
+                if a.get("group"):
+                    set_slot(name, k, a["group"])
                 if a["paths"]:
                     msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
                 else:
-                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（任务 {start(name, k, run, tq)}）")
+                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（{a.get('group') or gpu_group(M.MACHINES[name])} 组，"
+                                f"任务 {start(name, k, run, tq, a.get('group'))}）")
         except Exception as e:  # noqa: BLE001
             msgs.append(f"{L} {a['op']} {k} 出错：{e}")
     return msgs

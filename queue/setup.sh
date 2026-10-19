@@ -4,6 +4,7 @@
 # 组按 envs/machines.py 建；表里没有、也没有任务的组删掉。
 # crontab（lab 没开 linger 用不了 systemd 用户服务，都用 cron）：
 #   所有 pueue 机器：@reboot scripts/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务）
+#   表里有 shifts 的（lab）：每 30 分钟 scripts/queue/shift_gate.py（夜班的组到点开关）
 #   角色 autopull：每 30 分钟从 GitHub 拉代码（scripts/sync/git_pull_cron.sh）
 #   角色 hub（box）：每 30 分钟健康检查；08:30–20:30 每 3 小时更新登记表和看板、推送进度（scripts/monitor/auto_refresh.sh）
 set -euo pipefail
@@ -39,9 +40,15 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
 uncron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; } | crontab -; }
-uncron scripts/queue/gpu0_gate.sh  # 10/16 去掉（lab 0 号卡不再用）
+uncron scripts/queue/gpu0_gate.sh  # 10/16 去掉；10/19 起由 shift_gate.py 取代
 uncron scripts/sync/lab_git_pull.sh  # 10/16 改名为 git_pull_cron.sh
 cron "bash $HOME/PhD/scripts/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
+if [[ -n $($M shifts) ]]; then  # 只在一段时间里用的卡（表里 shifts）：每 30 分钟开关一次。新建的夜班组先停着，由它打开
+    for g in $($M shifts | cut -d' ' -f1); do [[ " $have " == *" $g "* ]] || $P pause -g "$g"; done
+    cron "python3 $HOME/PhD/scripts/queue/shift_gate.py >> $HOME/shift_gate.log 2>&1" "0,30 * * * *"
+else
+    uncron scripts/queue/shift_gate.py
+fi
 roles=" $($M get . roles) "
 if [[ $roles == *" autopull "* ]]; then
     cron "bash $HOME/PhD/scripts/sync/git_pull_cron.sh >> $HOME/git_pull.log 2>&1" "*/30 * * * *"

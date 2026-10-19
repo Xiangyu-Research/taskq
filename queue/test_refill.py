@@ -4,6 +4,7 @@
     python3 scripts/queue/test_refill.py
 """
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -48,12 +49,13 @@ QUEUE = [tq(K_T14, 0, 1), tq(K_UM, 50, 2), tq(K_T1C[0], 50, 3), tq(K_T1C[1], 50,
 SQ = [["rq1_t1c_f0", "485145_1", "PENDING", "0:00", "Priority", "50"]]  # DICC 上只有 nnunet 的作业
 
 
-def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_folds=None, enabled=True, skips=None):
+def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_folds=None, enabled=True, skips=None,
+         groups=None):
     return dict(ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=copy.deepcopy(SQ), sacct=[])},
                 probe={"lab": {"DISK": str(int(disk)), "HAVE": prep}},
                 src={"box": {"folds": {}}, "lab": {"folds": lab_folds or {}}, "dicc": {"folds": {}}},
                 taskq={"dicc": dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {})},
-                pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": {}, "tasks": list(lab_tasks)}})
+                pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": groups or {}, "tasks": list(lab_tasks)}})
 
 
 def ops(acts):
@@ -203,6 +205,43 @@ R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("续：一次 beat 带上所有在训的折", rem == [f"beat --worker lab {K_UM}"] and cmds == [])
 ok("没有 Slurm 作业取消、没有 box 下游任务", not any("scancel" in c or "fetch_fold" in c for _, c in cmds))
 
+# ---------------- 两张卡（10/19：lab 0 号卡夜班，machines.py 的 shifts） ----------------
+G2 = {"gpu1": "Running", "gpu0": "Running", "cpu": "Running", "wait": "Running"}
+acts, _, _ = R.plan(snap(groups=G2), "lab")
+ok("两个组都开着、都空：各领一折（不重复）", [(a["op"], a["key"], a["group"]) for a in acts] == [("take", K_UM, "gpu1"), ("take", K_T1C[0], "gpu0")])
+acts, _, why = R.plan(snap(groups=dict(G2, gpu0="Paused")), "lab")
+ok("夜班的组停着：只给 gpu1 领", [(a["op"], a["group"]) for a in acts] == [("take", "gpu1")])
+ok("读不到组的状态：夜班的组算停着", [a["group"] for a in R.plan(snap(), "lab")[0]] == ["gpu1"])
+acts, _, why = R.plan(snap([train(1, 111, 0)], groups=dict(G2, gpu0="Paused")), "lab")
+ok("gpu1 在训、夜班停着：不领", acts == [] and "训练任务" in why)
+acts, _, _ = R.plan(snap([train(1, 111, 0)], groups=G2), "lab")
+ok("gpu1 在训、夜班开着：给 gpu0 领", [(a["op"], a["key"], a["group"]) for a in acts] == [("take", K_UM, "gpu0")])
+night = dict(train(5, 101, 1, "Queued", UM), group="gpu0")  # 白天停下、放回队列等下一晚的
+acts, _, _ = R.plan(snap([night], queue=mine, groups=dict(G2, gpu0="Paused")), "lab")
+ok("夜班的折白天排着：续上；gpu1 空着照样领", ops(acts) == [("beat", K_UM), ("take", K_T1C[0])] and acts[1]["group"] == "gpu1")
+acts, stuck, _ = R.plan(snap([dict(night, status="Failed (1)")], queue=mine, lab_folds=prog, groups=G2), "lab")
+ok("夜班的折停了、有进度：报的接着训命令用 gpu0；gpu0 不再领，gpu1 照领",
+   "q gpu0 " in stuck[f"labclaim:{K_UM}"] and [(a["op"], a.get("group")) for a in acts] == [("beat", None), ("take", "gpu1")])
+cmds.clear(), rem.clear()
+acts, _, _ = R.plan(snap([train(1, 111, 0)], groups=G2), "lab")
+R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
+ok("给 gpu0 领的：训练任务加在 gpu0 组，记下组", cmds and cmds[0][1].split("scripts/queue/q ")[1].startswith("gpu0 -p")
+   and json.load(open(R.STATE))["slot"]["lab"][K_UM] == "gpu0")
+cmds.clear()
+acts, _, _ = R.plan(snap(queue=mine2, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset103_GLIrq1_t1c", groups=G2), "lab")
+ok("先传数据的折：数据到了按领的时候定的组开始训", acts[1] == dict(op="start", key=K_T1C[0], group="gpu1"))
+R.set_slot("lab", K_T1C[0], "gpu0")
+acts, _, _ = R.plan(snap(queue=mine2, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset103_GLIrq1_t1c", groups=G2), "lab")
+R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
+ok("（领给 gpu0 的）在 gpu0 开始训，gpu1 照领", acts[1]["group"] == "gpu0" and cmds[0][1].split("scripts/queue/q ")[1].startswith("gpu0 -p")
+   and acts[2]["op"] == "take" and acts[2]["group"] == "gpu1")
+cmds.clear(), rem.clear()
+acts, _, _ = R.plan(snap([train(5, 101, 1, "Killed", UM)], queue=mine), "lab")
+R.set_slot("lab", K_UM, "gpu0")
+R.execute(acts[:1], "lab", remote=fake_remote(), run=fake_run)
+ok("交还后去掉记下的组", K_UM not in json.load(open(R.STATE))["slot"]["lab"])
+cmds.clear(), rem.clear()
+
 # ---------------- 开关 ----------------
 R.taskq.remote = lambda h, a: (_ for _ in ()).throw(AssertionError("开关没开时不应该连 DICC"))
 ev, _, filled = R.run_all(snap())
@@ -227,7 +266,6 @@ ok("lab 上还有训完没归档的折：不删", R.cleanup(snap(lab_folds={K_T1
 ok("lab 还领着这个数据集的折：不删", R.cleanup(snap(queue=mine2), "lab", run=fake_run) == [] and not cmds)
 out = R.cleanup(snap(), "lab", run=fake_run)
 ok("都用完了：删掉自动传过去的数据集", len(out) == 1 and cmds[-1][1] == "rm -rf ~/BRAIN_TUMOR/nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
-import json  # noqa: E402
 json.dump({"transferred": {"lab": ["Dataset103_GLIrq1_t1c"]}}, open(R.STATE, "w"))
 out = R.cleanup(snap(), "lab", run=fake_run)
 ok("10/18 前只记了数据集名的：照样认、删掉后从记录里去掉", len(out) == 1 and cmds[-1][1].endswith("nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
