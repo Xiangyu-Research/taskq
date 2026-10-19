@@ -38,7 +38,7 @@ foreign() {
         [[ $ours == *" $p "* ]] || echo "$p"
     done
 }
-F=$(foreign)
+for _ in $(seq 24); do F=$(foreign); [[ -z $F ]] && break; sleep 5; done
 if [[ -n $F ]]; then
     echo "GPU 上有别的 CUDA 进程（PID $(echo $F)，可能在推理）；跳过集成测试"
     exit 0
@@ -50,6 +50,10 @@ if [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
 fi
 python3 -c "import torch" 2> /dev/null || { echo "python3 没有 torch（envs/machines.py 的 conda：${CONDA_BASE:-没有} ${CONDA_ENV:-}），跳过"; exit 0; }
 used() { nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' '; }
+pad_gone() { ! pgrep -f "$T/pad/gpu_pad.py" > /dev/null; }
+filled() { test "$(used)" -ge 7000; }
+parent_done() { pad_gone && ! kill -0 "$(cat "$T/parent_sup")" 2> /dev/null; }
+wait_for() { local n=$1; shift; while (( n-- > 0 )); do "$@" && return 0; sleep 1; done; "$@"; }
 BASE=$(used)
 
 (
@@ -85,7 +89,7 @@ export RQ1_GPU_PAD_SETTLE=4
 export RQ1_GPU_PAD_START_HOLD=6
 export RQ1_GPU_PAD_INTERVAL=1
 export RQ1_GPU_PAD_CHUNK_MIB=256
-PADLOG=$BRAIN_TUMOR/nnUNet/results/logs/gpu_pad_999001.log
+PADLOG=$BRAIN_TUMOR/logs/workers/gpu_pad_999001.log
 
 source "$REPO/envs/nnunet_paths.sh"
 SUP=$!
@@ -126,7 +130,8 @@ stop_train
 U=$(used)
 aborted
 check "DISABLED 后释放、缓存也还了（现在 ${U}MiB，开始时 ${BASE}MiB）" test "$U" -le $(( BASE + 300 ))
-check "DISABLED 后 pad 退出" bash -c "! pgrep -f '$T/pad/gpu_pad.py' > /dev/null"
+wait_for 15 pad_gone
+check "DISABLED 后 pad 退出" pad_gone
 kill "$SUP" 2> /dev/null; SUP=
 
 rm -f "$T/switch"
@@ -134,14 +139,14 @@ unset RQ1_GPU_PAD_STARTED
 export SLURM_JOB_ID=999002 RQ1_GPU_PAD=0
 source "$REPO/envs/nnunet_paths.sh"
 sleep 2
-check "RQ1_GPU_PAD=0 不启动" test ! -e "$BRAIN_TUMOR/nnUNet/results/logs/gpu_pad_999002.log"
+check "RQ1_GPU_PAD=0 不启动" test ! -e "$BRAIN_TUMOR/logs/workers/gpu_pad_999002.log"
 unset RQ1_GPU_PAD RQ1_GPU_PAD_STARTED
 
 touch "$T/switch"
 export SLURM_JOB_ID=999003
 source "$REPO/envs/nnunet_paths.sh"
 sleep 2
-check "DISABLED 开关在启动前生效" test ! -e "$BRAIN_TUMOR/nnUNet/results/logs/gpu_pad_999003.log"
+check "DISABLED 开关在启动前生效" test ! -e "$BRAIN_TUMOR/logs/workers/gpu_pad_999003.log"
 rm -f "$T/switch"
 unset RQ1_GPU_PAD_STARTED
 
@@ -153,8 +158,8 @@ bash -c '
     sleep 60
 ' &
 PARENT=$!
-sleep 8
-PL=$BRAIN_TUMOR/nnUNet/results/logs/gpu_pad_999005.log
+wait_for 30 filled
+PL=$BRAIN_TUMOR/logs/workers/gpu_pad_999005.log
 U=$(used)
 aborted
 check "父进程测试：pad 先补到约 8GB（现在 ${U}MiB）" test "$U" -ge 7000
@@ -164,8 +169,9 @@ stop_train
 U=$(used)
 aborted
 check "父进程退出后释放（现在 ${U}MiB，开始时 ${BASE}MiB）" test "$U" -le $(( BASE + 300 ))
+wait_for 15 parent_done
 check "父进程退出后日志有说明" grep -q '父进程' "$PL"
-check "父进程退出后 pad 和 supervisor 都不在了" bash -c "! pgrep -f '$T/pad/gpu_pad.py' > /dev/null && ! kill -0 \$(cat '$T/parent_sup') 2> /dev/null"
+check "父进程退出后 pad 和 supervisor 都不在了" parent_done
 
 aborted
 if (( fails == 0 )); then echo "全部通过"; else echo "$fails 项失败"; exit 1; fi
