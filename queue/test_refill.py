@@ -241,6 +241,10 @@ p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 9), "normal": (10, 3)
 ok("long 空 1 个、normal 空 7 个：各补满", p == [("long", "1-12:00:00", 1), ("normal", "08:00:00", 7)])
 p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (None, 4), "normal": (10, 10)}, QOS)
 ok("QOS 没设排队上限：按 SUBMIT_CAP", p == [("long", "1-12:00:00", R.SUBMIT_CAP - 4)])
+p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 6)}, {"long": ("3-00:00:00", 2)})
+ok("留 2 个名额：上限 10、现有 6，补 2", p == [("long", "3-00:00:00", 2)])
+p, why = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 8)}, {"long": ("3-00:00:00", 2)})
+ok("留 2 个名额：现有 8 就不补", p == [] and "排满" in why)
 done_q = [tq(K_T14, 0, 1, "done"), tq(K_UM, 50, 2, "claimed", "486191")]
 ok("队列里没有没人领的任务：不补", R.topup_plan(snap(queue=done_q)["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
 ok("领取过期的（stale）也算没人领", R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "stale")])["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 10)}, QOS)[0] != [])
@@ -261,7 +265,7 @@ def topup_run(probe_out, sbatch_rc=0):
     return run
 
 
-PROBE = "QOS|long|10|9\nQOS|normal|10|10\n"
+PROBE = "QOS|long|10|7\nQOS|normal|10|10\n"
 if os.path.exists(R.DICC_SWITCH):
     os.remove(R.DICC_SWITCH)
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))

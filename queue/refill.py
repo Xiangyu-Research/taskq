@@ -24,8 +24,8 @@
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
 DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
 
-DICC 补作业：每个 QOS（表里 qos 字段：QOS → 每段时限）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
-没设时按 SUBMIT_CAP）、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（一个不限并发的数组，
+DICC 补作业：每个 QOS（表里 qos 字段：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
+没设时按 SUBMIT_CAP）减去留给别的作业的名额、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（一个不限并发的数组，
 同时跑几个由 QOS 的 GPU 上限管）。空出一个补一个，作业的排队时间分从交上去开始累积。
 开关：box 上 ~/.cache/phd/taskq/DICC，不存在时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
@@ -392,12 +392,14 @@ def topup_plan(tq, counts, qos):
     if not any(t["state"] in ("free", "stale") for t in tq["tasks"]):
         return [], "队列里没有没人领的任务"
     out = []
-    for q, t in qos.items():
+    for q, v in qos.items():
+        t, keep = (v, 0) if isinstance(v, str) else v
         if q not in counts:
             return [], f"读不到 {q} 的作业数"
         lim, n = counts[q]
-        if (lim or SUBMIT_CAP) > n:
-            out.append((q, t, (lim or SUBMIT_CAP) - n))
+        cap = (lim or SUBMIT_CAP) - keep
+        if cap > n:
+            out.append((q, t, cap - n))
     return out, "" if out else "各 QOS 都排满了"
 
 
