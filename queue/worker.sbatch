@@ -2,7 +2,7 @@
 #SBATCH --job-name=train_worker
 #SBATCH --partition=gpu-a100
 #SBATCH --qos=long
-#SBATCH --time=1-12:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=32
