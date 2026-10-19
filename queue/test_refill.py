@@ -92,9 +92,10 @@ s = snap()
 s["ok"]["lab"] = False
 ok("lab 连不上：什么都不做（不续、不交还）", R.plan(s, "lab")[0] == [])
 SQW = [["train_worker", "490000_1", "PENDING", "0:00", "Priority", "0"]]
-s = snap(queue=q2[1:] + [tq(K_UM, 50, 9)])
+s = snap(queue=q2[1:] + [tq(K_UM, 50, 9)], prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset103_GLIrq1_t1c")
 s["slurm"]["dicc"]["squeue"] = SQW
 ok("DICC 有不带折的 worker 作业（什么都能领）：只按先后", ops(R.plan(s, "lab")[0]) == [("take", K_T1C[0])])
+ok("同一档里数据已经在 lab 上的先领（10/19）", ops(R.plan(snap(queue=q2[1:] + [tq(K_UM, 50, 9)]), "lab")[0]) == [("take", K_UM)])
 s = snap()
 del s["taskq"]["dicc"]["recent_skips"]
 acts, _, why = R.plan(s, "lab")
