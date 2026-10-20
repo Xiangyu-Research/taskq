@@ -55,6 +55,7 @@
 | `q` | 加任务：`q <组> [pueue add 选项] -- '<命令>'`，按 `envs/machines.py` 设好 `CUDA_VISIBLE_DEVICES` 和组的环境变量，工作目录是仓库根目录 |
 | `qs` | 查看各 pueue 机器的队列，每个任务一行（`qs lab` 只看一台） |
 | `recipes.py`、`spec.py`、`experiments.py`、`steps.py` | 做法、解析器、读实验表、实验表里步骤的"做完没"判断（`runlog`、`check`） |
+| `run_analysis.sh <命令…>` | 在 pueue 的 `cpu` 组跑一个分析：进仓库根目录、source `envs/nnunet_paths.sh`、exec 给定命令；stdout/stderr 由 pueue 收（2026-10-20 加，M3/R2/A4 用） |
 | `run_task.sh <做法> k=v…` | 所有机器共用的运行器：按任务说明激活环境、设 `vars`、在仓库根目录跑 `cmd`，输出写进分段日志；已经训完就直接退出；不在 Slurm 里、设了 `CUDA_VISIBLE_DEVICES` 时卡被占就等；Slurm 外出错隔 5 分钟重来，最多 3 次。SIGTERM 先停训练再退出 |
 | `fetch_task.sh <机器> <key>` | 等那台机器上这个任务训完（`done`），再把 `out`（去掉 `fetch.exclude`，加上上一级的 `fetch.extra`）拉回 box；每小时记一行最新训练日志 |
 | `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到备份机器（DICC），三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED` |
