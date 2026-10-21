@@ -26,8 +26,9 @@
 DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
 
 DICC 补作业：每个 QOS（表里 qos 字段：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
-没设时按 SUBMIT_CAP）减去留给别的作业的名额、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（一个不限并发的数组，
-同时跑几个由 QOS 的 GPU 上限管）。空出一个补一个，作业的排队时间分从交上去开始累积。
+没设时按 SUBMIT_CAP）减去留给别的作业的名额、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（每个空位交一个
+普通作业，不用数组：10/21 起 DICC 的使用率检查会在数组作业开始约 65 分钟后把它取消；同时跑几个由 QOS 的 GPU 上限管）。
+空出一个补一个，作业的排队时间分从交上去开始累积。
 开关：box 上 ~/.cache/phd/taskq/DICC，不存在时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
     python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
@@ -487,11 +488,15 @@ def topup(s, name, dry=False, run=None):
         return [], {}
     msgs, stuck = [], {}
     for q, t, n in subs:
-        rc, out = run(f"cd {m['repo']}/scripts/queue && sbatch --parsable --qos={q} --time={t} --array=1-{n} worker.sbatch", m["ssh"])
-        if rc == 0:
-            msgs.append(f"{m['label']} {q} 空出 {n} 个位置，交了 worker 作业 {out.strip().splitlines()[-1]}（{n} 段，每段 {t}）")
-        else:
-            stuck[f"topup:{name}:{q}"] = f"{m['label']} {q} 补交 worker.sbatch 出错：{out[-200:]}"
+        ids = []
+        for _ in range(n):
+            rc, out = run(f"cd {m['repo']}/scripts/queue && sbatch --parsable --qos={q} --time={t} worker.sbatch", m["ssh"])
+            if rc:
+                stuck[f"topup:{name}:{q}"] = f"{m['label']} {q} 补交 worker.sbatch 出错：{out[-200:]}"
+                break
+            ids.append(out.strip().splitlines()[-1])
+        if ids:
+            msgs.append(f"{m['label']} {q} 空出 {n} 个位置，交了 {len(ids)} 个 worker 作业 {'、'.join(ids)}（每个 {t}）")
     log(msgs)
     return [], stuck
 

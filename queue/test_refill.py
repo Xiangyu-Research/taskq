@@ -313,9 +313,31 @@ ev, st = R.topup(snap(), "dicc", dry=True, run=topup_run(PROBE))
 ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交 long 1 段"])
 open(R.DICC_SWITCH, "w").close()
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
-ok("开关开着：交 worker.sbatch（long，1 段，不限并发），记日志、不推送",
-   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=3-00:00:00 --array=1-1 worker.sbatch")]
-   and ev == [] and not st and "交了 worker 作业 487001" in open(R.LOG).read())
+ok("开关开着：交 worker.sbatch（long，1 个普通作业，不用数组），记日志、不推送",
+   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=3-00:00:00 worker.sbatch")]
+   and ev == [] and not st and "交了 1 个 worker 作业 487001" in open(R.LOG).read())
+sub.clear()
+
+
+def topup_seq(probe_out, fail_at=None):
+    def run(cmd, host=None, timeout=0):
+        if cmd.startswith("set -e"):
+            return 0, probe_out
+        sub.append((host, cmd))
+        if len(sub) == fail_at:
+            return 1, "sbatch: error: QOSMaxSubmitJobPerUserLimit"
+        return 0, str(487000 + len(sub))
+    return run
+
+
+ev, st = R.topup(snap(), "dicc", run=topup_seq("QOS|long|10|5\nQOS|normal|10|10\n"))
+ok("空出 3 个：交 3 个普通作业，都不带 --array",
+   len(sub) == 3 and not any("--array" in c for _, c in sub) and not st
+   and "交了 3 个 worker 作业 487001、487002、487003" in open(R.LOG).read())
+sub.clear()
+ev, st = R.topup(snap(), "dicc", run=topup_seq("QOS|long|10|5\nQOS|normal|10|10\n", fail_at=2))
+ok("第 2 个交不上：停下、报成问题，第 1 个照记",
+   len(sub) == 2 and list(st) == ["topup:dicc:long"] and "交了 1 个 worker 作业 487001" in open(R.LOG).read().splitlines()[-1])
 sub.clear()
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE, sbatch_rc=1))
 ok("交不上：报成问题", list(st) == ["topup:dicc:long"] and "QOSMaxSubmit" in st["topup:dicc:long"])
