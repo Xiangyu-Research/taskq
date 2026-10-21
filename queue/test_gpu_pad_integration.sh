@@ -80,6 +80,7 @@ export SLURM_JOB_ID=999001
 export nnUNet_n_proc_DA=4
 export RQ1_GPU_PAD_SWITCH=$T/switch
 export RQ1_GPU_PAD_BASE=$T/padsig
+export RQ1_GPU_PAD_FLOOR_MIB=5000
 export RQ1_GPU_PAD_TARGET_MIB=8000
 export RQ1_GPU_PAD_HIGH_MIB=9000
 export RQ1_GPU_PAD_MIN_FREE_MIB=2000
@@ -110,10 +111,11 @@ touch "$T/padsig.start"
 sleep 2
 U=$(used)
 aborted
-check "收到新训练信号后放掉（现在 ${U}MiB）" test "$U" -le $(( BASE + 3300 ))
-check "<base>.mib 变成 0" test "$(cat "$T/padsig.mib")" = 0
+check "收到新训练信号后只放到 floor 5000（现在 ${U}MiB）" test "$U" -ge 5000 -a "$U" -le 5600
+check "放好后写 <base>.ready" test -f "$T/padsig.ready"
 sleep 2
-check "新训练没起来、start_hold 没到：不补（现在 $(used)MiB）" test "$(used)" -le $(( BASE + 3300 ))
+U=$(used)
+check "新训练没起来、start_hold 没到：不补到 target（现在 ${U}MiB）" test "$U" -ge 5000 -a "$U" -le 5600
 sleep 6
 aborted
 check "等满 start_hold 后又补上（现在 $(used)MiB）" test "$(used)" -ge 7000
@@ -121,7 +123,8 @@ check "等满 start_hold 后又补上（现在 $(used)MiB）" test "$(used)" -ge
 stop_train
 sleep 2
 aborted
-check "训练结束后释放（现在 $(used)MiB，开始时 ${BASE}MiB）" test "$(used)" -le $(( BASE + 800 ))
+U=$(used)
+check "训练结束后不放掉，显存不低于 floor（现在 ${U}MiB）" test "$U" -ge 5000 -a "$U" -le 8300
 
 start_train; sleep 4
 touch "$T/switch"

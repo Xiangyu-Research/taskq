@@ -8,7 +8,7 @@ if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${RQ1_TEST_FAKEBIN:-} 
         export RQ1_GPU_PAD_STARTED=1
         _padlog=${BRAIN_TUMOR:-$HOME}/logs/workers/gpu_pad_${SLURM_JOB_ID}.log
         mkdir -p "$(dirname "$_padlog")" 2> /dev/null || _padlog=/tmp/gpu_pad_${SLURM_JOB_ID}.log
-        echo "$(date '+%F %T') 显存填充启动：target=${RQ1_GPU_PAD_TARGET_MIB:-42000}MiB 日志=$_padlog"
+        echo "$(date '+%F %T') 显存填充启动：floor=${RQ1_GPU_PAD_FLOOR_MIB:-42000}MiB target=${RQ1_GPU_PAD_TARGET_MIB:-55000}MiB 日志=$_padlog"
         _retry=${RQ1_GPU_PAD_RETRY_DELAY:-30}
         _py=$(command -v python3)
         nohup nice -n 19 bash -c '

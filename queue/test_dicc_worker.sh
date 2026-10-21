@@ -98,6 +98,19 @@ padpid=$!
 SLURM_JOB_ID=900006 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2c.out" 2>&1
 kill $padpid 2> /dev/null
 check "显存填充放掉之后才开始训练" '[[ -f $T/pad.released ]] && awk -v r=$(cat $T/pad.released) "/^start/ {exit !(\$2 >= r)}" $T/train.log'
+
+reset
+table << EOF
+t/a nnunet
+EOF
+rm -f "$T/pad.start" "$T/pad.released" "$T/pad.ready"
+echo 33000 > "$T/pad.mib"
+echo stale > "$T/pad.ready"
+( while [[ ! -e $T/pad.start ]]; do sleep 0.2; done; sleep 2; echo 1 > "$T/pad.ready"; date +%s.%N > "$T/pad.released" ) &
+padpid=$!
+SLURM_JOB_ID=900009 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2c2.out" 2>&1
+kill $padpid 2> /dev/null
+check "显存填充只放到 floor（不到 0）：等它写 ready 后才开始训练，旧的 ready 不算" '[[ -f $T/pad.released ]] && awk -v r=$(cat $T/pad.released) "/^start/ {exit !(\$2 >= r)}" $T/train.log && ! grep -q "没回应" $T/w2c2.out'
 unset RQ1_GPU_PAD_BASE
 
 # 2d. 训练失败：交还、记一次失败，本作业不再领它

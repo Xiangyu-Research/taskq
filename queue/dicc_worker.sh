@@ -78,13 +78,14 @@ EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
 pad_make_room() {
     [[ -f $PADBASE.mib ]] || return 0
+    rm -f "$PADBASE.ready"
     touch "$PADBASE.start"
     local i
     for i in $(seq 30); do
-        [[ $(cat "$PADBASE.mib" 2> /dev/null) == 0 ]] && return 0
+        [[ -e $PADBASE.ready || $(cat "$PADBASE.mib" 2> /dev/null) == 0 ]] && return 0
         sleep 1
     done
-    echo "$(ts) 显存填充 30 秒内没放掉（$PADBASE.mib = $(cat "$PADBASE.mib" 2> /dev/null)），照样开始"
+    echo "$(ts) 显存填充 30 秒内没回应（$PADBASE.mib = $(cat "$PADBASE.mib" 2> /dev/null)），照样开始"
 }
 gpu_stats() {  # 近 10 分钟的 GPU 平均使用率、样本数；现在的显存已用、总量（MiB）
     if [[ -n ${WORKER_TEST_GPU:-} ]]; then echo "$WORKER_TEST_GPU"; return; fi

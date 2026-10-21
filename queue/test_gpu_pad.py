@@ -67,7 +67,7 @@ class FakeBackend:
 
 
 def cfg(**kw):
-    base = dict(target_mib=42000, high_mib=62000, chunk_mib=1024, interval=0,
+    base = dict(floor_mib=42000, target_mib=55000, high_mib=62000, chunk_mib=1024, interval=0,
                 settle=0, start_hold=900, min_free_mib=8000, min_total_mib=60000, release_hysteresis_mib=2048,
                 min_train_mib=2000, base="", switch="/nonexistent/gpu_pad_switch", parent_pid=None,
                 supervisor_pid=None, dry_run=False, iterations=0, device=None)
@@ -80,18 +80,22 @@ def pad_of(b, **kw):
     return G.Pad(b, cfg(**kw), logger=logs.append), logs
 
 
-def filled(used, target=42000):
+def filled(used, target=55000):
     return target <= used < target + 1024
+
+
+def at_floor(used, floor=42000):
+    return floor <= used < floor + 1024
 
 
 b = FakeBackend()
 p, logs = pad_of(b)
 p.step()
-ok("补到 42000 MiB 以上、不到一块的余量，都是整块", filled(b.used()) and b.live[0] == 33 * 1024)
+ok("补到 55000 MiB 以上、不到一块的余量，都是整块", filled(b.used()) and b.live[0] == 45 * 1024)
 ok("日志里有启动和补显存", any("启动" in x for x in logs) and any("补 " in x for x in logs))
 
 b = FakeBackend(training=3000)
-p, _ = pad_of(b, target_mib=5500, high_mib=9000, chunk_mib=1024)
+p, _ = pad_of(b, floor_mib=5500, target_mib=5500, high_mib=9000, chunk_mib=1024)
 p.step()
 ok("只补整块（差 2500 补 3 块）", b.live[0] == 3 * 1024)
 
@@ -113,10 +117,15 @@ p.step()
 ok("没有训练：不填", b.live[0] == 0 and any("没有训练" in x for x in logs))
 b.training[0] = 9000
 p.step()
-ok("训练来了：补到 42GB", filled(b.used()))
+ok("训练来了：补到 55GB", filled(b.used()))
 b.training[0] = 500
 p.step()
-ok("训练没了：全部释放，缓存也还给 GPU", b.live[0] == 0 and b.cache[0] == 0 and b.used() == 500)
+ok("训练没了：不放掉，显存不低于 floor", b.live[0] == 45 * 1024 and b.used() >= 42000)
+b.training[0] = 0
+b.live[0] -= 0
+p._release(0, 0, reason="测试")
+p.step()
+ok("训练过、现在没有在训的：马上补回 floor（不补到 target）", at_floor(b.used()))
 
 b = FakeBackend(training=0)
 p, logs = pad_of(b, settle=100)
@@ -124,15 +133,22 @@ t = [1000.0]
 G.time.time = lambda: t[0]
 p.changed[0] = t[0]
 b.training[0] = 5000; p.step()
-ok("训练刚开始：不补", b.live[0] == 0 and any("等稳定" in x for x in logs))
+ok("训练刚开始：马上补到 floor，不到 target", at_floor(b.used()))
+lv = b.live[0]
 t[0] += 60; b.training[0] = 20000; p.step()
-ok("60 秒后显存还在涨：不补", b.live[0] == 0)
+ok("60 秒后显存还在涨：不再补", b.live[0] == lv and any("等稳定" in x for x in [p._decide(0, b.used(), 81920, False, t[0])[0]]))
 t[0] += 60; b.training[0] = 20500; p.step()
-ok("又 60 秒，变化 < 1GiB 但离上次大变化才 60 秒：不补", b.live[0] == 0)
+ok("又 60 秒，变化 < 1GiB 但离上次大变化才 60 秒：不再补", b.live[0] == lv)
 t[0] += 50; p.step()
-ok("稳定 110 秒：补到 42GB", filled(b.used()))
-t[0] += 10; b.training[0] = 25000; p.step()
-ok("补完后训练又涨 4.5GB（没超过 high）：不放、也不再补", b.live[0] == 21 * 1024)
+ok("稳定 110 秒：训练涨上来后已经超过 55GB，不再补", b.used() >= 55000 and b.live[0] == lv)
+t[0] += 10; b.training[0] = 22500; p.step()
+ok("训练又涨 2GB（没超过 high）：不放、也不再补", b.live[0] == lv)
+t[0] += 200; b.training[0] = 3000; p.step()
+ok("一个训练结束、训练显存掉下来：马上补回 floor，不等稳定", b.used() >= 42000)
+t[0] += 10; p.step()
+ok("再等稳定后补到 55GB", not filled(b.used()))
+t[0] += 110; p.step()
+ok("稳定 120 秒：补到 55GB", filled(b.used()))
 G.time.time = time.time
 
 with tempfile.TemporaryDirectory() as d:
@@ -143,24 +159,27 @@ with tempfile.TemporaryDirectory() as d:
     G.time.time = lambda: t[0]
     p.changed[0], p.train_ref[0] = 0, 9000
     p.step()
-    ok("稳定的训练：补到 42GB", filled(b.used()))
-    ok("<base>.mib 写了 pad 的大小", open(base + ".mib").read().strip() == str(33 * 1024))
+    ok("稳定的训练：补到 55GB", filled(b.used()))
+    ok("<base>.mib 写了 pad 的大小", open(base + ".mib").read().strip() == str(45 * 1024))
+    ok("还没有新训练信号：没有 <base>.ready", not os.path.exists(base + ".ready"))
     open(base + ".start", "w").close()
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
     t[0] += 10; p.step()
-    ok("收到新训练信号：全部释放", b.live[0] == 0 and any("要开始新训练" in x for x in logs))
-    ok("<base>.mib 变成 0", open(base + ".mib").read().strip() == "0")
+    ok("收到新训练信号：只放到 floor（42GB），不低于它", at_floor(b.used()) and any("要开始新训练" in x for x in logs))
+    ok("放好后写 <base>.ready", open(base + ".ready").read().strip() == str(t[0] - 5))
+    ok("给新训练留出约 39GB", 81920 - b.used() >= 38000)
+    lv = b.live[0]
     t[0] += 50; b.training[0] = 18000; p.step()
-    ok("新训练还没稳定：不补", b.live[0] == 0)
+    ok("新训练起来了、还没稳定：不补", b.live[0] == lv)
     t[0] += 110; p.step()
-    ok("新训练稳定后：补到 42GB", filled(b.used()))
+    ok("新训练稳定后：补到 55GB", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
     t[0] += 10; p.step()
-    ok("7b 第二次信号：释放", b.live[0] == 0)
+    ok("7b 第二次信号：放到 floor", at_floor(b.used()))
     t[0] += 300; p.step()
-    ok("7b 训练显存没涨（新训练还没起来）：settle 过了也不补", b.live[0] == 0 and any("等新训练起来" in x for x in [p._decide(0, b.used(), 81920, False, t[0])[0]]))
+    ok("7b 训练显存没涨（新训练还没起来）：settle 过了也不补到 target", at_floor(b.used()) and any("等新训练起来" in x for x in [p._decide(0, b.used(), 81920, False, t[0])[0]]))
     t[0] += 300; b.training[0] = 30000; p.step()
-    ok("7b 新训练起来了：先等它稳定", b.live[0] == 0)
+    ok("7b 新训练起来了：先等它稳定", not filled(b.used()) and b.used() >= 42000)
     t[0] += 110; p.step()
     ok("7b 稳定后补上", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
@@ -168,16 +187,26 @@ with tempfile.TemporaryDirectory() as d:
     t[0] += 950; p.step()
     ok("7b 等了 start_hold（900 秒）新训练还没起来：照常补", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
+    t[0] += 10; p.step()
     t[0] += 10; b.training[0] = 1000; p.step()
+    ok("7c 旧训练结束、新训练还没起来：显存不低于 floor", b.used() >= 42000)
     t[0] += 60; b.training[0] = 20000; p.step()
+    ok("7c 新训练涨上来：放掉多出 high 的部分或保持，不低于 floor", 42000 <= b.used() <= 62000)
     t[0] += 110; p.step()
-    ok("7c 旧训练结束后新训练起来（比原来少）：稳定后补上", filled(b.used()))
+    ok("7c 旧训练结束后新训练起来：稳定后在 55GB 以上、high 以下", 55000 <= b.used() <= 62000)
+    b.training[0] = 50000
+    p._release(0, 0, reason="测试")
+    os.remove(base + ".ready")
+    t[0] += 200; p.step()
+    os.utime(base + ".start", (t[0] + 5, t[0] + 5))
+    t[0] += 10; p.step()
+    ok("7d 训练本身已经超过 floor 时收到信号：没什么可放，照样写 ready", os.path.exists(base + ".ready") and b.live[0] == 0)
     G.time.time = time.time
 
 b = FakeBackend(fallback=True)
 p, _ = pad_of(b)
 p.step()
-ok("退回 mem_get_info 时目标多 1500MiB", filled(b.used(), 43500))
+ok("退回 mem_get_info 时目标多 1500MiB", filled(b.used(), 56500))
 
 b = FakeBackend(total=32000)
 p, logs = pad_of(b)
@@ -232,8 +261,9 @@ ok("无 CUDA_VISIBLE_DEVICES + 多卡拒绝", not G.visible_devices_ok(None, 2) 
 ok("有 CUDA_VISIBLE_DEVICES 或多卡以下允许", G.visible_devices_ok("0", 2) and G.visible_devices_ok(None, 1))
 
 a = G.parse_args([])
-ok("默认：settle 120 秒、start_hold 900 秒、10 秒一轮、2000MiB 以下算没有训练",
-   a.settle == 120 and a.start_hold == 900 and a.interval == 10 and a.min_train_mib == 2000)
+ok("默认：floor 42000、target 55000、high 62000 MiB，settle 120 秒、start_hold 900 秒、10 秒一轮、2000MiB 以下算没有训练",
+   (a.floor_mib, a.target_mib, a.high_mib) == (42000, 55000, 62000)
+   and a.settle == 120 and a.start_hold == 900 and a.interval == 10 and a.min_train_mib == 2000)
 os.environ["SLURM_JOB_ID"] = "4242"
 os.environ.pop("RQ1_GPU_PAD_BASE", None)
 ok("默认 base 是 /tmp/gpu_pad_<作业号>", G.parse_args([]).base == "/tmp/gpu_pad_4242")
@@ -244,6 +274,13 @@ try:
 except SystemExit:
     bad = True
 ok("target > high 被拒绝", bad)
+try:
+    with contextlib.redirect_stderr(io.StringIO()):
+        G.parse_args(["--floor-mib", "56000"])
+    bad = False
+except SystemExit:
+    bad = True
+ok("floor > target 被拒绝", bad)
 
 b = FakeBackend()
 p, _ = pad_of(b)

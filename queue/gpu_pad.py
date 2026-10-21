@@ -40,7 +40,8 @@ def env_float(name, default):
 
 @dataclass
 class Config:
-    target_mib: int = 42000
+    floor_mib: int = 42000
+    target_mib: int = 55000
     high_mib: int = 62000
     chunk_mib: int = 1024
     interval: float = 10.0
@@ -130,11 +131,12 @@ class Pad:
         self.changed = {d: self.start for d in self.devices}
         self.seen_start = self._start_mtime()
         self.wait_new = {}
+        self.seen_train = set()
         self.stopped = False
         self._steps = 0
         self.initial_ppid = os.getppid()
         self.log(f"启动：job={os.environ.get('SLURM_JOB_ID', '')} host={socket.gethostname()} pid={os.getpid()} "
-                 f"target={cfg.target_mib}MiB high={cfg.high_mib}MiB settle={cfg.settle:g}s start_hold={cfg.start_hold:g}s "
+                 f"floor={cfg.floor_mib}MiB target={cfg.target_mib}MiB high={cfg.high_mib}MiB settle={cfg.settle:g}s start_hold={cfg.start_hold:g}s "
                  f"min_train={cfg.min_train_mib}MiB base={cfg.base or '（无）'} devices={self.devices} "
                  f"switch={cfg.switch} parent={cfg.parent_pid} supervisor={cfg.supervisor_pid} dry_run={cfg.dry_run}")
 
@@ -151,6 +153,16 @@ class Pad:
             with open(self.c.base + ".mib.tmp", "w") as f:
                 f.write(f"{sum(self.b.pad_mib(d) for d in self.devices)}\n")
             os.replace(self.c.base + ".mib.tmp", self.c.base + ".mib")
+        except OSError:
+            pass
+
+    def _write_ready(self):
+        if not self.c.base:
+            return
+        try:
+            with open(self.c.base + ".ready.tmp", "w") as f:
+                f.write(f"{self.seen_start}\n")
+            os.replace(self.c.base + ".ready.tmp", self.c.base + ".ready")
         except OSError:
             pass
 
@@ -196,24 +208,34 @@ class Pad:
             self.train_ref[dev], self.changed[dev] = train, now
         if dev in self.wait_new:
             self.wait_new[dev] = (min(self.wait_new[dev][0], train), self.wait_new[dev][1])
+        margin = FALLBACK_TARGET_MARGIN_MIB if fallback else 0
+        floor, target = self.c.floor_mib + margin, self.c.target_mib + margin
         if train < self.c.min_train_mib:
-            if self.chunks[dev]:
-                used = self._release(dev, 0, reason=f"训练只占 {train}MiB，算没有训练", used=used)
-            return f"没有训练（train={train}MiB）", used
+            if dev not in self.seen_train:
+                return f"没有训练（train={train}MiB）", used
+            if used < floor:
+                used = self._allocate(dev, floor, used, total)
+            return f"没有在训的（train={train}MiB），保持 floor", used
+        self.seen_train.add(dev)
         state = f"train={train}MiB"
+        waiting = False
         if dev in self.wait_new:
             before, t0 = self.wait_new[dev]
             if train >= before + self.c.min_train_mib or now - t0 >= self.c.start_hold:
                 del self.wait_new[dev]
-            elif used <= self.c.high_mib:
-                return f"{state}，等新训练起来（之前 {before}MiB）", used
-        target = self.c.target_mib + (FALLBACK_TARGET_MARGIN_MIB if fallback else 0)
+            else:
+                waiting = True
         if used > self.c.high_mib:
             used = self._release(dev, self.c.high_mib - self.c.release_hysteresis_mib,
                                  reason=f"used={used}MiB > high={self.c.high_mib}MiB", used=used)
-        elif now - self.changed[dev] < self.c.settle:
+            return state, used
+        if used < floor:
+            used = self._allocate(dev, floor, used, total)
+        if waiting:
+            return f"{state}，等新训练起来（之前 {self.wait_new[dev][0]}MiB）", used
+        if now - self.changed[dev] < self.c.settle:
             return f"{state}，训练显存还在变，等稳定", used
-        elif used < target:
+        if used < target:
             used = self._allocate(dev, target, used, total)
         return state, used
 
@@ -238,7 +260,7 @@ class Pad:
             self.log(f"dev {dev}: 补 {mib}MiB，pad={self.b.pad_mib(dev)}MiB")
         return used
 
-    def _release(self, dev, limit, reason="", used=None):
+    def _release(self, dev, limit, reason="", used=None, keep_limit=False):
         chunks = self.chunks[dev]
         if not chunks:
             return used
@@ -251,7 +273,11 @@ class Pad:
         if excess is not None and excess <= 0:
             return used
         n, freed = 0, 0
+        if keep_limit and (excess is None or chunks[-1][1] > excess):
+            return used
         while chunks and (excess is None or freed < excess):
+            if keep_limit and freed + chunks[-1][1] > excess:
+                break
             _tensor, mib = chunks.pop()
             del _tensor
             freed += mib
@@ -272,9 +298,10 @@ class Pad:
         if st > self.seen_start:
             self.seen_start = st
             for dev in self.devices:
-                self._release(dev, 0, reason="要开始新训练")
+                self._release(dev, self.c.floor_mib, reason="要开始新训练，放到 floor", keep_limit=True)
                 self.changed[dev] = now
                 self.wait_new[dev] = (self.train_ref[dev], now)
+            self._write_ready()
         for dev in self.devices:
             self._step_dev(dev, now)
         self._write_mib()
@@ -301,7 +328,8 @@ class Pad:
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="DICC GPU 作业显存填充（只占显存，不训练）")
-    p.add_argument("--target-mib", type=int, default=env_int("RQ1_GPU_PAD_TARGET_MIB", 42000))
+    p.add_argument("--floor-mib", type=int, default=env_int("RQ1_GPU_PAD_FLOOR_MIB", 42000))
+    p.add_argument("--target-mib", type=int, default=env_int("RQ1_GPU_PAD_TARGET_MIB", 55000))
     p.add_argument("--high-mib", type=int, default=env_int("RQ1_GPU_PAD_HIGH_MIB", 62000))
     p.add_argument("--chunk-mib", type=int, default=env_int("RQ1_GPU_PAD_CHUNK_MIB", 1024))
     p.add_argument("--interval", type=float, default=env_float("RQ1_GPU_PAD_INTERVAL", 10.0))
@@ -320,8 +348,8 @@ def parse_args(argv=None):
     p.add_argument("--iterations", type=int, default=0)
     p.add_argument("--device", type=int, default=None)
     a = p.parse_args(argv)
-    if not 0 < a.target_mib <= a.high_mib:
-        p.error("要求 0 < target-mib <= high-mib")
+    if not 0 < a.floor_mib <= a.target_mib <= a.high_mib:
+        p.error("要求 0 < floor-mib <= target-mib <= high-mib")
     if a.chunk_mib <= 0 or a.interval < 0:
         p.error("chunk-mib 要 > 0，interval 要 >= 0")
     return a
@@ -345,7 +373,7 @@ def main(argv=None):
     if a.device is not None and a.device >= backend.device_count():
         log(f"--device {a.device} 超出可见卡数 {backend.device_count()}")
         return 1
-    cfg = Config(target_mib=a.target_mib, high_mib=a.high_mib, chunk_mib=a.chunk_mib,
+    cfg = Config(floor_mib=a.floor_mib, target_mib=a.target_mib, high_mib=a.high_mib, chunk_mib=a.chunk_mib,
                  interval=a.interval, settle=a.settle, start_hold=a.start_hold, min_free_mib=a.min_free_mib,
                  min_total_mib=a.min_total_mib, release_hysteresis_mib=a.release_hysteresis_mib,
                  min_train_mib=a.min_train_mib, base=a.base, switch=a.switch, parent_pid=a.parent_pid,
