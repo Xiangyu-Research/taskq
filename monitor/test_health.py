@@ -228,9 +228,9 @@ s["ok"]["fake"] = False
 ok("第四台机器连不上：报", "down:fake" in ids(s))
 del H.M.MACHINES["fake"]
 
-# ---------------- 推送规则 ----------------
+# ---------------- 推送规则（10/21：白话、并成一条、不推已恢复和汇总）----------------
 d = tempfile.mkdtemp()
-H.STATE, H.LOG, H.PRUNE_LOG = f"{d}/state.json", f"{d}/health.log", f"{d}/prune.log"
+H.STATE, H.LOG = f"{d}/state.json", f"{d}/health.log"
 sent = []
 H.push = lambda msg, **kw: sent.append((kw.get("title", ""), msg))
 
@@ -245,24 +245,24 @@ A = {"disk:lab": dict(msg="lab 盘", level="normal", kind="state", after=0)}
 U = {"dup:x": dict(msg="两处", level="urgent", kind="state", after=0)}
 day1 = datetime(2026, 10, 16, 12, 0)
 out = run(A, day1)
-ok("当天第一次白天检查：新问题并进每日汇总", len(out) == 1 and "每日汇总" in out[0][0] and "lab 盘" in out[0][1])
+ok("白天新问题：推送一条白话", len(out) == 1 and out[0][0] == "PhD：需要处理" and "盘满了" in out[0][1])
 ok("同一个问题不重复推送", run(A, day1 + timedelta(minutes=30)) == [])
-out = run({}, day1 + timedelta(hours=1))
-ok("恢复后推送一次已恢复", len(out) == 1 and "已恢复" in out[0][1])
-out = run(A, datetime(2026, 10, 16, 23, 0))
-ok("夜里普通问题不推送", out == [])
+ok("恢复后不推送", run({}, day1 + timedelta(hours=1)) == [])
+ok("夜里普通问题不推送", run(A, datetime(2026, 10, 16, 23, 0)) == [])
 out = run({**A, **U}, datetime(2026, 10, 17, 1, 0))
-ok("夜里紧急问题即时推送", [m for _, m in out] == ["两处"])
-out = run(A, datetime(2026, 10, 17, 8, 0))
-ok("早上汇总带上夜里的普通问题和已恢复的", len(out) == 1 and "lab 盘" in out[0][1] and "已恢复：两处" in out[0][1])
-ok("汇总之后不再单独推送", run(A, datetime(2026, 10, 17, 8, 30)) == [])
+ok("夜里紧急问题即时推送", len(out) == 1 and out[0][0] == "PhD：紧急" and "两处训练" in out[0][1])
+out = run({**A, **U}, datetime(2026, 10, 17, 8, 5))
+ok("早上第一次检查推送夜里攒下的", len(out) == 1 and "盘满了" in out[0][1] and "两处" not in out[0][1])
+ok("推过之后不再推送", run(A, datetime(2026, 10, 17, 8, 35)) == [])
 D = {"down:dicc": dict(msg="DICC 连不上", level="normal", kind="state", after=60)}
 ok("要持续一段时间才报的，刚出现时不推送", run({**A, **D}, datetime(2026, 10, 17, 9, 0)) == [])
-ok("持续够久后推送", [m for _, m in run({**A, **D}, datetime(2026, 10, 17, 10, 0))] == ["DICC 连不上"])
-E = {"pueue:box:1:t": dict(msg="任务失败", level="normal", kind="event", after=0)}
-run(E, datetime(2026, 10, 17, 11, 0))
-ok("事件类消失时不推送已恢复", run({}, datetime(2026, 10, 17, 11, 30)) == [] or
-   all("任务失败" not in m for _, m in sent))
+out = run({**A, **D}, datetime(2026, 10, 17, 10, 0))
+ok("持续够久后推送", len(out) == 1 and "DICC 连不上了" in out[0][1])
+B = {"git:lab": dict(msg="g", level="normal", kind="state", after=0), "gpulog:lab": dict(msg="l", level="normal", kind="state", after=0)}
+out = run(B, datetime(2026, 10, 17, 10, 30))
+ok("同一次查到几件：并成一条", len(out) == 1 and "（2 件）" in out[0][0] and out[0][1].count("\n- ") == 1)
+I = {"idle:lab:gpu1": dict(msg="只剩在训的", level="info", kind="state", after=0)}
+ok("info 级不推送", run(I, datetime(2026, 10, 17, 11, 0)) == [])
 
 # ---------------- refill / advance 出错不让健康检查停掉 ----------------
 import types  # noqa: E402
@@ -276,6 +276,12 @@ sys.argv = ["health.py"]
 H.main()
 ok("refill.py import 出错、advance.py 运行出错：都报出来，健康检查照常写完",
    "refill:error" in got and "advance:error" in got and "ZeroDivisionError" in got["advance:error"]["msg"])
+rf = types.ModuleType("refill")
+rf.run_all = lambda s, dry=False: (["lab 领了 x", "lab 交还 y"], {}, set())
+sys.modules["refill"] = rf
+got.clear()
+H.main()
+ok("lab 领了 / 交还了：只记 refill.log，不进推送", not any(k.startswith("refill:") for k in got))
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

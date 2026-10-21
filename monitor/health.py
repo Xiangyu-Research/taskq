@@ -17,12 +17,12 @@
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
   - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；代码自动同步（角色 autopull）2 小时没成功。
   - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
-提醒：22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时和每日汇总一起发（每天一条，没有问题也发，说明检查本身在跑）。
-  事件类（任务失败）推送一次；状态类（盘、卡住、连不上……）恢复后再推送一次"已恢复"。
+提醒（10/21 起）：每个问题推送一次，用 scripts/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
+  恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
 文件：~/.config/phd-health/ntfy_topic（ntfy 频道名，不进仓库）、~/.cache/phd-health/state.json（问题和推送记录，
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
 每次检查后还做两件事（10/18 起）：
-  - scripts/queue/refill.py：替 lab 从 DICC 的任务队列领任务、续上、交还；领了什么作为事件推送，停住等人处理的报成问题。
+  - scripts/queue/refill.py：替 lab 从 DICC 的任务队列领任务、续上、交还；领了、交还了什么只记在 ~/refill.log，停住等人处理的报成问题。
   - scripts/queue/advance.py：box 上按每一折的状态排下一步（拉回 → 推理 → 评测 → 五折分析）；失败停住的报成问题。
 """
 import argparse
@@ -47,11 +47,11 @@ import make_registry as mr  # noqa: E402  要登记的任务、训练命令 → 
 import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
 import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
 import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
+import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
 LOG = os.path.expanduser("~/.cache/phd-health/health.log")
 TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
-PRUNE_LOG = os.path.expanduser("~/archive_prune.log")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
@@ -402,10 +402,9 @@ def night(now):
 
 
 def update(P, now, dry=False):
-    """和上次的状态比：新出现、持续够久的推送；恢复的推送"已恢复"；夜里只推紧急的，其余攒到早上的汇总。"""
+    """和上次的状态比：新出现、持续够久的推送（白话，plain.py；同一次查到几件并成一条）；夜里只推紧急的，其余早上第一次检查时推。"""
     st = json.load(open(STATE)) if os.path.exists(STATE) else {}
     old = st.get("problems", {})
-    pending_res = st.get("resolved_overnight", [])
     msgs, log = [], []
     cur = {}
     for pid, p in P.items():
@@ -415,40 +414,30 @@ def update(P, now, dry=False):
         age = (now - datetime.strptime(p["first"], "%Y-%m-%d %H:%M")).total_seconds() / 60
         p["active"] = age >= p["after"]
         if p["active"] and not p["notified"] and p["level"] != "info" and (p["level"] == "urgent" or not night(now)):
-            msgs.append(p)
+            msgs.append((pid, p))
         if pid not in old:
             log.append(f"新问题 {pid}：{p['msg']}")
         cur[pid] = p
-    resolved = [o for pid, o in old.items() if pid not in cur and o.get("kind") == "state" and o.get("notified")]
-    for pid, o in old.items():
+    for pid in old:
         if pid not in cur:
             log.append(f"消失 {pid}")
     sent_ok = True
     if not dry:
         try:
-            day = now.strftime("%Y-%m-%d")
-            pending_res += [{"msg": o["msg"]} for o in resolved]
-            if not night(now) and st.get("digest") != day:  # 当天第一次白天的检查：所有消息并进每日汇总
-                push(digest(cur, pending_res, st.get("digest_prune_pos", 0), now), title="PhD 作业：每日汇总",
-                     priority="high" if any(p["level"] == "urgent" for p in msgs) else "low", tags="clipboard")
-                for p in cur.values():
-                    if p["active"] and p["level"] != "info":
-                        p["notified"] = True
-                pending_res = []
-                st["digest"] = day
-                st["digest_prune_pos"] = os.path.getsize(PRUNE_LOG) if os.path.exists(PRUNE_LOG) else 0
-            else:
-                for p in msgs:
-                    push(p["msg"], title="PhD 作业：紧急" if p["level"] == "urgent" else "PhD 作业",
-                         priority="high" if p["level"] == "urgent" else "default", tags="rotating_light" if p["level"] == "urgent" else "warning")
+            if msgs:
+                urgent = any(p["level"] == "urgent" for _, p in msgs)
+                texts = [PL.problem(pid, p) for pid, p in msgs]
+                push(texts[0] if len(texts) == 1 else "\n".join("- " + t for t in texts),
+                     title=("PhD：紧急" if urgent else "PhD：需要处理") + (f"（{len(texts)} 件）" if len(texts) > 1 else ""),
+                     priority="high" if urgent else "default", tags="rotating_light" if urgent else "warning")
+                for _, p in msgs:
                     p["notified"] = True
-                if pending_res and not night(now):
-                    push("\n".join("已恢复：" + o["msg"] for o in pending_res), tags="white_check_mark")
-                    pending_res = []
         except Exception as e:  # noqa: BLE001  推送失败：下次再推
             sent_ok = False
             log.append(f"推送失败：{e}")
-        st.update(problems=cur, resolved_overnight=pending_res, checked=now.strftime("%Y-%m-%d %H:%M"))
+        for k in ("digest", "digest_prune_pos", "resolved_overnight"):
+            st.pop(k, None)
+        st.update(problems=cur, checked=now.strftime("%Y-%m-%d %H:%M"))
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
         tmp = STATE + ".tmp"
         json.dump(st, open(tmp, "w"), ensure_ascii=False, indent=1)
@@ -456,21 +445,7 @@ def update(P, now, dry=False):
         if log:
             with open(LOG, "a") as f:
                 f.writelines(f"{now:%F %T} {x}\n" for x in log)
-    return msgs, resolved, sent_ok
-
-
-def digest(cur, resolved, prune_pos, now):
-    act = [p for p in cur.values() if p["active"]]
-    lines = [f"{now:%m-%d %H:%M} 健康检查：" + (f"{len(act)} 个问题" if act else "一切正常")]
-    lines += ["- " + p["msg"] for p in act]
-    lines += ["已恢复：" + o["msg"] for o in resolved]
-    if os.path.exists(PRUNE_LOG):
-        with open(PRUNE_LOG) as f:
-            f.seek(prune_pos if prune_pos <= os.path.getsize(PRUNE_LOG) else 0)
-            pr = [ln.strip() for ln in f if ln.strip()]
-        if pr:
-            lines.append(f"归档清理 {len(pr)} 条：" + "；".join(pr[-5:]))
-    return "\n".join(lines)
+    return [p for _, p in msgs], sent_ok
 
 
 def main():
@@ -499,8 +474,6 @@ def main():
         # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=30 if pid.startswith("advance:stale_fetch:") else 0)
     if not a.dry_run:
-        for i, msg in enumerate(events):
-            P[f"refill:{s['now']:%m%d%H%M}:{i}"] = dict(msg=msg, level="normal", kind="event", after=0)
         for pid in [k for k in P if k.startswith("idle:") and k.split(":")[1] in filled]:
             del P[pid]
     update(P, s["now"], dry=a.dry_run)

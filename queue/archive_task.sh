@@ -13,7 +13,7 @@
 #   2. 核对：训练机上 out 里的每个文件（exclude 的除外）box 上都有、内容一致（按校验和）；box 上的每个文件备份机器上都有、大小和
 #      修改时间一致（刚用 rsync 传过，传输时已按校验和核对；DICC 登录节点上不做大量读盘）。
 #   3. 都一致才删训练机上要删的文件，另写一个 ARCHIVED（训完的判断、登记表都认它）。没有要删的文件时只做第 1 步。
-# 任何一步不一致都不删、以非 0 退出（健康检查会提醒）。删除记到 box 的 ~/archive_prune.log（每日汇总里会带上）。
+# 任何一步不一致都不删、以非 0 退出（健康检查会提醒）。删除记到 box 的 ~/archive_prune.log。
 set -euo pipefail
 HOST=${1:?用法：archive_task.sh <机器> <key> [--dry-run]} KEY=${2:?用法：archive_task.sh <机器> <key> [--dry-run]}
 DRY=${3:-}
