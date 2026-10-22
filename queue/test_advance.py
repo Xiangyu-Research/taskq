@@ -262,6 +262,15 @@ done, _ = A.run(snap(remote={"lab": {"Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/
 fc = [c for c in calls if "fetch:" in c]  # 第 6 节留下的 T14 五折也会排，这里只看拉回
 check("有 LIVE：加任务（组、标签、命令都带上）", len(fc) == 1 and fc[0].startswith("wait -p --label fetch:umamba_f0 -- ")
       and "fetch_task.sh lab" in fc[0] and "fetch:umamba_f0（任务 900）" in done)
+with open(os.path.join(A.STATE_DIR, "HOLD"), "w") as f:
+    f.write("# 注释\nfetch:umamba_f*\n")
+calls.clear()
+done, _ = A.run(snap(remote={"lab": {"Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/0": FIN}}), q=fake_q)
+fc = [c for c in calls if "fetch:" in c]
+other = [c for c in calls if "fetch:" not in c]
+check("HOLD：对上的加成暂停的，别的照常", len(fc) == 1 and fc[0].startswith("wait -p --stashed --label fetch:umamba_f0 -- ")
+      and "fetch:umamba_f0（任务 900，暂停（HOLD））" in done and all("--stashed" not in c for c in other))
+os.remove(os.path.join(A.STATE_DIR, "HOLD"))
 todo, _ = A.plan(dict(pueue={"box": {"error": "x"}}, src={}, taskq={}))
 check("box 的 pueue 读不到：什么都不排", todo == [])
 

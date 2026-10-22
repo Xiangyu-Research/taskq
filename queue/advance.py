@@ -19,6 +19,8 @@
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排。
   拉回按源机器认：以前预先排的、在等另一台机器的拉回任务不算，报出来（可以删掉）。
 影子模式：没有 ~/.cache/phd/advance/LIVE 时只把"会排什么"写进 ~/advance.log，不真排。
+暂缓：~/.cache/phd/advance/HOLD 里每行一个标签的通配式（fnmatch，# 开头是注释），对上的步骤照常排，但加成暂停的
+  （pueue add --stashed），不开始跑；要跑时 pueue enqueue <任务号>。暂停的任务算在排，不会再排一次。
 任务的标签：每折 <步骤>:<实验 id>_f<fold>（如 infer:t14met_f3），实验一级 <步骤>:<实验 id>，最后的 <步骤>；
   不属于实验的任务 <步骤>:<key>。
 
@@ -29,6 +31,7 @@ import os
 import shlex
 import sys
 from datetime import datetime
+from fnmatch import fnmatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -273,6 +276,15 @@ def plan(s, root=None):
 
 
 # ---------------- 执行 ----------------
+def held():
+    """HOLD 里的通配式 → [str]。"""
+    try:
+        lines = open(os.path.join(STATE_DIR, "HOLD")).read().splitlines()
+    except OSError:
+        return []
+    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
+
 def run(s, dry=False, q=None):
     """health.py 调用：→ (这次排了的说明列表（影子模式下是"会排 …"）, 卡住的 {问题编号: 说明})。没有 LIVE 文件时是影子模式。"""
     import refill  # q()：在 box 上用 scripts/queue/q 加任务
@@ -280,18 +292,21 @@ def run(s, dry=False, q=None):
     todo, stuck = plan(s)
     live_mode = os.path.exists(os.path.join(STATE_DIR, "LIVE")) and not dry
     done, lines = [], []
+    hold = held()
     for t in todo:
+        h = any(fnmatch(t["label"], pat) for pat in hold)
+        note = "，暂停（HOLD）" if h else ""
         if live_mode:
             try:
-                tid = q(M.hub(), f"{t['group']} -p --label {shlex.quote(t['label'])} -- {shlex.quote(t['cmd'])}")
-                done.append(f"{t['label']}（任务 {tid}）")
-                lines.append(f"排了 {t['label']}（{t['group']} 组，任务 {tid}）：{t['cmd']}")
+                tid = q(M.hub(), f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(t['cmd'])}")
+                done.append(f"{t['label']}（任务 {tid}{note}）")
+                lines.append(f"排了 {t['label']}（{t['group']} 组，任务 {tid}{note}）：{t['cmd']}")
             except Exception as e:  # noqa: BLE001
                 lines.append(f"出错 {t['label']}：{e}")
                 stuck[f"advance:{t['step']}:{t['key']}"] = f"{t['step']} {t['key']}：加任务出错（{e}）"
         else:
-            done.append(f"会排 {t['label']}")
-            lines.append(f"会排 {t['label']}（{t['group']} 组）：{t['cmd']}")
+            done.append(f"会排 {t['label']}{note}")
+            lines.append(f"会排 {t['label']}（{t['group']} 组{note}）：{t['cmd']}")
     if not dry:
         log(lines, stuck, live_mode)
     return done, stuck
