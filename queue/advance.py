@@ -22,13 +22,14 @@
 暂缓：~/.cache/phd/advance/HOLD 里每行一个标签的通配式（fnmatch，# 开头是注释），对上的步骤照常排，但加成暂停的
   （pueue add --stashed），不开始跑；要跑时 pueue enqueue <任务号>。暂停的任务算在排，不会再排一次。
 分到别的机器（2026-10-22）：~/.cache/phd/advance/OFFLOAD 里每行一个标签的通配式，对上的每折步骤不在 box 上跑，分到
-  machines.py 里有 offload 组的机器（lab 0 号卡）。行尾加 idle 的只在那个组空着时分过去（box 上排着、还没开始的也挪过去，
+  machines.py 里有 offload 组的机器（lab 0 号卡）。行尾加 idle 的只在那个组空着、卡上也没有别人时分过去（box 上排着、还没开始的也挪过去，
   一次挪一个），否则照常在 box 上跑。步骤要支持 --stage needs（把命令里的 --stage <步骤> 换成 --stage needs，打印要用的输入，
   相对数据目录）。每次检查按状态做下一件事：
     缺输入         → box wait 组 push:<标签>：scripts/queue/offload_io.sh push（文件夹经隧道、文件用 rsync；那边的盘要留够）
     输入齐了       → 那边 offload 组排 <标签>（命令里的 {data}、{python} 换成那边的）
     那边成功跑完   → box wait 组 pull:<标签>：offload_io.sh pull（拉回结果文件夹 = done 判断的文件所在的文件夹，按校验和核对）
     box 上判断做完 → 删掉那边的结果文件夹和自动传过去的模型文件（别的分出去的步骤还要用的留着；测试集的输入文件夹留着）
+  那边的卡被别人占着时，predict.sh 每次开始前等（RQ1_WAIT_GPU），等的时候那边的任务算在跑，这里不重排；等超时失败的报出来。
   分出去的步骤记在 ~/.cache/phd/advance/offload.json；那边失败、拉回失败或拉回后还是没做完的不重排，报出来。
 任务的标签：每折 <步骤>:<实验 id>_f<fold>（如 infer:t14met_f3），实验一级 <步骤>:<实验 id>，最后的 <步骤>；
   不属于实验的任务 <步骤>:<key>。
@@ -346,6 +347,18 @@ def remote_have(name, paths):
     return set(lines[:-1]) if r.returncode == 0 and lines[-1:] == ["END"] else None
 
 
+def remote_gpu_free(name, group):
+    """这个组用的卡上没有别人（显存 ≤ 500 MiB，和 predict.sh 的判断一样）→ True；有人或查不到 → False。"""
+    gpu = M.MACHINES[name]["groups"][group][1]
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", M.MACHINES[name]["ssh"],
+                            f"nvidia-smi -i {gpu} --query-gpu=memory.used --format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode == 0 and int(r.stdout.strip()) <= 500
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def local_gb(paths, root):
     r = subprocess.run(["du", "-sbLc"] + [os.path.join(root, p) for p in paths], capture_output=True, text=True)
     return int(r.stdout.strip().splitlines()[-1].split()[0]) / 1e9 if r.stdout.strip() else 0
@@ -364,6 +377,7 @@ class Offload:
         self.rtasks = (s["pueue"].get(self.name) or {}).get("tasks") if self.name else None
         self.moved = False  # idle 的这次已经分过一个
         self.reserved = 0.0  # 这次要传过去的 GB
+        self.gpu_free = None
         self.cleaning = []
         self.have = {}
 
@@ -374,9 +388,14 @@ class Offload:
         return sorted((t for t in tasks or [] if t.get("label") == label), key=lambda t: t["id"])
 
     def idle(self):
+        """那个组空着（没有排着、在跑的任务，也没有在传的），卡上也没有别人。"""
         busy = any(t["status"] in LIVE_ST and t.get("group") == self.group for t in self.rtasks or [])
         pushing = any(t["status"] in LIVE_ST and (t.get("label") or "").startswith("push:") for t in self.ptasks)
-        return not busy and not pushing and not self.moved
+        if busy or pushing or self.moved:
+            return False
+        if self.gpu_free is None:
+            self.gpu_free = remote_gpu_free(self.name, self.group)
+        return self.gpu_free
 
     def take(self, t, st, label, n, archiving):
         """这一步分到别的机器（已经分过、或这次分）→ True；照常在 box 上排 → False。"""

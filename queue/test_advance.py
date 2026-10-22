@@ -283,6 +283,8 @@ REMOTE = {"have": set()}
 A.step_needs = lambda cmd: NEEDS if "--stage infer" in cmd else None
 A.remote_have = lambda name, paths: {p_ for p_ in paths if p_ in REMOTE["have"]}
 A.local_gb = lambda paths, root: 5.0
+GPU = {"free": True}
+A.remote_gpu_free = lambda name, group: GPU["free"]
 with open(os.path.join(A.STATE_DIR, "OFFLOAD"), "w") as f:
     f.write("# 大模型\ninfer:swin_v2_f*\ninfer:t3met_f* idle\n")
 
@@ -321,6 +323,10 @@ check("OFFLOAD：输入齐了 → lab gpu0 组排同样的标签，{data} 换成
 rinf = (7, "Running", x[0]["cmd"], "infer:swin_v2_f0", "gpu0")
 todo, stuck = A.plan(osnap(lab=[rinf]))
 check("OFFLOAD：那边在跑 → 等（box 上也不排）", not sw(todo) and not stuck)
+GPU["free"] = False
+todo, stuck = A.plan(osnap(lab=[rinf]))
+check("OFFLOAD：那边的任务在等别人用完卡（算在跑）→ 不重排、不报", not sw(todo) and not stuck)
+GPU["free"] = True
 todo, stuck = A.plan(osnap(lab=[(7, "Failed (1)", rinf[2], rinf[3], "gpu0")]))
 check("OFFLOAD：那边失败 → 不重排，报出来", not sw(todo) and "lab 任务 7" in stuck["advance:offload:infer:swin_v2_f0"])
 todo, stuck = A.plan(osnap(lab=[(7, "Success", rinf[2], rinf[3], "gpu0")]))
@@ -357,6 +363,10 @@ busy = (3, "Running", "x", "manual", "gpu0")
 todo, stuck = A.plan(osnap(lab=[busy]))
 check("idle：那边组里有任务 → 照常在 box 排", sorted((t["step"], t["key"], t.get("host")) for t in todo if t["key"].startswith(T3))
       == [("infer", f"{T3}/1", None), ("infer", f"{T3}/3", None)])
+GPU["free"] = False
+todo, stuck = A.plan(osnap())
+check("idle：组空着但卡上有别人 → 照常在 box 排", [t.get("host") for t in todo if t["key"].startswith(T3)] == [None, None])
+GPU["free"] = True
 todo, stuck = A.plan(osnap())
 x = [t for t in todo if t["key"].startswith(T3)]
 check("idle：那边空着 → 只分一个过去，另一个照常在 box", sorted((t["key"], t.get("host")) for t in x) == [(f"{T3}/1", "lab"), (f"{T3}/3", None)])

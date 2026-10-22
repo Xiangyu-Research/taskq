@@ -21,11 +21,11 @@
                  └──────── 都用 run_task.sh <做法> k=v… 跑：激活环境、设变量、跑命令、写分段日志 ────────┘
                                 ↓ 训完（任务说明的 done）
  box 按状态推进（advance.py，跟着健康检查每 30 分钟）：拉回 → 归档 → 实验表里的步骤（RQ1：推理 → 评测 → 五折分析）
-     └─ OFFLOAD 对上的推理：传输入（offload_io.sh push）→ lab gpu0 推理 → 拉回、核对（offload_io.sh pull）→ box 核对后删 lab 那份
+     └─ OFFLOAD 对上的推理（10/22 起暂不启用）：传输入（offload_io.sh push）→ lab gpu0 推理 → 拉回、核对（offload_io.sh pull）→ box 核对后删 lab 那份
 ```
 
 - **pueue** 在 box、lab 上只当运行器：按组限并发、留日志、断开 ssh 不中断。不用暂存、优先级、`--after`（10/18 起）。
-- **开关**（都是文件，删掉 / 不建就是关）：DICC `~/.cache/phd/taskq/ENABLED`（DICC 作业按队列领任务；没有时照旧训作业名那一折）；box `~/.cache/phd/taskq/LAB`（替 lab 领任务；没有时只续 lab 已有的领取，其余只记"会做什么"）；box `~/.cache/phd/advance/LIVE`（按状态推进真的排任务；没有时只记"会排什么"）；box `~/.cache/phd/advance/HOLD`（每行一个标签的通配式，如 `infer:umamba_f*`：对上的步骤照常排，但加成暂停的，要跑时 `pueue enqueue <任务号>`）；box `~/.cache/phd/advance/OFFLOAD`（每行一个标签的通配式：对上的每折步骤分到 `envs/machines.py` 里有 `offload` 组的机器（lab `gpu0`）跑；行尾加 `idle` 的只在那个组空着时分过去，box 上排着没开始的一次挪一个；10/22 起）；box `~/.cache/phd/taskq/DICC`（DICC 排着的作业不够时自动补交 `worker.sbatch`；没有时只记"会交什么"）；DICC `~/.cache/phd/gpu_pad/DISABLED`（有这个文件时不填显存）。
+- **开关**（都是文件，删掉 / 不建就是关）：DICC `~/.cache/phd/taskq/ENABLED`（DICC 作业按队列领任务；没有时照旧训作业名那一折）；box `~/.cache/phd/taskq/LAB`（替 lab 领任务；没有时只续 lab 已有的领取，其余只记"会做什么"）；box `~/.cache/phd/advance/LIVE`（按状态推进真的排任务；没有时只记"会排什么"）；box `~/.cache/phd/advance/HOLD`（每行一个标签的通配式，如 `infer:umamba_f*`：对上的步骤照常排，但加成暂停的，要跑时 `pueue enqueue <任务号>`）；box `~/.cache/phd/advance/OFFLOAD`（每行一个标签的通配式：对上的每折步骤分到 `envs/machines.py` 里有 `offload` 组的机器（lab `gpu0`）跑；行尾加 `idle` 的只在那个组空着时分过去，box 上排着没开始的一次挪一个；功能有，10/22 起暂不启用：lab 0 号卡有别人在用，规则都注释掉了）；box `~/.cache/phd/taskq/DICC`（DICC 排着的作业不够时自动补交 `worker.sbatch`；没有时只记"会交什么"）；DICC `~/.cache/phd/gpu_pad/DISABLED`（有这个文件时不填显存）。
 
 ## 出问题时看哪里
 
@@ -47,7 +47,7 @@
 | box | `cpu` | 2 | 评测（`run_predict_eval.sh --stage eval`）、五折集成评测、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等） |
 | box | `wait` | 不限 | 拉回训完的任务（`fetch_task.sh`）、lab 训的任务归档（`archive_task.sh`）、给 lab 传数据（`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡训练（`run_task.sh`） |
-| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务和 box 分过来的推理（10/22 起，`refill.py` 不往里领训练）；卡上有别人时推理先等，最多 24 小时 |
+| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领训练）；box 分推理过来的功能有，10/22 起暂不启用（卡上有别人时推理先等，最多 24 小时） |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 文件
