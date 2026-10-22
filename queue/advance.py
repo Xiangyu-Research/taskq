@@ -9,6 +9,11 @@
   archive  pueue 训练机（lab）上训完、拉回 box 以后，那边还没归档（没有 ARCHIVED），做法有 archive、实验没写 archive=False
            → scripts/queue/archive_task.sh <机器> <key>（wait 组：备份、核对后删那边的大文件）
   after    实验表里每折的步骤（RQ1：推理 → 评测），按顺序做第一个没做完的
+           带 queue 的步骤（2026-10-22，RQ1 的推理）不在 box 上跑，放进训练的任务队列（taskq.py add --recipe command，
+           参数是 queue 里的、nice 是 queue 的 nice）：queue 的 machines 第一台上缺输入（--stage needs）时，缺的是文件就先
+           offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；齐了再加。队列里已经有（同一个 key）就不再加，
+           那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按这一步的 done 判断，不对就报出来。
+           box pueue 里已经有这一步（10/22 前排的）时不加。HOLD 对上的先不加。
 一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤> 的要每折都做完那一步）。
 最后：FINAL 的步骤（RQ1：compare_all）。有 rerun_if_newer 的，在列出的步骤有比它开始时更新的结果、实验一级的步骤都没有在排 / 在跑时重跑。
 队列里不属于任何实验的任务只拉回、归档。
@@ -231,6 +236,46 @@ def plan(s, root=None):
                                                            f"不用了：pueue kill {i} 后 pueue remove {i}")
 
     off = Offload(s, root, ptasks, todo, stuck, live, live_tasks)
+    qkeys = {t["key"] for t in queue_tasks}
+
+    def to_queue(t, st, label, n, archiving):
+        """带 queue 的步骤：放进任务队列（见开头 after）。"""
+        if (st["name"], t["key"]) in live:
+            return
+        qd = st["queue"]
+        q = {k: S.fill(v, dict(t["names"], data="{data}"), keep=()) for k, v in qd.items() if k != "nice"}
+        if q["key"] in qkeys:
+            if all(os.path.exists(os.path.join(root, q["out"], d)) for d in q["done"]):
+                stuck[f"advance:{st['name']}:{t['key']}"] = (f"{label}：任务队列的 {q['key']} 做完、拉回了，但 box 上核对还是没做完"
+                                                              f"（{os.path.join(root, q['out'])}）")
+            return
+        if archiving:
+            return
+        mach = next(iter(q.get("machines") or []), None)
+        if mach and mach != hub:
+            needs = step_needs(S.fill(st["cmd"], t["names"], keep=()))
+            if needs is None:
+                stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：命令不支持 --stage needs，查不了 {mach} 上缺什么"
+                return
+            have = remote_have(mach, needs)
+            if have is None:
+                stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：连不上 {mach}，这次不处理"
+                return
+            missing = [p for p in needs if p not in have]
+            if missing:
+                dirs = [p for p in missing if not os.path.isfile(os.path.join(root, p))]
+                pushes = sorted((x for x in ptasks if x.get("label") == f"push:{label}"), key=lambda x: x["id"])
+                if dirs or (pushes and pushes[-1]["status"] not in LIVE_ST):
+                    why = (f"{mach} 上没有 {' '.join(dirs)}，要先传过去" if dirs else
+                           f"传输任务 {pushes[-1]['id']} {pushes[-1]['status']}，{mach} 上还缺 {' '.join(missing)}（看 pueue log "
+                           f"{pushes[-1]['id']}；处理好以后 pueue remove {pushes[-1]['id']}）")
+                    stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：{why}"
+                elif not pushes:
+                    todo.append(dict(step="push", key=t["key"], group="wait", label=f"push:{label}", nice=n, paths=missing,
+                                     cmd="bash scripts/queue/offload_io.sh push " + " ".join([mach] + [shlex.quote(p) for p in missing])))
+                return
+        todo.append(dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
+                         args=S.kv_args("command", q)[1:], cmd=q["cmd"]))
     trained, after_ok = {}, {}  # 任务 → box 上训完没；(任务, 步骤) → 做完没
     for t in tasks:
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
@@ -256,7 +301,9 @@ def plan(s, root=None):
             if ok:
                 off.finished(label)
             elif not blocked:
-                if not off.take(t, st, label, n, archiving):
+                if st.get("queue"):
+                    to_queue(t, st, label, n, archiving)
+                elif not off.take(t, st, label, n, archiving):
                     want(st["name"], key, label, S.fill(st["cmd"], t["names"], keep=()), st["group"], n)
                 blocked = True
 
@@ -519,10 +566,18 @@ def held():
     return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
 
-def run(s, dry=False, q=None):
+def taskq_add(nice, args):
+    """加进训练的任务队列（box 上的 taskq.py 自动经 ssh 转到 DICC）→ (退出码, 输出)。"""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", str(nice), "--recipe", "command", *args],
+                       cwd=REPO, capture_output=True, text=True, timeout=300)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def run(s, dry=False, q=None, tq=None):
     """health.py 调用：→ (这次排了的说明列表（影子模式下是"会排 …"）, 卡住的 {问题编号: 说明})。没有 LIVE 文件时是影子模式。"""
     import refill  # q()：在 box 上用 scripts/queue/q 加任务
     q = q or refill.q
+    tq = tq or taskq_add
     todo, stuck = plan(s)
     live_mode = os.path.exists(os.path.join(STATE_DIR, "LIVE")) and not dry
     done, lines = [], []
@@ -545,6 +600,22 @@ def run(s, dry=False, q=None):
                 lines.append(f"会清理 {what}")
             continue
         h = any(fnmatch(t["label"], pat) for pat in hold)
+        if t.get("op") == "taskq":
+            what = f"{t['label']}（任务队列，档位 {t['qnice']}）：{t['cmd']}"
+            if h:
+                lines.append(f"暂缓 {what}（HOLD）")
+            elif live_mode:
+                rc, out = tq(t["qnice"], t["args"])
+                if rc == 0:
+                    done.append(f"任务队列 {t['label']}")
+                    lines.append(f"排了 {what}")
+                else:
+                    lines.append(f"出错 {t['label']}：{out[-200:]}")
+                    stuck[f"advance:{t['step']}:{t['key']}"] = f"{t['step']} {t['key']}：加进任务队列出错（{out[-200:]}）"
+            else:
+                done.append(f"会排 任务队列 {t['label']}")
+                lines.append(f"会排 {what}")
+            continue
         note = "，暂停（HOLD）" if h else ""
         if t.get("steal"):
             note += f"，从 box 挪过去（删 box 任务 {' '.join(map(str, t['steal']))}）"
@@ -603,6 +674,8 @@ if __name__ == "__main__":
     for t in todo:
         if t.get("op") == "clean":
             print(f"会清理 {t['label']:26} {t['host']} {' '.join(t['paths'])}")
+        elif t.get("op") == "taskq":
+            print(f"会排 {t['label']:28} 任务队列（档位 {t['qnice']}） {' '.join(shlex.quote(a) for a in t['args'])}")
         else:
             print(f"会排 {t['label']:28} {(t.get('host', '') + ' ' + t['group']).strip():9} {t['cmd']}"
                   + (f"（挪走 box 任务 {t['steal']}）" if t.get("steal") else ""))

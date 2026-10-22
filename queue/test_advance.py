@@ -16,6 +16,8 @@ sys.path.insert(0, HERE)
 import advance as A  # noqa: E402
 
 A.STATE_DIR = os.path.join(T, "state")
+# 前面几节测 box 上排的步骤：先去掉推理的 queue（10/22 起推理放 DICC 任务队列），最后一节再放回来测
+QUEUED = [(st, st.pop("queue")) for e in A.E.load()[0] for st in e.get("after", []) if "queue" in st]
 P = "nnUNetResEncUNetMPlans__3d_fullres"
 F5 = ["0", "1", "2", "3", "4"]
 PY = A.python()
@@ -384,6 +386,66 @@ check("idle 挪的时候：先 pueue remove box 任务，再在那边加", rm ==
       and any(c.startswith("gpu0 -p --label infer:t3met_f1 -- ") for c in calls))
 os.remove(os.path.join(A.STATE_DIR, "OFFLOAD"))
 os.remove(os.path.join(A.STATE_DIR, "offload.json"))
+
+# 10. 带 queue 的步骤（10/22，推理）：放进 DICC 的任务队列，box 不跑
+for st_, qd_ in QUEUED:
+    st_["queue"] = qd_
+TC = "Dataset103_GLIrq1_t1c/nnUNetTrainer_save10"
+TCM = f"nnUNet/results/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}"
+TCQ = f"infer/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2"
+trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
+TNEEDS = [f"{TCM}/dataset.json", f"{TCM}/fold_2/checkpoint_final.pth", "nnUNet/raw/RQ1_holdout/GLI/imagesTs"]
+A.step_needs = lambda cmd: TNEEDS if "--stage infer" in cmd else None
+REMOTE["have"] = set(TNEEDS)
+
+
+def tc(todo):
+    return [t for t in todo if t["key"] == f"{TC}/2"]
+
+
+todo, stuck = A.plan(snap())
+x = tc(todo)
+check("queue：输入齐了 → 加进任务队列（档位 -100、只在 DICC、{data} 留给那边换）", len(x) == 1 and x[0]["op"] == "taskq"
+      and x[0]["qnice"] == -100 and f"key={TCQ}" in x[0]["args"] and 'machines=["dicc"]' in x[0]["args"]
+      and f"cmd=bash research/RQ1/analysis/infer_task.sh {{data}}/{TCM} 2" in x[0]["args"]
+      and 'done=[".infer_done"]' in x[0]["args"] and not any(t["group"] == "gpu" for t in todo))
+REMOTE["have"] = set(TNEEDS) - {f"{TCM}/fold_2/checkpoint_final.pth"}
+trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
+todo, stuck = A.plan(snap())
+x = tc(todo)
+check("queue：DICC 上缺模型文件 → box wait 组先传过去，不加任务", len(x) == 1 and x[0]["step"] == "push" and x[0]["group"] == "wait"
+      and x[0]["cmd"] == f"bash scripts/queue/offload_io.sh push dicc {TCM}/fold_2/checkpoint_final.pth")
+pq = [("Failed (1)", x[0]["cmd"], None)]
+s_ = snap(pq)
+s_["pueue"]["box"]["tasks"][0]["label"] = "push:infer:t1c_f2"
+todo, stuck = A.plan(s_)
+check("queue：传输失败过 → 不重排，报出来", not tc(todo) and "传输任务 0" in stuck.get(f"advance:infer:{TC}/2", ""))
+REMOTE["have"] = set(TNEEDS) - {"nnUNet/raw/RQ1_holdout/GLI/imagesTs"}
+todo, stuck = A.plan(snap())
+check("queue：DICC 上缺测试集文件夹 → 报出来", not tc(todo) and "imagesTs" in stuck.get(f"advance:infer:{TC}/2", ""))
+REMOTE["have"] = set(TNEEDS)
+s_ = snap()
+s_["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100))
+todo, stuck = A.plan(s_)
+check("queue：队列里已经有 → 不再加", not tc(todo) and f"advance:infer:{TC}/2" not in stuck)
+touch(f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/.infer_done")
+todo, stuck = A.plan(s_)
+check("queue：拉回了但 box 上核对不过 → 报出来", not tc(todo) and "核对还是没做完" in stuck.get(f"advance:infer:{TC}/2", ""))
+os.remove(f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/.infer_done")
+old_box = ("Stashed", f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer {T}/{TCM} 2", None)
+todo, stuck = A.plan(snap([old_box]))
+check("queue：box pueue 里已经有这一步（10/22 前排的）→ 不加", not tc(todo))
+added = []
+fake_tq = lambda nice, args: added.append((nice, args)) or (0, "加入")  # noqa: E731
+done, _ = A.run(snap(), q=lambda *a: 0, tq=fake_tq)
+check("queue：有 LIVE 时调用 taskq.py add（档位 -100）", any(n_ == -100 and f"key={TCQ}" in a_ for n_, a_ in added)
+      and "任务队列 infer:t1c_f2" in done)
+added.clear()
+with open(os.path.join(A.STATE_DIR, "HOLD"), "w") as f:
+    f.write("infer:*\n")
+done, _ = A.run(snap(), q=lambda *a: 0, tq=fake_tq)
+check("queue：HOLD 对上的先不加", not any(f"key={TCQ}" in a_ for _, a_ in added))
+os.remove(os.path.join(A.STATE_DIR, "HOLD"))
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
