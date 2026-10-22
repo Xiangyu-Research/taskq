@@ -274,5 +274,106 @@ os.remove(os.path.join(A.STATE_DIR, "HOLD"))
 todo, _ = A.plan(dict(pueue={"box": {"error": "x"}}, src={}, taskq={}))
 check("box 的 pueue 读不到：什么都不排", todo == [])
 
+# 9. 分到别的机器（OFFLOAD）：传输 → 那边推理 → 拉回 → box 核对 → 清理那边
+SW = "Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"
+SWM = f"nnUNet/results/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__{P}"
+NEEDS = [f"{SWM}/dataset.json", f"{SWM}/plans.json", f"{SWM}/fold_0/checkpoint_final.pth", "nnUNet/raw/RQ1_holdout/GLI/imagesTs"]
+trained("Dataset101_GLIrq1", "nnUNetTrainer_SwinUNETR", "0")
+REMOTE = {"have": set()}
+A.step_needs = lambda cmd: NEEDS if "--stage infer" in cmd else None
+A.remote_have = lambda name, paths: {p_ for p_ in paths if p_ in REMOTE["have"]}
+A.local_gb = lambda paths, root: 5.0
+with open(os.path.join(A.STATE_DIR, "OFFLOAD"), "w") as f:
+    f.write("# 大模型\ninfer:swin_v2_f*\ninfer:t3met_f* idle\n")
+
+
+def osnap(box=(), lab=(), disk=600e9):
+    s_ = snap()
+    s_["pueue"]["box"]["tasks"] = [dict(id=i, status=st, command=c, label=lb, group=g, end=None) for i, st, c, lb, g in box]
+    s_["pueue"]["lab"] = dict(tasks=[dict(id=i, status=st, command=c, label=lb, group=g, end=None) for i, st, c, lb, g in lab])
+    s_["probe"] = {"lab": {"DISK": str(int(disk))}}
+    return s_
+
+
+def sw(todo):
+    return [t for t in todo if t["label"].endswith("infer:swin_v2_f0")]
+
+
+todo, stuck = A.plan(osnap())
+x = sw(todo)
+check("OFFLOAD：缺输入 → box wait 组 push:<标签>，传缺的全部", len(x) == 1 and x[0]["label"] == "push:infer:swin_v2_f0"
+      and x[0]["group"] == "wait" and x[0]["cmd"].startswith("bash scripts/queue/offload_io.sh push lab ") and x[0]["paths"] == NEEDS
+      and not x[0].get("host"))
+check("OFFLOAD：传过去的文件记下来（以后删），文件夹不记", x[0]["record"][1]["pushed"] == [f"{SWM}/fold_0/checkpoint_final.pth"]
+      if os.path.isfile(f"{T}/{SWM}/fold_0/checkpoint_final.pth") else False)
+todo, stuck = A.plan(osnap(disk=60e9))
+check("OFFLOAD：那边的盘不够 → 不传，报出来", not sw(todo) and "盘" in stuck.get("advance:offload:infer:swin_v2_f0", ""))
+push = (5, "Running", "bash scripts/queue/offload_io.sh push lab x", "push:infer:swin_v2_f0", "wait")
+todo, stuck = A.plan(osnap([push]))
+check("OFFLOAD：在传 → 等", not sw(todo) and not stuck.get("advance:offload:infer:swin_v2_f0"))
+todo, stuck = A.plan(osnap([(5, "Failed (1)", push[2], push[3], "wait")]))
+check("OFFLOAD：传输失败过 → 不重排，报出来", not sw(todo) and "传输任务 5" in stuck["advance:offload:infer:swin_v2_f0"])
+REMOTE["have"] = set(NEEDS)
+todo, stuck = A.plan(osnap([(5, "Success", push[2], push[3], "wait")]))
+x = sw(todo)
+check("OFFLOAD：输入齐了 → lab gpu0 组排同样的标签，{data} 换成那边的", len(x) == 1 and x[0]["host"] == "lab" and x[0]["group"] == "gpu0"
+      and x[0]["label"] == "infer:swin_v2_f0" and x[0]["cmd"] == f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer ~/BRAIN_TUMOR/{SWM} 0")
+rinf = (7, "Running", x[0]["cmd"], "infer:swin_v2_f0", "gpu0")
+todo, stuck = A.plan(osnap(lab=[rinf]))
+check("OFFLOAD：那边在跑 → 等（box 上也不排）", not sw(todo) and not stuck)
+todo, stuck = A.plan(osnap(lab=[(7, "Failed (1)", rinf[2], rinf[3], "gpu0")]))
+check("OFFLOAD：那边失败 → 不重排，报出来", not sw(todo) and "lab 任务 7" in stuck["advance:offload:infer:swin_v2_f0"])
+todo, stuck = A.plan(osnap(lab=[(7, "Success", rinf[2], rinf[3], "gpu0")]))
+x = sw(todo)
+check("OFFLOAD：那边跑完 → box wait 组拉回结果文件夹", len(x) == 1 and x[0]["label"] == "pull:infer:swin_v2_f0" and x[0]["group"] == "wait"
+      and x[0]["cmd"] == f"bash scripts/queue/offload_io.sh pull lab predictions/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__{P}/fold_0")
+pull = (9, "Success", x[0]["cmd"], "pull:infer:swin_v2_f0", "wait")
+todo, stuck = A.plan(osnap([pull], lab=[(7, "Success", rinf[2], rinf[3], "gpu0")]))
+check("OFFLOAD：拉回了但 box 上核对不过 → 报出来", not sw(todo) and "核对还是没做完" in stuck["advance:offload:infer:swin_v2_f0"])
+json.dump({"infer:swin_v2_f0": dict(machine="lab", key=SW, out=f"predictions/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__{P}/fold_0",
+                                     needs=NEEDS, pushed=[NEEDS[2], NEEDS[0]]),
+           "infer:swin_v2_f1": dict(machine="lab", key=SW[:-1] + "1", out="o1", needs=[NEEDS[0]], pushed=[])},
+          open(os.path.join(A.STATE_DIR, "offload.json"), "w"))
+inferred("Dataset101_GLIrq1", "nnUNetTrainer_SwinUNETR", "0")
+todo, stuck = A.plan(osnap())
+x = [t for t in todo if t.get("op") == "clean"]
+check("OFFLOAD：box 上做完 → 清理那边的结果和模型文件（别的分出去的步骤还要用的留着）", len(x) == 1 and x[0]["host"] == "lab"
+      and x[0]["paths"] == [f"predictions/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__{P}/fold_0", NEEDS[2]])
+calls.clear()
+rm = []
+import refill  # noqa: E402
+refill.sh = lambda cmd, host=None, timeout=300: rm.append((cmd, host)) or (0, "")
+done, _ = A.run(osnap(), q=fake_q)
+st_ = json.load(open(os.path.join(A.STATE_DIR, "offload.json")))
+check("OFFLOAD：清理时 ssh 那边 rm，记录里去掉", rm and rm[0][1] == "lab" and rm[0][0].startswith("rm -rf ~/BRAIN_TUMOR/predictions/")
+      and "infer:swin_v2_f0" not in st_ and "infer:swin_v2_f1" in st_)
+os.remove(os.path.join(A.STATE_DIR, "offload.json"))
+
+# idle：那边空着才分；box 上排着没开始的挪过去，一次一个
+for k in ("1", "3"):
+    os.remove(f"{T}/predictions/Dataset116_METrq1/nnUNetTrainer_save10__{P}/fold_{k}/MANIFEST.json")
+REMOTE["have"] = set(NEEDS)
+busy = (3, "Running", "x", "manual", "gpu0")
+todo, stuck = A.plan(osnap(lab=[busy]))
+check("idle：那边组里有任务 → 照常在 box 排", sorted((t["step"], t["key"], t.get("host")) for t in todo if t["key"].startswith(T3))
+      == [("infer", f"{T3}/1", None), ("infer", f"{T3}/3", None)])
+todo, stuck = A.plan(osnap())
+x = [t for t in todo if t["key"].startswith(T3)]
+check("idle：那边空着 → 只分一个过去，另一个照常在 box", sorted((t["key"], t.get("host")) for t in x) == [(f"{T3}/1", "lab"), (f"{T3}/3", None)])
+q1 = (20, "Queued", "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 1", "infer:t3met_f1", "gpu")
+q3 = (21, "Queued", "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 3", "infer:t3met_f3", "gpu")
+todo, stuck = A.plan(osnap([q1, q3]))
+x = [t for t in todo if t["key"].startswith(T3)]
+check("idle：box 上排着没开始 → 挪一个（删 box 任务、在那边排）", len(x) == 1 and x[0]["host"] == "lab" and x[0]["steal"] == [20])
+todo, stuck = A.plan(osnap([(20, "Running", q1[2], q1[3], "gpu"), q3], lab=[busy]))
+check("idle：那边忙 → 不挪", not [t for t in todo if t["key"].startswith(T3)])
+calls.clear()
+rm.clear()
+done, _ = A.run(osnap([q1, q3]), q=fake_q)
+check("idle 挪的时候：先 pueue remove box 任务，再在那边加", rm == [("~/.local/bin/pueue remove 20", None)]
+      and any(c.startswith("gpu0 -p --label infer:t3met_f1 -- ") for c in calls))
+os.remove(os.path.join(A.STATE_DIR, "OFFLOAD"))
+os.remove(os.path.join(A.STATE_DIR, "offload.json"))
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

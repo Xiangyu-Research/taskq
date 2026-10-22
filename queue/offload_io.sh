@@ -1,0 +1,51 @@
+#!/bin/bash
+# 分到别的机器的步骤（scripts/queue/advance.py 的 OFFLOAD，2026-10-22）的传输，在 box 上跑（advance.py 放进 wait 组）：
+#   offload_io.sh push <机器> <相对数据目录的路径>...   box → 那边：文件夹经隧道（scripts/sync/tunnel_push.sh），文件用 rsync over ssh
+#   offload_io.sh pull <机器> <相对数据目录的文件夹>     那边 → box：rsync，再按校验和核对一遍，不一致就以非 0 退出
+# 只新增 / 更新，不删任何一边的文件。
+set -euo pipefail
+OP=${1:?用法：offload_io.sh push|pull <机器> <路径>...} HOST=${2:?缺机器}
+shift 2
+(( $# > 0 )) || { echo "至少给一个路径" >&2; exit 2; }
+REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+M="python3 $REPO/envs/machines.py"
+H=$($M get "$HOST" ssh)
+[[ -n $H ]] || { echo "envs/machines.py 里没有可以连过去的机器 $HOST" >&2; exit 2; }
+RD=$($M get "$HOST" data) LD=${BRAIN_TUMOR:-$($M get . data)}
+RD=${RD/#\~\//}
+for p in "$@"; do [[ $p != /* && $p != *..* ]] || { echo "路径要相对数据目录：$p" >&2; exit 2; }; done
+
+if [[ $OP == push ]]; then
+    files=()
+    for p in "$@"; do
+        p=${p%/}
+        if [[ -d $LD/$p ]]; then
+            d=$(dirname "$p")
+            bash "$REPO/scripts/sync/tunnel_push.sh" "$HOST" "$LD/$d" "$RD/$d" "$(basename "$p")"
+        elif [[ -f $LD/$p ]]; then
+            files+=("$p")
+        else
+            echo "box 上没有 $LD/$p" >&2; exit 1
+        fi
+    done
+    if (( ${#files[@]} )); then
+        echo "$(date '+%F %T') rsync ${#files[@]} 个文件到 $HOST"
+        (cd "$LD" && rsync -aRLK --partial "${files[@]}" "$H:$RD/")
+        diff=$(cd "$LD" && rsync -aRLKc -n --out-format='%n' "${files[@]}" "$H:$RD/")
+        diff=$(grep -v '/$' <<< "$diff" || true)
+        [[ -z $diff ]] || { echo "核对不一致：$diff" >&2; exit 1; }
+    fi
+    echo "$(date '+%F %T') 传完"
+elif [[ $OP == pull ]]; then
+    (( $# == 1 )) || { echo "pull 只给一个文件夹" >&2; exit 2; }
+    p=${1%/}
+    mkdir -p "$LD/$p"
+    echo "$(date '+%F %T') 从 $HOST 拉回 $p"
+    rsync -a --partial "$H:$RD/$p/" "$LD/$p/"
+    diff=$(rsync -ac -n --out-format='%n' "$H:$RD/$p/" "$LD/$p/")
+    diff=$(grep -v '/$' <<< "$diff" || true)
+    [[ -z $diff ]] || { echo "核对不一致：$diff" | head -20 >&2; exit 1; }
+    echo "$(date '+%F %T') 拉回、核对完：$(du -sh "$LD/$p" | cut -f1)"
+else
+    echo "用法：offload_io.sh push|pull <机器> <路径>..." >&2; exit 2
+fi
