@@ -128,7 +128,7 @@ def minutes(elapsed):
 
 def task_key(cmd):
     """pueue 任务命令 → (种类, key)：训练（run_task.sh <做法> k=v…，10/18 前的 train_task.sh，见 make_registry.train_key）、
-    拉回（fetch_task.sh <机器> <key>，10/18 前的 fetch_fold.sh <机器> <模型文件夹> <fold>）。"""
+    拉回（fetch_task.sh <机器> <key>）。"""
     key = mr.train_key(cmd)
     if key:
         return "train", key
@@ -136,9 +136,6 @@ def task_key(cmd):
     m = re.search(r"fetch_task\.sh\s+(\S+)\s+(\S+)", cmd)
     if m:
         return "fetch:" + m.group(1), m.group(2)
-    m = re.search(r"fetch_fold\.sh\s+(\S+)\s+(\S+)/(\S+?)__\S+\s+(\S+)", cmd)
-    if m:
-        return "fetch:" + m.group(1), f"{m.group(2)}/{m.group(3)}/{m.group(4)}"
     return None, None
 
 

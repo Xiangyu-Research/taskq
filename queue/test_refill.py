@@ -206,7 +206,7 @@ cmds.clear(), rem.clear()
 acts, _, _ = R.plan(snap([train(5, 101, 1, "Running", UM)], queue=mine), "lab")
 R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("续：一次 beat 带上所有在训的折", rem == [f"beat --worker lab {K_UM}"] and cmds == [])
-ok("没有 Slurm 作业取消、没有 box 下游任务", not any("scancel" in c or "fetch_fold" in c for _, c in cmds))
+ok("没有 Slurm 作业取消、没有 box 下游任务", not any("scancel" in c or "fetch_task" in c for _, c in cmds))
 
 # ---------------- 只跑手动任务的组（10/22：lab 0 号卡，machines.py 的 manual） ----------------
 G2 = {"gpu1": "Running", "gpu0": "Running", "cpu": "Running", "wait": "Running"}
@@ -250,7 +250,7 @@ ok("--dry-run：打印会做什么", "会 take" in ev[0])
 cmds.clear()
 busy = snap([train(1, 103, 3, "Running")])
 ok("还有训练在用：不删", R.cleanup(busy, "lab", run=fake_run) == [] and not cmds)
-arch = task(40, "wait", "Queued", "bash scripts/queue/archive_fold.sh lab Dataset103_GLIrq1_t1c/x 0", "a")
+arch = task(40, "wait", "Queued", "bash scripts/queue/archive_task.sh lab Dataset103_GLIrq1_t1c/x/0", "a")
 ok("box 上还有这台机器的归档任务：不删", R.cleanup(snap(box_tasks=[arch]), "lab", run=fake_run) == [] and not cmds)
 ok("lab 上还有训完没归档的折：不删", R.cleanup(snap(lab_folds={K_T1C[0]: dict(final=True, archived=False)}), "lab", run=fake_run) == [] and not cmds)
 ok("lab 还领着这个数据集的折：不删", R.cleanup(snap(queue=mine2), "lab", run=fake_run) == [] and not cmds)

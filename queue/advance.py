@@ -19,7 +19,7 @@
 队列里不属于任何实验的任务只拉回、归档。
 
 在不在跑：box pueue 里的任务，按命令或标签认出是哪一步、哪个任务：拉回、归档按命令（带源机器）；其他步骤的命令和这里会生成的
-  一样、或者标签一样就算；10/18 前的写法（fetch_fold.sh、archive_fold.sh、不带 --stage 的 run_predict_eval.sh 等）也认得。
+  一样、或者标签一样就算；10/18 前的写法（不带 --stage 的 run_predict_eval.sh 等）也认得。
 失败过的不自动重排：pueue 里这一步最后一次成功之后有失败 / 被停掉的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排。
   拉回按源机器认：以前预先排的、在等另一台机器的拉回任务不算，报出来（可以删掉）。
@@ -96,13 +96,6 @@ def step_of(cmd):
         if b in ("fetch_task.sh", "archive_task.sh") and len(rest) >= 2:
             return [(f"fetch@{rest[0]}" if b == "fetch_task.sh" else "archive", rest[1])]
         # 以下是 10/18 前的写法（box pueue 里的旧任务）
-        if b in ("fetch_fold.sh", "archive_fold.sh") and len(rest) >= 3:
-            mk = model_key(rest[1])
-            step = f"fetch@{rest[0]}" if b == "fetch_fold.sh" else "archive"
-            return [(step, f"{mk[0]}/{mk[1]}/{rest[2]}")] if mk else []
-        if b == "archive_lab_fold.sh" and len(rest) >= 2:  # 10/16 前的写法
-            mk = model_key(rest[0])
-            return [("archive", f"{mk[0]}/{mk[1]}/{rest[1]}")] if mk else []
         if b == "run_predict_eval.sh":
             stage = None
             if rest[:1] == ["--stage"] and len(rest) >= 2:

@@ -8,14 +8,13 @@ lab 由 box 上的 scripts/queue/refill.py 替它领。
 
 队列目录（DICC 上，家目录各节点共用）：~/.cache/phd/taskq/
   tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}
-                （10/18 前的 tasks.tsv 第一次读时自动转过来，原文件改名 tasks.tsv.bak）
   claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号，或 lab）、主机、领取和最近一次心跳的时间，
                 可选 ttl（心跳多久不更新算过期，默认 20 分钟；box 替 lab 领的是 24 小时，见 scripts/queue/refill.py）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
   skips/<key>   某台机器训不了的任务（release --skip，现在只有 lab 用）：这台机器不再领它，别的机器照常领；不算失败
   released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
-  ENABLED       总开关：有这个文件时 10/17 前交的按折作业才按队列领任务
+  ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（scripts/queue/worker_start.sh）
   lock          改队列时的锁（mkdir）
 不领的任务：已经训完（任务说明的 done）；别处正在训（claims 里有、心跳在 ttl 内，或者训练日志 15 分钟内更新过）；
   说明解析不了的（参数写错，status 里显示 bad）。
@@ -27,8 +26,6 @@ DICC 上（worker 调用）：
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
-    taskq.py claim --worker <作业号> --kind any [...]   10/19 前开始的 dicc_worker.sh 用：参数同 next（--kind 不再起作用），
-        打印 "key 数据集编号 训练器 fold"，只发它会跑的任务（做法 nnunet、默认 plans 和配置、环境和训练器名对得上）。约 10/21 删。
 box 上（本机没有队列时自动经 ssh 在 DICC 上跑）：
     taskq.py add --nice <档位> --exp <实验 id> [--folds 0 1 …]     从实验表加（已有的跳过）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
@@ -73,7 +70,7 @@ def tasks_path():
 
 
 def have_queue():
-    return os.path.exists(tasks_path()) or os.path.exists(os.path.join(TQ, "tasks.tsv"))
+    return os.path.exists(tasks_path())
 
 
 # ---------------- 文件 ----------------
@@ -135,11 +132,6 @@ class Lock:
 
 
 # ---------------- 任务说明 ----------------
-def env_guess(trainer):
-    """10/18 前按训练器名字选环境的规则：只用来把旧任务表转过来、判断旧 worker 能不能跑。"""
-    return "swinunetr" if "SwinUNETR" in trainer else "umamba" if "UMamba" in trainer else "nnunet"
-
-
 def from_key(key):
     """key → 任务（exp、recipe、params）：实验表里有的照表，没有的按 nnunet 做法（数据集/训练器/fold）。"""
     import experiments as E
@@ -150,8 +142,6 @@ def from_key(key):
     if not m:
         raise SystemExit(f"实验表里没有 {key}，也不是 数据集/训练器/fold 的格式（别的做法用 add --recipe）")
     p = dict(dataset=m.group(1), trainer=m.group(2), fold=m.group(3))
-    if env_guess(p["trainer"]) != "nnunet":
-        p["env"] = env_guess(p["trainer"])
     return dict(key=key, exp=None, recipe="nnunet", params=p)
 
 
@@ -173,31 +163,6 @@ def spec_of(t):
         t["bad"] = f"参数算出的任务名是 {s['key']}，和记录的 {t['key']} 不一致"
         return None
     return s
-
-
-def migrate():
-    """10/18 前的 tasks.tsv（7 列）→ tasks.jsonl：顺序、档位不变，按 key 找实验表。原文件改名 tasks.tsv.bak。"""
-    old = os.path.join(TQ, "tasks.tsv")
-    if os.path.exists(tasks_path()) or not os.path.exists(old):
-        return 0
-    out = []
-    for ln in open(old, encoding="utf-8"):
-        if ln.startswith("#") or not ln.strip():
-            continue
-        p = ln.rstrip("\n").split("\t")
-        if len(p) != 7:
-            continue
-        out.append(dict(from_key(p[2]), order=int(p[0]), nice=int(p[1])))
-    write_tasks(out)
-    os.replace(old, old + ".bak")
-    print(f"tasks.tsv → {TASKS}：{len(out)} 个任务（原文件留在 tasks.tsv.bak）", file=sys.stderr)
-    return len(out)
-
-
-def ensure_migrated():
-    if not os.path.exists(tasks_path()) and os.path.exists(os.path.join(TQ, "tasks.tsv")):
-        with Lock():
-            migrate()
 
 
 def data_root():
@@ -279,20 +244,6 @@ def state(t, root):
     return "free", ""
 
 
-def legacy_args(t):
-    """10/19 前开始的 dicc_worker.sh 能跑的任务 → "key 数据集编号 训练器 fold"；不能 → None。
-    它自己拼 nnU-Net 命令、按训练器名字选环境，所以只发默认 plans / 配置 / 训练器目录、环境对得上的 nnunet 任务。"""
-    import recipes as R
-    s = spec_of(t)
-    if s is None or t["recipe"] != "nnunet" or any(k not in R.RECIPES["nnunet"]["params"] for k in t["params"]):
-        return None
-    n, d = s["names"], R.RECIPES["nnunet"]["params"]
-    m = re.match(r"Dataset(\d+)_", n["dataset"])
-    if not m or n["plans"] != d["plans"] or n["config"] != d["config"] or n["code"] != d["code"] or n["env"] != env_guess(n["trainer"]):
-        return None
-    return f"{t['key']} {m.group(1)} {n['trainer']} {n['fold']}"
-
-
 # ---------------- DICC 上：领、心跳、交还 ----------------
 def _claim(a, pick):
     """按顺序领第一个 pick(t) 不为 None 的 free / stale 任务 → (退出码, pick 的结果)。"""
@@ -300,7 +251,6 @@ def _claim(a, pick):
         # 不能当成"没有任务"（退出码 10）：那样每个开始的作业都会马上结束，排队的作业几分钟内全部用掉
         print(f"没有 {tasks_path()}", file=sys.stderr)
         return 2, None
-    ensure_migrated()
     root = data_root()
     if recent_failures() >= PAUSE_N:
         return PAUSED, None
@@ -336,13 +286,6 @@ def _claim(a, pick):
             json.dump(dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now), open(os.path.join(d, "info"), "w"))
             return 0, out
     return NOTHING, None
-
-
-def cmd_claim(a):
-    rc, out = _claim(a, legacy_args)
-    if rc == 0:
-        print(out)
-    return rc
 
 
 def cmd_next(a):
@@ -395,7 +338,6 @@ def cmd_release(a):
 
 def cmd_take(a):
     """领指定的一个（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。"""
-    ensure_migrated()
     root = data_root()
     with Lock():
         t = next((t for t in read_tasks() if t["key"] == a.key), None)
@@ -447,7 +389,6 @@ def _insert(new, nice):
 
 def cmd_add(a):
     import experiments as E
-    ensure_migrated()
     try:
         if a.exp:
             e = E.experiment(a.exp) or sys.exit(f"实验表里没有 {a.exp}（有：{', '.join(x['id'] for x in E.load()[0])}）")
@@ -466,7 +407,6 @@ def cmd_add(a):
 
 def cmd_set(a):
     import experiments as E
-    ensure_migrated()
     with Lock():
         tasks = read_tasks()
         t = next((t for t in tasks if t["key"] == a.key), None)
@@ -494,7 +434,6 @@ def cmd_set(a):
 
 
 def cmd_set_nice(a):
-    ensure_migrated()
     with Lock():
         tasks = read_tasks()
         for t in tasks:
@@ -509,7 +448,6 @@ def cmd_set_nice(a):
 
 
 def cmd_show(a):
-    ensure_migrated()
     t = next((t for t in read_tasks() if t["key"] == a.key), None)
     if t is None:
         print(f"队列里没有 {a.key}")
@@ -532,7 +470,6 @@ def cmd_show(a):
 
 # ---------------- 状态（DICC 上直接读，box 上 ssh 过去） ----------------
 def local_status():
-    ensure_migrated()
     root = data_root()
     out = []
     for t in read_tasks():
@@ -596,7 +533,7 @@ def main(argv):
     if argv[:1] == ["--json-status"]:
         print(json.dumps(local_status(), ensure_ascii=False))
         return 0
-    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show", "migrate") and not have_queue():
+    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show") and not have_queue():
         # box 上：本机没有队列，转到 DICC 上那份去改（不在 box 上另建一份）
         import machines as M
         host = next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
@@ -608,16 +545,12 @@ def main(argv):
         return r[0]
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("claim", "next"):
-        p = sub.add_parser(name)
-        p.add_argument("--worker", required=True)
-        p.add_argument("--free-slots", type=int, default=1)
-        p.add_argument("--patience-until", type=float, default=0)
-        p.add_argument("--exclude", nargs="*", default=[])
-        if name == "claim":
-            p.add_argument("--kind", default="any", help="不再起作用（10/18 前的 worker 会传）")
-        else:
-            p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
+    p = sub.add_parser("next")
+    p.add_argument("--worker", required=True)
+    p.add_argument("--free-slots", type=int, default=1)
+    p.add_argument("--patience-until", type=float, default=0)
+    p.add_argument("--exclude", nargs="*", default=[])
+    p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
     p = sub.add_parser("beat")
     p.add_argument("--worker", required=True)
     p.add_argument("keys", nargs="+")
@@ -646,14 +579,10 @@ def main(argv):
     p = sub.add_parser("show")
     p.add_argument("--json", action="store_true")
     p.add_argument("key")
-    sub.add_parser("migrate")
     p = sub.add_parser("status")
     p.add_argument("--host", default="dicc")
     a = ap.parse_args(argv)
-    if a.cmd == "migrate":
-        with Lock():
-            return 0 if migrate() >= 0 else 1
-    return dict(claim=cmd_claim, next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
+    return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, status=cmd_status)[a.cmd.replace("-", "_")](a)
 
 

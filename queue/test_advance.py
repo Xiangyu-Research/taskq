@@ -73,10 +73,10 @@ check("拉回：wait 组、从训完的机器拉、标签 fetch:<实验>_f<fold>
 check("按队列的档位排在前面（档位 0 的 T14 先于没有档位的 T3）", todo[0]["key"] == f"{MET}/0")
 
 # 2. 已经有拉回任务在跑（以前手动排的）→ 不重复
-old = ("Running", f"bash scripts/queue/fetch_fold.sh dicc Dataset121_GLIMETrq1/nnUNetTrainer_save10__{P} 0", None)
+old = ("Running", f"bash scripts/queue/fetch_task.sh dicc {MET}/0", None)
 todo, stuck = A.plan(snap([old], remote={"dicc": {f"{MET}/0": FIN}}))
 check("已经有活着的拉回任务：不重复排", todo == [] and not stuck)
-other = ("Running", f"bash scripts/queue/fetch_fold.sh lab Dataset121_GLIMETrq1/nnUNetTrainer_save10__{P} 0", None)
+other = ("Running", f"bash scripts/queue/fetch_task.sh lab {MET}/0", None)
 todo, stuck = A.plan(snap([other], remote={"dicc": {f"{MET}/0": FIN}}))
 check("活着的拉回任务在等另一台机器（以前预先排的链）：照样从训完的机器拉，旧任务报出来",
       steps(todo) == [("fetch", f"{MET}/0")] and "fetch_task.sh dicc" in todo[0]["cmd"] and f"advance:stale_fetch:{MET}/0:0" in stuck)
@@ -92,7 +92,7 @@ inf = next(t for t in todo if t["step"] == "infer")
 check("推理：gpu 组、--stage infer", inf["group"] == "gpu" and "--stage infer" in inf["cmd"] and inf["cmd"].endswith(f"__{P} 1"))
 todo, _ = A.plan(snap(remote={"lab": {f"{T3}/1": dict(final=True, archived=True)}}))
 check("lab 上已经归档的：不再归档", steps(todo) == [("infer", f"{T3}/1")])
-stale = ("Queued", f"bash scripts/queue/fetch_fold.sh lab Dataset116_METrq1/nnUNetTrainer_save10__{P} 1", None)
+stale = ("Queued", f"bash scripts/queue/fetch_task.sh lab {T3}/1", None)
 todo, stuck = A.plan(snap([stale]))
 check("box 上已经有了、还有在等的拉回任务：报出来", f"advance:stale_fetch:{T3}/1:0" in stuck)
 
@@ -203,10 +203,10 @@ check("同属 T0 的 U-Mamba：照常归档", ("archive", UMK) in steps(todo))
 
 # 7. 认命令
 check("认命令：paired_compare 按 --out 认", A.step_of(f"py paired_compare.py --ref x --cmp T3=y --out {T}/RQ1/analysis/{T3.split('/')[0]}/nnUNetTrainer_save10__{P}/oof/paired") == [("paired", T3)])
-check("认命令：以前的 archive_lab_fold.sh", A.step_of(f"bash scripts/queue/archive_lab_fold.sh Dataset111_MENrq1/nnUNetTrainer_save10__{P} 4")
+check("认命令：归档", A.step_of("bash scripts/queue/archive_task.sh lab Dataset111_MENrq1/nnUNetTrainer_save10/4")
       == [("archive", "Dataset111_MENrq1/nnUNetTrainer_save10/4")])
 check("认命令：拉回带源机器、前面有环境变量也认得",
-      A.step_of(f"bash scripts/queue/fetch_fold.sh dicc Dataset111_MENrq1/nnUNetTrainer_save10__{P} 4") == [("fetch@dicc", "Dataset111_MENrq1/nnUNetTrainer_save10/4")]
+      A.step_of("bash scripts/queue/fetch_task.sh dicc Dataset111_MENrq1/nnUNetTrainer_save10/4") == [("fetch@dicc", "Dataset111_MENrq1/nnUNetTrainer_save10/4")]
       and A.step_of(f"NO_TTA=1 bash research/RQ1/analysis/run_predict_eval.sh /x/Dataset111_MENrq1/nnUNetTrainer_save10__{P} 4")
       == [("infer", "Dataset111_MENrq1/nnUNetTrainer_save10/4"), ("eval", "Dataset111_MENrq1/nnUNetTrainer_save10/4")])
 check("认命令：不认识的命令 → []", A.step_of("pueue parallel 2 --group cpu") == [] and A.step_of("echo 'unbalanced") == [])

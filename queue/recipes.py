@@ -30,7 +30,7 @@ RECIPES = {
     # nnU-Net v2 的训练（任何训练器、数据集、plans、配置）
     "nnunet": dict(
         params=dict(dataset=REQUIRED, fold=REQUIRED, trainer="nnUNetTrainer_save10", plans="nnUNetResEncUNetMPlans",
-                    config="3d_fullres", env="nnunet", code="research/RQ1/nnunet/trainers",
+                    config="3d_fullres", env="nnunet", code="research/common/nnunet/trainers",
                     model="{dataset}/{trainer}__{plans}__{config}"),
         key="{dataset}/{trainer}/{fold}",
         env="{env}",

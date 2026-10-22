@@ -61,7 +61,6 @@
 | `run_task.sh <做法> k=v…` | 所有机器共用的运行器：按任务说明激活环境、设 `vars`、在仓库根目录跑 `cmd`，输出写进分段日志；已经训完就直接退出；不在 Slurm 里、设了 `CUDA_VISIBLE_DEVICES` 时卡被占就等；Slurm 外出错隔 5 分钟重来，最多 3 次。SIGTERM 先停训练再退出 |
 | `fetch_task.sh <机器> <key>` | 等那台机器上这个任务训完（`done`），再把 `out`（去掉 `fetch.exclude`，加上上一级的 `fetch.extra`）拉回 box；每小时记一行最新训练日志 |
 | `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到备份机器（DICC），三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED` |
-| `fetch_fold.sh`、`archive_fold.sh` | 10/18 前的拉回、归档（按模型文件夹和 fold），box 上已排的旧任务用完后删 |
 | `refill.py` | 替 lab 从任务队列领任务（`taskq.py take --worker lab --ttl 86400`）、续、交还（lab 训完的等备份到 DICC 后才交还；没开始就失败的 `release --skip`）；lab 每个有卡、开着的组（`envs/machines.py` 的 `manual` 组除外，即 lab 的 `gpu0`）空了各领一个 lab 有环境、盘放得下的任务（10/19 起），任务说明里的 `data` 不在 lab 上先传。DICC 每个 QOS 排着和在跑的作业（数组按段算）不到上限减去留给别的作业的名额（`envs/machines.py` 的 `qos`，DICC 的 long 留 2 个）、队列里还有没人领的任务时，补交 `worker.sbatch` 补满，每个空位一个普通作业、不用数组（10/21 起；QOS 和每段时限在 `envs/machines.py` 的 `qos`）。由健康检查每 30 分钟调用，`python3 scripts/queue/refill.py` 只看会做什么。规则见 `admin/作业.md` 的优先级一节 |
 | `advance.py` | box 按状态推进：每一折缺哪一步、那一步没在跑就排（拉回、归档、推理、评测、五折分析）；失败过的不重排、报出来；`OFFLOAD` 对上的步骤分到 lab 跑（缺的输入先传，跑完拉回，box 核对后删 lab 那份）；由健康检查调用，`python3 scripts/queue/advance.py` 只看会排什么 |
 | `offload_io.sh` | 分到别的机器的步骤的传输：`push <机器> <路径>…`（文件夹经隧道 `tunnel_push.sh`，文件用 rsync over ssh）、`pull <机器> <文件夹>`（rsync 拉回 box，再按校验和核对）；由 `advance.py` 放进 box 的 `wait` 组 |
@@ -69,9 +68,9 @@
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（所有 pueue 机器 `on_boot.sh`；角色 autopull 的代码同步 `scripts/sync/git_pull_cron.sh`；hub 的健康检查和登记表 / 看板更新 `scripts/monitor/auto_refresh.sh`） |
 | `taskq.py` | 训练的任务队列（在 DICC 的 `~/.cache/phd/taskq/`）：DICC 作业领任务（`next`；10/19 前开始的作业用旧的 `claim`）、心跳（`beat`）、交还（`release`）；box 替 lab 领指定的一个（`take`）；加任务（`add --exp`、`add --recipe`、`add <key>…`）、改参数（`set`）、改先后（`set-nice`）、看说明（`show`）；`status` 看队列。命令的完整说明在文件开头，规则见 `admin/作业.md` |
 | `worker.sbatch`、`worker_start.sh` | DICC 的训练作业（作业名 `train_worker`）：只负责领到一张卡。`worker.sbatch` 提交时被 Slurm 复制，只有资源申请和一行转交（10/19 起）；开始后从仓库读 `worker_start.sh`：查总开关 `ENABLED`、激活 conda、启动显存填充，交给 `dicc_worker.sh`；普通作业（10/21 起不用数组），由 `refill.py` 自动补交，输出 `train_worker_<作业号>.out`。手动交：`cd scripts/queue && sbatch worker.sbatch`，要几个交几次（long、每个 3 天，long 的上限） |
-| `dicc_worker.sh` | 从队列领本机有环境的任务，用 `run_task.sh` 在后台跑；先训 1 个，最近一个开始 15 分钟后、近 10 分钟 GPU 使用率低于 90%、除去填充还空着一半显存时再加 1 个（最多 2 个），训完再领，领不到就退出；快到时限时把没训完的交还。10/17 前交的按折作业由 `envs/nnunet_paths.sh` 转过来（兼容层，这批作业用完约 2027-03 后删） |
+| `dicc_worker.sh` | 从队列领本机有环境的任务，用 `run_task.sh` 在后台跑；先训 1 个，最近一个开始 15 分钟后、近 10 分钟 GPU 使用率低于 90%、除去填充还空着一半显存时再加 1 个（最多 2 个），训完再领，领不到就退出；快到时限时把没训完的交还 |
 | `gpu_pad.py`、`gpu_pad_start.sh` | DICC GPU 作业显存填充：只占显存、不训练不推理，按 nvidia-smi 的 `memory.used` 保底 42GB、训练稳定后补到 55GB、封顶 62GB；`gpu_pad_start.sh` 在 Slurm GPU 作业里启动它（`worker_start.sh` 和 `envs/nnunet_paths.sh` 都调用），见下面"显存填充" |
-| `test_spec.py`、`test_run_task.sh`、`test_refill.py`、`test_taskq.py`、`test_advance.py`、`test_dicc_worker.sh` | 各脚本的测试（假训练、假队列、假快照，不连任何机器、不用 GPU）；`test_taskq.py` 里有"旧 worker 的调用方式"一组，改 `taskq.py` 后都要跑过 |
+| `test_spec.py`、`test_run_task.sh`、`test_refill.py`、`test_taskq.py`、`test_advance.py`、`test_dicc_worker.sh` | 各脚本的测试（假训练、假队列、假快照，不连任何机器、不用 GPU）；`test_taskq.py` 里有"worker 的调用方式"一组，改 `taskq.py` 后都要跑过 |
 | `test_gpu_pad.py`、`test_gpu_pad_launcher.sh`、`test_gpu_pad_integration.sh` | `gpu_pad.py` 的假 backend、启动逻辑、box 真卡测试 |
 
 ## 显存填充
@@ -81,7 +80,7 @@ DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pa
 - **默认开启**：`gpu_pad_start.sh`（`worker_start.sh` 直接调用，其他作业经 `envs/nnunet_paths.sh`）在所有 Slurm GPU 作业里启动它（不管作业名；不是 `SLURM_STEP_ID`、不是测试环境、有 `CUDA_VISIBLE_DEVICES`、有 `nvidia-smi`）。排队中的作业开训时会读这个文件，所以不用重新提交。
 - **日志**：`<数据目录>/logs/workers/gpu_pad_<作业号>.log`（10/18 前在 `nnUNet/results/logs/`）。
 - **总开关**：DICC 上 `~/.cache/phd/gpu_pad/DISABLED`。存在时运行中的 pad 10 秒内释放退出，新作业不启动。
-- **单个作业/脚本**：`RQ1_GPU_PAD=0` 关闭。设了 0 的脚本：启动前要求卡是空的 `research/RQ1/nnunet/smoke/run_gpu_smoke.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`。CPU 分区的作业没有 `CUDA_VISIBLE_DEVICES`，本来就不启动。
+- **单个作业/脚本**：`RQ1_GPU_PAD=0` 关闭。设了 0 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`。CPU 分区的作业没有 `CUDA_VISIBLE_DEVICES`，本来就不启动。
 - **supervisor**：pad 异常退出时最多重启 3 次（30 秒间隔）；父进程或 supervisor 退出、收到 SIGTERM、开关打开时释放显存退出。
 - **测试**：`python3 scripts/queue/test_gpu_pad.py`（假 backend）、`bash scripts/queue/test_gpu_pad_launcher.sh`（假 Slurm）、`bash scripts/queue/test_gpu_pad_integration.sh`（box 真卡，用一个占 2GB 的假训练，目标降到 8GB；卡上有别的 CUDA 进程时跳过，测试中途出现别的进程就立刻停掉 pad、中止测试）。
 - **退出码**（`gpu_pad.py`）：0 正常/开关/父进程退出；1 没有 GPU 或初始化失败；2 参数错误。启动失败只记日志，不影响训练。
@@ -93,7 +92,7 @@ DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pa
 
 - **DICC 作业提交时定下的**只有 `worker.sbatch`（资源申请和转交那一行，10/19 起）；其余脚本在作业开始时（`worker_start.sh`、`dicc_worker.sh`、显存填充）或每次调用时（`taskq.py`、`run_task.sh`、做法表、实验表、`envs/machines.py`）从仓库读。排着的作业依赖的只有 `~/.cache/phd/taskq/ENABLED` 这个文件和 `scripts/queue/worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它和 `taskq.py`、`run_task.sh` 之间的参数、退出码在这段时间内要兼容。
 - **退出码**（`run_task.sh`）：0 训完；3 命令正常结束但没训完（worker 记成失败）；2 任务说明或环境有问题（参数写错、这台机器没有这个环境）；143 被停掉（健康检查只记不推）；其他是训练出错。10/18 前的 `train_task.sh` 用过 75（训满 `--epochs` 停了），`on_boot.sh`、健康检查仍认。
-- **退出码**（`taskq.py next` / `claim`）：0 领到（`next` 输出两行：key、`run_task.sh` 的参数；旧的 `claim` 输出 `key 数据集编号 训练器 fold`）；10 没有能领的；11 等排在前面刚停下的；12 队列暂停（3 小时内失败 3 次）；其他（如没有任务表时的 2）是出错，worker 照出错处理。`take`：0 领到，10 领不到（队列里没有、已训完、别人领着）；box 上经 ssh 调用不通时是 ssh 的退出码。旧作业的调用方式（参数、退出码）不改，只加新命令。
+- **退出码**（`taskq.py next`）：0 领到（输出两行：key、`run_task.sh` 的参数）；10 没有能领的；11 等排在前面刚停下的；12 队列暂停（3 小时内失败 3 次）；其他（如没有任务表时的 2）是出错，worker 照出错处理。`take`：0 领到，10 领不到（队列里没有、已训完、别人领着）；box 上经 ssh 调用不通时是 ssh 的退出码。在跑的 worker 每次都调用仓库里的 `taskq.py`，所以 `next`、`beat`、`release` 的参数和退出码不改，只加新命令。
 - **同一个任务不在两处训**：先领到（`claims/<key>/info`，记 worker、host、since、beat、ttl）才训。`skips/<key>`：哪台 pueue 训练机跳过了这一折（每行 时刻、机器、原因），那台以后不领，删掉文件即撤销；`released/`：刚交还的折。领取在 `ttl` 秒内没有续（beat）就过期，别人可以领：DICC 作业 1200 秒、lab 86400 秒。10/16–10/18 用过的 `claimed_elsewhere.txt` 清单不再写（`taskq.py`、`train_folds.sbatch` 里读它的代码在文件超过 2 小时没更新时不起作用）。
 - **任务表** `tasks.jsonl` 每行一个任务 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。10/18 前的 `tasks.tsv`（7 列）第一次读时自动转过来，原文件留成 `tasks.tsv.bak`。
 - **pueue 任务名**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`；`advance.py` 按命令或任务名认步骤，10/18 前排的任务也认得。分到 lab 的步骤在 lab 上用同样的名字，box 上的传输是 `push:<名字>`、`pull:<名字>`。
@@ -130,7 +129,7 @@ $Q cpu --label eval:x_f4 -- 'bash research/RQ1/analysis/run_predict_eval.sh --st
 
 ## 加新东西
 
-- **新的 nnU-Net 变体**：在 `research/RQ1/nnunet/trainers/`（约 10/21 起 `research/common/nnunet/trainers/`）写训练器 → 实验表加一行（`recipe="nnunet"`，`params` 里写 `dataset`、`trainer`，要别的环境时写 `env`）→ `taskq.py add --exp <id>`。
+- **新的 nnU-Net 变体**：在 `research/common/nnunet/trainers/` 写训练器（网络代码放 `nets/`） → 实验表加一行（`recipe="nnunet"`，`params` 里写 `dataset`、`trainer`，要别的环境时写 `env`）→ `taskq.py add --exp <id>`。
 - **单个任务换环境、换参数**：`taskq.py set <key> k=v`。
 - **新环境**：各台机器装好 → `envs/machines.py` 里那几台的 `envs` 加一项。没装的机器自然不领用它的任务。
 - **不是 nnU-Net 的训练**：

@@ -3,11 +3,11 @@
 任务队列领任务；Slurm 训练机（DICC）排着的作业不够时补交 worker 作业（最后一节）。
 由 box 上的健康检查（scripts/monitor/health.py，每 30 分钟）调用。lab 连不上 DICC，所以由 box 替它领、续、交还。
 
-待办只有一份：DICC 上的 ~/.cache/phd/taskq/tasks.tsv（scripts/queue/taskq.py）；谁在训哪一折只看 claims/。
+待办只有一份：DICC 上的 ~/.cache/phd/taskq/tasks.jsonl（scripts/queue/taskq.py）；谁在训哪一折只看 claims/。
 每次检查，对每台这样的机器：
   1. 维护它已经领的折（领取记录 worker = 机器名；只看领取之后开始的训练任务）：
      - 训练任务还在（pueue 里 Running / Queued / Stashed / Paused / Locked），或者数据还在传 → 续上（beat）；
-     - 这台机器上训完了 → 继续续着，等 box 拉回、archive_fold.sh 备份到 DICC、队列显示"训完"后再交还
+     - 这台机器上训完了 → 继续续着，等 box 拉回、archive_task.sh 备份到 DICC、队列显示"训完"后再交还
        （提前交还的话 DICC 作业会把它当成没训过、从头训）；这样续着的不影响领下一折；
      - 任务没了、没训完：这台机器上一点进度都没有 → 交还，回到队列；有进度 → 领取保留、报出来（存档在这台，只让它接着训）；
      - 传数据出错 → 领取保留、报出来（数据可能只传了一半，不开始训）。
@@ -188,7 +188,7 @@ def plan(s, name):
         if t["state"] == "done":
             acts.append(dict(op="release", key=key, why="训完了，DICC 上有了存档"))
         elif s["src"].get(name, {}).get("folds", {}).get(key, {}).get("final"):
-            # lab 训完了，但要等 box 拉回、archive_fold.sh 备份到 DICC 后队列才看得到"训完"；这之前交还的话 DICC 作业会从头重训
+            # lab 训完了，但要等 box 拉回、archive_task.sh 备份到 DICC 后队列才看得到"训完"；这之前交还的话 DICC 作业会从头重训
             acts.append(dict(op="keep", key=key))
         elif live:
             acts.append(dict(op="beat", key=key))

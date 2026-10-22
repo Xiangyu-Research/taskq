@@ -109,7 +109,7 @@ source_it "$T/bin" SLURM_JOB_ID=1010 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet FAKE_
 sleep 1
 check "pad 失败一次后 supervisor 重启" test "$(lines)" -eq 2
 
-for f in research/RQ1/nnunet/smoke/run_gpu_smoke.sh research/RQ1/nnunet/predict.sh research/RQ1/analysis/run_predict_eval.sh \
+for f in research/common/nnunet/smoke/run_gpu_smoke.sh research/RQ1/nnunet/predict.sh research/RQ1/analysis/run_predict_eval.sh \
          research/RQ1/probe/p1_predict.sh research/RQ1/probe/run_p2.sh research/RQ2/quickcheck/run_p4.sh \
          research/RQ1/analysis/run_sensitivity.sh research/RQ1/external/run_t19.sh research/RQ1/external/t19_eval.sh; do
     check "$f 有 RQ1_GPU_PAD=0" grep -q 'RQ1_GPU_PAD=0' "$REPO/$f"

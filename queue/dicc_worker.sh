@@ -7,8 +7,7 @@
 # CPU 跟不上的训练（nnU-Net）会变成 2 个，GPU 跑满的（SwinUNETR、U-Mamba）自然只训 1 个。训完一个再领下一个；
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的就退出。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
-#   bash dicc_worker.sh                     （不带折的作业 scripts/queue/worker.sbatch）
-#   bash dicc_worker.sh <训练器> <fold> <数据集编号>   （10/17 前交的按折作业，由 envs/nnunet_paths.sh 转过来；参数只记日志）
+#   bash dicc_worker.sh                     （scripts/queue/worker.sbatch → worker_start.sh）
 # 出问题时不让排队的作业空跑掉：
 #   - 本作业训练失败 2 次（或开训前就出错）就不再领新的，也不重领自己失败过的；
 #   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业先空着等（健康检查提醒）；
@@ -42,7 +41,7 @@ ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上�
 IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
 MAX_OWN_FAIL=2
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
-unset nnUNet_n_proc_DA                  # 10/17 前交的作业里 nnunet_paths.sh 按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
+unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
 LOGDIR=$DATA/logs/workers
 mkdir -p "$LOGDIR"
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
@@ -65,7 +64,7 @@ get_end() {
 get_end
 left() { (( END == 0 )) && echo 999999 || echo $(( END - $(date +%s) )); }
 echo "$(ts) 任务队列 worker：作业 $W @ $(hostname -s)，最多同时 $SLOTS 个，CPU $NCPU，内存 ${MEMMB}M（每个训练 $TASK_CPUS 个 CPU），" \
-     "环境 $ENVS，时限 $( (( END )) && date -d @"$END" '+%F %T' || echo 查不到，之后再查)，代码 $COMMIT${1:+（按折作业 $*，参数不再用）}"
+     "环境 $ENVS，时限 $( (( END )) && date -d @"$END" '+%F %T' || echo 查不到，之后再查)，代码 $COMMIT"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
 
 GPUCSV=$LOGDIR/worker_${W}_gpu.csv

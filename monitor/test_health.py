@@ -99,7 +99,7 @@ ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
 s["src"]["lab"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 
-fetch = task(9, "wait", "Running", "bash scripts/queue/fetch_fold.sh dicc Dataset116_METrq1/nnUNetTrainer_save10__nnUNetResEncUNetMPlans__3d_fullres 2", "fetch_t3met_f2")
+fetch = task(9, "wait", "Running", f"bash scripts/queue/fetch_task.sh dicc {MET2}", "fetch_t3met_f2")
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}})
 ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
 s["slurm"] = sq(["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"])
