@@ -32,7 +32,7 @@ TRIES=3
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
 POLL=${RUN_TASK_POLL:-300}        # 只给测试用
 
-gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算，10/19 起：lab 0 号卡夜班允许和自己的进程共用）
+gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算，10/19 起）
     [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
     local used mine=0 pid pm
     used=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-gpu=memory.used --format=csv,noheader,nounits 2> /dev/null | tr -d ' ')

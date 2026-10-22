@@ -201,6 +201,8 @@ s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks
     dict(id=1, group="gpu1", status="Stashed", label="umamba_f0", deps=[], start=None, end=None, command="bash scripts/queue/train_task.sh 101 0 nnUNetTrainer_UMambaEnc")]}})
 s["pueue"]["lab"]["tasks"] = s["pueue"]["lab"]["tasks"][:1]
 ok("lab 1 号卡没有训练任务（暂存的不算）→ 报", "idle:lab:gpu1" in ids(s))
+s3 = dict(s, pueue=dict(s["pueue"], lab=dict(s["pueue"]["lab"], groups={"gpu1": "Running", "gpu0": "Running"})))
+ok("lab 0 号卡（只跑手动任务的组）开着、空着 → 不报", "idle:lab:gpu1" in ids(s3) and not any(k.startswith("idle:lab:gpu0") for k in ids(s3)))
 s2 = dict(s, taskq={"dicc": dict(enabled=True, paused=False, tasks=[tqrow(MET2, "claimed", "lab")])})
 ok("lab 领着折（在传数据或停了等人处理，refill.py 另外报）：卡空着不另报", "idle:lab:gpu1" not in ids(s2))
 s2["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "done", "lab")]

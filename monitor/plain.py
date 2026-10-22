@@ -133,7 +133,7 @@ def problem(pid, p):
         if kind == "disk":
             return f"{msg}，盘满了训练和存档会失败。"
         if kind == "gpulog":
-            return f"{L(part[1])} 的 GPU 使用记录停了（不影响训练，但夜班开卡要靠它判断别人有没有在用卡）。"
+            return f"{L(part[1])} 的 GPU 使用记录停了（不影响训练）。"
         if kind == "git":
             return f"{L(part[1])} 2 小时没拉到最新代码，那里跑的是旧版本的脚本。"
         if kind == "boot":

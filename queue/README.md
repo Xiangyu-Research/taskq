@@ -32,7 +32,6 @@
 |---|---|
 | 训练：哪一折没人训、谁领了、失败了几次 | `python3 scripts/queue/taskq.py status`（box 上跑，经 ssh 读 DICC 的队列）；DICC 作业的 `.out`；失败记录在 DICC `~/.cache/phd/taskq/failures/`，lab 训不了而跳过的在 `skips/` |
 | lab 领了什么、为什么没领；DICC 补交了哪些 worker 作业 | box `~/refill.log`；`python3 scripts/queue/refill.py`（只看会做什么） |
-| lab 0 号卡夜班开没开、为什么没开 | lab `~/shift_gate.log`；`ssh lab python3 PhD/scripts/queue/shift_gate.py --dry-run` |
 | 训完之后卡在哪一步 | box `~/advance.log`（每次有变化记一行：排了什么、会排什么、哪一步失败停住）；`python3 scripts/queue/advance.py`（只看会排什么）；再看 `pueue log <号>` |
 | 总览、报警 | `research/RQ1/实验登记表.md` 最上面的"需要处理"（`scripts/monitor/health.py`） |
 
@@ -46,6 +45,7 @@
 | box | `cpu` | 2 | 评测（`run_predict_eval.sh --stage eval`）、五折集成评测、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等） |
 | box | `wait` | 不限 | 拉回训完的任务（`fetch_task.sh`）、lab 训的任务归档（`archive_task.sh`）、给 lab 传数据（`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡训练（`run_task.sh`） |
+| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领） |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 文件
@@ -60,16 +60,15 @@
 | `fetch_task.sh <机器> <key>` | 等那台机器上这个任务训完（`done`），再把 `out`（去掉 `fetch.exclude`，加上上一级的 `fetch.extra`）拉回 box；每小时记一行最新训练日志 |
 | `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到备份机器（DICC），三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED` |
 | `fetch_fold.sh`、`archive_fold.sh` | 10/18 前的拉回、归档（按模型文件夹和 fold），box 上已排的旧任务用完后删 |
-| `refill.py` | 替 lab 从任务队列领任务（`taskq.py take --worker lab --ttl 86400`）、续、交还（lab 训完的等备份到 DICC 后才交还；没开始就失败的 `release --skip`）；lab 每个有卡的组（`gpu1`，夜班开着时的 `gpu0`）空了各领一个 lab 有环境、盘放得下的任务（10/19 起），任务说明里的 `data` 不在 lab 上先传。DICC 每个 QOS 排着和在跑的作业（数组按段算）不到上限减去留给别的作业的名额（`envs/machines.py` 的 `qos`，DICC 的 long 留 2 个）、队列里还有没人领的任务时，补交 `worker.sbatch` 补满，每个空位一个普通作业、不用数组（10/21 起；QOS 和每段时限在 `envs/machines.py` 的 `qos`）。由健康检查每 30 分钟调用，`python3 scripts/queue/refill.py` 只看会做什么。规则见 `admin/作业.md` 的优先级一节 |
+| `refill.py` | 替 lab 从任务队列领任务（`taskq.py take --worker lab --ttl 86400`）、续、交还（lab 训完的等备份到 DICC 后才交还；没开始就失败的 `release --skip`）；lab 每个有卡、开着的组（`envs/machines.py` 的 `manual` 组除外，即 lab 的 `gpu0`）空了各领一个 lab 有环境、盘放得下的任务（10/19 起），任务说明里的 `data` 不在 lab 上先传。DICC 每个 QOS 排着和在跑的作业（数组按段算）不到上限减去留给别的作业的名额（`envs/machines.py` 的 `qos`，DICC 的 long 留 2 个）、队列里还有没人领的任务时，补交 `worker.sbatch` 补满，每个空位一个普通作业、不用数组（10/21 起；QOS 和每段时限在 `envs/machines.py` 的 `qos`）。由健康检查每 30 分钟调用，`python3 scripts/queue/refill.py` 只看会做什么。规则见 `admin/作业.md` 的优先级一节 |
 | `advance.py` | box 按状态推进：每一折缺哪一步、那一步没在跑就排（拉回、归档、推理、评测、五折分析）；失败过的不重排、报出来；由健康检查调用，`python3 scripts/queue/advance.py` 只看会排什么 |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把重启时被打断的任务原地放回队列；表里 `gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（所有 pueue 机器 `on_boot.sh`；角色 autopull 的代码同步 `scripts/sync/git_pull_cron.sh`；hub 的健康检查和登记表 / 看板更新 `scripts/monitor/auto_refresh.sh`） |
 | `taskq.py` | 训练的任务队列（在 DICC 的 `~/.cache/phd/taskq/`）：DICC 作业领任务（`next`；10/19 前开始的作业用旧的 `claim`）、心跳（`beat`）、交还（`release`）；box 替 lab 领指定的一个（`take`）；加任务（`add --exp`、`add --recipe`、`add <key>…`）、改参数（`set`）、改先后（`set-nice`）、看说明（`show`）；`status` 看队列。命令的完整说明在文件开头，规则见 `admin/作业.md` |
-| `shift_gate.py` | lab 0 号卡夜班的开关（10/19，lab 的 cron 每 30 分钟）：`envs/machines.py` 的 `shifts` 写的时间段里（20:00–12:00），过去 45 分钟卡上只有我们自己的进程或空着（`~/gpu_usage/` 的 GPU 使用记录）就打开 `gpu0` 组；到点停住组，SIGTERM 停掉在训的任务、原地放回队列，下一晚接着训。日志 lab `~/shift_gate.log`；`--dry-run` 只说会做什么 |
 | `worker.sbatch`、`worker_start.sh` | DICC 的训练作业（作业名 `train_worker`）：只负责领到一张卡。`worker.sbatch` 提交时被 Slurm 复制，只有资源申请和一行转交（10/19 起）；开始后从仓库读 `worker_start.sh`：查总开关 `ENABLED`、激活 conda、启动显存填充，交给 `dicc_worker.sh`；普通作业（10/21 起不用数组），由 `refill.py` 自动补交，输出 `train_worker_<作业号>.out`。手动交：`cd scripts/queue && sbatch worker.sbatch`，要几个交几次（long、每个 3 天，long 的上限） |
 | `dicc_worker.sh` | 从队列领本机有环境的任务，用 `run_task.sh` 在后台跑；先训 1 个，最近一个开始 15 分钟后、近 10 分钟 GPU 使用率低于 90%、除去填充还空着一半显存时再加 1 个（最多 2 个），训完再领，领不到就退出；快到时限时把没训完的交还。10/17 前交的按折作业由 `envs/nnunet_paths.sh` 转过来（兼容层，这批作业用完约 2027-03 后删） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | DICC GPU 作业显存填充：只占显存、不训练不推理，按 nvidia-smi 的 `memory.used` 保底 42GB、训练稳定后补到 55GB、封顶 62GB；`gpu_pad_start.sh` 在 Slurm GPU 作业里启动它（`worker_start.sh` 和 `envs/nnunet_paths.sh` 都调用），见下面"显存填充" |
-| `test_spec.py`、`test_run_task.sh`、`test_refill.py`、`test_shift_gate.py`、`test_taskq.py`、`test_advance.py`、`test_dicc_worker.sh` | 各脚本的测试（假训练、假队列、假快照，不连任何机器、不用 GPU）；`test_taskq.py` 里有"旧 worker 的调用方式"一组，改 `taskq.py` 后都要跑过 |
+| `test_spec.py`、`test_run_task.sh`、`test_refill.py`、`test_taskq.py`、`test_advance.py`、`test_dicc_worker.sh` | 各脚本的测试（假训练、假队列、假快照，不连任何机器、不用 GPU）；`test_taskq.py` 里有"旧 worker 的调用方式"一组，改 `taskq.py` 后都要跑过 |
 | `test_gpu_pad.py`、`test_gpu_pad_launcher.sh`、`test_gpu_pad_integration.sh` | `gpu_pad.py` 的假 backend、启动逻辑、box 真卡测试 |
 
 ## 显存填充

@@ -319,8 +319,8 @@ def check(s):
         for g, (_, gpu, _) in m["groups"].items():
             if gpu is None:
                 continue
-            if g in M.shift_groups(name) and (s["pueue"][name].get("groups") or {}).get(g) != "Running":
-                continue  # 夜班的组停着（白天，或者晚上还没等到卡空）：scripts/queue/shift_gate.py 管
+            if g in M.manual_groups(name):
+                continue  # 只跑手动加的任务
             ts = train_q.get((name, g), [])
             run = [n for st, n in ts if st == "Running"]
             if not ts:

@@ -13,7 +13,7 @@
      - 传数据出错 → 领取保留、报出来（数据可能只传了一半，不开始训）。
      这台机器、box 或任何一台训练机连不上时什么都不动（领取 24 小时内有效，过期后 DICC 才能领）。
   2. 卡空了（有卡的组里没有活着的训练任务、也没有领着没训完的折）就给这个组领下一折（10/19 起每个有卡的组各领各的；
-     只在一段时间里用的组（machines.py 的 shifts）停着时不领，由 scripts/queue/shift_gate.sh 打开）：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
+     组停着、或者是 machines.py 的 manual 组时不领）：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
      取第一个。训练没开始就失败、又没有进度（多半是这台机器放不下这个模型）时用 release --skip 交还：记在 skips/，
      这台机器以后不再领它，不算队列的失败，不用事先按模型分类。24 小时内这样跳过 2 个就先不领、报出来（多半是环境坏了）。
      taskq.py take 成功后：任务说明里的 data（scripts/queue/spec.py）这台机器上都有，就直接在 pueue 的训练组里加
@@ -69,7 +69,7 @@ def queue_host():
 
 
 def gpu_groups(m):
-    return [g for g, (_, gpu, _) in m["groups"].items() if gpu is not None]
+    return [g for g, (_, gpu, _) in m["groups"].items() if gpu is not None and g not in (m.get("manual") or ())]
 
 
 def gpu_group(m):
@@ -77,9 +77,9 @@ def gpu_group(m):
 
 
 def open_group(s, name, g):
-    """这个组现在能不能开始训练：pueue 里组是 Running。读不到组的状态时：平时用的组算开着，夜班的组算停着。"""
+    """这个组现在能不能开始训练：pueue 里组是 Running；读不到组的状态时算开着。"""
     st = ((s["pueue"].get(name) or {}).get("groups") or {}).get(g)
-    return st == "Running" if st or g in M.shift_groups(name) else True
+    return st == "Running" if st else True
 
 
 def task_groups(s, name):
@@ -223,7 +223,7 @@ def plan(s, name):
     busy_g = {tgroup.get(k) for k in busy}
     free_g = [g for g in gpu_groups(m) if g not in busy_g and g not in held_g and open_group(s, name, g)]
     if not free_g:
-        return acts, stuck, "卡上有训练任务" if busy else "还领着没训完的折" if held_g else "有卡的组都停着（夜班还没开）"
+        return acts, stuck, "卡上有训练任务" if busy else "还领着没训完的折" if held_g else "有卡的组都停着"
     nskip = (tq.get("recent_skips") or {}).get(name, 0)
     if nskip >= SKIP_BREAK:
         stuck[f"labskip:{name}"] = (f"{M.MACHINES[name]['label']} 24 小时内有 {nskip} 个领到的任务没开始就失败了，先不再领；"
