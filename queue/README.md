@@ -98,6 +98,7 @@ DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pa
 - **任务表** `tasks.jsonl` 每行一个任务 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。10/18 前的 `tasks.tsv`（7 列）第一次读时自动转过来，原文件留成 `tasks.tsv.bak`。
 - **pueue 任务名**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`；`advance.py` 按命令或任务名认步骤，10/18 前排的任务也认得。分到 lab 的步骤在 lab 上用同样的名字，box 上的传输是 `push:<名字>`、`pull:<名字>`。
 - **能分到别的机器的步骤**（10/22 起）：命令里有 `--stage <步骤>`，把它换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个）、不做别的（`run_predict_eval.sh --stage needs`）；结果在 `done` 判断的文件所在的文件夹里。传过去的文件（模型）用完删，文件夹（测试集输入）留着。
+- **只在某几台机器上跑**（10/22 起）：任务说明的 `machines`（如 `["dicc"]`；默认不限）。`taskq.py next` 按本机的名字（`envs/machines.py` 的 `whoami`）筛，`refill.py` 不替不在名单里的机器领。推理任务都写 `machines=["dicc"]`。
 - **key** 由做法给，nnU-Net 是 `<数据集文件夹>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。10/17 前按折的 Slurm 作业名 `rq1_<实验 id>_f<fold>`；不带折的 `train_worker`（10/18 前 `rq1_worker`）没有 key。
 - **训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
 - **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_seg<段>.log`，第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`；作业 = Slurm 作业号或"主机名-时间"。10/18 前 nnU-Net 的在 `nnUNet/results/logs/`，登记表两种都认。worker 自己的日志（GPU 记录、显存填充）在 `<数据目录>/logs/workers/`。
@@ -118,7 +119,11 @@ $TQ set Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1 env=umamba
 $TQ take --worker lab --ttl 86400 Dataset111_MENrq1/nnUNetTrainer_save10_n470/1
 $Q gpu1 --label train:Dataset111_MENrq1/nnUNetTrainer_save10_n470/1 -- \
     'bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=1'
-# box 上单独推理 / 评测一折（平时由 advance.py 排）
+# 推理一折放进 DICC 队列（第 ⓪ 档，只在 DICC 领；跑完由 advance.py 拉回 box）
+$TQ add --nice -100 --recipe command key=infer/<数据集>/<训练器文件夹>/fold_4 env=nnunet machines='["dicc"]' \
+    cmd='bash research/RQ1/analysis/infer_task.sh {data}/nnUNet/results/<数据集>/<训练器文件夹> 4' \
+    out=predictions/<数据集>/<训练器文件夹>/fold_4 done='[".infer_done"]'
+# box 上单独推理 / 评测一折
 $Q gpu --label infer:x_f4 -- 'bash research/RQ1/analysis/run_predict_eval.sh --stage infer <模型文件夹的完整路径> 4'
 $Q cpu --label eval:x_f4 -- 'bash research/RQ1/analysis/run_predict_eval.sh --stage eval <模型文件夹的完整路径> 4'
 ```

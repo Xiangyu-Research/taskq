@@ -21,6 +21,7 @@
     data       训练机上要有的数据（相对数据目录；lab 没有时 refill.py 先传）
     fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
+    machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc"]）；None = 有环境的都行
 """
 
 REQUIRED = object()
@@ -46,6 +47,7 @@ RECIPES = {
         data=["nnUNet/preprocessed/{dataset}"],
         fetch=dict(exclude=["checkpoint_latest.pth"], extra=["*.json"]),
         archive=dict(drop=["checkpoint_*.pth", "validation/**"], keep=["validation/summary.json"]),
+        machines=None,
     ),
     # 什么都由任务自己给（非 nnU-Net 的训练可以直接用，或者照着写一种新的做法）
     "command": dict(
@@ -53,5 +55,6 @@ RECIPES = {
         open=True,
         key="{key}", env="{env}", cmd="{cmd}", vars={}, out="{out}", done="{done}", log="*.log",
         progress=None, info=None, metrics={}, checkpoint=None, data=[], fetch=dict(exclude=[], extra=[]), archive=None,
+        machines=None,
     ),
 }

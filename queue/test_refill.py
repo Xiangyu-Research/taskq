@@ -103,6 +103,8 @@ ok("DICC 上的 taskq.py 还是旧版（状态里没有 recent_skips）：什么
 ok("实验表里没有、队列状态里也没有说明的任务不领", ops(R.plan(snap(queue=[tq("Dataset999_X/nnUNetTrainer_save10/0", -1, 0)] + QUEUE), "lab")[0]) == [("take", K_UM)])
 HD = dict(tq("hdbet/x", -1, 0), recipe="command", params={}, spec=dict(key="hdbet/x", env="hdbet", data=[]))
 ok("lab 没有任务要的环境（hdbet）：不领", ops(R.plan(snap(queue=[HD] + QUEUE), "lab")[0]) == [("take", K_UM)])
+DO = dict(tq("infer/x", -100, 0), recipe="command", params={}, spec=dict(key="infer/x", env="nnunet", data=[], machines=["dicc"]))
+ok("任务限定在别的机器（machines=[dicc]，10/22 推理）：lab 不领", ops(R.plan(snap(queue=[DO] + QUEUE), "lab")[0]) == [("take", K_UM)])
 ok("队列标成有问题（bad）的任务不领", ops(R.plan(snap(queue=[dict(t, bad="x") if t["key"] == K_UM else t for t in QUEUE]), "lab")[0]) == [("take", K_T1C[0])])
 CMD = dict(tq("misc/a", -1, 0), recipe="command", params={"key": "misc/a", "cmd": "python x.py", "env": "nnunet"},
            spec=dict(key="misc/a", env="nnunet", data=["other/stuff"]))

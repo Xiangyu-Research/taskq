@@ -234,6 +234,7 @@ def plan(s, name):
     warn = (m["disk"][1] if m["disk"] else 0) + TRAIN_OUT_GB
     envs = set(m.get("envs") or {})
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
+             and name in (info(tq, t["key"])["spec"].get("machines") or [name])
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
     # 同一档里数据已经在这台机器上的先领（马上能训；10/19 起：数据还在传的不再另传一份）
     cands.sort(key=lambda t: (t["nice"], any(p not in have for p in info(tq, t["key"])["spec"].get("data") or []), t["order"]))

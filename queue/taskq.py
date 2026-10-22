@@ -22,7 +22,7 @@ lab 由 box 上的 scripts/queue/refill.py 替它领。
 
 DICC 上（worker 调用）：
     taskq.py next --worker <作业号> --envs <环境,…> [--free-slots N] [--patience-until 时间] [--exclude key...]
-        领一个本机有环境的 → 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
+        领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领）→ 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
         排在前面的刚停下、还在等它（--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
@@ -348,9 +348,12 @@ def cmd_claim(a):
 def cmd_next(a):
     envs = set(e for e in a.envs.split(",") if e)
 
+    import machines as M
+    me = os.environ.get("TASKQ_MACHINE") or M.whoami()
+
     def pick(t):
         s = spec_of(t)
-        if s["env"] not in envs:
+        if s["env"] not in envs or (s.get("machines") and me not in s["machines"]):
             return None
         return t["key"] + "\n" + " ".join(shlex.quote(x) for x in S.kv_args(t["recipe"], t["params"]))
     rc, out = _claim(a, pick)

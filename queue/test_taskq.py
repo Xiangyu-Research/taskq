@@ -349,5 +349,14 @@ with open(os.path.join(TQ3, "tasks.jsonl"), "a") as f:
 rc, out, _ = tq3("status")
 check("解析不了的任务显示 bad、不影响别的", rc == 0 and "bad" in out)
 
+# 10/22：machines 限定在哪几台机器上领（推理只在 DICC）
+tq3("add", "--nice", "-100", "--recipe", "command", "key=toy/m", "cmd=true", "env=nnunet", "out=toy/m", 'done=["DONE"]', 'machines=["dicc"]')
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "710", "--envs", "nnunet"],
+                   env=dict(ENV3, TASKQ_MACHINE="lab"), capture_output=True, text=True)
+check("next：machines 里没有本机的不领", r.returncode == 10)
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "711", "--envs", "nnunet"],
+                   env=dict(ENV3, TASKQ_MACHINE="dicc"), capture_output=True, text=True)
+check("next：machines 里有本机的照档位先领", r.returncode == 0 and r.stdout.startswith("toy/m"))
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
