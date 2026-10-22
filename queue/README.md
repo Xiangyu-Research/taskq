@@ -81,7 +81,7 @@ DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pa
 - **默认开启**：`gpu_pad_start.sh`（`worker_start.sh` 直接调用，其他作业经 `envs/nnunet_paths.sh`）在所有 Slurm GPU 作业里启动它（不管作业名；不是 `SLURM_STEP_ID`、不是测试环境、有 `CUDA_VISIBLE_DEVICES`、有 `nvidia-smi`）。排队中的作业开训时会读这个文件，所以不用重新提交。
 - **日志**：`<数据目录>/logs/workers/gpu_pad_<作业号>.log`（10/18 前在 `nnUNet/results/logs/`）。
 - **总开关**：DICC 上 `~/.cache/phd/gpu_pad/DISABLED`。存在时运行中的 pad 10 秒内释放退出，新作业不启动。
-- **单个作业/脚本**：`RQ1_GPU_PAD=0` 关闭。设了 0 的脚本：启动前要求卡是空的 `research/RQ1/nnunet/smoke/run_gpu_smoke.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`。CPU 分区的作业没有 `CUDA_VISIBLE_DEVICES`，本来就不启动。
+- **单个作业/脚本**：`RQ1_GPU_PAD=0` 关闭。设了 0 的脚本：启动前要求卡是空的 `research/RQ1/nnunet/smoke/run_gpu_smoke.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`。CPU 分区的作业没有 `CUDA_VISIBLE_DEVICES`，本来就不启动。
 - **supervisor**：pad 异常退出时最多重启 3 次（30 秒间隔）；父进程或 supervisor 退出、收到 SIGTERM、开关打开时释放显存退出。
 - **测试**：`python3 scripts/queue/test_gpu_pad.py`（假 backend）、`bash scripts/queue/test_gpu_pad_launcher.sh`（假 Slurm）、`bash scripts/queue/test_gpu_pad_integration.sh`（box 真卡，用一个占 2GB 的假训练，目标降到 8GB；卡上有别的 CUDA 进程时跳过，测试中途出现别的进程就立刻停掉 pad、中止测试）。
 - **退出码**（`gpu_pad.py`）：0 正常/开关/父进程退出；1 没有 GPU 或初始化失败；2 参数错误。启动失败只记日志，不影响训练。
