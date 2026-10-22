@@ -64,7 +64,7 @@ ok("kv_args → parse_kv 来回一致（列表用 JSON）", S.parse_kv(args[1:])
 
 # ---------------- 实验表 ----------------
 ts = E.tasks()
-ok(f"实验表展开 {len(ts)} 个任务、key 不重复", len(ts) == 141 and len(set(ts)) == len(ts))
+ok(f"实验表展开 {len(ts)} 个任务、key 不重复", len(ts) == 151 and len(set(ts)) == len(ts))
 ok("每个任务都解析得了、有环境和输出", all(t["spec"].get("env") and t["spec"].get("out") for t in ts.values()))
 um = ts["Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1"]["spec"]
 sw = ts["Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"]["spec"]
