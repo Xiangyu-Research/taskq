@@ -485,7 +485,8 @@ class Offload:
         busy |= {p for ns in self.have.values() for p in ns}
         for lb in self.cleaning:
             r = self.state[lb]
-            drop = [r["out"]] + [p for p in r.get("pushed", []) if p not in busy]
+            drop = [p for p in [r["out"]] + [p for p in r.get("pushed", []) if p not in busy]
+                    if ".." not in p.split("/") and len(p.strip("/").split("/")) >= 2]
             self.todo.append(dict(op="clean", step="clean", key=r["key"], label=lb, nice=NO_NICE, host=r["machine"], paths=drop))
 
 

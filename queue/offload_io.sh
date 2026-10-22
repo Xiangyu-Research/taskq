@@ -13,7 +13,7 @@ H=$($M get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以连过去的机器 $HOST" >&2; exit 2; }
 RD=$($M get "$HOST" data) LD=${BRAIN_TUMOR:-$($M get . data)}
 RD=${RD/#\~\//}
-for p in "$@"; do [[ $p != /* && $p != *..* ]] || { echo "路径要相对数据目录：$p" >&2; exit 2; }; done
+for p in "$@"; do [[ $p != /* && $p != *..* && $p == */* ]] || { echo "路径要相对数据目录、至少两层：$p" >&2; exit 2; }; done
 
 if [[ $OP == push ]]; then
     files=()
