@@ -191,11 +191,13 @@ check("比输入病例少：推理没做完", not inf_ok("2"))
 manifest(2, 2)
 check("都对得上：推理做完", inf_ok("2"))
 
-# 6c. T0 五折在 lab 上的副本不自动归档（删不删还没定）
+# 6c. T0 五折在 lab 上的副本 10/23 手动归档过（有 ARCHIVED）：不再排归档
 T0K = "Dataset101_GLIrq1/nnUNetTrainer_save10/0"
 trained("Dataset101_GLIrq1", "nnUNetTrainer_save10", "0")
+todo, _ = A.plan(snap(remote={"lab": {T0K: dict(final=True, archived=True)}}))
+check("T0 nnU-Net 的 lab 副本已归档：不排归档", not [t for t in todo if t["step"] == "archive"])
 todo, _ = A.plan(snap(remote={"lab": {T0K: FIN}}))
-check("T0 nnU-Net 的 lab 副本：不排归档", not [t for t in todo if t["step"] == "archive"])
+check("T0 nnU-Net 的 lab 副本没归档：照常归档", ("archive", T0K) in steps(todo))
 UMK = "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/3"
 trained("Dataset101_GLIrq1", "nnUNetTrainer_UMambaEnc", "3")
 todo, _ = A.plan(snap(remote={"lab": {UMK: FIN}}))
