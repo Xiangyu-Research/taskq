@@ -62,7 +62,7 @@
 | `fetch_task.sh <机器> <key>` | 等那台机器上这个任务训完（`done`），再把 `out`（去掉 `fetch.exclude`，加上上一级的 `fetch.extra`）拉回 box；每小时记一行最新训练日志 |
 | `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到备份机器（DICC），三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED` |
 | `refill.py` | 替 lab 从任务队列领任务（`taskq.py take --worker lab --ttl 86400`）、续、交还（lab 训完的等备份到 DICC 后才交还；没开始就失败的 `release --skip`）；lab 每个有卡、开着的组（`envs/machines.py` 的 `manual` 组除外，即 lab 的 `gpu0`）空了各领一个 lab 有环境、盘放得下的任务（10/19 起），任务说明里的 `data` 不在 lab 上先传。DICC 每个 QOS 排着和在跑的作业（数组按段算）不到上限减去留给别的作业的名额（`envs/machines.py` 的 `qos`，DICC 的 long 留 2 个）、队列里还有没人领的任务时，补交 `worker.sbatch` 补满，每个空位一个普通作业、不用数组（10/21 起；QOS 和每段时限在 `envs/machines.py` 的 `qos`）。由健康检查每 30 分钟调用，`python3 scripts/queue/refill.py` 只看会做什么。规则见 `admin/作业.md` 的优先级一节 |
-| `advance.py` | box 按状态推进：每一折缺哪一步、那一步没在跑就排（拉回、归档、推理、评测、五折分析）；失败过的不重排、报出来；`OFFLOAD` 对上的步骤分到 lab 跑（缺的输入先传，跑完拉回，box 核对后删 lab 那份）；由健康检查调用，`python3 scripts/queue/advance.py` 只看会排什么 |
+| `advance.py` | box 按状态推进：每一折缺哪一步、那一步没在跑就排（拉回、归档、推理、评测、五折分析）；带 `queue` 的步骤（每折的推理、五折训完后的 P1 / P2 重跑）放进 DICC 的任务队列，那边缺的文件先传，拉回后接着做下一步；失败过的不重排、报出来；`OFFLOAD` 对上的步骤分到 lab 跑（缺的输入先传，跑完拉回，box 核对后删 lab 那份）；由健康检查调用，`python3 scripts/queue/advance.py` 只看会排什么 |
 | `offload_io.sh` | 分到别的机器的步骤的传输：`push <机器> <路径>…`（文件夹经隧道 `tunnel_push.sh`，文件用 rsync over ssh）、`pull <机器> <文件夹>`（rsync 拉回 box，再按校验和核对）；由 `advance.py` 放进 box 的 `wait` 组 |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把重启时被打断的任务原地放回队列；表里 `gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（所有 pueue 机器 `on_boot.sh`；角色 autopull 的代码同步 `scripts/sync/git_pull_cron.sh`；hub 的健康检查和登记表 / 看板更新 `scripts/monitor/auto_refresh.sh`） |

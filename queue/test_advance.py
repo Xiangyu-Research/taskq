@@ -18,6 +18,10 @@ import advance as A  # noqa: E402
 A.STATE_DIR = os.path.join(T, "state")
 # 前面几节测 box 上排的步骤：先去掉推理的 queue（10/22 起推理放 DICC 任务队列），最后一节再放回来测
 QUEUED = [(st, st.pop("queue")) for e in A.E.load()[0] for st in e.get("after", []) if "queue" in st]
+# 实验一级带 queue 的几串（10/23，P1 / P2 重跑）也先拿掉，第 11 节再放回来测
+GQUEUED = [(e, e["group_after"]) for e in A.E.load()[0] if any(st.get("queue") for c in e.get("group_after", []) for st in c)]
+for e_, g_ in GQUEUED:
+    e_["group_after"] = [c for c in g_ if not any(st.get("queue") for st in c)]
 P = "nnUNetResEncUNetMPlans__3d_fullres"
 F5 = ["0", "1", "2", "3", "4"]
 PY = A.python()
@@ -397,7 +401,8 @@ TCM = f"nnUNet/results/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}"
 TCQ = f"infer/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2"
 trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
 TNEEDS = [f"{TCM}/dataset.json", f"{TCM}/fold_2/checkpoint_final.pth", "nnUNet/raw/RQ1_holdout/GLI/imagesTs"]
-A.step_needs = lambda cmd: TNEEDS if "--stage infer" in cmd else None
+A.step_needs = lambda cmd: (None if "--stage infer" not in cmd else
+                           TNEEDS if "Dataset103_GLIrq1_t1c" in cmd and cmd.endswith(" 2") else [])
 REMOTE["have"] = set(TNEEDS)
 
 
@@ -448,6 +453,59 @@ with open(os.path.join(A.STATE_DIR, "HOLD"), "w") as f:
 done, _ = A.run(snap(), q=lambda *a: 0, tq=fake_tq)
 check("queue：HOLD 对上的先不加", not any(f"key={TCQ}" in a_ for _, a_ in added))
 os.remove(os.path.join(A.STATE_DIR, "HOLD"))
+
+# 11. 实验一级带 queue 的步骤（10/23，P1 / P2 换模型重跑）：五折都在 box 上以后放进 DICC 的任务队列，拉回后 box 上做比较
+for e_, g_ in GQUEUED:
+    e_["group_after"] = g_
+MEN = "Dataset111_MENrq1"
+MENM = f"nnUNet/results/{MEN}/nnUNetTrainer_save10__{P}"
+for k in F5:
+    trained(MEN, "nnUNetTrainer_save10", k)
+PIN = (["RQ1/probe/p1/inputs", "RQ1/probe/p1/targets.csv", "RQ1/probe/p2/inputs", "RQ1/probe/p2/lesions",
+        f"nnUNet/preprocessed/{MEN}/splits_final.json", f"{MENM}/dataset.json", f"{MENM}/plans.json"]
+       + [f"{MENM}/fold_{k}/checkpoint_final.pth" for k in F5])
+REMOTE["have"] = set(PIN)
+
+
+PSTEPS = ("p1", "p2", "p2cmp", "push")
+
+
+def pr(todo):
+    return sorted((t["step"], t.get("op", t["group"])) for t in todo if t["key"] == "t3men" and t["step"] in PSTEPS)
+
+
+todo, stuck = A.plan(snap())
+x = {t["step"]: t for t in todo if t["key"] == "t3men" and t["step"] in PSTEPS}
+check("probe：五折都在 box 上、DICC 上输入齐了 → p1、p2 都加进任务队列（档位 -100），p2cmp 先不排",
+      pr(todo) == [("p1", "taskq"), ("p2", "taskq")] and x["p2"]["qnice"] == -100
+      and "key=probe/p2_t3men" in x["p2"]["args"] and 'machines=["dicc"]' in x["p2"]["args"]
+      and f"cmd=MODEL={{data}}/{MENM} TAG=t3men bash research/RQ1/probe/p2_predict_model.sh && touch {{data}}/RQ1/probe/p2_t3men/.probe_done"
+      in x["p2"]["args"] and "out=RQ1/probe/p2_t3men" in x["p2"]["args"] and not any(a_.startswith("inputs=") for a_ in x["p2"]["args"]))
+REMOTE["have"] = set(PIN) - {"RQ1/probe/p2/inputs"}
+todo, stuck = A.plan(snap())
+check("probe：DICC 上缺 P2 的输入文件夹 → 报出来，p1 照常加", pr(todo) == [("p1", "taskq")]
+      and "RQ1/probe/p2/inputs" in stuck.get("advance:p2:t3men", ""))
+REMOTE["have"] = set(PIN) - {f"{MENM}/fold_3/checkpoint_final.pth"}
+todo, stuck = A.plan(snap())
+x = [t for t in todo if t["key"] == "t3men" and t["step"] in PSTEPS]
+check("probe：DICC 上缺一折的模型文件 → 先传过去（只排一次传输），不加任务",
+      [t["step"] for t in x] == ["push"] and x[0]["cmd"] == f"bash scripts/queue/offload_io.sh push dicc {MENM}/fold_3/checkpoint_final.pth"
+      and x[0]["label"] in ("push:p1:t3men", "push:p2:t3men"))
+REMOTE["have"] = set(PIN)
+s_ = snap()
+s_["taskq"]["dicc"]["tasks"] += [dict(key="probe/p1_t3men", nice=-100), dict(key="probe/p2_t3men", nice=-100)]
+todo, stuck = A.plan(s_)
+check("probe：队列里已经有 → 不再加", pr(todo) == [] and "advance:p2:t3men" not in stuck)
+touch(f"{T}/RQ1/probe/p2_t3men/.probe_done")
+todo, stuck = A.plan(s_)
+x = [t for t in todo if t["key"] == "t3men" and t["step"] in PSTEPS]
+check("probe：p2 拉回了 → box cpu 组排和 T0 的比较", [(t["step"], t["group"]) for t in x] == [("p2cmp", "cpu")]
+      and x[0]["cmd"] == f"{PY} research/RQ1/probe/p2_compare.py --tags t3men --out {T}/RQ1/probe/p2_compare_t3men"
+      and x[0]["label"] == "p2cmp:t3men")
+touch(f"{T}/RQ1/probe/p2_compare_t3men/p2_compare.run.json", '{"status": "ok"}')
+touch(f"{T}/RQ1/probe/p1_t3men/.probe_done")
+todo, stuck = A.plan(s_)
+check("probe：p1、p2、p2cmp 都做完 → 没有要排的", pr(todo) == [] and not [k for k in stuck if k.split(":")[1:2] and k.split(":")[1] in PSTEPS and k.endswith(":t3men")])
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

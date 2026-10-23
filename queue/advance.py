@@ -15,6 +15,8 @@
            那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按这一步的 done 判断，不对就报出来。
            box pueue 里已经有这一步（10/22 前排的）时不加。HOLD 对上的先不加。
 一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤> 的要每折都做完那一步）。
+           带 queue 的和每折的一样放进任务队列（2026-10-23，P1 / P2 换模型重跑）。queue 里写了 inputs（相对数据目录的路径）时，
+           查那边缺什么用它，不用 --stage needs。
 最后：FINAL 的步骤（RQ1：compare_all）。有 rerun_if_newer 的，在列出的步骤有比它开始时更新的结果、实验一级的步骤都没有在排 / 在跑时重跑。
 队列里不属于任何实验的任务只拉回、归档。
 
@@ -236,7 +238,7 @@ def plan(s, root=None):
         if (st["name"], t["key"]) in live:
             return
         qd = st["queue"]
-        q = {k: S.fill(v, dict(t["names"], data="{data}"), keep=()) for k, v in qd.items() if k != "nice"}
+        q = {k: S.fill(v, dict(t["names"], data="{data}"), keep=()) for k, v in qd.items() if k not in ("nice", "inputs")}
         if q["key"] in qkeys:
             if all(os.path.exists(os.path.join(root, q["out"], d)) for d in q["done"]):
                 stuck[f"advance:{st['name']}:{t['key']}"] = (f"{label}：任务队列的 {q['key']} 做完、拉回了，但 box 上核对还是没做完"
@@ -246,7 +248,8 @@ def plan(s, root=None):
             return
         mach = next(iter(q.get("machines") or []), None)
         if mach and mach != hub:
-            needs = step_needs(S.fill(st["cmd"], t["names"], keep=()))
+            needs = ([S.fill(p, t["names"], keep=()) for p in qd["inputs"]] if "inputs" in qd
+                     else step_needs(S.fill(st["cmd"], t["names"], keep=())))
             if needs is None:
                 stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：命令不支持 --stage needs，查不了 {mach} 上缺什么"
                 return
@@ -257,15 +260,17 @@ def plan(s, root=None):
             missing = [p for p in needs if p not in have]
             if missing:
                 dirs = [p for p in missing if not os.path.isfile(os.path.join(root, p))]
-                pushes = sorted((x for x in ptasks if x.get("label") == f"push:{label}"), key=lambda x: x["id"])
+                pcmd = "bash scripts/queue/offload_io.sh push " + " ".join([mach] + [shlex.quote(p) for p in missing])
+                # 同样的传输（同一个实验的另一步要的同一批文件）也算
+                pushes = sorted((x for x in ptasks if x.get("label") == f"push:{label}" or x["command"].strip() == pcmd),
+                                key=lambda x: x["id"])
                 if dirs or (pushes and pushes[-1]["status"] not in LIVE_ST):
                     why = (f"{mach} 上没有 {' '.join(dirs)}，要先传过去" if dirs else
                            f"传输任务 {pushes[-1]['id']} {pushes[-1]['status']}，{mach} 上还缺 {' '.join(missing)}（看 pueue log "
                            f"{pushes[-1]['id']}；处理好以后 pueue remove {pushes[-1]['id']}）")
                     stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：{why}"
-                elif not pushes:
-                    todo.append(dict(step="push", key=t["key"], group="wait", label=f"push:{label}", nice=n, paths=missing,
-                                     cmd="bash scripts/queue/offload_io.sh push " + " ".join([mach] + [shlex.quote(p) for p in missing])))
+                elif not pushes and not any(x.get("cmd") == pcmd for x in todo):
+                    todo.append(dict(step="push", key=t["key"], group="wait", label=f"push:{label}", nice=n, paths=missing, cmd=pcmd))
                 return
         todo.append(dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
                          args=S.kv_args("command", q)[1:], cmd=q["cmd"]))
@@ -318,7 +323,10 @@ def plan(s, root=None):
                 if st.get("needs") and not all(after_ok.get((t["key"], st["needs"])) for t in mine):
                     break
                 if not st["done"].ok(root, names):
-                    want(st["name"], e["id"], f"{st['name']}:{e['id']}", S.fill(st["cmd"], names, keep=()), st["group"], n)
+                    if st.get("queue"):
+                        to_queue(dict(key=e["id"], names=names), st, f"{st['name']}:{e['id']}", n, False)
+                    else:
+                        want(st["name"], e["id"], f"{st['name']}:{e['id']}", S.fill(st["cmd"], names, keep=()), st["group"], n)
                     break
                 if st["name"] in watch:
                     newest = max(newest, st["done"].mtime(root, names))
