@@ -62,6 +62,7 @@ FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
+TEMP_ROOT = "TEMP_ROOT"  # 临时数据目录（第一行）和只在那里训的任务（之后每行一个），见 temp_keys()
 safe = S.safe
 
 
@@ -176,6 +177,28 @@ def data_root():
     return M.expand(M.MACHINES[me]["data"]) if me else os.path.expanduser("~/st/BRAIN_TUMOR")
 
 
+def temp_keys(root):
+    """数据目录是 TEMP_ROOT 第一行写的临时目录时 → 只在那里领的任务名集合；否则 None。
+    主数据目录出故障时用（2026-10-23）：worker_start.sh 让 Slurm 作业用临时目录，只领名单里的任务，失败也只数名单里的。"""
+    try:
+        lines = [x.strip() for x in open(os.path.join(TQ, TEMP_ROOT), encoding="utf-8")]
+    except OSError:
+        return None
+    lines = [x for x in lines if x and not x.startswith("#")]
+    if not lines or os.path.realpath(os.path.expanduser(lines[0])) != os.path.realpath(os.path.expanduser(root)):
+        return None
+    return set(lines[1:])
+
+
+def root_error(root):
+    """数据目录读不了时 → 原因（这时训完没、日志新旧都判断不了，不能领任务）；读得了 → None。"""
+    try:
+        os.listdir(root)
+    except OSError as e:
+        return f"数据目录 {root} 读不了：{e}"
+    return None
+
+
 # ---------------- 状态 ----------------
 def claim_info(key):
     try:
@@ -210,10 +233,13 @@ def released_at(key):
         return None
 
 
-def recent_failures(window=PAUSE_WINDOW):
-    """整个队列最近 window 秒内的失败次数。"""
+def recent_failures(window=PAUSE_WINDOW, keys=None):
+    """整个队列（keys 给了时只算这几个任务）最近 window 秒内的失败次数。"""
     n, cut = 0, time.time() - window
+    only = None if keys is None else {safe(k) for k in keys}
     for p in glob.glob(os.path.join(TQ, "failures", "*")):
+        if only is not None and os.path.basename(p) not in only:
+            continue
         for ln in open(p, encoding="utf-8"):
             try:
                 n += time.mktime(time.strptime(ln.split("\t")[0], "%Y-%m-%d %H:%M:%S")) >= cut
@@ -252,12 +278,17 @@ def _claim(a, pick):
         print(f"没有 {tasks_path()}", file=sys.stderr)
         return 2, None
     root = data_root()
-    if recent_failures() >= PAUSE_N:
+    err = root_error(root)
+    if err:
+        print(err, file=sys.stderr)
+        return PAUSED, None
+    only = temp_keys(root)
+    if recent_failures(keys=only) >= PAUSE_N:
         return PAUSED, None
     busy_ahead = 0  # 排在前面、刚停下（日志 15 分钟内更新过、没人领）的
     with Lock():
         for t in read_tasks():
-            if t["key"] in a.exclude:
+            if t["key"] in a.exclude or (only is not None and t["key"] not in only):
                 continue
             st, _ = state(t, root)
             if st == "busy":
@@ -339,6 +370,10 @@ def cmd_release(a):
 def cmd_take(a):
     """领指定的一个（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。"""
     root = data_root()
+    err = root_error(root)
+    if err:
+        print(err)
+        return NOTHING
     with Lock():
         t = next((t for t in read_tasks() if t["key"] == a.key), None)
         if t is None:

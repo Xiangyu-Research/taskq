@@ -8,5 +8,14 @@ read -r CONDA_BASE CONDA_ENV < <(python3 "$REPO/envs/machines.py" get . conda) |
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
 export BRAIN_TUMOR=$(python3 "$REPO/envs/machines.py" get . data)
+_tmp_root=${TASKQ_DIR:-$HOME/.cache/phd/taskq}/TEMP_ROOT
+if [[ -n ${SLURM_JOB_ID:-} && -s $_tmp_root ]]; then
+    _t=$(grep -v '^[[:space:]]*\(#\|$\)' "$_tmp_root" | head -n 1 | tr -d '[:space:]')
+    _t=${_t/#\~/$HOME}
+    if [[ -d $_t ]]; then
+        echo "$(date '+%F %T') 临时数据目录 $_t（$_tmp_root），只领那里列的任务"
+        export BRAIN_TUMOR=$_t
+    fi
+fi
 source "$HERE/gpu_pad_start.sh"
 exec bash "$HERE/dicc_worker.sh"

@@ -259,6 +259,7 @@ fake = os.path.join(T, "fakessh")
 open(fake, "w").write("#!/bin/bash\n# 假 ssh：去掉选项和主机名，命令里的仓库路径换成本仓库\n"
                       "while [[ $1 == -o ]]; do shift 2; done; shift\n"
                       f"cmd=${{1//\\~\\/Projects\\/PhD/{os.path.dirname(os.path.dirname(HERE))}}}\n"
+                      f"cmd=$(printf '%s' \"$cmd\" | sed 's#BRAIN_TUMOR=[^ ]*#BRAIN_TUMOR={DATA}#')\n"
                       f"export TASKQ_DIR={TQ2}\nbash -c \"$cmd\"\n")
 os.chmod(fake, 0o755)
 os.environ["TASKQ_SSH"] = fake
@@ -343,6 +344,38 @@ check("next：machines 里没有本机的不领", r.returncode == 10)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "711", "--envs", "nnunet"],
                    env=dict(ENV3, TASKQ_MACHINE="dicc"), capture_output=True, text=True)
 check("next：machines 里有本机的照档位先领", r.returncode == 0 and r.stdout.startswith("toy/m"))
+
+# 10/23：主数据目录读不了时不领；TEMP_ROOT 临时数据目录只领名单里的，失败只数名单里的
+TQ4, D4, TMP4 = os.path.join(T, "taskq4"), os.path.join(T, "data4"), os.path.join(T, "tmp4")
+os.makedirs(D4)
+os.makedirs(TMP4)
+ks4 = ["Dataset121_X/nnUNetTrainer_save10/0", "Dataset121_X/nnUNetTrainer_save10/1", "Dataset121_X/nnUNetTrainer_save10/2"]
+write_jsonl(os.path.join(TQ4, "tasks.jsonl"), [(i, 0, k) for i, k in enumerate(ks4)])
+os.makedirs(os.path.join(TQ4, "failures"))
+for k in ks4[:2]:
+    with open(os.path.join(TQ4, "failures", taskq.safe(k)), "w") as f:
+        f.write(f"{time.strftime('%F %T')}\t作业 1\tx\n" * 2)
+
+
+def tq4(*args, root=D4):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ4, BRAIN_TUMOR=root),
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+rc, out, err = tq4("next", "--worker", "800", "--envs", ALL, root=os.path.join(T, "nosuch"))
+check("next：数据目录读不了时不领（退出码 12，报原因）", rc == 12 and "读不了" in err)
+rc, out, err = tq4("take", "--worker", "lab", ks4[2], root=os.path.join(T, "nosuch"))
+check("take：数据目录读不了时不领", rc == 10 and "读不了" in out and not os.path.exists(os.path.join(TQ4, "claims", taskq.safe(ks4[2]))))
+rc, out, err = tq4("next", "--worker", "801", "--envs", ALL)
+check("没有 TEMP_ROOT：4 次失败照常暂停", rc == 12)
+open(os.path.join(TQ4, "TEMP_ROOT"), "w").write(f"# 临时目录\n{TMP4}\n{ks4[2]}\n")
+rc, out, err = tq4("next", "--worker", "802", "--envs", ALL)
+check("有 TEMP_ROOT、用的是主数据目录：照常暂停", rc == 12)
+rc, out, err = tq4("next", "--worker", "803", "--envs", ALL, root=TMP4)
+check("临时目录：失败只数名单里的，只领名单里的", rc == 0 and out.startswith(ks4[2] + "\n"))
+rc, out, err = tq4("next", "--worker", "804", "--envs", ALL, root=TMP4)
+check("临时目录：名单里的领完就没有了（不领名单外的）", rc == 10)
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
