@@ -17,7 +17,13 @@ out=$BRAIN_TUMOR/runs/$1
 mkdir -p "$out"
 echo "start $(date +%s.%N) $1 ${VIRTUAL_ENV:-无} $(command -v python) cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
 trap 'echo "term $1" >> "$FAKE_LOG"; exit 143' TERM
-sleep "${FAKE_SECS:-3}" & wait $!
+if [[ ${FAKE_BUSY:-} == "$1" ]]; then  # 一直在写结果文件夹、不写日志（像概率图稀疏化）
+    for _ in $(seq 10); do touch "$out/progress"; sleep 1; done
+elif [[ ${FAKE_HANG:-} == "$1" ]]; then
+    sleep 120 & wait $!
+else
+    sleep "${FAKE_SECS:-3}" & wait $!
+fi
 [[ ${FAKE_FAIL:-} == "$1" ]] && { echo "fail $1" >> "$FAKE_LOG"; exit 1; }
 touch "$out/DONE"
 echo "end $(date +%s.%N) $1" >> "$FAKE_LOG"
@@ -121,6 +127,38 @@ t/b nnunet
 EOF
 SLURM_JOB_ID=900008 FAKE_FAIL=t/a TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2d.out" 2>&1
 check "训练失败：记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
+
+# 2e. 开始不久就失败的 2 个任务：作业不再领；跑了一段时间才失败的不算作业的问题，照常领下一个
+reset
+table << EOF
+t/a nnunet
+t/b nnunet
+t/c nnunet
+EOF
+cat > "$T/fail2.sh" << EOF
+[[ \$1 == t/a || \$1 == t/b ]] && FAKE_FAIL=\$1; export FAKE_FAIL
+exec bash "$T/fake_train.sh.orig" "\$@"
+EOF
+cp "$T/fake_train.sh" "$T/fake_train.sh.orig"; cp "$T/fail2.sh" "$T/fake_train.sh"
+SLURM_JOB_ID=900011 TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2e1.out" 2>&1
+check "两个任务开始不久就失败：作业不再领第三个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && ! grep -q "start .* t/c" $T/train.log && grep -q "开始不久就失败" $T/w2e1.out'
+reset
+SLURM_JOB_ID=900012 TASKQ_SLOTS=1 TASKQ_EARLY_FAIL=0 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2e2.out" 2>&1
+check "跑了一段时间才失败的：记在任务上，作业照常领下一个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && [[ -f $TASKQ_DIR/failures/t__a && -f $TASKQ_DIR/failures/t__b ]]'
+cp "$T/fake_train.sh.orig" "$T/fake_train.sh"
+
+# 2f. 卡住的任务（日志、结果文件夹都不动）：停掉、交还、不记失败，本作业领下一个；一直在写结果文件夹的不算卡住
+reset
+table << EOF
+t/a nnunet
+t/b nnunet
+t/c nnunet
+EOF
+SLURM_JOB_ID=900013 TASKQ_SLOTS=1 TASKQ_STALL_MAX=4 FAKE_HANG=t/a FAKE_BUSY=t/b timeout 90 bash "$HERE/dicc_worker.sh" > "$T/w2f.out" 2>&1
+check "卡住：停掉、交还、不记失败" 'grep -q "^term t/a" $T/train.log && grep -q "t/a 的日志和结果文件夹 .*当作卡住" $T/w2f.out && grep -q "卡住的 t/a 已停下" $T/w2f.out && [[ ! -e $TASKQ_DIR/failures/t__a ]]'
+check "卡住的停下后，本作业接着领后面的" 'grep -q "end .* t/b" $T/train.log && grep -q "end .* t/c" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
+check "一直在写结果文件夹（不写日志）的不算卡住" '! grep -q "t/b 的日志和结果文件夹" $T/w2f.out'
+check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 
 # 3. 收到停止信号：停训练、交还领取（下一个作业能接着领）
 reset

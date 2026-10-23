@@ -9,7 +9,10 @@
 # 下一个领到的从存档接着训。
 #   bash dicc_worker.sh                     （scripts/queue/worker.sbatch → worker_start.sh）
 # 出问题时不让排队的作业空跑掉：
-#   - 本作业训练失败 2 次（或开训前就出错）就不再领新的，也不重领自己失败过的；
+#   - 任务卡住（10/23 起）：开始 30 分钟以后，任务的日志和结果文件夹都 30 分钟没有变化，就停掉它、交还（不算失败），
+#     马上领下一个；本作业不再领它。停不下来的（卡在读写上）3 分钟后不再等它。读不了日志或结果文件夹时不判断；
+#   - 本作业有 2 个任务开始 10 分钟内就失败（多半是节点或环境的问题），就不再领新的；跑了一段时间才失败的
+#     只记在任务上（10/23 起），作业照常领下一个。本作业不重领自己失败过的；
 #   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业先空着等（健康检查提醒）；
 #   - 队列本身出错（taskq.py 读写不了）连续 10 分钟、手上又没有在训的：结束作业、把卡还回去；
 #   - 查不到作业的结束时间时当作时间还多，之后每轮再查。
@@ -40,6 +43,8 @@ PATIENCE=${TASKQ_PATIENCE:-1200}        # 开始后最多等这么久，给排�
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
 IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
 MAX_OWN_FAIL=2
+EARLY_FAIL=${TASKQ_EARLY_FAIL:-600}     # 开始后这么久内就失败的才算本作业（节点、环境）的问题
+STALL_MAX=${TASKQ_STALL_MAX:-1800}      # 任务的日志和结果文件夹都这么久没变化，算卡住
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
 unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
 LOGDIR=$DATA/logs/workers
@@ -72,6 +77,9 @@ GPUCSV=$LOGDIR/worker_${W}_gpu.csv
 GPUMON=$!
 
 declare -A KEY=()         # 训练的 pid → key
+declare -A STARTED=()     # pid → 开始的时刻
+declare -A OUTDIR=()      # pid → 结果文件夹
+declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
@@ -113,11 +121,23 @@ can_add() {  # 手上有训练时，还能不能再加一个；不能时 why_not
     echo "$(ts) GPU 使用率 $util%、训练占 $(( used - pad ))MiB / ${total}MiB，再领一个"
     return 0
 }
-fail() {  # key 原因：交还并记一次失败；本作业不再领这个 key
+fail() {  # key 原因 跑了多少秒：交还并记一次失败；本作业不再领这个 key；开始不久就失败的才算本作业的
     $TQPY release --worker "$W" "$1" --failed "$2"
     EXCL+=("$1")
+    (( $3 < EARLY_FAIL )) || return 0
     OWN_FAILS=$(( OWN_FAILS + 1 ))
-    (( OWN_FAILS >= MAX_OWN_FAIL )) && echo "$(ts) 本作业已失败 $OWN_FAILS 次，不再领新任务（多半是这个节点或环境有问题）"
+    (( OWN_FAILS >= MAX_OWN_FAIL )) && echo "$(ts) 本作业已有 $OWN_FAILS 个任务开始不久就失败，不再领新任务（多半是这个节点或环境有问题）"
+}
+quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变化；读不了时输出空
+    local p=$1 now log m
+    now=$(date +%s)
+    log=$DATA/logs/tasks/${KEY[$p]//\//__}__${W}_seg1.log
+    m=$(timeout 20 stat -c %Y "$log" 2> /dev/null) || return 0
+    (( now - m < STALL_MAX )) && { echo $(( now - m )); return 0; }
+    [[ -n ${OUTDIR[$p]:-} && -d ${OUTDIR[$p]} ]] || { echo $(( now - m )); return 0; }
+    local hit
+    hit=$(timeout 60 find "${OUTDIR[$p]}" -newermt "@$(( now - STALL_MAX ))" -print -quit 2> /dev/null) || return 0
+    [[ -n $hit ]] && echo 0 || echo $(( now - m ))
 }
 start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的参数（shell 引号）
     local key args
@@ -125,11 +145,15 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     eval "local targs=($args)"
     pad_make_room
     TASK_JOBTAG=$W TASK_SEG=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
-    KEY[$!]=$key
+    local pid=$! out
+    KEY[$pid]=$key
+    STARTED[$pid]=$(date +%s)
+    out=$(eval "$(python3 "$HERE/spec.py" shell "${targs[@]}" 2> /dev/null | grep '^TASK_OUT=')"; echo "${TASK_OUT:-}")
+    OUTDIR[$pid]=$out
     CHANGED=$(date +%s)
-    echo "$(ts) 开训 $key（pid $!：run_task.sh $args）"
+    echo "$(ts) 开训 $key（pid $pid：run_task.sh $args）"
 }
-kill_tree() { local c; for c in $(pgrep -P "$1"); do kill_tree "$c"; done; kill -TERM "$1" 2> /dev/null; }
+kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
 on_term() {
     echo "$(ts) 收到停止信号（多半是到时限），停训练、交还任务"
     local p
@@ -158,19 +182,46 @@ while true; do
         if ! kill -0 "$p" 2> /dev/null; then
             wait "$p"; rc=$?
             key=${KEY[$p]}; unset "KEY[$p]"
-            if (( rc == 0 )); then
+            ran=$(( $(date +%s) - ${STARTED[$p]:-0} ))
+            stalled=${STALLED[$p]:-}
+            unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]"
+            if [[ -n $stalled ]]; then
+                echo "$(ts) 卡住的 $key 已停下，交还（不算失败），本作业不再领它"
+                $TQPY release --worker "$W" "$key"
+                EXCL+=("$key")
+            elif (( rc == 0 )); then
                 echo "$(ts) 训完 $key"
                 $TQPY release --worker "$W" "$key"
             elif (( rc == 3 )); then
                 echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
-                fail "$key" "退出码 0 但没训完"
+                fail "$key" "退出码 0 但没训完" "$ran"
             else
                 echo "$(ts) $key 训练失败（run_task.sh 退出码 $rc），交还并记一次失败"
-                fail "$key" "退出码 $rc"
+                fail "$key" "退出码 $rc" "$ran"
             fi
         fi
     done
     now=$(date +%s)
+    # 卡住的任务：停掉、交还，空出位置领下一个
+    for p in "${!KEY[@]}"; do
+        if [[ -n ${STALLED[$p]:-} ]]; then
+            if (( now - STALLED[$p] >= 180 )); then
+                echo "$(ts) ${KEY[$p]} 停了 3 分钟还没停下（多半卡在读写上），不再等它，交还"
+                $TQPY release --worker "$W" "${KEY[$p]}"
+                EXCL+=("${KEY[$p]}")
+                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]"
+            elif (( now - STALLED[$p] >= 60 )); then
+                kill_tree "$p" KILL
+            fi
+            continue
+        fi
+        (( now - STARTED[$p] >= STALL_MAX )) || continue
+        q=$(quiet_since "$p")
+        [[ -n $q ]] && (( q >= STALL_MAX )) || continue
+        echo "$(ts) ${KEY[$p]} 的日志和结果文件夹 $(( q / 60 )) 分钟没有变化，当作卡住：停掉、交还，领下一个"
+        STALLED[$p]=$now
+        kill_tree "$p"
+    done
     (( END )) || get_end
     if (( now - last_beat >= 300 && ${#KEY[@]} > 0 )); then
         $TQPY beat --worker "$W" "${KEY[@]}"
