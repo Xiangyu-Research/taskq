@@ -5,7 +5,7 @@
 # 结果文件夹、训完的标志、不拉的文件、上一级里还要拉的文件都按任务说明（scripts/queue/spec.py lookup <key>：实验表或训练队列）：
 #   out、done、fetch.exclude、fetch.extra（nnU-Net 是模型文件夹里的 plans.json 等，推理要用）、log。
 # 那边还没训完时每 10 分钟查一次，每小时记一行最新训练日志的情况（pueue log 里能看到）；不设等待上限，没进展由健康检查提醒。
-# 只新增 / 更新，不删 box 上的文件；box 上已经训完（done 都有）时直接结束。拉回失败重试 3 次。
+# 只新增 / 更新，不删 box 上的文件；box 上已经训完（done 都有）时直接结束。训完的标志最后拉。拉回失败重试 3 次。
 set -euo pipefail
 HOST=${1:?用法：fetch_task.sh <机器> <key>} KEY=${2:?用法：fetch_task.sh <机器> <key>}
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
@@ -21,11 +21,13 @@ s = json.loads(sys.stdin.read()); f = sys.argv[1]
 if f == "out": print(s["out"])
 elif f == "test": print(" && ".join("{ " + " || ".join("test -e " + shlex.quote(a) for a in d.split("|")) + "; }" for d in s["done"]))
 elif f in ("exclude", "extra"): print("\n".join((s.get("fetch") or {}).get(f, [])))
+elif f == "donefiles": print("\n".join(a for d in s["done"] for a in d.split("|")))
 elif f == "log": print(s.get("log") or "")
 ' "$1" <<< "$SPEC"; }
 OUT=$(sp out) TEST=$(sp test) LOGPAT=$(sp log)
 mapfile -t EXCL < <(sp exclude | grep . || true)
 mapfile -t EXTRA < <(sp extra | grep . || true)
+mapfile -t DONEF < <(sp donefiles | grep . || true)
 SRC=$RDATA/$OUT DST=$LDATA/$OUT PARENT=$(dirname "$OUT")
 done_here() { [[ -d $DST ]] && (cd "$DST" && eval "$TEST"); }
 if done_here; then
@@ -44,14 +46,17 @@ until ssh -o BatchMode=yes -o ConnectTimeout=30 "$SSH" "cd $SRC 2> /dev/null && 
 done
 echo "$(date '+%F %T') 训完了，拉回 → $DST"
 mkdir -p "$DST"
-EX=()
+EX=() EXD=()
 for x in ${EXCL[@]+"${EXCL[@]}"}; do EX+=(--exclude="$x"); done
+# 训完的标志最后拉：先拉了标志的话，拉到一半时 box 上就像已经训完了，advance.py 会提前排评测（10/23）
+for x in ${DONEF[@]+"${DONEF[@]}"}; do EXD+=(--exclude="/$x"); done
 for i in 1 2 3; do
     ok=1
     for x in ${EXTRA[@]+"${EXTRA[@]}"}; do
         rsync -rlt --partial --update "$SSH:$RDATA/$PARENT/$x" "$LDATA/$PARENT/" || ok=0
     done
-    (( ok )) && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
+    (( ok )) && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} ${EXD[@]+"${EXD[@]}"} "$SSH:$SRC/" "$DST/" \
+        && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
     (( i == 3 )) && { echo "拉回失败 3 次" >&2; exit 1; }
     sleep "${FETCH_TEST_RETRY:-300}"
 done
