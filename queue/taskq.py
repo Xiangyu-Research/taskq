@@ -504,6 +504,17 @@ def cmd_show(a):
 
 
 # ---------------- 状态（DICC 上直接读，box 上 ssh 过去） ----------------
+def task_log_age(root, key, worker):
+    """领着这个任务的作业写的分段日志（run_task.sh）多久没更新（秒）；没有 → None。"""
+    if not worker:
+        return None
+    logs = glob.glob(os.path.join(root, "logs", "tasks", f"{glob.escape(key.replace('/', '__'))}__{glob.escape(str(worker))}_seg*.log"))
+    try:
+        return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
+    except OSError:
+        return None
+
+
 def local_status():
     root = data_root()
     out = []
@@ -512,7 +523,8 @@ def local_status():
         s = spec_of(t)
         ci = claim_info(t["key"]) or {}
         out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
-                        beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None, failures=failures(t["key"]),
+                        beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None,
+                        task_log_age=task_log_age(root, t["key"], ci.get("worker")), failures=failures(t["key"]),
                         skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]

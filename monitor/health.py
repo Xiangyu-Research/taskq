@@ -220,9 +220,10 @@ def check(s):
                     claim(key, name, "队列" if st in ("free", "stale") else f"在训（{t['note']}）")
                 if st in ("claimed", "busy"):
                     busy.setdefault(key, set()).add(name)
-                if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (t["log_age"] is None or t["log_age"] > 5400):
+                ages = [a for a in (t["log_age"], t.get("task_log_age")) if a is not None]
+                if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (not ages or min(ages) > 5400):
                     add(f"stuck:{name}:{key}", f"{L(name)} 作业 {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
-                        f"{'训练日志 90 分钟没有新 epoch' if t['log_age'] is not None else '还没有训练日志'}")
+                        f"{'日志 90 分钟没有更新' if ages else '还没有日志'}")
                 if t["failures"] and st != "done":  # 后来训完了就不再报
                     add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 训练失败 {t['failures']} 次"
                         + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))

@@ -120,9 +120,9 @@ s["src"]["dicc"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
 ok("同一折两边都在训 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
 
 # ---------------- DICC 任务队列（10/17）+ lab 领的折（10/18）----------------
-def tqrow(key, state, worker=None, since=None, log_age=None, kind="nnunet"):
+def tqrow(key, state, worker=None, since=None, log_age=None, kind="nnunet", task_log_age=None):
     return dict(key=key, state=state, worker=worker, host=worker, since=since, beat=None, note="", log_age=log_age, failures=0,
-                kind=kind, nice=0, order=1)
+                kind=kind, nice=0, order=1, task_log_age=task_log_age)
 
 
 old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
@@ -136,6 +136,11 @@ ok("lab 领的折在 lab 上训：不算同一折两处，也不按 DICC 的日�
 s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
 s["slurm"] = sq(["rq1_t3met_f2", "486191_2", "RUNNING", "3:00:00", "None", "0"])
 ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
+INF = "infer/Dataset103_GLIrq1_t1c/x/fold_2"
+s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=120)]
+ok("推理任务（没有训练日志）：任务日志刚更新过，不算卡住", f"stuck:dicc:{INF}" not in H.check(s))
+s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=6000)]
+ok("推理任务：任务日志 100 分钟没更新，算卡住", "日志 90 分钟没有更新" in H.check(s).get(f"stuck:dicc:{INF}", {}).get("msg", ""))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "claimed", "lab", since=old)]
 s["pueue"]["lab"]["tasks"] = []
 ok("在跑的 DICC 作业没领到任务：lab 领的不算 DICC 作业", "tqidle:dicc" in H.check(s))
