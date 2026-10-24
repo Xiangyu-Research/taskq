@@ -21,12 +21,13 @@
                  └──────── 都用 run_task.sh <做法> k=v… 跑：激活环境、设变量、跑命令、写分段日志 ────────┘
                                 ↓ 训完（任务说明的 done）
  box 按状态推进（advance.py，跟着健康检查每 30 分钟）：拉回 → 归档 → 实验表里的步骤（RQ1：推理 → 评测 → 五折分析）
-     └─ OFFLOAD 对上的推理（10/24 起 infer:* idle：0 号卡空着才分，否则进 DICC 任务队列）：传输入（offload_io.sh push）→ lab gpu0 推理 → 拉回、核对（offload_io.sh pull）→ box 核对后删 lab 那份
+     ├─ lab 训的折（10/24 晚起，推理步骤的 on_trainer）：还在 gpu1 训着时把推理加进同一个组 → 训完马上推理 → 拉回、核对（offload_io.sh pull）→ box 核对后删 lab 那份
+     └─ OFFLOAD 对上的推理（10/24 白天用过，晚起只留 off）：传输入（offload_io.sh push）→ lab gpu0 推理 → 拉回、核对 → box 核对后删 lab 那份
      └─ 评测（10/24 起）：DICC 上有这一折的预测 → 进任务队列（device=cpu）→ refill.py 交 CPU worker（cpu_worker.sbatch，CPU 分区）→ 拉回；否则在 box 的 cpu 组跑
 ```
 
 - **pueue** 在 box、lab 上只当运行器：按组限并发、留日志、断开 ssh 不中断。不用暂存、优先级、`--after`（10/18 起）。
-- **开关**（都是文件，删掉 / 不建就是关）：DICC `~/.cache/phd/taskq/ENABLED`（DICC 作业按队列领任务；没有时照旧训作业名那一折）；box `~/.cache/phd/taskq/LAB`（替 lab 领任务；没有时只续 lab 已有的领取，其余只记"会做什么"）；box `~/.cache/phd/advance/LIVE`（按状态推进真的排任务；没有时只记"会排什么"）；box `~/.cache/phd/advance/HOLD`（每行一个标签的通配式，如 `infer:umamba_f*`：对上的步骤照常排，但加成暂停的，要跑时 `pueue enqueue <任务号>`）；box `~/.cache/phd/advance/OFFLOAD`（每行一个标签的通配式：对上的每折步骤分到 `envs/machines.py` 里有 `offload` 组的机器（lab `gpu0`）跑；行尾加 `idle` 的只在那个组空着时分过去，box 上排着没开始的一次挪一个；功能有，10/22 起暂不启用：lab 0 号卡有别人在用，规则都注释掉了）；box `~/.cache/phd/taskq/DICC`（DICC 排着的作业不够时自动补交 `worker.sbatch`；没有时只记"会交什么"）；DICC `~/.cache/phd/gpu_pad/DISABLED`（有这个文件时不填显存）。
+- **开关**（都是文件，删掉 / 不建就是关）：DICC `~/.cache/phd/taskq/ENABLED`（DICC 作业按队列领任务；没有时照旧训作业名那一折）；box `~/.cache/phd/taskq/LAB`（替 lab 领任务；没有时只续 lab 已有的领取，其余只记"会做什么"）；box `~/.cache/phd/advance/LIVE`（按状态推进真的排任务；没有时只记"会排什么"）；box `~/.cache/phd/advance/HOLD`（每行一个标签的通配式，如 `infer:umamba_f*`：对上的步骤照常排，但加成暂停的，要跑时 `pueue enqueue <任务号>`）；box `~/.cache/phd/advance/OFFLOAD`（每行一个标签的通配式：对上的每折步骤分到 `envs/machines.py` 里有 `offload` 组的机器（lab `gpu0`）跑；行尾加 `idle` 的只在那个组空着时分过去，box 上排着没开始的一次挪一个；一行 `off` = 停；10/24 晚起只留 `off`）；box `~/.cache/phd/taskq/DICC`（DICC 排着的作业不够时自动补交 `worker.sbatch`；没有时只记"会交什么"）；DICC `~/.cache/phd/gpu_pad/DISABLED`（有这个文件时不填显存）。
 
 ## 出问题时看哪里
 
@@ -35,7 +36,7 @@
 | 训练：哪一折没人训、谁领了、失败了几次 | `python3 scripts/queue/taskq.py status`（box 上跑，经 ssh 读 DICC 的队列）；DICC 作业的 `.out`；失败记录在 DICC `~/.cache/phd/taskq/failures/`，lab 训不了而跳过的在 `skips/` |
 | lab 领了什么、为什么没领；DICC 补交了哪些 worker 作业 | box `~/refill.log`；`python3 scripts/queue/refill.py`（只看会做什么） |
 | 训完之后卡在哪一步 | box `~/advance.log`（每次有变化记一行：排了什么、会排什么、哪一步失败停住）；`python3 scripts/queue/advance.py`（只看会排什么）；再看 `pueue log <号>` |
-| 分到 lab 的推理走到哪 | box `~/advance.log`；box 上 `push:<标签>`、`pull:<标签>` 任务的 `pueue log`；lab 上同标签的任务（`ssh lab pueue log <号>`）；分出去还没清理的记在 box `~/.cache/phd/advance/offload.json`（label → 机器、结果文件夹、要用的输入、传过去的模型文件） |
+| 分到 lab 的推理走到哪（lab 训的折接着训练推理的也是） | box `~/advance.log`；box 上 `push:<标签>`、`pull:<标签>` 任务的 `pueue log`；lab 上同标签的任务（`ssh lab pueue log <号>`）；分出去还没清理的记在 box `~/.cache/phd/advance/offload.json`（label → 机器、结果文件夹、要用的输入、传过去的模型文件） |
 | 总览、报警 | `research/RQ1/实验登记表.md` 最上面的"需要处理"（`scripts/monitor/health.py`） |
 
 各台机器的数据目录、conda、pueue 的组、角色、要查的盘都写在 [`envs/machines.py`](../../envs/machines.py)，这里的脚本、`scripts/sync/`、`scripts/monitor/health.py`、登记表都从那里读。加一台机器：在 `MACHINES` 里加一项；pueue 机器上再跑一次 `setup.sh`，box 上配好 ssh。
@@ -48,7 +49,7 @@
 | box | `cpu` | 2 | 评测（`run_predict_eval.sh --stage eval`）、五折集成评测、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等） |
 | box | `wait` | 不限 | 拉回训完的任务（`fetch_task.sh`）、lab 训的任务归档（`archive_task.sh`）、给 lab 传数据（`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡训练（`run_task.sh`） |
-| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领训练）；box 分推理过来，10/24 起在卡空着时分（卡上有别人时推理先等，最多 24 小时） |
+| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领训练）；box 分推理过来，10/24 白天用过，晚起不用 |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 文件
@@ -63,7 +64,7 @@
 | `fetch_task.sh <机器> <key>` | 等那台机器上这个任务训完（`done`），再把 `out`（去掉 `fetch.exclude`，加上上一级的 `fetch.extra`）拉回 box；每小时记一行最新训练日志 |
 | `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到备份机器（DICC），三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED` |
 | `refill.py` | 替 lab 从任务队列领任务（`taskq.py take --worker lab --ttl 86400`）、续、交还（lab 训完的等备份到 DICC 后才交还；没开始就失败的 `release --skip`）；lab 每个有卡、开着的组（`envs/machines.py` 的 `manual` 组除外，即 lab 的 `gpu0`）空了各领一个 lab 有环境、盘放得下的任务（10/19 起），任务说明里的 `data` 不在 lab 上先传；在训时为下一折提前传数据、快训完时提前领（排在同一个组后面），lab 上自动传过去的数据按还要不要用和空间预算删，传数据的任务传完后马上跑一次健康检查（10/24 起）。DICC 每个 QOS 排着和在跑的作业（数组按段算）不到上限减去留给别的作业的名额（`envs/machines.py` 的 `qos`，DICC 的 long 留 4 个）、队列里还有没人领的任务时，补交 `worker.sbatch` 补满，每个空位一个普通作业、不用数组（10/21 起；QOS 和每段时限在 `envs/machines.py` 的 `qos`）。由健康检查每 30 分钟调用，`python3 scripts/queue/refill.py` 只看会做什么。规则见 `admin/作业.md` 的优先级一节 |
-| `advance.py` | box 按状态推进：每一折缺哪一步、那一步没在跑就排（拉回、归档、推理、评测、五折分析）；带 `queue` 的步骤（每折的推理、五折训完后的 P1 / P2 重跑）放进 DICC 的任务队列，那边缺的文件先传，拉回后接着做下一步；失败过的不重排、报出来；`OFFLOAD` 对上的步骤分到 lab 跑（缺的输入先传，跑完拉回，box 核对后删 lab 那份）；由健康检查调用，`python3 scripts/queue/advance.py` 只看会排什么 |
+| `advance.py` | box 按状态推进：每一折缺哪一步、那一步没在跑就排（拉回、归档、推理、评测、五折分析）；带 `queue` 的步骤（每折的推理、五折训完后的 P1 / P2 重跑）放进 DICC 的任务队列，那边缺的文件先传，拉回后接着做下一步；失败过的不重排、报出来；lab 训的折推理加在 lab 训练它的组里、排在训练后面（`on_trainer`，10/24 起；推完才归档）；`OFFLOAD` 对上的步骤分到 lab 跑（缺的输入先传，跑完拉回，box 核对后删 lab 那份）；由健康检查调用，`python3 scripts/queue/advance.py` 只看会排什么 |
 | `offload_io.sh` | 分到别的机器的步骤的传输：`push <机器> <路径>…`（文件夹经隧道 `tunnel_push.sh`，文件用 rsync over ssh）、`pull <机器> <文件夹>`（rsync 拉回 box，再按校验和核对）；由 `advance.py` 放进 box 的 `wait` 组 |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把重启时被打断的任务原地放回队列；表里 `gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（所有 pueue 机器 `on_boot.sh`；角色 autopull 的代码同步 `scripts/sync/git_pull_cron.sh`；hub 的健康检查和登记表 / 看板更新 `scripts/monitor/auto_refresh.sh`） |

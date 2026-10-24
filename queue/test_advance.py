@@ -541,6 +541,73 @@ done, _ = A.run(snap(), q=lambda *a: 0, tq=fake_tq)
 check("queue：HOLD 对上的先不加", not any(f"key={TCQ}" in a_ for _, a_ in added))
 os.remove(os.path.join(A.STATE_DIR, "HOLD"))
 
+# 10b. lab 训的折在 lab 训练它的组里推理（on_trainer，10/24）
+K3 = f"{TC}/3"
+TN3 = [f"{TCM}/dataset.json", f"{TCM}/fold_3/checkpoint_final.pth", "nnUNet/raw/RQ1_holdout/GLI/imagesTs"]
+old_sn = A.step_needs
+A.step_needs = lambda cmd: TN3 if "Dataset103_GLIrq1_t1c" in cmd and cmd.endswith(" 3") and "--stage infer" in cmd else old_sn(cmd)
+REMOTE["have"] = {TN3[0], TN3[2]}
+TR3 = "bash scripts/queue/run_task.sh nnunet dataset=Dataset103_GLIrq1_t1c trainer=nnUNetTrainer_save10 fold=3"
+OSF = os.path.join(A.STATE_DIR, "offload.json")
+
+
+def t3(todo):
+    return [t for t in todo if t["key"] == K3]
+
+
+def lsnap(lab, fold=None):
+    s_ = osnap(lab=lab)
+    s_["src"]["lab"] = dict(folds={K3: fold or dict(final=False)})
+    return s_
+
+
+todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1")]))
+x = t3(todo)
+check("on_trainer：这一折在 lab gpu1 训着、别的输入那边都有 → 加进 lab gpu1（训练后面），不进任务队列",
+      len(x) == 1 and x[0].get("host") == "lab" and x[0]["group"] == "gpu1" and x[0]["label"] == "infer:t1c_f3"
+      and "--stage infer ~/BRAIN_TUMOR/" in x[0]["cmd"] and x[0]["record"][1]["on_trainer"] and not stuck.get(f"advance:infer:{K3}"))
+REMOTE["have"] = {TN3[0]}
+todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1")]))
+check("on_trainer：lab 上缺测试集 → 不加、报出来", not t3(todo) and "imagesTs" in stuck.get(f"advance:infer:{K3}", ""))
+REMOTE["have"] = {TN3[0], TN3[2]}
+todo, stuck = A.plan(lsnap([(19, "Queued", TR3, "train:x", "gpu1")]))
+check("on_trainer：训练还排着没开始（提前领的）→ 先不加（不然会排到训练前面）", not t3(todo))
+calls.clear()
+A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=fake_q, tq=lambda *a: (0, ""))
+rec = json.load(open(OSF)).get("infer:t1c_f3", {})
+check("on_trainer：run 时在 lab gpu1 加，offload.json 记下那边的任务号",
+      any(c.startswith("gpu1 -p --label infer:t1c_f3 -- ") for c in calls) and rec.get("on_trainer") and isinstance(rec.get("id"), int))
+json.dump({"infer:t1c_f3": dict(machine="lab", key=K3, out=f"predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3",
+                                needs=[], pushed=[], on_trainer=True, group="gpu1", id=30)}, open(OSF, "w"))
+INF3 = "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 3"
+todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1"), (30, "Queued", INF3, "infer:t1c_f3", "gpu1")]))
+check("on_trainer：已经排上 → 不重复加", not t3(todo))
+trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "3")
+LIVE3 = [(19, "Success", TR3, "train:x", "gpu1"), (30, "Running", INF3, "infer:t1c_f3", "gpu1")]
+todo, stuck = A.plan(lsnap(LIVE3, FIN))
+check("on_trainer：lab 训完、box 拉回了、那边在推理 → 不归档、不进任务队列", steps(t3(todo)) == [])
+todo, stuck = A.plan(lsnap([LIVE3[0], (30, "Success", INF3, "infer:t1c_f3", "gpu1")], FIN))
+x = t3(todo)
+check("on_trainer：那边做完 → 归档、拉回（box wait 组 pull:<标签>）", steps(x) == [("archive", K3), ("pull", K3)]
+      and next(t for t in x if t["step"] == "pull")["cmd"].startswith("bash scripts/queue/offload_io.sh pull lab predictions/"))
+todo, stuck = A.plan(lsnap([LIVE3[0], (30, "Failed (1)", INF3, "infer:t1c_f3", "gpu1")], FIN))
+check("on_trainer：训完了、那边推理失败 → 报出来，不进任务队列", not [t for t in t3(todo) if t["step"] != "archive"]
+      and "任务 30" in stuck.get(f"advance:infer:{K3}", ""))
+todo, stuck = A.plan(lsnap([LIVE3[0]], dict(final=True, archived=True)))
+check("on_trainer：那边的任务删掉了、已经归档 → 照常走任务队列（DICC 上缺模型先传过去）",
+      [(t.get("op"), t.get("host")) for t in t3(todo)] == [(None, None)] and t3(todo)[0]["cmd"].startswith("bash scripts/queue/offload_io.sh push dicc "))
+todo, stuck = A.plan(lsnap([LIVE3[0], (31, "Running", TR3.replace("fold=3", "fold=4"), "train:y", "gpu1")], FIN))
+check("on_trainer：训完了才发现没排、组里已经在训下一折 → 照常（归档后进任务队列）", steps(t3(todo)) == [("archive", K3)])
+os.remove(f"{T}/nnUNet/results/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3/checkpoint_final.pth")
+todo, stuck = A.plan(lsnap([(30, "Failed (1)", INF3, "infer:t1c_f3", "gpu1"), (32, "Running", TR3, "train:x", "gpu1")]))
+check("on_trainer：训练中途停了、推理跟着失败，那边又接着训 → 重新排在新的训练后面", [t.get("host") for t in t3(todo)] == ["lab"])
+open(os.path.join(A.STATE_DIR, "OFFLOAD"), "w").write("infer:* idle\noff\n")
+todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1"), (30, "Queued", INF3, "infer:t1c_f3", "gpu1")]))
+check("on_trainer：OFFLOAD 停着也不停 lab gpu1 上排着的推理", not t3(todo))
+os.remove(os.path.join(A.STATE_DIR, "OFFLOAD"))
+os.remove(OSF)
+A.step_needs = old_sn
+
 # 11. 实验一级带 queue 的步骤（10/23，P1 / P2 换模型重跑）：五折都在 box 上以后放进 DICC 的任务队列，拉回后 box 上做比较
 for e_, g_ in GQUEUED:
     e_["group_after"] = g_

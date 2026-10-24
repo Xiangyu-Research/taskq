@@ -278,7 +278,7 @@ def check(s):
             add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
 
     # --- pueue ---
-    waits, train_q = [], {}
+    waits, train_q, running_g = [], {}, set()
     for name in M.names("pueue"):
         if not s["ok"].get(name):
             continue
@@ -304,6 +304,8 @@ def check(s):
                 waits.append((name, t, key, kind[6:]))
             if kind == "train" and st in ("Running", "Queued"):
                 train_q.setdefault((name, t["group"]), []).append((st, tname))
+            if st == "Running":
+                running_g.add((name, t["group"]))
             if st in LIVE or st == "Success" or st in PAUSED_OK:
                 continue
             end = mr_time(t["end"])
@@ -327,7 +329,7 @@ def check(s):
             ts = train_q.get((name, g), [])
             run = [n for st, n in ts if st == "Running"]
             if not ts:
-                if name not in holding:  # 领着折时（在传数据、或停了等人处理）refill.py 另外报
+                if name not in holding and (name, g) not in running_g:  # 在跑别的（训完接着做的推理，10/24）不算空着  # 领着折时（在传数据、或停了等人处理）refill.py 另外报
                     add(f"idle:{name}:{g}", f"{L(name)} {g} 组没有训练任务，{gpu} 号卡空着（任务队列里没有能领的？看 ~/refill.log）")
             elif len(ts) == len(run):
                 add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练（训完后由 refill.py 领下一折）",
