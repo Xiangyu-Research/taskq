@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=cpu_worker
-#SBATCH --partition=cpu-epyc,cpu-epyc-genoa
+#SBATCH --partition=cpu-epyc-genoa
 #SBATCH --qos=normal
 #SBATCH --time=08:00:00
 #SBATCH --nodes=1
