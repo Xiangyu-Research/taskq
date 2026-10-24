@@ -301,6 +301,8 @@ ok("读不到 CPU worker 作业数：不交", R.cpu_plan(cq, None, ("normal", "0
 ok("没有纯 CPU 任务：不交", R.cpu_plan(snap()["taskq"]["dicc"], 0, ("normal", "08:00:00", 1))[0] == [])
 ok("队列暂停：不交", R.cpu_plan(cq | {"paused": True}, 0, ("normal", "08:00:00", 1))[0] == [])
 
+# 补交的测试用固定的配置，不跟着 envs/machines.py 里的名额变
+R.M.MACHINES["dicc"] = dict(R.M.MACHINES["dicc"], qos={"long": ("3-00:00:00", 2)}, cpu_worker=("normal", "08:00:00", 1))
 sub = []
 
 
