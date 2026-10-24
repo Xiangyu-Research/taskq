@@ -16,6 +16,7 @@ sys.path.insert(0, HERE)
 import advance as A  # noqa: E402
 
 A.STATE_DIR = os.path.join(T, "state")
+A.taskq_add = lambda nice, args: (0, "")  # 不经 ssh 真的加进 DICC 的队列
 # 前面几节测 box 上排的步骤：先去掉推理的 queue（10/22 起推理放 DICC 任务队列），最后一节再放回来测
 QUEUED = [(st, st.pop("queue")) for e in A.E.load()[0] for st in e.get("after", []) if "queue" in st]
 # 实验一级带 queue 的几串（10/23，P1 / P2 重跑）也先拿掉，第 11 节再放回来测
@@ -477,6 +478,34 @@ s2 = osnap()
 s2["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100))
 todo, stuck = A.plan(s2)
 check("queue + OFFLOAD idle：已经在任务队列里 → 不再分到 lab", not tc(todo))
+# 开、停和时段（10/24）
+from datetime import datetime as _dt  # noqa: E402
+OFFP = os.path.join(A.STATE_DIR, "OFFLOAD")
+open(OFFP, "w").write("infer:t1c_f* idle\nhours 20:00-08:00,12:00-13:00\n")
+check("hours：跨午夜的时段、几段", A.offload_open(_dt(2026, 10, 24, 21, 0))[0] and A.offload_open(_dt(2026, 10, 24, 7, 59))[0]
+      and A.offload_open(_dt(2026, 10, 24, 12, 30))[0] and not A.offload_open(_dt(2026, 10, 24, 8, 0))[0]
+      and "不在时段" in A.offload_open(_dt(2026, 10, 24, 15, 0))[1] and A.offload_rules() == [("infer:t1c_f*", True)])
+open(OFFP, "w").write("infer:t1c_f* idle\noff\n")
+check("off：停着", A.offload_open() == (False, "停着（off）"))
+todo, stuck = A.plan(osnap())
+x = tc(todo)
+check("off：没分过的 → 不分到 lab，照常进任务队列", len(x) == 1 and x[0].get("op") == "taskq")
+json.dump({"infer:t1c_f2": dict(machine="lab", key=f"{TC}/2", out="o", needs=[], pushed=[])}, open(os.path.join(A.STATE_DIR, "offload.json"), "w"))
+RINF = (7, "Running", "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 2", "infer:t1c_f2", "gpu0")
+todo, stuck = A.plan(osnap(lab=[RINF]))
+x = tc(todo)
+check("off：那边在跑 → 停掉那边的任务、这一步进任务队列", sorted(t.get("op") for t in x) == ["stop", "taskq"]
+      and next(t for t in x if t.get("op") == "stop")["ids"] == [7])
+todo, stuck = A.plan(osnap(lab=[(7, "Success", RINF[2], RINF[3], "gpu0")]))
+x = tc(todo)
+check("off：那边已经做完 → 照常拉回，不进任务队列", [t["label"] for t in x] == ["pull:infer:t1c_f2"])
+rm.clear()
+calls.clear()
+A.run(osnap(lab=[RINF]), q=fake_q, tq=lambda *a: (0, ""))
+check("off：run 时 ssh lab 先 pueue kill、等停下、再 remove", rm and rm[0][1] == "lab" and rm[0][0].startswith("~/.local/bin/pueue kill 7;")
+      and rm[0][0].endswith("~/.local/bin/pueue remove 7"))
+open(OFFP, "w").write("infer:t1c_f* idle\n")
+os.remove(os.path.join(A.STATE_DIR, "offload.json"))
 os.remove(os.path.join(A.STATE_DIR, "OFFLOAD"))
 old_box = ("Stashed", f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer {T}/{TCM} 2", None)
 todo, stuck = A.plan(snap([old_box]))

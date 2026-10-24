@@ -41,6 +41,9 @@
     box 上判断做完 → 删掉那边的结果文件夹和自动传过去的模型文件（别的分出去的步骤还要用的留着；测试集的输入文件夹留着）
   那边的卡被别人占着时，predict.sh 每次开始前等（RQ1_WAIT_GPU），等的时候那边的任务算在跑，这里不重排；等超时失败的报出来。
   分出去的步骤记在 ~/.cache/phd/advance/offload.json；那边失败、拉回失败或拉回后还是没做完的不重排，报出来。
+  开、停和时段（2026-10-24）：OFFLOAD 里一行 off = 停；一行 hours 20:00-08:00[,12:00-13:00] = 只在这些时段里分（box 的本地时间，
+  可以跨午夜）。停着、或者不在时段里时：不再分新的；那边在跑的停掉（pueue kill 后 remove），这一步照常进任务队列；
+  那边已经做完的照常拉回。用 scripts/queue/offload on|off|hours …|status 改，改完马上按新设置推进一次（不等 30 分钟）。
 任务的标签：每折 <步骤>:<实验 id>_f<fold>（如 infer:t14met_f3），实验一级 <步骤>:<实验 id>，最后的 <步骤>；
   不属于实验的任务 <步骤>:<key>。
 
@@ -373,9 +376,33 @@ def offload_rules():
     out = []
     for ln in lines:
         w = ln.split("#", 1)[0].split()
-        if w:
+        if w and w[0] not in ("off", "hours"):
             out.append((w[0], w[1:2] == ["idle"]))
     return out
+
+
+def offload_open(now=None):
+    """OFFLOAD 的开关和时段 → (现在能不能分, 说明)。"""
+    try:
+        lines = open(os.path.join(STATE_DIR, "OFFLOAD")).read().splitlines()
+    except OSError:
+        return True, ""
+    words = [ln.split("#", 1)[0].split() for ln in lines]
+    if any(w[:1] == ["off"] for w in words):
+        return False, "停着（off）"
+    spans = [x for w in words if w[:1] == ["hours"] for x in ",".join(w[1:]).split(",") if x]
+    if not spans:
+        return True, ""
+    now = now or datetime.now()
+    m = now.hour * 60 + now.minute
+    for x in spans:
+        try:
+            a, b = [int(h) * 60 + int(mm) for h, mm in (p.split(":") for p in x.split("-"))]
+        except ValueError:
+            return False, f"时段写错了（{x}），先当作停着"
+        if (a <= m < b) if a < b else (m >= a or m < b):
+            return True, ""
+    return False, f"不在时段 {','.join(spans)} 里"
 
 
 def offload_target():
@@ -437,6 +464,7 @@ class Offload:
 
     def __init__(self, s, root, ptasks, todo, stuck, live, live_tasks):
         self.rules = offload_rules()
+        self.open, self.closed_why = offload_open()
         self.name, self.group = offload_target()
         self.state = offload_state()
         self.s, self.root, self.ptasks, self.todo, self.stuck = s, root, ptasks, todo, stuck
@@ -477,6 +505,8 @@ class Offload:
                 return True
             return False
         steal = []
+        if not self.open and not mine:
+            return False
         if sk in self.live:
             box = self.live_tasks.get(sk, [])
             movable = ("Queued",) if idle else ("Queued", "Stashed")
@@ -486,7 +516,16 @@ class Offload:
         elif idle and not mine and not self.idle():
             return False
         rt = self.by_label(self.rtasks, label)
-        if any(x["status"] in LIVE_ST for x in rt):
+        if not self.open:
+            # 停着 / 不在时段里：那边在跑的停掉，这一步交回去照常排；那边做完了的照常拉回（下面）
+            live_rt = [x["id"] for x in rt if x["status"] in LIVE_ST]
+            if live_rt:
+                self.todo.append(dict(op="stop", step="stop", key=t["key"], group=self.group, host=self.name, label=label,
+                                      nice=n, ids=live_rt, why=self.closed_why))
+                return False
+            if not (rt and rt[-1]["status"] == "Success"):
+                return False
+        elif any(x["status"] in LIVE_ST for x in rt):
             return True
         names = dict(t["names"], data=self.root)
         out = os.path.dirname(S.fill(st["done"].path, names, keep=()))
@@ -619,6 +658,21 @@ def run(s, dry=False, q=None, tq=None):
             else:
                 lines.append(f"会清理 {what}")
             continue
+        if t.get("op") == "stop":
+            ids = " ".join(map(str, t["ids"]))
+            what = f"{t['label']}：{host} 上{t['why']}，停掉 {host} 任务 {ids}，这一步交回去照常排"
+            if live_mode:
+                pq = "~/.local/bin/pueue"
+                rc, out = refill.sh(f"{pq} kill {ids}; for _ in $(seq 30); do {pq} status --json | python3 -c 'import json, sys; "
+                                    f"t = json.load(sys.stdin)[\"tasks\"]; sys.exit(any(\"Running\" in str(t[i][\"status\"]) for i in sys.argv[1:] if i in t))' "
+                                    f"{ids} && break; sleep 2; done; {pq} remove {ids}", M.MACHINES[host]["ssh"])
+                if rc == 0:
+                    lines.append(f"停了 {what}")
+                else:
+                    stuck[f"advance:offload:{t['label']}"] = f"{t['label']}：停 {host} 上的任务 {ids} 出错（{out[-150:]}）"
+            else:
+                lines.append(f"会停 {what}")
+            continue
         h = any(fnmatch(t["label"], pat) for pat in hold)
         if t.get("op") == "taskq":
             what = f"{t['label']}（任务队列，档位 {t['qnice']}）：{t['cmd']}"
@@ -694,6 +748,8 @@ if __name__ == "__main__":
     for t in todo:
         if t.get("op") == "clean":
             print(f"会清理 {t['label']:26} {t['host']} {' '.join(t['paths'])}")
+        elif t.get("op") == "stop":
+            print(f"会停 {t['label']:28} {t['host']} 任务 {' '.join(map(str, t['ids']))}（{t['why']}）")
         elif t.get("op") == "taskq":
             print(f"会排 {t['label']:28} 任务队列（档位 {t['qnice']}） {' '.join(shlex.quote(a) for a in t['args'])}")
         else:
