@@ -54,8 +54,8 @@ TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.s
 unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
 LOGDIR=$DATA/logs/workers
 mkdir -p "$LOGDIR"
-COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
-git -C "$REPO" diff --quiet HEAD -- scripts/queue research/common 2> /dev/null || COMMIT="$COMMIT+改动"
+COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
+(cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
 ts() { date '+%F %T'; }
 T0=$(date +%s)
 

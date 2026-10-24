@@ -25,8 +25,8 @@ JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
 SEG=${TASK_SEG:-1}
 mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
 LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_seg${SEG}.log
-COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
-git -C "$REPO" diff --quiet HEAD -- scripts/queue research/common 2> /dev/null || COMMIT="$COMMIT+改动"
+COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
+(cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
 TRIES=3
 [[ -n ${SLURM_JOB_ID:-} ]] && TRIES=1
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
