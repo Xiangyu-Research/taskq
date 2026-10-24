@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -171,6 +172,21 @@ def nnunet_log(path):
     if done and (not tl or tl[-1][1] != done) and last:
         tl.append(last)
     return dict(start=start, end=end, epochs_done=done, tl=tl)
+
+
+def eta_at(runs, nep, hours=3):
+    """训练中的折：最近一次启动的训练日志里，最近 hours 小时的速度 → 训到 nep 个 epoch 的时刻；算不出来（不到两个点、
+    速度不是正的、已经训到）→ None。"""
+    tl = max(runs, key=lambda r: r["end"] or "").get("tl") or [] if runs else []
+    pts = [(datetime.strptime(t, "%Y-%m-%d %H:%M:%S"), e) for t, e in tl]
+    if len(pts) < 2 or not nep:
+        return None
+    recent = [q for q in pts if q[0] >= pts[-1][0] - timedelta(hours=hours)]
+    a, b = (recent if len(recent) >= 2 else pts[-2:])[0], pts[-1]
+    rate = (b[1] - a[1]) / max((b[0] - a[0]).total_seconds(), 1)  # epoch / 秒
+    if rate <= 0 or b[1] >= nep:
+        return None
+    return b[0] + timedelta(seconds=(nep - b[1]) / rate)
 
 
 def plain_log(path):

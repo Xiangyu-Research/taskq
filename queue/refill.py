@@ -18,10 +18,15 @@
      这台机器以后不再领它，不算队列的失败，不用事先按模型分类。24 小时内这样跳过 2 个就先不领、报出来（多半是环境坏了）。
      taskq.py take 成功后：任务说明里的 data（scripts/queue/spec.py）这台机器上都有，就直接在 pueue 的训练组里加
      run_task.sh；缺的先用 scripts/sync/tunnel_push.sh 传（box 的 wait 组），下次检查时数据到了再加训练任务。
-     传完后盘上剩不到"表里 disk 的提醒线 + 10 GB（训练输出）"的任务跳过；这台机器没有任务要的环境（machines.py 的 envs）不领。
-     只领要卡的任务（device=gpu）。
+     传完后盘上剩不到"表里 disk 的提醒线 + 10 GB（训练输出）"（硬线）的任务跳过；这台机器没有任务要的环境（machines.py 的 envs）不领。
+     只领要卡的任务（device=gpu）。数据正在传（box 上的 sync 任务活着）的文件夹不算"在"：领了等传完再开始，不另传一份。
+  3. 卡都在训时为下一折做准备（2026-10-24，换折不空等）：预测下一折（和第 2 步同一个挑法）缺数据就马上提前传（每台机器同时只传一份）；
+     组里在训的这一折预计 PRETAKE_S 秒内训完、下一折数据都在，就提前领下一折、加进同一个组排在它后面，训完马上开始。
+     训完时间按训练日志最近 3 小时的速度算（spec.py 的 eta_at），算不出来就不提前领。
   拉回、推理、评测不在这里排：box 上的 scripts/queue/advance.py 按状态推进。
-  自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json，这台机器上用它的训练和 box 上的拉回、归档都做完后删掉（Dataset101 不删）。
+  自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json，按"还要不要用"和空间预算管（cleanup()，2026-10-24）：
+  队列里没有这台机器能领的任务要用了就删；还有任务要用的留着，盘剩的低于软线（硬线 × SOFT）时从最晚用到的删起；
+  提前传之前先这样腾地方，腾不出来就不传。领着的、在训的、正在传的、拉回归档在用的、预测下一折要用的、Dataset101 不删。
 开关：box 上 ~/.cache/phd/taskq/LAB 不存在时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
 DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
@@ -56,6 +61,8 @@ import taskq  # noqa: E402
 
 TTL = 86400  # lab 的领取多久不续就过期（秒）
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
+SOFT = 2  # 自动传过去、留着以后用的数据和预传：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
+PRETAKE_S = 3600  # 组里在训的这一折预计这么多秒内训完时，提前领下一折、排在它后面（两次检查的间隔，保证训完前会检查一次）
 SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，就先停止替这台机器领（多半是环境坏了）
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
 SWITCH = os.path.expanduser("~/.cache/phd/taskq/LAB")
@@ -174,6 +181,7 @@ def plan(s, name):
     tgroup, slot = task_groups(s, name), slots(name)
     held_g = set()  # 领着没训完的折占着的组
     have = set(s["probe"].get(name, {}).get("HAVE", "").split())
+    ready = {p for p in have if tag(p) not in sync and tag(p) not in sync_bad}  # 还在传、传出错的文件夹不算有
     acts, stuck = [], {}
     mine = [t for t in tq["tasks"] if t.get("worker") == name]
     for t in mine:
@@ -225,40 +233,104 @@ def plan(s, name):
     busy = [k for k, ts in tt_all.items() if any(st in LIVE for _, st, _ in ts)]
     busy_g = {tgroup.get(k) for k in busy}
     free_g = [g for g in gpu_groups(m) if g not in busy_g and g not in held_g and open_group(s, name, g)]
+    pr = s["probe"].get(name, {})
+    free = int(pr["DISK"]) / 1e9 if pr.get("DISK", "").isdigit() else None
+    hard = (m["disk"][1] if m["disk"] else 0) + TRAIN_OUT_GB
+    cands = candidates(s, name, tq, ready)
     if not free_g:
+        if (tq.get("recent_skips") or {}).get(name, 0) < SKIP_BREAK:
+            acts += ahead(s, name, tq, cands, ready, free, hard, tt_all, tgroup, sync, sync_bad, acts, stuck)
         return acts, stuck, "卡上有训练任务" if busy else "还领着没训完的折" if held_g else "有卡的组都停着"
     nskip = (tq.get("recent_skips") or {}).get(name, 0)
     if nskip >= SKIP_BREAK:
         stuck[f"labskip:{name}"] = (f"{M.MACHINES[name]['label']} 24 小时内有 {nskip} 个领到的任务没开始就失败了，先不再领；"
                                     f"看 {name} 上 pueue log 里失败的训练任务（多半是环境或数据坏了，不是放不下）")
         return acts, stuck, f"24 小时内 {nskip} 个任务没开始就失败"
-    pr = s["probe"].get(name, {})
-    free = int(pr["DISK"]) / 1e9 if pr.get("DISK", "").isdigit() else None
-    warn = (m["disk"][1] if m["disk"] else 0) + TRAIN_OUT_GB
-    envs = set(m.get("envs") or {})
+    took = set()
+    for g in free_g:  # 每个空着的组领一折
+        t, need, gb, wait = next_pick(tq, cands, ready, free, hard, took, sync)
+        if t is None:
+            continue
+        if need:
+            free -= gb
+        acts.append(dict(op="take", key=t["key"], nice=t["nice"], paths=need, group=g, wait=wait))
+        took.add(t["key"])
+    if took:
+        return acts, stuck, ""
+    return acts, stuck, "队列里没有能领的折" if not cands else f"队列里的任务要的数据都放不下（{name} 盘剩 {free:.0f} GB）" if free is not None else "不知道盘还剩多少"
+
+
+def data_of(tq, key):
+    return info(tq, key)["spec"].get("data") or []
+
+
+def rank(tq, t, ready):
+    """领的先后：（档位，缺不缺数据，先后）。同一档里数据已经在这台机器上的先领（马上能训）。"""
+    return (t["nice"], any(p not in ready for p in data_of(tq, t["key"])), t["order"])
+
+
+def candidates(s, name, tq, ready):
+    """这台机器能领的任务，按领的先后排：free、没标成有问题、有环境、没限定在别的机器、要卡、任何机器上都没有进度、这台机器没跳过。"""
+    envs = set(M.MACHINES[name].get("envs") or {})
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
              and name in (info(tq, t["key"])["spec"].get("machines") or [name])
              and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu"
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
-    # 同一档里数据已经在这台机器上的先领（马上能训；10/19 起：数据还在传的不再另传一份）
-    cands.sort(key=lambda t: (t["nice"], any(p not in have for p in info(tq, t["key"])["spec"].get("data") or []), t["order"]))
-    took = set()
-    for g in free_g:  # 每个空着的组领一折
-        for t in cands:
-            if t["key"] in took:
-                continue
-            need = [p for p in info(tq, t["key"])["spec"].get("data") or [] if p not in have]
-            if need:
-                gb = data_gb(need)
-                if gb is None or free is None or free - gb < warn:
-                    continue
-                free -= gb
-            acts.append(dict(op="take", key=t["key"], nice=t["nice"], paths=need, group=g))
+    return sorted(cands, key=lambda t: rank(tq, t, ready))
+
+
+def next_pick(tq, cands, ready, free, hard, exclude=(), moving=()):
+    """下一折领哪个 → (任务, 要传的数据, 要传多少 GB, 有数据正在传)；没有 → (None, [], 0, False)。moving：正在传的数据集（tag）。
+    要传数据的：传完后盘剩的不低于硬线才领。正在传的不再另传，领了等传完再开始。
+    领（take）、提前传（prefetch）、提前领（pretake）都用它，三者挑的是同一折。"""
+    for t in cands:
+        if t["key"] in exclude:
+            continue
+        need = [p for p in data_of(tq, t["key"]) if p not in ready]
+        send = [p for p in need if tag(p) not in moving]
+        if not send:
+            return t, [], 0, len(need) > 0
+        gb = data_gb(send)
+        if gb is not None and free is not None and free - gb >= hard:
+            return t, send, gb, len(need) > len(send)
+    return None, [], 0, False
+
+
+def ahead(s, name, tq, cands, ready, free, hard, tt_all, tgroup, sync, sync_bad, acts, stuck):
+    """组里都在训时为下一折做准备（2026-10-24）→ 动作：
+      - 预测的下一折缺数据：马上提前传（prefetch；每台机器同时只传一份，空间预算由 cleanup() 管，放不下就不传）；
+      - 组里在训的这一折预计 PRETAKE_S 秒内训完、下一折数据都在：提前领，排在它后面（pueue 一个组一次跑一个，训完马上开始）。"""
+    from health import task_key
+    out, took = [], {a["key"] for a in acts if a["op"] == "take"}
+    moving = bool(sync) or any(a["op"] == "transfer" for a in acts)
+    m = M.MACHINES[name]
+    now = s.get("now") or datetime.now()
+    for g in gpu_groups(m):
+        if not open_group(s, name, g):
+            continue
+        live = [(t, task_key(t["command"])[1]) for t in (s["pueue"].get(name) or {}).get("tasks", [])
+                if t["status"] in LIVE and t.get("group") == g and task_key(t["command"])[0] == "train"]
+        if len(live) != 1 or live[0][0]["status"] != "Running":
+            continue  # 组空着（由领的那一步管）、或者已经排了下一折
+        t, need, gb, wait = next_pick(tq, cands, ready, free, hard, took, sync)
+        if t is None or wait:
+            continue  # 下一折的数据正在传：等传完
+        if need:
+            bad = [p for p in need if tag(p) in sync_bad]
+            if bad:
+                b = sync_bad[tag(bad[0])]
+                stuck[f"labsync:{tag(bad[0])}"] = (f"给 {m['label']} 提前传 {bad[0]} 的 box 任务 {b['id']} 出错了（{b['status']}）；"
+                                                   f"看 pueue log {b['id']}，处理后 pueue remove {b['id']}（下次检查会重传）")
+            elif not moving:
+                out.append(dict(op="prefetch", key=t["key"], paths=need, gb=gb, group=g))
+                moving = True
+            continue
+        f = (s["src"].get(name, {}).get("folds") or {}).get(live[0][1]) or {}
+        eta = S.eta_at(f.get("runs") or [], (f.get("debug") or {}).get("num_epochs"))
+        if eta is not None and (eta - now).total_seconds() <= PRETAKE_S:
+            out.append(dict(op="take", key=t["key"], nice=t["nice"], paths=[], group=g, after=live[0][1]))
             took.add(t["key"])
-            break
-    if took:
-        return acts, stuck, ""
-    return acts, stuck, "队列里没有能领的折" if not cands else f"队列里的任务要的数据都放不下（{name} 盘剩 {free:.0f} GB）" if free is not None else "不知道盘还剩多少"
+    return out
 
 
 def data_gb(paths):
@@ -340,6 +412,9 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
                 ok.add(k)
             elif a["op"] == "transfer":
                 msgs.append(f"{L} 领的 {k} 要先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
+            elif a["op"] == "prefetch":
+                msgs.append(f"{L} 卡在训，下一折多半是 {k}，提前传 {' '.join(a['paths'])}（{a['gb']:.0f} GB，box 任务 "
+                            f"{transfer(name, a['paths'], run)}）")
             elif a["op"] == "take":
                 r = remote(f"take --worker {name} --ttl {TTL} {k}")
                 if r is None or r[0]:
@@ -350,6 +425,11 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
                     set_slot(name, k, a["group"])
                 if a["paths"]:
                     msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
+                elif a.get("wait"):
+                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），数据正在传，传完开始训")
+                elif a.get("after"):
+                    msgs.append(f"{L} 提前领了 {k}（档位 {a['nice']}），排在快训完的 {a['after']} 后面（{a['group']} 组，"
+                                f"任务 {start(name, k, run, tq, a['group'])}）")
                 else:
                     msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（{a.get('group') or gpu_group(M.MACHINES[name])} 组，"
                                 f"任务 {start(name, k, run, tq, a.get('group'))}）")
@@ -358,39 +438,104 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
     return msgs
 
 
-def cleanup(s, name, run=sh, fresh=()):
-    """自动传过去的数据集：这台机器上没有用它的训练任务、box 上没有从这台机器拉回 / 归档它的任务了，就删掉 → [说明]。"""
+def cleanup(s, name, run=sh, acts=None, dry=False):
+    """自动传过去的数据（~/.cache/phd/refill.json 的 transferred）按"还要不要用"和空间预算管（2026-10-24）→ [说明]。
+    不删：Dataset101；这台机器领着的、这次要领 / 开始 / 传的、预测下一折的任务要用的；这台机器上训练任务在用的；box 上正在传、
+    正在从这台机器拉回 / 归档的；训完还没归档的折的。其余的：
+      - 队列里没有这台机器能领的任务要用了 → 删；
+      - 还有任务要用的留着，但盘剩的要不低于软线（硬线 × SOFT）：低了就从"下次用到"最晚的删起；
+      - acts 里有提前传（prefetch）的：先删比它晚用到的、腾到"剩的 − 要传的 ≥ 软线"，腾不出来就从 acts 里去掉、这次不传。
+    dry：只算、不删（说明照样给）。"""
     from health import task_key
+    acts = [] if acts is None else acts
+    m = M.MACHINES[name]
     st = json.load(open(STATE)) if os.path.exists(STATE) else {}
     lst = st.get("transferred", {}).get(name, [])
-    if not lst or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
+    pf = next((a for a in acts if a["op"] == "prefetch"), None)
+    if not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
+        if pf:
+            acts.remove(pf)
         return []
     box = s["pueue"].get(M.hub()) or {"error": 1}
-    if "error" in box:
-        return []
     tq = s.get("taskq", {}).get(queue_host()) or {}
-    uses = lambda key: set(info(tq, key)["spec"].get("data") or [])  # noqa: E731
-    claimed = set().union(*[uses(t["key"]) for t in tq.get("tasks", []) if t.get("worker") == name], *[uses(k) for k in fresh])
-    msgs = []
+    if "error" in box or not tq.get("tasks"):
+        if pf:
+            acts.remove(pf)
+        return []
+    L = m["label"]
+    have = set(s["probe"].get(name, {}).get("HAVE", "").split())
+    sync, sync_bad = syncing(s, name)
+    ready = {p for p in have if tag(p) not in sync and tag(p) not in sync_bad}
+    cands = candidates(s, name, tq, ready)
+    hard = (m["disk"][1] if m["disk"] else 0) + TRAIN_OUT_GB
+    soft = hard * SOFT
+    pr = s["probe"].get(name, {})
+    free = int(pr["DISK"]) / 1e9 if pr.get("DISK", "").isdigit() else None
+    nxt = next_pick(tq, cands, ready, free if free is not None else 1e9, hard, moving=sync)[0]
+    keep = set().union(*[set(data_of(tq, t["key"])) for t in tq["tasks"] if t.get("worker") == name and t["state"] != "done"],
+                       *[set(data_of(tq, a["key"])) | set(a.get("paths") or []) for a in acts if a["op"] != "release"],
+                       data_of(tq, nxt["key"]) if nxt else [])
+    when = {}  # 数据 → 要用它的任务里最早领到的那个的先后
+    for t in cands:
+        for d in data_of(tq, t["key"]):
+            when[d] = min(when.get(d, (9e9,)), rank(tq, t, ready))
+    msgs, gone, held, later = [], [], [], []
     for p in list(lst):
         p = p if "/" in p else f"nnUNet/preprocessed/{p}"  # 10/18 前只记数据集名
         parts = p.split("/")
         if (p.startswith("/") or ".." in parts or "" in parts or len(parts) < 3 or parts[:2] not in (["nnUNet", "preprocessed"], ["nnUNet", "raw"])
-                or not M.MACHINES[name].get("data")):
-            msgs.append(f"{M.MACHINES[name]['label']} 上自动传过去的记录 {p!r} 不是 nnUNet/preprocessed|raw/<数据集> 下的路径，不删")
+                or not m.get("data")):
+            msgs.append(f"{L} 上自动传过去的记录 {p!r} 不是 nnUNet/preprocessed|raw/<数据集> 下的路径，不删")
             continue
-        if tag(p).startswith("Dataset101_") or p in claimed:
+        if tag(p).startswith("Dataset101_") or p in keep or tag(p) in sync:
             continue
-        busy = any(t["status"] in LIVE and p in uses(task_key(t["command"])[1] or "") for t in s["pueue"][name]["tasks"])
+        busy = any(t["status"] in LIVE and p in data_of(tq, task_key(t["command"])[1] or "") for t in s["pueue"][name]["tasks"])
         busy |= any(t["status"] in LIVE and tag(p) in t["command"] and f" {name} " in f" {t['command']} " for t in box["tasks"])
-        busy |= any(p in uses(k) and not f.get("archived") for k, f in s["src"].get(name, {}).get("folds", {}).items() if f.get("final"))
+        busy |= any(p in data_of(tq, k) and not f.get("archived") for k, f in s["src"].get(name, {}).get("folds", {}).items() if f.get("final"))
         if busy:
             continue
-        rc, out = run(f"rm -rf {M.MACHINES[name]['data']}/{shlex.quote(p)}", M.MACHINES[name]["ssh"])
+        if p not in when:
+            gone.append((p, "队列里没有任务要用了"))
+        else:
+            later.append(p)
+    later.sort(key=lambda p: when[p], reverse=True)  # 最晚用到的在前
+    room = None if free is None else free - sum(data_gb([d]) or 0 for d in lst if tag(d) in sync)  # 正在传的按传完算
+    if pf:
+        if room is None:
+            acts.remove(pf)
+            msgs.append(f"不知道 {L} 盘还剩多少，不提前传 {' '.join(pf['paths'])}")
+        else:
+            mark = rank(tq, next(t for t in tq["tasks"] if t["key"] == pf["key"]), ready)
+            take, r = [], room
+            for p in [q for q in later if when[q] > mark]:
+                if r - pf["gb"] >= soft:
+                    break
+                take.append(p)
+                r += data_gb([p]) or 0
+            if r - pf["gb"] >= soft:
+                gone += [(p, f"给提前传 {tag(pf['paths'][0])} 腾地方") for p in take]
+                later = [p for p in later if p not in take]
+                room = r - pf["gb"]
+            else:
+                acts.remove(pf)
+                msgs.append(f"{L} 盘剩 {room:.0f} GB，提前传 {' '.join(pf['paths'])}（{pf['gb']:.0f} GB）后会低于 {soft:.0f} GB，"
+                            f"删掉比它晚用到的数据也不够，这次不传")
+    while room is not None and room < soft and later:  # 别人把盘用多了：我们留着的先缩小
+        p = later.pop(0)
+        gone.append((p, f"盘剩 {room:.0f} GB，低于 {soft:.0f} GB"))
+        room += data_gb([p]) or 0
+    for p, why in gone:
+        if dry:
+            msgs.append(f"{L} 上自动传过去的 {p} 会删（{why}）")
+            continue
+        rc, out = run(f"rm -rf {m['data']}/{shlex.quote(p)}", m["ssh"])
         if rc == 0:
             lst[:] = [x for x in lst if x not in (p, tag(p))]
-            msgs.append(f"{M.MACHINES[name]['label']} 上自动传过去的 {p} 用完了，已删掉（box 上有完整的一份）")
-    json.dump(st, open(STATE, "w"), indent=1)
+            msgs.append(f"{L} 上自动传过去的 {p} 删掉了（{why}；box 上有完整的一份）")
+        else:
+            msgs.append(f"{L} 上删 {p} 出错：{out[-150:]}")
+    if not dry:
+        json.dump(st, open(STATE, "w"), indent=1)
     return msgs
 
 
@@ -429,15 +574,19 @@ def run_all(s, dry=False):
         if not live:  # 开关没开：只续已有的领取（lab 上手动开始的训练不会过期被别处重训），其余只记日志、不推送
             desc = "；".join(f"{a['op']} {a['key']}" for a in todo) or f"不领（{why}）"
             if dry:
+                notes = cleanup(s, name, acts=acts, dry=True)
+                todo = [a for a in acts if a["op"] not in ("beat", "keep")]
+                desc = "；".join(f"{a['op']} {a['key']}" for a in todo) or f"不领（{why}）"
                 events.append(f"{name}：会 {desc}" if todo else f"{name}：{desc}")
+                events += notes
                 continue
             log(execute([a for a in acts if a["op"] in ("beat", "keep")], name))
             if todo:
                 shadow_log(name, f"（开关没开）{name} 会：{desc}")
             continue
         ok = set()
-        msgs = execute(acts, name, ok=ok, tq=s.get("taskq", {}).get(queue_host()))
-        msgs += cleanup(s, name, fresh=ok)
+        msgs = cleanup(s, name, acts=acts)  # 先腾地方；提前传放不下时从 acts 里去掉
+        msgs += execute(acts, name, ok=ok, tq=s.get("taskq", {}).get(queue_host()))
         log(msgs)
         events += msgs
         if ok:
