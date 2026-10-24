@@ -274,6 +274,11 @@ def plan(s, root=None):
                 return
         todo.append(dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
                          args=S.kv_args("command", q)[1:], cmd=q["cmd"]))
+    def fetching(st, names):
+        """带 queue 的步骤，那边做完的结果还在拉回：box 上的判断（如 MANIFEST）可能先对上，等拉完再算做完（10/24）。"""
+        qd = st.get("queue")
+        return bool(qd) and S.fill(qd["key"], names, keep=()) in live_fetch
+
     trained, after_ok = {}, {}  # 任务 → box 上训完没；(任务, 步骤) → 做完没
     for t in tasks:
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
@@ -293,13 +298,16 @@ def plan(s, root=None):
         blocked = False
         archiving = ("archive", key) in live or any(x["step"] == "archive" and x["key"] == key for x in todo)
         for st in (t["e"] or {}).get("after", []):
-            ok = st["done"].ok(root, t["names"])
+            busy = fetching(st, t["names"])
+            ok = not busy and st["done"].ok(root, t["names"])
             after_ok[(key, st["name"])] = ok
             label = f"{st['name']}:{t['lab']}"
             if ok:
                 off.finished(label)
             elif not blocked:
-                if st.get("queue"):
+                if busy:
+                    pass
+                elif st.get("queue"):
                     to_queue(t, st, label, n, archiving)
                 elif not off.take(t, st, label, n, archiving):
                     want(st["name"], key, label, S.fill(st["cmd"], t["names"], keep=()), st["group"], n)
@@ -322,8 +330,11 @@ def plan(s, root=None):
             for st in chain:
                 if st.get("needs") and not all(after_ok.get((t["key"], st["needs"])) for t in mine):
                     break
-                if not st["done"].ok(root, names):
-                    if st.get("queue"):
+                busy = fetching(st, names)
+                if busy or not st["done"].ok(root, names):
+                    if busy:
+                        pass
+                    elif st.get("queue"):
                         to_queue(dict(key=e["id"], names=names), st, f"{st['name']}:{e['id']}", n, False)
                     else:
                         want(st["name"], e["id"], f"{st['name']}:{e['id']}", S.fill(st["cmd"], names, keep=()), st["group"], n)
