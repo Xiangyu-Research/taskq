@@ -450,12 +450,15 @@ CPU_JOB = "cpu_worker"  # cpu_worker.sbatch 的作业名
 GPU_FILE, CPU_FILE = "worker.sbatch", "cpu_worker.sbatch"
 
 
-def topup_probe(qos):
-    """每个 QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"，最后一行"CPU|我们的 CPU worker 作业数"；
+def topup_probe(qos, cpu_q="normal"):
+    """每个 QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"；"CPU|我们的 CPU worker 作业数"；
+    "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
     有一条命令出错就整个出错（不按 0 算）。"""
     return "set -e; for q in " + " ".join(qos) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
         "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done; " \
-        f"ids=$(squeue -u $USER -h -r -n {CPU_JOB} -o %i); echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\""
+        f"ids=$(squeue -u $USER -h -r -n {CPU_JOB} -o %i); echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
+        f"lim=$(sacctmgr -nP show qos {cpu_q} format=maxsubmitpu); " \
+        "ids=$(squeue -u $USER -h -r -o %i); echo \"ALL|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\""
 
 
 def unclaimed(tq, device):
@@ -485,15 +488,18 @@ def topup_plan(tq, counts, qos):
     return out, "" if out else "各 QOS 都排满了"
 
 
-def cpu_plan(tq, have, conf):
-    """纯 CPU 任务的 worker 作业 → ([(QOS, 时限, 交几个, CPU_FILE)], 不交的原因)。have：我们排着和在跑的 CPU worker 作业数。"""
+def cpu_plan(tq, have, conf, free=None):
+    """纯 CPU 任务的 worker 作业 → ([(QOS, 时限, 交几个, CPU_FILE)], 不交的原因)。have：我们排着和在跑的 CPU worker 作业数；
+    free：还剩几个提交名额（None = 读不到，不交）。"""
     q, t, most = conf
     if not tq or not tq.get("enabled") or tq.get("paused"):
         return [], "任务队列关着或暂停中"
-    if have is None:
-        return [], "读不到 CPU worker 作业数"
-    n = min(unclaimed(tq, "cpu"), most) - have
-    return ([(q, t, n, CPU_FILE)], "") if n > 0 else ([], "没有没人领的纯 CPU 任务" if not unclaimed(tq, "cpu") else f"已有 {have} 个")
+    if have is None or free is None:
+        return [], "读不到作业数"
+    if not unclaimed(tq, "cpu"):
+        return [], "没有没人领的纯 CPU 任务"
+    n = min(min(unclaimed(tq, "cpu"), most) - have, free)
+    return ([(q, t, n, CPU_FILE)], "") if n > 0 else ([], f"已有 {have} 个" if free > 0 else "提交名额用完了")
 
 
 def topup(s, name, dry=False, run=None):
@@ -502,19 +508,21 @@ def topup(s, name, dry=False, run=None):
     m, tq = M.MACHINES[name], s.get("taskq", {}).get(name)
     if not s["ok"].get(name) or not tq:
         return [], {}
-    rc, out = run(topup_probe(m["qos"]), m["ssh"])
+    rc, out = run(topup_probe(m["qos"], (m.get("cpu_worker") or ("normal",))[0]), m["ssh"])
     if rc:
         return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
-    counts, ncpu = {}, None
+    counts, ncpu, free = {}, None, None
     for ln in out.splitlines():
         p = ln.split("|")
         if len(p) == 4 and p[0] == "QOS" and p[3].isdigit():
             counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]))
         elif len(p) == 2 and p[0] == "CPU" and p[1].isdigit():
             ncpu = int(p[1])
+        elif len(p) == 3 and p[0] == "ALL" and p[2].isdigit():
+            free = max(0, (int(p[1]) if p[1].isdigit() else SUBMIT_CAP) - int(p[2]))
     subs, why = topup_plan(tq, counts, m["qos"])
     if m.get("cpu_worker"):
-        csub, cwhy = cpu_plan(tq, ncpu, m["cpu_worker"])
+        csub, cwhy = cpu_plan(tq, ncpu, m["cpu_worker"], free)
         subs += csub
         why = why if csub else f"{why}；CPU：{cwhy}"
     desc = "；".join(f"交 {'CPU worker ' if f == CPU_FILE else ''}{q} {n} 段" for q, _, n, f in subs) or f"不交（{why}）"

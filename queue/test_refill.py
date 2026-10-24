@@ -294,12 +294,15 @@ cpu_q = [tq(K_T14, 0, 1, "done"), dict(tq(K_EV, -100, 2), spec=ev_spec), dict(tq
 cq = snap(queue=cpu_q)["taskq"]["dicc"]
 p, why = R.topup_plan(cq, {"long": (10, 0)}, {"long": ("3-00:00:00", 2)})
 ok("只有纯 CPU 任务没人领：不补 GPU worker", p == [] and "要卡" in why)
-ok("纯 CPU 任务 2 个、最多 1 个、现有 0：交 1 个 CPU worker", R.cpu_plan(cq, 0, ("normal", "08:00:00", 1)) == ([("normal", "08:00:00", 1, "cpu_worker.sbatch")], ""))
-ok("最多 3 个：按任务数交 2 个", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3))[0] == [("normal", "08:00:00", 2, "cpu_worker.sbatch")])
-ok("已有 1 个 CPU worker：不交", R.cpu_plan(cq, 1, ("normal", "08:00:00", 1))[0] == [])
-ok("读不到 CPU worker 作业数：不交", R.cpu_plan(cq, None, ("normal", "08:00:00", 1))[0] == [])
-ok("没有纯 CPU 任务：不交", R.cpu_plan(snap()["taskq"]["dicc"], 0, ("normal", "08:00:00", 1))[0] == [])
-ok("队列暂停：不交", R.cpu_plan(cq | {"paused": True}, 0, ("normal", "08:00:00", 1))[0] == [])
+ok("纯 CPU 任务 2 个、最多 1 个、现有 0：交 1 个 CPU worker", R.cpu_plan(cq, 0, ("normal", "08:00:00", 1), 5) == ([("normal", "08:00:00", 1, "cpu_worker.sbatch")], ""))
+ok("最多 3 个：按任务数交 2 个", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 5)[0] == [("normal", "08:00:00", 2, "cpu_worker.sbatch")])
+ok("已有 1 个 CPU worker：不交", R.cpu_plan(cq, 1, ("normal", "08:00:00", 1), 5)[0] == [])
+ok("读不到 CPU worker 作业数：不交", R.cpu_plan(cq, None, ("normal", "08:00:00", 1), 5)[0] == [])
+ok("没有纯 CPU 任务：不交", R.cpu_plan(snap()["taskq"]["dicc"], 0, ("normal", "08:00:00", 1), 5)[0] == [])
+ok("队列暂停：不交", R.cpu_plan(cq | {"paused": True}, 0, ("normal", "08:00:00", 1), 5)[0] == [])
+ok("最多 3 个、只剩 1 个提交名额：交 1 个", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 1)[0] == [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
+ok("提交名额用完：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 0) == ([], "提交名额用完了"))
+ok("读不到剩几个名额：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), None)[0] == [])
 
 # 补交的测试用固定的配置，不跟着 envs/machines.py 里的名额变
 R.M.MACHINES["dicc"] = dict(R.M.MACHINES["dicc"], qos={"long": ("3-00:00:00", 2)}, cpu_worker=("normal", "08:00:00", 1))
@@ -358,13 +361,15 @@ ok("查作业数时连不上：什么都不做", not sub and ev == [] and not st
 ev, st = R.topup(snap(), "dicc", run=topup_run("QOS|long|10|\nQOS|normal|10|1\n"))
 ok("作业数读不出来：不补（不按 0 算）", ev == [] and not st and not any("long" in c for _, c in sub))
 sub.clear()
-ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5\nCPU|0\n"))
+ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5\nCPU|0\nALL|10|6\n"))
 ok("开关开着、有纯 CPU 任务：只交 cpu_worker.sbatch（normal、8 小时），记日志",
    sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=normal --time=08:00:00 cpu_worker.sbatch")]
    and not st and "交了 1 个 CPU worker 作业 487001" in open(R.LOG).read())
 sub.clear()
-ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5\nCPU|1\n"))
+ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5\nCPU|1\nALL|10|7\n"))
 ok("已经有 CPU worker 排着：不再交", not sub and not st)
+ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|8\nCPU|0\nALL|10|10\n"))
+ok("所有作业已占满 10 个提交名额：不交 CPU worker、不报错", not sub and not st)
 os.remove(R.DICC_SWITCH)
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
