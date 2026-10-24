@@ -260,6 +260,12 @@ json.dump({"transferred": {"lab": ["Dataset103_GLIrq1_t1c"]}}, open(R.STATE, "w"
 out = R.cleanup(snap(), "lab", run=fake_run)
 ok("10/18 前只记了数据集名的：照样认、删掉后从记录里去掉", len(out) == 1 and cmds[-1][1].endswith("nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
    and json.load(open(R.STATE))["transferred"]["lab"] == [])
+for bad in ["/", "/etc/x", "nnUNet/preprocessed/", "nnUNet/preprocessed", "nnUNet//x", "raw/BraTS2023-GLI", "nnUNet/results/Dataset103_x",
+            "nnUNet/preprocessed/../../x"]:
+    cmds.clear()
+    json.dump({"transferred": {"lab": [bad]}}, open(R.STATE, "w"))
+    out = R.cleanup(snap(), "lab", run=fake_run)
+    ok(f"记录里的路径不对（{bad!r}）：不删", not cmds and (out == [] or "不删" in out[0]))
 
 # ---------------- DICC 补作业 ----------------
 QOS = {"long": "1-12:00:00", "normal": "08:00:00"}

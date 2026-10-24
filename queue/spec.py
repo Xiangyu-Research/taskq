@@ -123,9 +123,19 @@ def out_dir(s, root):
 
 
 def is_done(s, root):
-    """训完了：done 的每一项在 out 下都有（一项里 | 分开的有一个就行）。"""
+    """训完了：done 的每一项在 out 下都有（一项里 | 分开的有一个就行）。
+    文件不存在 → 没训完；其他读不了的情况（盘断开等）抛 OSError，不当成没训完。"""
     fd = out_dir(s, root)
-    return all(any(os.path.exists(os.path.join(fd, alt)) for alt in item.split("|")) for item in s["done"])
+    os.stat(root)
+    return all(any(_exists(os.path.join(fd, alt)) for alt in item.split("|")) for item in s["done"])
+
+
+def _exists(p):
+    try:
+        os.stat(p)
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
 
 
 def log_age(s, root):

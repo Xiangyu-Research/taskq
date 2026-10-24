@@ -57,6 +57,27 @@ open(os.path.join(out, "validation", "summary.json"), "w").write("{}")
 ok("只有 summary.json：没训完", not S.is_done(s, root))
 open(os.path.join(out, "ARCHIVED"), "w").close()
 ok("summary.json + ARCHIVED（| 里有一个就行）：训完", S.is_done(s, root))
+def oserr(fn):
+    try:
+        fn()
+    except OSError:
+        return True
+    return False
+
+
+ok("数据目录不存在（盘没挂上）：报错，不当成没训完", oserr(lambda: S.is_done(s, os.path.join(root, "nope"))))
+real_stat = os.stat
+
+
+def broken_stat(p, *a, **k):
+    if str(p).startswith(out):
+        raise OSError(70, "Communication error on send")
+    return real_stat(p, *a, **k)
+
+
+os.stat = broken_stat
+ok("结果目录读不了（BeeGFS 断开，errno 70）：报错", oserr(lambda: S.is_done(s, root)))
+os.stat = real_stat
 
 # ---------------- 命令行参数来回 ----------------
 args = S.kv_args("command", {"key": "a", "done": ["x", "y|z"]})
@@ -64,7 +85,7 @@ ok("kv_args → parse_kv 来回一致（列表用 JSON）", S.parse_kv(args[1:])
 
 # ---------------- 实验表 ----------------
 ts = E.tasks()
-ok(f"实验表展开 {len(ts)} 个任务、key 不重复", len(ts) == 151 and len(set(ts)) == len(ts))
+ok(f"实验表展开 {len(ts)} 个任务、key 不重复", len(ts) == 216 and len(set(ts)) == len(ts))
 ok("每个任务都解析得了、有环境和输出", all(t["spec"].get("env") and t["spec"].get("out") for t in ts.values()))
 um = ts["Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1"]["spec"]
 sw = ts["Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"]["spec"]

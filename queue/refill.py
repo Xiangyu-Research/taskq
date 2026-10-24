@@ -370,7 +370,12 @@ def cleanup(s, name, run=sh, fresh=()):
     msgs = []
     for p in list(lst):
         p = p if "/" in p else f"nnUNet/preprocessed/{p}"  # 10/18 前只记数据集名
-        if ".." in p.split("/") or tag(p).startswith("Dataset101_") or p in claimed:
+        parts = p.split("/")
+        if (p.startswith("/") or ".." in parts or "" in parts or len(parts) < 3 or parts[:2] not in (["nnUNet", "preprocessed"], ["nnUNet", "raw"])
+                or not M.MACHINES[name].get("data")):
+            msgs.append(f"{M.MACHINES[name]['label']} 上自动传过去的记录 {p!r} 不是 nnUNet/preprocessed|raw/<数据集> 下的路径，不删")
+            continue
+        if tag(p).startswith("Dataset101_") or p in claimed:
             continue
         busy = any(t["status"] in LIVE and p in uses(task_key(t["command"])[1] or "") for t in s["pueue"][name]["tasks"])
         busy |= any(t["status"] in LIVE and tag(p) in t["command"] and f" {name} " in f" {t['command']} " for t in box["tasks"])

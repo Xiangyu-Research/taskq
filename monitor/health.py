@@ -103,7 +103,8 @@ def sh(cmd, inp=None, timeout=120):
 
 
 def run_on(m, script, timeout=120):
-    return sh(["bash", "-s"] if m["ssh"] is None else SSH + [m["ssh"], "bash -s"], inp=script, timeout=timeout)
+    remote = f"timeout -k 10 {max(timeout - 15, 10)} bash -s"
+    return sh(["bash", "-s"] if m["ssh"] is None else SSH + [m["ssh"], remote], inp=script, timeout=timeout)
 
 
 # ---------------- 收集 ----------------
