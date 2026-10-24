@@ -8,6 +8,8 @@
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的就退出。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
 #   bash dicc_worker.sh                     （scripts/queue/worker.sbatch → worker_start.sh）
+# WORKER_DEVICE=cpu（scripts/queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
+# 不等排在前面的、不看 GPU；没有能领的就结束（由 box 上的 refill.py 在有这类任务时才交）。
 # 出问题时不让排队的作业空跑掉：
 #   - 任务卡住（10/23 起）：开始 30 分钟以后，任务的日志和结果文件夹都 30 分钟没有变化，就停掉它、交还（不算失败），
 #     马上领下一个；本作业不再领它。停不下来的（卡在读写上）3 分钟后不再等它。读不了日志或结果文件夹时不判断；
@@ -25,12 +27,15 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
 TQPY="python3 $HERE/taskq.py"
 W=${SLURM_JOB_ID:?只在 Slurm 作业里用}
+DEVICE=${WORKER_DEVICE:-gpu}
 DATA=${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)}
 export BRAIN_TUMOR=$DATA
 ENVS=${TASKQ_ENVS:-$(python3 "$REPO/envs/machines.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
-if (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
+if [[ $DEVICE == cpu ]]; then
+    SLOTS=1
+elif (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
     SLOTS=${TASKQ_SLOTS:-2}   # 最多同时训几个
 else
     SLOTS=${TASKQ_SLOTS:-1}
@@ -39,7 +44,7 @@ ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过�
 UTIL_MAX=${TASKQ_UTIL_MAX:-90}          # 近 10 分钟 GPU 平均使用率低于这个才加
 PADBASE=${RQ1_GPU_PAD_BASE:-/tmp/gpu_pad_$W}
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
-PATIENCE=${TASKQ_PATIENCE:-1200}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
+PATIENCE=${TASKQ_PATIENCE:-$([[ $DEVICE == cpu ]] && echo 0 || echo 1200)}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
 IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
 MAX_OWN_FAIL=2
@@ -68,13 +73,16 @@ get_end() {
 }
 get_end
 left() { (( END == 0 )) && echo 999999 || echo $(( END - $(date +%s) )); }
-echo "$(ts) 任务队列 worker：作业 $W @ $(hostname -s)，最多同时 $SLOTS 个，CPU $NCPU，内存 ${MEMMB}M（每个训练 $TASK_CPUS 个 CPU），" \
+echo "$(ts) 任务队列 worker（$DEVICE）：作业 $W @ $(hostname -s)，最多同时 $SLOTS 个，CPU $NCPU，内存 ${MEMMB}M（每个训练 $TASK_CPUS 个 CPU），" \
      "环境 $ENVS，时限 $( (( END )) && date -d @"$END" '+%F %T' || echo 查不到，之后再查)，代码 $COMMIT"
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
-
 GPUCSV=$LOGDIR/worker_${W}_gpu.csv
-( while true; do nvidia-smi --query-gpu=timestamp,index,memory.used,memory.total,utilization.gpu --format=csv,noheader >> "$GPUCSV" 2> /dev/null; sleep 60; done ) &
-GPUMON=$!
+if [[ $DEVICE == gpu ]]; then
+    nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
+    ( while true; do nvidia-smi --query-gpu=timestamp,index,memory.used,memory.total,utilization.gpu --format=csv,noheader >> "$GPUCSV" 2> /dev/null; sleep 60; done ) &
+    GPUMON=$!
+else
+    GPUMON=
+fi
 
 declare -A KEY=()         # 训练的 pid → key
 declare -A STARTED=()     # pid → 开始的时刻
@@ -153,7 +161,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     CHANGED=$(date +%s)
     echo "$(ts) 开训 $key（pid $pid：run_task.sh $args）"
 }
-kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
+kill_tree() { [[ -n $1 ]] || return 0; local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
 on_term() {
     echo "$(ts) 收到停止信号（多半是到时限），停训练、交还任务"
     local p
@@ -232,7 +240,7 @@ while true; do
     while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && can_add; do
         tried=1
         # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的任务留位置
-        t=$($TQPY next --worker "$W" --envs "$ENVS" --free-slots 1 \
+        t=$($TQPY next --worker "$W" --envs "$ENVS" --device "$DEVICE" --free-slots 1 \
                        --patience-until $(( T0 + PATIENCE )) --exclude ${EXCL[@]+"${EXCL[@]}"} 2> "$ERRF")
         rc=$?
         case $rc in

@@ -15,6 +15,8 @@
            那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按这一步的 done 判断，不对就报出来。
            box pueue 里已经有这一步（10/22 前排的）时不加。HOLD 对上的先不加。
            OFFLOAD 对上、还没进任务队列的（2026-10-24）先按下面"分到别的机器"分到 lab，分不了（idle 的那边不空）才进队列。
+           queue 里写了 or_here=True 的（2026-10-24，RQ1 的评测：纯 CPU，DICC 上由 CPU worker 做）：那边缺输入或连不上时不传、
+           不报，照常在 box 上跑（推理在 lab 或 box 做的折，DICC 上没有预测）。
 一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤> 的要每折都做完那一步）。
            带 queue 的和每折的一样放进任务队列（2026-10-23，P1 / P2 换模型重跑）。queue 里写了 inputs（相对数据目录的路径）时，
            查那边缺什么用它，不用 --stage needs。
@@ -239,7 +241,7 @@ def plan(s, root=None):
         if (st["name"], t["key"]) in live:
             return
         qd = st["queue"]
-        q = {k: S.fill(v, dict(t["names"], data="{data}"), keep=()) for k, v in qd.items() if k not in ("nice", "inputs")}
+        q = {k: S.fill(v, dict(t["names"], data="{data}"), keep=()) for k, v in qd.items() if k not in ("nice", "inputs", "or_here")}
         if q["key"] in qkeys:
             if all(os.path.exists(os.path.join(root, q["out"], d)) for d in q["done"]):
                 stuck[f"advance:{st['name']}:{t['key']}"] = (f"{label}：任务队列的 {q['key']} 做完、拉回了，但 box 上核对还是没做完"
@@ -255,6 +257,9 @@ def plan(s, root=None):
                 stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：命令不支持 --stage needs，查不了 {mach} 上缺什么"
                 return
             have = remote_have(mach, needs)
+            if qd.get("or_here") and (have is None or any(p not in have for p in needs)):
+                want(st["name"], t["key"], label, S.fill(st["cmd"], t["names"], keep=()), st["group"], n)
+                return
             if have is None:
                 stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：连不上 {mach}，这次不处理"
                 return

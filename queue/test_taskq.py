@@ -345,6 +345,16 @@ check("next：machines 里没有本机的不领", r.returncode == 10)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "711", "--envs", "nnunet"],
                    env=dict(ENV3, TASKQ_MACHINE="dicc"), capture_output=True, text=True)
 check("next：machines 里有本机的照档位先领", r.returncode == 0 and r.stdout.startswith("toy/m"))
+# 10/24：device=cpu 的只给 CPU worker（--device cpu）；不带 --device 的（GPU worker、在跑的旧 worker）不领
+tq3("add", "--nice", "-200", "--recipe", "command", "key=toy/c", "cmd=true", "env=nnunet", "out=toy/c", 'done=["DONE"]', "device=cpu")
+rc, out, _ = tq3("next", "--worker", "712", "--envs", "nnunet")
+check("next：不带 --device（GPU worker）不领 device=cpu 的，即使排在最前", rc != 0 or not out.startswith("toy/c"))
+if rc == 0:
+    tq3("release", "--worker", "712", out.splitlines()[0])
+rc, out, _ = tq3("next", "--worker", "713", "--envs", "nnunet", "--device", "cpu")
+check("next --device cpu：只领 device=cpu 的", rc == 0 and out.startswith("toy/c\n") and "device=cpu" in out)
+rc, out, _ = tq3("next", "--worker", "714", "--envs", "nnunet", "--device", "cpu")
+check("next --device cpu：没有别的纯 CPU 任务 → 10", rc == 10)
 
 # 10/23：主数据目录读不了时不领；TEMP_ROOT 临时数据目录只领名单里的，失败只数名单里的
 # add 不给 --nice（10/24）：--exp 用实验表里的档位，别的报错（单独一份队列，不影响上面的）

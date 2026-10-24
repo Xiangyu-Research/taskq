@@ -20,8 +20,8 @@ lab 由 box 上的 scripts/queue/refill.py 替它领。
   说明解析不了的（参数写错，status 里显示 bad）。
 
 DICC 上（worker 调用）：
-    taskq.py next --worker <作业号> --envs <环境,…> [--free-slots N] [--patience-until 时间] [--exclude key...]
-        领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领）→ 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
+    taskq.py next --worker <作业号> --envs <环境,…> [--device gpu|cpu] [--free-slots N] [--patience-until 时间] [--exclude key...]
+        领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领；只领 device 和 --device 一样的，默认 gpu）→ 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
         排在前面的刚停下、还在等它（--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
@@ -291,7 +291,7 @@ def _claim(a, pick):
             if t["key"] in a.exclude or (only is not None and t["key"] not in only):
                 continue
             st, _ = state(t, root)
-            if st == "busy":
+            if st == "busy" and pick(t) is not None:
                 busy_ahead += 1
             if st not in ("free", "stale"):
                 continue
@@ -327,7 +327,7 @@ def cmd_next(a):
 
     def pick(t):
         s = spec_of(t)
-        if s["env"] not in envs or (s.get("machines") and me not in s["machines"]):
+        if s["env"] not in envs or (s.get("machines") and me not in s["machines"]) or s.get("device", "gpu") != a.device:
             return None
         return t["key"] + "\n" + " ".join(shlex.quote(x) for x in S.kv_args(t["recipe"], t["params"]))
     rc, out = _claim(a, pick)
@@ -605,6 +605,7 @@ def main(argv):
     p.add_argument("--patience-until", type=float, default=0)
     p.add_argument("--exclude", nargs="*", default=[])
     p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
+    p.add_argument("--device", default="gpu", choices=["gpu", "cpu"], help="只领任务说明里 device 是这个的（2026-10-24）")
     p = sub.add_parser("beat")
     p.add_argument("--worker", required=True)
     p.add_argument("keys", nargs="+")

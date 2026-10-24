@@ -19,6 +19,7 @@
      taskq.py take 成功后：任务说明里的 data（scripts/queue/spec.py）这台机器上都有，就直接在 pueue 的训练组里加
      run_task.sh；缺的先用 scripts/sync/tunnel_push.sh 传（box 的 wait 组），下次检查时数据到了再加训练任务。
      传完后盘上剩不到"表里 disk 的提醒线 + 10 GB（训练输出）"的任务跳过；这台机器没有任务要的环境（machines.py 的 envs）不领。
+     只领要卡的任务（device=gpu）。
   拉回、推理、评测不在这里排：box 上的 scripts/queue/advance.py 按状态推进。
   自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json，这台机器上用它的训练和 box 上的拉回、归档都做完后删掉（Dataset101 不删）。
 开关：box 上 ~/.cache/phd/taskq/LAB 不存在时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
@@ -28,7 +29,9 @@ DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录�
 DICC 补作业：每个 QOS（表里 qos 字段：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
 没设时按 SUBMIT_CAP）减去留给别的作业的名额、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（每个空位交一个
 普通作业，不用数组：10/21 起 DICC 的使用率检查会在数组作业开始约 65 分钟后把它取消；同时跑几个由 QOS 的 GPU 上限管）。
-空出一个补一个，作业的排队时间分从交上去开始累积。
+空出一个补一个，作业的排队时间分从交上去开始累积。只看要卡的任务（任务说明的 device=gpu）。
+纯 CPU 的任务（device=cpu，如评测，2026-10-24）：表里有 cpu_worker 的机器，队列里有没人领的这类任务、我们的 CPU worker 作业
+（排着和在跑的）不到 min(这类任务数, 最多几个) 时交 scripts/queue/cpu_worker.sbatch；作业领不到任务就结束，不在节点上空等。
 开关：box 上 ~/.cache/phd/taskq/DICC，不存在时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
     python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
@@ -235,6 +238,7 @@ def plan(s, name):
     envs = set(m.get("envs") or {})
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
              and name in (info(tq, t["key"])["spec"].get("machines") or [name])
+             and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu"
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
     # 同一档里数据已经在这台机器上的先领（马上能训；10/19 起：数据还在传的不再另传一份）
     cands.sort(key=lambda t: (t["nice"], any(p not in have for p in info(tq, t["key"])["spec"].get("data") or []), t["order"]))
@@ -442,10 +446,21 @@ def run_all(s, dry=False):
 
 
 # ---------------- Slurm 训练机补作业 ----------------
+CPU_JOB = "cpu_worker"  # cpu_worker.sbatch 的作业名
+GPU_FILE, CPU_FILE = "worker.sbatch", "cpu_worker.sbatch"
+
+
 def topup_probe(qos):
-    """每个 QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"；有一条命令出错就整个出错（不按 0 算）。"""
+    """每个 QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"，最后一行"CPU|我们的 CPU worker 作业数"；
+    有一条命令出错就整个出错（不按 0 算）。"""
     return "set -e; for q in " + " ".join(qos) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
-        "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done"
+        "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done; " \
+        f"ids=$(squeue -u $USER -h -r -n {CPU_JOB} -o %i); echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\""
+
+
+def unclaimed(tq, device):
+    """队列里没人领（free / stale）、device 是这个的任务数。"""
+    return sum(1 for t in tq["tasks"] if t["state"] in ("free", "stale") and info(tq, t["key"])["spec"].get("device", "gpu") == device)
 
 
 def topup_plan(tq, counts, qos):
@@ -456,8 +471,8 @@ def topup_plan(tq, counts, qos):
         return [], "任务队列的总开关不在"
     if tq.get("paused"):
         return [], "任务队列失败太多、暂停中"
-    if not any(t["state"] in ("free", "stale") for t in tq["tasks"]):
-        return [], "队列里没有没人领的任务"
+    if not unclaimed(tq, "gpu"):
+        return [], "队列里没有没人领的要卡的任务"
     out = []
     for q, v in qos.items():
         t, keep = (v, 0) if isinstance(v, str) else v
@@ -466,8 +481,19 @@ def topup_plan(tq, counts, qos):
         lim, n = counts[q]
         cap = (lim or SUBMIT_CAP) - keep
         if cap > n:
-            out.append((q, t, cap - n))
+            out.append((q, t, cap - n, GPU_FILE))
     return out, "" if out else "各 QOS 都排满了"
+
+
+def cpu_plan(tq, have, conf):
+    """纯 CPU 任务的 worker 作业 → ([(QOS, 时限, 交几个, CPU_FILE)], 不交的原因)。have：我们排着和在跑的 CPU worker 作业数。"""
+    q, t, most = conf
+    if not tq or not tq.get("enabled") or tq.get("paused"):
+        return [], "任务队列关着或暂停中"
+    if have is None:
+        return [], "读不到 CPU worker 作业数"
+    n = min(unclaimed(tq, "cpu"), most) - have
+    return ([(q, t, n, CPU_FILE)], "") if n > 0 else ([], "没有没人领的纯 CPU 任务" if not unclaimed(tq, "cpu") else f"已有 {have} 个")
 
 
 def topup(s, name, dry=False, run=None):
@@ -479,13 +505,19 @@ def topup(s, name, dry=False, run=None):
     rc, out = run(topup_probe(m["qos"]), m["ssh"])
     if rc:
         return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
-    counts = {}
+    counts, ncpu = {}, None
     for ln in out.splitlines():
         p = ln.split("|")
         if len(p) == 4 and p[0] == "QOS" and p[3].isdigit():
             counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]))
+        elif len(p) == 2 and p[0] == "CPU" and p[1].isdigit():
+            ncpu = int(p[1])
     subs, why = topup_plan(tq, counts, m["qos"])
-    desc = "；".join(f"交 {q} {n} 段" for q, _, n in subs) or f"不交（{why}）"
+    if m.get("cpu_worker"):
+        csub, cwhy = cpu_plan(tq, ncpu, m["cpu_worker"])
+        subs += csub
+        why = why if csub else f"{why}；CPU：{cwhy}"
+    desc = "；".join(f"交 {'CPU worker ' if f == CPU_FILE else ''}{q} {n} 段" for q, _, n, f in subs) or f"不交（{why}）"
     if dry:
         return [f"{name}：会 {desc}" if subs else f"{name}：{desc}"], {}
     if not os.path.exists(DICC_SWITCH):
@@ -493,15 +525,17 @@ def topup(s, name, dry=False, run=None):
             shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
         return [], {}
     msgs, stuck = [], {}
-    for q, t, n in subs:
+    for q, t, n, f in subs:
         ids = []
         for _ in range(n):
-            rc, out = run(f"cd {m['repo']}/scripts/queue && sbatch --parsable --qos={q} --time={t} worker.sbatch", m["ssh"])
+            rc, out = run(f"cd {m['repo']}/scripts/queue && sbatch --parsable --qos={q} --time={t} {f}", m["ssh"])
             if rc:
-                stuck[f"topup:{name}:{q}"] = f"{m['label']} {q} 补交 worker.sbatch 出错：{out[-200:]}"
+                stuck[f"topup:{name}:{q}{':cpu' if f == CPU_FILE else ''}"] = f"{m['label']} {q} 补交 {f} 出错：{out[-200:]}"
                 break
             ids.append(out.strip().splitlines()[-1])
-        if ids:
+        if ids and f == CPU_FILE:
+            msgs.append(f"{m['label']} 有纯 CPU 任务，交了 {len(ids)} 个 CPU worker 作业 {'、'.join(ids)}（{q}，每个 {t}）")
+        elif ids:
             msgs.append(f"{m['label']} {q} 空出 {n} 个位置，交了 {len(ids)} 个 worker 作业 {'、'.join(ids)}（每个 {t}）")
     log(msgs)
     return [], stuck

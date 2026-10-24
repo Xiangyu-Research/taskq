@@ -444,7 +444,21 @@ s2 = dict(s_, pueue=snap([("Running", f"bash scripts/queue/fetch_task.sh dicc {T
 todo, stuck = A.plan(s2)
 check("queue：MANIFEST 到了但结果还在拉回（10/24）→ 不排评测、不报", not tc(todo) and f"advance:infer:{TC}/2" not in stuck)
 todo, stuck = A.plan(s_)
-check("queue：拉完了 → 排评测", [t["step"] for t in tc(todo)] == ["eval"])
+check("queue：拉完了、DICC 上没有评测的输入 → 评测照常在 box 的 cpu 组排（or_here，10/24）",
+      [(t["step"], t["group"], t.get("op")) for t in tc(todo)] == [("eval", "cpu", None)])
+EIN = [f"predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/.infer_done", f"{TCM}/fold_2/validation"]
+REMOTE["have"] = set(TNEEDS) | set(EIN)
+x = tc(A.plan(s_)[0])
+check("评测：DICC 上有这一折的预测 → 进任务队列，纯 CPU（device=cpu），结果在分析文件夹",
+      len(x) == 1 and x[0]["op"] == "taskq" and x[0]["step"] == "eval" and "device=cpu" in x[0]["args"]
+      and f"key=eval/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2" in x[0]["args"]
+      and 'done=[".eval_done"]' in x[0]["args"] and not any(a_.startswith(("or_here", "inputs")) for a_ in x[0]["args"]))
+old_rh = A.remote_have
+A.remote_have = lambda name, paths: None
+x = tc(A.plan(s_)[0])
+check("评测：连不上 DICC → 照常在 box 上排，不报", [(t["step"], t["group"]) for t in x] == [("eval", "cpu")])
+A.remote_have = old_rh
+REMOTE["have"] = set(TNEEDS)
 os.remove(f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/MANIFEST.json")
 # OFFLOAD 对上的带 queue 的推理（10/24）：lab 0 号卡空着就分到 lab，不进任务队列；不空、或已经在队列里 → 照常
 with open(os.path.join(A.STATE_DIR, "OFFLOAD"), "w") as f:

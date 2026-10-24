@@ -32,16 +32,16 @@ chmod +x "$T/fake_train.sh"
 export FAKE_LOG=$T/train.log
 fails=0
 check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi; }
-table() {  # 每行：任务名 环境
+table() {  # 每行：任务名 环境 [device]
     : > "$TASKQ_DIR/tasks.jsonl"
-    local i=0 name env
-    while read -r name env; do
+    local i=0 name env dev
+    while read -r name env dev; do
         i=$((i + 1))
-        python3 - "$TASKQ_DIR/tasks.jsonl" "$i" "$name" "$env" "$T/fake_train.sh" << 'EOF'
+        python3 - "$TASKQ_DIR/tasks.jsonl" "$i" "$name" "$env" "$T/fake_train.sh" "${dev:-gpu}" << 'EOF'
 import json, sys
-p, i, name, env, fake = sys.argv[1:]
+p, i, name, env, fake, dev = sys.argv[1:]
 t = dict(order=int(i), nice=0, key=name, exp=None, recipe="command",
-         params=dict(key=name, cmd=f"bash {fake} {name}", env=env, out=f"runs/{name}", done=["DONE"]))
+         params=dict(key=name, cmd=f"bash {fake} {name}", env=env, out=f"runs/{name}", done=["DONE"], device=dev))
 open(p, "a").write(json.dumps(t) + "\n")
 EOF
     done
@@ -184,6 +184,19 @@ i = json.load(open(p)); i["beat"] = time.time() - 1800; json.dump(i, open(p, "w"
 EOF
 SLURM_JOB_ID=900004 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4.out" 2>&1
 check "lab 领着的（30 分钟没续，但在 24 小时内）：DICC 作业不领" '[[ ! -s $T/train.log ]] && grep -q "没有能领的任务" $T/w4.out'
+
+# 4b. CPU worker（WORKER_DEVICE=cpu，10/24）：只领 device=cpu 的，一次 1 个，不记 GPU；GPU worker 不领 device=cpu 的
+reset
+table << EOF
+t/g nnunet
+t/c1 nnunet cpu
+t/c2 nnunet cpu
+EOF
+SLURM_JOB_ID=900020 WORKER_DEVICE=cpu TASKQ_SLOTS= timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4b.out" 2>&1
+check "CPU worker：两个纯 CPU 任务先后训完，不碰要卡的" '[[ $(grep -c "^end .* t/c" $T/train.log) == 2 ]] && ! grep -q "t/g" $T/train.log'
+check "CPU worker：一次 1 个、不记 GPU" '[[ $(head -2 $T/train.log | grep -c ^start) == 1 && ! -e $BRAIN_TUMOR/logs/workers/worker_900020_gpu.csv ]] && grep -q "worker（cpu）.*最多同时 1 个" $T/w4b.out'
+SLURM_JOB_ID=900021 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4c.out" 2>&1
+check "GPU worker：只训要卡的" 'grep -q "^end .* t/g" $T/train.log && [[ $(grep -c "^start .* t/c" $T/train.log) == 2 ]]'
 
 # 5. 队列出错（任务表读不了）连续一段时间、手上没有在训的：结束作业（不再训作业名那一折）
 rm -f "$TASKQ_DIR/tasks.jsonl"
