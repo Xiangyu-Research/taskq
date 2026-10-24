@@ -522,6 +522,16 @@ def task_log_age(root, key, worker):
         return None
 
 
+def out_age(s, root):
+    """结果文件夹和它下一层里最新的修改时间离现在多久（秒；推理一个测试集时日志不动、预测文件夹在变，2026-10-24）；没有 → None。"""
+    d = S.out_dir(s, root)
+    try:
+        ms = [os.path.getmtime(d)] + [e.stat().st_mtime for e in os.scandir(d)]
+    except OSError:
+        return None
+    return time.time() - max(ms)
+
+
 def local_status():
     root = data_root()
     out = []
@@ -531,7 +541,8 @@ def local_status():
         ci = claim_info(t["key"]) or {}
         out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
                         beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None,
-                        task_log_age=task_log_age(root, t["key"], ci.get("worker")), failures=failures(t["key"]),
+                        task_log_age=task_log_age(root, t["key"], ci.get("worker")),
+                        out_age=out_age(s, root) if s and st == "claimed" else None, failures=failures(t["key"]),
                         skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
