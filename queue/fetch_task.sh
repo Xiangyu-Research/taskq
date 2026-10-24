@@ -48,8 +48,10 @@ echo "$(date '+%F %T') 训完了，拉回 → $DST"
 mkdir -p "$DST"
 EX=() EXD=()
 for x in ${EXCL[@]+"${EXCL[@]}"}; do EX+=(--exclude="$x"); done
-# 训完的标志最后拉：先拉了标志的话，拉到一半时 box 上就像已经训完了，advance.py 会提前排评测（10/23）
+# 训完的标志最后拉：先拉了标志的话，拉到一半时 box 上就像已经训完了，advance.py 会提前排评测（10/23）；
+# 第一遍也不拉最上层的文件（推理的 MANIFEST.json、训练的 checkpoint 等），子文件夹拉完再拉（10/24）
 for x in ${DONEF[@]+"${DONEF[@]}"}; do EXD+=(--exclude="/$x"); done
+EXD+=(--include='/*/' --exclude='/*')
 for i in 1 2 3; do
     ok=1
     for x in ${EXTRA[@]+"${EXTRA[@]}"}; do

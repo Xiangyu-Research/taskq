@@ -41,6 +41,8 @@ elif [[ $OP == pull ]]; then
     p=${1%/}
     mkdir -p "$LD/$p"
     echo "$(date '+%F %T') 从 $HOST 拉回 $p"
+    # 先拷子文件夹（各测试集的结果），最上层的文件（MANIFEST.json、.infer_done）最后拷：先到的话 box 上就像已经做完了（10/24）
+    rsync -a --partial --include='/*/' --exclude='/*' "$H:$RD/$p/" "$LD/$p/"
     rsync -a --partial "$H:$RD/$p/" "$LD/$p/"
     diff=$(rsync -ac -n --out-format='%n' "$H:$RD/$p/" "$LD/$p/")
     diff=$(grep -v '/$' <<< "$diff" || true)

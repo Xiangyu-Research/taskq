@@ -292,10 +292,13 @@ def plan(s, root=None):
                 return
         todo.append(dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
                          args=S.kv_args("command", q)[1:], cmd=q["cmd"]))
-    def fetching(st, names):
-        """带 queue 的步骤，那边做完的结果还在拉回：box 上的判断（如 MANIFEST）可能先对上，等拉完再算做完（10/24）。"""
+    moving = {x.get("label") for x in ptasks if x["status"] in LIVE_ST and (x.get("label") or "").startswith(("pull:", "push:"))}
+
+    def fetching(st, names, label):
+        """这一步的结果还在往 box 上拷（任务队列的拉回、分到别的机器的 pull:<标签>、push:<标签>）：box 上的判断（如 MANIFEST）
+        可能先对上，拷完再算做完，也不清理那边（10/24）。"""
         qd = st.get("queue")
-        return bool(qd) and S.fill(qd["key"], names, keep=()) in live_fetch
+        return (bool(qd) and S.fill(qd["key"], names, keep=()) in live_fetch) or f"pull:{label}" in moving or f"push:{label}" in moving
 
     from health import task_key
     htasks = {h: (s["pueue"].get(h) or {}).get("tasks") for h in ARCHIVE_FROM}
@@ -393,10 +396,10 @@ def plan(s, root=None):
         blocked = False
         archiving = ("archive", key) in live or any(x["step"] == "archive" and x["key"] == key for x in todo)
         for st in (t["e"] or {}).get("after", []):
-            busy = fetching(st, t["names"])
+            label = f"{st['name']}:{t['lab']}"
+            busy = fetching(st, t["names"], label)
             ok = not busy and st["done"].ok(root, t["names"])
             after_ok[(key, st["name"])] = ok
-            label = f"{st['name']}:{t['lab']}"
             if ok:
                 off.finished(label)
             elif not blocked:
@@ -434,7 +437,7 @@ def plan(s, root=None):
             for st in chain:
                 if st.get("needs") and not all(after_ok.get((t["key"], st["needs"])) for t in mine):
                     break
-                busy = fetching(st, names)
+                busy = fetching(st, names, f"{st['name']}:{e['id']}")
                 if busy or not st["done"].ok(root, names):
                     if busy:
                         pass

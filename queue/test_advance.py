@@ -194,6 +194,10 @@ check("概率图比分割少：推理没做完", not inf_ok("2"))
 manifest(1, 1)
 check("比输入病例少：推理没做完", not inf_ok("2"))
 manifest(2, 2)
+check("MANIFEST 对得上、盘上没有这些文件（拷到一半，10/24）：推理没做完", not inf_ok("2"))
+for c in ("a", "b"):
+    touch(f"{os.path.dirname(man)}/X/{c}.nii.gz")
+    touch(f"{os.path.dirname(man)}/X/{c}.npz")
 check("都对得上：推理做完", inf_ok("2"))
 
 # 6c. T0 五折在 lab 上的副本 10/23 手动归档过（有 ARCHIVED）：不再排归档
@@ -604,6 +608,31 @@ check("on_trainer：训练中途停了、推理跟着失败，那边又接着训
 open(os.path.join(A.STATE_DIR, "OFFLOAD"), "w").write("infer:* idle\noff\n")
 todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1"), (30, "Queued", INF3, "infer:t1c_f3", "gpu1")]))
 check("on_trainer：OFFLOAD 停着也不停 lab gpu1 上排着的推理", not t3(todo))
+# 拷到一半不算做完（10/24：T20 fold 3 拉回时 MANIFEST 先到，box 当成做完、删了 lab 那份）
+trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "3")
+PD3 = f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3"
+touch(f"{PD3}/MANIFEST.json", json.dumps({"cohorts": {"X": {"n_segmentations": 2, "n_probabilities": 2}}, "probabilities_zeroed_below": {}}))
+touch(f"{PD3}/X/a.nii.gz")
+touch(f"{PD3}/X/a.npz")
+DONE3 = [(19, "Success", TR3, "train:x", "gpu1"), (30, "Success", INF3, "infer:t1c_f3", "gpu1")]
+todo, stuck = A.plan(lsnap(DONE3, dict(final=True, archived=True)))
+x = t3(todo)
+check("MANIFEST 到了、盘上的文件比它记的少 → 推理不算做完：不排评测、不清理 lab，排拉回",
+      [t["step"] for t in x] == ["pull"] and not [t for t in todo if t.get("op") == "clean" and t["key"] == K3])
+touch(f"{PD3}/X/b.nii.gz")
+touch(f"{PD3}/X/b.npz")
+s_ = lsnap(DONE3, dict(final=True, archived=True))
+s_["pueue"]["box"]["tasks"].append(dict(id=99, status="Running", command="bash scripts/queue/offload_io.sh pull lab x",
+                                        label="pull:infer:t1c_f3", group="wait", end=None))
+todo, stuck = A.plan(s_)
+check("文件数都对上了、但 pull:<标签> 还在跑 → 不算做完：不排评测、不清理 lab", not t3(todo) and not stuck.get(f"advance:offload:infer:t1c_f3"))
+s_["pueue"]["box"]["tasks"][-1]["status"] = "Success"
+todo, stuck = A.plan(s_)
+x = t3(todo)
+check("拉回做完、文件对上 → 排评测、清理 lab 上的预测", sorted(t["step"] for t in x) == ["clean", "eval"])
+import shutil  # noqa: E402
+shutil.rmtree(PD3)
+os.remove(f"{T}/nnUNet/results/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3/checkpoint_final.pth")
 os.remove(os.path.join(A.STATE_DIR, "OFFLOAD"))
 os.remove(OSF)
 A.step_needs = old_sn
