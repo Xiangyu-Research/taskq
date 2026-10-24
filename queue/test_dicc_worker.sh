@@ -128,7 +128,7 @@ EOF
 SLURM_JOB_ID=900008 FAKE_FAIL=t/a TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2d.out" 2>&1
 check "训练失败：记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
 
-# 2e. 开始不久就失败的 2 个任务：作业不再领；跑了一段时间才失败的不算作业的问题，照常领下一个
+# 2e. 开始不久就失败的 2 个任务：作业不再领；跑了一段时间才失败的、两次隔得比时间窗久的不算作业的问题，照常领下一个
 reset
 table << EOF
 t/a nnunet
@@ -145,6 +145,9 @@ check "两个任务开始不久就失败：作业不再领第三个" '[[ $(grep 
 reset
 SLURM_JOB_ID=900012 TASKQ_SLOTS=1 TASKQ_EARLY_FAIL=0 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2e2.out" 2>&1
 check "跑了一段时间才失败的：记在任务上，作业照常领下一个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && [[ -f $TASKQ_DIR/failures/t__a && -f $TASKQ_DIR/failures/t__b ]]'
+reset
+SLURM_JOB_ID=900013 TASKQ_SLOTS=1 TASKQ_FAIL_WINDOW=0 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2e3.out" 2>&1
+check "开始不久就失败、但不在时间窗内的两次：作业照常领下一个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && ! grep -q "开始不久就失败" $T/w2e3.out'
 cp "$T/fake_train.sh.orig" "$T/fake_train.sh"
 
 # 2f. 卡住的任务（日志、结果文件夹都不动）：停掉、交还、不记失败，本作业领下一个；一直在写结果文件夹的不算卡住

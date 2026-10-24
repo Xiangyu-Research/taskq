@@ -49,6 +49,7 @@ ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上�
 IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
 MAX_OWN_FAIL=2
 EARLY_FAIL=${TASKQ_EARLY_FAIL:-600}     # 开始后这么久内就失败的才算本作业（节点、环境）的问题
+FAIL_WINDOW=${TASKQ_FAIL_WINDOW:-3600}  # 只数这么久以内的（10/24：隔很久的零星失败不让作业提前结束）
 STALL_MAX=${TASKQ_STALL_MAX:-1800}      # 任务的日志和结果文件夹都这么久没变化，算卡住
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
 unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
@@ -91,6 +92,7 @@ declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
+FAIL_AT=()                # 本作业开始不久就失败的时刻
 pad_make_room() {
     [[ -f $PADBASE.mib ]] || return 0
     rm -f "$PADBASE.ready"
@@ -133,8 +135,17 @@ fail() {  # key 原因 跑了多少秒：交还并记一次失败；本作业不
     $TQPY release --worker "$W" "$1" --failed "$2"
     EXCL+=("$1")
     (( $3 < EARLY_FAIL )) || return 0
-    OWN_FAILS=$(( OWN_FAILS + 1 ))
-    (( OWN_FAILS >= MAX_OWN_FAIL )) && echo "$(ts) 本作业已有 $OWN_FAILS 个任务开始不久就失败，不再领新任务（多半是这个节点或环境有问题）"
+    FAIL_AT+=("$(date +%s)")
+    own_fails
+    (( OWN_FAILS >= MAX_OWN_FAIL )) && echo "$(ts) 本作业 $(( FAIL_WINDOW / 60 )) 分钟内已有 $OWN_FAILS 个任务开始不久就失败，不再领新任务（多半是这个节点或环境有问题）"
+    return 0
+}
+own_fails() {  # OWN_FAILS = FAIL_WINDOW 以内的次数
+    local now t keep=()
+    now=$(date +%s)
+    for t in ${FAIL_AT[@]+"${FAIL_AT[@]}"}; do (( now - t < FAIL_WINDOW )) && keep+=("$t"); done
+    FAIL_AT=(${keep[@]+"${keep[@]}"})
+    OWN_FAILS=${#FAIL_AT[@]}
 }
 quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变化；读不了时输出空
     local p=$1 now log m
@@ -237,6 +248,7 @@ while true; do
     fi
     # 领新的
     why= tried=0
+    own_fails
     while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && can_add; do
         tried=1
         # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的任务留位置
