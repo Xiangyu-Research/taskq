@@ -14,6 +14,7 @@
            offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；齐了再加。队列里已经有（同一个 key）就不再加，
            那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按这一步的 done 判断，不对就报出来。
            box pueue 里已经有这一步（10/22 前排的）时不加。HOLD 对上的先不加。
+           OFFLOAD 对上、还没进任务队列的（2026-10-24）先按下面"分到别的机器"分到 lab，分不了（idle 的那边不空）才进队列。
 一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤> 的要每折都做完那一步）。
            带 queue 的和每折的一样放进任务队列（2026-10-23，P1 / P2 换模型重跑）。queue 里写了 inputs（相对数据目录的路径）时，
            查那边缺什么用它，不用 --stage needs。
@@ -308,7 +309,9 @@ def plan(s, root=None):
                 if busy:
                     pass
                 elif st.get("queue"):
-                    to_queue(t, st, label, n, archiving)
+                    # OFFLOAD 对上、还没进任务队列的先看能不能分到 lab（10/24）；分不了再进队列
+                    if S.fill(st["queue"]["key"], t["names"], keep=()) in qkeys or not off.take(t, st, label, n, archiving):
+                        to_queue(t, st, label, n, archiving)
                 elif not off.take(t, st, label, n, archiving):
                     want(st["name"], key, label, S.fill(st["cmd"], t["names"], keep=()), st["group"], n)
                 blocked = True

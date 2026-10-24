@@ -446,6 +446,24 @@ check("queue：MANIFEST 到了但结果还在拉回（10/24）→ 不排评测�
 todo, stuck = A.plan(s_)
 check("queue：拉完了 → 排评测", [t["step"] for t in tc(todo)] == ["eval"])
 os.remove(f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/MANIFEST.json")
+# OFFLOAD 对上的带 queue 的推理（10/24）：lab 0 号卡空着就分到 lab，不进任务队列；不空、或已经在队列里 → 照常
+with open(os.path.join(A.STATE_DIR, "OFFLOAD"), "w") as f:
+    f.write("infer:t1c_f* idle\n")
+GPU["free"] = True
+todo, stuck = A.plan(osnap())
+x = tc(todo)
+check("queue + OFFLOAD idle：那边空着 → 分到 lab gpu0，不加进任务队列", len(x) == 1 and x[0].get("host") == "lab"
+      and x[0]["group"] == "gpu0" and x[0].get("op") != "taskq" and "--stage infer" in x[0]["cmd"])
+GPU["free"] = False
+todo, stuck = A.plan(osnap())
+x = tc(todo)
+check("queue + OFFLOAD idle：卡上有别人 → 照常进任务队列", len(x) == 1 and x[0].get("op") == "taskq")
+GPU["free"] = True
+s2 = osnap()
+s2["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100))
+todo, stuck = A.plan(s2)
+check("queue + OFFLOAD idle：已经在任务队列里 → 不再分到 lab", not tc(todo))
+os.remove(os.path.join(A.STATE_DIR, "OFFLOAD"))
 old_box = ("Stashed", f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer {T}/{TCM} 2", None)
 todo, stuck = A.plan(snap([old_box]))
 check("queue：box pueue 里已经有这一步（10/22 前排的）→ 不加", not tc(todo))

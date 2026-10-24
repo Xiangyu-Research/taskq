@@ -21,7 +21,7 @@
                  └──────── 都用 run_task.sh <做法> k=v… 跑：激活环境、设变量、跑命令、写分段日志 ────────┘
                                 ↓ 训完（任务说明的 done）
  box 按状态推进（advance.py，跟着健康检查每 30 分钟）：拉回 → 归档 → 实验表里的步骤（RQ1：推理 → 评测 → 五折分析）
-     └─ OFFLOAD 对上的推理（10/22 起暂不启用）：传输入（offload_io.sh push）→ lab gpu0 推理 → 拉回、核对（offload_io.sh pull）→ box 核对后删 lab 那份
+     └─ OFFLOAD 对上的推理（10/24 起 infer:* idle：0 号卡空着才分，否则进 DICC 任务队列）：传输入（offload_io.sh push）→ lab gpu0 推理 → 拉回、核对（offload_io.sh pull）→ box 核对后删 lab 那份
 ```
 
 - **pueue** 在 box、lab 上只当运行器：按组限并发、留日志、断开 ssh 不中断。不用暂存、优先级、`--after`（10/18 起）。
@@ -47,7 +47,7 @@
 | box | `cpu` | 2 | 评测（`run_predict_eval.sh --stage eval`）、五折集成评测、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等） |
 | box | `wait` | 不限 | 拉回训完的任务（`fetch_task.sh`）、lab 训的任务归档（`archive_task.sh`）、给 lab 传数据（`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡训练（`run_task.sh`） |
-| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领训练）；box 分推理过来的功能有，10/22 起暂不启用（卡上有别人时推理先等，最多 24 小时） |
+| lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领训练）；box 分推理过来，10/24 起在卡空着时分（卡上有别人时推理先等，最多 24 小时） |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 文件
