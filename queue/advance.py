@@ -64,6 +64,7 @@ sys.path.insert(0, HERE)
 import machines as M  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
+import refill  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.cache/phd/advance")
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
@@ -238,6 +239,7 @@ def plan(s, root=None):
 
     off = Offload(s, root, ptasks, todo, stuck, live, live_tasks)
     qkeys = {t["key"] for t in queue_tasks}
+    qfree = {t["key"] for t in queue_tasks if t.get("state") == "free"}
 
     def to_queue(t, st, label, n, archiving):
         """带 queue 的步骤：放进任务队列（见开头 after）。"""
@@ -317,8 +319,12 @@ def plan(s, root=None):
                 if busy:
                     pass
                 elif st.get("queue"):
-                    # OFFLOAD 对上、还没进任务队列的先看能不能分到 lab（10/24）；分不了再进队列
-                    if S.fill(st["queue"]["key"], t["names"], keep=()) in qkeys or not off.take(t, st, label, n, archiving):
+                    # OFFLOAD 对上的先看能不能分到 lab（10/24）；分不了再进队列。已经在队列里、还没人领的，lab 空着时挪过去
+                    qk = S.fill(st["queue"]["key"], t["names"], keep=())
+                    if qk in qkeys:
+                        if not (qk in qfree and off.take(t, st, label, n, archiving, qsteal=qk)):
+                            to_queue(t, st, label, n, archiving)
+                    elif not off.take(t, st, label, n, archiving):
                         to_queue(t, st, label, n, archiving)
                 elif not off.take(t, st, label, n, archiving):
                     want(st["name"], key, label, S.fill(st["cmd"], t["names"], keep=()), st["group"], n)
@@ -492,10 +498,13 @@ class Offload:
             self.gpu_free = remote_gpu_free(self.name, self.group)
         return self.gpu_free
 
-    def take(self, t, st, label, n, archiving):
-        """这一步分到别的机器（已经分过、或这次分）→ True；照常在 box 上排 → False。"""
+    def take(self, t, st, label, n, archiving, qsteal=None):
+        """这一步分到别的机器（已经分过、或这次分）→ True；照常在 box 上排 → False。
+        qsteal：这一步已经在任务队列里、还没人领（key）：只在那边空着时挪过去（先从队列里拿掉，见 run()）。"""
         idle = self.rule(label)
         if idle is None or not self.name:
+            return False
+        if qsteal and (label in self.state or not self.open or self.rtasks is None or not self.idle()):
             return False
         sk = (st["name"], t["key"])
         mine = label in self.state
@@ -589,13 +598,14 @@ class Offload:
             files = [p for p in rest if os.path.isfile(os.path.join(self.root, p))]
             rec["pushed"] = sorted(set(rec["pushed"]) | set(files))
             self.todo.append(dict(step="push", key=t["key"], group="wait", label=f"push:{label}", nice=n, paths=rest,
-                                  cmd="bash scripts/queue/offload_io.sh push " + " ".join([self.name] + [shlex.quote(p) for p in rest]),
-                                  steal=steal, record=(label, rec)))
+                                  cmd=refill.then_check("bash scripts/queue/offload_io.sh push " + " ".join([self.name] + [shlex.quote(p) for p in rest]),
+                                                        f"push:{label}"),
+                                  steal=steal, qsteal=qsteal, record=(label, rec)))
             self.moved |= bool(idle)
             return True
         rnames = dict(names, data=M.MACHINES[self.name]["data"], python=python(self.name))
         self.todo.append(dict(step=st["name"], key=t["key"], group=self.group, label=label, nice=n, host=self.name,
-                              cmd=S.fill(st["cmd"], rnames, keep=()), steal=steal, record=(label, rec)))
+                              cmd=S.fill(st["cmd"], rnames, keep=()), steal=steal, qsteal=qsteal, record=(label, rec)))
         self.moved |= bool(idle)
         return True
 
@@ -632,11 +642,18 @@ def taskq_add(nice, args):
     return r.returncode, (r.stdout + r.stderr).strip()
 
 
-def run(s, dry=False, q=None, tq=None):
+def taskq_drop(key):
+    """从任务队列里拿掉没人领的任务（box 上的 taskq.py 经 ssh 转到 DICC）→ (退出码, 输出)。"""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "drop", key], cwd=REPO, capture_output=True, text=True, timeout=300)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def run(s, dry=False, q=None, tq=None, tdrop=None):
     """health.py 调用：→ (这次排了的说明列表（影子模式下是"会排 …"）, 卡住的 {问题编号: 说明})。没有 LIVE 文件时是影子模式。"""
     import refill  # q()：在 box 上用 scripts/queue/q 加任务
     q = q or refill.q
     tq = tq or taskq_add
+    tdrop = tdrop or taskq_drop
     todo, stuck = plan(s)
     live_mode = os.path.exists(os.path.join(STATE_DIR, "LIVE")) and not dry
     done, lines = [], []
@@ -693,7 +710,14 @@ def run(s, dry=False, q=None, tq=None):
         note = "，暂停（HOLD）" if h else ""
         if t.get("steal"):
             note += f"，从 box 挪过去（删 box 任务 {' '.join(map(str, t['steal']))}）"
+        if t.get("qsteal"):
+            note += "，从任务队列挪过去（还没人领）"
         if live_mode:
+            if t.get("qsteal"):
+                rc, out = tdrop(t["qsteal"])
+                if rc != 0:  # 刚被领走、或连不上：照常留在队列里
+                    lines.append(f"没挪 {t['label']}：任务队列里拿不掉（{out[-150:]}）")
+                    continue
             try:
                 for i in t.get("steal") or []:
                     rc, out = refill.sh(f"~/.local/bin/pueue remove {i}")
@@ -754,7 +778,8 @@ if __name__ == "__main__":
             print(f"会排 {t['label']:28} 任务队列（档位 {t['qnice']}） {' '.join(shlex.quote(a) for a in t['args'])}")
         else:
             print(f"会排 {t['label']:28} {(t.get('host', '') + ' ' + t['group']).strip():9} {t['cmd']}"
-                  + (f"（挪走 box 任务 {t['steal']}）" if t.get("steal") else ""))
+                  + (f"（挪走 box 任务 {t['steal']}）" if t.get("steal") else "")
+                  + (f"（从任务队列挪走 {t['qsteal']}）" if t.get("qsteal") else ""))
     for k, v in stuck.items():
         print(f"卡住 {v}")
     if not todo and not stuck:

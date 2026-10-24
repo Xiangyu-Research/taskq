@@ -477,7 +477,26 @@ GPU["free"] = True
 s2 = osnap()
 s2["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100))
 todo, stuck = A.plan(s2)
-check("queue + OFFLOAD idle：已经在任务队列里 → 不再分到 lab", not tc(todo))
+check("queue + OFFLOAD idle：已经在任务队列里、有人领了 → 不再分到 lab", not tc(todo))
+s2 = osnap()
+s2["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100, state="free"))
+todo, stuck = A.plan(s2)
+x = tc(todo)
+check("queue + OFFLOAD idle：在任务队列里、还没人领、lab 空着 → 挪到 lab gpu0（先从队列里拿掉）", len(x) == 1 and x[0].get("host") == "lab"
+      and x[0].get("qsteal") == TCQ and "--stage infer" in x[0]["cmd"])
+GPU["free"] = False
+todo, stuck = A.plan(s2)
+check("queue + OFFLOAD idle：在任务队列里、还没人领、lab 不空 → 留在队列", not tc(todo))
+GPU["free"] = True
+drops, calls_q = [], []
+A.run(s2, q=lambda *a: calls_q.append(a) or 0, tq=lambda *a: (0, ""), tdrop=lambda k: drops.append(k) or (10, "claimed"))
+check("queue 挪到 lab：队列里拿不掉（刚被领走）→ 不在 lab 排", drops == [TCQ] and not [c for c in calls_q if "infer:t1c_f2" in str(c)])
+drops.clear()
+A.run(s2, q=lambda *a: calls_q.append(a) or 0, tq=lambda *a: (0, ""), tdrop=lambda k: drops.append(k) or (0, "拿掉"))
+check("queue 挪到 lab：拿掉了 → 在 lab gpu0 排", drops == [TCQ] and any("infer:t1c_f2" in str(c) and c[0] == "lab" for c in calls_q))
+for f_ in ("offload.json",):
+    if os.path.exists(os.path.join(A.STATE_DIR, f_)):
+        os.remove(os.path.join(A.STATE_DIR, f_))
 # 开、停和时段（10/24）
 from datetime import datetime as _dt  # noqa: E402
 OFFP = os.path.join(A.STATE_DIR, "OFFLOAD")

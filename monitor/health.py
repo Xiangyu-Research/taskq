@@ -144,6 +144,10 @@ def gather():
     s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={})
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
+    just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
+    for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
+        if t["label"] == just and t["status"] == "Running":
+            t["status"] = "Success"
     # 先查 Slurm 集群（任务队列在那里）：收集训练状态、查训练机上的数据都要用队列里的任务
     order = sorted(M.MACHINES, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
     queue = []

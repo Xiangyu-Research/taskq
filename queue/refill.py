@@ -62,6 +62,7 @@ import taskq  # noqa: E402
 TTL = 86400  # lab 的领取多久不续就过期（秒）
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
 SOFT = 2  # 自动传过去、留着以后用的数据和预传：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
+KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron 用的克隆里跑，和定时的共用一把锁）
 PRETAKE_S = 3600  # 组里在训的这一折预计这么多秒内训完时，提前领下一折、排在它后面（两次检查的间隔，保证训完前会检查一次）
 SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，就先停止替这台机器领（多半是环境坏了）
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
@@ -369,6 +370,12 @@ def start(name, key, run=sh, tq=None, group=None):
     return q(name, f"{g} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run)
 
 
+def then_check(cmd, label):
+    """box 任务的命令 → 做完（成功）后马上跑一次健康检查（不等 30 分钟，和定时的共用一把锁）；这一次里这个任务算做完
+    （health.py 看 PHD_TASK_DONE）。检查出错不算这个任务失败。"""
+    return f"{cmd} && {{ PHD_TASK_DONE={shlex.quote(label)} bash {KICK} health || true; }}"
+
+
 def transfer(name, paths, run=sh):
     """把 box 上的这些数据（相对数据目录）传到这台机器 → [box 任务号]。"""
     tids = []
@@ -378,8 +385,9 @@ def transfer(name, paths, run=sh):
         parent = os.path.dirname(p.rstrip("/"))
         rel = M.MACHINES[name]["data"].replace("~/", "", 1) + (f"/{parent}" if parent else "")
         src = M.expand(M.MACHINES[M.hub()]["data"]) + (f"/{parent}" if parent else "")
-        tids.append(q(M.hub(), f"wait -p --label sync_{name}_{tag(p)} -- "
-                      + shlex.quote(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}"), run))
+        lab = f"sync_{name}_{tag(p)}"
+        tids.append(q(M.hub(), f"wait -p --label {lab} -- "
+                      + shlex.quote(then_check(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}", lab)), run))
         if p not in lst:
             lst.append(p)
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
