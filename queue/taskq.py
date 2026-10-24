@@ -27,7 +27,7 @@ DICC 上（worker 调用）：
     taskq.py beat --worker <作业号> <key>...            心跳
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
 box 上（本机没有队列时自动经 ssh 在 DICC 上跑）：
-    taskq.py add --nice <档位> --exp <实验 id> [--folds 0 1 …]     从实验表加（已有的跳过）
+    taskq.py add [--nice <档位>] --exp <实验 id> [--folds 0 1 …]   从实验表加（已有的跳过；不给 --nice 用表里的档位）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py add --nice <档位> <key>...                             按 key 加：实验表里有的照表，没有的按 nnunet 做法
                                                                     （key = 数据集/训练器/fold）
@@ -428,12 +428,19 @@ def cmd_add(a):
         if a.exp:
             e = E.experiment(a.exp) or sys.exit(f"实验表里没有 {a.exp}（有：{', '.join(x['id'] for x in E.load()[0])}）")
             new = [dict(exp=t["exp"], recipe=t["recipe"], params=t["params"]) for t in E.expand(e, a.folds)]
+            if a.nice is None:
+                a.nice = e.get("nice")
+                if a.nice is None:
+                    sys.exit(f"实验表里 {a.exp} 没有 nice，要给 --nice")
+                print(f"档位用实验表里的 {a.nice}")
         elif a.recipe:
             new = [dict(exp=None, recipe=a.recipe, params=S.parse_kv(a.args))]
         else:
             if not a.args:
                 sys.exit("要给 --exp、--recipe 或 key")
             new = [from_key(k) for k in a.args]
+        if a.nice is None:
+            sys.exit("要给 --nice")
         return _insert(new, a.nice)
     except S.SpecError as e:
         print(f"加不进去：{e}")
@@ -612,7 +619,7 @@ def main(argv):
     p.add_argument("--ttl", type=int, default=STALE_BEAT)
     p.add_argument("key")
     p = sub.add_parser("add")
-    p.add_argument("--nice", type=int, required=True)
+    p.add_argument("--nice", type=int, help="档位；--exp 时不给就用实验表里的 nice")
     p.add_argument("--exp")
     p.add_argument("--folds", nargs="*")
     p.add_argument("--recipe")

@@ -85,7 +85,9 @@ ok("kv_args → parse_kv 来回一致（列表用 JSON）", S.parse_kv(args[1:])
 
 # ---------------- 实验表 ----------------
 ts = E.tasks()
-ok(f"实验表展开 {len(ts)} 个任务、key 不重复", len(ts) == 226 and len(set(ts)) == len(ts))
+exps = E.load()[0]
+ok(f"实验表展开 {len(ts)} 个任务（= 各实验的折数之和）、key 不重复",
+   len(ts) == sum(len(e.get("folds") or [None]) for e in exps) and len(set(ts)) == len(ts))
 ok("每个任务都解析得了、有环境和输出", all(t["spec"].get("env") and t["spec"].get("out") for t in ts.values()))
 um = ts["Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1"]["spec"]
 sw = ts["Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"]["spec"]
@@ -97,6 +99,39 @@ ok("实验表的 metrics 进了说明（登记表读）", set(um.get("metrics", 
 ok("env_of：按实验表找模型的环境，表里没有用 nnunet",
    E.env_of("/x/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__nnUNetResEncUNetMPlans__3d_fullres") == "swinunetr"
    and E.env_of("/x/Dataset999_X/foo") == "nnunet")
+
+
+# ---------------- 实验的声明（10/24）：别的脚本按模型文件夹查，不按名字猜 ----------------
+M = "/x/{}/nnUNetTrainer_save10__nnUNetResEncUNetMPlans__3d_fullres"
+ok("names_of：T24 跳过转移瘤四个队列、用 t24_splits.json",
+   E.names_of(M.format("Dataset155_METrq1_ecov"), "skip_ext", "splits") == ["MET-Yale MET-UCSF MET-Multi MET-UCSD", "t24_splits.json"])
+ok("names_of：T22 只测留出的机构", E.names_of(M.format("Dataset151_METrq1_loYale"), "only_ext") == ["MET-Yale"])
+ok("names_of：GLI 模型什么都不跳过、没有划分", E.names_of(M.format("Dataset101_GLIrq1"), "skip_ext", "only_ext", "splits") == ["", "", ""])
+ok("names_of：表里没有的模型报错（不猜）", raises(lambda: E.names_of("/x/Dataset999_X/foo", "skip_ext")))
+ok("每个 RQ1 实验都有档位和看板名称", all(isinstance(e.get("nice"), int) and set(e.get("board") or {}) == {"group", "en", "zh"}
+                                      for e in exps if e["rq"] == "RQ1"))
+ok("有 oof 步骤的都给了划分文件", all(e["names"]["splits"] for e in exps if e["rq"] == "RQ1"
+                                     and any(s["name"] == "oof" for c in e["group_after"] for s in c)))
+import importlib.util  # noqa: E402
+spec_ = importlib.util.spec_from_file_location("rq1_exps", os.path.join(E.REPO, "research", "RQ1", "experiments.py"))
+R = importlib.util.module_from_spec(spec_)
+spec_.loader.exec_module(R)
+x = R._x("toy", "T99", "玩具", "nnU-Net", "Dataset999_X", ("G", "en", "zh"), 0, steps=R.OOF5 + ["ens"] + R.PROBE, splits="s.json", probe="p")
+ok("_x：steps 展开成每折步骤和一串串实验级步骤（paired 接 oof、p2cmp 接 p2）",
+   [s["name"] for s in x["after"]] == ["infer", "eval"]
+   and [[s["name"] for s in c] for c in x["group_after"]] == [["oof", "paired"], ["ens"], ["p1"], ["p2", "p2cmp"]])
+
+
+def bad(**kw):
+    try:
+        R._x("toy", "T99", "玩具", "nnU-Net", "Dataset999_X", ("G", "en", "zh"), 0, **kw)
+    except ValueError:
+        return True
+    return False
+
+
+ok("_x：写错步骤名、oof 没给 splits、paired 不跟在 oof 后面、P1 没给 probe 都报错",
+   bad(steps=["infer", "evl"]) and bad(steps=["oof"]) and bad(steps=["paired"], splits="s.json") and bad(steps=["p1"]))
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

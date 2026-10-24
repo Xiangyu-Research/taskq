@@ -1,5 +1,9 @@
 """读所有研究问题的实验表（research/*/experiments.py，2026-10-18），展开成一个个任务。
-taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读。"""
+taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读；
+分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
+
+实验的字段：id、exp、label、model、hours、recipe、params、fields、folds、after、group_after、names（见 RQ1 的表），
+另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。"""
 import glob
 import importlib.util
 import os
@@ -83,14 +87,40 @@ def task_names(t, data, python):
     return dict(t["spec"]["names"], exp=e.get("exp", ""), id=t["exp"], data=data, python=python)
 
 
-def env_of(model_dir):
-    """模型文件夹（…/<数据集>/<训练器>__<plans>__<配置>，放在哪里都行）→ 实验表里训它用的环境；表里没有 → nnunet。"""
+def _task_of(model_dir):
+    """模型文件夹（…/<数据集>/<训练器>__<plans>__<配置>，放在哪里都行）→ 实验表里训它的第一个任务；表里没有 → None。"""
     rel = "/".join(os.path.normpath(model_dir).split(os.sep)[-2:])
-    return next((t["spec"]["env"] for t in tasks().values() if t["spec"].get("names", {}).get("model") == rel), "nnunet")
+    return next((t for t in tasks().values() if t["spec"].get("names", {}).get("model") == rel), None)
+
+
+def env_of(model_dir):
+    """模型文件夹 → 实验表里训它用的环境；表里没有 → nnunet。"""
+    t = _task_of(model_dir)
+    return t["spec"]["env"] if t else "nnunet"
+
+
+def experiment_of(model_dir):
+    """模型文件夹 → 训它的实验；表里没有 → None。"""
+    t = _task_of(model_dir)
+    return experiment(t["exp"]) if t else None
+
+
+def names_of(model_dir, *names):
+    """模型文件夹 → 它所属实验的 names 里这几项（没有的给空串），分析脚本按这个取实验的声明（如 RQ1 的 skip_ext、splits）。
+    表里没有这个模型时报 SpecError：不按名字猜。"""
+    e = experiment_of(model_dir)
+    if e is None:
+        raise spec.SpecError(f"实验表里没有训这个模型的实验：{model_dir}")
+    return [str((e.get("names") or {}).get(n, "")) for n in names]
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "env-of":
         print(env_of(sys.argv[2]))
+    elif len(sys.argv) >= 4 and sys.argv[1] == "name-of":
+        try:
+            print("\n".join(names_of(sys.argv[2], *sys.argv[3:])))
+        except spec.SpecError as err:
+            sys.exit(str(err))
     else:
-        sys.exit("用法：experiments.py env-of <模型文件夹>")
+        sys.exit("用法：experiments.py env-of <模型文件夹>\n      experiments.py name-of <模型文件夹> <名字>…（每行一个）")

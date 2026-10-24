@@ -17,6 +17,7 @@ ENV.pop("nnUNet_results", None)
 sys.path.insert(0, HERE)
 os.environ.update(TASKQ_DIR=TQ)
 import taskq  # noqa: E402
+import experiments as E  # noqa: E402
 
 ok = True
 
@@ -346,6 +347,24 @@ r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--w
 check("next：machines 里有本机的照档位先领", r.returncode == 0 and r.stdout.startswith("toy/m"))
 
 # 10/23：主数据目录读不了时不领；TEMP_ROOT 临时数据目录只领名单里的，失败只数名单里的
+# add 不给 --nice（10/24）：--exp 用实验表里的档位，别的报错（单独一份队列，不影响上面的）
+TQ3B = os.path.join(T, "taskq3b")
+os.makedirs(TQ3B)
+open(os.path.join(TQ3B, "tasks.jsonl"), "w").close()
+
+
+def tq3b(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ3B), capture_output=True, text=True)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+rc, out, _ = tq3b("add", "--exp", "t15met", "--folds", "0")
+ts = taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))
+check("add --exp 不给 --nice：用实验表里的档位", rc == 0 and [t["key"] for t in ts] == ["Dataset116_METrq1/nnUNetTrainer_save10_n470/0"]
+      and ts[0]["nice"] == E.experiment("t15met")["nice"])
+rc, out, err = tq3b("add", "--recipe", "command", "key=toy/n", "cmd=true", "env=nnunet", "out=toy/n", 'done=["DONE"]')
+check("add --recipe 不给 --nice：报错、不加", rc != 0 and "--nice" in err and len(taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))) == 1)
+
 TQ4, D4, TMP4 = os.path.join(T, "taskq4"), os.path.join(T, "data4"), os.path.join(T, "tmp4")
 os.makedirs(D4)
 os.makedirs(TMP4)

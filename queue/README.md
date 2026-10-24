@@ -8,7 +8,7 @@
 |---|---|
 | [`envs/machines.py`](../../envs/machines.py) 每台机器的 `envs` | 环境名 → 怎么激活（`conda <名>`、`venv <路径>`）。`machines.py activate <环境>` 输出激活语句，这台机器没有就退出 3；没有某个环境的机器不领用它的任务 |
 | [`recipes.py`](recipes.py) 做法 | 一种训练怎么跑：参数和默认值、`key`、`env`、`cmd`、`vars`、`out`、`done`、`data`、`fetch`、`archive` 等（字段说明在文件开头）。现在有 `nnunet`（命令在 `research/common/nnunet/train.sh`）和 `command`（全部由任务自己给） |
-| `research/<RQ>/experiments.py` 实验表 | 每个实验用哪种做法、什么参数、几折、每折训完后做什么（`after`）、全部训完后做什么（`group_after`）、最后一起做的（`FINAL`）。`experiments.py`（这里的）读所有 RQ 的表并检查任务名不重复 |
+| `research/<RQ>/experiments.py` 实验表 | 每个实验的一切：用哪种做法、什么参数、几折、每折训完后做什么（`after`）、全部训完后做什么（`group_after`）、最后一起做的（`FINAL`）、默认档位（`nice`）、分析脚本要的声明（`names`，如 RQ1 的 `skip_ext`、`splits`）、看板名称（`board`）。`experiments.py`（这里的）读所有 RQ 的表并检查任务名不重复；分析脚本按模型文件夹查所属实验的声明（`experiments.py name-of <模型文件夹> <名字>…`，表里没有的模型报错），不按数据集名字或实验编号判断（10/24 起） |
 
 `spec.py` 是唯一的解析器：做法 + 参数 → 任务说明（`python3 scripts/queue/spec.py resolve <做法> k=v…` 看完整说明，`spec.py lookup <key>` 按任务名查）。
 
@@ -107,8 +107,8 @@ DICC 的 `gpu-a100` 要求作业显存占用 >= 40GB（10/17 收到）。`gpu_pa
 ```bash
 Q=scripts/queue/q
 TQ="python3 scripts/queue/taskq.py"
-# 加实验表里的实验（第 ③ 档）、只加某几折、改先后、看一个任务会怎么跑
-$TQ add --nice 100 --exp t15met
+# 加实验表里的实验（档位用表里的 nice；也可以 --nice 指定）、只加某几折、改先后、看一个任务会怎么跑
+$TQ add --exp t15met
 $TQ add --nice 0 --exp t15men --folds 1 2 3 4
 $TQ set-nice --nice 0 Dataset116_METrq1/nnUNetTrainer_save10_n470/2
 $TQ show Dataset116_METrq1/nnUNetTrainer_save10_n470/2
@@ -129,7 +129,8 @@ $Q cpu --label eval:x_f4 -- 'bash research/RQ1/analysis/run_predict_eval.sh --st
 
 ## 加新东西
 
-- **新的 nnU-Net 变体**：在 `research/common/nnunet/trainers/` 写训练器（网络代码放 `nets/`） → 实验表加一行（`recipe="nnunet"`，`params` 里写 `dataset`、`trainer`，要别的环境时写 `env`）→ `taskq.py add --exp <id>`。
+- **新实验**：实验表加一个条目（RQ1 用 `_x(...)`：数据集、训练器、折、训完后的步骤 `steps`、档位、看板名称，训练用过外部队列时写 `skip_ext`，做折外评测时写 `splits`；字段说明在 `research/RQ1/experiments.py` 开头）→ `taskq.py add --exp <id>`。别的脚本不用改。
+- **新的 nnU-Net 变体**：在 `research/common/nnunet/trainers/` 写训练器（网络代码放 `nets/`），实验条目的 `trainer` 写它，要别的环境时写 `env`。
 - **单个任务换环境、换参数**：`taskq.py set <key> k=v`。
 - **新环境**：各台机器装好 → `envs/machines.py` 里那几台的 `envs` 加一项。没装的机器自然不领用它的任务。
 - **不是 nnU-Net 的训练**：
