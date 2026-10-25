@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """任务说明（2026-10-18）：做法（scripts/queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
-调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：make_registry.py 把本文件经 ssh 送到别的机器上跑 collect()。
+调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（scripts/monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
 
 命令行：
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开）
@@ -38,11 +38,9 @@ def json_out(obj):
     print(JSON_MARK + json.dumps(obj), flush=True)
 
 
-def json_in(out, old=False):
-    """输出里 @@JSON 那一行 → 对象；没有这一行或解析不了 → None。old：没有这一行时退回找第一个 {（读 DICC 上旧版的 taskq.py）。"""
+def json_in(out):
+    """输出里 @@JSON 那一行 → 对象；没有这一行或解析不了 → None。"""
     line = next((ln[len(JSON_MARK):] for ln in out.splitlines() if ln.startswith(JSON_MARK)), None)
-    if line is None and old and "{" in out:
-        line = out[out.find("{"):]
     try:
         return json.loads(line) if line is not None else None
     except ValueError:
@@ -252,8 +250,29 @@ def metrics(s, fd):
     return out
 
 
+COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics")
+
+
+def all_tasks(queue=()):
+    """要登记的任务：实验表里的（按表的顺序）+ 任务队列里有、实验表里没有的。
+    → [dict(key, spec, e)]，e 是所属的实验（临时任务为 None）。queue：taskq 状态里的任务列表。"""
+    import experiments as E
+    out = [dict(key=k, spec=t["spec"], e=E.experiment(t["exp"])) for k, t in E.tasks().items()]
+    have = {t["key"] for t in out}
+    for t in queue:
+        if t["key"] not in have and t.get("spec"):
+            out.append(dict(key=t["key"], spec=t["spec"], e=None))
+            have.add(t["key"])
+    return out
+
+
+def task_specs(queue=()):
+    """各机器上 collect() 用的说明（只留它要的字段，经 ssh 传过去的量小）。"""
+    return [{k: t["spec"].get(k) for k in COLLECT_FIELDS} for t in all_tasks(queue)]
+
+
 def collect(specs, root):
-    """这台机器上每个任务的情况（make_registry.py 用）：{"folds": {key: …}, "seglogs": […]}。
+    """这台机器上每个任务的情况（健康检查、登记表用）：{"folds": {key: …}, "seglogs": […]}。
     specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。"""
     out = {"folds": {}, "seglogs": []}
     for s in specs:
@@ -314,7 +333,7 @@ def lookup(key):
     if t:
         return t["spec"]
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--json", key], capture_output=True, text=True)
-    return json_in(r.stdout, old=True) if r.returncode == 0 else None
+    return json_in(r.stdout) if r.returncode == 0 else None
 
 
 def shell_lines(s, data, repo=REPO):

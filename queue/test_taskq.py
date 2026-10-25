@@ -287,11 +287,12 @@ r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--j
 check("转发：那边的标准输出、退出码照样传回来", r.returncode == 1 and "队列里没有" in r.stdout)
 J = '{"tasks": [], "enabled": true}'
 check("@@JSON 行前后混着别的输出：只读那一行", taskq.S.json_in(f"警告：x {{1}}\n@@JSON {J}\n{{别的}}\n") == json.loads(J))
-check("没有 @@JSON 行：不认（找第一个 { 只在 old=True 时）", taskq.S.json_in(f"x\n{J}\n") is None
-      and taskq.S.json_in(f"x\n{J}\n", old=True) == json.loads(J))
+check("没有 @@JSON 行：不认（不找第一个 {）", taskq.S.json_in(f"x\n{J}\n") is None)
 remote_orig = taskq.remote
-taskq.remote = lambda h, a, timeout=0: (0, f"旧版的输出\n{J}\n", "")
-check("remote_status：DICC 还是旧版（没有 @@JSON 行）时退回找第一个 {", taskq.remote_status("dicc") == json.loads(J))
+taskq.remote = lambda h, a, timeout=0: (0, f"别的输出\n{J}\n", "")
+check("remote_status：输出里没有 @@JSON 行 → None", taskq.remote_status("dicc") is None)
+taskq.remote = lambda h, a, timeout=0: (0, f"别的输出 {{x}}\n@@JSON {J}\n", "")
+check("remote_status：读 @@JSON 那一行", taskq.remote_status("dicc") == json.loads(J))
 taskq.remote = remote_orig
 os.environ["TASKQ_SSH"] = "false"
 check("ssh 不通（退出码非 0）：remote_status 返回 None", taskq.remote_status("dicc") is None)
