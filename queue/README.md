@@ -40,6 +40,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
 | `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件只有 `have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
 | `envs/policy.py` `MANUAL` | 机器 → 组 | 只跑手动加的任务（lab `gpu0`）：不替它领训练，健康检查不报它空着 |
+| `envs/policy.py` `GPU_AUG` | 机器 → True | 这台机器上训练集的数据增强在 GPU 上做（`train.sh` 设 `RQ1_GPU_AUG=1`）；新开始或续训的段生效。单个任务可以预先设 `RQ1_GPU_AUG=0 / 1` |
 | `envs/policy.py` `SLURM` | 每台 Slurm 机器的 QOS、时限、个数 | `refill.py` 补交多少 GPU / CPU worker 作业 |
 | DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 总开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`） |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
