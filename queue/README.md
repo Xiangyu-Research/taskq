@@ -148,7 +148,9 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **队列所在的机器**：`envs/machines.py` 里用 Slurm、能训练的那台（`taskq.queue_host()`）；在别的机器上跑 `taskq.py add / set / set-nice / take / show / status` 时经 ssh 到那边跑。worker 用的 `next / beat / release` 不转发，没有 `tasks.jsonl` 就退出 2（10/25 定）。
 - **Slurm 作业名**：`envs/machines.py` 的 `jobs`（`gpu` = `worker.sbatch`、`cpu` = `cpu_worker.sbatch` 的 `--job-name`，`test_refill.py` 核对两边一致）；健康检查只把 GPU worker 当成"还有训练作业"，`refill.py` 按 CPU worker 的名字数已有几个；查提交名额用的 QOS 来自 `envs/policy.py` 的 `SLURM`（10/25 定）。
 - **代码版本**：box 的 pueue 任务的工作目录是 `~/.cache/phd/code/<提交号>`（`envs/machines.py` 的 `code`，`q` 加任务时先跑 `scripts/sync/snapshot.sh` 更新到 origin/main），任务开始后代码再更新也不影响它；旧副本没有任务用、建了 7 天以上才删。lab、DICC 跑各自克隆里的代码（`repo`），box 每 30 分钟快进。
-- **状态文件整份换**：`refill.json`、`tasks.json`、`last.json`、领取的 `info` 都先写临时文件再换过去（`scripts/queue/common.py` 的 `write_json`），断电、被杀时只有旧的或新的。领取只建了目录、没有 `info` 的，5 分钟后算过期。
+- **跑命令、查文件**：调度脚本在本机或经 ssh 跑命令都用 `common.run`（返回退出码、标准输出、标准错误；超时、起不来是 124）；查别的机器上有哪些文件用 `common.have_script` / `parse_have`（输出以 `@@END` 结束，没有结束标记算没查到）（10/25 定）。
+- **日志不重复**：`advance.py`、`refill.py` 的"会做什么"和上次一样就不再写日志，上次的内容在 `~/.cache/phd/last/<名字>.json`（`common.changed`）。
+- **状态文件整份换**：`refill.json`、`tasks.json`、`last/` 下的文件、领取的 `info` 都先写临时文件再换过去（`scripts/queue/common.py` 的 `write_json`），断电、被杀时只有旧的或新的。领取只建了目录、没有 `info` 的，5 分钟后算过期。
 - **同一个任务不在两处做**：先领到（`claims/<key>/info`：worker、host、since、beat、ttl）才做；`ttl` 秒内没续就过期（DICC 作业 1200 秒、lab 604800 秒：box 离线时不过期）。`skips/<key>`：哪台 pueue 训练机跳过了这一折（删掉即撤销）；`released/`：刚交还的。
 - **任务表** `tasks.jsonl` 每行 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。任务说明的 `device`（默认 `gpu`）、`machines`（默认不限，如 `["dicc"]`）决定谁能领。`after`（默认 `[]`）：一组任务 key，都做完前这个任务是 `waiting`（不领、不算补交作业的数）；其中有失败 2 次的或不在队列里的是 `blocked`，健康检查报 `tqblocked:<key>`。
 - **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`（任务队列缺的文件）、`pull:<标签>`（训练机上做完的拉回），传数据集给 lab 是 `sync_<机器>_<数据集>`。标签只给人看，程序不靠它认任务（见下一条）。
