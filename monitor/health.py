@@ -43,12 +43,13 @@ sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
 sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
-import make_registry as mr  # noqa: E402  要登记的任务、训练命令 → key
+import make_registry as mr  # noqa: E402  要登记的任务
 import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
 import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
 import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
 import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
-from common import write_json  # noqa: E402  scripts/queue/common.py
+import common as C  # noqa: E402  scripts/queue/common.py
+from common import write_json  # noqa: E402
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
 CODE_HEADS = os.path.expanduser("~/.cache/phd/code/heads.tsv")  # scripts/monitor/auto_refresh.sh 写
@@ -112,19 +113,6 @@ def minutes(elapsed):
     return int(d or 0) * 1440 + p[0] * 60 + p[1] + p[2] / 60
 
 
-def task_key(cmd):
-    """pueue 任务命令 → (种类, key)：训练（run_task.sh <做法> k=v…，见 make_registry.train_key）、
-    拉回（fetch_task.sh <机器> <key>）。"""
-    key = mr.train_key(cmd)
-    if key:
-        return "train", key
-    cmd = cmd.replace("'", " ").replace('"', " ")
-    m = re.search(r"fetch_task\.sh\s+(\S+)\s+(\S+)", cmd)
-    if m:
-        return "fetch:" + m.group(1), m.group(2)
-    return None, None
-
-
 def code_heads():
     """各台机器的代码在哪个提交（auto_refresh.sh 快进后写的 heads.tsv）和 GitHub 上的 main → dict(main, heads={机器: 提交号})。"""
     rc, main = sh(["git", "-C", REPO, "rev-parse", "HEAD"])
@@ -142,6 +130,7 @@ def gather():
     s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={}, code=code_heads())
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
+    s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（scripts/queue/common.py），main() 里写回
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
@@ -268,7 +257,8 @@ def check(s):
             add(f"pueued:{name}", f"{L(name)} 的 pueue 没有响应：{d['error'][:120]}")
             continue
         for t in d["tasks"]:
-            kind, key = task_key(t["command"])
+            r = C.identify(name, t, s.get("records") or [])
+            kind, key = (r["step"], r["key"]) if r else (None, None)
             tname = t["label"] or f"#{t['id']}"
             st = t["status"]
             if kind == "train":
@@ -281,8 +271,8 @@ def check(s):
                     if start and now - start > timedelta(minutes=60) and \
                             (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
                         add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
-            if kind and kind.startswith("fetch:") and st == "Running":
-                waits.append((name, t, key, kind[6:]))
+            if kind == "fetch" and st == "Running":
+                waits.append((name, t, key, r.get("src")))
             if kind == "train" and st in ("Running", "Queued"):
                 train_q.setdefault((name, t["group"]), []).append((st, tname))
             if st == "Running":
@@ -437,6 +427,8 @@ def main():
         print("已推送测试消息")
         return
     s = gather()
+    if not a.dry_run:
+        s["records"] = C.update_records(lambda recs: C.sync_records(s["pueue"], recs))
     P = check(s)
     # 这两步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
     try:

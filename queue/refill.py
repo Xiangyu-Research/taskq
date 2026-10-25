@@ -60,6 +60,7 @@ import policy as P  # noqa: E402
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
+import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
 TTL = 7 * 86400  # lab 的领取多久不续就过期（秒）
@@ -95,12 +96,17 @@ def open_group(s, name, g):
     return st == "Running" if st else True
 
 
+def kind_key(s, name, t):
+    """这台机器上的 pueue 任务 → (步骤, key)（任务记录，scripts/queue/common.py 的 identify）；认不出 → (None, None)。"""
+    r = C.identify(name, t, s.get("records") or [])
+    return (r["step"], r["key"]) if r else (None, None)
+
+
 def task_groups(s, name):
     """这台机器 pueue 里每一折的训练任务在哪个组 → {key: 组}：有活着的任务看活着的，否则看最新的。"""
-    from health import task_key
     out = {}
     for t in sorted((s["pueue"].get(name) or {}).get("tasks", []), key=lambda t: t["id"]):
-        kind, key = task_key(t["command"])
+        kind, key = kind_key(s, name, t)
         if kind == "train" and t.get("group") and (key not in out or t["status"] in LIVE or out[key][1] not in LIVE):
             out[key] = (t["group"], t["status"])
     return {k: g for k, (g, _) in out.items()}
@@ -148,10 +154,10 @@ def progress(s, key, host=None):
 
 def train_tasks(s, name):
     """这台机器 pueue 里的训练任务 → {key: [(任务号, 状态, 开始时间或 None)]}，按任务号排。"""
-    from health import task_key, mr_time
+    from health import mr_time
     out = {}
     for t in sorted((s["pueue"].get(name) or {}).get("tasks", []), key=lambda t: t["id"]):
-        kind, key = task_key(t["command"])
+        kind, key = kind_key(s, name, t)
         if kind == "train":
             out.setdefault(key, []).append((t["id"], t["status"], mr_time(t.get("start"))))
     return out
@@ -162,8 +168,9 @@ def syncing(s, name):
     box = s["pueue"].get(M.hub()) or {}
     last = {}
     for t in sorted(box.get("tasks", []), key=lambda t: t["id"]):
-        if (t["label"] or "").startswith(f"sync_{name}_"):
-            last[t["label"][len(f"sync_{name}_"):]] = t
+        r = C.identify(M.hub(), t, s.get("records") or [])
+        if r and r["step"] == "sync" and r.get("to") == name:
+            last[tag(r["key"])] = t
     return ({d: t for d, t in last.items() if t["status"] in LIVE},
             {d: t for d, t in last.items() if t["status"] not in LIVE and t["status"] != "Success"})
 
@@ -300,7 +307,6 @@ def ahead(s, name, tq, cands, ready, free, hard, tt_all, tgroup, sync, sync_bad,
     """组里都在训时为下一折做准备（2026-10-24）→ 动作：
       - 预测的下一折缺数据：马上提前传（prefetch；每台机器同时只传一份，空间预算由 cleanup() 管，放不下就不传）；
       - 组里在训的这一折预计 PRETAKE_S 秒内训完、下一折数据都在：提前领，排在它后面（pueue 一个组一次跑一个，训完马上开始）。"""
-    from health import task_key
     out, took = [], {a["key"] for a in acts if a["op"] == "take"}
     moving = bool(sync) or any(a["op"] == "transfer" for a in acts)
     m = M.MACHINES[name]
@@ -308,8 +314,8 @@ def ahead(s, name, tq, cands, ready, free, hard, tt_all, tgroup, sync, sync_bad,
     for g in gpu_groups(name):
         if not open_group(s, name, g):
             continue
-        live = [(t, task_key(t["command"])[1]) for t in (s["pueue"].get(name) or {}).get("tasks", [])
-                if t["status"] in LIVE and t.get("group") == g and task_key(t["command"])[0] == "train"]
+        live = [(t, kind_key(s, name, t)[1]) for t in (s["pueue"].get(name) or {}).get("tasks", [])
+                if t["status"] in LIVE and t.get("group") == g and kind_key(s, name, t)[0] == "train"]
         if len(live) != 1 or live[0][0]["status"] != "Running":
             continue  # 组空着（由领的那一步管）、或者已经排了下一折
         t, need, gb, wait = next_pick(tq, cands, ready, free, hard, took, sync)
@@ -364,9 +370,17 @@ def q(name, args, run=sh):
     return int(hit.group(1))
 
 
+def add(name, label, step, key, args, run=sh, **rec):
+    """先记下（scripts/queue/common.py 的任务记录）、再在这台机器上加任务 → 任务号。"""
+    r = C.new_record(name, label, step, key, **rec)
+    tid = q(name, args, run)
+    C.set_record_id(r, tid)
+    return tid
+
+
 def start(name, key, run=sh, tq=None, group=None):
     g = group or gpu_group(name)
-    return q(name, f"{g} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run)
+    return add(name, f"train:{key}", "train", key, f"{g} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run, group=g)
 
 
 def then_check(cmd, label):
@@ -376,12 +390,6 @@ def then_check(cmd, label):
 
 
 KICK_SEP = " && { PHD_TASK_DONE="
-
-
-def unwrap(cmd):
-    """then_check 包过的命令 → 原来的命令（认步骤时用）。"""
-    i = cmd.find(KICK_SEP)
-    return cmd[:i] if i >= 0 else cmd
 
 
 def transfer(name, paths, run=sh):
@@ -394,8 +402,9 @@ def transfer(name, paths, run=sh):
         rel = M.MACHINES[name]["data"].replace("~/", "", 1) + (f"/{parent}" if parent else "")
         src = M.expand(M.MACHINES[M.hub()]["data"]) + (f"/{parent}" if parent else "")
         lab = f"sync_{name}_{tag(p)}"
-        tids.append(q(M.hub(), f"wait -p --label {lab} -- "
-                      + shlex.quote(then_check(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}", lab)), run))
+        tids.append(add(M.hub(), lab, "sync", p, f"wait -p --label {lab} -- "
+                        + shlex.quote(then_check(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}", lab)), run,
+                        to=name, group="wait"))
         if p not in lst:
             lst.append(p)
     write_json(STATE, st)
@@ -453,6 +462,15 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
     return msgs
 
 
+def moves(s, t, name, p):
+    """box 任务 t 在给这台机器传 p、或在从这台机器拉回 / 归档 p 那个数据集的折。没有记录的（手动加的）按命令里有没有
+    这台机器和 p 的名字算，宁可多留。"""
+    r = C.identify(M.hub(), t, s.get("records") or [])
+    if r and (r.get("to") == name or r.get("src") == name):
+        return r["key"] == p or tag(p) in r["key"].split("/")
+    return not r and tag(p) in t["command"] and f" {name} " in f" {t['command']} "
+
+
 def cleanup(s, name, run=sh, acts=None, dry=False):
     """自动传过去的数据（~/.cache/phd/refill.json 的 transferred）按"还要不要用"和空间预算管（2026-10-24）→ [说明]。
     不删：Dataset101；这台机器领着的、这次要领 / 开始 / 传的、预测下一折的任务要用的；这台机器上训练任务在用的；box 上正在传、
@@ -461,7 +479,6 @@ def cleanup(s, name, run=sh, acts=None, dry=False):
       - 还有任务要用的留着，但盘剩的要不低于软线（硬线 × SOFT）：低了就从"下次用到"最晚的删起；
       - acts 里有提前传（prefetch）的：先删比它晚用到的、腾到"剩的 − 要传的 ≥ 软线"，腾不出来就从 acts 里去掉、这次不传。
     dry：只算、不删（说明照样给）。"""
-    from health import task_key
     acts = [] if acts is None else acts
     m = M.MACHINES[name]
     st = json.load(open(STATE)) if os.path.exists(STATE) else {}
@@ -503,8 +520,8 @@ def cleanup(s, name, run=sh, acts=None, dry=False):
             continue
         if tag(p).startswith("Dataset101_") or p in keep or tag(p) in sync:
             continue
-        busy = any(t["status"] in LIVE and p in data_of(tq, task_key(t["command"])[1] or "") for t in s["pueue"][name]["tasks"])
-        busy |= any(t["status"] in LIVE and tag(p) in t["command"] and f" {name} " in f" {t['command']} " for t in box["tasks"])
+        busy = any(t["status"] in LIVE and p in data_of(tq, kind_key(s, name, t)[1] or "") for t in s["pueue"][name]["tasks"])
+        busy |= any(t["status"] in LIVE and moves(s, t, name, p) for t in box["tasks"])
         busy |= any(p in data_of(tq, k) and not f.get("archived") for k, f in s["src"].get(name, {}).get("folds", {}).items() if f.get("final"))
         if busy:
             continue

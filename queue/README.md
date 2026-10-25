@@ -55,7 +55,8 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 哪个任务没人做、谁领了、失败了几次 | `python3 scripts/queue/taskq.py status`（box 上跑，经 ssh 读 DICC 的队列）；DICC 作业的 `.out`；失败记录 DICC `~/.cache/phd/taskq/failures/`，lab 训不了跳过的 `skips/` |
 | lab 领了什么、为什么没领；DICC 补交了哪些作业 | box `~/refill.log`；`python3 scripts/queue/refill.py`（只看会做什么） |
 | 训完之后卡在哪一步、为什么没排 | box `~/advance.log`（排了什么、会排什么、"没排"的原因、哪一步失败停住）；`python3 scripts/queue/advance.py`（只看会排什么）；`pueue log <号>` |
-| 放到别的 pueue 机器上做的步骤（lab 训的折的推理）走到哪 | box `~/advance.log`；box 上 `pull:<标签>` 任务的 `pueue log`；那边同标签的任务（`ssh lab pueue log <号>`）；还没清理的记在 box `~/.cache/phd/advance/remote.json`（标签 → 机器、组、任务号、训练的任务号、结果文件夹、要用的输入） |
+| 放到别的 pueue 机器上做的步骤（lab 训的折的推理）走到哪 | box `~/advance.log`；box 上 `pull:<标签>` 任务的 `pueue log`；那边同标签的任务（`ssh lab pueue log <号>`）；还没清理的在 box 的任务记录 `~/.cache/phd/tasks.json` 里（有 `out` 的：机器、标签、组、任务号、训练的任务号、结果文件夹、要用的输入） |
+| 某个 pueue 任务被认成哪一步 | box `~/.cache/phd/tasks.json`（见"约定"的任务记录） |
 | 总览、报警 | `research/RQ1/实验登记表.md` 最上面的"需要处理"（`scripts/monitor/health.py`） |
 
 ## 组
@@ -102,7 +103,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 3. pueue 训练机（lab）上训完、拉回以后 → `archive_task.sh lab <key>`：备份到 DICC，三份核对一致后删 lab 上的存档和验证集预测。那边还在用这一折做别的步骤时等；要进任务队列的步骤等归档做完再加。
 4. 一个实验所有折都在 box 上训完 → `group_after` 的每一串步骤（RQ1：oof、配对比较、五折集成、删单折概率图、P1 / P2 重跑）；最后 `FINAL` 的（`compare_all.py`，有比它上次开始时更新的结果就重跑）。
 
-每一步放在哪：已经在某处做着（box pueue 里有、任务队列里有、`remote.json` 里记着）就接着那边的；否则按 `PLACE[步骤]` 的顺序用第一个现在能用的，都用不了时把原因写进 `~/advance.log`（"没排 …"），不报成问题。第一个地方是 `trainer` 的步骤（推理），在这一折还在 lab 训着时就排进训练的组，训完马上做。
+每一步放在哪：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有那边的）就接着那边的；否则按 `PLACE[步骤]` 的顺序用第一个现在能用的，都用不了时把原因写进 `~/advance.log`（"没排 …"），不报成问题。第一个地方是 `trainer` 的步骤（推理），在这一折还在 lab 训着时就排进训练的组，训完马上做。
 
 - 放到别的 pueue 机器上的：缺的输入先从 box 传过去（文件夹经隧道、文件用 rsync；传完那边的盘要留够，另给结果留 15 GB），齐了在那边的组里排同样的标签（命令里的 `{data}`、`{python}` 换成那边的），成功后 box 拉回、按校验和核对，box 判断做完后删掉那边的结果和自动传过去的文件（别的步骤还要用的留着，文件夹留着）。
 - 进任务队列的：那边缺的文件先 `offload_io.sh push` 过去，缺文件夹就报出来；那边做完后按任务拉回（`fetch_task.sh`），拉回后照常按 `done` 判断。`have` 条件的地方只在那边已经有全部输入时用。
@@ -145,10 +146,11 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **DICC 作业提交时定下的**只有 `worker.sbatch`；其余脚本在作业开始时或每次调用时从仓库读。排着的作业依赖的只有 `ENABLED` 和 `worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它调用的 `taskq.py next / beat / release` 和 `run_task.sh` 的参数、退出码不改，只加新命令。
 - **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，2 任务说明或环境有问题，143 被停掉，其他是出错。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。
 - **代码版本**：box 的 pueue 任务的工作目录是 `~/.cache/phd/code/<提交号>`（`envs/machines.py` 的 `code`，`q` 加任务时先跑 `scripts/sync/snapshot.sh` 更新到 origin/main），任务开始后代码再更新也不影响它；旧副本没有任务用、建了 7 天以上才删。lab、DICC 跑各自克隆里的代码（`repo`），box 每 30 分钟快进。
-- **状态文件整份换**：`refill.json`、`remote.json`、`last.json`、领取的 `info` 都先写临时文件再换过去（`scripts/queue/common.py` 的 `write_json`），断电、被杀时只有旧的或新的。领取只建了目录、没有 `info` 的，5 分钟后算过期。
+- **状态文件整份换**：`refill.json`、`tasks.json`、`last.json`、领取的 `info` 都先写临时文件再换过去（`scripts/queue/common.py` 的 `write_json`），断电、被杀时只有旧的或新的。领取只建了目录、没有 `info` 的，5 分钟后算过期。
 - **同一个任务不在两处做**：先领到（`claims/<key>/info`：worker、host、since、beat、ttl）才做；`ttl` 秒内没续就过期（DICC 作业 1200 秒、lab 604800 秒：box 离线时不过期）。`skips/<key>`：哪台 pueue 训练机跳过了这一折（删掉即撤销）；`released/`：刚交还的。
 - **任务表** `tasks.jsonl` 每行 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。任务说明的 `device`（默认 `gpu`）、`machines`（默认不限，如 `["dicc"]`）决定谁能领。`after`（默认 `[]`）：一组任务 key，都做完前这个任务是 `waiting`（不领、不算补交作业的数）；其中有失败 2 次的或不在队列里的是 `blocked`，健康检查报 `tqblocked:<key>`。
-- **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`；`advance.py` 按命令或标签认步骤。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`（任务队列缺的文件）、`pull:<标签>`（训练机上做完的拉回）。
+- **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`（任务队列缺的文件）、`pull:<标签>`（训练机上做完的拉回），传数据集给 lab 是 `sync_<机器>_<数据集>`。标签只给人看，程序不靠它认任务（见下一条）。
+- **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`src`（从哪拉回）、`to`、`paths`（传给谁、传什么）、`of`（传输为哪一步）、`out`、`needs`、`train_id`（训练机上做的步骤）。`refill.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删，有 `out` 的留到那边的结果清理完；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）、拉回（`fetch_task.sh <机器> <key>`）、归档（`archive_task.sh <机器> <key>`）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
 - **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_seg<段>.log`，第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前 nnU-Net 的在 `nnUNet/results/logs/`，登记表两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。

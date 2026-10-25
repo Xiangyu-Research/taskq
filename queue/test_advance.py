@@ -12,9 +12,64 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 T = tempfile.mkdtemp()
 os.environ["ADVANCE_BT"] = T
 os.environ["ADVANCE_LOG"] = os.path.join(T, "advance.log")
+os.environ["PHD_TASKS"] = os.path.join(T, "tasks.json")
 sys.path.insert(0, HERE)
 import advance as A  # noqa: E402
 REAL_STEP_NEEDS = A.step_needs
+
+
+def legacy_index():
+    """10/25 以前按命令和标签认 box、lab 任务的规则 → ({命令: (步骤, key)}, {标签: (步骤, key)})。测试里用它给快照配记录。"""
+    tasks, groups, final = A.candidates(T, PY, [])
+    by_cmd, by_label = {}, {}
+    for t in tasks:
+        for st in (t["e"] or {}).get("after", []):
+            by_cmd[A.S.fill(st["cmd"], t["names"], keep=())] = (st["name"], t["key"])
+            by_label[f"{st['name']}:{t['lab']}"] = (st["name"], t["key"])
+    for e in A.E.load()[0]:
+        for chain in e.get("group_after", []):
+            for st in chain:
+                by_cmd[A.S.fill(st["cmd"], groups[e["id"]], keep=())] = (st["name"], e["id"])
+                by_label[f"{st['name']}:{e['id']}"] = (st["name"], e["id"])
+    for f in final:
+        by_cmd[A.S.fill(f["cmd"], dict(data=T, python=PY), keep=())] = (f["name"], "all")
+        by_label[f["name"]] = (f["name"], "all")
+    return by_cmd, by_label
+
+
+def legacy_records(s):
+    """快照里每个 pueue 任务按旧规则认出来的记录（health.py 平时从任务记录读到的那种）。"""
+    by_cmd, by_label = legacy_index()
+    out = []
+    for h, d in s.get("pueue", {}).items():
+        for x in (d or {}).get("tasks") or []:
+            lb, cmd = x.get("label") or "", (x.get("command") or "").strip()
+            rec = dict(machine=h, id=x["id"], label=lb, added=0)
+            if lb.startswith(("pull:", "push:")):
+                hit = by_label.get(lb[5:])
+                tok = cmd.split()
+                where = tok[tok.index("offload_io.sh") + 2:] if "offload_io.sh" in tok else ["?"]
+                rec.update(step=lb[:4], of=hit[0] if hit else lb[5:].split(":")[0], key=hit[1] if hit else lb[5:].split(":", 1)[-1])
+                rec.update(dict(src=where[0]) if lb.startswith("pull:") else dict(to=where[0], paths=where[1:]))
+            else:
+                hit = by_cmd.get(cmd) or by_label.get(lb)
+                if not hit:
+                    continue
+                rec.update(step=hit[0], key=hit[1])
+            out.append(rec)
+    return out
+
+
+_plan = A.plan
+
+
+def plan_with_records(s, *a, **kw):
+    if "records" not in s:  # 任务记录（run 写的）+ 按旧规则给快照里的任务配的
+        s = dict(s, records=A.C.load_records() + legacy_records(s))
+    return _plan(s, *a, **kw)
+
+
+A.plan = plan_with_records
 
 A.STATE_DIR = os.path.join(T, "state")
 A.taskq_add = lambda nice, args: (0, "")  # 不经 ssh 真的加进 DICC 的队列
@@ -282,17 +337,18 @@ trained("Dataset101_GLIrq1", "nnUNetTrainer_UMambaEnc", "3")
 todo, _ = A.plan(snap(remote={"lab": {UMK: FIN}}))
 check("同属 T0 的 U-Mamba：照常归档", ("archive", UMK) in steps(todo))
 
-# 7. 认命令
-check("认命令：归档", A.step_of("bash scripts/queue/archive_task.sh lab Dataset111_MENrq1/nnUNetTrainer_save10/4")
-      == [("archive", "Dataset111_MENrq1/nnUNetTrainer_save10/4")])
-check("认命令：拉回带源机器", A.step_of("bash scripts/queue/fetch_task.sh dicc Dataset111_MENrq1/nnUNetTrainer_save10/4")
-      == [("fetch@dicc", "Dataset111_MENrq1/nnUNetTrainer_save10/4")])
-check("认命令：不认识的命令 → []", A.step_of("pueue parallel 2 --group cpu") == [] and A.step_of("echo 'unbalanced") == [])
+# 7. 没有记录的任务按命令认：拉回（带源机器）、归档；别的命令认不出
+K4 = "Dataset111_MENrq1/nnUNetTrainer_save10/4"
+check("认命令：归档", A.C.from_command(f"bash scripts/queue/archive_task.sh lab {K4}") == dict(step="archive", src="lab", key=K4))
+check("认命令：拉回带源机器", A.C.from_command(f"bash scripts/queue/fetch_task.sh dicc {K4}") == dict(step="fetch", src="dicc", key=K4))
+check("认命令：不认识的命令 → None", A.C.from_command("pueue parallel 2 --group cpu") is None and A.C.from_command("echo 'unbalanced") is None)
+nr = [dict(machine="box", id=7, label="eval:t3met_f4", added=0, step="eval", key=K4)]
+check("有记录的按记录认（任务号和标签都对上）；任务号被别的任务重用（标签不同）→ 不认",
+      A.C.identify("box", dict(id=7, label="eval:t3met_f4", command="x"), nr)["step"] == "eval"
+      and A.C.identify("box", dict(id=7, label="other", command="x"), nr) is None
+      and A.C.identify("lab", dict(id=7, label="eval:t3met_f4", command="x"), nr) is None)
 
-# 7b. 新写法：拉回、归档按命令认；其他步骤按命令或标签认；生成的命令和 10/18 前逐字一样
-check("认命令：fetch_task.sh、archive_task.sh",
-      A.step_of("bash scripts/queue/fetch_task.sh lab Dataset111_MENrq1/nnUNetTrainer_save10/4") == [("fetch@lab", "Dataset111_MENrq1/nnUNetTrainer_save10/4")]
-      and A.step_of("bash scripts/queue/archive_task.sh lab Dataset111_MENrq1/nnUNetTrainer_save10/4") == [("archive", "Dataset111_MENrq1/nnUNetTrainer_save10/4")])
+# 7b. 生成的命令和 10/18 前逐字一样
 M5 = f"{T}/nnUNet/results/Dataset116_METrq1/nnUNetTrainer_save10__{P}"
 trained("Dataset116_METrq1", "nnUNetTrainer_save10", "3")
 for p_ in (f"{T}/predictions/Dataset116_METrq1/nnUNetTrainer_save10__{P}/fold_3/MANIFEST.json",):
@@ -304,7 +360,7 @@ lab_task = [dict(id=0, status="Running", command="bash run_predict_eval.sh --oth
 todo, _ = A.plan(dict(snap(), pueue={"box": dict(tasks=lab_task)}))
 check("按标签认得（命令写法不同）：不重复排", not [t for t in todo if t["step"] == "infer" and t["key"] == f"{T3}/3"])
 inferred("Dataset116_METrq1", "nnUNetTrainer_save10", "3")
-_, _, _, by_cmd, _ = A.candidates(T, PY, [])
+by_cmd = legacy_index()[0]
 want_cmds = {
     ("eval", f"{T3}/3"): f"bash research/RQ1/analysis/run_predict_eval.sh --stage eval {M5} 3",
     ("oof", "t3met"): f"{PY} research/RQ1/analysis/oof_eval.py {M5}",
@@ -355,7 +411,6 @@ inferred("Dataset101_GLIrq1", "nnUNetTrainer_save10", "0")  # 第 6c 节训完�
 inferred("Dataset101_GLIrq1", "nnUNetTrainer_UMambaEnc", "3")
 REMOTE = {"have": set()}
 A.remote_have = lambda name, paths: {p_ for p_ in paths if p_ in REMOTE["have"]}
-RJ = os.path.join(A.STATE_DIR, "remote.json")
 import refill  # noqa: E402
 refill.sh = lambda cmd, host=None, timeout=300: (0, "")  # 清理时不真的 ssh
 
@@ -467,7 +522,16 @@ old_sn = A.step_needs
 A.step_needs = lambda cmd: TN3 if "Dataset103_GLIrq1_t1c" in cmd and cmd.endswith(" 3") and "--stage infer" in cmd else old_sn(cmd)
 REMOTE["have"] = {TN3[0], TN3[2]}
 TR3 = "bash scripts/queue/run_task.sh nnunet dataset=Dataset103_GLIrq1_t1c trainer=nnUNetTrainer_save10 fold=3"
-OSF = RJ
+
+
+def trec(label):
+    """任务记录里这个标签最新的、训练机上做的步骤（有 out）。"""
+    rs = [r for r in A.C.load_records() if r.get("out") and r["label"] == label]
+    return rs[-1] if rs else None
+
+
+def no_recs():
+    A.C.drop_records(lambda r: True)
 
 
 def t3(todo):
@@ -484,7 +548,7 @@ todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1")]))
 x = t3(todo)
 check("trainer：这一折在 lab gpu1 训着、别的输入那边都有 → 加进 lab gpu1（训练后面），不进任务队列，记下训练的任务号",
       len(x) == 1 and x[0].get("host") == "lab" and x[0]["group"] == "gpu1" and x[0]["label"] == "infer:t1c_f3"
-      and "--stage infer ~/BRAIN_TUMOR/" in x[0]["cmd"] and x[0]["record"][1].get("train_id") == 19 and not stuck.get(f"advance:infer:{K3}"))
+      and "--stage infer ~/BRAIN_TUMOR/" in x[0]["cmd"] and x[0].get("train_id") == 19 and not stuck.get(f"advance:infer:{K3}"))
 REMOTE["have"] = {TN3[0]}
 todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1")]))
 check("trainer：lab 上缺测试集 → 训练期间不加，原因写进日志", not t3(todo) and any("imagesTs" in n_ for n_ in A.NOTES))
@@ -493,23 +557,23 @@ todo, stuck = A.plan(lsnap([(19, "Queued", TR3, "train:x", "gpu1")]))
 check("trainer：训练还排着没开始（提前领的）→ 先不加（不然会排到训练前面）", not t3(todo))
 calls.clear()
 A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=fake_q, tq=lambda *a: (0, ""))
-rec = json.load(open(OSF)).get("infer:t1c_f3", {})
-check("trainer：run 时在 lab gpu1 加，remote.json 记下那边的任务号",
-      any(c.startswith("gpu1 -p --label infer:t1c_f3 -- ") for c in calls) and rec.get("train_id") == 19 and isinstance(rec.get("id"), int))
-os.remove(OSF)
+rec = trec("infer:t1c_f3") or {}
+check("trainer：run 时在 lab gpu1 加，任务记录里记下那边的任务号、训练的任务号",
+      any(c.startswith("gpu1 -p --label infer:t1c_f3 -- ") for c in calls) and rec.get("train_id") == 19 and isinstance(rec.get("id"), int) and rec["machine"] == "lab")
+no_recs()
 seen = {}
 
 
 def peek_q(host, args):
     if "--label infer:t1c_f3 " in args:
-        seen["rec"] = json.load(open(OSF)).get("infer:t1c_f3") if os.path.exists(OSF) else None
+        seen["rec"] = trec("infer:t1c_f3")
     return 31
 
 
 A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=peek_q, tq=lambda *a: (0, ""))
-check("先写记录、后加任务：加任务那一刻 remote.json 里已经有这一条（中间断电时 resume() 按标签在那边找得到）",
-      (seen.get("rec") or {}).get("train_id") == 19 and "id" not in seen["rec"] and json.load(open(OSF))["infer:t1c_f3"]["id"] == 31)
-os.remove(OSF)
+check("先写记录、后加任务：加任务那一刻任务记录里已经有这一条（还没有任务号；中间断电时按标签和创建时间找回）",
+      (seen.get("rec") or {}).get("train_id") == 19 and seen["rec"]["id"] is None and trec("infer:t1c_f3")["id"] == 31)
+no_recs()
 
 
 def bad_q(host, args):
@@ -517,9 +581,12 @@ def bad_q(host, args):
 
 
 A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=bad_q, tq=lambda *a: (0, ""))
-check("加任务失败：先写的记录撤掉", "infer:t1c_f3" not in json.load(open(OSF)))
-json.dump({"infer:t1c_f3": dict(machine="lab", key=K3, out=f"predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3",
-                                needs=[], pushed=[], group="gpu1", train_id=19, id=30)}, open(OSF, "w"))
+check("加任务失败：记录留着（没有任务号；其实加上了的话下次找回，找不到一小时后作废）", trec("infer:t1c_f3")["id"] is None)
+todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1")]))
+check("加任务失败、那边也没有这个任务：下一次照常重排", [t.get("host") for t in t3(todo)] == ["lab"])
+REC30 = dict(machine="lab", id=30, label="infer:t1c_f3", added=1, step="infer", key=K3, group="gpu1", train_id=19, needs=[],
+             out=f"predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3")
+A.C.update_records(lambda recs: [dict(REC30)])
 INF3 = "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 3"
 todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1"), (30, "Queued", INF3, "infer:t1c_f3", "gpu1")]))
 check("trainer：已经排上 → 不重复加", not t3(todo))
@@ -527,11 +594,11 @@ trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "3")
 LIVE3 = [(19, "Success", TR3, "train:x", "gpu1"), (30, "Running", INF3, "infer:t1c_f3", "gpu1")]
 todo, stuck = A.plan(lsnap(LIVE3, FIN))
 check("trainer：lab 训完、box 拉回了、那边在推理 → 不归档、不进任务队列", steps(t3(todo)) == [])
-os.rename(OSF, OSF + ".x")
+no_recs()
 todo, stuck = A.plan(lsnap(LIVE3, FIN))
-check("trainer：remote.json 没记上、那边在推理 → 也不归档（归档会删那边的模型），报出来",
-      steps(t3(todo)) == [] and "没有记录" in stuck.get("advance:remote:infer:t1c_f3", ""))
-os.rename(OSF + ".x", OSF)
+check("trainer：没有这一折的记录、那边在推理 → 也不归档（归档会删那边的模型），报出来",
+      steps(t3(todo)) == [] and "不是这一折现在的记录" in stuck.get("advance:remote:infer:t1c_f3", ""))
+A.C.update_records(lambda recs: [dict(REC30)])
 todo, stuck = A.plan(lsnap([LIVE3[0], (30, "Success", INF3, "infer:t1c_f3", "gpu1")], FIN))
 x = t3(todo)
 check("trainer：那边做完 → 归档、拉回（box wait 组 pull:<标签>）", steps(x) == [("archive", K3), ("pull", K3)]
@@ -576,7 +643,7 @@ check("拉回做完、文件对上 → 排评测、清理 lab 上的预测", sor
 import shutil  # noqa: E402
 shutil.rmtree(PD3)
 os.remove(f"{T}/nnUNet/results/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3/checkpoint_final.pth")
-os.remove(OSF)
+no_recs()
 A.step_needs = old_sn
 
 # 11. 实验一级带 queue 的步骤（10/23，P1 / P2 换模型重跑）：五折都在 box 上以后放进 DICC 的任务队列，拉回后 box 上做比较
@@ -774,8 +841,13 @@ A.run(snap(), q=fake_q, tq=lambda *a: (0, ""))
 ec = [c for c in calls if "--label ens:t18 " in c]
 check("box 的任务包上 kick（PHD_TASK_DONE=标签）", len(ec) == 1 and "PHD_TASK_DONE=ens:t18 bash ~/auto/PhD/scripts/monitor/auto_refresh.sh kick" in ec[0])
 wrapped = A.refill.then_check(ens18(A.plan(snap())[0])[0]["cmd"], "ens:t18")
-check("包过的命令在跑：认得出、不重排", not ens18(A.plan(snap([("Running", wrapped, None)]))[0]))
-check("unwrap：去掉 kick 那段就是原来的命令", A.refill.unwrap(A.refill.then_check("echo 1", "x")) == "echo 1")
+er = [r for r in A.C.load_records() if r["label"] == "ens:t18"]
+s_ = dict(snap(), records=A.C.load_records())  # 只用 run 写的记录，不按旧规则配
+s_["pueue"]["box"]["tasks"] = [dict(id=er[-1]["id"], status="Running", command=wrapped, label="ens:t18", group="cpu", end=None)]
+check("run 加任务前写了记录（box、步骤、key、组）；包过的命令在跑按记录认出、不重排",
+      er and er[-1]["machine"] == "box" and (er[-1]["step"], er[-1]["key"], er[-1]["group"]) == ("ens", "t18", "cpu") and not ens18(A.plan(s_)[0]))
+s_["pueue"]["box"]["tasks"][0]["label"] = "other"
+check("任务号对上、标签不同（任务号被重用）→ 不认，照常排", ens18(A.plan(s_)[0]))
 REMOTE["have"] = set()
 
 print("\n全部通过" if ok else "\n有失败")

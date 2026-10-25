@@ -10,6 +10,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
 import refill as R  # noqa: E402
 
 fails = 0
@@ -58,7 +59,13 @@ def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_
                 probe={"lab": {"DISK": str(int(disk)), "HAVE": prep}},
                 src={"box": {"folds": {}}, "lab": {"folds": lab_folds or {}}, "dicc": {"folds": {}}},
                 taskq={"dicc": dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {})},
-                pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": groups or {}, "tasks": list(lab_tasks)}})
+                pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": groups or {}, "tasks": list(lab_tasks)}},
+                records=[sync_record(t) for t in box_tasks if t["label"].startswith("sync_")])
+
+
+def sync_record(t):  # box 上传数据的任务的记录（refill.transfer 写的那种）
+    to, tag = t["label"][5:].split("_", 1)
+    return dict(machine="box", id=t["id"], label=t["label"], step="sync", key=PP + tag, to=to, group=t["group"], created_at=0)
 
 
 def ops(acts):
@@ -171,7 +178,11 @@ def fake_remote(rc=0, out=""):
 
 
 acts, _, _ = R.plan(snap(), "lab")
+R.C.drop_records(lambda r: True)
 msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
+tr = [r for r in R.C.load_records() if r["step"] == "train"]
+ok("开始训练的任务记进任务记录（step=train、key、组、任务号）",
+   len(tr) == 1 and tr[0]["machine"] == "lab" and tr[0]["key"] == K_UM and tr[0]["group"] == "gpu1" and isinstance(tr[0]["id"], int))
 ok("领：take --worker lab --ttl 604800，成功后在 lab gpu1 加训练任务（不暂存、不带优先级）",
    rem == [f"take --worker lab --ttl 604800 {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
    and f"gpu1 -p --label train:{K_UM} -- 'bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=1'" in cmds[0][1]
@@ -291,11 +302,16 @@ ok("在训、下一折缺数据：提前传它的数据（每台机器一份）"
    and acts[1]["paths"] == [PP + "Dataset103_GLIrq1_t1c"])
 cmds.clear(), rem.clear()
 json.dump({}, open(R.STATE, "w"))
+R.C.drop_records(lambda r: True)
 note = R.cleanup(snap_a(), "lab", run=fake_run, acts=acts)
 R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("盘够：照传（box 上加传数据任务、记进 transferred），不领、不开始训",
    any("sync_lab_Dataset103_GLIrq1_t1c" in c for _, c in cmds) and not any(r.startswith("take") for r in rem)
    and PP + "Dataset103_GLIrq1_t1c" in json.load(open(R.STATE))["transferred"]["lab"] and note == [])
+sr = [r for r in R.C.load_records() if r["step"] == "sync"]
+ok("传数据的任务记进任务记录（step=sync、to、key=路径、任务号）",
+   len(sr) == 1 and sr[0]["to"] == "lab" and sr[0]["key"] == PP + "Dataset103_GLIrq1_t1c" and sr[0]["machine"] == "box"
+   and sr[0]["label"] == "sync_lab_Dataset103_GLIrq1_t1c" and isinstance(sr[0]["id"], int))
 SY = task(50, "wait", "Running", "bash scripts/sync/tunnel_push.sh lab …", "sync_lab_Dataset103_GLIrq1_t1c")
 acts, _, _ = R.plan(snap_a(box_tasks=[SY], prep=f"{PP}Dataset101_GLIrq1 {P131} {PP}Dataset103_GLIrq1_t1c"), "lab")
 ok("提前传的还在传（文件夹已经在）：不再传、也不当成数据在", ops(acts) == [("beat", K_UM)])

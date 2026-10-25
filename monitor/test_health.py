@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
 import health as H  # noqa: E402
 
 NOW = datetime(2026, 10, 16, 12, 0)
@@ -144,14 +145,19 @@ ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dic
 H.time.time = time_orig
 
 # ---------------- 通用的任务（10/18）：run_task.sh、fetch_task.sh、数据清单 ----------------
-ok("run_task.sh 的训练命令 → key", H.task_key("bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 "
+def tk(cmd):
+    r = H.C.from_command(cmd)
+    return (r["step"], r["key"]) if r else (None, None)
+
+
+ok("run_task.sh 的训练命令 → key", tk("bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 "
                                               "trainer=nnUNetTrainer_save10_n470 fold=0") == ("train", MEN0))
-ok("q 加的、整条命令包在引号里的 run_task.sh 也认", H.task_key("bash -c 'bash scripts/queue/run_task.sh nnunet "
+ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c 'bash scripts/queue/run_task.sh nnunet "
                                                            "dataset=Dataset116_METrq1 fold=2'") == ("train", MET2))
-ok("command 做法的任务 → 它自己给的 key", H.task_key("bash scripts/queue/run_task.sh command key=x/y cmd=true env=nnunet "
+ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/queue/run_task.sh command key=x/y cmd=true env=nnunet "
                                                      "out=runs/x done=ok") == ("train", "x/y"))
-ok("参数写错的 run_task.sh 不当成训练", H.task_key("bash scripts/queue/run_task.sh nnunet datset=x fold=0") == (None, None))
-ok("fetch_task.sh <机器> <key> → 拉回", H.task_key(f"bash scripts/queue/fetch_task.sh dicc {MET2}") == ("fetch:dicc", MET2))
+ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/queue/run_task.sh nnunet datset=x fold=0") == (None, None))
+ok("fetch_task.sh <机器> <key> → 拉回", H.C.from_command(f"bash scripts/queue/fetch_task.sh dicc {MET2}") == dict(step="fetch", src="dicc", key=MET2))
 lab_rt = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0",
               "train:" + MEN0)
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
