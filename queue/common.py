@@ -20,7 +20,7 @@ def write_json(path, obj, indent=1):
             os.remove(tmp)
 
 
-# ---------------- 任务记录（2026-10-26）：box、lab 的 pueue 任务"是谁"只看这里 ----------------
+# ---------------- 任务记录（2026-10-25）：box、lab 的 pueue 任务"是谁"只看这里 ----------------
 def tasks_path():
     return os.path.expanduser(os.environ.get("PHD_TASKS") or "~/.cache/phd/tasks.json")  # 环境变量只给测试用
 
