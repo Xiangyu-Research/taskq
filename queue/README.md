@@ -11,7 +11,7 @@
 | [`recipes.py`](recipes.py) | 做法：一种训练怎么跑（参数和默认值、`key`、`env`、`cmd`、`out`、`done`、`data`、`fetch`、`archive` 等，字段说明在文件开头）。现在有 `nnunet`（`research/common/nnunet/train.sh`）和 `command`（全部由任务自己给） |
 | `research/<RQ>/experiments.py` | 实验表：做法和参数、几折、每折训完后的步骤（`after`）、五折都训完后的（`group_after`）、最后一起做的（`FINAL`）、默认档位（`nice`）、分析脚本要的声明（`names`）、看板名称（`board`）。`scripts/queue/experiments.py` 读所有 RQ 的表；分析脚本按模型文件夹查（`experiments.py name-of <模型文件夹> <名字>…`），查不到就报错 |
 
-`spec.py` 是唯一的解析器：做法 + 参数 → 任务说明（`spec.py resolve <做法> k=v…`、`spec.py lookup <key>`）。
+`spec.py` 是唯一的解析器：做法 + 参数 → 任务说明（`spec.py lookup <key>` 打印某个任务的说明）。
 
 ## 结构
 
@@ -24,7 +24,6 @@
  box 的 advance.py（跟着健康检查每 30 分钟）：拉回 → 归档（lab 训的）→ 实验表里的步骤（RQ1：推理 → 评测 → 五折分析）
      每一步在哪里做：envs/policy.py 的 PLACE，按顺序用第一个现在能用的
        box:<组>      box 的 pueue
-       <机器>:<组>   别的 pueue 机器：缺的输入先传过去（offload_io.sh push）→ 那边做 → 拉回、核对（offload_io.sh pull）→ 删那边的结果
        trainer       训这一折的 pueue 机器、训练的同一个组，排在训练后面（输入要都在那边）
        queue:<机器>  任务队列，那台机器的 worker 领；缺的文件先传过去，做完按任务拉回
 ```
@@ -39,7 +38,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `AUTO["lab"]` | True / False | 替 lab 领训练、预传数据；False 时已领的照常续，其余只记"会做什么" |
 | `envs/policy.py` `AUTO["dicc"]` | True / False | 补交 DICC 的 worker 作业；False 时只记"会交什么" |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
-| `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件 `idle`、`hours=`、`have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
+| `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件只有 `have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
 | `envs/policy.py` `MANUAL` | 机器 → 组 | 只跑手动加的任务（lab `gpu0`）：不替它领训练，健康检查不报它空着 |
 | `envs/policy.py` `SLURM` | 每台 Slurm 机器的 QOS、时限、个数 | `refill.py` 补交多少 GPU / CPU worker 作业 |
 | DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 总开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`） |
@@ -56,7 +55,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 哪个任务没人做、谁领了、失败了几次 | `python3 scripts/queue/taskq.py status`（box 上跑，经 ssh 读 DICC 的队列）；DICC 作业的 `.out`；失败记录 DICC `~/.cache/phd/taskq/failures/`，lab 训不了跳过的 `skips/` |
 | lab 领了什么、为什么没领；DICC 补交了哪些作业 | box `~/refill.log`；`python3 scripts/queue/refill.py`（只看会做什么） |
 | 训完之后卡在哪一步、为什么没排 | box `~/advance.log`（排了什么、会排什么、"没排"的原因、哪一步失败停住）；`python3 scripts/queue/advance.py`（只看会排什么）；`pueue log <号>` |
-| 放到别的 pueue 机器上做的步骤（lab 训的折的推理）走到哪 | box `~/advance.log`；box 上 `push:<标签>`、`pull:<标签>` 任务的 `pueue log`；那边同标签的任务（`ssh lab pueue log <号>`）；还没清理的记在 box `~/.cache/phd/advance/remote.json`（标签 → 机器、组、任务号、训练的任务号、结果文件夹、要用的输入、传过去的文件） |
+| 放到别的 pueue 机器上做的步骤（lab 训的折的推理）走到哪 | box `~/advance.log`；box 上 `pull:<标签>` 任务的 `pueue log`；那边同标签的任务（`ssh lab pueue log <号>`）；还没清理的记在 box `~/.cache/phd/advance/remote.json`（标签 → 机器、组、任务号、训练的任务号、结果文件夹、要用的输入） |
 | 总览、报警 | `research/RQ1/实验登记表.md` 最上面的"需要处理"（`scripts/monitor/health.py`） |
 
 ## 组
@@ -144,12 +143,12 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 ## 约定
 
 - **DICC 作业提交时定下的**只有 `worker.sbatch`；其余脚本在作业开始时或每次调用时从仓库读。排着的作业依赖的只有 `ENABLED` 和 `worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它调用的 `taskq.py next / beat / release` 和 `run_task.sh` 的参数、退出码不改，只加新命令。
-- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，2 任务说明或环境有问题，143 被停掉，其他是出错（10/18 前的 `train_task.sh` 用过 75 = 训满 `--epochs`，`on_boot.sh`、健康检查仍认）。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。
+- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，2 任务说明或环境有问题，143 被停掉，其他是出错。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。
 - **代码版本**：box 的 pueue 任务的工作目录是 `~/.cache/phd/code/<提交号>`（`envs/machines.py` 的 `code`，`q` 加任务时先跑 `scripts/sync/snapshot.sh` 更新到 origin/main），任务开始后代码再更新也不影响它；旧副本没有任务用、建了 7 天以上才删。lab、DICC 跑各自克隆里的代码（`repo`），box 每 30 分钟快进。
 - **状态文件整份换**：`refill.json`、`remote.json`、`last.json`、领取的 `info` 都先写临时文件再换过去（`scripts/queue/common.py` 的 `write_json`），断电、被杀时只有旧的或新的。领取只建了目录、没有 `info` 的，5 分钟后算过期。
 - **同一个任务不在两处做**：先领到（`claims/<key>/info`：worker、host、since、beat、ttl）才做；`ttl` 秒内没续就过期（DICC 作业 1200 秒、lab 604800 秒：box 离线时不过期）。`skips/<key>`：哪台 pueue 训练机跳过了这一折（删掉即撤销）；`released/`：刚交还的。
 - **任务表** `tasks.jsonl` 每行 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。任务说明的 `device`（默认 `gpu`）、`machines`（默认不限，如 `["dicc"]`）决定谁能领。`after`（默认 `[]`）：一组任务 key，都做完前这个任务是 `waiting`（不领、不算补交作业的数）；其中有失败 2 次的或不在队列里的是 `blocked`，健康检查报 `tqblocked:<key>`。
-- **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`；`advance.py` 按命令或标签认步骤。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`、`pull:<标签>`。
+- **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`；`advance.py` 按命令或标签认步骤。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`（任务队列缺的文件）、`pull:<标签>`（训练机上做完的拉回）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
 - **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_seg<段>.log`，第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前 nnU-Net 的在 `nnUNet/results/logs/`，登记表两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
@@ -182,6 +181,6 @@ pueue 本身：`pueue log <号>`、`pueue follow <号>`、`pueue kill -s SIGTERM
 - **新实验**：实验表加一个条目（RQ1 用 `_x(...)`，字段说明在 `research/RQ1/experiments.py` 开头）→ `taskq.py add --exp <id>`。
 - **新的 nnU-Net 变体**：`research/common/nnunet/trainers/` 写训练器（网络代码放 `nets/`），实验条目的 `trainer` 写它，要别的环境时写 `env`。
 - **新环境**：各台机器装好 → `envs/machines.py` 里那几台的 `envs` 加一项。
-- **新机器**：`envs/machines.py` 的 `MACHINES` 加一项；pueue 机器上跑一次 `setup.sh`，box 上配好 ssh。要让某些步骤放过去，在 `envs/policy.py` 的 `PLACE` 里写 `<机器>:<组>`。
+- **新机器**：`envs/machines.py` 的 `MACHINES` 加一项；pueue 机器上跑一次 `setup.sh`，box 上配好 ssh。要让某些步骤放过去，`PLACE` 现有的写法（`trainer`、`queue:<机器>`、`box:<组>`）表达不了时，给 `advance.py` 加一种地方。
 - **不是 nnU-Net 的训练**：实验表里 `recipe="command"`，`params` 写 `key`、`cmd`、`env`、`out`、`done`（还可以写 `data`、`log`、`vars`）；同一类多了在 `recipes.py` 加一种做法。命令要能"重跑就接着训"。
 - **实验表以外的临时任务**：`taskq.py add --nice <档> --recipe <做法> k=v…`（只拉回、归档，没有后续步骤）。

@@ -138,7 +138,7 @@ def problem(pid, p):
             return f"{msg}，盘满了训练和存档会失败。"
         if kind == "gpulog":
             return f"{L(part[1])} 的 GPU 使用记录停了（不影响训练）。"
-        if kind == "git":
+        if kind == "code":
             return f"{L(part[1])} 2 小时没拉到最新代码，那里跑的是旧版本的脚本。"
         if kind == "boot":
             return f"{L(part[1])} {pid.split(':', 2)[2][5:16]} 重启过，被打断的任务已自动放回队列，要确认训练接上了。"
@@ -154,8 +154,6 @@ def problem(pid, p):
             return "lab 多次领到任务就失败，暂停给 lab 派任务，lab 的卡会空着。"
         if kind == "topup":
             return f"给 {L(part[1])} 补交作业出错，那边排队的作业会越来越少。"
-        if kind == "advance" and part[1] == "stale_fetch":
-            return f"box 有一个拉回任务还在等 {fold(part[2])}，但已经不用等了，要清掉。"
         if kind == "advance":
             return f"{_who(':'.join(part[2:]))} 的{STEP.get(part[1], part[1])}出错停了，这个结果会推迟。"
         if len(part) == 2 and part[0] in M.MACHINES:  # Slurm 作业异常结束

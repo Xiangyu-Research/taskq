@@ -1,6 +1,6 @@
 #!/bin/bash
 # 往 pueue 队列里加一个任务（2026-10-16）：按组设好用哪张卡，工作目录是仓库根目录。
-#   q <组> [pueue add 的选项，如 --after 12、--label 名字、--stashed] -- '<命令>'
+#   q <组> [pueue add 的选项，如 --label 名字] -- '<命令>'
 # 各机器有哪些组、每组用哪张卡、带哪些环境变量，写在 envs/machines.py（setup.sh 按它建组）；
 # 没有卡的组 CUDA_VISIBLE_DEVICES 设为空（看不到卡）。每个任务都带上 envs/nnunet_paths.sh 设的数据路径。
 # 表里这台机器有 code（box）时，任务的工作目录是按提交号的代码副本（先用 scripts/sync/snapshot.sh 更新到 GitHub 上的 main），

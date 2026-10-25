@@ -55,7 +55,7 @@ def tasks(d):
         if res is not None:
             st = res if isinstance(res, str) else "{} ({})".format(*next(iter(res.items())))
         rows.append({"id": k["id"], "group": k["group"], "status": st, "label": k.get("label") or "",
-                     "deps": k.get("dependencies") or [], "start": info.get("start"), "end": info.get("end"), "priority": k.get("priority", 0),
+                     "deps": k.get("dependencies") or [], "start": info.get("start"), "end": info.get("end"),
                      "command": k["original_command"]})
     return sorted(rows, key=lambda r: (r["group"], r["id"]))
 

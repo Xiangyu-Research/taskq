@@ -96,8 +96,7 @@ todo, stuck = A.plan(snap([old], remote={"dicc": {f"{MET}/0": FIN}}))
 check("已经有活着的拉回任务：不重复排", todo == [] and not stuck)
 other = ("Running", f"bash scripts/queue/fetch_task.sh lab {MET}/0", None)
 todo, stuck = A.plan(snap([other], remote={"dicc": {f"{MET}/0": FIN}}))
-check("活着的拉回任务在等另一台机器（以前预先排的链）：照样从训完的机器拉，旧任务报出来",
-      steps(todo) == [("fetch", f"{MET}/0")] and "fetch_task.sh dicc" in todo[0]["cmd"] and f"advance:stale_fetch:{MET}/0:0" in stuck)
+check("活着的拉回任务在等另一台机器：照样从训完的机器拉", steps(todo) == [("fetch", f"{MET}/0")] and "fetch_task.sh dicc" in todo[0]["cmd"])
 failed_lab = ("Failed (1)", other[1], None)
 todo, stuck = A.plan(snap([failed_lab], remote={"dicc": {f"{MET}/0": FIN}}))
 check("从另一台机器拉回失败过：不挡从训完的机器拉", steps(todo) == [("fetch", f"{MET}/0")] and not stuck)
@@ -110,9 +109,6 @@ inf = next(t for t in todo if t["step"] == "infer")
 check("推理：gpu 组、--stage infer", inf["group"] == "gpu" and "--stage infer" in inf["cmd"] and inf["cmd"].endswith(f"__{P} 1"))
 todo, _ = A.plan(snap(remote={"lab": {f"{T3}/1": dict(final=True, archived=True)}}))
 check("lab 上已经归档的：不再归档", steps(todo) == [("infer", f"{T3}/1")])
-stale = ("Queued", f"bash scripts/queue/fetch_task.sh lab {T3}/1", None)
-todo, stuck = A.plan(snap([stale]))
-check("box 上已经有了、还有在等的拉回任务：报出来", f"advance:stale_fetch:{T3}/1:0" in stuck)
 
 # 4. 推理做完 → 评测（cpu）；评测做完 → 这一折没事了
 inferred("Dataset116_METrq1", "nnUNetTrainer_save10", "1")
@@ -136,7 +132,7 @@ check("推理失败过：不重排，报到卡住", todo == [] and f"advance:inf
 todo, stuck = A.plan(snap([("Success", cmd3, now.isoformat())]))
 check("刚成功跑完但还是没结果：不重排，报到卡住", todo == [] and "成功跑完" in stuck[f"advance:infer:{T3}/3"])
 todo, stuck = A.plan(snap([("DependencyFailed", cmd3, now.isoformat())]))
-check("以前 --after 链里因依赖失败没跑的：照常排", steps(todo) == [("infer", f"{T3}/3")] and not stuck)
+check("依赖失败（DependencyFailed）也算失败：不重排，报出来", todo == [] and "DependencyFailed" in stuck.get(f"advance:infer:{T3}/3", ""))
 todo, stuck = A.plan(snap([("Success", cmd3, (now - timedelta(hours=8)).isoformat())]))
 check("8 小时前成功过、结果没了：也报出来（不按时间放开，pueue remove 后重排）", todo == [] and "成功跑完" in stuck[f"advance:infer:{T3}/3"])
 todo, stuck = A.plan(snap([("Failed (1)", cmd3, None), ("Success", cmd3, None), ("Success", "echo x", None)]))
@@ -354,153 +350,34 @@ A.P.HOLD = []
 todo, _ = A.plan(dict(pueue={"box": {"error": "x"}}, src={}, taskq={}))
 check("box 的 pueue 读不到：什么都不排", todo == [])
 
-# 9. 别的 pueue 机器（PLACE 写 <机器>:<组>）：传输 → 那边推理 → 拉回 → box 核对 → 清理那边
-SW = "Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"
-SWM = f"nnUNet/results/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__{P}"
-NEEDS = [f"{SWM}/dataset.json", f"{SWM}/plans.json", f"{SWM}/fold_0/checkpoint_final.pth", "nnUNet/raw/RQ1_holdout/GLI/imagesTs"]
-trained("Dataset101_GLIrq1", "nnUNetTrainer_SwinUNETR", "0")
-inferred("Dataset101_GLIrq1", "nnUNetTrainer_save10", "0")  # 第 6c 节训完的两折：先推理完，这一节只看 Swin 的
+# 9. 后面几节用的：别的机器上有哪些输入（REMOTE）、lab 的 pueue 快照；PLACE 写错了要报
+inferred("Dataset101_GLIrq1", "nnUNetTrainer_save10", "0")  # 第 6c 节训完的两折：先推理完，后面几节不看它们
 inferred("Dataset101_GLIrq1", "nnUNetTrainer_UMambaEnc", "3")
 REMOTE = {"have": set()}
-A.step_needs = lambda cmd: NEEDS if "--stage infer" in cmd else None
 A.remote_have = lambda name, paths: {p_ for p_ in paths if p_ in REMOTE["have"]}
-A.local_gb = lambda paths, root: 5.0
-GPU = {"free": True}
-A.remote_gpu_free = lambda name, group: GPU["free"]
-A.P.PLACE = {"infer": ["lab:gpu0"]}
 RJ = os.path.join(A.STATE_DIR, "remote.json")
-SWO = f"predictions/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__{P}/fold_0"
+import refill  # noqa: E402
+refill.sh = lambda cmd, host=None, timeout=300: (0, "")  # 清理时不真的 ssh
 
 
-def osnap(box=(), lab=(), disk=600e9):
+def osnap(box=(), lab=()):
     s_ = snap()
     s_["pueue"]["box"]["tasks"] = [dict(id=i, status=st, command=c, label=lb, group=g, end=None) for i, st, c, lb, g in box]
     s_["pueue"]["lab"] = dict(tasks=[dict(id=i, status=st, command=c, label=lb, group=g, end=None) for i, st, c, lb, g in lab])
-    s_["probe"] = {"lab": {"DISK": str(int(disk))}}
     return s_
 
 
-def sw(todo):
-    return [t for t in todo if t["label"].endswith("infer:swin_v2_f0")]
-
-
-todo, stuck = A.plan(osnap())
-x = sw(todo)
-check("lab:gpu0：缺输入 → box wait 组 push:<标签>，传缺的全部", len(x) == 1 and x[0]["label"] == "push:infer:swin_v2_f0"
-      and x[0]["group"] == "wait" and x[0]["cmd"].startswith("bash scripts/queue/offload_io.sh push lab ") and x[0]["paths"] == NEEDS
-      and not x[0].get("host"))
-check("lab:gpu0：传过去的文件记下来（以后删），文件夹不记", x[0]["record"][1]["pushed"] == [f"{SWM}/fold_0/checkpoint_final.pth"]
-      if os.path.isfile(f"{T}/{SWM}/fold_0/checkpoint_final.pth") else False)
-todo, stuck = A.plan(osnap(disk=60e9))
-check("lab:gpu0：那边的盘不够 → 不传，报出来", not sw(todo) and "盘" in stuck.get("advance:remote:infer:swin_v2_f0", ""))
-push = (5, "Running", "bash scripts/queue/offload_io.sh push lab x", "push:infer:swin_v2_f0", "wait")
-todo, stuck = A.plan(osnap([push]))
-check("lab:gpu0：在传 → 等", not sw(todo) and not stuck.get("advance:remote:infer:swin_v2_f0"))
-todo, stuck = A.plan(osnap([(5, "Failed (1)", push[2], push[3], "wait")]))
-check("lab:gpu0：传输失败过 → 不重排，报出来", not sw(todo) and "传输任务 5" in stuck.get("advance:remote:infer:swin_v2_f0", ""))
-REMOTE["have"] = set(NEEDS)
-todo, stuck = A.plan(osnap([(5, "Success", push[2], push[3], "wait")]))
-x = sw(todo)
-check("lab:gpu0：输入齐了 → lab gpu0 组排同样的标签，{data} 换成那边的，记下机器和组", len(x) == 1 and x[0]["host"] == "lab"
-      and x[0]["group"] == "gpu0" and x[0]["label"] == "infer:swin_v2_f0"
-      and x[0]["cmd"] == f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer ~/BRAIN_TUMOR/{SWM} 0"
-      and x[0]["record"][1]["machine"] == "lab" and x[0]["record"][1]["group"] == "gpu0" and x[0]["record"][1]["out"] == SWO)
-rinf = (7, "Running", x[0]["cmd"], "infer:swin_v2_f0", "gpu0")
-todo, stuck = A.plan(osnap(lab=[rinf]))
-check("lab:gpu0：那边在跑、remote.json 里没记上 → 不另排，报出来（做完不会自动拉回）", not sw(todo)
-      and "没有记录" in stuck.get("advance:remote:infer:swin_v2_f0", ""))
-os.makedirs(A.STATE_DIR, exist_ok=True)
-REC = dict(machine="lab", group="gpu0", key=SW, out=SWO, needs=NEEDS, pushed=[NEEDS[2], NEEDS[0]], id=7)
-json.dump({"infer:swin_v2_f0": REC}, open(RJ, "w"))
-todo, stuck = A.plan(osnap(lab=[rinf]))
-check("lab:gpu0：记着、那边在跑 → 等", not sw(todo) and not stuck)
-A.P.PLACE = {"infer": ["box:gpu"]}
-todo, stuck = A.plan(osnap(lab=[rinf]))
-check("PLACE 改了：已经在 lab 做着的接着那边做，不挪、不停", not sw(todo) and not stuck)
-A.P.PLACE = {"infer": ["lab:gpu0"]}
-todo, stuck = A.plan(osnap(lab=[(7, "Failed (1)", rinf[2], rinf[3], "gpu0")]))
-check("lab:gpu0：那边失败 → 不重排，报出来", not sw(todo) and "lab 任务 7" in stuck.get("advance:remote:infer:swin_v2_f0", ""))
-todo, stuck = A.plan(osnap(lab=[(7, "Success", rinf[2], rinf[3], "gpu0")]))
-x = sw(todo)
-check("lab:gpu0：那边跑完 → box wait 组拉回结果文件夹", len(x) == 1 and x[0]["label"] == "pull:infer:swin_v2_f0" and x[0]["group"] == "wait"
-      and x[0]["cmd"] == f"bash scripts/queue/offload_io.sh pull lab {SWO}")
-pull = (9, "Success", x[0]["cmd"], "pull:infer:swin_v2_f0", "wait")
-todo, stuck = A.plan(osnap([pull], lab=[(7, "Success", rinf[2], rinf[3], "gpu0")]))
-check("lab:gpu0：拉回了但 box 上核对不过 → 报出来", not sw(todo) and "核对还是没做完" in stuck.get("advance:remote:infer:swin_v2_f0", ""))
-json.dump({"infer:swin_v2_f0": REC, "infer:swin_v2_f1": dict(machine="lab", group="gpu0", key=SW[:-1] + "1", out="o1", needs=[NEEDS[0]], pushed=[])},
-          open(RJ, "w"))
-inferred("Dataset101_GLIrq1", "nnUNetTrainer_SwinUNETR", "0")
-todo, stuck = A.plan(osnap())
-x = [t for t in todo if t.get("op") == "clean"]
-check("lab:gpu0：box 上做完 → 清理那边的结果和传过去的文件（别的步骤还要用的留着）", len(x) == 1 and x[0]["host"] == "lab"
-      and x[0]["paths"] == [SWO, NEEDS[2]])
-calls.clear()
-rm = []
-import refill  # noqa: E402
-refill.sh = lambda cmd, host=None, timeout=300: rm.append((cmd, host)) or (0, "")
-done, _ = A.run(osnap(), q=fake_q)
-st_ = json.load(open(RJ))
-check("lab:gpu0：清理时 ssh 那边 rm，记录里去掉", rm and rm[0][1] == "lab" and rm[0][0].startswith("rm -rf ~/BRAIN_TUMOR/predictions/")
-      and "infer:swin_v2_f0" not in st_ and "infer:swin_v2_f1" in st_)
-os.remove(RJ)
-
-# idle：那边空着才用，每次检查只分一个；box 上已经排着的不挪
-A.P.PLACE = {"infer": ["lab:gpu0 idle", "box:gpu"]}
-for k in ("1", "3"):
-    os.remove(f"{T}/predictions/Dataset116_METrq1/nnUNetTrainer_save10__{P}/fold_{k}/MANIFEST.json")
-busy = (3, "Running", "x", "manual", "gpu0")
-todo, stuck = A.plan(osnap(lab=[busy]))
-check("idle：那边组里有任务 → 用下一个地方（box gpu 组）", sorted((t["step"], t["key"], t.get("host"), t["group"]) for t in todo if t["key"].startswith(T3))
-      == [("infer", f"{T3}/1", None, "gpu"), ("infer", f"{T3}/3", None, "gpu")])
-GPU["free"] = False
-todo, stuck = A.plan(osnap())
-check("idle：组空着但卡上有别人 → 用下一个地方", [t.get("host") for t in todo if t["key"].startswith(T3)] == [None, None])
-GPU["free"] = True
-todo, stuck = A.plan(osnap())
-x = [t for t in todo if t["key"].startswith(T3)]
-check("idle：那边空着 → 只分一个过去，另一个用下一个地方", sorted((t["key"], t.get("host")) for t in x) == [(f"{T3}/1", "lab"), (f"{T3}/3", None)])
-q1 = (20, "Queued", "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 1", "infer:t3met_f1", "gpu")
-q3 = (21, "Queued", "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 3", "infer:t3met_f3", "gpu")
-todo, stuck = A.plan(osnap([q1, q3]))
-check("idle：box 上已经排着（没开始）→ 不挪", not [t for t in todo if t["key"].startswith(T3)])
-calls.clear()
-A.run(osnap(), q=fake_q)
-st_ = json.load(open(RJ))
-check("idle：run 时在 lab gpu0 加，remote.json 记下那边的任务号", any(c.startswith("gpu0 -p --label infer:t3met_f1 -- ") for c in calls)
-      and st_.get("infer:t3met_f1", {}).get("id") == 900 and st_["infer:t3met_f1"]["group"] == "gpu0")
-A.P.PLACE = {"infer": ["lab:gpu0 idle"]}
-todo, stuck = A.plan(osnap(lab=[busy]))
-check("记着的那边任务删掉了 → 重新选地方；都用不了 → 不排、不报，原因写进日志",
-      not [t for t in todo if t["key"].startswith(T3)] and not stuck
-      and any(n_.startswith("infer:t3met_f1：现在没有能用的地方（lab:gpu0 idle：lab gpu0 组不空") for n_ in A.NOTES))
-A.run(osnap(lab=[busy]), q=fake_q)
-check("都用不了：~/advance.log 里写'没排'", "没排 infer:t3met_f3：现在没有能用的地方" in open(os.environ["ADVANCE_LOG"]).read())
-os.remove(RJ)
-
-# hours：只在时段里开始
-from datetime import datetime as _dt  # noqa: E402
-H_ = "20:00-08:00,12:00-13:00"
-check("hours：跨午夜的时段、几段", A.in_hours(H_, _dt(2026, 10, 24, 21, 0)) and A.in_hours(H_, _dt(2026, 10, 24, 7, 59))
-      and A.in_hours(H_, _dt(2026, 10, 24, 12, 30)) and not A.in_hours(H_, _dt(2026, 10, 24, 8, 0))
-      and not A.in_hours(H_, _dt(2026, 10, 24, 15, 0)))
-REAL_IN_HOURS = A.in_hours
-A.P.PLACE = {"infer": ["lab:gpu0 hours=20:00-08:00", "box:gpu"]}
-A.in_hours = lambda spec, now=None: False
-todo, stuck = A.plan(osnap())
-check("hours：不在时段里 → 用下一个地方", sorted(t.get("host") or "box" for t in todo if t["key"].startswith(T3)) == ["box", "box"])
-A.in_hours = lambda spec, now=None: True
-todo, stuck = A.plan(osnap())
-check("hours：在时段里 → 用这个地方（没写 idle 的不限一次一个）", [t.get("host") for t in todo if t["key"].startswith(T3)] == ["lab", "lab"])
-A.in_hours = REAL_IN_HOURS
 bad_ = []
-for pl in ({"infer": ["lab:gpu9"]}, {"infer": ["lab:gpu0 idel"]}, {"nosuch": ["box:cpu"]}, {"infer": ["lab:gpu0 hours=25-1"]}, {"infer": ["dicc:x"]}):
+for pl in ({"infer": ["box:gpu9"]}, {"infer": ["queue:dicc idel"]}, {"nosuch": ["box:cpu"]}, {"infer": ["dicc:x"]},
+           {"infer": ["lab:gpu0"]}, {"infer": ["box:gpu idle"]}, {"infer": ["box:gpu hours=20:00-08:00"]}):
     A.P.PLACE = pl
     todo, stuck = A.plan(osnap())
     if todo or "advance:policy" not in stuck:
         bad_.append(pl)
-check("PLACE 写错了（没有的组、不认识的条件、没有的步骤、时段写错、不是 pueue 机器）→ 什么都不排，报出来", not bad_)
-for k in ("1", "3"):
-    inferred("Dataset116_METrq1", "nnUNetTrainer_save10", k)
+check("PLACE 写错了（没有的组、不认识的条件、没有的步骤、不认识的地方，包括已经不用的 <机器>:<组>、idle、hours=）→ 什么都不排，报出来",
+      not bad_)
+A.P.PLACE = {"infer": ["lab:gpu0"]}
+check("PLACE 写 lab:gpu0：报不认识的地方", "不认识的地方" in A.plan(osnap())[1].get("advance:policy", ""))
 
 # 10. 进任务队列（PLACE 写 queue:<机器>，现在的推理、评测）：缺的文件先传过去，box 不跑
 BASE = {k: v for k, v in REAL_PLACE.items() if k not in ("p1", "p2")}  # P1 / P2 第 11 节再测
@@ -569,24 +446,6 @@ check("评测：连不上 DICC → 照常在 box 上排，不报", [(t["step"], 
 A.remote_have = old_rh
 REMOTE["have"] = set(TNEEDS)
 os.remove(f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/MANIFEST.json")
-# 先试 lab 0 号卡（空着才用），否则进任务队列
-A.P.PLACE = dict(BASE, infer=["lab:gpu0 idle", "queue:dicc"])
-GPU["free"] = True
-todo, stuck = A.plan(osnap())
-x = tc(todo)
-check("lab:gpu0 idle → queue:dicc：lab 空着 → 在 lab gpu0 排，不加进任务队列", len(x) == 1 and x[0].get("host") == "lab"
-      and x[0]["group"] == "gpu0" and x[0].get("op") != "taskq" and "--stage infer" in x[0]["cmd"])
-GPU["free"] = False
-todo, stuck = A.plan(osnap())
-x = tc(todo)
-check("lab:gpu0 idle → queue:dicc：卡上有别人 → 进任务队列", len(x) == 1 and x[0].get("op") == "taskq")
-GPU["free"] = True
-for st_q in ("claimed", "free"):
-    s2 = osnap()
-    s2["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100, state=st_q))
-    todo, stuck = A.plan(s2)
-    check(f"已经在任务队列里（{st_q}）、lab 空着 → 留在队列，不挪", not tc(todo))
-A.P.PLACE = dict(BASE)
 old_box = ("Stashed", f"bash research/RQ1/analysis/run_predict_eval.sh --stage infer {T}/{TCM} 2", None)
 todo, stuck = A.plan(snap([old_box]))
 check("queue：box pueue 里已经有这一步 → 不加", not tc(todo))

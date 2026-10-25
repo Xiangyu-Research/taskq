@@ -174,14 +174,17 @@ os.makedirs(TQ2)
 write_jsonl(os.path.join(TQ2, "tasks.jsonl"), [(486191, 0, "Dataset116_METrq1/nnUNetTrainer_save10/4"),
                                                (486300, 2000, "Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0", "swinunetr")])
 os.environ["TASKQ_DIR"] = TQ2
-rc, out = tq2("add", "--nice", "50", "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/0", "Dataset116_METrq1/nnUNetTrainer_save10/4")
+rc, out = tq2("add", "--nice", "50", "--exp", "umamba", "--folds", "0")
+rc2, out2 = tq2("add", "--nice", "50", "--exp", "umamba", "--folds", "0")
 ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
 um = ts[1]
-check("add key：实验表里有的照表（U-Mamba：环境 umamba、实验 umamba），按档位排进去，已有的跳过",
+check("add --exp：照实验表（U-Mamba：环境 umamba、实验 umamba），按档位排进去，已有的跳过",
       rc == 0 and [t["key"].split("/")[1] for t in ts] == ["nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc", "nnUNetTrainer_SwinUNETR"]
-      and um["exp"] == "umamba" and um["params"]["env"] == "umamba" and um["order"] == 486301 and "已有，跳过" in out)
-rc, out = tq2("add", "--nice", "0", "Dataset101_GLIrq1/badkey")
-check("add：key 格式不对报错", rc != 0)
+      and um["exp"] == "umamba" and um["params"]["env"] == "umamba" and um["order"] == 486301 and "已有，跳过" in out2)
+rc, out = tq2("add", "--nice", "0", "--exp", "nosuch")
+check("add：实验表里没有的实验报错", rc != 0)
+rc, out = tq2("add", "--nice", "0", "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/0")
+check("add：不给 --exp / --recipe 报错", rc != 0)
 rc, out = tq2("set-nice", "--nice", "100", "Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0")
 ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
 check("set-nice：改档位后重新排序", rc == 0 and "SwinUNETR" in ts[2]["key"] and ts[2]["nice"] == 100)
@@ -272,7 +275,8 @@ ci4 = json.load(open(os.path.join(TQ2, "claims", taskq.safe(UM), "info")))
 check("remote：take 经 ssh 跑、领到，记下 worker=lab、ttl", rc_out is not None and rc_out[0] == 0 and ci4["worker"] == "lab" and ci4["ttl"] == 86400)
 EMPTY = os.path.join(T, "box_tq")  # box 上：只有 LAB 开关，没有任务表
 os.makedirs(EMPTY)
-r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "Dataset113_PEDsrq1/nnUNetTrainer_save10/0"],
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "nnunet",
+                    "dataset=Dataset113_PEDsrq1", "trainer=nnUNetTrainer_save10", "fold=0"],
                    env=dict(os.environ, TASKQ_DIR=EMPTY), capture_output=True, text=True)
 check("box 上没有队列时 add 转到 DICC 那份（不在本机另建）", r.returncode == 0 and "加入" in r.stdout
       and not os.path.exists(os.path.join(EMPTY, "tasks.jsonl")) and "Dataset113_PEDsrq1" in open(os.path.join(TQ2, "tasks.jsonl")).read())
@@ -357,7 +361,7 @@ check("next --device cpu：只领 device=cpu 的", rc == 0 and out.startswith("t
 rc, out, _ = tq3("next", "--worker", "714", "--envs", "nnunet", "--device", "cpu")
 check("next --device cpu：没有别的纯 CPU 任务 → 10", rc == 10)
 
-# 10/23：主数据目录读不了时不领；TEMP_ROOT 临时数据目录只领名单里的，失败只数名单里的
+# 10/23：主数据目录读不了时不领
 # add 不给 --nice（10/24）：--exp 用实验表里的档位，别的报错（单独一份队列，不影响上面的）
 TQ3B = os.path.join(T, "taskq3b")
 os.makedirs(TQ3B)
@@ -376,9 +380,8 @@ check("add --exp 不给 --nice：用实验表里的档位", rc == 0 and [t["key"
 rc, out, err = tq3b("add", "--recipe", "command", "key=toy/n", "cmd=true", "env=nnunet", "out=toy/n", 'done=["DONE"]')
 check("add --recipe 不给 --nice：报错、不加", rc != 0 and "--nice" in err and len(taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))) == 1)
 
-TQ4, D4, TMP4 = os.path.join(T, "taskq4"), os.path.join(T, "data4"), os.path.join(T, "tmp4")
+TQ4, D4 = os.path.join(T, "taskq4"), os.path.join(T, "data4")
 os.makedirs(D4)
-os.makedirs(TMP4)
 ks4 = ["Dataset121_X/nnUNetTrainer_save10/0", "Dataset121_X/nnUNetTrainer_save10/1", "Dataset121_X/nnUNetTrainer_save10/2"]
 write_jsonl(os.path.join(TQ4, "tasks.jsonl"), [(i, 0, k) for i, k in enumerate(ks4)])
 os.makedirs(os.path.join(TQ4, "failures"))
@@ -398,14 +401,7 @@ check("next：数据目录读不了时不领（退出码 12，报原因）", rc 
 rc, out, err = tq4("take", "--worker", "lab", ks4[2], root=os.path.join(T, "nosuch"))
 check("take：数据目录读不了时不领", rc == 10 and "读不了" in out and not os.path.exists(os.path.join(TQ4, "claims", taskq.safe(ks4[2]))))
 rc, out, err = tq4("next", "--worker", "801", "--envs", ALL)
-check("没有 TEMP_ROOT：4 次失败照常暂停", rc == 12)
-open(os.path.join(TQ4, "TEMP_ROOT"), "w").write(f"# 临时目录\n{TMP4}\n{ks4[2]}\n")
-rc, out, err = tq4("next", "--worker", "802", "--envs", ALL)
-check("有 TEMP_ROOT、用的是主数据目录：照常暂停", rc == 12)
-rc, out, err = tq4("next", "--worker", "803", "--envs", ALL, root=TMP4)
-check("临时目录：失败只数名单里的，只领名单里的", rc == 0 and out.startswith(ks4[2] + "\n"))
-rc, out, err = tq4("next", "--worker", "804", "--envs", ALL, root=TMP4)
-check("临时目录：名单里的领完就没有了（不领名单外的）", rc == 10)
+check("最近 4 次失败：暂停", rc == 12)
 
 # ---------------- 10/25：领取只建了目录、info 没写上（领的进程在中间被杀） ----------------
 TQ5, D5 = os.path.join(T, "taskq5"), os.path.join(T, "data5")

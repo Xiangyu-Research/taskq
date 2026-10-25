@@ -33,7 +33,7 @@ def ok(what, cond):
 
 
 def task(i, group, status, cmd, label=""):
-    return dict(id=i, group=group, status=status, label=label, deps=[], start=None, end=None, command=cmd, priority=0)
+    return dict(id=i, group=group, status=status, label=label, deps=[], start=None, end=None, command=cmd)
 
 
 def train(i, ds, f, status="Running", tr=""):
@@ -100,9 +100,6 @@ s["slurm"]["dicc"]["squeue"] = SQW
 ok("DICC 有不带折的 worker 作业（什么都能领）：只按先后", ops(R.plan(s, "lab")[0]) == [("take", K_T1C[0])])
 ok("同一档里数据已经在 lab 上的先领（10/19）", ops(R.plan(snap(queue=q2[1:] + [tq(K_UM, 50, 9)]), "lab")[0]) == [("take", K_UM)])
 s = snap()
-del s["taskq"]["dicc"]["recent_skips"]
-acts, _, why = R.plan(s, "lab")
-ok("DICC 上的 taskq.py 还是旧版（状态里没有 recent_skips）：什么都不做", acts == [] and "旧版" in why)
 ok("实验表里没有、队列状态里也没有说明的任务不领", ops(R.plan(snap(queue=[tq("Dataset999_X/nnUNetTrainer_save10/0", -1, 0)] + QUEUE), "lab")[0]) == [("take", K_UM)])
 HD = dict(tq("hdbet/x", -1, 0), recipe="command", params={}, spec=dict(key="hdbet/x", env="hdbet", data=[]))
 ok("lab 没有任务要的环境（hdbet）：不领", ops(R.plan(snap(queue=[HD] + QUEUE), "lab")[0]) == [("take", K_UM)])
@@ -261,10 +258,6 @@ NO103 = [t for t in QUEUE if not t["key"].startswith("Dataset103")]
 out = R.cleanup(snap(queue=NO103), "lab", run=fake_run)
 ok("队列里没有任务要用了：删掉自动传过去的数据集", len(out) == 1 and cmds[-1][1] == "rm -rf ~/BRAIN_TUMOR/nnUNet/preprocessed/Dataset103_GLIrq1_t1c"
    and "没有任务要用" in out[0])
-json.dump({"transferred": {"lab": ["Dataset103_GLIrq1_t1c"]}}, open(R.STATE, "w"))
-out = R.cleanup(snap(queue=NO103), "lab", run=fake_run)
-ok("10/18 前只记了数据集名的：照样认、删掉后从记录里去掉", len(out) == 1 and cmds[-1][1].endswith("nnUNet/preprocessed/Dataset103_GLIrq1_t1c")
-   and json.load(open(R.STATE))["transferred"]["lab"] == [])
 for bad in ["/", "/etc/x", "nnUNet/preprocessed/", "nnUNet/preprocessed", "nnUNet//x", "raw/BraTS2023-GLI", "nnUNet/results/Dataset103_x",
             "nnUNet/preprocessed/../../x"]:
     cmds.clear()

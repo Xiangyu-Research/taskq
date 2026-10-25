@@ -30,7 +30,7 @@
   提前传之前先这样腾地方，腾不出来就不传。领着的、在训的、正在传的、拉回归档在用的、预测下一折要用的、Dataset101 不删。
 开关：envs/policy.py 的 AUTO["lab"] 是 False 时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
-DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
+跳过记录（skips/<key>）要撤销，删掉那个文件。
 
 DICC 补作业：每个 QOS（envs/policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
 没设时按 SUBMIT_CAP）减去留给别的作业的名额、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（每个空位交一个
@@ -177,8 +177,6 @@ def plan(s, name):
         return [], {}, "连不上"  # 有一台训练机的进度读不到时也不动：不然看不出哪一折在别处训了一半
     if not tq or not tq.get("enabled"):
         return [], {}, "读不到任务队列，或者队列没开"
-    if "recent_skips" not in tq:  # 10/18 前的 taskq.py 不认 take、ttl、--skip
-        return [], {}, f"{host} 上的 taskq.py 还是旧版（先在 {host} 上 git pull）"
     tt_all, (sync, sync_bad) = train_tasks(s, name), syncing(s, name)
     tgroup, slot = task_groups(s, name), slots(name)
     held_g = set()  # 领着没训完的折占着的组
@@ -224,7 +222,7 @@ def plan(s, name):
             stuck[f"labclaim:{key}"] = (f"{M.MACHINES[name]['label']} 领的 {key} 训练任务 {last[0]} 停了（{last[1]}），没训完、有进度，"
                                         f"领取保留；接着训：q {g} --label train:{key} -- {shlex.quote(run_cmd(f))}；"
                                         f"放弃：taskq.py release --worker {name} {key}")
-        elif tt[key][-1][1].startswith("Failed") and tt[key][-1][1] not in ("Failed (75)", "Failed (137)", "Failed (143)"):
+        elif tt[key][-1][1].startswith("Failed") and tt[key][-1][1] not in ("Failed (137)", "Failed (143)"):
             # 没开始就失败（多半是这台机器放不下这个模型）：交还，记在 skips/（这台机器以后不再领它；不算队列的失败）
             acts.append(dict(op="release", key=key, skip=f"训练任务 {tt[key][-1][0]} {tt[key][-1][1]}",
                              why=f"训练任务 {tt[key][-1][0]} 失败了（{tt[key][-1][1]}），{name} 上没有进度，交还，{name} 不再领它"))
@@ -498,7 +496,6 @@ def cleanup(s, name, run=sh, acts=None, dry=False):
             when[d] = min(when.get(d, (9e9,)), rank(tq, t, ready))
     msgs, gone, held, later = [], [], [], []
     for p in list(lst):
-        p = p if "/" in p else f"nnUNet/preprocessed/{p}"  # 10/18 前只记数据集名
         parts = p.split("/")
         if (p.startswith("/") or ".." in parts or "" in parts or len(parts) < 3 or parts[:2] not in (["nnUNet", "preprocessed"], ["nnUNet", "raw"])
                 or not m.get("data")):

@@ -3,7 +3,6 @@
 调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：make_registry.py 把本文件经 ssh 送到别的机器上跑 collect()。
 
 命令行：
-  spec.py resolve <做法> k=v…        完整的说明（JSON；{data}、{repo} 不展开）
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
   spec.py lookup <key>               按 key 找任务（先查实验表 research/*/experiments.py，再查训练队列），打印说明（JSON）
@@ -318,7 +317,7 @@ def main(argv):
         return 2
     cmd, args = argv[0], argv[1:]
     try:
-        if cmd in ("resolve", "shell", "done"):
+        if cmd in ("shell", "done"):
             s = resolve(args[0], parse_kv(args[1:]))
         elif cmd == "lookup":
             s = lookup(args[0])
@@ -336,7 +335,7 @@ def main(argv):
         import machines as M
         me = M.whoami()
         data = M.expand(M.MACHINES[me]["data"]) if me else ""
-    if cmd in ("resolve", "lookup"):
+    if cmd == "lookup":
         print(json.dumps(s, ensure_ascii=False, indent=1))
     elif cmd == "shell":
         print(shell_lines(s, data))

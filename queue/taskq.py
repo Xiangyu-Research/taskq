@@ -41,7 +41,6 @@ import argparse
 import glob
 import json
 import os
-import re
 import shlex
 import shutil
 import socket
@@ -64,7 +63,6 @@ HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过�
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
-TEMP_ROOT = "TEMP_ROOT"  # 临时数据目录（第一行）和只在那里训的任务（之后每行一个），见 temp_keys()
 safe = S.safe
 
 
@@ -135,19 +133,6 @@ class Lock:
 
 
 # ---------------- 任务说明 ----------------
-def from_key(key):
-    """key → 任务（exp、recipe、params）：实验表里有的照表，没有的按 nnunet 做法（数据集/训练器/fold）。"""
-    import experiments as E
-    t = E.tasks().get(key)
-    if t:
-        return dict(key=key, exp=t["exp"], recipe=t["recipe"], params=dict(t["params"]))
-    m = re.fullmatch(r"(Dataset\d+_[^/]+)/([^/]+)/(\w+)", key)
-    if not m:
-        raise SystemExit(f"实验表里没有 {key}，也不是 数据集/训练器/fold 的格式（别的做法用 add --recipe）")
-    p = dict(dataset=m.group(1), trainer=m.group(2), fold=m.group(3))
-    return dict(key=key, exp=None, recipe="nnunet", params=p)
-
-
 _specs = {}
 
 
@@ -169,27 +154,12 @@ def spec_of(t):
 
 
 def data_root():
-    """本机的数据目录：BRAIN_TUMOR（envs/nnunet_paths.sh 设的）> nnUNet_results 的上两级 > envs/machines.py。"""
+    """本机的数据目录：BRAIN_TUMOR（envs/nnunet_paths.sh 设的）> envs/machines.py。"""
     if os.environ.get("BRAIN_TUMOR"):
         return os.environ["BRAIN_TUMOR"]
-    if os.environ.get("nnUNet_results"):
-        return os.path.dirname(os.path.dirname(os.environ["nnUNet_results"].rstrip("/")))
     import machines as M
     me = M.whoami()
     return M.expand(M.MACHINES[me]["data"]) if me else os.path.expanduser("~/st/BRAIN_TUMOR")
-
-
-def temp_keys(root):
-    """数据目录是 TEMP_ROOT 第一行写的临时目录时 → 只在那里领的任务名集合；否则 None。
-    主数据目录出故障时用（2026-10-23）：worker_start.sh 让 Slurm 作业用临时目录，只领名单里的任务，失败也只数名单里的。"""
-    try:
-        lines = [x.strip() for x in open(os.path.join(TQ, TEMP_ROOT), encoding="utf-8")]
-    except OSError:
-        return None
-    lines = [x for x in lines if x and not x.startswith("#")]
-    if not lines or os.path.realpath(os.path.expanduser(lines[0])) != os.path.realpath(os.path.expanduser(root)):
-        return None
-    return set(lines[1:])
 
 
 def root_error(root):
@@ -235,13 +205,10 @@ def released_at(key):
         return None
 
 
-def recent_failures(window=PAUSE_WINDOW, keys=None):
-    """整个队列（keys 给了时只算这几个任务）最近 window 秒内的失败次数。"""
+def recent_failures(window=PAUSE_WINDOW):
+    """整个队列最近 window 秒内的失败次数。"""
     n, cut = 0, time.time() - window
-    only = None if keys is None else {safe(k) for k in keys}
     for p in glob.glob(os.path.join(TQ, "failures", "*")):
-        if only is not None and os.path.basename(p) not in only:
-            continue
         for ln in open(p, encoding="utf-8"):
             try:
                 n += time.mktime(time.strptime(ln.split("\t")[0], "%Y-%m-%d %H:%M:%S")) >= cut
@@ -318,13 +285,12 @@ def _claim(a, pick):
     if err:
         print(err, file=sys.stderr)
         return PAUSED, None
-    only = temp_keys(root)
-    if recent_failures(keys=only) >= PAUSE_N:
+    if recent_failures() >= PAUSE_N:
         return PAUSED, None
     busy_ahead = 0  # 排在前面、刚停下（日志 15 分钟内更新过、没人领）的
     with Lock():
         for t in read_tasks():
-            if t["key"] in a.exclude or (only is not None and t["key"] not in only):
+            if t["key"] in a.exclude:
                 continue
             st, _ = state(t, root)
             if st == "busy" and pick(t) is not None:
@@ -430,7 +396,7 @@ def cmd_take(a):
             print(f"{a.key}：刚被别人领走")
             return NOTHING
         now = time.time()
-        write_json(os.path.join(d, "info"), dict(worker=a.worker, host=a.host or a.worker, since=ci.get("since", now) if mine else now,
+        write_json(os.path.join(d, "info"), dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now,
                                                  beat=now, ttl=a.ttl), indent=None)
         print(t["key"])
         return 0
@@ -471,9 +437,7 @@ def cmd_add(a):
         elif a.recipe:
             new = [dict(exp=None, recipe=a.recipe, params=S.parse_kv(a.args))]
         else:
-            if not a.args:
-                sys.exit("要给 --exp、--recipe 或 key")
-            new = [from_key(k) for k in a.args]
+            sys.exit("要给 --exp 或 --recipe")
         if a.nice is None:
             sys.exit("要给 --nice")
         return _insert(new, a.nice)
@@ -605,15 +569,21 @@ def remote(host, args, timeout=120):
     ssh = os.environ.get("TASKQ_SSH", "ssh").split()  # TASKQ_SSH 只给测试用
     try:
         r = subprocess.run(ssh + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", m["ssh"],
-                                  f"cd {m['repo']} && BRAIN_TUMOR={m['data']} nnUNet_results={M.results(host)} python3 scripts/queue/taskq.py {args}"],
+                                  f"cd {m['repo']} && BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"],
                            capture_output=True, text=True, timeout=timeout)
         return (None if r.returncode == 255 else (r.returncode, r.stdout + r.stderr))
     except Exception:  # noqa: BLE001
         return None
 
 
+def queue_host():
+    """队列所在的机器：envs/machines.py 里用 Slurm、能训练的那台。"""
+    import machines as M
+    return next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
+
+
 def cmd_status(a):
-    s = local_status() if have_queue() else remote_status(a.host)
+    s = local_status() if have_queue() else remote_status(queue_host())
     if s is None:
         print("读不到队列")
         return 1
@@ -635,8 +605,7 @@ def main(argv):
         return 0
     if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show") and not have_queue():
         # box 上：本机没有队列，转到 DICC 上那份去改（不在 box 上另建一份）
-        import machines as M
-        host = next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
+        host = queue_host()
         r = remote(host, " ".join(shlex.quote(x) for x in argv))
         if r is None:
             print(f"连不上 {host}")
@@ -662,7 +631,6 @@ def main(argv):
     p.add_argument("--skip", help="这台机器训不了、以后不再领它（记在 skips/，不算失败）")
     p = sub.add_parser("take")
     p.add_argument("--worker", required=True)
-    p.add_argument("--host", default=None, help="记在领取记录里的机器（默认同 worker）")
     p.add_argument("--ttl", type=int, default=STALE_BEAT)
     p.add_argument("key")
     p = sub.add_parser("add")
@@ -670,7 +638,7 @@ def main(argv):
     p.add_argument("--exp")
     p.add_argument("--folds", nargs="*")
     p.add_argument("--recipe")
-    p.add_argument("args", nargs="*", help="--recipe 时是 k=v，否则是 key")
+    p.add_argument("args", nargs="*", help="--recipe 的 k=v")
     p = sub.add_parser("set")
     p.add_argument("key")
     p.add_argument("kv", nargs="+")
@@ -681,7 +649,6 @@ def main(argv):
     p.add_argument("--json", action="store_true")
     p.add_argument("key")
     p = sub.add_parser("status")
-    p.add_argument("--host", default="dicc")
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, status=cmd_status)[a.cmd.replace("-", "_")](a)

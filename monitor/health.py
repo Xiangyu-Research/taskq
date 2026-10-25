@@ -8,7 +8,7 @@
 
 查什么（每项一个问题编号，同一个问题只推送一次）：
   - 连不上：ssh 不通（pueue 机器 30 分钟、Slurm 集群 1 小时后才报）。
-  - pueue：常驻进程连不上；任务失败或因依赖失败没跑（训满 N 个 epoch 停的退出码 75、手动停的 143 / Killed 不算）。
+  - pueue：常驻进程连不上；任务失败（手动停的 143 / Killed 只记进登记表，不推送）。
   - Slurm：过去 24 小时 FAILED / OUT_OF_MEMORY / NODE_FAIL 的作业（到时限停的段不算）。
   - 训练卡住：Slurm 在跑的作业、pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
   - 拉回：box 上在等的折既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
@@ -57,7 +57,6 @@ TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
-PAUSED_OK = ("Failed (75)",)  # train_task.sh 训满 N 个 epoch 停了、还没训完
 STOPPED = ("Failed (143)", "Killed")  # 手动停的：只记进登记表，不推送
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
@@ -114,7 +113,7 @@ def minutes(elapsed):
 
 
 def task_key(cmd):
-    """pueue 任务命令 → (种类, key)：训练（run_task.sh <做法> k=v…，10/18 前的 train_task.sh，见 make_registry.train_key）、
+    """pueue 任务命令 → (种类, key)：训练（run_task.sh <做法> k=v…，见 make_registry.train_key）、
     拉回（fetch_task.sh <机器> <key>）。"""
     key = mr.train_key(cmd)
     if key:
@@ -288,7 +287,7 @@ def check(s):
                 train_q.setdefault((name, t["group"]), []).append((st, tname))
             if st == "Running":
                 running_g.add((name, t["group"]))
-            if st in LIVE or st == "Success" or st in PAUSED_OK:
+            if st in LIVE or st == "Success":
                 continue
             end = mr_time(t["end"])
             if end and now - end > timedelta(hours=24):
@@ -461,7 +460,7 @@ def main():
             stuck["refill:error"] = f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
     for pid, msg in {**stuck, **stuck2}.items():
         # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
-        P[pid] = dict(msg=msg, level="normal", kind="state", after=30 if pid.startswith("advance:stale_fetch:") else 0)
+        P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
     if not a.dry_run:
         for pid in [k for k in P if k.startswith("idle:") and k.split(":")[1] in filled]:
             del P[pid]
