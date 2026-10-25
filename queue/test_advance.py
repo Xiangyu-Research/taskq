@@ -560,6 +560,11 @@ x = t3(todo)
 check("trainer：这一折在 lab gpu1 训着、别的输入那边都有 → 加进 lab gpu1（训练后面），不进任务队列，记下训练的任务号",
       len(x) == 1 and x[0].get("host") == "lab" and x[0]["group"] == "gpu1" and x[0]["label"] == "infer:t1c_f3"
       and "--stage infer ~/BRAIN_TUMOR/" in x[0]["cmd"] and x[0].get("train_id") == 19 and not stuck.get(f"advance:infer:{K3}"))
+todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu0")]))
+check("trainer：这一折在只跑手动任务的组（lab gpu0）训着 → 不加进那个组，原因写进日志",
+      not any(t.get("host") == "lab" for t in t3(todo)) and any("只跑手动加的任务" in n_ for n_ in A.NOTES))
+todo, stuck = A.plan(lsnap([(19, "Success", TR3, "train:x", "gpu0")], dict(final=True)))
+check("trainer：lab gpu0 刚训完、组里没有下一折 → 也不加进 gpu0", not any(t.get("host") == "lab" and t["step"] == "infer" for t in t3(todo)))
 REMOTE["have"] = {TN3[0]}
 todo, stuck = A.plan(lsnap([(19, "Running", TR3, "train:x", "gpu1")]))
 check("trainer：lab 上缺测试集 → 训练期间不加，原因写进日志", not t3(todo) and any("imagesTs" in n_ for n_ in A.NOTES))

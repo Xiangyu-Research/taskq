@@ -502,6 +502,8 @@ class Remote:
             tr = trs[-1] if trs else None
             if not tr or cp.get("archived") or (tr["status"] != "Running" and not cp.get("final")):
                 return f"{h} 上没有在训这一折"
+            if tr.get("group") in P.MANUAL.get(h, []):  # 只跑手动加的任务的组（10/25）
+                return f"{h} 的 {tr['group']} 组只跑手动加的任务"
             if cp.get("final") and (archiving or any(y["status"] in LIVE_ST and y.get("group") == tr.get("group")
                                                      and self.is_train(h, y) for y in rts)):
                 return f"{h} 上训完了，在归档或那个组在训下一折"
