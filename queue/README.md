@@ -46,7 +46,7 @@
 | 机器 | 组 | 同时跑 | 放什么 |
 |---|---|---|---|
 | box | `gpu` | 1 | 4070：推理（`run_predict_eval.sh --stage infer`）、P1 / P2 这类重推理 |
-| box | `cpu` | 2 | 评测（`run_predict_eval.sh --stage eval`）、五折集成评测、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等） |
+| box | `cpu` | 2 | 评测（`run_predict_eval.sh --stage eval`）、五折集成评测、删单折概率图（`prune_fold_probs.py`）、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等） |
 | box | `wait` | 不限 | 拉回训完的任务（`fetch_task.sh`）、lab 训的任务归档（`archive_task.sh`）、给 lab 传数据（`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡训练（`run_task.sh`） |
 | lab | `gpu0` | 1 | 0 号卡：手动加的临时任务（10/22 起，`refill.py` 不往里领训练）；box 分推理过来，10/24 白天用过，晚起不用 |

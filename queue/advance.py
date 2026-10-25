@@ -24,10 +24,11 @@
            那边在做 → 不归档（归档会删那边的 checkpoint）；做完 → box wait 组 pull:<标签> 拉回（和"分到别的机器"一样），
            box 上判断做完后删掉那边的结果；失败 → 报出来（ssh lab pueue log；处理好以后在那边 pueue remove，训完没归档时重排，
            否则进任务队列）。训练没训完就停了、推理跟着失败的不算，那边接着训时重排。排上的记在 offload.json（on_trainer）。
-一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤> 的要每折都做完那一步）。
+一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs=<每折的步骤或列表> 的要每折都做完这些步骤，结果也没在往 box 上拷）。
            带 queue 的和每折的一样放进任务队列（2026-10-23，P1 / P2 换模型重跑）。queue 里写了 inputs（相对数据目录的路径）时，
            查那边缺什么用它，不用 --stage needs。
-最后：FINAL 的步骤（RQ1：compare_all）。有 rerun_if_newer 的，在列出的步骤有比它开始时更新的结果、实验一级的步骤都没有在排 / 在跑时重跑。
+最后：FINAL 的步骤（RQ1：compare_all）。有 rerun_if_newer 的，在列出的步骤有比它开始时更新的结果、
+  这些步骤（和同一串里排在它们前面的）都没有在排 / 在跑时重跑。
 队列里不属于任何实验的任务只拉回、归档。
 
 在不在跑：box pueue 里的任务，按命令或标签认出是哪一步、哪个任务：拉回、归档按命令（带源机器）；其他步骤的命令和这里会生成的
@@ -431,12 +432,13 @@ def plan(s, root=None):
         names = groups[e["id"]]
         n = min([nice.get(t["key"], NO_NICE) for t in mine] or [NO_NICE])
         for chain in e["group_after"]:
-            for st in chain:
-                group_steps.add(st["name"])
+            cn = [st["name"] for st in chain]  # 串里最后一个 rerun_if_newer 列出的步骤和它前面的（后面的如 prune 不影响比较）
+            group_steps.update(cn[:max((i for i, x in enumerate(cn) if x in watch), default=-1) + 1])
             if not all(trained.get(t["key"]) for t in mine):
                 continue
             for st in chain:
-                if st.get("needs") and not all(after_ok.get((t["key"], st["needs"])) for t in mine):
+                need = st.get("needs") or []
+                if not all(after_ok.get((t["key"], x)) for t in mine for x in ([need] if isinstance(need, str) else need)):
                     break
                 busy = fetching(st, names, f"{st['name']}:{e['id']}")
                 if busy or not st["done"].ok(root, names):

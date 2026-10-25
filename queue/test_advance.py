@@ -55,6 +55,15 @@ def evaluated(ds, tr, tag):
     touch(f"{T}/RQ1/analysis/{ds}/{tr}__{P}/{tag}/report/report.run.json", '{"status": "ok"}')
 
 
+def pruned(ds, tr):
+    """各折的单折概率图删过了（prune_fold_probs.py 写的记录）。"""
+    import glob
+    for mp in glob.glob(f"{T}/predictions/{ds}/{tr}__{P}/fold_*/MANIFEST.json"):
+        m = json.load(open(mp))
+        m["probabilities_removed"] = dict(status="done", cohorts={})
+        json.dump(m, open(mp, "w"))
+
+
 def snap(tasks=(), remote=None):
     rows = [dict(id=i, status=st, command=c, label="", group="x", end=end) for i, (st, c, end) in enumerate(tasks)]
     return dict(pueue={"box": dict(tasks=rows)}, src={h: dict(folds=f) for h, f in (remote or {}).items()},
@@ -134,7 +143,7 @@ todo, stuck = A.plan(snap([("Failed (1)", cmd3, None), ("Success", cmd3, None), 
 check("失败之后又成功过：只看最后一次成功之后的（报的是成功跑完没结果，不是那次失败）",
       todo == [] and "任务 1 成功跑完" in stuck[f"advance:infer:{T3}/3"])
 
-# 6. 五折到齐：T3 → oof → paired；T14 → oof 和集成；compare_all 等实验一级的都做完再排
+# 6. 五折到齐：T3 → oof → paired，集成 → 删单折概率图；T14 一样；compare_all 等 paired、ens 和前面的步骤做完再排（prune 不等）
 for k in "0", "4":
     trained("Dataset116_METrq1", "nnUNetTrainer_save10", k)
     inferred("Dataset116_METrq1", "nnUNetTrainer_save10", k)
@@ -142,14 +151,25 @@ for k in "0", "4":
 inferred("Dataset116_METrq1", "nnUNetTrainer_save10", "3")
 evaluated("Dataset116_METrq1", "nnUNetTrainer_save10", "fold_3")
 todo, _ = A.plan(snap())
-check("T3 五折到齐：排 oof（不排集成）", steps(todo) == [("oof", "t3met")] and todo[0]["group"] == "cpu" and "oof_eval.py" in todo[0]["cmd"])
+oof_ = [t for t in todo if t["step"] == "oof"]
+check("T3 五折到齐：排 oof 和集成，不排删单折概率图", steps(todo) == [("ens", "t3met"), ("oof", "t3met")]
+      and oof_[0]["group"] == "cpu" and "oof_eval.py" in oof_[0]["cmd"])
+evaluated("Dataset116_METrq1", "nnUNetTrainer_save10", "folds_0-1-2-3-4")
+_er = f"{T}/RQ1/analysis/Dataset116_METrq1/nnUNetTrainer_save10__{P}/folds_0-1-2-3-4/report/report.run.json"
+os.utime(_er, (os.path.getmtime(_er) - 3600,) * 2)  # 集成比下面的 compare_all 早做完
 touch(f"{T}/RQ1/analysis/Dataset116_METrq1/nnUNetTrainer_save10__{P}/oof/oof_eval.run.json", '{"status": "ok"}')
 todo, _ = A.plan(snap())
-check("oof 做完：排配对（--cmp T3=…/oof/eval）", steps(todo) == [("paired", "t3met")] and "--cmp T3=" in todo[0]["cmd"]
-      and todo[0]["cmd"].endswith("oof/paired"))
+pa = [t for t in todo if t["step"] == "paired"]
+check("oof、集成做完：排配对（--cmp T3=…/oof/eval）和删单折概率图", steps(todo) == [("paired", "t3met"), ("prune", "t3met")]
+      and "--cmp T3=" in pa[0]["cmd"] and pa[0]["cmd"].endswith("oof/paired"))
 touch(f"{T}/RQ1/analysis/Dataset116_METrq1/nnUNetTrainer_save10__{P}/oof/paired/paired_compare.run.json", '{"status": "ok"}')
 todo, _ = A.plan(snap())
-check("配对做完、compare_all 比它旧：排 compare_all", steps(todo) == [("compare_all", "all")])
+check("配对做完、compare_all 比它旧：排 compare_all，删单折概率图在排不挡它", steps(todo) == [("compare_all", "all"), ("prune", "t3met")])
+todo, _ = A.plan(snap([("Queued", [t for t in todo if t["step"] == "prune"][0]["cmd"], None)]))
+check("删单折概率图排着（HOLD 暂停的也算）：认得出来、不重复，compare_all 照常", steps(todo) == [("compare_all", "all")])
+pruned("Dataset116_METrq1", "nnUNetTrainer_save10")
+todo, _ = A.plan(snap())
+check("单折概率图删完：只剩 compare_all", steps(todo) == [("compare_all", "all")])
 cp = f"{T}/RQ1/analysis/compare/all/compare_all.run.json"
 touch(cp, json.dumps({"status": "ok", "start": (datetime.now() - timedelta(minutes=10)).astimezone().isoformat(timespec="seconds")}))
 os.utime(f"{T}/RQ1/analysis/Dataset116_METrq1/nnUNetTrainer_save10__{P}/oof/paired/paired_compare.run.json",
@@ -171,13 +191,56 @@ for k in F5:
     evaluated("Dataset121_GLIMETrq1", "nnUNetTrainer_save10", f"fold_{k}")
 todo, _ = A.plan(snap())
 ens = [t for t in todo if t["step"] == "ens"]
-check("T14 五折到齐：oof 和五折集成都排，compare_all 先不排", steps(todo) == [("ens", "t14met"), ("oof", "t14met")]
+check("T14 五折到齐：oof 和五折集成都排，删单折概率图、compare_all 先不排", steps(todo) == [("ens", "t14met"), ("oof", "t14met")]
       and ens[0]["cmd"].endswith("'0 1 2 3 4'") and ens[0]["cmd"].startswith("ENSEMBLE_ONLY=1 "))
 old_ens = ("Running", f"bash research/RQ1/analysis/run_predict_eval.sh {T}/nnUNet/results/Dataset121_GLIMETrq1/nnUNetTrainer_save10__{P} '0 1 2 3 4'", None)
 todo, _ = A.plan(snap([old_ens]))
 check("集成任务在跑：认得出来，不重复", steps(todo) == [("oof", "t14met")])
 todo, _ = A.plan(snap([("Running", ens[0]["cmd"], None)]))
 check("带 ENSEMBLE_ONLY=1 的集成任务也认得出来", steps(todo) == [("oof", "t14met")])
+# 删单折概率图（10/25）：集成做完、每折都评测完、没有在往 box 上拷的才排
+M14 = f"Dataset121_GLIMETrq1/nnUNetTrainer_save10__{P}"
+evaluated("Dataset121_GLIMETrq1", "nnUNetTrainer_save10", "folds_0-1-2-3-4")
+os.remove(f"{T}/RQ1/analysis/{M14}/fold_2/report/report.run.json")
+todo, _ = A.plan(snap())
+check("删单折概率图：集成做完、但 fold 2 还没评测完 → 不删（先评测）", ("prune", "t14met") not in steps(todo) and ("eval", f"{MET}/2") in steps(todo))
+evaluated("Dataset121_GLIMETrq1", "nnUNetTrainer_save10", "fold_2")
+todo, _ = A.plan(snap())
+pr_ = [t for t in todo if t["step"] == "prune"]
+check("删单折概率图：集成和每折评测都做完 → 排（box cpu 组，命令带五折）",
+      steps(todo) == [("oof", "t14met"), ("prune", "t14met")] and pr_[0]["group"] == "cpu" and pr_[0]["label"] == "prune:t14met"
+      and pr_[0]["cmd"] == f"{PY} research/RQ1/analysis/prune_fold_probs.py {T}/predictions/{M14} --folds '0 1 2 3 4'")
+s_ = snap()
+s_["pueue"]["box"]["tasks"].append(dict(id=98, status="Running", command="bash scripts/queue/offload_io.sh pull lab x",
+                                        label="pull:infer:t14met_f1", group="wait", end=None))
+todo, _ = A.plan(s_)
+check("删单折概率图：fold 1 的推理结果还在往 box 上拉 → 不删", ("prune", "t14met") not in steps(todo))
+s_["pueue"]["box"]["tasks"][-1]["label"] = "pull:eval:t14met_f3"
+todo, _ = A.plan(s_)
+check("删单折概率图：fold 3 的评测结果还在往 box 上拉 → 不删", ("prune", "t14met") not in steps(todo))
+todo, stuck = A.plan(snap([("Success", pr_[0]["cmd"], None)]))
+check("删单折概率图成功跑完、盘上还有单折概率图 → 报出来，不重排", ("prune", "t14met") not in steps(todo) and "advance:prune:t14met" in stuck)
+pruned("Dataset121_GLIMETrq1", "nnUNetTrainer_save10")
+todo, stuck = A.plan(snap([("Success", pr_[0]["cmd"], None)]))
+check("删完了：不再排，也不报", ("prune", "t14met") not in steps(todo) and "advance:prune:t14met" not in stuck)
+touch(f"{T}/predictions/{M14}/fold_4/MEN/x.npz")
+check("删完以后又拉回来一个单折概率图（sync）→ 不算做完", not A.E.experiment("t14met")["group_after"][1][1]["done"].ok(T, A.E.group_names(A.E.experiment("t14met"), T, PY)))
+os.remove(f"{T}/predictions/{M14}/fold_4/MEN/x.npz")
+# T0 和三种架构：五折、集成都做完也不删单折概率图（测完删掉这些假文件，后面几节要 Dataset101 还没训）
+import shutil  # noqa: E402
+for k in F5:
+    for tr in ("nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc"):
+        trained("Dataset101_GLIrq1", tr, k)
+        inferred("Dataset101_GLIrq1", tr, k)
+        evaluated("Dataset101_GLIrq1", tr, f"fold_{k}")
+for tr in ("nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc"):
+    evaluated("Dataset101_GLIrq1", tr, "folds_0-1-2-3-4")
+todo, _ = A.plan(snap())
+keep = ("t0", "swin_v2", "umamba", "stunet")
+check("T0、U-Mamba 五折和集成都做完：不排删单折概率图", not [t for t in todo if t["step"] == "prune"])
+for d in ("nnUNet/results", "predictions", "RQ1/analysis"):
+    shutil.rmtree(f"{T}/{d}/Dataset101_GLIrq1")
+check("实验表：T0 和三种架构没有 prune 步骤", all("prune" not in [st["name"] for c in A.E.experiment(i)["group_after"] for st in c] for i in keep))
 
 # 6b. 推理的完整性：分割、概率图、输入病例数要对得上
 src = f"{T}/raw/X/imagesTs"
@@ -200,6 +263,19 @@ for c in ("a", "b"):
     touch(f"{os.path.dirname(man)}/X/{c}.nii.gz")
     touch(f"{os.path.dirname(man)}/X/{c}.npz")
 check("都对得上：推理做完", inf_ok("2"))
+m_ = json.load(open(man))
+m_["probabilities_removed"] = dict(status="done", cohorts={"X": 2})
+touch(man, json.dumps(m_))
+os.remove(f"{os.path.dirname(man)}/X/a.npz")
+os.remove(f"{os.path.dirname(man)}/X/b.npz")
+check("单折概率图按记录删掉了（10/25）：推理仍算做完，不重新推理", inf_ok("2"))
+os.remove(f"{os.path.dirname(man)}/X/a.nii.gz")
+check("删了概率图、又少了分割：推理没做完", not inf_ok("2"))
+del m_["probabilities_removed"]
+touch(man, json.dumps(m_))
+for c in ("a", "b"):
+    touch(f"{os.path.dirname(man)}/X/{c}.nii.gz")
+    touch(f"{os.path.dirname(man)}/X/{c}.npz")
 
 # 6c. T0 五折在 lab 上的副本 10/23 手动归档过（有 ARCHIVED）：不再排归档
 T0K = "Dataset101_GLIrq1/nnUNetTrainer_save10/0"
@@ -717,6 +793,24 @@ with tempfile.TemporaryDirectory() as R:
     else:
         os.environ["BRAIN_TUMOR"] = old_bt
     check(f"needs：{len(seen)} 个实验步骤在模型还没拉回时都能列出输入", seen and not bad)
+    for b in bad[:5]:
+        print("   ", b)
+
+# 删单折概率图的命令对每个有 prune 的实验真跑一次（--dry-run，10/25）：刚训完、集成还没做，要报"集成没做完"、一个都不删
+import subprocess  # noqa: E402
+with tempfile.TemporaryDirectory() as R:
+    bad, n = [], 0
+    for e in A.E.load()[0]:
+        for c in e.get("group_after") or []:
+            for st in c:
+                if st["name"] != "prune":
+                    continue
+                n += 1
+                cmd = A.S.fill(st["cmd"], A.E.group_names(e, R, sys.executable), keep=())
+                r = subprocess.run(cmd + " --dry-run", shell=True, cwd=os.path.dirname(os.path.dirname(HERE)), capture_output=True, text=True)
+                if r.returncode != 1 or "集成没做完" not in r.stdout or "Traceback" in r.stderr:
+                    bad.append(f"{e['id']}：{r.returncode} {(r.stdout + r.stderr).strip()[-200:]}")
+    check(f"prune：{n} 个实验的命令真跑一次，集成没做完时都报出来、不出错", n and not bad)
     for b in bad[:5]:
         print("   ", b)
 
