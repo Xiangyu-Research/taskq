@@ -54,11 +54,13 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "envs"))
 import spec as S  # noqa: E402
+from common import write_json  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", "~/.cache/phd/taskq"))  # TASKQ_DIR 只给测试用
 TASKS = "tasks.jsonl"
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
+HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过期
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
@@ -257,6 +259,11 @@ def state(t, root):
         return "done", ""
     ci = claim_info(t["key"])
     age = S.log_age(s, root)
+    if ci is None and os.path.isdir(os.path.join(TQ, "claims", safe(t["key"]))):
+        # 只建了目录、info 没写上（领的进程在中间被杀）：几分钟后算过期，下一个照常领走（10/25）
+        if time.time() - os.stat(os.path.join(TQ, "claims", safe(t["key"]))).st_mtime > HALF_CLAIM:
+            return "stale", "领取记录不完整（只有目录，没有 info）"
+        return "claimed", "正在领"
     if ci:
         if time.time() - ci.get("beat", 0) < ci.get("ttl", STALE_BEAT) or (age is not None and age < FRESH_LOG):
             return "claimed", f"作业 {ci.get('worker')} @ {ci.get('host')}"
@@ -314,7 +321,7 @@ def _claim(a, pick):
             except FileExistsError:
                 continue
             now = time.time()
-            json.dump(dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now), open(os.path.join(d, "info"), "w"))
+            write_json(os.path.join(d, "info"), dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now), indent=None)
             return 0, out
     return NOTHING, None
 
@@ -342,8 +349,7 @@ def cmd_beat(a):
         ci = claim_info(key)
         if ci and str(ci.get("worker")) == str(a.worker):
             ci["beat"] = time.time()
-            json.dump(ci, open(p + ".tmp", "w"))
-            os.replace(p + ".tmp", p)
+            write_json(p, ci, indent=None)
     return 0
 
 
@@ -386,7 +392,7 @@ def cmd_take(a):
             print(f"{a.key}：{st} {note}")
             return NOTHING
         d = os.path.join(TQ, "claims", safe(a.key))
-        if ci:
+        if ci or st == "stale":
             shutil.rmtree(d, ignore_errors=True)
         os.makedirs(os.path.dirname(d), exist_ok=True)
         try:
@@ -395,8 +401,8 @@ def cmd_take(a):
             print(f"{a.key}：刚被别人领走")
             return NOTHING
         now = time.time()
-        json.dump(dict(worker=a.worker, host=a.host or a.worker, since=ci.get("since", now) if mine else now, beat=now, ttl=a.ttl),
-                  open(os.path.join(d, "info"), "w"))
+        write_json(os.path.join(d, "info"), dict(worker=a.worker, host=a.host or a.worker, since=ci.get("since", now) if mine else now,
+                                                 beat=now, ttl=a.ttl), indent=None)
         print(t["key"])
         return 0
 
@@ -515,7 +521,7 @@ def task_log_age(root, key, worker):
     """领着这个任务的作业写的分段日志（run_task.sh）多久没更新（秒）；没有 → None。"""
     if not worker:
         return None
-    logs = glob.glob(os.path.join(root, "logs", "tasks", f"{glob.escape(key.replace('/', '__'))}__{glob.escape(str(worker))}_seg*.log"))
+    logs = glob.glob(os.path.join(root, "logs", "tasks", f"{glob.escape(safe(key))}__{glob.escape(str(worker))}_seg*.log"))
     try:
         return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
     except OSError:

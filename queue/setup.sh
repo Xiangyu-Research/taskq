@@ -3,8 +3,7 @@
 #   bash scripts/queue/setup.sh
 # 组按 envs/machines.py 建；表里没有、也没有任务的组删掉。
 # crontab（lab 没开 linger 用不了 systemd 用户服务，都用 cron）：
-#   所有 pueue 机器：@reboot scripts/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务）
-#   角色 autopull：每 30 分钟从 GitHub 拉代码（scripts/sync/git_pull_cron.sh）
+#   所有 pueue 机器：@reboot scripts/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务），从表里的 code（没有就 repo）跑
 #   角色 hub（box）：每 30 分钟健康检查；08:30–20:30 每 2 小时更新登记表和看板、推送进度（scripts/monitor/auto_refresh.sh）
 set -euo pipefail
 P=~/.local/bin/pueue
@@ -38,11 +37,11 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
     fi
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
-cron "bash $HOME/PhD/scripts/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
+CODE=$($M get . code); [[ -n $CODE ]] || CODE=$($M get . repo)
+crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | grep -v "on_boot.sh" | crontab -; }
+cron "bash $CODE/scripts/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
+crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | grep -v "git_pull_cron.sh" | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) "
-if [[ $roles == *" autopull "* ]]; then
-    cron "bash $HOME/PhD/scripts/sync/git_pull_cron.sh >> $HOME/git_pull.log 2>&1" "*/30 * * * *"
-fi
 if [[ $roles == *" hub "* ]]; then  # 健康检查；登记表和看板。从只给 cron 用的克隆 ~/auto/PhD 运行（只跑已提交的代码）
     [[ -d ~/auto/PhD/.git ]] || git clone -q git@github.com:xiangyumou/PhD.git ~/auto/PhD
     cron "bash $HOME/auto/PhD/scripts/monitor/auto_refresh.sh health" "5,35 * * * *"

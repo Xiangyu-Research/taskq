@@ -60,6 +60,7 @@ import policy as P  # noqa: E402
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
+from common import write_json  # noqa: E402
 
 TTL = 7 * 86400  # lab 的领取多久不续就过期（秒）
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
@@ -118,8 +119,7 @@ def set_slot(name, key, group):
         d.pop(key, None)
     else:
         d[key] = group
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    json.dump(st, open(STATE, "w"), indent=1)
+    write_json(STATE, st)
 
 
 def info(tq, key):
@@ -391,8 +391,7 @@ def transfer(name, paths, run=sh):
                       + shlex.quote(then_check(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}", lab)), run))
         if p not in lst:
             lst.append(p)
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    json.dump(st, open(STATE, "w"), indent=1)
+    write_json(STATE, st)
     return tids
 
 
@@ -544,7 +543,7 @@ def cleanup(s, name, run=sh, acts=None, dry=False):
         else:
             msgs.append(f"{L} 上删 {p} 出错：{out[-150:]}")
     if not dry:
-        json.dump(st, open(STATE, "w"), indent=1)
+        write_json(STATE, st)
     return msgs
 
 
@@ -560,8 +559,7 @@ def shadow_log(name, line):
     if st.setdefault("shadow", {}).get(name) == line:
         return
     st["shadow"][name] = line
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    json.dump(st, open(STATE, "w"), indent=1)
+    write_json(STATE, st)
     log([line])
 
 

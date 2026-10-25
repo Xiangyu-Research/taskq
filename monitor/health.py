@@ -15,7 +15,7 @@
   - 同一折两处：同一折在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
   - 训练机的卡空了：pueue 训练机（角色 train）上有卡的组里没有排着的训练任务（只剩在训的一个，或者全空），这次也没领到新的。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
-  - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；代码自动同步（角色 autopull）2 小时没成功。
+  - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
   - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
 提醒（10/21 起）：每个问题推送一次，用 scripts/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
@@ -48,8 +48,10 @@ import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
 import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
 import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
 import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
+from common import write_json  # noqa: E402  scripts/queue/common.py
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
+CODE_HEADS = os.path.expanduser("~/.cache/phd/code/heads.tsv")  # scripts/monitor/auto_refresh.sh 写
 LOG = os.path.expanduser("~/.cache/phd-health/health.log")
 TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
@@ -85,9 +87,6 @@ def probe_script(m, paths=()):
         # 里面有 .incomplete 的是 tunnel_push.sh 没传完的，不算
         lines.append(f'echo "HAVE|$(cd {m["data"]} 2>/dev/null && for p in {" ".join(shlex.quote(p) for p in paths)}; do '
                      f'[[ -e $p && ! -e $p/.incomplete ]] && printf "%s " "$p"; done)"')
-    if "autopull" in m["roles"]:
-        lines.append('echo "GITOK|$(cat ~/.cache/phd/git_pull_ok 2>/dev/null)"')
-        lines.append('echo "GITLOG|$(tail -1 ~/git_pull.log 2>/dev/null)"')
     return "\n".join(lines) + "\n"
 
 
@@ -127,8 +126,21 @@ def task_key(cmd):
     return None, None
 
 
+def code_heads():
+    """各台机器的代码在哪个提交（auto_refresh.sh 快进后写的 heads.tsv）和 GitHub 上的 main → dict(main, heads={机器: 提交号})。"""
+    rc, main = sh(["git", "-C", REPO, "rev-parse", "HEAD"])
+    heads = {}
+    try:
+        for line in open(CODE_HEADS):
+            name, _, head = (line.rstrip("\n").split("\t") + ["", ""])[:3]
+            heads[name] = head
+    except OSError:
+        pass
+    return dict(main=main.strip() if rc == 0 else "", heads=heads)
+
+
 def gather():
-    s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={})
+    s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={}, code=code_heads())
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
@@ -197,6 +209,11 @@ def check(s):
     for name, m in M.MACHINES.items():
         if not s["ok"].get(name):
             add(f"down:{name}", f"{L(name)} 连不上（ssh {m['ssh']}）", after=60 if m["scheduler"] == "slurm" else 30)
+    code = s.get("code") or {}
+    for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了
+        if head and code.get("main") and head != code["main"] and name in M.MACHINES:
+            add(f"code:{name}", f"{L(name)} 的代码停在 {head[:7]}，GitHub 上是 {code['main'][:7]}"
+                f"（{M.MACHINES[name].get('repo')} 快进不了？auto_refresh.sh 每 30 分钟快进一次）", after=120)
     # --- Slurm ---
     for name, d in s["slurm"].items():
         tq = s.get("taskq", {}).get(name)
@@ -332,10 +349,6 @@ def check(s):
                 age = None
             if age is None or age > timedelta(minutes=10):
                 add(f"gpulog:{name}", f"{L(name)} GPU 使用记录停了（最后一条 {last or '没有'}）")
-        if "autopull" in m["roles"]:
-            ok = pr.get("GITOK", "").strip()
-            if not ok.isdigit() or now - datetime.fromtimestamp(int(ok)) > timedelta(hours=2):
-                add(f"git:{name}", f"{L(name)} 代码 2 小时没有同步成功：{pr.get('GITLOG', '')[:150] or '没有同步记录'}")
         boot, _, line = pr.get("BOOT", "").partition("|")
         try:
             t = datetime.strptime(boot, "%Y-%m-%d %H:%M:%S")
@@ -406,10 +419,7 @@ def update(P, now, dry=False):
         for k in ("digest", "digest_prune_pos", "resolved_overnight"):
             st.pop(k, None)
         st.update(problems=cur, checked=now.strftime("%Y-%m-%d %H:%M"))
-        os.makedirs(os.path.dirname(STATE), exist_ok=True)
-        tmp = STATE + ".tmp"
-        json.dump(st, open(tmp, "w"), ensure_ascii=False, indent=1)
-        os.replace(tmp, STATE)
+        write_json(STATE, st)
         if log:
             with open(LOG, "a") as f:
                 f.writelines(f"{now:%F %T} {x}\n" for x in log)

@@ -3,6 +3,7 @@
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -405,6 +406,39 @@ rc, out, err = tq4("next", "--worker", "803", "--envs", ALL, root=TMP4)
 check("临时目录：失败只数名单里的，只领名单里的", rc == 0 and out.startswith(ks4[2] + "\n"))
 rc, out, err = tq4("next", "--worker", "804", "--envs", ALL, root=TMP4)
 check("临时目录：名单里的领完就没有了（不领名单外的）", rc == 10)
+
+# ---------------- 10/25：领取只建了目录、info 没写上（领的进程在中间被杀） ----------------
+TQ5, D5 = os.path.join(T, "taskq5"), os.path.join(T, "data5")
+k5 = "Dataset121_X/nnUNetTrainer_save10/3"
+write_jsonl(os.path.join(TQ5, "tasks.jsonl"), [(1, 0, k5)])
+half = os.path.join(TQ5, "claims", taskq.safe(k5))
+os.makedirs(half)
+os.makedirs(D5, exist_ok=True)
+
+
+def tq5(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ5, BRAIN_TUMOR=D5),
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+rc, out = tq5("next", "--worker", "900", "--envs", ALL)
+check("半建的领取：刚建的（5 分钟内）当作正在领，不抢", rc == 10)
+rc, out = tq5("take", "--worker", "lab", k5)
+check("半建的领取：take 也不抢刚建的", rc == 10)
+os.utime(half, (time.time() - 600,) * 2)
+rc, out = tq5("status")
+check("半建的领取：10 分钟前建的算过期", "stale" in out or "过期" in out or "不完整" in out)
+rc, out = tq5("next", "--worker", "901", "--envs", ALL)
+ci5 = json.load(open(os.path.join(half, "info")))
+check("半建的领取：过期后照常领走，info 写全", rc == 0 and out.startswith(k5 + "\n") and ci5["worker"] == "901")
+shutil.rmtree(half)
+os.makedirs(half)
+os.utime(half, (time.time() - 600,) * 2)
+rc, out = tq5("take", "--worker", "lab", "--ttl", "604800", k5)
+ci5 = json.load(open(os.path.join(half, "info")))
+check("半建的领取：take 也能领走过期的", rc == 0 and ci5["worker"] == "lab" and ci5["ttl"] == 604800)
+check("info 写完不留临时文件", os.listdir(half) == ["info"])
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

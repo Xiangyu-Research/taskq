@@ -54,6 +54,7 @@ import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 import refill  # noqa: E402
+from common import write_json  # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/.cache/phd/advance")
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
@@ -732,14 +733,24 @@ def run(s, dry=False, q=None, tq=None):
             continue
         note = "，暂停（HOLD）" if h else ""
         if live_mode:
+            rec_label = t["record"][0] if t.get("record") else None
+            prev = state.get(rec_label)
             try:
+                if rec_label:  # 先记下来再加任务：中间断电时 resume() 按标签在那边找得到，不会"任务有、记录没有"
+                    state[rec_label] = dict(t["record"][1])
+                    write_json(state_path(), state)
                 tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(t['cmd'])}")
-                if t.get("record"):
-                    label, rec = t["record"]
-                    state[label] = dict(rec, **({"id": tid} if t.get("host") else {}))
+                if rec_label and t.get("host"):
+                    state[rec_label]["id"] = tid
+                    write_json(state_path(), state)
                 done.append(f"{where}{t['label']}（任务 {tid}{note}）")
                 lines.append(f"排了 {t['label']}（{where}{t['group']} 组，任务 {tid}{note}）：{t['cmd']}")
             except Exception as e:  # noqa: BLE001
+                if rec_label:
+                    if prev is None:
+                        state.pop(rec_label, None)
+                    else:
+                        state[rec_label] = prev
                 lines.append(f"出错 {t['label']}：{e}")
                 stuck[f"advance:{t['step']}:{t['key']}"] = f"{t['step']} {t['key']}：加任务出错（{e}）"
         else:
@@ -747,10 +758,7 @@ def run(s, dry=False, q=None, tq=None):
             lines.append(f"会排 {t['label']}（{where}{t['group']} 组{note}）：{t['cmd']}")
     lines += [f"没排 {x}" for x in NOTES]
     if live_mode:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(state_path() + ".tmp", "w") as f:
-            json.dump(state, f, indent=1, ensure_ascii=False)
-        os.replace(state_path() + ".tmp", state_path())
+        write_json(state_path(), state)
     if not dry:
         log(lines, stuck, live_mode)
     return done, stuck
@@ -774,7 +782,7 @@ def log(lines, stuck, live_mode):
         with open(LOG, "a") as f:
             mode = "" if live_mode else "（只算不排）"
             f.writelines(f"{datetime.now():%F %T}{mode} {ln}\n" for ln in out)
-    json.dump(cur, open(last_p, "w"), ensure_ascii=False)
+    write_json(last_p, cur, indent=None)
 
 
 if __name__ == "__main__":

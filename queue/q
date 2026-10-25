@@ -3,10 +3,21 @@
 #   q <组> [pueue add 的选项，如 --after 12、--label 名字、--stashed] -- '<命令>'
 # 各机器有哪些组、每组用哪张卡、带哪些环境变量，写在 envs/machines.py（setup.sh 按它建组）；
 # 没有卡的组 CUDA_VISIBLE_DEVICES 设为空（看不到卡）。每个任务都带上 envs/nnunet_paths.sh 设的数据路径。
-# 例：q gpu1 --label t15men_f0 -- 'bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470'
+# 表里这台机器有 code（box）时，任务的工作目录是按提交号的代码副本（先用 scripts/sync/snapshot.sh 更新到 GitHub 上的 main），
+# 只跑已经推送的代码，以后的代码更新不改到这个任务；没有 code 时是表里的 repo。
+# 例：q gpu1 --label t15men_f0 -- 'bash scripts/queue/run_task.sh nnunet ds=111 fold=0'
 set -euo pipefail
 G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
-REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+HERE=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+SRC=$(python3 "$HERE/envs/machines.py" get . repo) CODE=$(python3 "$HERE/envs/machines.py" get . code)
+if [[ -n $CODE ]]; then
+    bash "$HERE/scripts/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
+    REPO=$(readlink -f "$CODE")
+else
+    REPO=$(readlink -f "$SRC")
+fi
+[[ -d $REPO ]] || { echo "q：没有工作目录 $REPO" >&2; exit 2; }
+echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）"
 ENV=$(python3 "$REPO/envs/machines.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID

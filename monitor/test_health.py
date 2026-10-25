@@ -51,8 +51,7 @@ LAB_BUSY = {"groups": {}, "tasks": [dict(id=90, group="gpu1", status="Running", 
 def snap(**kw):
     s = dict(now=NOW, ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=[], sacct=[])},
              probe={"box": {"DISK": str(int(500e9)), "BOOT": "2026-10-01 08:00:00|"},
-                    "lab": {"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "BOOT": "2026-10-01 08:00:00|",
-                            "GITOK": str(int((NOW - timedelta(minutes=20)).timestamp())), "GITLOG": ""}},
+                    "lab": {"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "BOOT": "2026-10-01 08:00:00|"}},
              src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {}}},
              pueue={"box": {"groups": {}, "tasks": []}, "lab": LAB_BUSY})
     s.update(kw)
@@ -178,8 +177,12 @@ s["probe"]["box"]["DISK"] = str(int(50e9))
 P = H.check(s)
 ok("lab 盘不到 15 GB → 紧急；box 盘不到 100 GB → 提醒", P["disk:lab"]["level"] == "urgent" and P["disk:box"]["level"] == "normal")
 s["probe"]["lab"]["GPULOG"] = ts(NOW - timedelta(minutes=30))
-s["probe"]["lab"]["GITOK"] = str(int((NOW - timedelta(hours=3)).timestamp()))
-ok("GPU 记录停了、代码没同步 → 报（只查表里有的机器）", {"gpulog:lab", "git:lab"} <= ids(s) and "git:box" not in ids(s))
+s["code"] = dict(main="a" * 40, heads={"lab": "b" * 40, "dicc": "a" * 40, "gone": "c" * 40})
+P = H.check(s)
+ok("GPU 记录停了 → 报；代码停在别的提交 → 报（持续 2 小时才算），和 main 一样的、表里没有的机器不报",
+   "gpulog:lab" in P and P.get("code:lab", {}).get("after") == 120 and "code:dicc" not in P and "code:gone" not in P)
+s["code"]["heads"]["lab"] = ""
+ok("连不上（提交号空着）→ 不报代码", "code:lab" not in H.check(s))
 
 s = snap(board_pending=["data/rq1_v50.json"])
 s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00 开机：放回队列 3 4"
@@ -206,16 +209,17 @@ ok("还有排着的 → 不报", "idle:lab:gpu1" not in ids(snap()))
 
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
-                            groups={"gpu0": (1, "0", {})}, roles=("train", "autopull"), disk=("/data", 50, 10), gpu_log=False)
+                            groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
 fk = task(3, "gpu0", "Running", "bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470", "t15men_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
          src={"box": {"folds": {}}, "dicc": {"folds": {}}, "fake": {"folds": {}},
               "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
 s["ok"]["fake"] = True
-s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|", "GITOK": "", "GITLOG": ""}
+s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|"}
+s["code"] = dict(main="a" * 40, heads={"fake": "b" * 40})
 P = H.check(s)
 ok("第四台机器：同一折和 lab 两边都在训 → 紧急", P.get(f"dup:{MEN0}", {}).get("level") == "urgent")
-ok("第四台机器：盘、代码同步按表里的字段查", P["disk:fake"]["level"] == "urgent" and "git:fake" in P and "gpulog:fake" not in P)
+ok("第四台机器：盘、代码按表里的字段查", P["disk:fake"]["level"] == "urgent" and "code:fake" in P and "gpulog:fake" not in P)
 s["ok"]["fake"] = False
 ok("第四台机器连不上：报", "down:fake" in ids(s))
 del H.M.MACHINES["fake"]

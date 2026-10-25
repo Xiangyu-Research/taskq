@@ -88,6 +88,7 @@ fi
 declare -A KEY=()         # 训练的 pid → key
 declare -A STARTED=()     # pid → 开始的时刻
 declare -A OUTDIR=()      # pid → 结果文件夹
+declare -A SAFE=()        # pid → key 转成的文件名（spec.py 的 TASK_SAFE）
 declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
@@ -150,7 +151,7 @@ own_fails() {  # OWN_FAILS = FAIL_WINDOW 以内的次数
 quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变化；读不了时输出空
     local p=$1 now log m
     now=$(date +%s)
-    log=$DATA/logs/tasks/${KEY[$p]//\//__}__${W}_seg1.log
+    log=$DATA/logs/tasks/${SAFE[$p]}__${W}_seg1.log
     m=$(timeout 20 stat -c %Y "$log" 2> /dev/null) || return 0
     (( now - m < STALL_MAX )) && { echo $(( now - m )); return 0; }
     [[ -n ${OUTDIR[$p]:-} && -d ${OUTDIR[$p]} ]] || { echo $(( now - m )); return 0; }
@@ -164,11 +165,13 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     eval "local targs=($args)"
     pad_make_room
     TASK_JOBTAG=$W TASK_SEG=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
-    local pid=$! out
+    local pid=$! sh TASK_OUT= TASK_SAFE=
     KEY[$pid]=$key
     STARTED[$pid]=$(date +%s)
-    out=$(eval "$(python3 "$HERE/spec.py" shell "${targs[@]}" 2> /dev/null | grep '^TASK_OUT=')"; echo "${TASK_OUT:-}")
-    OUTDIR[$pid]=$out
+    sh=$(python3 "$HERE/spec.py" shell "${targs[@]}" 2> /dev/null | grep -E '^TASK_(OUT|SAFE)=')
+    eval "$sh"
+    OUTDIR[$pid]=$TASK_OUT
+    SAFE[$pid]=${TASK_SAFE:-${key//\//__}}
     CHANGED=$(date +%s)
     echo "$(ts) 开训 $key（pid $pid：run_task.sh $args）"
 }
@@ -203,7 +206,7 @@ while true; do
             key=${KEY[$p]}; unset "KEY[$p]"
             ran=$(( $(date +%s) - ${STARTED[$p]:-0} ))
             stalled=${STALLED[$p]:-}
-            unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]"
+            unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
             if [[ -n $stalled ]]; then
                 echo "$(ts) 卡住的 $key 已停下，交还（不算失败），本作业不再领它"
                 $TQPY release --worker "$W" "$key"
@@ -228,7 +231,7 @@ while true; do
                 echo "$(ts) ${KEY[$p]} 停了 3 分钟还没停下（多半卡在读写上），不再等它，交还"
                 $TQPY release --worker "$W" "${KEY[$p]}"
                 EXCL+=("${KEY[$p]}")
-                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]"
+                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
             elif (( now - STALLED[$p] >= 60 )); then
                 kill_tree "$p" KILL
             fi

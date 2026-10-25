@@ -636,6 +636,28 @@ A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=fake_q, tq=lambda *a: 
 rec = json.load(open(OSF)).get("infer:t1c_f3", {})
 check("trainer：run 时在 lab gpu1 加，remote.json 记下那边的任务号",
       any(c.startswith("gpu1 -p --label infer:t1c_f3 -- ") for c in calls) and rec.get("train_id") == 19 and isinstance(rec.get("id"), int))
+os.remove(OSF)
+seen = {}
+
+
+def peek_q(host, args):
+    if "--label infer:t1c_f3 " in args:
+        seen["rec"] = json.load(open(OSF)).get("infer:t1c_f3") if os.path.exists(OSF) else None
+    return 31
+
+
+A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=peek_q, tq=lambda *a: (0, ""))
+check("先写记录、后加任务：加任务那一刻 remote.json 里已经有这一条（中间断电时 resume() 按标签在那边找得到）",
+      (seen.get("rec") or {}).get("train_id") == 19 and "id" not in seen["rec"] and json.load(open(OSF))["infer:t1c_f3"]["id"] == 31)
+os.remove(OSF)
+
+
+def bad_q(host, args):
+    raise RuntimeError("ssh 断了")
+
+
+A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=bad_q, tq=lambda *a: (0, ""))
+check("加任务失败：先写的记录撤掉", "infer:t1c_f3" not in json.load(open(OSF)))
 json.dump({"infer:t1c_f3": dict(machine="lab", key=K3, out=f"predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_3",
                                 needs=[], pushed=[], group="gpu1", train_id=19, id=30)}, open(OSF, "w"))
 INF3 = "bash research/RQ1/analysis/run_predict_eval.sh --stage infer x 3"
@@ -797,6 +819,17 @@ with tempfile.TemporaryDirectory() as R:
     check(f"prune：{n} 个实验的命令真跑一次，集成没做完时都报出来、不出错", n and not bad)
     for b in bad[:5]:
         print("   ", b)
+
+# 状态文件写到一半（10/25）：出错时原来的文件不变、不留临时文件
+import common  # noqa: E402
+with tempfile.TemporaryDirectory() as R:
+    f = os.path.join(R, "x.json")
+    common.write_json(f, {"a": 1})
+    try:
+        common.write_json(f, {"a": object()})
+    except TypeError:
+        pass
+    check("write_json：写到一半出错 → 原来的内容还在，没有留下临时文件", json.load(open(f)) == {"a": 1} and os.listdir(R) == ["x.json"])
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
