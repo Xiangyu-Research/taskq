@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """进度汇报（2026-10-16；10/21 起每 2 小时、改成白话）：box 上 cron 每 2 小时（08:30–20:30）在更新登记表和看板之后跑一次
-（scripts/monitor/auto_refresh.sh registry），推送到手机（和健康检查同一个 ntfy 频道）：总进度和上次以来的变化、在训的折和预计训完时间、
+（scripts/monitor/auto_refresh.sh registry），推送到手机（和健康检查同一个 ntfy 频道）：训完的折数和上次以来多了几折、剩余天数、在训的折和预计训完时间、
 上次以来训完的折和出了结果的实验、要处理的问题（说法见 scripts/monitor/plain.py）。
 
     python3 scripts/monitor/report.py            推送
     python3 scripts/monitor/report.py --dry-run  只打印
 读：research/RQ1/实验登记_状态.json、实验登记表.csv（make_registry.py 刚生成的）、scripts/queue/qs --json、
-  ~/.cache/phd-health/state.json（健康检查的当前问题）。上一次的总进度和时间记在 ~/.cache/phd-health/report.json。
+  ~/.cache/phd-health/state.json（健康检查的当前问题）。上一次的训完折数和时间记在 ~/.cache/phd-health/report.json。
 """
 import argparse
 import csv
@@ -43,11 +43,11 @@ def build(now):
     last = json.load(open(LAST)) if os.path.exists(LAST) else {}
     cut = datetime.strptime(last["time"], "%Y-%m-%d %H:%M") if "time" in last else now - timedelta(hours=HOURS)
     span = f"{(now - cut).total_seconds() / 3600:.0f} 小时"
-    p = st["progress"]
-    delta = f"（{span} {100 * (p - last['progress']):+.1f}%）" if "progress" in last else ""
-    lines = [f"总进度 {100 * p:.1f}%{delta}" + (f"，预计 {st['eta'][5:].replace('-', '/')} 全部训完" if st.get("eta") else "")]
+    p = st["folds_done"]
+    delta = f"（{span} +{p - last['folds_done']}）" if "folds_done" in last and p > last["folds_done"] else ""
+    lines = [f"已训完 {p} 折{delta}" + (f"，还剩约 {st['days_left']:.0f} 天" if st.get("days_left") else "")]
 
-    run = [r for r in rows if r["状态"] == "训练中"]
+    run = [r for r in rows if r["状态"] == "训练中" and r["实验"]]  # 临时任务（推理等）不算
     lines.append(f"正在训 {len(run)} 折" + ("：" if run else ""))
     for r in run:
         pct = 100 * int(r["epoch"] or 0) / int(r["num_epochs"] or 1000)
@@ -101,7 +101,7 @@ def main():
         return
     H.push(msg, title=f"PhD 进度 {now:%H:%M}", priority="low", tags="bar_chart")
     os.makedirs(os.path.dirname(LAST), exist_ok=True)
-    json.dump({"progress": p, "time": now.strftime("%Y-%m-%d %H:%M")}, open(LAST, "w"))
+    json.dump({"folds_done": p, "time": now.strftime("%Y-%m-%d %H:%M")}, open(LAST, "w"))
 
 
 if __name__ == "__main__":
