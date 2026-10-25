@@ -406,7 +406,8 @@ check("lab:gpu0：输入齐了 → lab gpu0 组排同样的标签，{data} 换�
       and x[0]["record"][1]["machine"] == "lab" and x[0]["record"][1]["group"] == "gpu0" and x[0]["record"][1]["out"] == SWO)
 rinf = (7, "Running", x[0]["cmd"], "infer:swin_v2_f0", "gpu0")
 todo, stuck = A.plan(osnap(lab=[rinf]))
-check("lab:gpu0：那边在跑（remote.json 里没记上也认得）→ 等，box 上也不排", not sw(todo) and not stuck)
+check("lab:gpu0：那边在跑、remote.json 里没记上 → 不另排，报出来（做完不会自动拉回）", not sw(todo)
+      and "没有记录" in stuck.get("advance:remote:infer:swin_v2_f0", ""))
 os.makedirs(A.STATE_DIR, exist_ok=True)
 REC = dict(machine="lab", group="gpu0", key=SW, out=SWO, needs=NEEDS, pushed=[NEEDS[2], NEEDS[0]], id=7)
 json.dump({"infer:swin_v2_f0": REC}, open(RJ, "w"))
@@ -644,6 +645,11 @@ trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "3")
 LIVE3 = [(19, "Success", TR3, "train:x", "gpu1"), (30, "Running", INF3, "infer:t1c_f3", "gpu1")]
 todo, stuck = A.plan(lsnap(LIVE3, FIN))
 check("trainer：lab 训完、box 拉回了、那边在推理 → 不归档、不进任务队列", steps(t3(todo)) == [])
+os.rename(OSF, OSF + ".x")
+todo, stuck = A.plan(lsnap(LIVE3, FIN))
+check("trainer：remote.json 没记上、那边在推理 → 也不归档（归档会删那边的模型），报出来",
+      steps(t3(todo)) == [] and "没有记录" in stuck.get("advance:remote:infer:t1c_f3", ""))
+os.rename(OSF + ".x", OSF)
 todo, stuck = A.plan(lsnap([LIVE3[0], (30, "Success", INF3, "infer:t1c_f3", "gpu1")], FIN))
 x = t3(todo)
 check("trainer：那边做完 → 归档、拉回（box wait 组 pull:<标签>）", steps(x) == [("archive", K3), ("pull", K3)]

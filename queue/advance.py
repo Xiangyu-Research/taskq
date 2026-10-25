@@ -242,6 +242,15 @@ def plan(s, root=None):
                                                            f"不用了：pueue kill {i} 后 pueue remove {i}")
 
     rem = Remote(s, root, ptasks, todo, stuck)
+    remote_live = {}  # 别的 pueue 机器上活着的步骤（按标签认）→ (机器, 任务号)：不管 remote.json 记没记，都算在做、在用这一折
+    for h, d in s["pueue"].items():
+        if h == hub:
+            continue
+        for x in (d or {}).get("tasks") or []:
+            hit = by_label.get(x.get("label") or "")
+            if hit and x["status"] in LIVE_ST:
+                remote_live[hit] = (h, x["id"])
+    remote_busy = {k for _, k in remote_live}
     qkeys = {t["key"] for t in queue_tasks}
     moving = {x.get("label") for x in ptasks if x["status"] in LIVE_ST and (x.get("label") or "").startswith(("pull:", "push:"))}
 
@@ -316,6 +325,11 @@ def plan(s, root=None):
             return
         if label in rem.state and rem.resume(t, st, label, n, archiving):
             return
+        if sk in remote_live:
+            h, i = remote_live[sk]
+            stuck[f"advance:remote:{label}"] = (f"{label}：{h} 任务 {i} 在做，但 ~/.cache/phd/advance/remote.json 里没有记录，做完不会"
+                                                f"自动拉回（补上记录，或者等它做完、在 {h} 上 pueue remove {i} 后重排）")
+            return
         if sk in done:  # box 上做过：失败的、成功了结果还不对的报出来
             want(st["name"], key, label, cmd, st["group"], n)
             return
@@ -353,7 +367,7 @@ def plan(s, root=None):
             st = after[0] if after else None
             tg = next((x for x in targets(st["name"], st["group"]) if x["kind"] == "trainer"), None) if st else None
             label = f"{st['name']}:{t['lab']}" if st else None
-            if tg and (st["name"], key) not in live and not st["done"].ok(root, t["names"]) and (not tg["hours"] or in_hours(tg["hours"])):
+            if tg and (st["name"], key) not in live and (st["name"], key) not in remote_live and not st["done"].ok(root, t["names"]) and (not tg["hours"] or in_hours(tg["hours"])):
                 if not (label in rem.state and rem.resume(t, st, label, n, archiving)):
                     r = rem.trainer(t, st, label, n, archiving, src)
                     if r is not True and any(key in (src.get(h) or {}) for h in TRAINERS):
@@ -374,7 +388,7 @@ def plan(s, root=None):
                 if not busy:
                     place(t, st, label, n, archiving, bool(archive_due), True)
                 blocked = True
-        if key not in rem.busy:  # 那边在用这一折（归档会删那边的 checkpoint）时先不归档
+        if key not in rem.busy and key not in remote_busy:  # 那边在用这一折（归档会删那边的 checkpoint）时先不归档
             for h in archive_due:
                 want("archive", key, f"archive:{t['lab']}", f"bash scripts/queue/archive_task.sh {h} {key}", "wait", n)
 
@@ -543,8 +557,6 @@ class Remote:
         rts = self.rtasks(name)
         if rts is None:
             return f"读不到 {name} 的 pueue"
-        if any(x["status"] in LIVE_ST for x in self.by_label(rts, label)):  # 那边已经有（remote.json 没记上）
-            return True
         if idle and not self.idle(name, group):
             return f"{name} {group} 组不空"
         if archiving:  # 训练机上的同一折还在归档（会删那边的存档），归档完再说
