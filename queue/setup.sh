@@ -38,11 +38,7 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
     fi
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
-uncron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; } | crontab -; }
-uncron scripts/queue/gpu0_gate.sh  # 10/16 去掉；10/19 起由 shift_gate.py 取代
-uncron scripts/sync/lab_git_pull.sh  # 10/16 改名为 git_pull_cron.sh
 cron "bash $HOME/PhD/scripts/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
-uncron scripts/queue/shift_gate.py  # 10/19 的夜班开关，10/22 去掉
 roles=" $($M get . roles) "
 if [[ $roles == *" autopull "* ]]; then
     cron "bash $HOME/PhD/scripts/sync/git_pull_cron.sh >> $HOME/git_pull.log 2>&1" "*/30 * * * *"

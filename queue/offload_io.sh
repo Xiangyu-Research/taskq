@@ -1,5 +1,5 @@
 #!/bin/bash
-# 分到别的机器的步骤（scripts/queue/advance.py 的 OFFLOAD，2026-10-22）的传输，在 box 上跑（advance.py 放进 wait 组）：
+# box 和别的机器之间传一步的输入、结果（2026-10-22）：advance.py 按 envs/policy.py 的 PLACE 把步骤放到别处时用，在 box 的 wait 组跑：
 #   offload_io.sh push <机器> <相对数据目录的路径>...   box → 那边：文件夹经隧道（scripts/sync/tunnel_push.sh），文件用 rsync over ssh
 #   offload_io.sh pull <机器> <相对数据目录的文件夹>     那边 → box：rsync，再按校验和核对一遍，不一致就以非 0 退出
 # 只新增 / 更新，不删任何一边的文件。

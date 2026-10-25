@@ -63,11 +63,8 @@ SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y'; echo '=====';"
                " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
 
 
-WORKER_JOBS = ("rq1_", "train_worker")  # DICC 上训练作业的名字：10/18 前交的按折作业 rq1_*，不带折的 worker.sbatch
-
-
 def is_worker_job(name):
-    return name.startswith(WORKER_JOBS)
+    return name.startswith("train_worker")  # scripts/queue/worker.sbatch
 
 
 def data_candidates(queue=()):
@@ -108,16 +105,6 @@ def run_on(m, script, timeout=120):
 
 
 # ---------------- 收集 ----------------
-def job_keys():
-    """10/18 前交的按折 Slurm 作业名 rq1_<实验 id>_f<fold>（fold all 是 rq1_<实验 id>）→ key，按实验表。"""
-    out = {}
-    for key, t in E.tasks().items():
-        f = t.get("fold")
-        if f is not None:
-            out[f"rq1_{t['exp']}_f{f}" if f != "all" else f"rq1_{t['exp']}"] = key
-    return out
-
-
 def minutes(elapsed):
     """squeue 的 %M（[D-]HH:MM:SS 或 MM:SS）→ 分钟。"""
     d, _, hms = elapsed.rpartition("-")
@@ -211,7 +198,6 @@ def check(s):
         if not s["ok"].get(name):
             add(f"down:{name}", f"{L(name)} 连不上（ssh {m['ssh']}）", after=60 if m["scheduler"] == "slurm" else 30)
     # --- Slurm ---
-    jk = job_keys()
     for name, d in s["slurm"].items():
         tq = s.get("taskq", {}).get(name)
         if tq and tq["enabled"]:
@@ -236,16 +222,7 @@ def check(s):
                 add(f"tqpause:{name}", f"{L(name)} 任务队列 3 小时内失败 {tq.get('recent_failures')} 次，暂停领任务，"
                     "作业空等 40 分钟就结束，排队的作业会一个个用掉（看 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
             # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
-            def mins(el):
-                d_, _, hms = el.rpartition("-")
-                p_ = [int(x) for x in hms.split(":")]
-                while len(p_) < 3:
-                    p_.insert(0, 0)
-                return (int(d_ or 0) * 24 + p_[0]) * 60 + p_[1]
-            # 按原来的做法训自己那一折的作业（开关打开前就开始的）不算空着：它名下那一折正在训
-            training = {t["key"] for t in tq["tasks"] if t["state"] in ("claimed", "busy") and t.get("worker") not in pueue_workers}
-            run = [r for r in d["squeue"] if is_worker_job(r[0]) and r[2] == "RUNNING" and mins(r[3]) >= 30
-                   and jk.get(r[0]) not in training]
+            run = [r for r in d["squeue"] if is_worker_job(r[0]) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
             workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed" and t.get("worker") not in pueue_workers}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
@@ -254,26 +231,12 @@ def check(s):
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
             if left and not any(is_worker_job(r[0]) for r in d["squeue"]):
                 add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
-                    "（box 上补作业的开关 ~/.cache/phd/taskq/DICC 没开？看 ~/refill.log）", after=60)
+                    "（envs/policy.py 的 AUTO[\"dicc\"] 关着？看 ~/refill.log）", after=60)
             for jid, jname, st, end, code in d["sacct"]:
                 add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
             continue
         if name in s.get("taskq", {}) and tq is None:
             add(f"taskq:{name}", f"{L(name)} 读不到任务队列（~/.cache/phd/taskq/）")
-        for jname, jid, st, el, why, *_ in d["squeue"]:
-            key = jk.get(jname)
-            if not key:
-                continue
-            claim(key, name, f"{jid}（{st}）")
-            info = fold_info(s, key).get(name)
-            if st == "RUNNING":
-                busy.setdefault(key, set()).add(name)
-                last = info[2] if info else None
-                if minutes(el) > 60 and (not last or now - last > timedelta(minutes=90)):
-                    add(f"stuck:{name}:{jid}", f"{L(name)} {jid}（{key}）开始 {minutes(el) / 60:.1f} 小时，"
-                        f"{'训练日志 90 分钟没有新 epoch' if last else '还没有训练日志'}")
-            elif st == "PENDING" and info and info[1] > 0 and not info[0]:
-                busy.setdefault(key, set()).add(name)
         for jid, jname, st, end, code in d["sacct"]:
             add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
 

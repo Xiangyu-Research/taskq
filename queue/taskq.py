@@ -35,7 +35,6 @@ box 上（本机没有队列时自动经 ssh 在 DICC 上跑）：
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态
     taskq.py take --worker lab --ttl 86400 <key>        领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
-    taskq.py drop <key>...                              拿掉没人领（free）的任务（box 把排着的推理挪到 lab 做）：都拿掉了 0，否则 10
     taskq.py status                   打印队列
 """
 import argparse
@@ -403,33 +402,6 @@ def cmd_take(a):
 
 
 # ---------------- 加、改 ----------------
-def cmd_drop(a):
-    """从队列里拿掉没人领的任务（2026-10-24：box 把排着的推理挪到 lab 0 号卡做）：只拿掉 free 的，其余不动 → 都拿掉了 0，否则 NOTHING。"""
-    root = data_root()
-    err = root_error(root)
-    if err:
-        print(err)
-        return NOTHING
-    with Lock():
-        tasks = read_tasks()
-        keep, gone = [], []
-        for t in tasks:
-            if t["key"] in a.keys:
-                st, note = state(t, root)
-                if st == "free":
-                    gone.append(t["key"])
-                    continue
-                print(f"{t['key']}：{st} {note}，不拿掉")
-            keep.append(t)
-        if gone:
-            write_tasks(keep)
-    for k in gone:
-        print(f"拿掉：{k}")
-    for k in sorted(set(a.keys) - {t["key"] for t in tasks}):
-        print(f"队列里没有：{k}")
-    return 0 if len(gone) == len(set(a.keys)) else NOTHING
-
-
 def _insert(new, nice):
     """把新任务（dict(key, exp, recipe, params)）加进队列，已有的跳过。先解析一遍，写错参数的不加。"""
     import experiments as E
@@ -626,7 +598,7 @@ def main(argv):
     if argv[:1] == ["--json-status"]:
         print(json.dumps(local_status(), ensure_ascii=False))
         return 0
-    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show", "drop") and not have_queue():
+    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show") and not have_queue():
         # box 上：本机没有队列，转到 DICC 上那份去改（不在 box 上另建一份）
         import machines as M
         host = next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
@@ -670,8 +642,6 @@ def main(argv):
     p = sub.add_parser("set-nice")
     p.add_argument("--nice", type=int, required=True)
     p.add_argument("keys", nargs="+")
-    p = sub.add_parser("drop")
-    p.add_argument("keys", nargs="+")
     p = sub.add_parser("show")
     p.add_argument("--json", action="store_true")
     p.add_argument("key")
@@ -679,7 +649,7 @@ def main(argv):
     p.add_argument("--host", default="dicc")
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
-                set_nice=cmd_set_nice, show=cmd_show, status=cmd_status, drop=cmd_drop)[a.cmd.replace("-", "_")](a)
+                set_nice=cmd_set_nice, show=cmd_show, status=cmd_status)[a.cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

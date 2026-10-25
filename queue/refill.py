@@ -13,7 +13,7 @@
      - 传数据出错 → 领取保留、报出来（数据可能只传了一半，不开始训）。
      这台机器、box 或任何一台训练机连不上时什么都不动（领取 24 小时内有效，过期后 DICC 才能领）。
   2. 卡空了（有卡的组里没有活着的训练任务、也没有领着没训完的折）就给这个组领下一折（10/19 起每个有卡的组各领各的；
-     组停着、或者是 machines.py 的 manual 组时不领）：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
+     组停着、或者是 envs/policy.py 的 MANUAL 组时不领）：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
      取第一个。训练没开始就失败、又没有进度（多半是这台机器放不下这个模型）时用 release --skip 交还：记在 skips/，
      这台机器以后不再领它，不算队列的失败，不用事先按模型分类。24 小时内这样跳过 2 个就先不领、报出来（多半是环境坏了）。
      taskq.py take 成功后：任务说明里的 data（scripts/queue/spec.py）这台机器上都有，就直接在 pueue 的训练组里加
@@ -27,17 +27,17 @@
   自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json，按"还要不要用"和空间预算管（cleanup()，2026-10-24）：
   队列里没有这台机器能领的任务要用了就删；还有任务要用的留着，盘剩的低于软线（硬线 × SOFT）时从最晚用到的删起；
   提前传之前先这样腾地方，腾不出来就不传。领着的、在训的、正在传的、拉回归档在用的、预测下一折要用的、Dataset101 不删。
-开关：box 上 ~/.cache/phd/taskq/LAB 不存在时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
+开关：envs/policy.py 的 AUTO["lab"] 是 False 时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
 DICC 上的 taskq.py 是 10/18 之前的旧版时什么都不做。跳过记录（skips/<key>）要撤销，删掉那个文件。
 
-DICC 补作业：每个 QOS（表里 qos 字段：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
+DICC 补作业：每个 QOS（envs/policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
 没设时按 SUBMIT_CAP）减去留给别的作业的名额、任务队列里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（每个空位交一个
 普通作业，不用数组：10/21 起 DICC 的使用率检查会在数组作业开始约 65 分钟后把它取消；同时跑几个由 QOS 的 GPU 上限管）。
 空出一个补一个，作业的排队时间分从交上去开始累积。只看要卡的任务（任务说明的 device=gpu）。
-纯 CPU 的任务（device=cpu，如评测，2026-10-24）：表里有 cpu_worker 的机器，队列里有没人领的这类任务、我们的 CPU worker 作业
+纯 CPU 的任务（device=cpu，如评测，2026-10-24）：SLURM[机器] 里有 cpu 的机器，队列里有没人领的这类任务、我们的 CPU worker 作业
 （排着和在跑的）不到 min(这类任务数, 最多几个) 时交 scripts/queue/cpu_worker.sbatch；作业领不到任务就结束，不在节点上空等。
-开关：box 上 ~/.cache/phd/taskq/DICC，不存在时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
+开关：envs/policy.py 的 AUTO["dicc"]，False 时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
     python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
 """
@@ -55,6 +55,7 @@ sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
 sys.path.insert(0, HERE)
 import machines as M  # noqa: E402
+import policy as P  # noqa: E402
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
@@ -66,8 +67,6 @@ KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron �
 PRETAKE_S = 3600  # 组里在训的这一折预计这么多秒内训完时，提前领下一折、排在它后面（两次检查的间隔，保证训完前会检查一次）
 SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，就先停止替这台机器领（多半是环境坏了）
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
-SWITCH = os.path.expanduser("~/.cache/phd/taskq/LAB")
-DICC_SWITCH = os.path.expanduser("~/.cache/phd/taskq/DICC")
 SUBMIT_CAP = 10  # QOS 没设排队上限时，每个 QOS 最多排这么多段
 LOG = os.path.expanduser("~/refill.log")
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
@@ -79,12 +78,13 @@ def queue_host():
     return next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
 
 
-def gpu_groups(m):
-    return [g for g, (_, gpu, _) in m["groups"].items() if gpu is not None and g not in (m.get("manual") or ())]
+def gpu_groups(name):
+    """这台机器上有卡、不是只跑手动任务的 pueue 组。"""
+    return [g for g, (_, gpu, _) in M.MACHINES[name]["groups"].items() if gpu is not None and g not in M.manual_groups(name)]
 
 
-def gpu_group(m):
-    return gpu_groups(m)[0]
+def gpu_group(name):
+    return gpu_groups(name)[0]
 
 
 def open_group(s, name, g):
@@ -195,7 +195,7 @@ def plan(s, name):
         since = datetime.fromtimestamp(t["since"] - 60) if t.get("since") else datetime.min
         tt = {key: [(i, st) for i, st, beg in tt_all.get(key, []) if beg is None or beg >= since]}
         live = [st for _, st, _ in tt_all.get(key, []) if st in LIVE]  # 活着的任务不看开始时间（恢复的旧任务也算）
-        g = tgroup.get(key) or slot.get(key) or gpu_group(m)
+        g = tgroup.get(key) or slot.get(key) or gpu_group(name)
         n_act = len(acts)
         if t["state"] == "done":
             acts.append(dict(op="release", key=key, why="训完了，DICC 上有了存档"))
@@ -233,7 +233,7 @@ def plan(s, name):
             held_g.add(g)
     busy = [k for k, ts in tt_all.items() if any(st in LIVE for _, st, _ in ts)]
     busy_g = {tgroup.get(k) for k in busy}
-    free_g = [g for g in gpu_groups(m) if g not in busy_g and g not in held_g and open_group(s, name, g)]
+    free_g = [g for g in gpu_groups(name) if g not in busy_g and g not in held_g and open_group(s, name, g)]
     pr = s["probe"].get(name, {})
     free = int(pr["DISK"]) / 1e9 if pr.get("DISK", "").isdigit() else None
     hard = (m["disk"][1] if m["disk"] else 0) + TRAIN_OUT_GB
@@ -306,7 +306,7 @@ def ahead(s, name, tq, cands, ready, free, hard, tt_all, tgroup, sync, sync_bad,
     moving = bool(sync) or any(a["op"] == "transfer" for a in acts)
     m = M.MACHINES[name]
     now = s.get("now") or datetime.now()
-    for g in gpu_groups(m):
+    for g in gpu_groups(name):
         if not open_group(s, name, g):
             continue
         live = [(t, task_key(t["command"])[1]) for t in (s["pueue"].get(name) or {}).get("tasks", [])
@@ -366,7 +366,7 @@ def q(name, args, run=sh):
 
 
 def start(name, key, run=sh, tq=None, group=None):
-    g = group or gpu_group(M.MACHINES[name])
+    g = group or gpu_group(name)
     return q(name, f"{g} -p --label train:{key} -- {shlex.quote(run_cmd(info(tq, key)))}", run)
 
 
@@ -416,7 +416,7 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
                     set_slot(name, k, None)
                 msgs.append(f"{L} 交还 {k}：{a['why']}" if r and r[0] == 0 else f"{L} 交还 {k} 出错：{(r or ['', 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "start":
-                msgs.append(f"{L} 开始训 {k}（{a.get('group') or gpu_group(M.MACHINES[name])} 组，任务 {start(name, k, run, tq, a.get('group'))}）")
+                msgs.append(f"{L} 开始训 {k}（{a.get('group') or gpu_group(name)} 组，任务 {start(name, k, run, tq, a.get('group'))}）")
                 ok.add(k)
             elif a["op"] == "transfer":
                 msgs.append(f"{L} 领的 {k} 要先传 {' '.join(a['paths'])}（box 任务 {transfer(name, a['paths'], run)}）")
@@ -439,7 +439,7 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
                     msgs.append(f"{L} 提前领了 {k}（档位 {a['nice']}），排在快训完的 {a['after']} 后面（{a['group']} 组，"
                                 f"任务 {start(name, k, run, tq, a['group'])}）")
                 else:
-                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（{a.get('group') or gpu_group(M.MACHINES[name])} 组，"
+                    msgs.append(f"{L} 领了 {k}（档位 {a['nice']}），开始训（{a.get('group') or gpu_group(name)} 组，"
                                 f"任务 {start(name, k, run, tq, a.get('group'))}）")
         except Exception as e:  # noqa: BLE001
             msgs.append(f"{L} {a['op']} {k} 出错：{e}")
@@ -568,11 +568,11 @@ def run_all(s, dry=False):
     """health.py 调用：→ (事件说明列表, 卡住的 {问题编号: 说明}, 这次领了任务的机器)。"""
     events, stuck, filled = [], {}, set()
     for name in M.names("slurm"):
-        if "train" in M.MACHINES[name]["roles"] and M.MACHINES[name].get("qos"):
+        if "train" in M.MACHINES[name]["roles"] and P.SLURM.get(name):
             ev, st = topup(s, name, dry=dry)
             events += ev
             stuck.update(st)
-    live = os.path.exists(SWITCH) and not dry
+    live = bool(P.AUTO.get("lab")) and not dry
     for name in M.names("pueue"):
         if "train" not in M.MACHINES[name]["roles"]:
             continue
@@ -662,10 +662,10 @@ def cpu_plan(tq, have, conf, free=None):
 def topup(s, name, dry=False, run=None):
     """→ (dry 时的说明, 出错的 {问题编号: 说明})。交上去的作业只记日志、不推送。"""
     run = run or sh
-    m, tq = M.MACHINES[name], s.get("taskq", {}).get(name)
+    m, tq, conf = M.MACHINES[name], s.get("taskq", {}).get(name), P.SLURM[name]
     if not s["ok"].get(name) or not tq:
         return [], {}
-    rc, out = run(topup_probe(m["qos"], (m.get("cpu_worker") or ("normal",))[0]), m["ssh"])
+    rc, out = run(topup_probe(conf["gpu"], (conf.get("cpu") or ("normal",))[0]), m["ssh"])
     if rc:
         return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
     counts, ncpu, free = {}, None, None
@@ -677,15 +677,15 @@ def topup(s, name, dry=False, run=None):
             ncpu = int(p[1])
         elif len(p) == 3 and p[0] == "ALL" and p[2].isdigit():
             free = max(0, (int(p[1]) if p[1].isdigit() else SUBMIT_CAP) - int(p[2]))
-    subs, why = topup_plan(tq, counts, m["qos"])
-    if m.get("cpu_worker"):
-        csub, cwhy = cpu_plan(tq, ncpu, m["cpu_worker"], free)
+    subs, why = topup_plan(tq, counts, conf["gpu"])
+    if conf.get("cpu"):
+        csub, cwhy = cpu_plan(tq, ncpu, conf["cpu"], free)
         subs += csub
         why = why if csub else f"{why}；CPU：{cwhy}"
     desc = "；".join(f"交 {'CPU worker ' if f == CPU_FILE else ''}{q} {n} 段" for q, _, n, f in subs) or f"不交（{why}）"
     if dry:
         return [f"{name}：会 {desc}" if subs else f"{name}：{desc}"], {}
-    if not os.path.exists(DICC_SWITCH):
+    if not P.AUTO.get("dicc"):
         if subs:
             shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
         return [], {}

@@ -14,7 +14,10 @@ import refill as R  # noqa: E402
 
 fails = 0
 D = tempfile.mkdtemp()
-R.LOG, R.STATE, R.SWITCH, R.DICC_SWITCH = f"{D}/refill.log", f"{D}/refill.json", f"{D}/LAB", f"{D}/DICC"
+R.LOG, R.STATE = f"{D}/refill.log", f"{D}/refill.json"
+# 测试用固定的配置，不跟着 envs/policy.py 变
+R.P.AUTO = dict(advance=False, lab=False, dicc=False)
+R.P.MANUAL = {"lab": ["gpu0"]}
 R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")  # run_all 里补作业那一步
 GB = {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0, "stuff": 1.0}
 R.data_gb = lambda paths: sum(GB.get(R.tag(p), 10.0) for p in paths)
@@ -208,7 +211,7 @@ R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("续：一次 beat 带上所有在训的折", rem == [f"beat --worker lab {K_UM}"] and [c for c in cmds if "sync_lab_" not in c[1]] == [])
 ok("没有 Slurm 作业取消、没有 box 下游任务", not any("scancel" in c or "fetch_task" in c for _, c in cmds))
 
-# ---------------- 只跑手动任务的组（10/22：lab 0 号卡，machines.py 的 manual） ----------------
+# ---------------- 只跑手动任务的组（10/22：lab 0 号卡，policy.py 的 MANUAL） ----------------
 G2 = {"gpu1": "Running", "gpu0": "Running", "cpu": "Running", "wait": "Running"}
 acts, _, _ = R.plan(snap(groups=G2), "lab")
 ok("两个组都开着、都空：只给 gpu1 领，gpu0 不领", [(a["op"], a["key"], a["group"]) for a in acts] == [("take", K_UM, "gpu1")])
@@ -398,8 +401,7 @@ ok("最多 3 个、只剩 1 个提交名额：交 1 个", R.cpu_plan(cq, 0, ("no
 ok("提交名额用完：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 0) == ([], "提交名额用完了"))
 ok("读不到剩几个名额：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), None)[0] == [])
 
-# 补交的测试用固定的配置，不跟着 envs/machines.py 里的名额变
-R.M.MACHINES["dicc"] = dict(R.M.MACHINES["dicc"], qos={"long": ("3-00:00:00", 2)}, cpu_worker=("normal", "08:00:00", 1))
+R.P.SLURM = {"dicc": dict(gpu={"long": ("3-00:00:00", 2)}, cpu=("normal", "08:00:00", 1))}
 sub = []
 
 
@@ -413,13 +415,12 @@ def topup_run(probe_out, sbatch_rc=0):
 
 
 PROBE = "QOS|long|10|7\nQOS|normal|10|10\n"
-if os.path.exists(R.DICC_SWITCH):
-    os.remove(R.DICC_SWITCH)
+R.P.AUTO["dicc"] = False
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关（DICC）没开：只记'会交什么'，不交", not sub and ev == [] and "会：交 long 1 段" in open(R.LOG).read())
 ev, st = R.topup(snap(), "dicc", dry=True, run=topup_run(PROBE))
 ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交 long 1 段"])
-open(R.DICC_SWITCH, "w").close()
+R.P.AUTO["dicc"] = True
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关开着：交 worker.sbatch（long，1 个普通作业，不用数组），记日志、不推送",
    sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=3-00:00:00 worker.sbatch")]
@@ -464,7 +465,7 @@ ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5\nCPU|1\
 ok("已经有 CPU worker 排着：不再交", not sub and not st)
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|8\nCPU|0\nALL|10|10\n"))
 ok("所有作业已占满 10 个提交名额：不交 CPU worker、不报错", not sub and not st)
-os.remove(R.DICC_SWITCH)
+R.P.AUTO["dicc"] = False
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

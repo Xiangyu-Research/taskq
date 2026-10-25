@@ -82,14 +82,7 @@ ok("24 小时前的失败不再报", not any(p.startswith("pueue:box:3:") for p 
 ok("手动停的（143）只记不推", [p["level"] for k, p in P.items() if k.startswith("pueue:box:4:")] == ["info"])
 ok("训满 N 个 epoch 停的（75）不报", not any(k.startswith("pueue:lab") for k in P))
 
-s = snap(slurm=sq(["rq1_t3met_f2", "486189_1", "RUNNING", "3:00:00", "None"]),
-         src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
-ok("DICC 在跑但 90 分钟没有新 epoch → 卡住", "stuck:dicc:486189_1" in ids(s))
-s["slurm"]["dicc"]["squeue"][0][3] = "40:00"
-ok("刚开始不到 1 小时的不算卡住", "stuck:dicc:486189_1" not in ids(s))
-s = snap(slurm=sq(["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"]),
-         src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(end=NOW - timedelta(hours=2))}}})
-s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "rq1_t14met_f0", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
+s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "train_worker", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
 ok("DICC 作业失败", "dicc:486300_1" in ids(s))
 
 lab_train = task(7, "gpu1", "Running", "bash scripts/queue/train_task.sh 111 0 nnUNetTrainer_save10_n470", "t15men_f0")
@@ -102,22 +95,12 @@ ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 fetch = task(9, "wait", "Running", f"bash scripts/queue/fetch_task.sh dicc {MET2}", "fetch_t3met_f2")
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}})
 ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
-s["slurm"] = sq(["rq1_t3met_f2", "486189_2", "PENDING", "0:00", "Priority"])
-ok("在等的折在 DICC 排着 → 不报", f"orphan:{MET2}" not in ids(s))
 s["slurm"], s["ok"]["dicc"] = {}, False
 ok("DICC 连不上时不判断是否在排队", f"orphan:{MET2}" not in ids(s) and "down:dicc" in ids(s))
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}},
          src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
 ok("训完 90 分钟还没拉回 → 报", f"fetch:{MET2}" in ids(s))
 
-s = snap(slurm=sq(["rq1_t15men_f0", "486202_1", "PENDING", "0:00", "Priority"]),
-         pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
-         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
-P = H.check(s)
-ok("同一折 DICC 排队 + lab 在训 → 报（不紧急）", P.get(f"dup:{MEN0}", {}).get("level") == "normal")
-s["slurm"]["dicc"]["squeue"][0][2:4] = ["RUNNING", "2:00:00"]
-s["src"]["dicc"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
-ok("同一折两边都在训 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
 
 # ---------------- DICC 任务队列（10/17）+ lab 领的折（10/18）----------------
 def tqrow(key, state, worker=None, since=None, log_age=None, kind="nnunet", task_log_age=None, out_age=None):
@@ -134,7 +117,7 @@ H.time.time = lambda: NOW.timestamp()
 P = H.check(s)
 ok("lab 领的折在 lab 上训：不算同一折两处，也不按 DICC 的日志判断卡住", f"dup:{MEN0}" not in P and f"stuck:dicc:{MEN0}" not in P)
 s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
-s["slurm"] = sq(["rq1_t3met_f2", "486191_2", "RUNNING", "3:00:00", "None", "0"])
+s["slurm"] = sq(["train_worker", "486191_2", "RUNNING", "3:00:00", "None", "0"])
 ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
 INF = "infer/Dataset103_GLIrq1_t1c/x/fold_2"
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=120)]
@@ -148,8 +131,8 @@ s["pueue"]["lab"]["tasks"] = []
 ok("在跑的 DICC 作业没领到任务：lab 领的不算 DICC 作业", "tqidle:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None, since=old)]
 s["slurm"] = sq()
-ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "taskq/DICC" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
-s["slurm"] = sq(["rq1_swin_v2_f0", "486300_1", "PENDING", "0:00", "Priority", "2000"])
+ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "AUTO" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
+s["slurm"] = sq(["train_worker", "486300_1", "PENDING", "0:00", "Priority", "2000"])
 ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
 s["slurm"] = sq(["train_worker", "487000_1", "PENDING", "0:00", "Priority", "0"])
 ok("排着不带折的 train_worker 作业也算：不提醒", "tqorphan:dicc" not in H.check(s))

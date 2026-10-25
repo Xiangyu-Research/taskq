@@ -215,13 +215,6 @@ os.makedirs(os.path.join(d, "validation"), exist_ok=True)
 open(os.path.join(d, "validation", "summary.json"), "w").write("{}")
 rc, out = tq2("take", "--worker", "lab", "Dataset116_METrq1/nnUNetTrainer_save10/4")
 check("take 已训完的：领不到", rc == 10 and "done" in out)
-rc, out = tq2("add", "--nice", "5", "Dataset116_METrq1/nnUNetTrainer_save10/3")
-rc, out = tq2("drop", "Dataset116_METrq1/nnUNetTrainer_save10/3")
-keys2 = [t["key"] for t in taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))]
-check("drop：没人领的拿掉", rc == 0 and "Dataset116_METrq1/nnUNetTrainer_save10/3" not in keys2 and "拿掉" in out)
-rc, out = tq2("drop", UM, "Dataset116_METrq1/nnUNetTrainer_save10/4")
-keys2 = [t["key"] for t in taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))]
-check("drop：领着的、做完的不拿掉（退出码 10）", rc == 10 and UM in keys2 and "Dataset116_METrq1/nnUNetTrainer_save10/4" in keys2)
 rc, out = tq2("next", "--worker", "502", "--envs", ALL)
 check("kind any：什么种类都领（领到 SwinUNETR）", rc == 0 and out.startswith("Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"))
 s2 = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV2, capture_output=True, text=True).stdout)

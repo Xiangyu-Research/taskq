@@ -7,7 +7,6 @@
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
   spec.py lookup <key>               按 key 找任务（先查实验表 research/*/experiments.py，再查训练队列），打印说明（JSON）
-  spec.py field <key> <字段>         说明里的一个字段（列表每行一个）
 k=v 的值以 [ 或 { 开头时按 JSON 读（如 done='["a","b|c"]'），其他都是字符串。
 """
 import fnmatch
@@ -321,7 +320,7 @@ def main(argv):
     try:
         if cmd in ("resolve", "shell", "done"):
             s = resolve(args[0], parse_kv(args[1:]))
-        elif cmd in ("lookup", "field"):
+        elif cmd == "lookup":
             s = lookup(args[0])
             if s is None:
                 print(f"实验表和训练队列里都没有 {args[0]}", file=sys.stderr)
@@ -339,9 +338,6 @@ def main(argv):
         data = M.expand(M.MACHINES[me]["data"]) if me else ""
     if cmd in ("resolve", "lookup"):
         print(json.dumps(s, ensure_ascii=False, indent=1))
-    elif cmd == "field":
-        v = s.get(args[1]) if args[1] != "out_abs" else os.path.join(data, s["out"])
-        print("\n".join(map(str, v)) if isinstance(v, list) else json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v if v is not None else "")
     elif cmd == "shell":
         print(shell_lines(s, data))
     elif cmd == "done":
