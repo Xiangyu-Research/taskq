@@ -26,14 +26,12 @@ DICC 上（worker 调用）：
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
-box 上（本机没有队列时自动经 ssh 在 DICC 上跑）：
+box 上（不是队列所在的机器（envs/machines.py 里用 Slurm、能训练的那台）时自动经 ssh 在那边跑）：
     taskq.py add [--nice <档位>] --exp <实验 id> [--folds 0 1 …]   从实验表加（已有的跳过；不给 --nice 用表里的档位）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
-    taskq.py add --nice <档位> <key>...                             按 key 加：实验表里有的照表，没有的按 nnunet 做法
-                                                                    （key = 数据集/训练器/fold）
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
-    taskq.py show [--json] <key>      任务的完整说明和状态
+    taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
     taskq.py take --worker lab --ttl 604800 <key>       领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
     taskq.py status                   打印队列
 """
@@ -323,9 +321,7 @@ def _claim(a, pick):
 
 def cmd_next(a):
     envs = set(e for e in a.envs.split(",") if e)
-
-    import machines as M
-    me = os.environ.get("TASKQ_MACHINE") or M.whoami()
+    me = here()
 
     def pick(t):
         s = spec_of(t)
@@ -498,7 +494,7 @@ def cmd_show(a):
         if s is None:
             print(t.get("bad"), file=sys.stderr)
             return 2
-        print(json.dumps(s, ensure_ascii=False))
+        S.json_out(s)
         return 0
     st, note = state(t, data_root())
     print(f"{t['key']}：档位 {t['nice']}，{st} {note}；实验 {t.get('exp') or '（不在实验表里）'}")
@@ -554,16 +550,12 @@ def remote_status(host):
     r = remote(host, "--json-status", timeout=180)
     if r is None:
         return None
-    rc, out = r
-    i = out.find("{")
-    try:
-        return json.loads(out[i:]) if rc == 0 and i >= 0 else None
-    except ValueError:
-        return None
+    rc, out, _ = r
+    return S.json_in(out, old=True) if rc == 0 else None
 
 
 def remote(host, args, timeout=120):
-    """box 上：在 host（DICC）的仓库里跑 taskq.py <args> → (退出码, 输出)，ssh 不通时 None。"""
+    """box 上：在 host（DICC）的仓库里跑 taskq.py <args> → (退出码, 标准输出, 标准错误)，ssh 不通时 None。"""
     import machines as M
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split()  # TASKQ_SSH 只给测试用
@@ -571,7 +563,7 @@ def remote(host, args, timeout=120):
         r = subprocess.run(ssh + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", m["ssh"],
                                   f"cd {m['repo']} && BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"],
                            capture_output=True, text=True, timeout=timeout)
-        return (None if r.returncode == 255 else (r.returncode, r.stdout + r.stderr))
+        return None if r.returncode == 255 else (r.returncode, r.stdout, r.stderr)
     except Exception:  # noqa: BLE001
         return None
 
@@ -582,8 +574,13 @@ def queue_host():
     return next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
 
 
+def here():
+    import machines as M
+    return os.environ.get("TASKQ_MACHINE") or M.whoami()  # TASKQ_MACHINE 只给测试用
+
+
 def cmd_status(a):
-    s = local_status() if have_queue() else remote_status(queue_host())
+    s = local_status() if here() == queue_host() else remote_status(queue_host())
     if s is None:
         print("读不到队列")
         return 1
@@ -601,16 +598,17 @@ def cmd_status(a):
 
 def main(argv):
     if argv[:1] == ["--json-status"]:
-        print(json.dumps(local_status(), ensure_ascii=False))
+        S.json_out(local_status())
         return 0
-    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show") and not have_queue():
-        # box 上：本机没有队列，转到 DICC 上那份去改（不在 box 上另建一份）
+    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show") and here() != queue_host():
+        # 不在队列所在的机器上（box）：转到那边去改（不在本机另建一份）
         host = queue_host()
         r = remote(host, " ".join(shlex.quote(x) for x in argv))
         if r is None:
             print(f"连不上 {host}")
             return 1
         print(r[1], end="")
+        print(r[2], end="", file=sys.stderr)
         return r[0]
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)

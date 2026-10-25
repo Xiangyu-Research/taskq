@@ -6,7 +6,8 @@
 # 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给 Slurm 作业号），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每 5 分钟看一次；
 # 训练出错隔 5 分钟重来，最多 3 次（Slurm 里只跑 1 次，由 dicc_worker.sh 交还队列）。
-# 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；143 被停掉；其他 = 训练出错。
+# 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
+# ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练再退出，下次从存档接着训。
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -62,8 +63,8 @@ for (( try = 1; ; try++ )); do
     if done_ "$@"; then
         echo "训完 $(ts)" >> "$LOG"; echo "$(ts) 训完：$TASK_KEY"; exit 0
     fi
-    echo "$(ts) 命令结束（退出码 $rc），没训完（第 $try 次）"
+    echo "$(ts) 命令结束（退出码 $rc），没训完（第 $try 次）" | tee -a "$LOG"
     (( rc == 0 )) && exit 3
-    (( try >= TRIES )) && exit "$rc"
+    (( try >= TRIES )) && exit $(( rc >= 128 ? rc : 1 ))
     sleep "$POLL" & wait $!
 done

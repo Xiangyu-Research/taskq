@@ -96,9 +96,11 @@ def _task_of(model_dir):
 
 
 def env_of(model_dir):
-    """模型文件夹 → 实验表里训它用的环境；表里没有 → nnunet。"""
+    """模型文件夹 → 实验表里训它用的环境；表里没有时报 SpecError（实验表以外的模型由调用的一方设 MODEL_ENV）。"""
     t = _task_of(model_dir)
-    return t["spec"]["env"] if t else "nnunet"
+    if t is None:
+        raise spec.SpecError(f"实验表里没有训这个模型的实验：{model_dir}（实验表以外的模型设 MODEL_ENV）")
+    return t["spec"]["env"]
 
 
 def experiment_of(model_dir):
@@ -118,7 +120,10 @@ def names_of(model_dir, *names):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "env-of":
-        print(env_of(sys.argv[2]))
+        try:
+            print(env_of(sys.argv[2]))
+        except spec.SpecError as err:
+            sys.exit(str(err))
     elif len(sys.argv) >= 4 and sys.argv[1] == "name-of":
         try:
             print("\n".join(names_of(sys.argv[2], *sys.argv[3:])))

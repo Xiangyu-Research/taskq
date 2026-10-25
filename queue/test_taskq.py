@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 T = tempfile.mkdtemp()
 TQ, DATA = os.path.join(T, "taskq"), os.path.join(T, "data")
 RES = os.path.join(DATA, "nnUNet", "results")
-ENV = dict(os.environ, TASKQ_DIR=TQ, BRAIN_TUMOR=DATA)
+ENV = dict(os.environ, TASKQ_DIR=TQ, BRAIN_TUMOR=DATA, TASKQ_MACHINE="dicc")  # 测试里本机当队列所在的机器
 ENV.pop("nnUNet_results", None)
 sys.path.insert(0, HERE)
 os.environ.update(TASKQ_DIR=TQ)
@@ -221,10 +221,10 @@ rc, out = tq2("take", "--worker", "lab", "Dataset116_METrq1/nnUNetTrainer_save10
 check("take 已训完的：领不到", rc == 10 and "done" in out)
 rc, out = tq2("next", "--worker", "502", "--envs", ALL)
 check("kind any：什么种类都领（领到 SwinUNETR）", rc == 0 and out.startswith("Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"))
-s2 = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV2, capture_output=True, text=True).stdout)
+s2 = taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV2, capture_output=True, text=True).stdout)
 row = next(t for t in s2["tasks"] if t["key"] == UM)
 rc, _ = tq2("release", "--worker", "lab", SWK, "--skip", "训练任务 5 Failed (1)")
-s3 = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV2, capture_output=True, text=True).stdout)
+s3 = taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV2, capture_output=True, text=True).stdout)
 row3 = next(t for t in s3["tasks"] if t["key"] == SWK)
 check("release --skip：记在 skips/、不算失败；--json-status 带 skipped_by 和 24 小时内的次数",
       rc == 0 and row3["skipped_by"] == ["lab"] and row3["failures"] == 0
@@ -265,7 +265,7 @@ open(fake, "w").write("#!/bin/bash\n# 假 ssh：去掉选项和主机名，命�
                       "while [[ $1 == -o ]]; do shift 2; done; shift\n"
                       f"cmd=${{1//\\~\\/Projects\\/PhD/{os.path.dirname(os.path.dirname(HERE))}}}\n"
                       f"cmd=$(printf '%s' \"$cmd\" | sed 's#BRAIN_TUMOR=[^ ]*#BRAIN_TUMOR={DATA}#')\n"
-                      f"export TASKQ_DIR={TQ2}\nbash -c \"$cmd\"\n")
+                      f"export TASKQ_DIR={TQ2} TASKQ_MACHINE=dicc\nbash -c \"$cmd\"\n")
 os.chmod(fake, 0o755)
 os.environ["TASKQ_SSH"] = fake
 st = taskq.remote_status("dicc")
@@ -277,11 +277,28 @@ EMPTY = os.path.join(T, "box_tq")  # box 上：只有 LAB 开关，没有任务�
 os.makedirs(EMPTY)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "nnunet",
                     "dataset=Dataset113_PEDsrq1", "trainer=nnUNetTrainer_save10", "fold=0"],
-                   env=dict(os.environ, TASKQ_DIR=EMPTY), capture_output=True, text=True)
-check("box 上没有队列时 add 转到 DICC 那份（不在本机另建）", r.returncode == 0 and "加入" in r.stdout
+                   env=dict(os.environ, TASKQ_DIR=EMPTY, TASKQ_MACHINE="box"), capture_output=True, text=True)
+check("在 box 上（不是队列所在的机器）add 转到 DICC 那份（不在本机另建）", r.returncode == 0 and "加入" in r.stdout
       and not os.path.exists(os.path.join(EMPTY, "tasks.jsonl")) and "Dataset113_PEDsrq1" in open(os.path.join(TQ2, "tasks.jsonl")).read())
+r = taskq.remote("dicc", "nosuchcmd")
+check("remote：标准输出、标准错误分开返回", r is not None and r[0] == 2 and r[1] == "" and "nosuchcmd" in r[2])
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--json", "nosuch/key"],
+                   env=dict(os.environ, TASKQ_MACHINE="box"), capture_output=True, text=True)
+check("转发：那边的标准输出、退出码照样传回来", r.returncode == 1 and "队列里没有" in r.stdout)
+J = '{"tasks": [], "enabled": true}'
+check("@@JSON 行前后混着别的输出：只读那一行", taskq.S.json_in(f"警告：x {{1}}\n@@JSON {J}\n{{别的}}\n") == json.loads(J))
+check("没有 @@JSON 行：不认（找第一个 { 只在 old=True 时）", taskq.S.json_in(f"x\n{J}\n") is None
+      and taskq.S.json_in(f"x\n{J}\n", old=True) == json.loads(J))
+remote_orig = taskq.remote
+taskq.remote = lambda h, a, timeout=0: (0, f"旧版的输出\n{J}\n", "")
+check("remote_status：DICC 还是旧版（没有 @@JSON 行）时退回找第一个 {", taskq.remote_status("dicc") == json.loads(J))
+taskq.remote = remote_orig
 os.environ["TASKQ_SSH"] = "false"
 check("ssh 不通（退出码非 0）：remote_status 返回 None", taskq.remote_status("dicc") is None)
+open(fake + "255", "w").write("#!/bin/bash\nexit 255\n")
+os.chmod(fake + "255", 0o755)
+os.environ["TASKQ_SSH"] = fake + "255"
+check("ssh 退出 255：remote 返回 None", taskq.remote("dicc", "status") is None)
 del os.environ["TASKQ_SSH"]
 
 
@@ -327,13 +344,14 @@ check("set k=（空值）删掉参数、回到默认环境", rc == 0 and out.sta
 rc, out, _ = tq3("set", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1", "fold=3")
 check("set：会改变任务名的不让改", rc == 2)
 rc, out, _ = tq3("show", "--json", "toy/a")
-check("show --json：完整说明", rc == 0 and json.loads(out)["out"] == "toy/a" and json.loads(out)["env"] == "rstats")
+sj = taskq.S.json_in(out)
+check("show --json：完整说明，写在 @@JSON 开头的一行里", rc == 0 and out.startswith("@@JSON ") and sj["out"] == "toy/a" and sj["env"] == "rstats")
 rc, out, _ = tq3("show", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/2")
 check("show：说明、状态、run_task.sh 的写法", rc == 0 and "claimed" in out and "run_task.sh nnunet" in out and "train.sh" in out)
 d = os.path.join(DATA, "toy", "a")
 os.makedirs(d)
 open(os.path.join(d, "DONE"), "w").close()
-s3 = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV3, capture_output=True, text=True).stdout)
+s3 = taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=ENV3, capture_output=True, text=True).stdout)
 st3 = {t["key"]: t for t in s3["tasks"]}
 check("--json-status：带说明；command 任务按 done 判断训完", st3["toy/a"]["state"] == "done" and st3["toy/a"]["spec"]["recipe"] == "command"
       and st3["Dataset111_MENrq1/nnUNetTrainer_save10_n470/2"]["spec"]["out"].startswith("nnUNet/results/Dataset111_MENrq1/"))
@@ -463,7 +481,7 @@ def tq6(*args):
 def st6():
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=dict(ENV, TASKQ_DIR=TQ6, BRAIN_TUMOR=DATA),
                        capture_output=True, text=True)
-    return {t["key"]: (t["state"], t["note"]) for t in json.loads(r.stdout)["tasks"]}
+    return {t["key"]: (t["state"], t["note"]) for t in taskq.S.json_in(r.stdout)["tasks"]}
 
 
 s6 = st6()

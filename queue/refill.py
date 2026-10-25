@@ -168,6 +168,12 @@ def syncing(s, name):
             {d: t for d, t in last.items() if t["status"] not in LIVE and t["status"] != "Success"})
 
 
+def failed_here(s, name, tid):
+    """这台机器的 pueue 任务是训练命令自己出错退出的（退出码 1–127）；被信号停掉的（≥128，如 137、143）、pueue 停的不算。"""
+    t = next((t for t in (s["pueue"].get(name) or {}).get("tasks", []) if t["id"] == tid), {})
+    return t.get("result") == "Failed" and 0 < (t.get("code") or 0) < 128
+
+
 def plan(s, name):
     """→ (动作列表, 卡住的 {问题编号: 说明}, 不领的原因)。动作：dict(op=beat|release|start|transfer|take, key, …)。"""
     m, host = M.MACHINES[name], queue_host()
@@ -222,7 +228,7 @@ def plan(s, name):
             stuck[f"labclaim:{key}"] = (f"{M.MACHINES[name]['label']} 领的 {key} 训练任务 {last[0]} 停了（{last[1]}），没训完、有进度，"
                                         f"领取保留；接着训：q {g} --label train:{key} -- {shlex.quote(run_cmd(f))}；"
                                         f"放弃：taskq.py release --worker {name} {key}")
-        elif tt[key][-1][1].startswith("Failed") and tt[key][-1][1] not in ("Failed (137)", "Failed (143)"):
+        elif failed_here(s, name, tt[key][-1][0]):
             # 没开始就失败（多半是这台机器放不下这个模型）：交还，记在 skips/（这台机器以后不再领它；不算队列的失败）
             acts.append(dict(op="release", key=key, skip=f"训练任务 {tt[key][-1][0]} {tt[key][-1][1]}",
                              why=f"训练任务 {tt[key][-1][0]} 失败了（{tt[key][-1][1]}），{name} 上没有进度，交还，{name} 不再领它"))
@@ -406,7 +412,12 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
     """按动作做 → [说明]。出错的那一步写进说明，后面的照做。ok（set）：记下领到或开始训的 key。"""
     ok = set() if ok is None else ok
     host = queue_host()
-    remote = remote or (lambda a: taskq.remote(host, a))
+
+    def dicc(a):
+        r = taskq.remote(host, a)
+        return r and (r[0], r[1] + r[2])  # 出错的说明在标准错误里
+
+    remote = remote or dicc
     tq = tq or {}
     L, msgs = M.MACHINES[name]["label"], []
     beats = [a["key"] for a in acts if a["op"] in ("beat", "keep")]
@@ -614,19 +625,22 @@ def topup_all(s, dry=False):
     return events, stuck
 
 
-CPU_JOB = "cpu_worker"  # cpu_worker.sbatch 的作业名
 GPU_FILE, CPU_FILE = "worker.sbatch", "cpu_worker.sbatch"
 
 
-def topup_probe(qos, cpu_q="normal"):
-    """每个 QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"；"CPU|我们的 CPU worker 作业数"；
+def topup_probe(name):
+    """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
     "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
-    有一条命令出错就整个出错（不按 0 算）。"""
-    return "set -e; for q in " + " ".join(qos) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
-        "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done; " \
-        f"ids=$(squeue -u $USER -h -r -n {CPU_JOB} -o %i); echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
-        f"lim=$(sacctmgr -nP show qos {cpu_q} format=maxsubmitpu); " \
-        "ids=$(squeue -u $USER -h -r -o %i); echo \"ALL|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\""
+    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM，作业名来自 envs/machines.py 的 jobs。"""
+    conf = P.SLURM[name]
+    out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
+        "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done"
+    if conf.get("cpu"):
+        out += f"; ids=$(squeue -u $USER -h -r -n {M.MACHINES[name]['jobs']['cpu']} -o %i); " \
+            "echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
+            f"lim=$(sacctmgr -nP show qos {conf['cpu'][0]} format=maxsubmitpu); " \
+            "ids=$(squeue -u $USER -h -r -o %i); echo \"ALL|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\""
+    return out
 
 
 def unclaimed(tq, device):
@@ -676,7 +690,7 @@ def topup(s, name, dry=False, run=None):
     m, tq, conf = M.MACHINES[name], s.get("taskq", {}).get(name), P.SLURM[name]
     if not s["ok"].get(name) or not tq:
         return [], {}
-    rc, out = run(topup_probe(conf["gpu"], (conf.get("cpu") or ("normal",))[0]), m["ssh"])
+    rc, out = run(topup_probe(name), m["ssh"])
     if rc:
         return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
     counts, ncpu, free = {}, None, None
