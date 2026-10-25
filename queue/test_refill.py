@@ -175,8 +175,8 @@ def fake_remote(rc=0, out=""):
 
 acts, _, _ = R.plan(snap(), "lab")
 msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
-ok("领：take --worker lab --ttl 86400，成功后在 lab gpu1 加训练任务（不暂存、不带优先级）",
-   rem == [f"take --worker lab --ttl 86400 {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
+ok("领：take --worker lab --ttl 604800，成功后在 lab gpu1 加训练任务（不暂存、不带优先级）",
+   rem == [f"take --worker lab --ttl 604800 {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
    and f"gpu1 -p --label train:{K_UM} -- 'bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=1'" in cmds[0][1]
    and "--stashed" not in cmds[0][1] and "priority" not in cmds[0][1] and "领了" in msgs[0])
 cmds.clear(), rem.clear()
@@ -344,7 +344,7 @@ ok("在训的这一折 40 分钟内训完、下一折数据在：提前领，排
    and acts[1]["group"] == "gpu1" and acts[1]["after"] == K_UM)
 cmds.clear(), rem.clear()
 msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
-ok("提前领：take，再在 gpu1 加训练任务（排在后面）", rem[-1] == f"take --worker lab --ttl 86400 {K_T1C[0]}"
+ok("提前领：take，再在 gpu1 加训练任务（排在后面）", rem[-1] == f"take --worker lab --ttl 604800 {K_T1C[0]}"
    and cmds[-1][0] == "lab" and f"gpu1 -p --label train:{K_T1C[0]}" in cmds[-1][1] and "提前领了" in msgs[-1])
 ok("还要 100 分钟才训完：不提前领", ops(R.plan(snap_a(prep=P3, eta_min=100), "lab")[0]) == [("beat", K_UM)])
 ok("训完时间算不出来：不提前领", ops(R.plan(snap_a(prep=P3), "lab")[0]) == [("beat", K_UM)])

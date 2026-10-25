@@ -78,7 +78,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 - 先跑 1 个；最近一个开始 15 分钟后，近 10 分钟 GPU 平均使用率低于 90%、除去显存填充还空着一半显存，再领 1 个（最多 2 个）。nnU-Net 这类 CPU 跟不上的自然变成 2 个，GPU 跑满的只跑 1 个。CPU 少于 24 个或内存少于 56G 的作业只跑 1 个。
 - 跑完一个领下一个；离时限不到 1 小时不再领；到时限时把没做完的交还，下一个领到的从存档接着训。
-- 不领：已做完的、别处在做的（领取在有效期内续过：DICC 作业 20 分钟，lab 24 小时；或训练日志 15 分钟内更新过）、失败过 2 次的。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
+- 不领：已做完的、别处在做的（领取在有效期内续过：DICC 作业 20 分钟，lab 7 天；或训练日志 15 分钟内更新过）、失败过 2 次的。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
 - 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败）；整个队列 3 小时内失败 3 次就暂停领任务；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
 - 每个训练 14 个数据增强进程（作业 32 个 CPU）。
 - CPU worker（`cpu_worker.sbatch`，`WORKER_DEVICE=cpu`）只领 `device=cpu` 的任务，一次 1 个，领不到就结束。
@@ -86,7 +86,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 ### 补交 DICC 作业、替 lab 领（`refill.py`，健康检查每 30 分钟调用）
 
 - **DICC**：每个 QOS 排着和在跑的不到 `SLURM` 写的上限、队列里还有没人领的任务时，补交 `worker.sbatch`，空一个补一个，每个空位一个普通作业（不用数组）。队列里有没人领的纯 CPU 任务时才交 `cpu_worker.sbatch`，按剩下的提交名额交。
-- **lab**：lab 连不上 DICC，由 box 替它领（`taskq.py take --worker lab --ttl 86400`）、续、交还。每个有卡、开着、不在 `MANUAL` 里的组没有训练时领一个：队列里没人领、任何机器上都没有进度、lab 有环境、盘放得下的，按档位、先后取第一个。
+- **lab**：lab 连不上 DICC，由 box 替它领（`taskq.py take --worker lab --ttl 604800`）、续、交还。每个有卡、开着、不在 `MANUAL` 里的组没有训练时领一个：队列里没人领、任何机器上都没有进度、lab 有环境、盘放得下的，按档位、先后取第一个。
   - 数据集 lab 上没有就先传（传完盘上剩不到 50 GB 的跳过），传完、核对一致再开训（没传完的数据集里有 `.incomplete`）。传数据的任务传完马上跑一次健康检查。
   - 换折不空等：1 号卡在训时，预测的下一折缺数据就提前传（同时只传一份）；在训的这一折按最近 3 小时的速度估计 60 分钟内训完、下一折数据都在时，提前领下一折，排在同一个组后面。
   - 训练没开始就失败（手动停的不算）、又没有进度的（多半是 32 GB 放不下）交还并记为 lab 跳过（`skips/<key>`，DICC 照常领）；24 小时内跳过 2 折就停止领、报出来。
@@ -142,7 +142,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 - **DICC 作业提交时定下的**只有 `worker.sbatch`；其余脚本在作业开始时或每次调用时从仓库读。排着的作业依赖的只有 `ENABLED` 和 `worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它调用的 `taskq.py next / beat / release` 和 `run_task.sh` 的参数、退出码不改，只加新命令。
 - **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，2 任务说明或环境有问题，143 被停掉，其他是出错（10/18 前的 `train_task.sh` 用过 75 = 训满 `--epochs`，`on_boot.sh`、健康检查仍认）。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。
-- **同一个任务不在两处做**：先领到（`claims/<key>/info`：worker、host、since、beat、ttl）才做；`ttl` 秒内没续就过期（DICC 作业 1200 秒、lab 86400 秒）。`skips/<key>`：哪台 pueue 训练机跳过了这一折（删掉即撤销）；`released/`：刚交还的。
+- **同一个任务不在两处做**：先领到（`claims/<key>/info`：worker、host、since、beat、ttl）才做；`ttl` 秒内没续就过期（DICC 作业 1200 秒、lab 604800 秒：box 离线时不过期）。`skips/<key>`：哪台 pueue 训练机跳过了这一折（删掉即撤销）；`released/`：刚交还的。
 - **任务表** `tasks.jsonl` 每行 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。任务说明的 `device`（默认 `gpu`）、`machines`（默认不限，如 `["dicc"]`）决定谁能领。
 - **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每折 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`；`advance.py` 按命令或标签认步骤。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`、`pull:<标签>`。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
@@ -162,7 +162,7 @@ $TQ show Dataset116_METrq1/nnUNetTrainer_save10_n470/2
 # 改一个任务（会改变 key 的参数不能改，删掉重加）
 $TQ set Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1 env=umamba
 # 手动在 lab 训一个：先领（box 上跑，自动经 ssh 转到 DICC），再加任务
-$TQ take --worker lab --ttl 86400 Dataset111_MENrq1/nnUNetTrainer_save10_n470/1
+$TQ take --worker lab --ttl 604800 Dataset111_MENrq1/nnUNetTrainer_save10_n470/1
 $Q gpu1 --label train:Dataset111_MENrq1/nnUNetTrainer_save10_n470/1 -- \
     'bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=1'
 # box 上单独推理 / 评测一折

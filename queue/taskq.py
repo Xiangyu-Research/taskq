@@ -9,7 +9,7 @@ lab 由 box 上的 scripts/queue/refill.py 替它领。
 队列目录（DICC 上，家目录各节点共用）：~/.cache/phd/taskq/
   tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}
   claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号，或 lab）、主机、领取和最近一次心跳的时间，
-                可选 ttl（心跳多久不更新算过期，默认 20 分钟；box 替 lab 领的是 24 小时，见 scripts/queue/refill.py）
+                可选 ttl（心跳多久不更新算过期，默认 20 分钟；box 替 lab 领的是 7 天，见 scripts/queue/refill.py）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
   skips/<key>   某台机器训不了的任务（release --skip，现在只有 lab 用）：这台机器不再领它，别的机器照常领；不算失败
@@ -34,7 +34,7 @@ box 上（本机没有队列时自动经 ssh 在 DICC 上跑）：
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态
-    taskq.py take --worker lab --ttl 86400 <key>        领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
+    taskq.py take --worker lab --ttl 604800 <key>       领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
     taskq.py status                   打印队列
 """
 import argparse
