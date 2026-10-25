@@ -74,10 +74,12 @@ def tasks():
 
 
 def group_names(e, data, python):
-    """实验一级步骤（group_after、FINAL）的模板名字：各折都一样的参数 + exp、id、folds_q + 实验的 names + data、python。"""
+    """实验一级步骤（group_after、FINAL）的模板名字：各折都一样的参数 + exp、id、folds（空格隔开）、folds_q（加了引号的）
+    + 实验的 names + data、python。"""
     ts = expand(e)
     common = {k: v for k, v in ts[0]["spec"]["names"].items() if all(t["spec"]["names"].get(k) == v for t in ts)}
-    return dict(common, exp=e["exp"], id=e["id"], folds_q=shlex.quote(" ".join(e.get("folds") or [])), **(e.get("names") or {}),
+    folds = " ".join(e.get("folds") or [])
+    return dict(common, exp=e["exp"], id=e["id"], folds=folds, folds_q=shlex.quote(folds), **(e.get("names") or {}),
                 data=data, python=python)
 
 

@@ -128,6 +128,11 @@ ok("推理任务：日志 100 分钟没更新、但预测文件夹 5 分钟前�
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "claimed", "lab", since=old)]
 s["pueue"]["lab"]["tasks"] = []
 ok("在跑的 DICC 作业没领到任务：lab 领的不算 DICC 作业", "tqidle:dicc" in H.check(s))
+s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "waiting", None), tqrow(MET2, "claimed", "491480", since=old, task_log_age=60)]
+s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
+ok("提前排的推理在等训练（waiting）：不报、不算没人训、不算有卡空着", not {f"tqblocked:{INF}", "tqorphan:dicc", "tqidle:dicc"} & ids(s))
+s["taskq"]["dicc"]["tasks"][0] = dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次")
+ok("等的任务失败了（blocked）：报出来", "失败 2 次" in H.check(s).get(f"tqblocked:{INF}", {}).get("msg", ""))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None, since=old)]
 s["slurm"] = sq()
 ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "AUTO" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))

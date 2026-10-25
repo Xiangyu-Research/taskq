@@ -250,13 +250,42 @@ def recent_failures(window=PAUSE_WINDOW, keys=None):
     return n
 
 
+_BY_KEY = {}  # (任务表路径, 修改时间) → {key: 任务}
+
+
+def after_state(s, root):
+    """说明里 after 的任务 → None（都做完了）或 (waiting / blocked, 说明)。"""
+    if not s.get("after"):
+        return None
+    p = tasks_path()
+    ver = (p, os.path.getmtime(p) if os.path.exists(p) else 0)
+    if ver not in _BY_KEY:
+        _BY_KEY.clear()
+        _BY_KEY[ver] = {x["key"]: x for x in read_tasks()}
+    for k in s["after"]:
+        x = _BY_KEY[ver].get(k)
+        xs = spec_of(x) if x else None
+        if xs is None:
+            return "blocked", f"等的 {k} 不在队列里"
+        if S.is_done(xs, root):
+            continue
+        if failures(k) >= MAX_FAIL:
+            return "blocked", f"等的 {k} 失败 {failures(k)} 次"
+        return "waiting", f"等 {k}"
+    return None
+
+
 def state(t, root):
-    """→ (状态, 说明)：done / claimed / busy / failed / free / stale（领取过期，可以重新领）/ bad（说明解析不了）。"""
+    """→ (状态, 说明)：done / claimed / busy / failed / free / stale（领取过期，可以重新领）/ bad（说明解析不了）/
+    waiting（after 里的任务还没做完）/ blocked（after 里的任务失败了或不在队列里）。"""
     s = spec_of(t)
     if s is None:
         return "bad", t.get("bad", "")
     if S.is_done(s, root):
         return "done", ""
+    w = after_state(s, root)
+    if w:
+        return w
     ci = claim_info(t["key"])
     age = S.log_age(s, root)
     if ci is None and os.path.isdir(os.path.join(TQ, "claims", safe(t["key"]))):

@@ -65,7 +65,7 @@ from common import write_json  # noqa: E402
 TTL = 7 * 86400  # lab 的领取多久不续就过期（秒）
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
 SOFT = 2  # 自动传过去、留着以后用的数据和预传：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
-KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron 用的克隆里跑，和定时的共用一把锁）
+KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
 PRETAKE_S = 3600  # 组里在训的这一折预计这么多秒内训完时，提前领下一折、排在它后面（两次检查的间隔，保证训完前会检查一次）
 SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，就先停止替这台机器领（多半是环境坏了）
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
@@ -374,7 +374,16 @@ def start(name, key, run=sh, tq=None, group=None):
 def then_check(cmd, label):
     """box 任务的命令 → 做完（成功）后马上跑一次健康检查（不等 30 分钟，和定时的共用一把锁）；这一次里这个任务算做完
     （health.py 看 PHD_TASK_DONE）。检查出错不算这个任务失败。"""
-    return f"{cmd} && {{ PHD_TASK_DONE={shlex.quote(label)} bash {KICK} health || true; }}"
+    return f"{cmd}{KICK_SEP}{shlex.quote(label)} bash {KICK} kick || true; }}"
+
+
+KICK_SEP = " && { PHD_TASK_DONE="
+
+
+def unwrap(cmd):
+    """then_check 包过的命令 → 原来的命令（认步骤时用）。"""
+    i = cmd.find(KICK_SEP)
+    return cmd[:i] if i >= 0 else cmd
 
 
 def transfer(name, paths, run=sh):
@@ -565,12 +574,7 @@ def shadow_log(name, line):
 
 def run_all(s, dry=False):
     """health.py 调用：→ (事件说明列表, 卡住的 {问题编号: 说明}, 这次领了任务的机器)。"""
-    events, stuck, filled = [], {}, set()
-    for name in M.names("slurm"):
-        if "train" in M.MACHINES[name]["roles"] and P.SLURM.get(name):
-            ev, st = topup(s, name, dry=dry)
-            events += ev
-            stuck.update(st)
+    events, stuck, filled = topup_all(s, dry) + (set(),)
     live = bool(P.AUTO.get("lab")) and not dry
     for name in M.names("pueue"):
         if "train" not in M.MACHINES[name]["roles"]:
@@ -602,6 +606,17 @@ def run_all(s, dry=False):
 
 
 # ---------------- Slurm 训练机补作业 ----------------
+def topup_all(s, dry=False):
+    """每台 Slurm 训练机补交 worker 作业 → (dry 时的说明, 出错的 {问题编号: 说明})。"""
+    events, stuck = [], {}
+    for name in M.names("slurm"):
+        if "train" in M.MACHINES[name]["roles"] and P.SLURM.get(name):
+            ev, st = topup(s, name, dry=dry)
+            events += ev
+            stuck.update(st)
+    return events, stuck
+
+
 CPU_JOB = "cpu_worker"  # cpu_worker.sbatch 的作业名
 GPU_FILE, CPU_FILE = "worker.sbatch", "cpu_worker.sbatch"
 

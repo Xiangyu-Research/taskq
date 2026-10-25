@@ -232,6 +232,8 @@ def check(s):
                 if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (not ages or min(ages) > 5400):
                     add(f"stuck:{name}:{key}", f"{L(name)} 作业 {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
                         f"{'日志和结果文件夹 90 分钟没有变化' if ages else '还没有日志'}")
+                if st == "blocked":  # 提前排的推理、评测：前一步失败了或不在队列里（2026-10-25）
+                    add(f"tqblocked:{key}", f"{L(name)} 队列任务 {key} {t['note']}，不会开始")
                 if t["failures"] and st != "done":  # 后来训完了就不再报
                     add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 失败 {t['failures']} 次"
                         + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
@@ -448,6 +450,15 @@ def main():
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"scripts/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
+    if not a.dry_run and any(d.startswith("任务队列") for d in done):
+        # 刚加进任务队列的（如评测）这一次就补交 worker 作业，不等下一次检查（10/25）
+        try:
+            for name in s.get("taskq", {}):
+                s["taskq"][name] = taskq.remote_status(name) or s["taskq"][name]
+            ev2, st3 = refill.topup_all(s)
+            stuck.update(st3)
+        except Exception as e:  # noqa: BLE001
+            stuck["refill:error"] = f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
     for pid, msg in {**stuck, **stuck2}.items():
         # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=30 if pid.startswith("advance:stale_fetch:") else 0)

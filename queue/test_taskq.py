@@ -440,5 +440,58 @@ ci5 = json.load(open(os.path.join(half, "info")))
 check("半建的领取：take 也能领走过期的", rc == 0 and ci5["worker"] == "lab" and ci5["ttl"] == 604800)
 check("info 写完不留临时文件", os.listdir(half) == ["info"])
 
+# ---------------- 10/25：after（先要做完的任务）→ waiting / blocked ----------------
+TQ6, D6 = os.path.join(T, "taskq6"), os.path.join(T, "data6")
+kt = "Dataset121_X/nnUNetTrainer_save10/4"
+os.makedirs(os.path.join(TQ6), exist_ok=True)
+fold(*kt.split("/"))
+
+
+def cmdtask(order, key, after, device="gpu"):
+    return dict(order=order, nice=-100, key=key, exp=None, recipe="command",
+                params=dict(key=key, cmd="true", env="nnunet", out=f"out/{key}", done=[".done"], after=after, device=device))
+
+
+rows = [dict(order=1, nice=0, key=kt, exp=None, recipe="nnunet", params=dict(dataset="Dataset121_X", trainer="nnUNetTrainer_save10", fold="4")),
+        cmdtask(2, "infer/x/fold_4", [kt]), cmdtask(3, "eval/x/fold_4", ["infer/x/fold_4"], "cpu"), cmdtask(4, "infer/y", ["nosuch/key"])]
+with open(os.path.join(TQ6, "tasks.jsonl"), "w") as f:
+    f.writelines(json.dumps(r) + "\n" for r in rows)
+
+
+def tq6(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ6, BRAIN_TUMOR=DATA),
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def st6():
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=dict(ENV, TASKQ_DIR=TQ6, BRAIN_TUMOR=DATA),
+                       capture_output=True, text=True)
+    return {t["key"]: (t["state"], t["note"]) for t in json.loads(r.stdout)["tasks"]}
+
+
+s6 = st6()
+check("after：训练没训完 → 推理 waiting、评测 waiting（等推理）", s6["infer/x/fold_4"][0] == "waiting" and kt in s6["infer/x/fold_4"][1]
+      and s6["eval/x/fold_4"] == ("waiting", "等 infer/x/fold_4"))
+check("after：等的任务不在队列里 → blocked", s6["infer/y"][0] == "blocked" and "不在队列里" in s6["infer/y"][1])
+rc, out = tq6("next", "--worker", "950", "--envs", ALL)
+check("after：next 先领训练（档位 0），不领在等的推理（档位 -100）", rc == 0 and out.startswith(kt + "\n"))
+rc, out = tq6("next", "--worker", "951", "--envs", ALL)
+check("after：训练被领走后没有别的能领", rc == 10)
+rc, out = tq6("take", "--worker", "lab", "infer/x/fold_4")
+check("after：take 也不领在等的", rc == 10)
+d4 = fold(*kt.split("/"))
+open(os.path.join(d4, "checkpoint_final.pth"), "w").close()
+os.makedirs(os.path.join(d4, "validation"), exist_ok=True)
+open(os.path.join(d4, "validation", "summary.json"), "w").write("{}")
+s6 = st6()
+check("after：训练训完 → 推理 free，评测还在等推理", s6["infer/x/fold_4"][0] == "free" and s6["eval/x/fold_4"][0] == "waiting")
+rc, out = tq6("next", "--worker", "952", "--envs", ALL)
+check("after：训完后推理能领", rc == 0 and out.startswith("infer/x/fold_4\n"))
+tq6("release", "--worker", "952", "infer/x/fold_4", "--failed", "退出码 1")
+tq6("release", "--worker", "952", "infer/x/fold_4", "--failed", "退出码 1")
+s6 = st6()
+check("after：推理失败两次 → 评测 blocked", s6["eval/x/fold_4"][0] == "blocked" and "失败 2 次" in s6["eval/x/fold_4"][1])
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

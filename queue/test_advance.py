@@ -23,9 +23,10 @@ A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组
 A.P.AUTO = dict(A.P.AUTO, advance=False)
 A.P.HOLD = []
 # 实验一级带 queue 的几串（10/23，P1 / P2 重跑）也先拿掉，第 11 节再放回来测
-GQUEUED = [(e, e["group_after"]) for e in A.E.load()[0] if any(st.get("queue") for c in e.get("group_after", []) for st in c)]
+PROBE_STEPS = ("p1", "p2", "p2cmp")
+GQUEUED = [(e, e["group_after"]) for e in A.E.load()[0] if any(st["name"] in PROBE_STEPS for c in e.get("group_after", []) for st in c)]
 for e_, g_ in GQUEUED:
-    e_["group_after"] = [c for c in g_ if not any(st.get("queue") for st in c)]
+    e_["group_after"] = [c for c in g_ if not any(st["name"] in PROBE_STEPS for st in c)]
 P = "nnUNetResEncUNetMPlans__3d_fullres"
 F5 = ["0", "1", "2", "3", "4"]
 PY = A.python()
@@ -830,6 +831,93 @@ with tempfile.TemporaryDirectory() as R:
     except TypeError:
         pass
     check("write_json：写到一半出错 → 原来的内容还在，没有留下临时文件", json.load(open(f)) == {"a": 1} and os.listdir(R) == ["x.json"])
+
+# 12. DICC 的作业在训的折：推理、评测现在就进任务队列，after 接上前一步（10/25）
+A.P.PLACE = dict(REAL_PLACE)
+A.P.HOLD = []
+SB = "Dataset133_GLIrq1_syn18b/nnUNetTrainer_save10"
+SBK, SBM = f"{SB}/1", f"Dataset133_GLIrq1_syn18b/nnUNetTrainer_save10__{P}"
+SBI = f"infer/{SBM}/fold_1"
+HEAD = "a" * 40
+
+
+def psnap(state="claimed", worker="492500", heads=None, extra=()):
+    s_ = snap()
+    s_["taskq"]["dicc"]["tasks"] += [dict(key=SBK, nice=60, state=state, worker=worker)] + list(extra)
+    s_["code"] = dict(main=HEAD, heads={"dicc": HEAD, "lab": HEAD} if heads is None else heads)
+    return s_
+
+
+def sb(todo):
+    return [t for t in todo if t["key"] == SBK]
+
+
+x = sb(A.plan(psnap())[0])
+check("DICC 在训：推理、评测一起进队列，推理等训练、评测等推理（档位 -100，评测纯 CPU）",
+      [(t["step"], t.get("op")) for t in x] == [("infer", "taskq"), ("eval", "taskq")]
+      and "after=" + json.dumps([SBK]) in x[0]["args"] and "after=" + json.dumps([SBI]) in x[1]["args"]
+      and x[0]["qnice"] == x[1]["qnice"] == -100 and "device=cpu" in x[1]["args"] and 'machines=["dicc"]' in x[0]["args"])
+check("lab 领着的折：不提前排", not sb(A.plan(psnap(worker="lab"))[0]))
+check("还没人领的折：不提前排", not sb(A.plan(psnap(state="free", worker=None))[0]))
+todo, _ = A.plan(psnap(heads={"dicc": "b" * 40}))
+check("DICC 的代码不是最新（不认 after）：不提前排，记下原因", not sb(todo) and any("代码不是最新" in n_ for n_ in A.NOTES))
+x = sb(A.plan(psnap(extra=[dict(key=SBI, nice=-100, state="waiting")]))[0])
+check("推理已经在队列里：只加评测，等那个推理", [t["step"] for t in x] == ["eval"] and "after=" + json.dumps([SBI]) in x[0]["args"])
+x = sb(A.plan(psnap(extra=[dict(key=SBI, nice=-100, state="waiting"), dict(key=f"eval/{SBM}/fold_1", nice=-100, state="waiting")]))[0])
+check("推理、评测都在队列里：不再加", not x)
+A.P.HOLD = ["infer:*"]
+check("HOLD 对上推理：推理、评测都先不提前排", not sb(A.plan(psnap())[0]))
+A.P.HOLD = []
+A.P.PLACE = dict(REAL_PLACE, eval=["box:cpu"])
+x = sb(A.plan(psnap())[0])
+check("评测写的是 box：只提前排推理", [t["step"] for t in x] == ["infer"])
+A.P.PLACE = dict(REAL_PLACE)
+
+# 12b. 五折集成：各折都在 DICC 推理过（.infer_done 都在那边）→ DICC 的 CPU worker 做；缺一折 → box（10/25）
+S18 = "Dataset132_GLIrq1_syn18"
+S18M = f"{S18}/nnUNetTrainer_save10__{P}"
+for k in F5:
+    trained(S18, "nnUNetTrainer_save10", k)
+    inferred(S18, "nnUNetTrainer_save10", k)
+    evaluated(S18, "nnUNetTrainer_save10", f"fold_{k}")
+ENSIN = {f"predictions/{S18M}/fold_{k}/.infer_done" for k in F5}
+REMOTE["have"] = set(ENSIN)
+
+
+def ens18(todo):
+    return [t for t in todo if t["key"] == "t18" and t["step"] == "ens"]
+
+
+x = ens18(A.plan(snap())[0])
+check("集成：DICC 上五折的推理都在 → 进任务队列（纯 CPU、拉回集成的预测和报告）",
+      len(x) == 1 and x[0].get("op") == "taskq" and f"key=ens/{S18M}" in x[0]["args"] and "device=cpu" in x[0]["args"]
+      and f"out=RQ1/analysis/{S18M}/folds_0-1-2-3-4" in x[0]["args"] and 'done=[".ens_done"]' in x[0]["args"]
+      and any(a_.startswith("fetch=") and f"predictions/{S18M}/folds_0-1-2-3-4" in a_ for a_ in x[0]["args"])
+      and "ENSEMBLE_ONLY=1" in x[0]["cmd"] and "'0 1 2 3 4'" in x[0]["cmd"])
+REMOTE["have"] = ENSIN - {f"predictions/{S18M}/fold_3/.infer_done"}
+x = ens18(A.plan(snap())[0])
+check("集成：DICC 上缺一折的推理 → box 的 cpu 组", [(t["group"], t.get("op")) for t in x] == [("cpu", None)])
+REMOTE["have"] = set(ENSIN)
+evaluated(S18, "nnUNetTrainer_save10", "folds_0-1-2-3-4")  # 报告先拷到了 box，集成的预测、.ens_done 还在拉
+s_ = snap([("Running", f"bash scripts/queue/fetch_task.sh dicc ens/{S18M}", None)])
+s_["taskq"]["dicc"]["tasks"].append(dict(key=f"ens/{S18M}", nice=-100, state="done"))
+todo, stuck = A.plan(s_)
+check("集成：还在从 DICC 拉回（报告已经到了）→ 不算做完，不排删单折概率图、不重排集成",
+      not [t for t in todo if t["key"] == "t18"] and not any(k_.endswith(":t18") for k_ in stuck))
+todo, _ = A.plan(snap())
+check("集成：拉完 → 排删单折概率图（box）", [t["step"] for t in todo if t["key"] == "t18"] == ["prune"])
+
+os.remove(f"{T}/RQ1/analysis/{S18M}/folds_0-1-2-3-4/report/report.run.json")
+REMOTE["have"] = set()
+# 12c. box 的任务做完马上跑一次健康检查（refill.then_check，锁最多等 5 分钟）；包过的命令照样认得出是哪一步
+calls.clear()
+A.run(snap(), q=fake_q, tq=lambda *a: (0, ""))
+ec = [c for c in calls if "--label ens:t18 " in c]
+check("box 的任务包上 kick（PHD_TASK_DONE=标签）", len(ec) == 1 and "PHD_TASK_DONE=ens:t18 bash ~/auto/PhD/scripts/monitor/auto_refresh.sh kick" in ec[0])
+wrapped = A.refill.then_check(ens18(A.plan(snap())[0])[0]["cmd"], "ens:t18")
+check("包过的命令在跑：认得出、不重排", not ens18(A.plan(snap([("Running", wrapped, None)]))[0]))
+check("unwrap：去掉 kick 那段就是原来的命令", A.refill.unwrap(A.refill.then_check("echo 1", "x")) == "echo 1")
+REMOTE["have"] = set()
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

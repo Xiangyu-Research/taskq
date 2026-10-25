@@ -107,6 +107,9 @@ def problem(pid, p):
             again = "，不会再自动重试" if "不再领" in msg else "，会自动重试"
             step = {"infer": "推理", "eval": "评测"}.get(pid[7:].split("/")[0], "训练")
             return f"{fold(pid[7:])} {step}失败了 {num(r'失败 (\d+) 次')} 次{again}。"
+        if kind == "tqblocked":
+            step = {"infer": "推理", "eval": "评测"}.get(pid[10:].split("/")[0], "任务")
+            return f"{fold(pid[10:])} 的{step}在等的前一步失败了（或不在队列里），不会自己开始。"
         if kind == "tqpause":
             return f"{L(part[1])} 3 小时内训练失败太多次，暂停领新任务；排着的作业会白白用掉。"
         if kind == "tqidle":

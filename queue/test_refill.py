@@ -306,7 +306,7 @@ ok("盘够：照传（box 上加传数据任务、记进 transferred），不领
 SY = task(50, "wait", "Running", "bash scripts/sync/tunnel_push.sh lab …", "sync_lab_Dataset103_GLIrq1_t1c")
 acts, _, _ = R.plan(snap_a(box_tasks=[SY], prep=f"{PP}Dataset101_GLIrq1 {P131} {PP}Dataset103_GLIrq1_t1c"), "lab")
 ok("提前传的还在传（文件夹已经在）：不再传、也不当成数据在", ops(acts) == [("beat", K_UM)])
-ok("传数据的任务传完后马上跑一次健康检查（带 PHD_TASK_DONE）", any("tunnel_push.sh" in c and "PHD_TASK_DONE=sync_lab_Dataset103_GLIrq1_t1c bash ~/auto/PhD/scripts/monitor/auto_refresh.sh health" in c for _, c in cmds))
+ok("传数据的任务传完后马上跑一次健康检查（带 PHD_TASK_DONE）", any("tunnel_push.sh" in c and "PHD_TASK_DONE=sync_lab_Dataset103_GLIrq1_t1c bash ~/auto/PhD/scripts/monitor/auto_refresh.sh kick" in c for _, c in cmds))
 acts, _, _ = R.plan(snap_a(box_tasks=[dict(SY, label="sync_lab_DatasetXYZ")]), "lab")
 ok("有别的数据正在传给这台机器：先不提前传（同时只传一份）", ops(acts) == [("beat", K_UM)])
 acts, stuck, _ = R.plan(snap_a(box_tasks=[dict(SY, status="Failed (1)")]), "lab")

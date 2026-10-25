@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由 envs/policy.py 的 PLACE 定）：box 上的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；不提前排链。
+（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有在任务队列那台机器上训着的折提前排（见下）。
 步骤和判断都从实验表（research/*/experiments.py，经 scripts/queue/experiments.py 读）和任务说明（scripts/queue/spec.py）来，
 这里不认识具体模型。
 
@@ -27,6 +27,10 @@
   那边的步骤记在 ~/.cache/phd/advance/remote.json。要知道每折的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage
   needs，打印相对数据目录的输入），或者步骤的 queue 里写了 inputs。
 
+提前排（10/25）：一折正被任务队列那台机器（DICC）的作业训着、那边的代码是最新的（health 的 code 检查）时，每折的步骤里 PLACE
+  第一个地方（不算 trainer）是这台的任务队列的，现在就加进队列，任务说明的 after 接上前一步（推理 after 训练，评测 after 推理）；
+  after 里的没做完时那个任务是 waiting，worker 不领，做完后训完的那个作业接着就能领到。被 lab 领着、没人领的折不提前排。
+box 上排的任务（不连别的机器的）做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
 失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排；那边的任务、传输、拉回一样。
 在不在跑：box pueue 里的任务，拉回、归档按命令（带源机器）认，其他步骤按命令或标签认。拉回按源机器认：以前预先排的、在等
@@ -204,7 +208,7 @@ def plan(s, root=None):
     live, done = set(), {}
     live_fetch = {}  # 任务 → [(源机器, 任务号)]：活着的拉回任务
     for t in ptasks:
-        hit = by_cmd.get(t["command"].strip()) or by_label.get(t.get("label") or "")
+        hit = by_cmd.get(refill.unwrap(t["command"]).strip()) or by_label.get(t.get("label") or "")
         for sk in step_of(t["command"]) or ([hit] if hit else []):
             if t["status"] in LIVE_ST:
                 live.add(sk)
@@ -261,15 +265,9 @@ def plan(s, root=None):
         qd = st.get("queue")
         return (bool(qd) and S.fill(qd["key"], names, keep=()) in live_fetch) or f"pull:{label}" in moving or f"push:{label}" in moving
 
-    def to_queue(t, st, label, n, wait, tg):
-        """放进任务队列（见开头 queue:<机器>）→ True（排了、在等、报了），或者用不了的原因（have 的那边缺输入、连不上）。"""
-        qd = st.get("queue")
-        if not qd:
-            stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：envs/policy.py 写了 {tg['text']}，但实验表里这一步没有 queue"
-            return True
-        if wait:
-            return True
-        mach = tg["machine"]
+    def queue_item(t, st, label, n, mach, after=None):
+        """任务队列里的一项（taskq.py add --recipe command 的参数，machines = mach；after = 先要做完的任务）。"""
+        qd = st["queue"]
         q = {}
         for k, v in qd.items():
             if k not in ("nice", "inputs"):
@@ -277,9 +275,23 @@ def plan(s, root=None):
             if k == "env":
                 q["machines"] = [mach]
         q.setdefault("machines", [mach])
+        if after:
+            q["after"] = after
+        return dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
+                    args=S.kv_args("command", q)[1:], cmd=q["cmd"])
+
+    def to_queue(t, st, label, n, wait, tg):
+        """放进任务队列（见开头 queue:<机器>）→ True（排了、在等、报了），或者用不了的原因（have 的那边缺输入、连不上；
+        实验表里这一步没写 queue）。"""
+        qd = st.get("queue")
+        if not qd:
+            return "实验表里这一步没有 queue"
+        if wait:
+            return True
+        mach = tg["machine"]
         if mach != hub:
             cmd = S.fill(st["cmd"], t["names"], keep=())
-            needs = [S.fill(p, t["names"], keep=()) for p in qd["inputs"]] if "inputs" in qd else step_needs(cmd)
+            needs = inputs_of(qd, t["names"]) if "inputs" in qd else step_needs(cmd)
             if needs is None:
                 if tg["have"]:
                     return no_needs(cmd)
@@ -296,7 +308,7 @@ def plan(s, root=None):
                 dirs = [p for p in missing if not os.path.isfile(os.path.join(root, p))]
                 pcmd = "bash scripts/queue/offload_io.sh push " + " ".join([mach] + [shlex.quote(p) for p in missing])
                 # 同样的传输（同一个实验的另一步要的同一批文件）也算
-                pushes = sorted((x for x in ptasks if x.get("label") == f"push:{label}" or x["command"].strip() == pcmd),
+                pushes = sorted((x for x in ptasks if x.get("label") == f"push:{label}" or refill.unwrap(x["command"]).strip() == pcmd),
                                 key=lambda x: x["id"])
                 if dirs or (pushes and pushes[-1]["status"] not in LIVE_ST):
                     why = (f"{mach} 上没有 {' '.join(dirs)}，要先传过去" if dirs else
@@ -306,9 +318,40 @@ def plan(s, root=None):
                 elif not pushes and not any(x.get("cmd") == pcmd for x in todo):
                     todo.append(dict(step="push", key=t["key"], group="wait", label=f"push:{label}", nice=n, paths=missing, cmd=pcmd))
                 return True
-        todo.append(dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
-                         args=S.kv_args("command", q)[1:], cmd=q["cmd"]))
+        todo.append(queue_item(t, st, label, n, mach))
         return True
+
+    tq_tasks = {h: {x["key"]: x for x in (tq or {}).get("tasks", [])} for h, tq in (s.get("taskq") or {}).items()}
+    pueue_names = set(M.names("pueue"))
+    code = s.get("code") or {}
+
+    def prequeue(t, after):
+        """这一折正被任务队列那台机器（DICC）的作业训着：每折的步骤里，PLACE 第一个用得上的地方（不算 trainer：这一折不在
+        pueue 机器上训）是这台的任务队列的，现在就加进队列，after 接上前一步；训完的那个作业接着就能领到推理（10/25）。"""
+        h = next((h for h, byk in tq_tasks.items() if (byk.get(t["key"]) or {}).get("state") == "claimed"
+                  and byk[t["key"]].get("worker") not in pueue_names), None)
+        if h is None:
+            return
+        prev, items = t["key"], []
+        for st in after:
+            label = f"{st['name']}:{t['lab']}"
+            qd = st.get("queue")
+            tg = next((x for x in targets(st["name"], st["group"]) if x["kind"] != "trainer"), None)
+            if not qd or not tg or tg["kind"] != "queue" or tg["machine"] != h or any(fnmatch(label, pat) for pat in P.HOLD):
+                break
+            sk = (st["name"], t["key"])
+            if sk in live or sk in done or sk in remote_live or label in rem.state or st["done"].ok(root, t["names"]):
+                break
+            qk = S.fill(qd["key"], t["names"], keep=())
+            if qk not in qkeys:
+                items.append(queue_item(t, st, label, nice.get(t["key"], NO_NICE), h, after=[prev]))
+            prev = qk
+        if not items:
+            return
+        if not code.get("main") or (code.get("heads") or {}).get(h) != code["main"]:
+            NOTES.append(f"{t['lab']}：{h} 的代码不是最新的（不认 after），先不提前排")
+            return
+        todo.extend(items)
 
     def place(t, st, label, n, archiving, archive_due, fold):
         """这一步没做完、没在往 box 上拷：接着已经在做的地方，否则按 PLACE 选一个排上。"""
@@ -373,6 +416,7 @@ def plan(s, root=None):
                     r = rem.trainer(t, st, label, n, archiving, src)
                     if r is not True and any(key in (src.get(h) or {}) for h in TRAINERS):
                         NOTES.append(f"{label}：训练期间不能接着在 {tg['text']} 做（{r}），训完再选地方")
+            prequeue(t, after)
             continue
         stale_fetch(key, None)
         archive_due = [h for h in TRAINERS if sp.get("archive") and (t["e"] or {}).get("archive", True) is not False
@@ -436,6 +480,17 @@ def plan(s, root=None):
 
 # ---------------- 别的机器 ----------------
 NEEDS_ERR = {}
+
+
+def inputs_of(qd, names):
+    """步骤 queue 里的 inputs → 相对数据目录的路径；实验一级的步骤（没有 fold）里带 {fold} 的按实验的每一折展开。"""
+    out = []
+    for p in qd["inputs"]:
+        if "{fold}" in p and "fold" not in names:
+            out += [S.fill(p, dict(names, fold=f), keep=()) for f in names.get("folds", "").split()]
+        else:
+            out.append(S.fill(p, names, keep=()))
+    return out
 
 
 def step_needs(cmd):
@@ -566,7 +621,7 @@ class Remote:
         out = os.path.dirname(S.fill(st["done"].path, names, keep=()))
         qd = st.get("queue") or {}
         cmd = S.fill(st["cmd"], names, keep=())
-        needs = [S.fill(p, t["names"], keep=()) for p in qd["inputs"]] if "inputs" in qd else step_needs(cmd)
+        needs = inputs_of(qd, t["names"]) if "inputs" in qd else step_needs(cmd)
         if needs is None:
             self.stuck[f"advance:remote:{label}"] = f"{label}：{no_needs(cmd)}，不能在 {name} 上做（envs/policy.py 的 PLACE）"
             return no_needs(cmd)
@@ -739,7 +794,8 @@ def run(s, dry=False, q=None, tq=None):
                 if rec_label:  # 先记下来再加任务：中间断电时 resume() 按标签在那边找得到，不会"任务有、记录没有"
                     state[rec_label] = dict(t["record"][1])
                     write_json(state_path(), state)
-                tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(t['cmd'])}")
+                cmd = t["cmd"] if t.get("host") or refill.KICK in t["cmd"] else refill.then_check(t["cmd"], t["label"])
+                tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
                 if rec_label and t.get("host"):
                     state[rec_label]["id"] = tid
                     write_json(state_path(), state)

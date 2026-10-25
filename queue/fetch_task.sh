@@ -3,7 +3,8 @@
 # 由 box 上的 scripts/queue/advance.py 在那边训完以后放进 wait 组：
 #   q wait --label fetch:t14met_f0 -- 'bash scripts/queue/fetch_task.sh dicc Dataset121_GLIMETrq1/nnUNetTrainer_save10/0'
 # 结果文件夹、训完的标志、不拉的文件、上一级里还要拉的文件都按任务说明（scripts/queue/spec.py lookup <key>：实验表或训练队列）：
-#   out、done、fetch.exclude、fetch.extra（nnU-Net 是模型文件夹里的 plans.json 等，推理要用）、log。
+#   out、done、fetch.exclude、fetch.extra（nnU-Net 是模型文件夹里的 plans.json 等，推理要用）、fetch.also（另外要拉的文件夹，
+#   相对数据目录，先于 out 拉；如五折集成的预测）、log。
 # 那边还没训完时每 10 分钟查一次，每小时记一行最新训练日志的情况（pueue log 里能看到）；不设等待上限，没进展由健康检查提醒。
 # 只新增 / 更新，不删 box 上的文件；box 上已经训完（done 都有）时直接结束。训完的标志最后拉。拉回失败重试 3 次。
 set -euo pipefail
@@ -20,13 +21,14 @@ import json, shlex, sys
 s = json.loads(sys.stdin.read()); f = sys.argv[1]
 if f == "out": print(s["out"])
 elif f == "test": print(" && ".join("{ " + " || ".join("test -e " + shlex.quote(a) for a in d.split("|")) + "; }" for d in s["done"]))
-elif f in ("exclude", "extra"): print("\n".join((s.get("fetch") or {}).get(f, [])))
+elif f in ("exclude", "extra", "also"): print("\n".join((s.get("fetch") or {}).get(f, [])))
 elif f == "donefiles": print("\n".join(a for d in s["done"] for a in d.split("|")))
 elif f == "log": print(s.get("log") or "")
 ' "$1" <<< "$SPEC"; }
 OUT=$(sp out) TEST=$(sp test) LOGPAT=$(sp log)
 mapfile -t EXCL < <(sp exclude | grep . || true)
 mapfile -t EXTRA < <(sp extra | grep . || true)
+mapfile -t ALSO < <(sp also | grep . || true)
 mapfile -t DONEF < <(sp donefiles | grep . || true)
 SRC=$RDATA/$OUT DST=$LDATA/$OUT PARENT=$(dirname "$OUT")
 done_here() { [[ -d $DST ]] && (cd "$DST" && eval "$TEST"); }
@@ -56,6 +58,9 @@ for i in 1 2 3; do
     ok=1
     for x in ${EXTRA[@]+"${EXTRA[@]}"}; do
         rsync -rlt --partial --update "$SSH:$RDATA/$PARENT/$x" "$LDATA/$PARENT/" || ok=0
+    done
+    for x in ${ALSO[@]+"${ALSO[@]}"}; do
+        mkdir -p "$LDATA/$x" && rsync -rlt --partial --update "$SSH:$RDATA/$x/" "$LDATA/$x/" || ok=0
     done
     (( ok )) && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} ${EXD[@]+"${EXD[@]}"} "$SSH:$SRC/" "$DST/" \
         && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
