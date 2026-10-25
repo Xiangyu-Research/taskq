@@ -39,7 +39,6 @@ envs/policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/adv
 
     python3 scripts/queue/advance.py           看现在会排什么（不改任何东西）
 """
-import json
 import os
 import shlex
 import subprocess
@@ -58,14 +57,11 @@ import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 import refill  # noqa: E402
 import common as C  # noqa: E402
-from common import write_json  # noqa: E402
 
-STATE_DIR = os.path.expanduser("~/.cache/phd/advance")
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
 LIVE_ST = refill.LIVE
 TRAINERS = [n for n in M.names("pueue") if "train" in M.MACHINES[n]["roles"]]  # 训完要备份、删大文件的机器（lab）
 NO_NICE = 10 ** 6
-SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NOTES = []  # 这次检查里"为什么没排"的说明（写进 ~/advance.log，不报成问题）
 
 
@@ -458,14 +454,8 @@ def no_needs(cmd):
 def remote_have(name, paths):
     """这台机器上已经有的（文件夹里有 .incomplete 的是没传完的，不算）→ set；连不上 → None。"""
     m = M.MACHINES[name]
-    script = (f'cd {m["data"]} && for p in {" ".join(shlex.quote(p) for p in paths)}; do '
-              '[[ -e $p && ! -e $p/.incomplete ]] && echo "$p"; done; echo END')
-    try:
-        r = subprocess.run(SSH + [m["ssh"], "bash -s"], input=script, capture_output=True, text=True, timeout=120)
-    except Exception:  # noqa: BLE001
-        return None
-    lines = r.stdout.split()
-    return set(lines[:-1]) if r.returncode == 0 and lines[-1:] == ["END"] else None
+    rc, out, _ = C.run("bash -s", m["ssh"], input=C.have_script(paths, m["data"]))
+    return C.parse_have(out) if rc == 0 else None
 
 
 class Remote:
@@ -674,15 +664,9 @@ def run(s, dry=False, q=None, tq=None):
 
 def log(lines, stuck, live_mode):
     """写 ~/advance.log：和上次一样（同样的"会排"、"没排"、卡住）就不重复写。"""
-    os.makedirs(STATE_DIR, exist_ok=True)
-    last_p = os.path.join(STATE_DIR, "last.json")
     cur = dict(lines=[ln for ln in lines if not ln.startswith("排了")], stuck=sorted(stuck))
-    try:
-        last = json.load(open(last_p))
-    except (OSError, ValueError):
-        last = {}
     out = [ln for ln in lines if ln.startswith("排了")]
-    if cur != last:
+    if C.changed("advance", cur):
         out += [ln for ln in cur["lines"]] + [f"卡住 {stuck[k]}" for k in cur["stuck"]]
         if not out:
             out = ["没有要排的"]
@@ -690,7 +674,6 @@ def log(lines, stuck, live_mode):
         with open(LOG, "a") as f:
             mode = "" if live_mode else "（只算不排）"
             f.writelines(f"{datetime.now():%F %T}{mode} {ln}\n" for ln in out)
-    write_json(last_p, cur, indent=None)
 
 
 if __name__ == "__main__":

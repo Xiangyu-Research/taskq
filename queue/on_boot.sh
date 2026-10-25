@@ -19,15 +19,17 @@ if ! $P status > /dev/null 2>&1; then
 fi
 boot=$(( $(date +%s) - $(cut -d. -f1 /proc/uptime) ))
 ids=$($P status --json | python3 -c '
-import datetime, json, sys
+import json, sys
+sys.path.insert(0, sys.argv[2])
+from common import pueue_time
 boot = int(sys.argv[1]) - 900
 for i, k in sorted(json.load(sys.stdin)["tasks"].items(), key=lambda x: int(x[0])):
     d = k["status"].get("Done") if isinstance(k["status"], dict) else None
     if not d or d["result"] == "Success":
         continue
-    end = datetime.datetime.fromisoformat(d["end"][:26] + d["end"][-6:]).timestamp()
+    end = pueue_time(d["end"])
     if end >= boot:
-        print(i)' "$boot") || { log "pueue 没有响应"; exit 1; }
+        print(i)' "$boot" "$REPO/scripts/queue") || { log "pueue 没有响应"; exit 1; }
 if [[ -n $ids ]]; then
     $P restart --in-place $ids > /dev/null && log "开机：放回队列 $(echo $ids | tr '\n' ' ')"
 else

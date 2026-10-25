@@ -28,9 +28,7 @@
 import argparse
 import json
 import os
-import re
 import shlex
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -56,7 +54,6 @@ CODE_HEADS = os.path.expanduser("~/.cache/phd/code/heads.tsv")  # scripts/monito
 LOG = os.path.expanduser("~/.cache/phd-health/health.log")
 TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
-SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
 
 
@@ -97,16 +94,14 @@ def probe_script(m, paths=()):
 
 
 def sh(cmd, inp=None, timeout=120):
-    try:
-        r = subprocess.run(cmd, input=inp, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout
-    except Exception as e:  # noqa: BLE001
-        return 1, str(e)
+    """本机跑命令（列表）→ (退出码, 标准输出；出错时没有输出就给标准错误)。"""
+    rc, out, err = C.run(cmd, timeout=timeout, input=inp)
+    return rc, out if rc == 0 or out else err
 
 
 def run_on(m, script, timeout=120):
     remote = f"timeout -k 10 {max(timeout - 15, 10)} bash -s"
-    return sh(["bash", "-s"] if m["ssh"] is None else SSH + [m["ssh"], remote], inp=script, timeout=timeout)
+    return sh(["bash", "-s"] if m["ssh"] is None else C.SSH + [m["ssh"], remote], inp=script, timeout=timeout)
 
 
 # ---------------- 收集 ----------------
@@ -273,7 +268,7 @@ def check(s):
                 if st == "Running":
                     busy.setdefault(key, set()).add(name)
                     info = fold_info(s, key).get(name)
-                    start = mr_time(t["start"])
+                    start = C.local_time(t["start"])
                     if start and now - start > timedelta(minutes=60) and \
                             (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
                         add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
@@ -285,7 +280,7 @@ def check(s):
                 running_g.add((name, t["group"]))
             if st in LIVE or st == "Success":
                 continue
-            end = mr_time(t["end"])
+            end = C.local_time(t["end"])
             if end and now - end > timedelta(hours=24):
                 continue
             add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
@@ -314,7 +309,7 @@ def check(s):
 
     # --- 拉回 ---
     for host, t, key, src in waits:
-        start = mr_time(t["start"])
+        start = C.local_time(t["start"])
         if not start or now - start < timedelta(minutes=60) or src not in M.MACHINES:
             continue
         fin = fold_info(s, key).get(src)
@@ -357,14 +352,6 @@ def check(s):
         add("board", f"看板有新结果等确认后发布（{len(s['board_pending'])} 个文件：{'、'.join(s['board_pending'][:4])}）")
 
     return P
-
-
-def mr_time(x):
-    """pueue 的时间（带时区；秒的小数部分可能是 0、3、6、9 位）→ 本地 naive datetime。"""
-    if not x:
-        return None
-    m = re.fullmatch(r"(.+T\d\d:\d\d:\d\d)(\.\d+)?(.*)", x)
-    return datetime.fromisoformat(m.group(1) + (m.group(2) or "")[:7] + m.group(3)).astimezone().replace(tzinfo=None)
 
 
 # ---------------- 推送和状态 ----------------

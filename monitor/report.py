@@ -19,7 +19,8 @@ from datetime import datetime, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-import health as H  # noqa: E402  push、mr_time、机器表
+import health as H  # noqa: E402  push、机器表
+import common as C  # noqa: E402  scripts/queue/common.py（health 已经把路径加上）
 import plain as PL  # noqa: E402  白话说法
 
 RQ1 = os.path.join(REPO, "research", "RQ1")
@@ -66,7 +67,7 @@ def build(now):
         q = {}
     for name, d in q.items():
         for t in d.get("tasks", []):
-            end = H.mr_time(t["end"])
+            end = C.local_time(t["end"])
             r = PL.label(t["label"] or "") if t["status"] == "Success" and end and end >= cut else None
             if r and r[0] == "其他":
                 other.add(r[1])

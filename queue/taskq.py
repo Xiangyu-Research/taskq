@@ -42,7 +42,6 @@ import os
 import shlex
 import shutil
 import socket
-import subprocess
 import sys
 import time
 
@@ -51,6 +50,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "envs"))
 import spec as S  # noqa: E402
+import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", "~/.cache/phd/taskq"))  # TASKQ_DIR 只给测试用
@@ -558,14 +558,9 @@ def remote(host, args, timeout=120):
     """box 上：在 host（DICC）的仓库里跑 taskq.py <args> → (退出码, 标准输出, 标准错误)，ssh 不通时 None。"""
     import machines as M
     m = M.MACHINES[host]
-    ssh = os.environ.get("TASKQ_SSH", "ssh").split()  # TASKQ_SSH 只给测试用
-    try:
-        r = subprocess.run(ssh + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", m["ssh"],
-                                  f"cd {m['repo']} && BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"],
-                           capture_output=True, text=True, timeout=timeout)
-        return None if r.returncode == 255 else (r.returncode, r.stdout, r.stderr)
-    except Exception:  # noqa: BLE001
-        return None
+    ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
+    rc, out, err = C.run(f"cd {m['repo']} && BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}", m["ssh"], timeout, ssh=ssh)
+    return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 
 
 def queue_host():

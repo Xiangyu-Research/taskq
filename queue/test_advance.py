@@ -13,6 +13,7 @@ T = tempfile.mkdtemp()
 os.environ["ADVANCE_BT"] = T
 os.environ["ADVANCE_LOG"] = os.path.join(T, "advance.log")
 os.environ["PHD_TASKS"] = os.path.join(T, "tasks.json")
+os.environ["PHD_LAST"] = os.path.join(T, "last")
 sys.path.insert(0, HERE)
 import advance as A  # noqa: E402
 REAL_STEP_NEEDS = A.step_needs
@@ -82,7 +83,6 @@ def plan_with_records(s, *a, **kw):
 
 A.plan = plan_with_records
 
-A.STATE_DIR = os.path.join(T, "state")
 A.taskq_add = lambda nice, args: (0, "")  # 不经 ssh 真的加进 DICC 的队列
 REAL_PLACE = dict(A.P.PLACE)
 A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组）；第 9 节起测别的地方

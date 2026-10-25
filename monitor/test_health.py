@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
+os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
 import health as H  # noqa: E402
 
 NOW = datetime(2026, 10, 16, 12, 0)

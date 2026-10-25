@@ -72,7 +72,6 @@ SKIP_BREAK = 2  # 24 小时内这么多个领到的任务没开始就失败，�
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
 SUBMIT_CAP = 10  # QOS 没设排队上限时，每个 QOS 最多排这么多段
 LOG = os.path.expanduser("~/refill.log")
-SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 
@@ -154,12 +153,11 @@ def progress(s, key, host=None):
 
 def train_tasks(s, name):
     """这台机器 pueue 里的训练任务 → {key: [(任务号, 状态, 开始时间或 None)]}，按任务号排。"""
-    from health import mr_time
     out = {}
     for t in sorted((s["pueue"].get(name) or {}).get("tasks", []), key=lambda t: t["id"]):
         kind, key = kind_key(s, name, t)
         if kind == "train":
-            out.setdefault(key, []).append((t["id"], t["status"], mr_time(t.get("start"))))
+            out.setdefault(key, []).append((t["id"], t["status"], C.local_time(t.get("start"))))
     return out
 
 
@@ -357,12 +355,8 @@ def data_gb(paths):
 # ---------------- 执行 ----------------
 def sh(cmd, host=None, timeout=300):
     """在 box（host=None）或别的机器上跑一条 shell 命令 → (退出码, 输出)。"""
-    full = ["bash", "-c", cmd] if host is None else SSH + [host, cmd]
-    try:
-        r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, (r.stdout + r.stderr).strip()
-    except Exception as e:  # noqa: BLE001
-        return 1, str(e)
+    rc, out, err = C.run(cmd, host, timeout)
+    return rc, (out + err).strip()
 
 
 def q(name, args, run=sh):
@@ -589,12 +583,8 @@ def log(lines):
 
 def shadow_log(name, line):
     """影子模式的"会做什么"：和上次一样就不再写（每 30 分钟一条一样的没用）。"""
-    st = json.load(open(STATE)) if os.path.exists(STATE) else {}
-    if st.setdefault("shadow", {}).get(name) == line:
-        return
-    st["shadow"][name] = line
-    write_json(STATE, st)
-    log([line])
+    if C.changed(f"refill_{name}", line):
+        log([line])
 
 
 def run_all(s, dry=False):

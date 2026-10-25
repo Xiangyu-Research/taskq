@@ -20,6 +20,77 @@ def write_json(path, obj, indent=1):
             os.remove(tmp)
 
 
+# ---------------- 跑命令（本机或经 ssh） ----------------
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+
+
+def run(cmd, host=None, timeout=120, input=None, ssh=None):
+    """跑命令 → (退出码, 标准输出, 标准错误)。cmd 是列表时在本机直接跑；是字符串时本机用 bash -c、给了 host（ssh 名）就到那台跑。
+    超时、起不来 → (124, "", 原因)。ssh 不通时退出码是 255。"""
+    import subprocess
+    if isinstance(cmd, str):
+        cmd = ["bash", "-c", cmd] if host is None else (ssh or SSH) + [host, cmd]
+    elif host is not None:
+        raise ValueError("列表形式的命令只在本机跑")
+    try:
+        r = subprocess.run(cmd, input=input, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except Exception as e:  # noqa: BLE001
+        return 124, "", str(e)
+
+
+HAVE_END = "@@END"
+
+
+def have_script(paths, data):
+    """bash 片段：在数据目录 data 下，打印 paths 里已经有的（文件夹里有 .incomplete 的是没传完的，不算），每行一个，最后一行 @@END。"""
+    import shlex
+    ps = " ".join(shlex.quote(p) for p in paths)
+    return (f'(cd {data} 2>/dev/null && for p in {ps}; do [[ -e $p && ! -e $p/.incomplete ]] && echo "HAVE|$p"; done); '
+            f'echo "{HAVE_END}"\n')
+
+
+def parse_have(out):
+    """have_script 的输出 → 有的路径的 set；没有结束标记（输出被截断、脚本没跑完）→ None，不当成"文件不在"。"""
+    lines = out.splitlines()
+    if HAVE_END not in lines:
+        return None
+    return {ln[5:] for ln in lines[:lines.index(HAVE_END)] if ln.startswith("HAVE|")}
+
+
+# ---------------- 时间 ----------------
+def pueue_time(x):
+    """pueue 的时间（带时区；秒的小数部分可能是 0、3、6、9 位）→ 时间戳；没有 → None。"""
+    import re
+    from datetime import datetime
+    if not x:
+        return None
+    m = re.fullmatch(r"(.+T\d\d:\d\d:\d\d)(\.\d+)?(.*)", x)
+    return datetime.fromisoformat(m.group(1) + (m.group(2) or "")[:7] + m.group(3)).timestamp() if m else None
+
+
+def local_time(x):
+    """pueue 的时间 → 本机时区、不带时区的 datetime；没有 → None。"""
+    from datetime import datetime
+    ts = pueue_time(x)
+    return None if ts is None else datetime.fromtimestamp(ts)
+
+
+# ---------------- 和上次一样就不再写日志 ----------------
+def changed(name, value):
+    """value 和上次记下的不一样 → 记下、返回 True；一样 → False。记在 ~/.cache/phd/last/<name>.json。"""
+    import re
+    d = os.path.expanduser(os.environ.get("PHD_LAST") or "~/.cache/phd/last")  # 环境变量只给测试用
+    p = os.path.join(d, re.sub(r"[^\w.-]", "_", name) + ".json")
+    try:
+        if json.load(open(p)) == value:
+            return False
+    except (OSError, ValueError):
+        pass
+    write_json(p, value)
+    return True
+
+
 # ---------------- 任务记录（2026-10-25）：box、lab 的 pueue 任务"是谁"只看这里 ----------------
 def tasks_path():
     return os.path.expanduser(os.environ.get("PHD_TASKS") or "~/.cache/phd/tasks.json")  # 环境变量只给测试用
@@ -71,16 +142,6 @@ def set_record_id(rec, tid):
 
 def drop_records(pred):
     update_records(lambda recs: [r for r in recs if not pred(r)])
-
-
-def pueue_time(x):
-    """pueue 的时间（带时区；秒的小数部分可能是 0、3、6、9 位）→ 时间戳；没有 → None。"""
-    import re
-    from datetime import datetime
-    if not x:
-        return None
-    m = re.fullmatch(r"(.+T\d\d:\d\d:\d\d)(\.\d+)?(.*)", x)
-    return datetime.fromisoformat(m.group(1) + (m.group(2) or "")[:7] + m.group(3)).timestamp() if m else None
 
 
 SKEW = 300  # 机器之间的时钟差
