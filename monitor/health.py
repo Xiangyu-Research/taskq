@@ -58,15 +58,21 @@ TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
 H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
-STOPPED = ("Failed (143)", "Killed")  # 手动停的：只记进登记表，不推送
+
+
+def stopped(t):
+    """手动停的（pueue kill，或 SIGTERM 让 run_task.sh 退出 143）：只记进登记表，不推送。"""
+    return t.get("result") == "Killed" or t.get("code") == 143
+
+
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y'; echo '=====';"
                " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
 
 
-def is_worker_job(name):
-    return name.startswith("train_worker")  # scripts/queue/worker.sbatch
+def is_worker_job(machine, job):
+    return job == M.MACHINES[machine]["jobs"]["gpu"]  # scripts/queue/worker.sbatch（CPU worker 不算）
 
 
 def data_candidates(queue=()):
@@ -134,7 +140,7 @@ def gather():
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
-            t["status"] = "Success"
+            t.update(status="Success", result="Success", code=0)
     # 先查 Slurm 集群（任务队列在那里）：收集训练状态、查训练机上的数据都要用队列里的任务
     order = sorted(M.MACHINES, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
     queue = []
@@ -229,14 +235,14 @@ def check(s):
                 add(f"tqpause:{name}", f"{L(name)} 任务队列 3 小时内失败 {tq.get('recent_failures')} 次，暂停领任务，"
                     "作业空等 40 分钟就结束，排队的作业会一个个用掉（看 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
             # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
-            run = [r for r in d["squeue"] if is_worker_job(r[0]) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
+            run = [r for r in d["squeue"] if is_worker_job(name, r[0]) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
             workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed" and t.get("worker") not in pueue_workers}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
                     "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
             # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了：refill.py 应该已经补交了 worker.sbatch
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
-            if left and not any(is_worker_job(r[0]) for r in d["squeue"]):
+            if left and not any(is_worker_job(name, r[0]) for r in d["squeue"]):
                 add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
                     "（envs/policy.py 的 AUTO[\"dicc\"] 关着？看 ~/refill.log）", after=60)
             for jid, jname, st, end, code in d["sacct"]:
@@ -283,7 +289,7 @@ def check(s):
             if end and now - end > timedelta(hours=24):
                 continue
             add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
-                level="info" if st in STOPPED else "normal", kind="event")
+                level="info" if stopped(t) else "normal", kind="event")
 
     # --- 训练机的卡空了 ---
     qh = next((n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"]), None)

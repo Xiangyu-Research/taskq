@@ -3,7 +3,8 @@
 
     scripts/queue/qs            都看（在 box 上运行；别的机器经 ssh）
     scripts/queue/qs <机器>     只看一台（如 qs lab）
-    scripts/queue/qs --json     机器 → 任务列表（scripts/monitor/health.py 用）
+    scripts/queue/qs --json     机器 → 任务列表（scripts/monitor/health.py 用）：status 是给人看的（如 "Failed (1)"），
+                                程序看 result（Success / Failed / Killed / …，没结束是 None）和 code（退出码，没有是 None）
 wait 组里在跑的任务（等训完再拉回）下面多一行：输出的最后一行（fetch_fold.sh 每小时记远端训到第几个 epoch）。
 单个任务的输出：pueue log <编号>（别的机器上：ssh lab ~/.local/bin/pueue log <编号>）。
 """
@@ -52,9 +53,12 @@ def tasks(d):
     for k in d["tasks"].values():
         (st, info), = k["status"].items() if isinstance(k["status"], dict) else [(k["status"], {})]
         res = info.get("result") if st == "Done" else None
+        result = code = None
         if res is not None:
-            st = res if isinstance(res, str) else "{} ({})".format(*next(iter(res.items())))
-        rows.append({"id": k["id"], "group": k["group"], "status": st, "label": k.get("label") or "",
+            result, code = (res, 0 if res == "Success" else None) if isinstance(res, str) else next(iter(res.items()))
+            st = res if isinstance(res, str) else f"{result} ({code})"
+            code = code if isinstance(code, int) else None
+        rows.append({"id": k["id"], "group": k["group"], "status": st, "result": result, "code": code, "label": k.get("label") or "",
                      "deps": k.get("dependencies") or [], "start": info.get("start"), "end": info.get("end"),
                      "created_at": k.get("created_at"), "command": k["original_command"]})
     return sorted(rows, key=lambda r: (r["group"], r["id"]))

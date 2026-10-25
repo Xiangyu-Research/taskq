@@ -6,6 +6,7 @@
 import copy
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -33,8 +34,15 @@ def ok(what, cond):
     fails += 0 if cond else 1
 
 
+def fields(status):
+    """qs 从 status 拆出的 result、code（如 "Failed (137)" → Failed、137）。"""
+    m = re.fullmatch(r"(\w+)(?: \((-?\d+)\))?", status)
+    done = m[1] not in ("Running", "Queued", "Stashed", "Paused", "Locked")
+    return dict(result=m[1] if done else None, code=int(m[2]) if m[2] else 0 if m[1] == "Success" else None)
+
+
 def task(i, group, status, cmd, label=""):
-    return dict(id=i, group=group, status=status, label=label, deps=[], start=None, end=None, command=cmd)
+    return dict(id=i, group=group, status=status, **fields(status), label=label, deps=[], start=None, end=None, command=cmd)
 
 
 def train(i, ds, f, status="Running", tr=""):
@@ -250,7 +258,7 @@ ok("开关（LAB）没开：只记'会做什么'，不推送、不连 DICC、不
 R.run_all(snap())
 ok("影子日志和上次一样就不再写", open(R.LOG).read().count("开关没开") == 1)
 called = []
-R.taskq.remote = lambda h, a: called.append(a) or (0, "")
+R.taskq.remote = lambda h, a: called.append(a) or (0, "", "")
 ev, _, filled = R.run_all(snap([train(5, 101, 1, "Running", UM)], queue=mine))
 ok("开关没开、lab 领着在训的折：照样续（不让领取过期），别的不做", called == [f"beat --worker lab {K_UM}"] and not filled)
 R.taskq.remote = lambda h, a: (_ for _ in ()).throw(AssertionError("dry-run 不应该连 DICC"))
@@ -475,6 +483,19 @@ ok("已经有 CPU worker 排着：不再交", not sub and not st)
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|8\nCPU|0\nALL|10|10\n"))
 ok("所有作业已占满 10 个提交名额：不交 CPU worker、不报错", not sub and not st)
 R.P.AUTO["dicc"] = False
+probe = R.topup_probe("dicc")
+ok("查作业数用 envs/policy.py 的 QOS、envs/machines.py 的作业名",
+   "show qos normal " in probe and "-n cpu_worker " in probe and "for q in long;" in probe)
+
+
+def job_name(f):
+    return next(ln.split("=", 1)[1].strip() for ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f))
+                if ln.startswith("#SBATCH --job-name="))
+
+
+for name in R.M.names("slurm"):
+    ok(f"{name}：两个 sbatch 文件的 --job-name 和 envs/machines.py 的 jobs 一致",
+       {"gpu": job_name(R.GPU_FILE), "cpu": job_name(R.CPU_FILE)} == R.M.MACHINES[name]["jobs"])
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

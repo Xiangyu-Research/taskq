@@ -31,6 +31,24 @@ def safe(key):
     return key.replace("/", SAFE)
 
 
+JSON_MARK = "@@JSON "  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/queue/README.md 的"约定"）
+
+
+def json_out(obj):
+    print(JSON_MARK + json.dumps(obj), flush=True)
+
+
+def json_in(out, old=False):
+    """输出里 @@JSON 那一行 → 对象；没有这一行或解析不了 → None。old：没有这一行时退回找第一个 {（读 DICC 上旧版的 taskq.py）。"""
+    line = next((ln[len(JSON_MARK):] for ln in out.splitlines() if ln.startswith(JSON_MARK)), None)
+    if line is None and old and "{" in out:
+        line = out[out.find("{"):]
+    try:
+        return json.loads(line) if line is not None else None
+    except ValueError:
+        return None
+
+
 # ---------------- 解析 ----------------
 class SpecError(ValueError):
     pass
@@ -268,12 +286,14 @@ def collect(specs, root):
 def remote_collect(ssh, specs, root, timeout=600):
     """ssh 到别的机器上跑 collect()：把本文件和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
     prog = open(os.path.abspath(__file__), encoding="utf-8").read().replace('\nif __name__ == "__main__":', "\nif False:")
-    prog += f"\nprint(json.dumps(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r}))))\n"
+    prog += f"\njson_out(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r})))\n"
     try:
         r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ssh, "python3 -"], input=prog,
                            capture_output=True, text=True, timeout=timeout)
-        i = r.stdout.find("{")
-        return json.loads(r.stdout[i:]) if i >= 0 else None
+        out = json_in(r.stdout)
+        if out is None:
+            print(f"收集 {ssh} 失败（退出码 {r.returncode}）：{r.stderr.strip()[-300:]}", file=sys.stderr)
+        return out
     except Exception as e:  # noqa: BLE001
         print(f"收集 {ssh} 失败：{e}", file=sys.stderr)
         return None
@@ -294,10 +314,7 @@ def lookup(key):
     if t:
         return t["spec"]
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--json", key], capture_output=True, text=True)
-    if r.returncode == 0:
-        i = r.stdout.find("{")
-        return json.loads(r.stdout[i:]) if i >= 0 else None
-    return None
+    return json_in(r.stdout, old=True) if r.returncode == 0 else None
 
 
 def shell_lines(s, data, repo=REPO):

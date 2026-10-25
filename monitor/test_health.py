@@ -4,6 +4,7 @@
     python3 scripts/monitor/test_health.py
 """
 import os
+import re
 import sys
 import tempfile
 import time
@@ -38,8 +39,15 @@ def fold(final=False, epochs=100, end=NOW):
     return dict(final=final, runs=[dict(start=ts(end - timedelta(hours=5)), end=ts(end), epochs_done=epochs, tl=[])], dice={}, debug={})
 
 
+def fields(status):
+    """qs 从 status 拆出的 result、code（如 "Failed (143)" → Failed、143）。"""
+    m = re.fullmatch(r"(\w+)(?: \((-?\d+)\))?", status)
+    done = m[1] not in H.LIVE
+    return dict(result=m[1] if done else None, code=int(m[2]) if m[2] else 0 if m[1] == "Success" else None)
+
+
 def task(i, group, status, cmd, label="", start=NOW - timedelta(hours=3), end=None):
-    return dict(id=i, group=group, status=status, label=label, deps=[], start=pt(start) if start else None,
+    return dict(id=i, group=group, status=status, **fields(status), label=label, deps=[], start=pt(start) if start else None,
                 end=pt(end) if end else None, command=cmd)
 
 
@@ -74,11 +82,14 @@ s = snap(pueue={"box": {"groups": {}, "tasks": [
     task(1, "gpu", "Failed (1)", "bash x", "infer_a", end=NOW - timedelta(hours=1)),
     task(2, "cpu", "DependencyFailed", "python y", "oof_a", end=NOW - timedelta(hours=1)),
     task(3, "gpu", "Failed (1)", "bash z", "old", end=NOW - timedelta(hours=30)),
-    task(4, "cpu", "Failed (143)", "bash w", "stopped", end=NOW - timedelta(hours=1))]}})
+    task(4, "cpu", "Failed (143)", "bash w", "stopped", end=NOW - timedelta(hours=1)),
+    task(5, "cpu", "Killed", "bash v", "killed", end=NOW - timedelta(hours=1)),
+    task(6, "gpu", "Failed (137)", "bash u", "oom", end=NOW - timedelta(hours=1))]}})
 P = H.check(s)
 ok("任务失败、依赖失败都报", any(p.startswith("pueue:box:1:") for p in P) and any(p.startswith("pueue:box:2:") for p in P))
 ok("24 小时前的失败不再报", not any(p.startswith("pueue:box:3:") for p in P))
-ok("手动停的（143）只记不推", [p["level"] for k, p in P.items() if k.startswith("pueue:box:4:")] == ["info"])
+ok("手动停的（143、pueue kill）只记不推", [p["level"] for k, p in P.items() if k.startswith(("pueue:box:4:", "pueue:box:5:"))] == ["info"] * 2)
+ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["level"] for k, p in P.items() if k.startswith("pueue:box:6:")] == ["normal"])
 
 s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "train_worker", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
 ok("DICC 作业失败", "dicc:486300_1" in ids(s))
@@ -139,6 +150,8 @@ s["slurm"] = sq(["train_worker", "486300_1", "PENDING", "0:00", "Priority", "200
 ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
 s["slurm"] = sq(["train_worker", "487000_1", "PENDING", "0:00", "Priority", "0"])
 ok("排着不带折的 train_worker 作业也算：不提醒", "tqorphan:dicc" not in H.check(s))
+s["slurm"] = sq(["cpu_worker", "487001", "RUNNING", "1:00:00", "None", "0"])
+ok("只有 CPU worker 在跑：还是提醒没人训（作业名按 envs/machines.py 的 jobs）", "tqorphan:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "claimed", "lab", since=old)]
 s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
 ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))

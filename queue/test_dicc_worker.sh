@@ -5,7 +5,7 @@
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 T=$(mktemp -d)
-export TASKQ_DIR=$T/tq BRAIN_TUMOR=$T/data
+export TASKQ_DIR=$T/tq BRAIN_TUMOR=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 unset nnUNet_results nnUNet_preprocessed
 export TASKQ_POLL=1 TASKQ_IDLE_MAX=4 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_SLOTS=2 TASKQ_ADD_AFTER=0 TASKQ_ERR_MAX=3
 mkdir -p "$TASKQ_DIR" "$BRAIN_TUMOR"

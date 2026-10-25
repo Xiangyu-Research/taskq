@@ -4,6 +4,7 @@
     python3 scripts/queue/test_spec.py
 """
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -96,9 +97,15 @@ ok("nnU-Net 的任务 key = 数据集/训练器/fold，out 和 10/18 前的文�
    all(t["spec"]["out"] == "nnUNet/results/{0}/{1}__nnUNetResEncUNetMPlans__3d_fullres/fold_{2}".format(*k.split("/"))
        for k, t in ts.items() if t["recipe"] == "nnunet"))
 ok("实验表的 metrics 进了说明（登记表读）", set(um.get("metrics", {})) == {"val_WT", "val_TC", "val_ET"})
-ok("env_of：按实验表找模型的环境，表里没有用 nnunet",
-   E.env_of("/x/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__nnUNetResEncUNetMPlans__3d_fullres") == "swinunetr"
-   and E.env_of("/x/Dataset999_X/foo") == "nnunet")
+ok("env_of：按实验表找模型的环境",
+   E.env_of("/x/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__nnUNetResEncUNetMPlans__3d_fullres") == "swinunetr")
+try:
+    E.env_of("/x/Dataset999_X/foo")
+    ok("env_of：表里没有的模型报错（不默认 nnunet）", False)
+except S.SpecError as err:
+    ok("env_of：表里没有的模型报错（不默认 nnunet），提示设 MODEL_ENV", "MODEL_ENV" in str(err))
+r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "experiments.py"), "env-of", "/x/Dataset999_X/foo"], capture_output=True, text=True)
+ok("experiments.py env-of：表里没有 → 退出码非 0、说明在标准错误（predict.sh 因此停下）", r.returncode != 0 and "MODEL_ENV" in r.stderr and not r.stdout)
 
 
 # ---------------- 实验的声明（10/24）：别的脚本按模型文件夹查，不按名字猜 ----------------
