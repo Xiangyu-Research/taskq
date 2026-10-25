@@ -191,8 +191,8 @@ open(os.path.join(d, "nnUNet/preprocessed/B/.incomplete"), "w").close()
 fake = dict(H.M.MACHINES["lab"], data=d, disk=None, gpu_log=False, roles=("train",))
 out = subprocess.run(["bash", "-s"], input=H.probe_script(fake, ["nnUNet/preprocessed/A", "nnUNet/preprocessed/B", "C", "D"]),
                      capture_output=True, text=True).stdout
-have = next(ln for ln in out.splitlines() if ln.startswith("HAVE|"))[5:].split()
-ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", have == ["nnUNet/preprocessed/A", "C"])
+ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", H.C.parse_have(out) == {"nnUNet/preprocessed/A", "C"})
+ok("HAVE 输出被截断（没有结束标记）→ 没读到", H.C.parse_have(out.split(H.C.HAVE_END)[0]) is None)
 
 # ---------------- gather：各卡和卡上的进程、Slurm 分区、只看本机 ----------------
 fakebin = tempfile.mkdtemp()
@@ -224,7 +224,11 @@ def fake_run_on(m, script, timeout=120):
     calls.append(("run_on", m["label"]))
     if m["scheduler"] == "slurm":
         return 0, "train_worker|123|RUNNING|1:00|None|0|gpu-a100\nbad|line\n=====\n"
-    return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n"
+    have = "HAVE|nnUNet/x\nHAVE|a b\n@@END\n" if H.C.HAVE_END in script and not cut else ""
+    return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n" + have
+
+
+cut = False
 
 
 H.sh, H.run_on = fake_sh, fake_run_on
@@ -233,10 +237,14 @@ H.spec.remote_collect = lambda ssh, specs, root: {"folds": {}, "seglogs": []}
 H.spec.collect = lambda specs, root: {"folds": {}, "seglogs": []}
 g = H.gather()
 ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留着",
-   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123"}
+   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123", "HAVE": "a b nnUNet/x"}
    and g["gpus"]["lab"] == [dict(gpu="0", uuid="GPU-a", util="37", mem="1200", apps=[dict(pid="42", mem="1100", args="python x|y")])])
 ok("gather：squeue 每行 7 项（最后是分区），格式不对的行不要",
    g["slurm"]["dicc"]["squeue"] == [["train_worker", "123", "RUNNING", "1:00", "None", "0", "gpu-a100"]])
+cut = True
+g = H.gather()
+ok("gather：训练机的 HAVE 没有结束标记（输出被截断）→ 这台算没读到", g["ok"]["lab"] is False and "lab" not in g["probe"])
+cut = False
 calls.clear()
 g = H.gather(remote=False)
 qs_call = next(c[1] for c in calls if c[0] == "sh" and c[1][0] != "git")

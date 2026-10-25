@@ -29,7 +29,6 @@
 import argparse
 import json
 import os
-import shlex
 import sys
 import time
 import urllib.parse
@@ -104,9 +103,7 @@ def probe_script(m, paths=()):
     if m["gpu_log"]:
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
     if "train" in m["roles"] and paths:  # 训练要用的数据哪些已经在了（scripts/queue/refill.py 判断要不要先传）
-        # 里面有 .incomplete 的是 tunnel_push.sh 没传完的，不算
-        lines.append(f'echo "HAVE|$(cd {m["data"]} 2>/dev/null && for p in {" ".join(shlex.quote(p) for p in paths)}; do '
-                     f'[[ -e $p && ! -e $p/.incomplete ]] && printf "%s " "$p"; done)"')
+        lines.append(C.have_script(paths, m["data"]).rstrip("\n"))
     return "\n".join(lines) + "\n"
 
 
@@ -172,11 +169,15 @@ def gather(remote=True):
                     s["taskq"][name] = taskq.remote_status(name)
                     queue += (s["taskq"][name] or {}).get("tasks", [])
         else:
-            rc, out = run_on(m, probe_script(m, data_candidates(queue)))
-            ok = rc == 0 and "BOOT|" in out
+            script = probe_script(m, data_candidates(queue))
+            rc, out = run_on(m, script)
+            have = C.parse_have(out) if C.HAVE_END in script else set()  # 输出被截断：这次算没读到，不当成数据不在
+            ok = rc == 0 and "BOOT|" in out and have is not None
             if ok:
                 lines = out.splitlines()
-                s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|")))
+                s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|", "HAVE|")))
+                if C.HAVE_END in script:
+                    s["probe"][name]["HAVE"] = " ".join(sorted(have))
                 s["gpus"][name] = gpus_of(lines)
         s["ok"][name] = ok
     specs = spec.task_specs(queue)
