@@ -3,6 +3,7 @@
 
     python3 scripts/monitor/test_health.py
 """
+import json
 import os
 import re
 import sys
@@ -192,6 +193,57 @@ out = subprocess.run(["bash", "-s"], input=H.probe_script(fake, ["nnUNet/preproc
                      capture_output=True, text=True).stdout
 have = next(ln for ln in out.splitlines() if ln.startswith("HAVE|"))[5:].split()
 ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", have == ["nnUNet/preprocessed/A", "C"])
+
+# ---------------- gather：各卡和卡上的进程、Slurm 分区、只看本机 ----------------
+fakebin = tempfile.mkdtemp()
+sl = subprocess.Popen(["sleep", "30"])
+with open(os.path.join(fakebin, "nvidia-smi"), "w") as f:
+    f.write(f'#!/bin/bash\ncase "$*" in *query-gpu=*) echo "0, GPU-a, 37, 1200"; echo "1, GPU-b, 0, 5";;\n'
+            f'*query-compute-apps*) echo "GPU-a, {sl.pid}, 1100"; echo "GPU-x, 1, 9";; esac\n')
+os.chmod(os.path.join(fakebin, "nvidia-smi"), 0o755)
+out = subprocess.run(["bash", "-s"], input=H.GPU_PROBE, capture_output=True, text=True,
+                     env=dict(os.environ, PATH=fakebin + ":" + os.environ["PATH"])).stdout
+sl.kill()
+gp = H.gpus_of(out.splitlines())
+ok("GPU 探查实跑：每张卡一项，卡上的进程带命令行，对不上卡的进程不要",
+   [(x["gpu"], x["util"], x["mem"]) for x in gp] == [("0", "37", "1200"), ("1", "0", "5")]
+   and [(a["pid"], a["mem"], a["args"]) for a in gp[0]["apps"]] == [(str(sl.pid), "1100", "sleep 30")] and gp[1]["apps"] == [])
+ok("探查脚本里有 GPU 那几行", H.GPU_PROBE in H.probe_script(H.M.MACHINES["box"]))
+calls = []
+saved = (H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect)
+
+
+def fake_sh(cmd, inp=None, timeout=120):
+    calls.append(("sh", cmd))
+    if cmd[0] == "git":
+        return 0, "abc\n"
+    return 0, json.dumps({n: {"groups": {}, "tasks": []} for n in (cmd[2:] or H.M.names("pueue"))})
+
+
+def fake_run_on(m, script, timeout=120):
+    calls.append(("run_on", m["label"]))
+    if m["scheduler"] == "slurm":
+        return 0, "train_worker|123|RUNNING|1:00|None|0|gpu-a100\nbad|line\n=====\n"
+    return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n"
+
+
+H.sh, H.run_on = fake_sh, fake_run_on
+H.taskq.remote_status = lambda n: dict(enabled=True, tasks=[])
+H.spec.remote_collect = lambda ssh, specs, root: {"folds": {}, "seglogs": []}
+H.spec.collect = lambda specs, root: {"folds": {}, "seglogs": []}
+g = H.gather()
+ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留着",
+   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123"}
+   and g["gpus"]["lab"] == [dict(gpu="0", uuid="GPU-a", util="37", mem="1200", apps=[dict(pid="42", mem="1100", args="python x|y")])])
+ok("gather：squeue 每行 7 项（最后是分区），格式不对的行不要",
+   g["slurm"]["dicc"]["squeue"] == [["train_worker", "123", "RUNNING", "1:00", "None", "0", "gpu-a100"]])
+calls.clear()
+g = H.gather(remote=False)
+qs_call = next(c[1] for c in calls if c[0] == "sh" and c[1][0] != "git")
+ok("gather(remote=False)：只探查本机，qs 只问本机，不碰 Slurm",
+   [c for c in calls if c[0] == "run_on"] == [("run_on", "box")] and qs_call[1:] == ["--json", "box"]
+   and set(g["ok"]) == {"box"} and not g["slurm"] and not g["taskq"] and set(g["pueue"]) == {"box"})
+H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect = saved
 
 s = snap()
 s["probe"]["lab"]["DISK"] = str(int(10e9))

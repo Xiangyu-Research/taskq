@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """各台机器（envs/machines.py）的健康检查（2026-10-16）：box 上 cron 每 30 分钟跑一次，发现问题推送到手机（ntfy），
-同时记进状态文件，make_registry.py 把当前的问题放在实验登记表最上面（"需要处理"）。
+同时记进状态文件，make_registry.py 把当前的问题放在实验登记表最上面（"需要处理"）。各机器的状态只在 gather() 里取，
+登记表 make_registry.py 也用它。
 
     python3 scripts/monitor/health.py              检查、推送、更新状态
     python3 scripts/monitor/health.py --dry-run    只打印这次查到的问题，不推送、不改任何文件
@@ -37,11 +38,9 @@ from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "research", "RQ1", "nnunet"))
 sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
-import make_registry as mr  # noqa: E402  要登记的任务
 import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
 import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
 import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
@@ -64,7 +63,7 @@ def stopped(t):
 
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
-SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y'; echo '=====';"
+SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y|%P'; echo '=====';"
                " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
 
 
@@ -79,9 +78,27 @@ def data_candidates(queue=()):
     return sorted(out)
 
 
+GPU_PROBE = r"""timeout 20 nvidia-smi --query-gpu=index,uuid,utilization.gpu,memory.used --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU|/'
+timeout 20 nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while IFS=, read u p m; do
+  echo "APP|$u|$p|$m|$(ps -o args= -p $p 2>/dev/null | cut -c1-400)"; done"""
+
+
+def gpus_of(lines):
+    """探查里的 GPU|、APP| 行 → [dict(gpu=编号, uuid, util, mem, apps=[dict(pid, mem, args)])]。"""
+    gpus = {}
+    for ln in lines:
+        p = [x.strip() for x in ln.split("|", 4)]
+        if p[0] == "GPU" and len(p) >= 2 and p[1].count(",") >= 3:
+            idx, uuid, util, mem = [x.strip() for x in p[1].split(",")][:4]
+            gpus[uuid] = dict(gpu=idx, uuid=uuid, util=util, mem=mem, apps=[])
+        elif p[0] == "APP" and len(p) >= 5 and p[1] in gpus:
+            gpus[p[1]]["apps"].append(dict(pid=p[2], mem=p[3], args=p[4]))
+    return list(gpus.values())
+
+
 def probe_script(m, paths=()):
     """pueue 机器上要查的东西（按表里的字段），每行"项|值"。paths：训练机上要看在不在的数据（相对数据目录）。"""
-    lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"']
+    lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"', GPU_PROBE]
     if m["disk"]:
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
@@ -127,17 +144,20 @@ def code_heads():
     return dict(main=main.strip() if rc == 0 else "", heads=heads)
 
 
-def gather():
-    s = dict(now=datetime.now(), ok={}, probe={}, slurm={}, src={}, taskq={}, code=code_heads())
-    rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
-    s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in M.names("pueue")}
+def gather(remote=True):
+    """各机器的状态（只读）。remote=False：只看本机（不连别的机器）。"""
+    s = dict(now=datetime.now(), ok={}, probe={}, gpus={}, slurm={}, src={}, taskq={}, code=code_heads())
+    here = [n for n in M.MACHINES if remote or M.MACHINES[n]["ssh"] is None]
+    pq = [n for n in M.names("pueue") if n in here]
+    rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"] + ([] if remote else pq), timeout=180)
+    s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in pq}
     s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（scripts/queue/common.py），main() 里写回
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
             t.update(status="Success", result="Success", code=0)
     # 先查 Slurm 集群（任务队列在那里）：收集训练状态、查训练机上的数据都要用队列里的任务
-    order = sorted(M.MACHINES, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
+    order = sorted(here, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
     queue = []
     for name in order:
         m = M.MACHINES[name]
@@ -146,7 +166,7 @@ def gather():
             ok = rc == 0 and "=====" in out
             if ok:
                 q, a = out.split("=====", 1)
-                s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 5],  # 作业名、号、状态、已跑、原因、Nice
+                s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 6],  # 作业名、号、状态、已跑、原因、Nice、分区
                                         sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
                 if "train" in m["roles"]:
                     s["taskq"][name] = taskq.remote_status(name)
@@ -155,9 +175,11 @@ def gather():
             rc, out = run_on(m, probe_script(m, data_candidates(queue)))
             ok = rc == 0 and "BOOT|" in out
             if ok:
-                s["probe"][name] = dict(ln.split("|", 1) for ln in out.splitlines() if "|" in ln)
+                lines = out.splitlines()
+                s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|")))
+                s["gpus"][name] = gpus_of(lines)
         s["ok"][name] = ok
-    specs = mr.task_specs(queue)
+    specs = spec.task_specs(queue)
     for name in order:  # 各机器上每个任务的训练状态（spec.collect）
         m = M.MACHINES[name]
         if s["ok"][name]:

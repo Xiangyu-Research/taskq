@@ -551,7 +551,7 @@ def remote_status(host):
     if r is None:
         return None
     rc, out, _ = r
-    return S.json_in(out, old=True) if rc == 0 else None
+    return S.json_in(out) if rc == 0 else None
 
 
 def remote(host, args, timeout=120):
