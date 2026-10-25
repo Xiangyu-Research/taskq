@@ -697,5 +697,28 @@ bad = "sh -c 'echo 没有这个模型文件夹 >&2; exit 3' --stage infer"
 check("needs 出错：返回 None，原因带上错误原文", A.step_needs(bad) is None and A.no_needs(bad) == "--stage needs 出错（没有这个模型文件夹）")
 check("needs 不支持：原样说不支持", A.step_needs("true") is None and A.no_needs("true") == "命令不支持 --stage needs")
 
+# 每个实验的每折步骤都真跑一次 --stage needs，模型文件夹一个都不在本机（10/25：lab 训的新数据集第一折，box 上还没拉回）
+with tempfile.TemporaryDirectory() as R:
+    os.makedirs(f"{R}/nnUNet/raw")
+    old_bt = os.environ.get("BRAIN_TUMOR")
+    os.environ["BRAIN_TUMOR"] = R
+    seen, bad = set(), []
+    for t in A.candidates(R, sys.executable, [])[0]:
+        for st in (t["e"] or {}).get("after", []):
+            cmd = A.S.fill(st["cmd"], t["names"], keep=())
+            if "--stage" not in cmd or (t["exp"], st["name"]) in seen:
+                continue
+            seen.add((t["exp"], st["name"]))
+            got = REAL_STEP_NEEDS(cmd)
+            if not got or not any(x.endswith("/checkpoint_final.pth") for x in got):
+                bad.append(f"{t['lab']} {st['name']}：{A.no_needs(cmd)}")
+    if old_bt is None:
+        os.environ.pop("BRAIN_TUMOR")
+    else:
+        os.environ["BRAIN_TUMOR"] = old_bt
+    check(f"needs：{len(seen)} 个实验步骤在模型还没拉回时都能列出输入", seen and not bad)
+    for b in bad[:5]:
+        print("   ", b)
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
