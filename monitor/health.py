@@ -230,7 +230,7 @@ def check(s):
                     add(f"stuck:{name}:{key}", f"{L(name)} 作业 {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
                         f"{'日志和结果文件夹 90 分钟没有变化' if ages else '还没有日志'}")
                 if t["failures"] and st != "done":  # 后来训完了就不再报
-                    add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 训练失败 {t['failures']} 次"
+                    add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 失败 {t['failures']} 次"
                         + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
             if tq.get("paused"):
                 add(f"tqpause:{name}", f"{L(name)} 任务队列 3 小时内失败 {tq.get('recent_failures')} 次，暂停领任务，"

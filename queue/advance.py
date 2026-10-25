@@ -263,10 +263,10 @@ def plan(s, root=None):
             return
         mach = next(iter(q.get("machines") or []), None)
         if mach and mach != hub:
-            needs = ([S.fill(p, t["names"], keep=()) for p in qd["inputs"]] if "inputs" in qd
-                     else step_needs(S.fill(st["cmd"], t["names"], keep=())))
+            cmd = S.fill(st["cmd"], t["names"], keep=())
+            needs = [S.fill(p, t["names"], keep=()) for p in qd["inputs"]] if "inputs" in qd else step_needs(cmd)
             if needs is None:
-                stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：命令不支持 --stage needs，查不了 {mach} 上缺什么"
+                stuck[f"advance:{st['name']}:{t['key']}"] = f"{label}：{no_needs(cmd)}，查不了 {mach} 上缺什么"
                 return
             have = remote_have(mach, needs)
             if qd.get("or_here") and (have is None or any(p not in have for p in needs)):
@@ -340,9 +340,10 @@ def plan(s, root=None):
             if (cp or {}).get("final") and (("archive", key) in live or any(
                     y["status"] in LIVE_ST and y.get("group") == tr.get("group") and task_key(y["command"])[0] == "train" for y in rts)):
                 return None, False  # 训完了才排（之前没排上）：在归档、或组里已经在训下一折（要等太久），照常进任务队列
-            needs = step_needs(S.fill(st["cmd"], t["names"], keep=()))
+            cmd = S.fill(st["cmd"], t["names"], keep=())
+            needs = step_needs(cmd)
             if needs is None:
-                stuck[f"advance:{st['name']}:{key}"] = f"{label}：命令不支持 --stage needs，不能在 {h} 上做"
+                stuck[f"advance:{st['name']}:{key}"] = f"{label}：{no_needs(cmd)}，不能在 {h} 上做"
                 return None, False
             needs = [p for p in needs if not p.startswith(t["spec"]["out"].rstrip("/") + "/")]
             have = remote_have(h, needs)
@@ -513,14 +514,26 @@ def offload_state():
         return {}
 
 
+NEEDS_ERR = {}
+
+
 def step_needs(cmd):
-    """步骤的命令 → 要用的输入（相对数据目录）；不支持 --stage needs → None。"""
+    """步骤的命令 → 要用的输入（相对数据目录）；不支持 --stage needs 或运行出错 → None（原因见 no_needs）。"""
     tok = shlex.split(cmd)
     if "--stage" not in tok or tok.index("--stage") + 1 >= len(tok):
         return None
     tok[tok.index("--stage") + 1] = "needs"
     r = subprocess.run(tok, cwd=REPO, capture_output=True, text=True, timeout=120)
-    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] if r.returncode == 0 else None
+    if r.returncode != 0:
+        err = (r.stderr.strip().splitlines() or [f"退出码 {r.returncode}"])[-1]
+        NEEDS_ERR[cmd] = f"--stage needs 出错（{err}）"
+        return None
+    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def no_needs(cmd):
+    """step_needs 返回 None 的原因。"""
+    return NEEDS_ERR.get(cmd, "命令不支持 --stage needs")
 
 
 def remote_have(name, paths):
@@ -652,7 +665,7 @@ class Offload:
         cmd = S.fill(st["cmd"], names, keep=())
         needs = step_needs(cmd)
         if needs is None:
-            self.stuck[f"advance:offload:{label}"] = f"{label}：命令不支持 --stage needs，不能分到 {self.name}（{cmd}）"
+            self.stuck[f"advance:offload:{label}"] = f"{label}：{no_needs(cmd)}，不能分到 {self.name}（{cmd}）"
             return True
         have = remote_have(self.name, needs)
         if have is None:

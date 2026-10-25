@@ -14,6 +14,7 @@ os.environ["ADVANCE_BT"] = T
 os.environ["ADVANCE_LOG"] = os.path.join(T, "advance.log")
 sys.path.insert(0, HERE)
 import advance as A  # noqa: E402
+REAL_STEP_NEEDS = A.step_needs
 
 A.STATE_DIR = os.path.join(T, "state")
 A.taskq_add = lambda nice, args: (0, "")  # 不经 ssh 真的加进 DICC 的队列
@@ -689,6 +690,12 @@ touch(f"{T}/RQ1/probe/p2_compare_t3men/p2_compare.run.json", '{"status": "ok"}')
 touch(f"{T}/RQ1/probe/p1_t3men/.probe_done")
 todo, stuck = A.plan(s_)
 check("probe：p1、p2、p2cmp 都做完 → 没有要排的", pr(todo) == [] and not [k for k in stuck if k.split(":")[1:2] and k.split(":")[1] in PSTEPS and k.endswith(":t3men")])
+
+# step_needs 运行出错（10/25：box 上还没有 lab 训的模型文件夹）和命令不支持分开报
+A.step_needs = REAL_STEP_NEEDS
+bad = "sh -c 'echo 没有这个模型文件夹 >&2; exit 3' --stage infer"
+check("needs 出错：返回 None，原因带上错误原文", A.step_needs(bad) is None and A.no_needs(bad) == "--stage needs 出错（没有这个模型文件夹）")
+check("needs 不支持：原样说不支持", A.step_needs("true") is None and A.no_needs("true") == "命令不支持 --stage needs")
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
