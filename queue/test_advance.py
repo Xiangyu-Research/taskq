@@ -63,7 +63,18 @@ def legacy_records(s):
 _plan = A.plan
 
 
+def fields(status):
+    """qs 从 status 拆出的 result、code（如 "Failed (137)" → Failed、137）。"""
+    import re
+    m = re.fullmatch(r"(\w+)(?: \((-?\d+)\))?", status)
+    done = m[1] not in ("Running", "Queued", "Stashed", "Paused", "Locked")
+    return dict(result=m[1] if done else None, code=int(m[2]) if m[2] else 0 if m[1] == "Success" else None)
+
+
 def plan_with_records(s, *a, **kw):
+    for d in (s.get("pueue") or {}).values():  # 测试里只写 status，result、code 每次按它补上（和 qs 一样）
+        for x in (d or {}).get("tasks") or []:
+            x.update(fields(x["status"]))
     if "records" not in s:  # 任务记录（run 写的）+ 按旧规则给快照里的任务配的
         s = dict(s, records=A.C.load_records() + legacy_records(s))
     return _plan(s, *a, **kw)

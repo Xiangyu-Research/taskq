@@ -180,8 +180,8 @@ def plan(s, root=None):
         if sk in live:
             return
         prev = sorted(done.get(sk, []), key=lambda t: t["id"])
-        last_ok = max((i for i, t in enumerate(prev) if t["status"] == "Success"), default=-1)
-        bad = [t for t in prev[last_ok + 1:] if t["status"] != "Success"]  # 只看最后一次成功之后的
+        last_ok = max((i for i, t in enumerate(prev) if t.get("result") == "Success"), default=-1)
+        bad = [t for t in prev[last_ok + 1:] if t.get("result") != "Success"]  # 只看最后一次成功之后的
         ok_empty = last_ok >= 0 and step not in rerun
         if bad or ok_empty:
             t = bad[-1] if bad else prev[last_ok]
@@ -560,7 +560,7 @@ class Remote:
             x = None  # 以前那次训练后面排的（这一折后来又在这台接着训了）
         if x and x["status"] in LIVE_ST:
             return True
-        if x and x["status"] == "Success":
+        if x and x.get("result") == "Success":
             self.pull_back(t, label)
             return True
         if x:
@@ -581,7 +581,7 @@ class Remote:
             return
         if pulls:
             x = pulls[-1]
-            why = (f"box 任务 {x['id']} 拉回了，但 box 上核对还是没做完" if x["status"] == "Success" else f"拉回任务 {x['id']} {x['status']}")
+            why = (f"box 任务 {x['id']} 拉回了，但 box 上核对还是没做完" if x.get("result") == "Success" else f"拉回任务 {x['id']} {x['status']}")
             self.stuck[f"advance:remote:{label}"] = (f"{label}（{r['machine']} 任务 {r.get('id')}）：{why}，不再自动重排"
                                                      f"（看 pueue log {x['id']}；处理好以后 pueue remove {x['id']}）")
             return
