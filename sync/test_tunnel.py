@@ -23,7 +23,7 @@ s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 ENV = dict(os.environ, HOME=HOME, TUNNEL_SSH=FAKE, RSYNC_RSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}",
-           TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1", TUNNEL_CHUNK=str(1 << 20), TUNNEL_MIN="1",
+           TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1", TUNNEL_CHUNK=str(1 << 20),
            TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", PATH=os.environ["PATH"])
 FAILS = []
 
@@ -159,8 +159,6 @@ ok("替身推送（~/ 开头的目标）：一致、数据经隧道", r.returnco
    and "Literal data: 0 bytes" in r.stdout and not os.path.exists(os.path.join(HOME, "~")))
 ok("替身推送：那边的暂存目录删了", not [d for d in os.listdir(os.path.dirname(rdst)) if d.startswith(".tunnel_stage_")])
 
-r = run("rsync", "-rlt", "--stats", bsrc + "/", "dicc:st/arch/fold2/", env=dict(ENV, TUNNEL_MIN="1e12"))
-ok("小于下限：直接 rsync，不经隧道", r.returncode == 0 and "经隧道" not in r.stdout and same(bsrc, os.path.join(HOME, "st/arch/fold2"), [f[5:] for f in big]))
 r = run("rsync", "-rltR", bsrc + "/./checkpoint_final.pth", "dicc:st/arch3/")
 ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/checkpoint_final.pth")))
 r = run("rsync", "-rlt", "lab:x/", os.path.join(T, "lab/"))

@@ -31,7 +31,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 CHUNK = int(os.environ.get("TUNNEL_CHUNK", 90 * 2 ** 20))
 NPAR = 8
-MIN_TUNNEL = float(os.environ.get("TUNNEL_MIN", 1e9))
 MIN_JOB = float(os.environ.get("TUNNEL_MIN_JOB", 1e9))
 JOB_WAIT = 600
 STALL = int(os.environ.get("TUNNEL_STALL", 3600))
@@ -229,10 +228,11 @@ def run_remote(host, mode, plan, serve, total):
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
     ssh(host, f"nohup bash {wd}/run.sh > /dev/null 2>&1 < /dev/null &")
-    t0, seen, where = time.time(), time.time(), ""
+    t0, seen, where, wait = time.time(), time.time(), "", 2
     try:
         while True:
-            time.sleep(POLL)
+            time.sleep(min(wait, POLL))
+            wait *= 2
             try:
                 st = ssh(host, f"cd {wd} && if [ -e done ]; then echo done; elif pgrep -f '[b]ash {wd}/run.sh' > /dev/null; "
                                f"then echo run; else echo dead; fi; grep '^在 ' log 2> /dev/null | tail -1").split("\n")
@@ -251,6 +251,8 @@ def run_remote(host, mode, plan, serve, total):
             if time.time() - serve.last > STALL:
                 raise RuntimeError(f"连续 {STALL // 60} 分钟没有数据经过隧道")
             dt = time.time() - t0
+            if wait < POLL:
+                continue
             log(f"已传 {serve.moved / 1e9:.1f} / {total / 1e9:.1f} GB，平均 {serve.moved / 1e6 / dt:.1f} MB/s")
         out = ssh(host, f"cat {wd}/results.tsv 2> /dev/null || true; echo ===; grep '^失败' {wd}/log || true")
         res, fails = out.split("===\n", 1)
@@ -492,7 +494,7 @@ def wrap(args):
         if len(p) == 3 and len(p[0]) > 1 and p[0][0] in "<>" and p[0][1] == "f":
             items.append((p[2], int(p[1])))
     total = sum(n for _, n in items)
-    if total < MIN_TUNNEL:
+    if not items:
         plain(args)
     sroot = rs.group(2) if rs else src
     if not sroot.endswith("/"):

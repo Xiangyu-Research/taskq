@@ -1,6 +1,6 @@
 #!/bin/bash
 # box 和别的机器之间传一步的输入、结果（2026-10-22）：advance.py 按 envs/policy.py 的 PLACE 把步骤放到别处时用，在 box 的 wait 组跑：
-#   offload_io.sh push <机器> <相对数据目录的路径>...   box → 那边：文件夹经隧道（scripts/sync/tunnel_push.sh），文件用 rsync over ssh
+#   offload_io.sh push <机器> <相对数据目录的路径>...   box → 那边：文件夹经 scripts/sync/tunnel_push.sh，文件经 tunnel.py push，再用 rsync 补齐、核对
 #   offload_io.sh pull <机器> <相对数据目录的文件夹>     那边 → box：rsync，再按校验和核对一遍，不一致就以非 0 退出
 # 只新增 / 更新，不删任何一边的文件。
 set -euo pipefail
@@ -30,6 +30,9 @@ if [[ $OP == push ]]; then
     done
     if (( ${#files[@]} )); then
         echo "$(date '+%F %T') rsync ${#files[@]} 个文件到 $HOST"
+        printf '%s\n' "${files[@]}" > "$LD/.offload_files_$$"
+        python3 "$REPO/scripts/sync/tunnel.py" push "$HOST" "$LD" "$RD" "$LD/.offload_files_$$" || true
+        rm -f "$LD/.offload_files_$$"
         (cd "$LD" && rsync -aRLK --partial "${files[@]}" "$H:$RD/")
         diff=$(cd "$LD" && rsync -aRLKc -n --out-format='%n' "${files[@]}" "$H:$RD/")
         diff=$(grep -v '/$' <<< "$diff" || true)

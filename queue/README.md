@@ -136,7 +136,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `advance.py` | 训完以后的步骤（见上面）；`python3 scripts/queue/advance.py` 只看会排什么 |
 | `fetch_task.sh <机器> <key>` | 等那台机器上的任务做完，把 `fetch.also` 的文件夹和 `out`（去掉 `fetch.exclude`，加上 `fetch.extra`）拉回 box，`out` 最后拉 |
 | `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到 DICC，三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED` |
-| `offload_io.sh` | box 和别的机器之间传一步的输入、结果：`push <机器> <路径>…`（文件夹经隧道 `scripts/sync/tunnel_push.sh`，文件用 rsync）、`pull <机器> <文件夹>`（rsync 拉回，再按校验和核对）。这里和 `fetch_task.sh`、`archive_task.sh` 的 rsync 都经 `scripts/sync/tunnel.py rsync`：1 GB 以上、`envs/machines.py` 的 `tunnel` 里有的方向先经隧道传（`scripts/sync/README.md`） |
+| `offload_io.sh` | box 和别的机器之间传一步的输入、结果：`push <机器> <路径>…`（文件夹经 `scripts/sync/tunnel_push.sh`，文件经 `tunnel.py push`）、`pull <机器> <文件夹>`（rsync 拉回，再按校验和核对）。这里和 `fetch_task.sh`、`archive_task.sh` 的 rsync 都经 `scripts/sync/tunnel.py rsync`：`envs/machines.py` 的 `tunnel` 里有的方向文件都经隧道传（`scripts/sync/README.md`） |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（nnU-Net 从存档接着训，推理跳过已做好的病例），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 和 DICC 的克隆） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
