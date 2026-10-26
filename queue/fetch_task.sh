@@ -60,10 +60,10 @@ for i in 1 2 3; do
         rsync -rlt --partial --update "$SSH:$RDATA/$PARENT/$x" "$LDATA/$PARENT/" || ok=0
     done
     for x in ${ALSO[@]+"${ALSO[@]}"}; do
-        mkdir -p "$LDATA/$x" && rsync -rlt --partial --update "$SSH:$RDATA/$x/" "$LDATA/$x/" || ok=0
+        mkdir -p "$LDATA/$x" && python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --update "$SSH:$RDATA/$x/" "$LDATA/$x/" || ok=0
     done
-    (( ok )) && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} ${EXD[@]+"${EXD[@]}"} "$SSH:$SRC/" "$DST/" \
-        && rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
+    (( ok )) && python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} ${EXD[@]+"${EXD[@]}"} "$SSH:$SRC/" "$DST/" \
+        && python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
     (( i == 3 )) && { echo "拉回失败 3 次" >&2; exit 1; }
     sleep "${FETCH_TEST_RETRY:-300}"
 done

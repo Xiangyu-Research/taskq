@@ -49,7 +49,7 @@ mapfile -t EXTRA < <(sp extra | grep . || true)
 PARENT=$(dirname "$OUT") BOX=$LD/$OUT
 log() { echo "$(date '+%F %T') $*"; }
 [[ -d $BOX ]] && (cd "$BOX" && eval "$TEST") || { log "box 上这个任务还没拉回完整：$BOX"; exit 1; }
-R=(rsync -rlt --partial --ignore-existing)
+R=(python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --ignore-existing)
 [[ $DRY == --dry-run ]] && R+=(-n --itemize-changes)
 EX=()
 for x in ${EXCL[@]+"${EXCL[@]}"}; do EX+=(--exclude="$x"); done
