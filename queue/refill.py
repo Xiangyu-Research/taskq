@@ -28,6 +28,7 @@
   自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json，按"还要不要用"和空间预算管（cleanup()，2026-10-24）：
   队列里没有这台机器能领的任务要用了就删；还有任务要用的留着，盘剩的低于软线（硬线 × SOFT）时从最晚用到的删起；
   提前传之前先这样腾地方，腾不出来就不传。领着的、在训的、正在传的、拉回归档在用的、预测下一折要用的、Dataset101 不删。
+  训练机自己生成的缓存（做法的 cache：nnU-Net 的解压缓存，train.sh 训练前导出）只留在训、领着的折用的（cache_cleanup()，10/26）。
 开关：envs/policy.py 的 AUTO["lab"] 是 False 时只续已有的领取，其余只算、不动（"会做什么"有变化时记进 ~/refill.log，不推送）；
 要停掉 lab 的训练用这个开关：只在 lab 上停掉训练任务的话，下次检查会把那一折交还队列、再领下一折。
 跳过记录（skips/<key>）要撤销，删掉那个文件。
@@ -575,6 +576,47 @@ def cleanup(s, name, run=sh, acts=None, dry=False):
     return msgs
 
 
+CACHE_DIR = re.compile(r"Dataset\d+_[A-Za-z0-9_-]+")
+
+
+def cache_cleanup(s, name, run=sh, acts=(), dry=False):
+    """训练机自己从数据生成的缓存（做法的 cache，如 nnU-Net 的解压缓存，10/26）→ [说明]。要用时训练开始前重新生成
+    （几分钟），所以只留这台机器上活着的训练任务、领着没训完的折、这次要领 / 开始的折的数据集用过的（缓存自己的数据集，
+    加上缓存里记的用过它的数据集；软链接到别的数据集时几个数据集共用一份），其余删掉。
+    缓存列表没读全（探查没有结束标记）、队列或 pueue 读不到时什么都不删。"""
+    import recipes
+    m = M.MACHINES[name]
+    raw = (s["probe"].get(name) or {}).get("CACHE")
+    if raw is None or not raw.endswith(C.CACHE_END) or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
+        return []
+    tq = s.get("taskq", {}).get(queue_host()) or {}
+    have = [x.split(":", 1) for x in raw[:-len(C.CACHE_END)].split()]
+    if not have or not tq.get("tasks") or any(len(x) != 2 for x in have):
+        return []
+    keys = {kind_key(s, name, t)[1] for t in s["pueue"][name]["tasks"] if t["status"] in LIVE and kind_key(s, name, t)[0] == "train"}
+    keys |= {t["key"] for t in tq["tasks"] if t.get("worker") == name and t["state"] != "done"}
+    keys |= {a["key"] for a in acts if a["op"] in ("take", "start")}
+    used = {tag(p) for k in keys - {None} for p in data_of(tq, k)}
+    roots = {c["root"]: c["depth"] for c in (r.get("cache") for r in recipes.RECIPES.values()) if c}
+    msgs = []
+    for p, users in have:
+        root = next((r for r in roots if p.startswith(r + "/")), None)
+        rest = p[len(root) + 1:].split("/") if root else []
+        if (not rest or len(rest) != roots[root] or not CACHE_DIR.fullmatch(rest[0])
+                or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) and x not in (".", "..") for x in rest)):
+            msgs.append(f"{m['label']} 上的缓存 {p!r} 路径不对，不删")
+            continue
+        if ({rest[0]} | set(filter(None, users.split(",")))) & used:
+            continue
+        if dry:
+            msgs.append(f"{m['label']} 上的缓存 {p} 会删（没有在训、领着的折用它）")
+            continue
+        rc, out = run(f"rm -rf {m['data']}/{shlex.quote(p)}", m["ssh"])
+        msgs.append(f"{m['label']} 上的缓存 {p} 删掉了（没有在训、领着的折用它；要用时训练开始前重新生成）" if rc == 0
+                    else f"{m['label']} 上删缓存 {p} 出错：{out[-150:]}")
+    return msgs
+
+
 def log(lines):
     if lines:
         with open(LOG, "a") as fo:
@@ -600,7 +642,7 @@ def run_all(s, dry=False):
         if not live:  # 开关没开：只续已有的领取（lab 上手动开始的训练不会过期被别处重训），其余只记日志、不推送
             desc = "；".join(f"{a['op']} {a['key']}" for a in todo) or f"不领（{why}）"
             if dry:
-                notes = cleanup(s, name, acts=acts, dry=True)
+                notes = cleanup(s, name, acts=acts, dry=True) + cache_cleanup(s, name, acts=acts, dry=True)
                 todo = [a for a in acts if a["op"] not in ("beat", "keep")]
                 desc = "；".join(f"{a['op']} {a['key']}" for a in todo) or f"不领（{why}）"
                 events.append(f"{name}：会 {desc}" if todo else f"{name}：{desc}")
@@ -612,6 +654,7 @@ def run_all(s, dry=False):
             continue
         ok = set()
         msgs = cleanup(s, name, acts=acts)  # 先腾地方；提前传放不下时从 acts 里去掉
+        msgs += cache_cleanup(s, name, acts=acts)
         msgs += execute(acts, name, ok=ok, tq=s.get("taskq", {}).get(queue_host()))
         log(msgs)
         events += msgs

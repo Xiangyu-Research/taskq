@@ -285,6 +285,47 @@ for bad in ["/", "/etc/x", "nnUNet/preprocessed/", "nnUNet/preprocessed", "nnUNe
     out = R.cleanup(snap(queue=NO103), "lab", run=fake_run)
     ok(f"记录里的路径不对（{bad!r}）：不删", not cmds and (out == [] or "不删" in out[0]))
 
+# ---------------- 训练机自己生成的缓存（10/26：nnU-Net 的解压缓存） ----------------
+NC = "nnUNet/npy_cache/"
+
+
+def snap_c(caches, end="@@", **kw):
+    s = snap(**kw)
+    s["probe"]["lab"]["CACHE"] = "".join(f"{c} " for c in caches) + end
+    return s
+
+
+C133, C101 = NC + "Dataset133_GLIrq1_syn18b/nnUNetPlans_3d_fullres:", NC + "Dataset101_GLIrq1/nnUNetPlans_3d_fullres:"
+C116 = NC + "Dataset116_METrq1/nnUNetPlans_3d_fullres:Dataset103_GLIrq1_t1c,Dataset151_x,"  # 103 软链接过去、用过它
+cmds.clear()
+out = R.cache_cleanup(snap_c([C101, C133, C116], lab_tasks=[train(1, 103, 3, "Running")]), "lab", run=fake_run)
+ok("在训的折用过的缓存留着（软链接的数据集按缓存里记的用过它的算），别的删掉",
+   sorted(c[1] for c in cmds) == [f"rm -rf ~/BRAIN_TUMOR/{C101[:-1]}", f"rm -rf ~/BRAIN_TUMOR/{C133[:-1]}"] and len(out) == 2 and "删掉了" in out[0])
+cmds.clear()
+R.cache_cleanup(snap_c([C101], lab_tasks=[train(1, 101, 3, "Running")]), "lab", run=fake_run)
+ok("缓存自己的数据集在训（没有用过的记录，如手动导出的）：留着", not cmds)
+mineC = [dict(t, state="claimed", worker="lab") if t["key"] == K_UM else t for t in QUEUE]
+R.cache_cleanup(snap_c([C101], queue=mineC), "lab", run=fake_run)
+ok("领着没训完的折用的缓存留着", not cmds)
+R.cache_cleanup(snap_c([C101]), "lab", run=fake_run, acts=[dict(op="take", key=K_UM, paths=[])])
+ok("这次要领的折用的缓存留着", not cmds)
+R.cache_cleanup(snap_c([C133], end=""), "lab", run=fake_run)
+ok("缓存列表没读全（没有结束标记）：不删", not cmds)
+R.cache_cleanup(snap_c([C133[:-1]]), "lab", run=fake_run)
+ok("缓存列表格式不对：不删", not cmds)
+for bad in ["nnUNet/npy_cache/../x:", "nnUNet/other/Dataset1_a/b:", "nnUNet/npy_cache/Dataset1_a/../../b:", "nnUNet/npy_cache/Dataset1_a:",
+            "nnUNet/npy_cache/x/y:"]:
+    out = R.cache_cleanup(snap_c([bad]), "lab", run=fake_run)
+    ok(f"缓存路径不对（{bad!r}）：不删", not cmds and "不删" in out[0])
+out = R.cache_cleanup(snap_c([C133]), "lab", run=fake_run, dry=True)
+ok("dry：只说会删", not cmds and "会删" in out[0])
+s = snap_c([C133])
+s["ok"]["lab"] = False
+ok("lab 连不上：不删", R.cache_cleanup(s, "lab", run=fake_run) == [] and not cmds)
+ok("probe 的缓存列表：每份缓存和用过它的数据集 + 结束标记",
+   R.C.cache_script("~/d").startswith('echo "CACHE|$(cd ~/d ') and ".used_by" in R.C.cache_script("~/d") and "@@" in R.C.cache_script("~/d"))
+cmds.clear()
+
 # ---------------- 换折不空等：提前传、提前领、按需要和空间管数据（10/24） ----------------
 from datetime import datetime  # noqa: E402
 K_LATE = "misc/late"

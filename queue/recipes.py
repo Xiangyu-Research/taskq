@@ -27,6 +27,9 @@
                2026-10-24）
     after      先要做完的任务（队列里的 key 列表）：没做完时这个任务是 waiting，谁都不领；前一个失败、不在队列里时是 blocked
                （2026-10-25，DICC 训的折提前排的推理、评测）
+    cache      训练机自己从 data 生成的缓存（10/26，nnU-Net 的解压缓存）：root（相对数据目录）、depth（root 下几层是一份缓存，
+               第一层是数据集名）、users（每份缓存里记"哪些数据集用过它"的文件夹，里面一个数据集名一个空文件）。用过它的数据集和
+               它自己的数据集都没有在训、领着的折时，refill.py 的 cache_cleanup() 删掉；None = 没有
 """
 
 REQUIRED = object()
@@ -55,6 +58,7 @@ RECIPES = {
         machines=None,
         device="gpu",
         after=[],
+        cache=dict(root="nnUNet/npy_cache", depth=2, users=".used_by"),
     ),
     # 什么都由任务自己给（非 nnU-Net 的训练可以直接用，或者照着写一种新的做法）
     "command": dict(
@@ -62,6 +66,6 @@ RECIPES = {
         open=True,
         key="{key}", env="{env}", cmd="{cmd}", vars={}, out="{out}", done="{done}", log="*.log",
         progress=None, info=None, metrics={}, checkpoint=None, data=[], fetch=dict(exclude=[], extra=[]), archive=None,
-        machines=None, device="gpu", after=[],
+        machines=None, device="gpu", after=[], cache=None,
     ),
 }

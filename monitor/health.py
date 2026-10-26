@@ -104,6 +104,8 @@ def probe_script(m, paths=()):
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
     if "train" in m["roles"] and paths:  # 训练要用的数据哪些已经在了（scripts/queue/refill.py 判断要不要先传）
         lines.append(C.have_script(paths, m["data"]).rstrip("\n"))
+    if "train" in m["roles"] and m["data"]:  # 训练机自己生成的缓存（refill.py 的 cache_cleanup 删不再用的）
+        lines.append(C.cache_script(m["data"]).rstrip("\n"))
     return "\n".join(lines) + "\n"
 
 
