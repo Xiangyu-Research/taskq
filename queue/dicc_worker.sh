@@ -189,6 +189,7 @@ on_term() {
     (( ${#KEY[@]} )) && $TQPY release --worker "$W" "${KEY[@]}"
     kill_tree "$GPUMON"
     rm -f "$ERRF"
+    rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"
     exit 143
 }
 trap on_term TERM INT
@@ -294,4 +295,5 @@ while true; do
 done
 kill_tree "$GPUMON"
 rm -f "$ERRF"
+rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # train.sh 拷的本地副本（stage_tmp.sh）
 exit 0
