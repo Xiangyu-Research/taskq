@@ -345,11 +345,11 @@ def ahead(s, name, tq, cands, ready, free, hard, tt_all, tgroup, sync, sync_bad,
 
 
 def data_gb(paths):
-    """box 上这些数据（相对数据目录）一共多大；有一个不在 → None。"""
+    """box 上这些数据（相对数据目录）一共多大（几个路径指到同一个文件时按几份算，和传过去后一样）；有一个不在 → None。"""
     ps = [os.path.join(M.expand(M.MACHINES[M.hub()]["data"]), p) for p in paths]
     if not all(os.path.exists(p) for p in ps):
         return None
-    r = subprocess.run(["du", "-sbLc"] + ps, capture_output=True, text=True)
+    r = subprocess.run(["du", "-sbLlc"] + ps, capture_output=True, text=True)
     return int(r.stdout.strip().splitlines()[-1].split()[0]) / 1e9 if r.returncode == 0 else None
 
 
