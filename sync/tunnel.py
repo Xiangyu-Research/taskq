@@ -350,7 +350,7 @@ def remote_fetch(plan):
         else:
             def get():
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-                subprocess.run(["curl", "-sSf", "--retry", "5", "--retry-all-errors", "-A", UA["User-Agent"], "-o", p + ".tunnelpart",
+                subprocess.run(["curl", "-sSf", "--retry", "5", "--retry-all-errors", "--speed-limit", "1024", "--speed-time", "180", "-A", UA["User-Agent"], "-o", p + ".tunnelpart",
                                 plan["base"] + "/" + urllib.parse.quote(rel)], check=True, capture_output=True)
                 n = os.path.getsize(p + ".tunnelpart")
                 if n != size:
