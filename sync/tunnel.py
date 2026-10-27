@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 CHUNK = int(os.environ.get("TUNNEL_CHUNK", 90 * 2 ** 20))
-NPAR = 8
+NPAR = int(os.environ.get("TUNNEL_NPAR", 8))
 MIN_JOB = float(os.environ.get("TUNNEL_MIN_JOB", 1e9))
 JOB_WAIT = 600
 STALL = int(os.environ.get("TUNNEL_STALL", 3600))
@@ -277,7 +277,7 @@ def push(host, src, dst, rels):
     log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
     t0 = time.time()
     try:
-        plan = dict(base=f"{url}/{token}", root=dst, files=[[r, *v] for r, v in files.items()])
+        plan = dict(base=f"{url}/{token}", root=dst, npar=NPAR, files=[[r, *v] for r, v in files.items()])
         res = run_remote(host, "_fetch", plan, serve, total)
     finally:
         srv.shutdown()
@@ -307,7 +307,7 @@ def pull(host, src, dst, items):
     log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
     t0 = time.time()
     try:
-        plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, files=[[r, n[0]] for r, n in files.items()])
+        plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, npar=NPAR, files=[[r, n[0]] for r, n in files.items()])
         run_remote(host, "_send", plan, serve, total)
     finally:
         srv.shutdown()
@@ -369,7 +369,7 @@ def remote_fetch(plan):
             out.write(f"{rel}\t{digest}\n")
             out.flush()
 
-    with ThreadPoolExecutor(NPAR) as ex:
+    with ThreadPoolExecutor(plan.get("npar", NPAR)) as ex:
         list(ex.map(one, plan["files"]))
     print("完成", flush=True)
 
@@ -435,7 +435,7 @@ def remote_send(plan):
         except Exception as e:
             print(f"失败 {rel}：{e}", flush=True)
 
-    with ThreadPoolExecutor(NPAR) as ex:
+    with ThreadPoolExecutor(plan.get("npar", NPAR)) as ex:
         list(ex.map(one, plan["files"]))
     print("完成", flush=True)
 
