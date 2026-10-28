@@ -575,7 +575,7 @@ calls.clear()
 A.run(lsnap([(19, "Running", TR3, "train:x", "gpu1")]), q=fake_q, tq=lambda *a: (0, ""))
 rec = trec("infer:t1c_f3") or {}
 check("trainer：run 时在 lab gpu1 加，任务记录里记下那边的任务号、训练的任务号",
-      any(c.startswith("gpu1 -p --label infer:t1c_f3 -- ") for c in calls) and rec.get("train_id") == 19 and isinstance(rec.get("id"), int) and rec["machine"] == "lab")
+      any(c.startswith("gpu1 -p --priority 1 --label infer:t1c_f3 -- ") for c in calls) and rec.get("train_id") == 19 and isinstance(rec.get("id"), int) and rec["machine"] == "lab")
 no_recs()
 seen = {}
 

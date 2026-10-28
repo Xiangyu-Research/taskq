@@ -20,7 +20,7 @@
                  那边缺的输入是文件就先 offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；写了 have 的，那边
                  缺输入就用下一个地方。那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按 done 判断
   trainer        训这一折的 pueue 机器（lab）、训练的那个组：这一折还在那边训（或刚训完、那个组里没有下一折）时排同样的标签
-                 （命令里的 {data}、{python} 换成那边的），pueue 按任务号先后跑，训完马上接着做；输入要都在那边（不传），否则用
+                 （命令里的 {data}、{python} 换成那边的），加成 --priority 1，组里排了好几折时也在这一折训完后马上接着做；输入要都在那边（不传），否则用
                  下一个地方。训练没训完就停了、这一步跟着失败的不算，接着训时重排。那边成功 → box wait 组 pull:<标签>
                  （offload_io.sh pull，按校验和核对）→ box 上判断做完 → 删那边的结果
   那边的步骤的记录留到那边的结果清理完。要知道每折的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage
@@ -648,7 +648,9 @@ def run(s, dry=False, q=None, tq=None):
                 rec = C.new_record(host, t["label"], t["step"], t["key"], group=t["group"],
                                    **{k: t.get(k) for k in ("src", "of", "to", "paths", "out", "needs", "train_id")})
                 cmd = t["cmd"] if t.get("host") else refill.then_check(t["cmd"], t["label"])
-                tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
+                # trainer 的步骤加 --priority 1：组里排了好几折时也排在正在训的这一折后面，不排到最后（10/28）
+                pr = " --priority 1" if t.get("train_id") is not None else ""
+                tid = q(host, f"{t['group']} -p{pr}{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
                 C.set_record_id(rec, tid)
                 done.append(f"{where}{t['label']}（任务 {tid}{note}）")
                 lines.append(f"排了 {t['label']}（{where}{t['group']} 组，任务 {tid}{note}）：{t['cmd']}")
