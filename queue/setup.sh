@@ -43,7 +43,7 @@ cron "bash $CODE/scripts/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
 crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | grep -v "git_pull_cron.sh" | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) "
 if [[ $roles == *" hub "* ]]; then  # 健康检查；登记表和看板。从只给 cron 用的克隆 ~/auto/PhD 运行（只跑已提交的代码）
-    [[ -d ~/auto/PhD/.git ]] || git clone -q git@github.com:xiangyumou/PhD.git ~/auto/PhD
+    [[ -d ~/auto/PhD/.git ]] || git clone -q git@github.com:Xiangyu-Research/PhD.git ~/auto/PhD
     cron "bash $HOME/auto/PhD/scripts/monitor/auto_refresh.sh health" "5,35 * * * *"
     cron "bash $HOME/auto/PhD/scripts/monitor/auto_refresh.sh registry" "30 8-20/2 * * *"
 fi
