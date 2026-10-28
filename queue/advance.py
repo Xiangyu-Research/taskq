@@ -76,14 +76,14 @@ def python(name=None):
 
 # ---------------- 在哪里做（envs/policy.py 的 PLACE） ----------------
 def targets(step, group):
-    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group, have)]；没写 → box 的这个组。写错了 → ValueError。"""
+    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group, have, manual)]；没写 → box 的这个组。写错了 → ValueError。"""
     out = []
     for text in P.PLACE.get(step) or [f"{M.hub()}:{group}"]:
         w = text.split()
-        bad = [x for x in w[1:] if x != "have"]
+        bad = [x for x in w[1:] if x not in ("have", "manual")]
         if not w or bad:
             raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的条件 {bad}")
-        d = dict(text=text, have="have" in w, machine=None, group=None)
+        d = dict(text=text, have="have" in w, manual="manual" in w, machine=None, group=None)
         a, _, b = w[0].partition(":")
         if w[0] == "trainer":
             d["kind"] = "trainer"
@@ -502,7 +502,8 @@ class Remote:
             tr = trs[-1] if trs else None
             if not tr or cp.get("archived") or (tr["status"] != "Running" and not cp.get("final")):
                 return f"{h} 上没有在训这一折"
-            if tr.get("group") in P.MANUAL.get(h, []):  # 只跑手动加的任务的组（10/25）
+            manual = any(x["kind"] == "trainer" and x["manual"] for x in targets(st["name"], st["group"]))
+            if tr.get("group") in P.MANUAL.get(h, []) and not manual:  # 只跑手动加的任务的组（10/25；trainer manual 时也做，10/28）
                 return f"{h} 的 {tr['group']} 组只跑手动加的任务"
             if cp.get("final") and (archiving or any(y["status"] in LIVE_ST and y.get("group") == tr.get("group")
                                                      and self.is_train(h, y) for y in rts)):

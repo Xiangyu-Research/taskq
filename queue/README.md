@@ -69,7 +69,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | box | `cpu` | 2 | 评测、五折集成评测、删单折概率图、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等）。同时 2 个不看内存：两个大任务加上 box 上别的服务可能用光 61 GB 内存（10/25 出过一次） |
 | box | `wait` | 不限 | 拉回（`fetch_task.sh`）、归档（`archive_task.sh`）、传输（`offload_io.sh`、`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡：训练（`run_task.sh`），lab 训的折训完接着推理（PLACE 的 `trainer`） |
-| lab | `gpu0` | 1 | 0 号卡：只跑手动加的（`MANUAL`） |
+| lab | `gpu0` | 1 | 0 号卡：只跑手动加的（`MANUAL`），和这些折训完后的推理 |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 怎么运转
