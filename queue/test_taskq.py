@@ -508,5 +508,23 @@ tq6("release", "--worker", "952", "infer/x/fold_4", "--failed", "退出码 1")
 s6 = st6()
 check("after：推理失败两次 → 评测 blocked", s6["eval/x/fold_4"][0] == "blocked" and "失败 2 次" in s6["eval/x/fold_4"][1])
 
+# ---------------- 10/28：remove（DICC 停机时把排在那边的任务删掉、改在别处做） ----------------
+rc, out = tq6("remove", "infer/x/fold_4")
+check("remove：别的任务的 after 里有它、又不一起删 → 不删", rc == 1 and "eval/x/fold_4" in out and "infer/x/fold_4" in st6())
+rc, out = tq6("remove", "nosuch/key")
+check("remove：没有的 key 退出码 1", rc == 1 and "队列里没有" in out)
+tq6("take", "--worker", "lab", "infer/y")
+rows2 = rows + [dict(order=5, nice=-100, key="free/z", exp=None, recipe="command",
+                     params=dict(key="free/z", cmd="true", env="nnunet", out="out/free/z", done=[".done"], device="cpu"))]
+with open(os.path.join(TQ6, "tasks.jsonl"), "a") as f:
+    f.write(json.dumps(rows2[-1]) + "\n")
+rc, out = tq6("take", "--worker", "lab", "free/z")
+rc, out = tq6("remove", "free/z")
+check("remove：有人领着的不删", rc == 1 and "claimed" in out and "free/z" in st6())
+rc, out = tq6("remove", "infer/x/fold_4", "eval/x/fold_4")
+s6 = st6()
+check("remove：连同依赖它的一起删 → 都删掉，别的不动", rc == 0 and "infer/x/fold_4" not in s6 and "eval/x/fold_4" not in s6
+      and kt in s6 and "free/z" in s6)
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

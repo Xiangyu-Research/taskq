@@ -32,6 +32,7 @@ box 上（不是队列所在的机器（envs/machines.py 里用 Slurm、能训�
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
+    taskq.py remove <key>...         删掉没人领着的任务（after 里有它的任务要一起删；结果文件不动）
     taskq.py take --worker lab --ttl 604800 <key>       领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
     taskq.py status                   打印队列
 """
@@ -484,6 +485,38 @@ def cmd_set_nice(a):
     return 0 if not missing else 1
 
 
+def cmd_remove(a):
+    """从队列里删掉没人在做的任务（10/28：DICC 停机期间把排在那边的评测挪回 box）。有人领着、在做的不删；
+    别的任务的 after 里有它、又不一起删的不删。结果文件不动。"""
+    root = data_root()
+    with Lock():
+        tasks = read_tasks()
+        by = {t["key"]: t for t in tasks}
+        missing = [k for k in a.keys if k not in by]
+        bad = []
+        for k in a.keys:
+            if k in by:
+                st, _ = state(by[k], root)
+                if st in ("claimed", "busy"):
+                    bad.append(f"{k}：{st}，有人在做")
+        for t in tasks:
+            if t["key"] in a.keys:
+                continue
+            dep = [k for k in ((spec_of(t) or {}).get("after") or []) if k in a.keys]
+            if dep:
+                bad.append(f"{t['key']} 的 after 里有 {' '.join(dep)}（一起删，或者先改它）")
+        for k in missing:
+            print(f"队列里没有：{k}")
+        for b in bad:
+            print(f"不删：{b}")
+        if missing or bad:
+            return 1
+        write_tasks([t for t in tasks if t["key"] not in a.keys])
+    for k in a.keys:
+        print(f"删了：{k}")
+    return 0
+
+
 def cmd_show(a):
     t = next((t for t in read_tasks() if t["key"] == a.key), None)
     if t is None:
@@ -595,7 +628,7 @@ def main(argv):
     if argv[:1] == ["--json-status"]:
         S.json_out(local_status())
         return 0
-    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show") and here() != queue_host():
+    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show", "remove") and here() != queue_host():
         # 不在队列所在的机器上（box）：转到那边去改（不在本机另建一份）
         host = queue_host()
         r = remote(host, " ".join(shlex.quote(x) for x in argv))
@@ -638,13 +671,15 @@ def main(argv):
     p = sub.add_parser("set-nice")
     p.add_argument("--nice", type=int, required=True)
     p.add_argument("keys", nargs="+")
+    p = sub.add_parser("remove")
+    p.add_argument("keys", nargs="+")
     p = sub.add_parser("show")
     p.add_argument("--json", action="store_true")
     p.add_argument("key")
     p = sub.add_parser("status")
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
-                set_nice=cmd_set_nice, show=cmd_show, status=cmd_status)[a.cmd.replace("-", "_")](a)
+                set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status)[a.cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

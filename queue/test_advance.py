@@ -84,7 +84,7 @@ def plan_with_records(s, *a, **kw):
 A.plan = plan_with_records
 
 A.taskq_add = lambda nice, args: (0, "")  # 不经 ssh 真的加进 DICC 的队列
-REAL_PLACE = dict(A.P.PLACE)
+REAL_PLACE = dict(A.P.PLACE, eval=["queue:dicc have", "box:cpu"], ens=["queue:dicc have", "box:cpu"])  # 按平时的写法测（DICC 停机时 policy 临时改过）
 A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组）；第 9 节起测别的地方
 A.P.AUTO = dict(A.P.AUTO, advance=False)
 A.P.HOLD = []
