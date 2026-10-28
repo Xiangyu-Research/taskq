@@ -113,7 +113,8 @@ for f in research/common/nnunet/smoke/run_gpu_smoke.sh research/RQ1/nnunet/predi
          research/RQ1/probe/p1_predict.sh research/RQ1/probe/run_p2.sh research/RQ2/quickcheck/run_p4.sh \
          research/RQ1/analysis/run_sensitivity.sh research/RQ1/external/run_t19.sh research/RQ1/external/t19_eval.sh \
          research/RQ1/probe/p1_predict_model.sh research/RQ1/probe/p2_predict_model.sh \
-         research/RQ1/analysis/validation_predict_eval.sh research/RQ1/analysis/validation_prep.sh; do
+         research/RQ1/analysis/validation_predict_eval.sh research/RQ1/analysis/validation_prep.sh \
+         research/RQ1/analysis/edema_intervention.sh; do
     check "$f 有 RQ1_GPU_PAD=0" grep -q 'RQ1_GPU_PAD=0' "$REPO/$f"
 done
 
