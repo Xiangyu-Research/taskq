@@ -14,6 +14,7 @@ import machines as M  # noqa: E402
 import experiments as E  # noqa: E402
 
 STEP = {"eval": "评测", "oof": "五折汇总", "paired": "和 T0 的配对比较", "ens": "五折集成评测", "infer": "推理",
+        "lprob": "病灶概率汇总",
         "fetch": "拉回 box", "archive": "存档", "train": "训练",
         "compare_all": "对比表"}
 QUIET = {"infer", "fetch", "archive", "train", "wait"}  # 中间步骤：进度报告里不列
