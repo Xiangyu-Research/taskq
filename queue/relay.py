@@ -56,6 +56,7 @@ import common as C  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
 import relay_names as RN  # noqa: E402
+import relay_bundle as RB  # noqa: E402
 from common import write_json  # noqa: E402
 
 DIR = RN.RELAY_DIR
@@ -113,6 +114,28 @@ def keys_of(st, name):
     return (st.get("keys") or {}).get(name) or {}
 
 
+def relayable(i):
+    """refill.info 的结果 → 能不能领给它：做法能翻译（按本机的 recipes.py 算，总队列那边的代码可能还没更新），训练器不读仓库里的病例子集。"""
+    sp = i["spec"]
+    rec, params = i["recipe"] or sp.get("recipe"), i["params"] or sp.get("params") or {}
+    try:
+        relay = S.resolve(rec, params).get("relay")
+    except S.SpecError:
+        relay = sp.get("relay")
+    return relay in RN.TRANSLATORS and not repo_files(params.get("trainer"))
+
+
+def repo_files(trainer):
+    """训练器要读仓库里的病例子集（SPLITS_DIR，如 n470、frac）→ True：那边没有、也没换名，不领。"""
+    d = os.path.join(REPO, "research", "common", "nnunet", "trainers")
+    for f in os.listdir(d) if trainer else []:
+        if f.endswith(".py"):
+            src = open(os.path.join(d, f), encoding="utf-8").read()
+            if f"class {trainer}(" in src:
+                return "SPLITS_DIR" in src
+    return False
+
+
 # ---------------- 在那边跑 ----------------
 def rsh(name, cmd, input=None, timeout=300):
     return C.run(cmd, conf(name)["ssh"], timeout, input=input, ssh=ssh_argv())
@@ -120,7 +143,7 @@ def rsh(name, cmd, input=None, timeout=300):
 
 def prefix(name):
     r = shlex.quote(root(name))
-    return f"cd {r}/code/current && TASKQ_DIR={r}/queue BRAIN_TUMOR={r}/data"
+    return f"cd {r}/code/current && TASKQ_DIR={r}/queue {RB.rename('BRAIN_TUMOR')}={r}/data"
 
 
 def rtq(name, args, timeout=180):
@@ -144,7 +167,7 @@ HEAD = "import json,os,sys\nsys.path.insert(0,'scripts/queue')\nimport spec\nR=s
 STATUS_PY = HEAD + """import shutil,subprocess,taskq
 st=taskq.local_status()
 sp=[{k:t['spec'].get(k) for k in spec.COLLECT_FIELDS} for t in st['tasks'] if t.get('spec')]
-col=spec.collect(sp,os.environ['BRAIN_TUMOR'])
+col=spec.collect(sp,os.environ['@DATA@'])
 try:
     q=subprocess.run(['squeue','-u',os.environ.get('USER',''),'-h','-o','%i|%j|%T|%M|%q|%R'],capture_output=True,text=True,timeout=60)
     sq=[l.split('|') for l in q.stdout.splitlines()] if q.returncode==0 else None
@@ -153,6 +176,8 @@ except Exception:
 spec.json_out(dict(taskq=st,folds=col['folds'],squeue=sq,free=shutil.disk_usage(R).free,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
+
+STATUS_PY = STATUS_PY.replace("@DATA@", RB.rename("BRAIN_TUMOR"))
 
 MISSING_PY = HEAD + "spec.json_out([i for i in A if not os.path.isfile(os.path.join(R,'blobs',i[:2],i))])\n"
 
@@ -241,8 +266,7 @@ def deploy(name, bid, path):
 
 def bundle(name, commit="origin/main", have=None, run_build=None):
     """origin/main 打的包和那边的 current 不同就推过去 → 说明（没变 → None）。"""
-    import relay_bundle
-    bid, path = (run_build or relay_bundle.build)(name, commit)
+    bid, path = (run_build or RB.build)(name, commit)
     if bid == have:
         return None
     deploy(name, bid, path)
@@ -276,7 +300,7 @@ def lookup(key):
     s = S.lookup(key)
     if s is None:
         raise RN.RelayError(f"实验表和总队列里都没有 {key}")
-    return s
+    return s if s.get("exp") else S.resolve(s["recipe"], s["params"])
 
 
 def stage(name, key, nice=None, add=True, say=print):
@@ -311,7 +335,7 @@ def stage(name, key, nice=None, add=True, say=print):
             alias=alias["key"], recipe=real["recipe"], params=ex["params"], data=real.get("data") or [], staged=time.time())
     update_state(rec)
     if add:
-        r = rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(x) for x in S.kv_args(real["recipe"], ex["params"])))
+        r = rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(RB.rename(x)) for x in S.kv_args(real["recipe"], ex["params"])))
         if r is None or r[0]:
             raise RuntimeError(f"加进 {conf(name)['label']} 的队列出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
         say(r[1])
@@ -485,7 +509,7 @@ def fill(s, name, rs, st, acts):
     keys = keys_of(st, name)
     ready = {p for k in keys.values() for p in k.get("data") or []}
     cands = [t for t in refill.candidates(s, name, mtq, ready)
-             if refill.info(mtq, t["key"])["spec"].get("relay") in RN.TRANSLATORS]
+             if relayable(refill.info(mtq, t["key"]))]
     free = rs.get("free", 0) / 1e9
     out, took = [], set()
     for _ in range(want - have):
@@ -644,8 +668,7 @@ def run_one(s, name, dry):
         try:
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
             if rs is None or rs.get("bundle") != st.get("bundle_for", {}).get(commit):
-                import relay_bundle
-                bid, path = relay_bundle.build(name, commit or "origin/main")
+                bid, path = RB.build(name, commit or "origin/main")
                 update_state(lambda x: x.setdefault("bundle_for", {}).update({commit: bid}))
                 if rs is None or rs.get("bundle") != bid:
                     try:

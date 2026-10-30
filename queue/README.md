@@ -136,7 +136,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
    总队列显示训完 → 交还，删掉那边的任务和结果
 ```
 
-- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。
+- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，环境变量名 `BRAIN_TUMOR`、`RQ1_*` 换成 `SEG_DATA`、`SEG_*`（`RENAME`）；包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据集是软链接视图，JSON 改写过（`relay_names.py`，别名表在 box `~/.cache/phd/relay/names.json`，分配后不变）。拉回时 `validation/` 的病例要和这一折的划分一致，否则不收、报出来。
 - **传输**：都经隧道（`scripts/sync/tunnel.py`，在那边的 CPU 作业里收发，不在登录节点上跑）。
 - **个数**：`envs/policy.py` 的 `SLURM["dicc2"]`（`gpu`：QOS 和时限；`ready`：那边备好、等 worker 领的折数）。

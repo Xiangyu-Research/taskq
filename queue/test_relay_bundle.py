@@ -28,7 +28,7 @@ def ok(msg):
 
 
 def run(cmd, env=None, **kw):
-    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", "TASKQ_DIR", "TASKQ_MACHINE")}
+    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", "SEG_DATA", "TASKQ_DIR", "TASKQ_MACHINE")}
     e.update(env or {})
     return subprocess.run(cmd, capture_output=True, text=True, env=e, **kw)
 
@@ -166,20 +166,20 @@ def test_bundle(T):
     assert f"#SBATCH --job-name={e['jobs']['gpu']}" in sb
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
-    assert "export TASKQ_DIR=$R/queue RQ1_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
+    assert "export TASKQ_DIR=$R/queue SEG_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
     assert sb[-2] == 'exec bash "$REPO/scripts/queue/worker_start.sh"' and "git" not in "\n".join(sb)
     assert run(["bash", "-n", os.path.join(cur, "scripts/queue/worker.sbatch")]).returncode == 0
     fake = os.path.join(T, "fakeR")
     os.makedirs(os.path.join(fake, "code", "b1", "scripts", "queue"))
     with open(os.path.join(fake, "code", "b1", "scripts", "queue", "worker_start.sh"), "w") as f:
-        f.write('echo "$TASKQ_DIR|$RQ1_GPU_PAD_SWITCH|$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
+        f.write('echo "$TASKQ_DIR|$SEG_GPU_PAD_SWITCH|$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
     os.symlink("b1", os.path.join(fake, "code", "current"))
     body = "\n".join(sb).replace(f"R={R}", f"R={fake}")
     out = run(["bash", "-c", body]).stdout.strip()
     assert out == f"{fake}/queue|{fake}/queue/gpu_pad_DISABLED|{fake}/code/b1", out
     ok("worker.sbatch：资源和原来一样，作业名、输出位置按账号；开始时按 current 的实际包跑，队列和显存开关在根目录下")
 
-    env = dict(BRAIN_TUMOR=f"{R}/data", TASKQ_DIR=f"{R}/queue")
+    env = dict(SEG_DATA=f"{R}/data", TASKQ_DIR=f"{R}/queue")
     tq = ["python3", os.path.join(cur, "scripts/queue/taskq.py")]
     key = "Dataset999_abcdef/nnUNetTrainer_save10/0"
     r = run(tq + ["add", "--nice", "0", "--recipe", "nnunet", "dataset=Dataset999_abcdef", "fold=0"], env)
@@ -201,7 +201,7 @@ def test_bundle(T):
     assert run(tq + ["resume", key], env).returncode == 0
     assert run(tq + ["remove", key], env).returncode == 0
     assert not open(f"{R}/queue/tasks.jsonl").read().strip()
-    r = run(tq + ["--json-status"], {"BRAIN_TUMOR": f"{R}/data"})
+    r = run(tq + ["--json-status"], {"SEG_DATA": f"{R}/data"})
     assert r.returncode == 0 and '"enabled": false' in r.stdout
     ok("包里的 taskq.py：add → --json-status → next（0；再领 10）→ beat → stop → release → resume → remove；"
        "不设 TASKQ_DIR 也用根目录下的 queue/")
@@ -224,7 +224,7 @@ def test_dicc_worker_in_bundle(T):
     assert "TASKQ_MACHINE=dicc " in test
     dst = os.path.join(path, "scripts", "queue", "test_dicc_worker.sh")
     with open(dst, "w") as f:
-        f.write(test.replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
+        f.write(B.rename(test).replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
     r = run(["bash", dst], timeout=1800)
     assert r.returncode == 0 and "全部通过" in r.stdout and not [ln for ln in r.stdout.splitlines() if ln.startswith("失败：")], r.stdout[-3000:] + r.stderr[-2000:]
     ok(f"包里的 dicc_worker.sh 跑原来的 test_dicc_worker.sh：{r.stdout.count('通过：')} 项全部通过")

@@ -34,7 +34,9 @@ KEEP_DIRS = ["research/common/nnunet/trainers", "research/common/nnunet/nets"]
 FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-host", "BEGIN OPENSSH",
              "PRIVATE KEY", "ntfy", "cloudflare", "trycloudflare", "cfargotunnel", "/data/others", "auto/PhD",
              "Projects/PhD", "miniforge", "vps-x", "jump-x", "203.0.113.10", "203.0.113.20", ".cache/phd", "@gmail",
-             "name-z"]
+             "name-z", "BRAIN_TUMOR", "RQ1", "rq1"]
+# 包里所有文件统一换掉的标识符（环境变量名、目录名）；relay.py 在那边设变量、加任务时用同样的换法（rename）
+RENAME = [("BRAIN_TUMOR", "SEG_DATA"), ("RQ1", "SEG")]
 # 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
 PATCHES = [("scripts/queue/taskq.py", 'os.path.expanduser("~/st/BRAIN_TUMOR")', "{data!r}")]
 
@@ -296,6 +298,12 @@ def home_paths(text, root):
     return text
 
 
+def rename(text):
+    for a, b in RENAME:
+        text = text.replace(a, b)
+    return text
+
+
 # ---------------- 核对 ----------------
 def nnunet_python():
     """本机 nnunet 环境的 python（和那边的 conda 环境同一个 Python 版本），用来核对能编译。"""
@@ -352,7 +360,7 @@ def contents(name, commit="origin/main", root=None, entry=None):
     out["envs/machines.py"] = (home_paths(strip_py(gen_machines(read(commit, "envs/machines.py"), name, m)), root), True)
     out["envs/policy.py"] = (gen_policy(name), False)
     out["scripts/queue/worker.sbatch"] = (gen_sbatch(read(commit, "scripts/queue/worker.sbatch"), m, root), False)
-    return out
+    return {p: (rename(x), e) for p, (x, e) in out.items()}
 
 
 def bundle_id(files):
