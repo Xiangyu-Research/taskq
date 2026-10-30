@@ -94,8 +94,10 @@ um = ts["Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1"]["spec"]
 sw = ts["Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"]["spec"]
 ok("U-Mamba、SwinUNETR 写明了自己的环境", um["env"] == "umamba" and sw["env"] == "swinunetr")
 ok("nnU-Net 的任务 key = 数据集/训练器/fold，out 和 10/18 前的文件夹一致",
-   all(t["spec"]["out"] == "nnUNet/results/{0}/{1}__nnUNetResEncUNetMPlans__3d_fullres/fold_{2}".format(*k.split("/"))
+   all(t["spec"]["out"] == "nnUNet/results/{0}/{1}__{p}__3d_fullres/fold_{2}".format(*k.split("/"), p=t["params"].get("plans", "nnUNetResEncUNetMPlans"))
        for k, t in ts.items() if t["recipe"] == "nnunet"))
+ok("实验表给了 plans 的（T35 nnU-Net 原版）进了模型文件夹",
+   ts["Dataset101_GLIrq1/nnUNetTrainer_save10_plain/0"]["spec"]["out"] == "nnUNet/results/Dataset101_GLIrq1/nnUNetTrainer_save10_plain__nnUNetPlans__3d_fullres/fold_0")
 ok("实验表的 metrics 进了说明（登记表读）", set(um.get("metrics", {})) == {"val_WT", "val_TC", "val_ET"})
 ok("env_of：按实验表找模型的环境",
    E.env_of("/x/Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR__nnUNetResEncUNetMPlans__3d_fullres") == "swinunetr")
