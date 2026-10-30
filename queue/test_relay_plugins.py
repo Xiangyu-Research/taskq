@@ -120,7 +120,14 @@ def test_export():
         raise AssertionError("没有 relay 的做法应报错")
     except RN.RelayError:
         pass
-    ok("认不出的文件、不能送的做法报错")
+    make_case("100199A")
+    ex4 = RN.export(sp, ROOT, names)
+    assert len(ex4["files"]) == 5 * 4 and "100199A" not in names.case_map(REAL)
+    for f in os.listdir(os.path.join(PRE, DI)):
+        if f.startswith("100199A"):
+            os.remove(os.path.join(PRE, DI, f))
+    os.remove(os.path.join(PRE, "gt_segmentations", "100199A.nii.gz"))
+    ok("认不出的文件、不能送的做法报错；不在划分里的病例不送")
     return sp, alias
 
 

@@ -141,16 +141,18 @@ def export_nnunet(spec, root, names):
     gt_dir = os.path.join(pre, "gt_segmentations")
     gts = sorted(os.listdir(gt_dir))
     in_gt = {g[:-len(ending)] for g in gts if g.endswith(ending)}
-    if in_splits != in_gt or len(in_gt) != len(gts):
+    if not in_splits <= in_gt or len(in_gt) != len(gts):
         raise RelayError(f"{real}：splits_final.json 和 gt_segmentations 的病例不一致"
-                         f"（只在 splits {len(in_splits - in_gt)} 个，只在 gt {len(in_gt - in_splits)} 个，gt 里别的文件 {len(gts) - len(in_gt)} 个）")
-    cm = names.cases(real, sorted(in_gt))
+                         f"（只在 splits {len(in_splits - in_gt)} 个，gt 里别的文件 {len(gts) - len(in_gt)} 个）")
+    cm = names.cases(real, sorted(in_splits))
     di = _data_identifier(plans, n["config"])
     base = f"nnUNet/preprocessed/{alias}"
     files = [(f"{base}/gt_segmentations/{cm[c]}{ending}", os.path.realpath(os.path.join(gt_dir, c + ending)))
-             for c in sorted(in_gt)]
+             for c in sorted(in_splits)]
     for name in sorted(os.listdir(os.path.join(pre, di))):
         c, rest = _case_of(name, ("_seg.b2nd", ".b2nd", ".pkl"), in_gt)
+        if c not in in_splits:
+            continue
         files.append((f"{base}/{di}/{cm[c]}{rest}", os.path.realpath(os.path.join(pre, di, name))))
     dsj = {k: v for k, v in dsj.items() if k != "description"}
     dsj["name"] = alias
@@ -159,7 +161,7 @@ def export_nnunet(spec, root, names):
     fp.pop("_note", None)
     texts = {f"{base}/dataset.json": _jdump(dsj), f"{base}/{n['plans']}.json": _jdump(plans),
              f"{base}/splits_final.json": _jdump(splits), f"{base}/dataset_fingerprint.json": _jdump(fp)}
-    _check_clean(list(texts.values()), [a for a, _ in files] + list(texts), [real] + sorted(in_gt))
+    _check_clean(list(texts.values()), [a for a, _ in files] + list(texts), [real] + sorted(in_splits))
     params = {k: (v.replace(real, alias) if isinstance(v, str) else v) for k, v in spec["params"].items()}
     return dict(params=params, files=files, texts=texts)
 
