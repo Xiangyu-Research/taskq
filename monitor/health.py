@@ -451,10 +451,20 @@ def main():
     P = check(s)
     # 这两步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
     try:
+        import shift  # scripts/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）
+        shift_msgs = shift.run(s, dry=a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        shift_msgs, shift_err = [], f"scripts/queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
+    else:
+        shift_err = None
+    try:
         import refill  # scripts/queue/refill.py：替 lab 从任务队列领任务、续上、交还
         events, stuck, filled = refill.run_all(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         events, stuck, filled = [], {"refill:error": f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}, set()
+    events = shift_msgs + events
+    if shift_err:
+        stuck["shift:error"] = shift_err
     try:
         import relay  # scripts/queue/relay.py：中转执行机（envs/machines.py 的 RELAY）领任务、传数据、拉回
         ev3, st4 = relay.run_all(s, dry=a.dry_run)
@@ -487,7 +497,7 @@ def main():
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\n补任务（lab 领任务、DICC 补作业）：" + "；".join(events))
+        print("\n补任务（lab 领任务、DICC 补作业、按时段开关组）：" + "；".join(events))
         print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
 
 

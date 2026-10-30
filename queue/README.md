@@ -44,6 +44,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `GPU_AUG` | 机器 → True | 这台机器上训练集的数据增强在 GPU 上做（`train.sh` 设 `RQ1_GPU_AUG=1`）；新开始或续训的段生效。单个任务可以预先设 `RQ1_GPU_AUG=0 / 1` |
 | `envs/policy.py` `GPU_AUG_LOADER` | 机器 → True | GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集（`gpu_aug_loader.py`，`train.sh` 设 `RQ1_GPU_AUG_LOADER=1`，训练前补齐解压缓存，`refill.py` 的 `cache_cleanup()` 删不再用的）；单个任务可以预先设 |
 | `envs/policy.py` `SLURM` | 每台 Slurm 机器的 QOS、时限、个数 | `refill.py` 补交多少 GPU / CPU worker 作业 |
+| `envs/policy.py` `SHIFT` | 机器 → {组: (开始, 结束)} | `shift.py` 跟着健康检查在时段开始时恢复组（卡上有别人的进程就等）、结束时暂停并把在训的放回队列；每个时段只动这两次，记录在 box `~/.cache/phd/shift.json`，日志 `~/refill.log` |
 | DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 总开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`） |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
 | `RQ1_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"） |
@@ -70,7 +71,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | box | `cpu` | 2 | 评测、五折集成评测、删单折概率图、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等）。同时 2 个不看内存：两个大任务加上 box 上别的服务可能用光 61 GB 内存（10/25 出过一次） |
 | box | `wait` | 不限 | 拉回（`fetch_task.sh`）、归档（`archive_task.sh`）、传输（`offload_io.sh`、`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡：训练（`run_task.sh`），lab 训的折训完接着推理（PLACE 的 `trainer`） |
-| lab | `gpu0` | 1 | 0 号卡：只跑手动加的（`MANUAL`），和这些折训完后的推理 |
+| lab | `gpu0` | 1 | 0 号卡：只跑手动加的（`MANUAL`），和这些折训完后的推理；晚班 18:00–9:00 由 `shift.py` 开关（`SHIFT`） |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 怎么运转
