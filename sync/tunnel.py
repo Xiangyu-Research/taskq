@@ -219,11 +219,12 @@ def run_remote(host, mode, plan, serve, total):
     pyx = "python3"
     with open(__file__) as f:
         src = f.read()
-    if relay:  # 中转执行机（scripts/queue/relay.py）：工作目录在它的根目录下，两个方向都在 CPU 作业里跑，送去的脚本不带注释
+    if relay:  # 中转执行机（scripts/queue/relay.py）：工作目录在它的根目录下，送去的脚本不带注释；在哪里跑同其他 Slurm 机器
         sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
         import relay_bundle
         base = relay["root"].rstrip("/")
-        job, pyx, src = relay["transfer_job"], relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(relay_bundle.strip_py(src), base)
+        job = relay["transfer_job"] if mode == "_fetch" and total >= MIN_JOB else None
+        pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(relay_bundle.strip_py(src), base)
         jname, script = (relay.get("jobs") or {}).get("transfer") or f"tunnel{mode}", "xfer.py"
         hits = [w for w in relay_bundle.FORBIDDEN if w.lower() in src.lower()]
         if hits:
@@ -240,8 +241,7 @@ def run_remote(host, mode, plan, serve, total):
     if job:
         t = max(30, int(total / 5e6 / 60) + 10)
         run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {jname} {pyx} {script} {mode} plan.json >> log 2>&1")
-    if not relay:
-        run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
+    run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
     ssh(host, f"nohup bash {wd}/run.sh > /dev/null 2>&1 < /dev/null &")
