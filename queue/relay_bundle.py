@@ -34,9 +34,9 @@ KEEP_DIRS = ["research/common/nnunet/trainers", "research/common/nnunet/nets"]
 FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-host", "BEGIN OPENSSH",
              "PRIVATE KEY", "ntfy", "cloudflare", "trycloudflare", "cfargotunnel", "/data/others", "auto/PhD",
              "Projects/PhD", "miniforge", "vps-x", "jump-x", "203.0.113.10", "203.0.113.20", ".cache/phd", "@gmail",
-             "name-z", "BRAIN_TUMOR", "RQ1", "rq1"]
+             "name-z", "BRAIN_TUMOR", "RQ1", "rq1", "phd", "PHD"]
 # 包里所有文件统一换掉的标识符（环境变量名、目录名）；relay.py 在那边设变量、加任务时用同样的换法（rename）
-RENAME = [("BRAIN_TUMOR", "SEG_DATA"), ("RQ1", "SEG")]
+RENAME = [("BRAIN_TUMOR", "SEG_DATA"), ("RQ1", "SEG"), ("phd_stage", "seg_stage"), ("PHD_", "SEG_")]
 # 包里改名的脚本（常驻进程的名字和 DICC 的分开，10/30 DICC 管理员要求）：文件名和所有引用一起换
 FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad_start.sh", "mem_keep_start.sh"),
          ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh"), ("stage_tmp.sh", "copy_local.sh")]
