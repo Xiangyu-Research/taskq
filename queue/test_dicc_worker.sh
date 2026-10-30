@@ -17,6 +17,10 @@ out=$BRAIN_TUMOR/runs/$1
 mkdir -p "$out"
 echo "start $(date +%s.%N) $1 ${VIRTUAL_ENV:-无} $(command -v python) cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
 trap 'echo "term $1" >> "$FAKE_LOG"; exit 143' TERM
+if [[ ${FAKE_IGNORE:-} == "$1" ]]; then  # 不理停止信号
+    trap 'echo "term $1" >> "$FAKE_LOG"' TERM
+    while :; do sleep 1; done
+fi
 if [[ ${FAKE_BUSY:-} == "$1" ]]; then  # 一直在写结果文件夹、不写日志（像概率图稀疏化）
     for _ in $(seq 10); do touch "$out/progress"; sleep 1; done
 elif [[ ${FAKE_HANG:-} == "$1" ]]; then
@@ -46,7 +50,7 @@ open(p, "a").write(json.dumps(t) + "\n")
 EOF
     done
 }
-reset() { : > "$T/train.log"; rm -rf "$BRAIN_TUMOR/runs" "$TASKQ_DIR/claims" "$TASKQ_DIR/failures" "$TASKQ_DIR/released"; }
+reset() { : > "$T/train.log"; rm -rf "$BRAIN_TUMOR/runs" "$TASKQ_DIR/claims" "$TASKQ_DIR/failures" "$TASKQ_DIR/released" "$TASKQ_DIR/stopped"; }
 
 # 1. 旧作业的调用方式（训练器 fold 数据集，参数只记日志）：按顺序领；GPU 不忙、显存够时一张卡 2 个；按任务换环境
 export WORKER_TEST_GPU="50 10 20000 81920"   # 近 10 分钟使用率 50%、训练占 20GB
@@ -173,6 +177,34 @@ wpid=$!
 for _ in $(seq 30); do grep -q ^start "$T/train.log" 2> /dev/null && break; sleep 1; done
 kill -TERM $wpid; wait $wpid; rc=$?
 check "停止信号：退出 143、训练收到停止、领取交还" '[[ $rc == 143 ]] && grep -q ^term $T/train.log && [[ -z $(ls $TASKQ_DIR/claims) ]]'
+
+# 3b. 停止某个任务（taskq.py stop）：30 秒内停下、交还、不记失败，不再领它；另一个照常训；不理停止信号的强制停
+reset
+table << EOF
+t/a nnunet
+t/b nnunet
+t/c nnunet
+EOF
+FAKE_SECS=40 FAKE_IGNORE=t/b SLURM_JOB_ID=900031 TASKQ_IDLE_MAX=60 TASKQ_STOP_WAIT=3 TASKQ_POLL=30 bash "$HERE/dicc_worker.sh" > "$T/w3b.out" 2>&1 &
+wpid=$!
+for _ in $(seq 30); do [[ $(grep -c ^start "$T/train.log" 2> /dev/null) == 2 ]] && break; sleep 1; done
+t0=$(date +%s)
+python3 "$HERE/taskq.py" stop --why 测试 t/a > "$T/stop.out"
+for _ in $(seq 40); do [[ ! -e $TASKQ_DIR/claims/t__a ]] && break; sleep 1; done
+dt=$(( $(date +%s) - t0 ))
+check "停止：$dt 秒内停下、交还（≤ 30 秒）、不记失败" '(( dt <= 30 )) && grep -q "^term t/a" $T/train.log && [[ ! -e $TASKQ_DIR/claims/t__a && ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "30 秒内停下" $T/stop.out'
+python3 "$HERE/taskq.py" status > "$T/st.out"
+check "状态里是 stopped" 'grep -q "t/a .*stopped 停止" $T/st.out'
+t0=$(date +%s)
+python3 "$HERE/taskq.py" stop t/b > /dev/null
+for _ in $(seq 40); do [[ ! -e $TASKQ_DIR/claims/t__b ]] && break; sleep 1; done
+dt=$(( $(date +%s) - t0 ))
+check "不理停止信号的：$dt 秒内强制停、交还（≤ 30 秒）" '(( dt <= 30 )) && grep -q "t/b 3 秒没停下，强制停" $T/w3b.out && [[ ! -e $TASKQ_DIR/claims/t__b ]]'
+sleep 3
+check "停止的不再领，空出的位置领下一个" '[[ $(grep -c "start .* t/a" $T/train.log) == 1 ]] && grep -q "start .* t/c" $T/train.log'
+python3 "$HERE/taskq.py" resume t/a > /dev/null
+check "撤销停止后照常排" '[[ ! -e $TASKQ_DIR/stopped/t__a ]] && python3 "$HERE/taskq.py" status | grep -q "t/a .* free"'
+kill -TERM $wpid; wait $wpid 2> /dev/null
 
 # 4. box 替 lab 领的（ttl 24 小时、beat 30 分钟前）不被 DICC 作业领走
 reset

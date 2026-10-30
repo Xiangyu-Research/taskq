@@ -18,6 +18,8 @@
 #   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业先空着等（健康检查提醒）；
 #   - 队列本身出错（taskq.py 读写不了）连续 10 分钟、手上又没有在训的：结束作业、把卡还回去；
 #   - 查不到作业的结束时间时当作时间还多，之后每轮再查。
+# 停止的任务（taskq.py stop，10/30）：每 5 秒看一次，发停止信号，20 秒还没停就强制停，交还（不算失败），30 秒内做完；
+# 存档是原子写的，下次从存档接着训。
 # 不管什么原因，手上没有在训的连续 40 分钟就结束作业、把卡还回去：DICC gpu-a100 分区 GPU 使用率连续 1 小时低于 40%
 # 会被自动取消（10/17 的新规定）。
 # TASKQ_* 环境变量只给测试用（scripts/queue/test_dicc_worker.sh）。
@@ -194,6 +196,41 @@ on_term() {
 }
 trap on_term TERM INT
 
+QDIR=${TASKQ_DIR:-$HOME/.cache/phd/taskq}
+SAFECH=$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import spec; print(spec.SAFE)" 2> /dev/null || echo __)
+STOP_POLL=${TASKQ_STOP_POLL:-5}
+STOP_WAIT=${TASKQ_STOP_WAIT:-20}
+check_stops() {
+    local p k i n=0
+    for p in "${!KEY[@]}"; do
+        k=${KEY[$p]}
+        [[ -e $QDIR/stopped/${k//\//$SAFECH} ]] || continue
+        echo "$(ts) $k 被停止（taskq.py stop），停训练、交还"
+        kill_tree "$p"
+        for (( i = 0; i < STOP_WAIT; i++ )); do kill -0 "$p" 2> /dev/null || break; sleep 1; done
+        if kill -0 "$p" 2> /dev/null; then
+            echo "$(ts) $k $STOP_WAIT 秒没停下，强制停"
+            kill_tree "$p" KILL
+            sleep 1
+        fi
+        kill -0 "$p" 2> /dev/null || wait "$p" 2> /dev/null
+        $TQPY release --worker "$W" "$k"
+        unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
+        n=1
+    done
+    (( n ))
+}
+nap() {
+    local end=$(( $(date +%s) + ${TASKQ_POLL:-30} )) d
+    while (( (d = end - $(date +%s)) > 0 )); do
+        check_stops && return 0
+        (( d > STOP_POLL )) && d=$STOP_POLL
+        sleep "$d" & wait $!
+    done
+    check_stops
+    return 0
+}
+
 why_not=
 last_beat=$(date +%s)
 ERRF=$(mktemp)
@@ -291,7 +328,7 @@ while true; do
         [[ $why == paused && ${said_paused:-} != 1 ]] && { echo "$(ts) 队列暂停领任务（3 小时内失败太多次），空着等，最多 $(( IDLE_MAX / 60 )) 分钟"; said_paused=1; }
         [[ $why == wait && ${said_wait:-} != 1 ]] && { echo "$(ts) 排在前面的任务刚停下，等它（最多到开始后 $(( PATIENCE / 60 )) 分钟）"; said_wait=1; }
     fi
-    sleep "${TASKQ_POLL:-30}" & wait $!
+    nap
 done
 kill_tree "$GPUMON"
 rm -f "$ERRF"

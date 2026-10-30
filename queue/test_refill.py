@@ -196,6 +196,15 @@ ok("领：take --worker lab --ttl 604800，成功后在 lab gpu1 加训练任务
    rem == [f"take --worker lab --ttl 604800 {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
    and f"gpu1 -p --label train:{K_UM} -- 'bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=1'" in cmds[0][1]
    and "--stashed" not in cmds[0][1] and "priority" not in cmds[0][1] and "领了" in msgs[0])
+# 停止的（taskq.py stop，10/30）：停掉 lab 上的训练（SIGTERM）、交还，不续
+stopq = [dict(t, state="stopped", worker="lab", since=None) if t["key"] == K_UM else t for t in QUEUE]
+acts_s, _, _ = R.plan(snap([train(5, 101, 1, "Running", UM)], queue=stopq), "lab")
+ok("停止的：交还并停掉在训的任务，不续", ("release", K_UM) in ops(acts_s) and ("beat", K_UM) not in ops(acts_s)
+   and next(a for a in acts_s if a["key"] == K_UM)["kill"] == [5])
+cmds.clear(), rem.clear()
+R.execute([a for a in acts_s if a["key"] == K_UM], "lab", remote=fake_remote(), run=fake_run)
+ok("停止的：lab 上 pueue kill -s SIGTERM、再交还", any(h == "lab" and "pueue kill -s SIGTERM 5" in c for h, c in cmds)
+   and rem == [f"release --worker lab {K_UM}"])
 cmds.clear(), rem.clear()
 msgs = R.execute(acts, "lab", remote=fake_remote(10, "刚被别人领走"), run=fake_run)
 ok("take 没成功（DICC 刚领走）：不加训练任务", cmds == [] and "没领到" in msgs[0])

@@ -81,7 +81,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - 先跑 1 个；最近一个开始 15 分钟后，近 10 分钟 GPU 平均使用率低于 90%、除去显存填充还空着一半显存，再领 1 个（最多 2 个）。nnU-Net 这类 CPU 跟不上的自然变成 2 个，GPU 跑满的只跑 1 个。CPU 少于 24 个或内存少于 56G 的作业只跑 1 个。
 - 跑完一个领下一个；离时限不到 1 小时不再领；到时限时把没做完的交还，下一个领到的从存档接着训。
 - 不领：已做完的、别处在做的（领取在有效期内续过：DICC 作业 20 分钟，lab 7 天；或训练日志 15 分钟内更新过）、失败过 2 次的。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
-- 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败）；整个队列 3 小时内失败 3 次就暂停领任务；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
+- 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败）；整个队列 3 小时内失败 3 次就暂停领任务；停止的任务（`taskq.py stop`）每 5 秒看一次，先发 SIGTERM，20 秒没停就 SIGKILL，交还（不算失败），30 秒内做完（存档是原子写的）；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
 - 每个训练 14 个数据增强进程（作业 32 个 CPU）。
 - CPU worker（`cpu_worker.sbatch`，`WORKER_DEVICE=cpu`）只领 `device=cpu` 的任务，一次 1 个，领不到就结束。
 
@@ -174,6 +174,9 @@ $TQ set-nice --nice 0 Dataset116_METrq1/nnUNetTrainer_save10_n470/2
 $TQ show Dataset116_METrq1/nnUNetTrainer_save10_n470/2
 # 改一个任务（会改变 key 的参数不能改，删掉重加）
 $TQ set Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1 env=umamba
+# 停止一个任务（10/30）：DICC 上在训的 30 秒内停下、交还，lab 上的由 refill.py 下次检查时停；之后不再领，resume 撤销
+$TQ stop --why 原因 Dataset156_METrq1_erand/nnUNetTrainer_save10/0
+$TQ resume Dataset156_METrq1_erand/nnUNetTrainer_save10/0
 # 手动在 lab 训一个：先领（box 上跑，自动经 ssh 转到 DICC），再加任务
 $TQ take --worker lab --ttl 604800 Dataset111_MENrq1/nnUNetTrainer_save10_n470/1
 $Q gpu1 --label train:Dataset111_MENrq1/nnUNetTrainer_save10_n470/1 -- \

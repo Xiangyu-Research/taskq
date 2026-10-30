@@ -208,6 +208,11 @@ def plan(s, name):
         live = [st for _, st, _ in tt_all.get(key, []) if st in LIVE]  # 活着的任务不看开始时间（恢复的旧任务也算）
         g = tgroup.get(key) or slot.get(key) or gpu_group(name)
         n_act = len(acts)
+        if t["state"] == "stopped":  # taskq.py stop（10/30）：停掉这台机器上的训练（SIGTERM，从存档接着训）、交还
+            ids = [i for i, st, _ in tt_all.get(key, []) if st in LIVE]
+            acts.append(dict(op="release", key=key, kill=ids,
+                             why="停止（taskq.py stop）" + (f"，停了训练任务 {' '.join(map(str, ids))}" if ids else "")))
+            continue
         if t["state"] == "done":
             acts.append(dict(op="release", key=key, why="训完了，DICC 上有了存档"))
         elif s["src"].get(name, {}).get("folds", {}).get(key, {}).get("final"):
@@ -433,6 +438,9 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
         k = a["key"]
         try:
             if a["op"] == "release":
+                if a.get("kill"):
+                    ids = " ".join(map(str, a["kill"]))
+                    rc, out = run(f"~/.local/bin/pueue kill -s SIGTERM {ids}; ~/.local/bin/pueue remove {ids}; true", M.MACHINES[name]["ssh"])
                 r = remote(f"release --worker {name} {k}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
                 if r and r[0] == 0:
                     set_slot(name, k, None)
