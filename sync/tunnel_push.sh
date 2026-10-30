@@ -10,7 +10,7 @@
 #
 # 做法和安全措施（传输本身的见 scripts/sync/README.md）：
 # - 软链接在 box 上解析，那边存成真实文件。那边已经存在、大小和修改时间相同的文件跳过，所以中断后重新运行会接着传。
-# - 最后用 rsync 校验和逐个文件核对那边和 box（只传校验和），列出不一致的文件。
+# - 最后两边各算 MD5 逐个文件核对（顺着软链接读），列出不一致的文件。
 # - 传之前在那边每个子目录里放一个 .incomplete，核对一致后才删：中途出错留下的半份数据，refill.py 不会当成"数据在"。
 set -euo pipefail
 
@@ -34,9 +34,11 @@ MARKS=$(printf " ~/$DEST/%q/.incomplete" "${SUBS[@]}")
 ssh "$H" "for f in $MARKS; do mkdir -p \"\$(dirname \$f)\" && touch \$f; done"
 python3 "$REPO/scripts/sync/tunnel.py" push "$HOST" "$SRC" "$DEST" "$W/files.txt"
 
-# 核对：rsync 只比较校验和，不传数据；列出那边缺少或内容不同的文件
+# 核对：两边各算 MD5（顺着软链接读，那边是软链接也算一致），列出那边缺少或内容不同的文件
 echo "$(date '+%F %T') 用校验和核对（下面列出的是不一致的文件，没有列出 = 一致）"
-BAD=$(cd "$SRC" && rsync -rLc -n --itemize-changes -R "${SUBS[@]}" "$H:$DEST/" | grep -v '^\.' || true)
+BAD=$(diff <(cd "$SRC" && xargs -d '\n' -a "$W/files.txt" md5sum) \
+           <(ssh "$H" "cd $(printf %q "$DEST") && xargs -d '\n' md5sum 2> /dev/null" < "$W/files.txt") \
+      | sed -n 's/^< [0-9a-f]*  //p' || true)
 if [[ -n $BAD ]]; then
     echo "$BAD" | head -20
     echo "不一致：$(echo "$BAD" | wc -l) 个（重新运行本脚本会补传大小不对的文件；大小对但内容不对的，先在 $HOST 上删掉再运行）"
