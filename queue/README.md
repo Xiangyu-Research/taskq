@@ -37,6 +37,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `AUTO["advance"]` | True / False | 训完以后的步骤真的排；False 时只把"会排什么"写进 box `~/advance.log` |
 | `envs/policy.py` `AUTO["lab"]` | True / False | 替 lab 领训练、预传数据；False 时已领的照常续，其余只记"会做什么" |
 | `envs/policy.py` `AUTO["dicc"]` | True / False | 补交 DICC 的 worker 作业；False 时只记"会交什么" |
+| `envs/policy.py` `AUTO["dicc2"]` | True / False | 中转执行机（DICC2）：领新的折、补交作业；False 时只记进 box `~/relay.log`，已领的折照常推进（见下面"中转执行机"） |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
 | `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件只有 `have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
 | `envs/policy.py` `MANUAL` | 机器 → 组 | 只跑手动加的任务（lab `gpu0`）：不替它领训练，健康检查不报它空着 |
@@ -123,6 +124,25 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - `RQ1_GPU_PAD=0` 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`、`research/RQ1/probe/p1_predict_model.sh`、`research/RQ1/probe/p2_predict_model.sh`、`research/RQ1/analysis/validation_predict_eval.sh`、`research/RQ1/analysis/validation_prep.sh`、`research/RQ1/analysis/edema_intervention.sh`、`research/RQ1/analysis/edema_ring_probe.sh`。CPU 分区的作业本来就不启动。
 - pad 异常退出时最多重启 3 次；父进程退出、收到 SIGTERM、`DISABLED` 出现时放掉显存退出。退出码：0 正常 / 开关 / 父进程退出，1 没有 GPU 或初始化失败，2 参数错误；启动失败只记日志，不影响训练。
 
+### 中转执行机（DICC2，`relay.py`，10/30）
+
+一台中转执行机（`envs/machines.py` 的 `RELAY`，ssh `dicc2`）用来训练同一个总队列里的折。两边不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙，数据集和病例用别名。流程细节写在 `relay.py` 开头。
+
+```
+ box 的 relay.py（健康检查每 30 分钟，refill.py 之后）
+   总队列 take --worker dicc2 → box wait 组 relay.py stage：换成别名（relay_names.py）、补传缺的数据块、建软链接、加进那边的队列
+   那边：R/code/current 的 worker.sbatch → dicc_worker.sh → run_task.sh，和 DICC 一样（显存填充、加第二个、卡死、停止、到时限交还）
+   那边训完 → box wait 组 relay.py fetch（拉回、换回真名、核对验证集病例）&& archive_task.sh box（备份到 DICC）
+   总队列显示训完 → 交还，删掉那边的任务和结果
+```
+
+- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。
+- **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据集是软链接视图，JSON 改写过（`relay_names.py`，别名表在 box `~/.cache/phd/relay/names.json`，分配后不变）。拉回时 `validation/` 的病例要和这一折的划分一致，否则不收、报出来。
+- **传输**：都经隧道（`scripts/sync/tunnel.py`，在那边的 CPU 作业里收发，不在登录节点上跑）。
+- **个数**：`envs/policy.py` 的 `SLURM["dicc2"]`（`gpu`：QOS 和时限；`ready`：那边备好、等 worker 领的折数）。
+- **状态**：box `~/.cache/phd/relay/state.json`（领着的折和别名）、`status.json`（那边各折进度，登记表显示成 DICC2）、日志 `~/relay.log`。
+- **手动**：`python3 scripts/queue/relay.py stage dicc2 <key> --nice N --no-add`（只传数据，不领）；`relay.py status dicc2`；`relay.py bundle dicc2`。
+
 ## 文件
 
 | 文件 | 内容 |
@@ -140,6 +160,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（nnU-Net 从存档接着训，推理跳过已做好的病例），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 和 DICC 的克隆） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
+| `relay.py`、`relay_bundle.py`、`relay_names.py` | 中转执行机（见上面）：接力、代码包、改名 |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口 |
 
 ## 约定

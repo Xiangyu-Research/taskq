@@ -24,6 +24,7 @@
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
 每次检查后还做两件事（10/18 起）：
   - scripts/queue/refill.py：替 lab 从 DICC 的任务队列领任务、续上、交还；领了、交还了什么只记在 ~/refill.log，停住等人处理的报成问题。
+  - scripts/queue/relay.py：中转执行机（10/30）的领任务、传数据、拉回，同上。
   - scripts/queue/advance.py：box 上按每一折的状态排下一步（拉回 → 推理 → 评测 → 五折分析）；失败停住的报成问题。
 """
 import argparse
@@ -233,11 +234,11 @@ def check(s):
         tq = s.get("taskq", {}).get(name)
         if tq and tq["enabled"]:
             # 任务队列开着时，作业名不再对应训哪一折：排队、在训都看队列（scripts/queue/taskq.py）
-            pueue_workers = set(M.names("pueue"))
+            pueue_workers = set(M.names("pueue")) | set(M.RELAY)
             for t in tq["tasks"]:
                 key, st = t["key"], t["state"]
                 if t.get("worker") in pueue_workers and st in ("claimed", "stale"):
-                    continue  # lab 领的（box 替它领）：在训看 lab 的 pueue（下面），续上、交还由 refill.py 管
+                    continue  # lab、中转执行机领的（box 替它们领）：lab 在训看 lab 的 pueue（下面），续上、交还由 refill.py / relay.py 管
                 if st in ("free", "stale", "claimed", "busy"):
                     claim(key, name, "队列" if st in ("free", "stale") else f"在训（{t['note']}）")
                 if st in ("claimed", "busy"):
@@ -454,6 +455,13 @@ def main():
         events, stuck, filled = refill.run_all(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         events, stuck, filled = [], {"refill:error": f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}, set()
+    try:
+        import relay  # scripts/queue/relay.py：中转执行机（envs/machines.py 的 RELAY）领任务、传数据、拉回
+        ev3, st4 = relay.run_all(s, dry=a.dry_run)
+        events += ev3
+        stuck.update(st4)
+    except Exception as e:  # noqa: BLE001
+        stuck["relay:error"] = f"scripts/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]
     try:
         import advance  # scripts/queue/advance.py：box 上按状态排下一步
         done, stuck2 = advance.run(s, dry=a.dry_run)

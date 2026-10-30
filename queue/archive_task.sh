@@ -14,13 +14,17 @@
 #      修改时间一致（刚用 rsync 传过，传输时已按校验和核对；DICC 登录节点上不做大量读盘）。
 #   3. 都一致才删训练机上要删的文件，另写一个 ARCHIVED（训完的判断、登记表都认它）。没有要删的文件时只做第 1 步。
 # 任何一步不一致都不删、以非 0 退出（健康检查会提醒）。删除记到 box 的 ~/archive_prune.log。
+# <机器> 是 box 本身时（中转执行机训的、scripts/queue/relay.py 已拉回改名的，10/30）：只做 box → 备份机器和核对，没有训练机那一侧。
 set -euo pipefail
 HOST=${1:?用法：archive_task.sh <机器> <key> [--dry-run]} KEY=${2:?用法：archive_task.sh <机器> <key> [--dry-run]}
 DRY=${3:-}
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
 M="python3 $REPO/envs/machines.py"
-SRCH=$($M get "$HOST" ssh) SRCD=$($M get "$HOST" data)
-[[ -n $SRCH ]] || { echo "envs/machines.py 里没有可以归档的机器 $HOST" >&2; exit 2; }
+SRCH= SRCD=
+if [[ $HOST != "$($M names hub | head -1)" ]]; then
+    SRCH=$($M get "$HOST" ssh) SRCD=$($M get "$HOST" data)
+    [[ -n $SRCH ]] || { echo "envs/machines.py 里没有可以归档的机器 $HOST" >&2; exit 2; }
+fi
 BK=$($M names backup | grep -vx "$HOST" | head -1)
 [[ -n $BK ]] || { echo "envs/machines.py 里没有 $HOST 以外的备份机器（角色 backup）" >&2; exit 2; }
 BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" data) LD=${BRAIN_TUMOR:-$($M get . data)}
@@ -56,10 +60,10 @@ for x in ${EXCL[@]+"${EXCL[@]}"}; do EX+=(--exclude="$x"); done
 
 log "1. 备份：$OUT（$HOST → box 的分段日志；box → $BK）"
 mkdir -p "$LD/logs/tasks"
-if ssh "$SRCH" "test -d $SRCD/logs/tasks"; then  # 那边可能还没有这个目录
+if [[ -n $SRCH ]] && ssh "$SRCH" "test -d $SRCD/logs/tasks"; then  # 那边可能还没有这个目录
     "${R[@]}" --include="${SAFE}_*" --exclude='*' "$SRCH:$SRCD/logs/tasks/" "$LD/logs/tasks/"
 fi
-if [[ -n $OLDSEG ]] && ssh "$SRCH" "test -d $SRCD/nnUNet/results/logs"; then
+if [[ -n $SRCH && -n $OLDSEG ]] && ssh "$SRCH" "test -d $SRCD/nnUNet/results/logs"; then
     mkdir -p "$LD/nnUNet/results/logs"
     "${R[@]}" --include="${OLDSEG}*" --exclude='*' "$SRCH:$SRCD/nnUNet/results/logs/" "$LD/nnUNet/results/logs/"
 fi
@@ -85,6 +89,7 @@ if [[ $DRY == --dry-run ]]; then
 elif [[ -n $bad_bk ]]; then
     log "$BK 上的副本和 box 不一致，不删 $HOST 上的文件："; echo "$bad_bk" | head -20; exit 1
 fi
+[[ -n $SRCH ]] || { log "box 上的副本已备份到 $BK、核对一致"; exit 0; }
 LIST=$(mktemp); trap 'rm -f "$LIST"' EXIT
 ssh "$SRCH" "cd $SRCD/$OUT && find . -type f -printf '%P\n'" > "$LIST"
 drop=$(sp drop "$LIST")

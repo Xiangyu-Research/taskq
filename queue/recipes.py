@@ -22,6 +22,8 @@
     fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）、
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
+    relay      能交给中转执行机（envs/machines.py 的 RELAY）训练时，数据和结果怎么改名（scripts/queue/relay_names.py 的
+               TRANSLATORS 里的名字）；None = 不交
     machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc"]）；None = 有环境的都行
     device     gpu = 要卡（DICC 的 GPU worker、lab 领）；cpu = 纯 CPU（只由 DICC 的 CPU worker 领，scripts/queue/cpu_worker.sbatch，
                2026-10-24）
@@ -59,6 +61,7 @@ RECIPES = {
         device="gpu",
         after=[],
         cache=dict(root="nnUNet/npy_cache", depth=2, users=".used_by"),
+        relay="nnunet",
     ),
     # 什么都由任务自己给（非 nnU-Net 的训练可以直接用，或者照着写一种新的做法）
     "command": dict(
@@ -66,6 +69,6 @@ RECIPES = {
         open=True,
         key="{key}", env="{env}", cmd="{cmd}", vars={}, out="{out}", done="{done}", log="*.log",
         progress=None, info=None, metrics={}, checkpoint=None, data=[], fetch=dict(exclude=[], extra=[]), archive=None,
-        machines=None, device="gpu", after=[], cache=None,
+        machines=None, device="gpu", after=[], cache=None, relay=None,
     ),
 }

@@ -214,17 +214,32 @@ def take_lock():
 def run_remote(host, mode, plan, serve, total):
     """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。"""
     M = machines()
+    relay = next((m for m in M.RELAY.values() if m.get("ssh") == host), None)
     name = next((n for n, m in M.MACHINES.items() if m.get("ssh") == host), host)
-    job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
-    wd = ssh(host, f"d=~/.cache/phd/tunnel/{secrets.token_hex(6)} && mkdir -p $d && cd $d && pwd").strip()
+    pyx = "python3"
     with open(__file__) as f:
-        ssh(host, f"cat > {wd}/tunnel.py", input=f.read())
+        src = f.read()
+    if relay:  # 中转执行机（scripts/queue/relay.py）：工作目录在它的根目录下，两个方向都在 CPU 作业里跑，送去的脚本不带注释
+        sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+        import relay_bundle
+        base = relay["root"].rstrip("/")
+        job, pyx, src = relay["transfer_job"], relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(relay_bundle.strip_py(src), base)
+        hits = [w for w in relay_bundle.FORBIDDEN if w.lower() in src.lower()]
+        if hits:
+            raise RuntimeError(f"送去 {host} 的 tunnel.py 里有不该出现的字样：{hits}")
+        base += "/tmp"
+    else:
+        job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
+        base = "~/.cache/phd/tunnel"
+    wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p $d && cd $d && pwd").strip()
+    ssh(host, f"cat > {wd}/tunnel.py", input=src)
     ssh(host, f"cat > {wd}/plan.json", input=json.dumps(plan))
     run = [f"cd {wd}"]
     if job:
         t = max(30, int(total / 5e6 / 60) + 10)
-        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J tunnel_fetch python3 tunnel.py _fetch plan.json >> log 2>&1")
-    run.append(f"grep -q '^完成' log 2> /dev/null || python3 tunnel.py {mode} plan.json >> log 2>&1")
+        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J tunnel{mode} {pyx} tunnel.py {mode} plan.json >> log 2>&1")
+    if not relay:
+        run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} tunnel.py {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
     ssh(host, f"nohup bash {wd}/run.sh > /dev/null 2>&1 < /dev/null &")

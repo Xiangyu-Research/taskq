@@ -35,7 +35,7 @@ box 上（不是队列所在的机器（envs/machines.py 里用 Slurm、能训�
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
     taskq.py remove <key>...         删掉没人领着的任务（after 里有它的任务要一起删；结果文件不动）
     taskq.py stop [--why 原因] <key>...   停止任务（10/30）：在训的 30 秒内停下、交还（存档是原子写的，从存档接着训），
-                                      之后不再领它；lab 上训的由 box 的 refill.py 下次检查时停
+                                      之后不再领它；lab、中转执行机上训的由 box 下次检查时停（refill.py / relay.py）
     taskq.py resume <key>...         撤销停止，照常排
     taskq.py take --worker lab --ttl 604800 <key>       领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
     taskq.py status                   打印队列
@@ -58,7 +58,7 @@ import spec as S  # noqa: E402
 import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
-TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", "~/.cache/phd/taskq"))  # TASKQ_DIR 只给测试用
+TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", "~/.cache/phd/taskq"))  # TASKQ_DIR：测试和中转执行机（relay.py）用
 TASKS = "tasks.jsonl"
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
@@ -553,7 +553,7 @@ def cmd_stop(a):
             elif w.isdigit():
                 print(f"停止：{k}（作业 {w} 30 秒内停下、交还）")
             else:
-                print(f"停止：{k}（{w} 领着，由 box 的 refill.py 下次检查时停、交还）")
+                print(f"停止：{k}（{w} 领着，由 box 下次检查时停、交还）")
     return 0
 
 

@@ -288,7 +288,7 @@ def rank(tq, t, ready):
 
 def candidates(s, name, tq, ready):
     """这台机器能领的任务，按领的先后排：free、没标成有问题、有环境、没限定在别的机器、要卡、任何机器上都没有进度、这台机器没跳过。"""
-    envs = set(M.MACHINES[name].get("envs") or {})
+    envs = set(M.machine(name).get("envs") or {})
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
              and name in (info(tq, t["key"])["spec"].get("machines") or [name])
              and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu"
