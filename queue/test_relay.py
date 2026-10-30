@@ -156,9 +156,11 @@ def test_plan():
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K2], more
+    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0")] + cands), NAME, RS(rtask(A, "free")), st, [])
+    assert more == [] and "排着 2" in why, (more, why)
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=105e9), st, [])
     assert more == [] and "放不下" in why, why
-    ok("补任务：那边排着的不够 ready 个才领，按档位，只领能翻译的做法，放不下不领")
+    ok("补任务：那边排着的（含在传数据的）不够 ready 个才领，按档位，只领能翻译的做法，放不下不领")
 
 
 # ---------------- 2. 挪进数据目录的顺序 ----------------

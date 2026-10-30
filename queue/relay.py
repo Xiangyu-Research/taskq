@@ -502,11 +502,16 @@ def fill(s, name, rs, st, acts):
     if any(n not in s["src"] for n in M.names("train")):
         return [], "有训练机的进度读不到"
     want = (P.SLURM.get(name) or {}).get("ready", 1)
-    have = sum(1 for t in rs["taskq"]["tasks"] if t["state"] in ("free", "stale", "waiting")) \
-        + sum(1 for a in acts if a["op"] == "stage")
+    keys = keys_of(st, name)
+    rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
+
+    def waiting(t):  # 领着、还没开训：在传数据，或在那边排着
+        a = rt.get(keys[t["key"]]["alias"]) if t["key"] in keys else None
+        return a is None or a["state"] in ("free", "stale", "waiting")
+    have = sum(1 for t in mtq.get("tasks", []) if t.get("worker") == name
+               and t["state"] not in ("done", "stopped") and waiting(t))
     if have >= want:
         return [], f"那边排着 {have} 个"
-    keys = keys_of(st, name)
     ready = {p for k in keys.values() for p in k.get("data") or []}
     cands = [t for t in refill.candidates(s, name, mtq, ready)
              if relayable(refill.info(mtq, t["key"]))]
