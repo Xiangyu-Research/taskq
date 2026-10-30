@@ -180,23 +180,55 @@ class Serve:
         return H
 
 
-def start_server(serve):
+def relay_of(host):
+    return next((m for m in machines().RELAY.values() if m.get("ssh") == host), None)
+
+
+def quick_tunnel(bind):
+    image, pat = machines().MACHINES[machines().hub()]["quick"]
+    cid = subprocess.run(["docker", "run", "-d", "--rm", "--network", "host", image, "tunnel", "--no-autoupdate", "--url", f"http://{bind}"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    for _ in range(60):
+        r = subprocess.run(["docker", "logs", cid], capture_output=True, text=True)
+        m = re.search(pat, r.stdout + r.stderr)
+        if m:
+            return cid, m.group(0)
+        time.sleep(1)
+    subprocess.run(["docker", "stop", cid], capture_output=True)
+    raise RuntimeError("临时隧道没给出地址")
+
+
+def stop_server(srv):
+    srv.shutdown()
+    srv.server_close()
+    if getattr(srv, "quick", None):
+        subprocess.run(["docker", "stop", srv.quick], capture_output=True)
+
+
+def start_server(serve, quick=False):
+    """quick：用临时地址（envs/machines.py 里 hub 的 quick、RELAY 的 quick_tunnel），不用 box 的固定地址。"""
     M = machines()
     url, bind = M.MACHINES[M.hub()]["transfer"]
+    quick = quick and "TUNNEL_URL" not in os.environ
     url, bind = os.environ.get("TUNNEL_URL", url), os.environ.get("TUNNEL_BIND", bind)
     host, port = bind.rsplit(":", 1)
     srv = http.server.ThreadingHTTPServer((host, int(port)), serve.handler())
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    for _ in range(30):
+    if quick:
+        try:
+            srv.quick, url = quick_tunnel(bind)
+        except Exception:
+            stop_server(srv)
+            raise
+    for _ in range(60 if quick else 30):
         try:
             if urllib.request.urlopen(urllib.request.Request(url + "/", headers=UA), timeout=10).read() == b"ok":
                 return srv, url
         except Exception:
             pass
         time.sleep(2)
-    srv.shutdown()
-    srv.server_close()
+    stop_server(srv)
     raise RuntimeError(f"{url} 连不到文件服务（traefik 的路由或隧道）")
 
 
@@ -214,7 +246,7 @@ def take_lock():
 def run_remote(host, mode, plan, serve, total):
     """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。"""
     M = machines()
-    relay = next((m for m in M.RELAY.values() if m.get("ssh") == host), None)
+    relay = relay_of(host)
     name = next((n for n, m in M.MACHINES.items() if m.get("ssh") == host), host)
     pyx = "python3"
     with open(__file__) as f:
@@ -290,15 +322,14 @@ def push(host, src, dst, rels):
     token = secrets.token_urlsafe(24)
     serve = Serve(token, files, src=src)
     lk = take_lock()
-    srv, url = start_server(serve)
+    srv, url = start_server(serve, quick=bool((relay_of(host) or {}).get("quick_tunnel")))
     log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
     t0 = time.time()
     try:
         plan = dict(base=f"{url}/{token}", root=dst, npar=NPAR, files=[[r, *v] for r, v in files.items()])
         res = run_remote(host, "_fetch", plan, serve, total)
     finally:
-        srv.shutdown()
-        srv.server_close()
+        stop_server(srv)
         lk.close()
     bad = []
     for r in files:
@@ -320,15 +351,14 @@ def pull(host, src, dst, items):
     os.makedirs(dst, exist_ok=True)
     serve = Serve(token, files, dst=dst)
     lk = take_lock()
-    srv, url = start_server(serve)
+    srv, url = start_server(serve, quick=bool((relay_of(host) or {}).get("quick_tunnel")))
     log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
     t0 = time.time()
     try:
         plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, npar=NPAR, files=[[r, n[0]] for r, n in files.items()])
         run_remote(host, "_send", plan, serve, total)
     finally:
-        srv.shutdown()
-        srv.server_close()
+        stop_server(srv)
         lk.close()
         for r in files:
             p = os.path.join(dst, r) + ".tunnelpart"
