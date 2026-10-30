@@ -4,7 +4,7 @@
 
 那边（根目录 R，machines.py 的 root）：
   R/code/<包名>、R/code/current   scripts/queue/relay_bundle.py 打的代码包（origin/main 变了就重打、切换 current；旧包留最新 3 个，
-                                  4 天以上的删）；worker 作业和原来的 DICC 一样（worker.sbatch → dicc_worker.sh → run_task.sh）
+                                  4 天以上的删）；worker 和 DICC 同一套脚本（作业名、资源、脚本名分开，见 machines.py 的 RELAY）
   R/queue/                        它自己的任务队列（原版 taskq.py，任务用别名）
   R/blobs/<id[:2]>/<id>           数据文件，id = sha256（内容相同的只传一次）
   R/data/                         数据目录：数据集是指向 blobs 的软链接 + 改写过的 JSON（scripts/queue/relay_names.py），训练结果用别名

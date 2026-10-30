@@ -131,12 +131,12 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 ```
  box 的 relay.py（健康检查每 30 分钟，refill.py 之后）
    总队列 take --worker dicc2 → box wait 组 relay.py stage：换成别名（relay_names.py）、补传缺的数据块、建软链接、加进那边的队列
-   那边：R/code/current 的 worker.sbatch → dicc_worker.sh → run_task.sh，和 DICC 一样（显存填充、加第二个、卡死、停止、到时限交还）
+   那边：R/code/current 的 worker.sbatch → loop.sh（= dicc_worker.sh）→ job_run.sh（= run_task.sh），做法和 DICC 一样（显存填充、加第二个、卡死、停止、到时限交还）
    那边训完 → box wait 组 relay.py fetch（拉回、换回真名、核对验证集病例）&& archive_task.sh box（备份到 DICC）
    总队列显示训完 → 交还，删掉那边的任务和结果
 ```
 
-- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，环境变量名 `BRAIN_TUMOR`、`RQ1_*` 换成 `SEG_DATA`、`SEG_*`（`RENAME`）；包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
+- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，环境变量名 `BRAIN_TUMOR`、`RQ1_*` 换成 `SEG_DATA`、`SEG_*`（`RENAME`）；作业名（`seg_fit`，传输作业 `seg_xfer`）、资源（30 核、60G，`envs/machines.py` 的 `sbatch`）、常驻脚本的文件名（`FILES`）和 DICC 的分开（10/30 DICC 管理员要求）；包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据集是软链接视图，JSON 改写过（`relay_names.py`，别名表在 box `~/.cache/phd/relay/names.json`，分配后不变）。拉回时 `validation/` 的病例要和这一折的划分一致，否则不收、报出来。
 - **传输**：都经隧道（`scripts/sync/tunnel.py`，在那边的 CPU 作业里收发，不在登录节点上跑）。
 - **个数**：`envs/policy.py` 的 `SLURM["dicc2"]`（`gpu`：QOS 和时限；`ready`：那边备好、等 worker 领的折数）。

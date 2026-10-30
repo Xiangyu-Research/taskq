@@ -37,6 +37,9 @@ FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-
              "name-z", "BRAIN_TUMOR", "RQ1", "rq1"]
 # 包里所有文件统一换掉的标识符（环境变量名、目录名）；relay.py 在那边设变量、加任务时用同样的换法（rename）
 RENAME = [("BRAIN_TUMOR", "SEG_DATA"), ("RQ1", "SEG")]
+# 包里改名的脚本（常驻进程的名字和 DICC 的分开，10/30 DICC 管理员要求）：文件名和所有引用一起换
+FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad_start.sh", "mem_keep_start.sh"),
+         ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh"), ("stage_tmp.sh", "copy_local.sh")]
 # 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
 PATCHES = [("scripts/queue/taskq.py", 'os.path.expanduser("~/st/BRAIN_TUMOR")', "{data!r}")]
 
@@ -247,7 +250,7 @@ def _declared(text):
 def machine_entry(name, e, root, entry=None):
     m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler="slurm", repo=f"{root}/code/current", code=None,
              data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups={}, roles=("train",),
-             disk=None, gpu_log=False, jobs=dict(e.get("jobs") or {}))
+             disk=None, gpu_log=False, jobs=dict(e.get("jobs") or {}), sbatch=dict(e.get("sbatch") or {}))
     m.update(entry or {})
     return m
 
@@ -275,8 +278,14 @@ def gen_policy(name):
 
 
 def gen_sbatch(real, m, root):
-    keep = [ln for ln in real.splitlines() if ln.startswith("#SBATCH")
-            and not re.match(r"#SBATCH\s+--(job-name|output)\b", ln)]
+    sb = m.get("sbatch") or {}
+    over = {"cpus-per-task": sb.get("cpus"), "mem": sb.get("mem")}
+    keep = []
+    for ln in real.splitlines():
+        o = re.match(r"#SBATCH\s+--([\w-]+)", ln)
+        if not o or o.group(1) in ("job-name", "output"):
+            continue
+        keep.append(f"#SBATCH --{o.group(1)}={over[o.group(1)]}" if over.get(o.group(1)) else ln)
     job = (m.get("jobs") or {}).get("gpu")
     if not job:
         raise BundleError("RELAY 里没有 jobs.gpu（worker 的作业名）")
@@ -301,7 +310,14 @@ def home_paths(text, root):
 def rename(text):
     for a, b in RENAME:
         text = text.replace(a, b)
+    for a, b in FILES:
+        text = re.sub(r"(?<![\w.-])" + re.escape(a), b, text)
     return text
+
+
+def rename_path(path):
+    d, f = os.path.split(path)
+    return os.path.join(d, dict(FILES).get(f, f))
 
 
 # ---------------- 核对 ----------------
@@ -360,7 +376,7 @@ def contents(name, commit="origin/main", root=None, entry=None):
     out["envs/machines.py"] = (home_paths(strip_py(gen_machines(read(commit, "envs/machines.py"), name, m)), root), True)
     out["envs/policy.py"] = (gen_policy(name), False)
     out["scripts/queue/worker.sbatch"] = (gen_sbatch(read(commit, "scripts/queue/worker.sbatch"), m, root), False)
-    return {p: (rename(x), e) for p, (x, e) in out.items()}
+    return {rename_path(p): (rename(x), e) for p, (x, e) in out.items()}
 
 
 def bundle_id(files):

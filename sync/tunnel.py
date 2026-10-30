@@ -224,22 +224,24 @@ def run_remote(host, mode, plan, serve, total):
         import relay_bundle
         base = relay["root"].rstrip("/")
         job, pyx, src = relay["transfer_job"], relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(relay_bundle.strip_py(src), base)
+        jname, script = (relay.get("jobs") or {}).get("transfer") or f"tunnel{mode}", "xfer.py"
         hits = [w for w in relay_bundle.FORBIDDEN if w.lower() in src.lower()]
         if hits:
             raise RuntimeError(f"送去 {host} 的 tunnel.py 里有不该出现的字样：{hits}")
         base += "/tmp"
     else:
         job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
+        jname, script = f"tunnel{mode}", "tunnel.py"
         base = "~/.cache/phd/tunnel"
     wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p $d && cd $d && pwd").strip()
-    ssh(host, f"cat > {wd}/tunnel.py", input=src)
+    ssh(host, f"cat > {wd}/{script}", input=src)
     ssh(host, f"cat > {wd}/plan.json", input=json.dumps(plan))
     run = [f"cd {wd}"]
     if job:
         t = max(30, int(total / 5e6 / 60) + 10)
-        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J tunnel{mode} {pyx} tunnel.py {mode} plan.json >> log 2>&1")
+        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {jname} {pyx} {script} {mode} plan.json >> log 2>&1")
     if not relay:
-        run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} tunnel.py {mode} plan.json >> log 2>&1")
+        run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
     ssh(host, f"nohup bash {wd}/run.sh > /dev/null 2>&1 < /dev/null &")
