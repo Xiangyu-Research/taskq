@@ -215,19 +215,22 @@ def start_server(serve, quick=False):
     srv = http.server.ThreadingHTTPServer((host, int(port)), serve.handler())
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    if quick:
-        try:
-            srv.quick, url = quick_tunnel(bind)
-        except Exception:
-            stop_server(srv)
-            raise
-    for _ in range(60 if quick else 30):
-        try:
-            if urllib.request.urlopen(urllib.request.Request(url + "/", headers=UA), timeout=10).read() == b"ok":
-                return srv, url
-        except Exception:
-            pass
-        time.sleep(2)
+    for attempt in range(3 if quick else 1):
+        if quick:
+            if attempt:
+                subprocess.run(["docker", "stop", srv.quick], capture_output=True)
+            try:
+                srv.quick, url = quick_tunnel(bind)
+            except Exception:
+                stop_server(srv)
+                raise
+        for _ in range(60 if quick else 30):
+            try:
+                if urllib.request.urlopen(urllib.request.Request(url + "/", headers=UA), timeout=10).read() == b"ok":
+                    return srv, url
+            except Exception:
+                pass
+            time.sleep(2)
     stop_server(srv)
     raise RuntimeError(f"{url} 连不到文件服务（traefik 的路由或隧道）")
 
