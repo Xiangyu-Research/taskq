@@ -151,6 +151,7 @@ def test_plan():
     K2, K3 = "Dataset2_y/tr/0", "Dataset3_z/tr/0"
     cands = [mtask(K2, "free", None, nice=3), mtask(K3, "free", None, nice=4), mtask("Dataset4_c/tr/0", "free", None, relay_=None)]
     relay.refill.data_gb = lambda paths: 10.0
+    relay.P.SLURM[NAME] = dict(relay.P.SLURM.get(NAME) or {}, ready=2)
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "claimed", "1")), st, [])
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
