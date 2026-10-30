@@ -37,7 +37,7 @@ STALL = int(os.environ.get("TUNNEL_STALL", 3600))
 POLL = int(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
 LOCK = os.path.expanduser(os.environ.get("TUNNEL_LOCK", "~/.cache/phd/tunnel_push.lock"))
-UA = {"User-Agent": "phd-tunnel/1"}
+UA = {"User-Agent": "xfer/1"}
 STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
 
 
@@ -234,7 +234,7 @@ def run_remote(host, mode, plan, serve, total):
         job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
         jname, script = f"tunnel{mode}", "tunnel.py"
         base = "~/.cache/phd/tunnel"
-    wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p $d && cd $d && pwd").strip()
+    wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p {base} && mkdir -m 700 $d && cd $d && pwd").strip()
     ssh(host, f"cat > {wd}/{script}", input=src)
     ssh(host, f"cat > {wd}/plan.json", input=json.dumps(plan))
     run = [f"cd {wd}"]
@@ -367,8 +367,10 @@ def remote_fetch(plan):
         else:
             def get():
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-                subprocess.run(["curl", "-sSf", "--retry", "5", "--retry-all-errors", "--speed-limit", "1024", "--speed-time", "180", "-A", UA["User-Agent"], "-o", p + ".tunnelpart",
-                                plan["base"] + "/" + urllib.parse.quote(rel)], check=True, capture_output=True)
+                cfg = {"url": plan["base"] + "/" + urllib.parse.quote(rel), "user-agent": UA["User-Agent"], "output": p + ".tunnelpart"}
+                cfg = "".join(f'{k} = "{v.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"\n' for k, v in cfg.items())
+                subprocess.run(["curl", "-sSf", "--retry", "5", "--retry-all-errors", "--speed-limit", "1024", "--speed-time", "180", "-K", "-"],
+                               input=cfg, text=True, check=True, capture_output=True)  # 地址、口令不出现在进程列表里
                 n = os.path.getsize(p + ".tunnelpart")
                 if n != size:
                     raise IOError(f"只收到 {n} / {size} 字节")
