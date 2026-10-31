@@ -34,14 +34,14 @@ KEEP_DIRS = ["research/common/nnunet/trainers", "research/common/nnunet/nets"]
 FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-host", "BEGIN OPENSSH",
              "PRIVATE KEY", "ntfy", "cloudflare", "trycloudflare", "cfargotunnel", "/data/others", "auto/PhD",
              "Projects/PhD", "miniforge", "vps-x", "jump-x", "203.0.113.10", "203.0.113.20", ".cache/phd", "@gmail",
-             "name-z", "BRAIN_TUMOR", "RQ1", "rq1", "phd", "PHD"]
+             "name-z", "BRAIN_TUMOR", "RQ1", "rq1", "phd", "PHD", "/mnt/disk1", "lesion-miss"]
 # 包里所有文件统一换掉的标识符（环境变量名、目录名）；relay.py 在那边设变量、加任务时用同样的换法（rename）
 RENAME = [("BRAIN_TUMOR", "SEG_DATA"), ("RQ1", "SEG"), ("phd_stage", "seg_stage"), ("PHD_", "SEG_")]
 # 包里改名的脚本（常驻进程的名字和 DICC 的分开，10/30 DICC 管理员要求）：文件名和所有引用一起换
 FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad_start.sh", "mem_keep_start.sh"),
          ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh"), ("stage_tmp.sh", "copy_local.sh")]
 # 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
-PATCHES = [("scripts/queue/taskq.py", 'os.path.expanduser("~/st/BRAIN_TUMOR")', "{data!r}")]
+PATCHES = []
 
 
 class BundleError(Exception):
@@ -248,9 +248,10 @@ def _declared(text):
 
 # ---------------- 生成的文件 ----------------
 def machine_entry(name, e, root, entry=None):
-    m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler="slurm", repo=f"{root}/code/current", code=None,
-             data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups={}, roles=("train",),
-             disk=None, gpu_log=False, jobs=dict(e.get("jobs") or {}), sbatch=dict(e.get("sbatch") or {}))
+    m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/code/current", code=None,
+             data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
+             roles=("train",), disk=None, gpu_log=False, jobs=dict(e.get("jobs") or {}), sbatch=dict(e.get("sbatch") or {}))
+    m.update({k: e[k] for k in ("slots", "worker") if k in e})
     m.update(entry or {})
     return m
 
@@ -272,8 +273,8 @@ def gen_machines(src, name, m):
     return "\n".join(lines)
 
 
-def gen_policy(name):
-    return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\nGPU_AUG = {{}}\nGPU_AUG_LOADER = {{}}\nSTAGE_TMP = {{{name!r}: True}}\n"
+def gen_policy(name, stage_tmp=True):
+    return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\nGPU_AUG = {{}}\nGPU_AUG_LOADER = {{}}\nSTAGE_TMP = {{{name!r}: {stage_tmp!r}}}\n"
             "MANUAL = {}\nSLURM = {}\n")
 
 
@@ -374,8 +375,9 @@ def contents(name, commit="origin/main", root=None, entry=None):
         text = strip_py(text) if path.endswith(".py") else strip_sh(text)
         out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
     out["envs/machines.py"] = (home_paths(strip_py(gen_machines(read(commit, "envs/machines.py"), name, m)), root), True)
-    out["envs/policy.py"] = (gen_policy(name), False)
-    out["scripts/queue/worker.sbatch"] = (gen_sbatch(read(commit, "scripts/queue/worker.sbatch"), m, root), False)
+    out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True)), False)
+    if m["scheduler"] == "slurm":
+        out["scripts/queue/worker.sbatch"] = (gen_sbatch(read(commit, "scripts/queue/worker.sbatch"), m, root), False)
     return {rename_path(p): (rename(x), e) for p, (x, e) in out.items()}
 
 

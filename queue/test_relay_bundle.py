@@ -215,6 +215,21 @@ def test_bundle(T):
     return path
 
 
+def test_pueue_site(T):
+    """pueue 的执行机（lab 那样，10/31）：不生成 worker.sbatch；slots、worker、组照抄；worker 从包里的 start.sh 开。"""
+    R = os.path.join(T, "pueue_site")
+    entry = dict(scheduler="pueue", groups={"g1": (1, "1", {})}, slots=1, worker=dict(group="g1", id="w1"))
+    files = B.contents(NAME, None, root=R, entry=entry)
+    assert "scripts/queue/worker.sbatch" not in files and "scripts/queue/start.sh" in files, sorted(files)
+    _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=entry)
+    os.makedirs(os.path.join(R, "data"))
+    mp = os.path.join(path, "envs", "machines.py")
+    assert run(["python3", mp, "get", ".", "slots"]).stdout.strip() == "1"
+    assert run(["python3", mp, "names", "pueue"]).stdout.split() == [NAME]
+    assert not B.forbidden_hits(path, sorted(files))
+    ok("pueue 的执行机：没有 worker.sbatch，slots、组照抄，禁用词查过")
+
+
 def test_dicc_worker_in_bundle(T):
     """包里的 dicc_worker.sh、run_task.sh、taskq.py 跑原来的 test_dicc_worker.sh（环境换成本机的，好真激活）。"""
     R = os.path.join(T, "R2")
@@ -244,6 +259,7 @@ def main():
         test_strip_sh()
         test_source_files_from_commit()
         test_bundle(T)
+        test_pueue_site(T)
         test_dicc_worker_in_bundle(T)
     except BaseException:
         print(f"失败（文件在 {T}）")

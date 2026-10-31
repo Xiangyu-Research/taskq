@@ -178,7 +178,9 @@ def data_root():
         return os.environ["BRAIN_TUMOR"]
     import machines as M
     me = M.whoami()
-    return M.expand(M.MACHINES[me]["data"]) if me else os.path.expanduser("~/st/BRAIN_TUMOR")
+    if not me:
+        sys.exit("认不出本机（envs/machines.py 里没有），不知道数据目录")
+    return M.expand(M.MACHINES[me]["data"])
 
 
 def root_error(root):
