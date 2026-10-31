@@ -678,20 +678,19 @@ def run_one(s, name, dry):
         return [], {}
     rs = remote_status(name)
     notes = []
-    if not dry and (live or mine):
+    if not dry and (live or mine) and rs is not None:
         try:
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
-            if rs is None or rs.get("bundle") != st.get("bundle_for", {}).get(commit):
+            if rs.get("bundle") != st.get("bundle_for", {}).get(commit):
                 bid, path = RB.build(name, commit or "origin/main")
                 update_state(lambda x: x.setdefault("bundle_for", {}).update({commit: bid}))
-                if rs is None or rs.get("bundle") != bid:
+                if rs.get("bundle") != bid:
                     try:
                         deploy(name, bid, path)
                         notes.append(f"{L} 的代码换成 {bid}")
                         rs = remote_status(name)
                     except RuntimeError as e:
-                        if rs is not None:
-                            notes.append(str(e))
+                        notes.append(str(e))
         except Exception as e:  # noqa: BLE001
             notes.append(f"{L} 打包出错：{e}")
     if rs is not None and not dry:
