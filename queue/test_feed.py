@@ -29,6 +29,8 @@ def ok(msg, cond):
     fails += not cond
 
 
+ok("lab：worker 在 gpu1 组、一次训 1 个（machines.py）", M.MACHINES["lab"].get("slots") == 1 and (M.MACHINES["lab"].get("worker") or {}).get("group") == "gpu1")
+
 D1, D2, D3 = (f"nnUNet/preprocessed/Dataset10{i}_X" for i in (1, 2, 3))
 
 

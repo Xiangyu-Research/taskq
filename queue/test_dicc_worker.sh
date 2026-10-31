@@ -249,7 +249,6 @@ table << EOF
 t/a nnunet
 t/b nnunet
 EOF
-check "lab 的 slots 写在 machines.py（1）" '[[ $(python3 "$HERE/../../envs/machines.py" get lab slots) == 1 ]]'
 (unset TASKQ_SLOTS; WORKER_ID=lab-test CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 PATH=$T/bin6:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/w6.out" 2>&1 &
 wpid=$!
 waitfor 60 '[[ $(grep -c ^end $T/train.log) == 2 ]]'
