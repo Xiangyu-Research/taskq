@@ -169,7 +169,7 @@ def export_nnunet(spec, root, names):
              f"{base}/splits_final.json": _jdump(splits), f"{base}/dataset_fingerprint.json": _jdump(fp)}
     _check_clean(list(texts.values()), [a for a, _ in files] + list(texts), [real] + sorted(in_splits))
     params = {k: (v.replace(real, alias) if isinstance(v, str) else v) for k, v in spec["params"].items()}
-    return dict(params=params, files=files, texts=texts)
+    return dict(params=params, files=files, texts=texts, views=[base])
 
 
 def _torch_fix(jobs, real_dsj):
@@ -433,7 +433,8 @@ def export_nnunet_infer(spec, root, names):
     bad = [a for a, _ in files[1:] if not re.fullmatch(r"c\d{4,}_\d{4}\.nii\.gz", os.path.basename(a))]
     if bad:
         raise RelayError(f"改名后的输入文件名不对：{bad[:3]}")
-    return dict(params=params, files=files, texts=texts, views=views, cleanup=[f"{amodel}/fold_{fold}"])
+    return dict(params=params, files=files, texts=texts, views=views,
+                cleanup=[f"{amodel}/fold_{fold}", RB.rename(f"RQ1/analysis/{alias}/{td}/fold_{fold}")])
 
 
 def _put(dst, written, rel, data=None, srcp=None):

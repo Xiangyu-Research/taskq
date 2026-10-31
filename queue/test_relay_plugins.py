@@ -13,6 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "..", "envs"))
 import relay_names as RN  # noqa: E402
+import relay_bundle as RB  # noqa: E402
 import spec as S  # noqa: E402
 import machines as M  # noqa: E402
 
@@ -299,7 +300,8 @@ def test_infer():
         assert os.path.isfile(r) and not os.path.islink(r)
     rd = {d: d.replace("RQ1", "SEG") for d in INS}
     assert ex["views"] == [f"{am}/fold_0"] + [rd[d] for d in sorted(INS)], ex["views"]
-    assert ex["cleanup"] == [f"{am}/fold_0"]
+    an = f"SEG/analysis/{alias}/{TD}/fold_0"
+    assert ex["cleanup"] == [f"{am}/fold_0", an] and RB.rename(f"RQ1/analysis/{alias}/{TD}/fold_0") == an, ex["cleanup"]
     cm = names.case_map(RN.INFER_CASES)
     assert cm["BraTS-PED-00010-000"] == cm["BraTS-PED-00010-000"] and len(set(cm.values())) == len(cm) == 4
     assert fm[f"{rd['nnUNet/raw/RQ1_external/UCSF/imagesTs']}/{cm['UCSF-PDGM-0004']}_0002.nii.gz"].endswith("UCSF-PDGM-0004_0002.nii.gz")
@@ -394,10 +396,89 @@ def test_infer():
     ok("推理拉回：少文件、checkpoint 对不上、认不出的文件、少测试集都报错，目标目录不动")
 
 
+# ---------------- 通用的换名（scripts/sites/names.py 的 path） ----------------
+def path_setup():
+    """box 上：一个输入文件夹（含指向别处的软链接）、一个输入文件、一个 box 上的绝对路径输入。→ 任务说明。"""
+    base = os.path.join(ROOT, "RQ1", "inputs", "cohortA")
+    wb(os.path.join(base, "a", "x_0000.nii.gz"), b"xa")
+    wb(os.path.join(ROOT, "elsewhere", "y.nii.gz"), b"yy")
+    os.symlink(os.path.join(ROOT, "elsewhere", "y.nii.gz"), os.path.join(base, "y_0000.nii.gz"))
+    wb(os.path.join(ROOT, "RQ1", "lists", "cases.txt"), b"x\ny\n")
+    ext = os.path.join(TMP, "boxonly", "ref.json")
+    wb(ext, b"{}")
+    out = "RQ1/analysis/thing/run1"
+    cmd = (f"python3 research/RQ1/x.py --in {{data}}/RQ1/inputs/cohortA --list {{data}}/RQ1/lists/cases.txt --ref {ext} "
+           f"--out {{data}}/{out} --tag RQ1/inputs/cohortA2")
+    return S.resolve("command", dict(key="probe/RQ1_thing_run1", cmd=cmd, env="nnunet", out=out, done=[".done", "a.csv|b.csv"],
+                                     data=["RQ1/inputs/cohortA", "RQ1/lists/cases.txt", ext], relay="path", machines=["lab"],
+                                     vars=dict(LIST="RQ1/lists/cases.txt"), fetch=dict(exclude=[], extra=["*.json"])))
+
+
+def test_path():
+    sys.path.insert(0, os.path.join(HERE, "..", "sites"))
+    import names as N
+    names = RN.Names()
+    sp = path_setup()
+    assert N.plugin_of(sp) == "path"
+    ex = N.export(sp, ROOT, names)
+    pa = ex["params"]
+    blob = json.dumps(pa)
+    assert blob.count("RQ1/inputs") == 1 and "RQ1/lists" not in blob and "thing" not in blob and "boxonly" not in blob, blob
+    assert "machines" not in pa and pa["key"].startswith("job/") and pa["out"].startswith("out/") and pa["out"].endswith("/o"), pa
+    a_in, a_list, a_ext = pa["data"]
+    assert pa["data"] == ex["views"] and all(v.startswith("in/") for v in ex["views"]), ex["views"]
+    assert f"--in {{data}}/{a_in} " in pa["cmd"] and f"--list {{data}}/{a_list}/cases.txt" in pa["cmd"], pa["cmd"]
+    assert f"--ref {{data}}/{a_ext}/ref.json" in pa["cmd"] and f"--out {{data}}/{pa['out']}" in pa["cmd"], pa["cmd"]
+    assert "--tag RQ1/inputs/cohortA2" in pa["cmd"], "名字只是前缀相同的不换"
+    assert pa["vars"] == dict(LIST=f"{a_list}/cases.txt"), pa["vars"]
+    fm = dict(ex["files"])
+    assert fm[f"{a_in}/y_0000.nii.gz"] == os.path.join(ROOT, "elsewhere", "y.nii.gz") and f"{a_in}/a/x_0000.nii.gz" in fm, fm
+    assert ex["texts"] == {} and ex["cleanup"] == [os.path.dirname(pa["out"])]
+    assert N.export(sp, ROOT, names)["params"] == pa
+    ok("通用换名送出：输入文件夹、文件、box 上的绝对路径、结果、任务名都换成别名（再送一次别名不变），名字相近的不换，参数里没有真路径")
+
+    asp = S.resolve("command", pa)
+    src, dst = os.path.join(TMP, "path_src"), os.path.join(TMP, "path_dst")
+    wb(os.path.join(src, asp["out"], "a.csv"), b"1")
+    wb(os.path.join(src, asp["out"], "sub", "p.nii.gz"), b"2")
+    wb(os.path.join(src, os.path.dirname(asp["out"]), "plans.json"), b"{}")
+    wb(os.path.join(src, "logs", "tasks", S.safe(asp["key"]) + "__1_seg1.log"), b"log")
+    try:
+        N.import_(asp, sp, src, dst, ROOT, names)
+        raise AssertionError("少 .done 应报错")
+    except RN.RelayError as e:
+        assert ".done" in str(e), e
+    ok("通用换名拉回：少一项训完的标志（拉回一半）报错")
+    wb(os.path.join(src, asp["out"], ".done"), b"")
+    written = N.import_(asp, sp, src, os.path.join(TMP, "path_dst2"), ROOT, names)
+    assert sorted(written) == sorted([f"{sp['out']}/a.csv", f"{sp['out']}/sub/p.nii.gz", f"{sp['out']}/.done",
+                                      "RQ1/analysis/thing/plans.json", f"logs/tasks/{S.safe(sp['key'])}__1_seg1.log"]), written
+    wb(os.path.join(src, "in", "stray.txt"), b"?")
+    try:
+        N.import_(asp, sp, src, dst, ROOT, names)
+        raise AssertionError("认不出的文件应报错")
+    except RN.RelayError:
+        pass
+    ok("通用换名拉回：结果、上一级的文件、分段日志换回真名，认不出的文件报错")
+    os.remove(os.path.join(ROOT, "RQ1", "lists", "cases.txt"))
+    try:
+        N.export(sp, ROOT, names)
+        raise AssertionError("缺输入应报错")
+    except RN.RelayError:
+        pass
+    wb(os.path.join(ROOT, "RQ1", "lists", "cases.txt"), b"x\ny\n")
+    try:
+        N.export(dict(sp, relay=None), ROOT, names)
+        raise AssertionError("relay=None 应报错")
+    except RN.RelayError:
+        pass
+    ok("通用换名：box 上缺输入、没写 relay 的任务都报错")
+
 
 if __name__ == "__main__":
     setup()
     test_import(*test_export())
     test_infer()
+    test_path()
     shutil.rmtree(TMP)
     print("全部通过")

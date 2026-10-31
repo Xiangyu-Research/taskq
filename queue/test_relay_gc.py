@@ -119,6 +119,20 @@ def main():
         assert not exists(R, "bb1") and not exists(R, "dd1") and r["removed_blobs"] == 2
         ok("释放不到软线时删光能删的就停，不碰在用的")
 
+        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        D = os.path.join(R, "data")
+        for v in ("in/aaa", "in/bbb", "in/ccc", "nnUNet/models/a/td/fold_0"):
+            os.makedirs(os.path.join(D, v))
+            os.symlink(blob(R, v.replace("/", "_"), 10), os.path.join(D, v, "f.nii.gz"))
+        open(os.path.join(D, "in/ccc/.incomplete"), "w").close()
+        reg = ["in/aaa", "in/bbb", "in/ccc", "in/gone", "nnUNet/models/a/td/fold_0", "../x", "in"]
+        r = G.gc("x", keep + ["in/bbb"], local_rpy(R), soft_gb=1e-6, free=0, views=reg)
+        assert r["removed_views"] == ["in/aaa", "in/gone", "nnUNet/models/a/td/fold_0", "nnUNet/preprocessed/ds_old"], r
+        assert not os.path.exists(os.path.join(D, "in/aaa")) and os.path.exists(os.path.join(D, "in/bbb/f.nii.gz"))
+        assert os.path.exists(os.path.join(D, "in/ccc/f.nii.gz")) and os.path.isdir(os.path.join(D, "nnUNet/models/a/td"))
+        assert os.path.isdir(os.path.dirname(R)) and os.path.isdir(os.path.join(D, "in"))
+        ok("登记过的任务视图也清理：keep 里的、正在建的（.incomplete）不删，那边已经没有的报出来让登记表去掉，越界的、只有一层的不认")
+
         assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
         ok("没有 budget 的机器不清理")
     finally:

@@ -211,7 +211,8 @@ def test_plan():
 # ---------------- 2. 挪进数据目录的顺序 ----------------
 def test_place():
     src, D = os.path.join(T, "place_src"), os.path.join(T, "place_dst")
-    real = dict(out="nnUNet/results/X/tr/fold_0", done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"])
+    real = dict(out="nnUNet/results/X/tr/fold_0", done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"],
+                fetch=dict(extra=["*.json"]))
     written = ["nnUNet/results/X/tr/fold_0/validation/a.nii.gz", "nnUNet/results/X/tr/plans.json",
                "logs/tasks/k__1_seg1.log", "nnUNet/results/X/tr/fold_0/checkpoint_final.pth",
                "nnUNet/results/X/tr/fold_0/validation/summary.json"]
@@ -240,6 +241,26 @@ def test_place():
     assert seen[:2] == ["nnUNet/results/X/tr/fold_0/validation/a.nii.gz", "logs/tasks/k__1_seg1.log"], seen
     assert os.path.exists(os.path.join(D, real["out"], "validation/summary.json"))
     ok("拉回：训完的标志最后挪（中途出错时不算训完），上一级已有的 JSON 不覆盖")
+
+    src, D = os.path.join(T, "place2_src"), os.path.join(T, "place2_dst")
+    real = dict(out="predictions/m/fold_0", done=[".infer_done"], fetch=dict(extra=[]))
+    written = ["predictions/m/fold_0/.infer_done", "predictions/m/fold_0/MANIFEST.json", "predictions/m/fold_0/c1.nii.gz",
+               "predictions/m/note.txt"]
+    for w in written:
+        TN.wb(os.path.join(src, w), b"n")
+    seen = []
+
+    def spy2(a, b):
+        seen.append(os.path.relpath(b, D))
+        real_replace(a, b)
+    relay.os.replace = spy2
+    try:
+        relay.place(src, D, written, real)
+    finally:
+        relay.os.replace = real_replace
+    assert seen == ["predictions/m/fold_0/c1.nii.gz", "predictions/m/note.txt", "predictions/m/fold_0/MANIFEST.json",
+                    "predictions/m/fold_0/.infer_done"], seen
+    ok("拉回：MANIFEST.json 在训完的标志前、普通文件后挪")
 
 
 # ---------------- 3. 真跑 ----------------
@@ -292,6 +313,62 @@ def test_e2e():
     st = json.load(open(relay.STATUS))[NAME]
     assert sp["key"] in st["folds"] and st["folds"][sp["key"]]["final"], st
     ok("status.json 里有这一折（真 key）")
+    return pre
+
+
+def test_e2e_path(pre):
+    """通用换名的任务：和上面训练的视图同时在那边，传数据只动自己的视图；拉回一半不算做完。"""
+    before = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
+                    for dp, _, fs in os.walk(pre) for f in fs)
+    sp = TN.path_setup()
+    relay.lookup = lambda k: sp
+    akey = relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
+    assert akey.startswith("job/") and k["views"] == k["params"]["data"] and len(k["views"]) == 3, k
+    assert k["cleanup"] == [os.path.dirname(k["params"]["out"])], k
+    D = os.path.join(RROOT, "data")
+    a_in = k["views"][0]
+    assert open(os.path.join(D, a_in, "y_0000.nii.gz"), "rb").read() == b"yy"
+    assert open(os.path.join(D, a_in, "a", "x_0000.nii.gz"), "rb").read() == b"xa"
+    assert not any(os.path.exists(os.path.join(D, v, ".incomplete")) for v in k["views"])
+    after = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
+                   for dp, _, fs in os.walk(pre) for f in fs)
+    assert after == before, "训练的视图被动了"
+    reg = relay.load_state()["views"][NAME]
+    assert set(k["views"]) <= set(reg) and any(v.startswith("nnUNet/preprocessed/") for v in reg), reg
+    TN.wb(os.path.join(D, a_in, "stray.txt"), b"?")
+    relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    assert not os.path.exists(os.path.join(D, a_in, "stray.txt")) and after == sorted(
+        (os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
+        for dp, _, fs in os.walk(pre) for f in fs)
+    ok("通用换名传数据：每个输入一个视图（登记了），只在自己的视图里删多出来的文件，同时在那边的训练视图不动")
+
+    asp = S.resolve("command", k["params"])
+    TN.wb(os.path.join(D, asp["out"], "a.csv"), b"1")
+    TN.wb(os.path.join(D, os.path.dirname(asp["out"]), "plans.json"), b"{}")
+    TN.wb(os.path.join(D, "logs", "tasks", S.safe(asp["key"]) + "__9_seg1.log"), b"log")
+    try:
+        relay.fetch(NAME, sp["key"], say=lambda m: None)
+        raise AssertionError("少 .done 应报没做完")
+    except relay.RN.RelayError as e:
+        assert "还没" in str(e), e
+    assert not os.path.exists(os.path.join(TN.ROOT, sp["out"]))
+    TN.wb(os.path.join(D, asp["out"], ".done"), b"")
+    relay.fetch(NAME, sp["key"], say=lambda m: None)
+    out = os.path.join(TN.ROOT, sp["out"])
+    assert sorted(os.listdir(out)) == [".done", "a.csv"], os.listdir(out)
+    assert os.path.exists(os.path.join(TN.ROOT, "RQ1/analysis/thing/plans.json"))
+    assert os.path.exists(os.path.join(TN.ROOT, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"))
+    ok("通用换名拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志换回真名放进 box")
+
+    for bad in ("/etc", "a/../../x", "in"):
+        try:
+            relay.safe_rel(bad)
+            raise AssertionError(bad)
+        except relay.RN.RelayError:
+            pass
+    assert relay.views_of(dict(view="nnUNet/preprocessed/D1")) == ["nnUNet/preprocessed/D1"]
+    ok("要删的、要建的路径在数据目录里、至少两层；旧记录的 view 也认")
 
 
 if __name__ == "__main__":
@@ -299,6 +376,6 @@ if __name__ == "__main__":
     test_pueue_worker()
     test_adopt_out()
     test_place()
-    test_e2e()
+    test_e2e_path(test_e2e())
     shutil.rmtree(T)
     print("全部通过")
