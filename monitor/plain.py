@@ -99,7 +99,7 @@ def problem(pid, p):
     num = lambda pat: (re.search(pat, msg) or [None, "?"])[1]  # noqa: E731
     try:
         if kind == "down":
-            return f"{L(part[1])} 连不上了，看不到上面的训练还在不在跑。"
+            return f"{L(part[1])} 读不到状态了（网络断了，或那边的存储挂住），看不到上面的训练还在不在跑。"
         if kind == "stuck":
             m = re.search(r"train:(\S+?)：", msg) or re.search(r"（(\S+/\S+)）", msg)
             what = fold(m.group(1)) if m else (fold(part[2]) if "/" in part[2] else "一个训练")

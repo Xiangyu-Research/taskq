@@ -417,8 +417,8 @@ def plan(s, name, rs, st, now=None):
         acts = [dict(op="beat", key=t["key"]) for t in mine if t["state"] != "done"]
         last = (st.get("last_ok") or {}).get(name, 0)
         if acts and now - last > DOWN_S:
-            stuck[f"site:{name}:down"] = (f"{L} 连不上{f' {(now - last) / 3600:.0f} 小时' if last else ''}，领着 {len(acts)} 折；"
-                                           f"总队列的领取续着，那边的进度看不到")
+            stuck[f"site:{name}:down"] = (f"{L} 读不到状态{f' {(now - last) / 3600:.0f} 小时' if last else ''}（ssh 不通，或那边的存储挂住），"
+                                           f"领着 {len(acts)} 折，那边的进度看不到")
         return acts, stuck
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     folds = rs.get("folds") or {}

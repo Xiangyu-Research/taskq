@@ -363,7 +363,7 @@ ok("推过之后不再推送", run(A, datetime(2026, 10, 17, 8, 35)) == [])
 D = {"down:dicc": dict(msg="DICC 连不上", level="normal", kind="state", after=60)}
 ok("要持续一段时间才报的，刚出现时不推送", run({**A, **D}, datetime(2026, 10, 17, 9, 0)) == [])
 out = run({**A, **D}, datetime(2026, 10, 17, 10, 0))
-ok("持续够久后推送", len(out) == 1 and "DICC 连不上了" in out[0][1])
+ok("持续够久后推送", len(out) == 1 and "DICC 读不到状态了" in out[0][1])
 B = {"code:lab": dict(msg="g", level="normal", kind="state", after=0), "gpulog:lab": dict(msg="l", level="normal", kind="state", after=0)}
 out = run(B, datetime(2026, 10, 17, 10, 30))
 ok("同一次查到几件：并成一条", len(out) == 1 and "（2 件）" in out[0][0] and out[0][1].count("\n- ") == 1)
