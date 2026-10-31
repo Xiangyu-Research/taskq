@@ -136,25 +136,15 @@ def safe_rel(rel):
 
 
 def relayable(i):
-    """refill.info 的结果 → 能不能领给它：做法能翻译（按本机的 recipes.py 算，总队列那边的代码可能还没更新），训练器不读仓库里的病例子集。"""
+    """refill.info 的结果 → 能不能领给它：做法能翻译（按本机的 recipes.py 算，总队列那边的代码可能还没更新），插件接受这个任务
+    （scripts/sites/names.py 的 accepts，如 nnU-Net 的训练器不读仓库里的病例子集）。"""
     sp = i["spec"]
     rec, params = i["recipe"] or sp.get("recipe"), i["params"] or sp.get("params") or {}
     try:
         relay = N.plugin_of(S.resolve(rec, params))
     except S.SpecError:
         relay = N.plugin_of(sp)
-    return relay in N.PLUGINS and not repo_files(params.get("trainer"))
-
-
-def repo_files(trainer):
-    """训练器要读仓库里的病例子集（SPLITS_DIR，如 n470、frac）→ True：那边没有、也没换名，不领。"""
-    d = os.path.join(REPO, "research", "common", "nnunet", "trainers")
-    for f in os.listdir(d) if trainer else []:
-        if f.endswith(".py"):
-            src = open(os.path.join(d, f), encoding="utf-8").read()
-            if f"class {trainer}(" in src:
-                return "SPLITS_DIR" in src
-    return False
+    return N.accepts(relay, params)
 
 
 # ---------------- 在那边跑 ----------------
@@ -306,13 +296,17 @@ spec.json_out(dict(done=spec.is_done(A,D),items=items))
 """
 
 
-ADOPT_OUT_PY = HEAD + """import shutil
+ADOPT_OUT_PY = HEAD + """import fnmatch,glob,shutil
 old=os.path.join(os.path.expanduser(A['old']),A['real'])
 new=os.path.join(R,'data',A['alias'])
 n=0
-if os.path.isfile(os.path.join(old,'checkpoint_latest.pth')) and not any(os.path.exists(os.path.join(new,f)) for f in ('checkpoint_latest.pth','checkpoint_final.pth')):
+res=A.get('resume') or []
+def rk(f):
+    return next((len(res)-i for i,x in enumerate(res) if fnmatch.fnmatch(f,x)),0)
+has=lambda d,xs:any(glob.glob(os.path.join(glob.escape(d),x)) for x in xs)
+if res and has(old,res[:1]) and not has(new,res):
     os.makedirs(new,exist_ok=True)
-    for f in sorted(os.listdir(old),key=lambda f:f=='checkpoint_latest.pth'):
+    for f in sorted(os.listdir(old),key=rk):
         if os.path.isfile(os.path.join(old,f)):
             shutil.copy2(os.path.join(old,f),os.path.join(new,f+'.relaytmp'))
             os.replace(os.path.join(new,f+'.relaytmp'),os.path.join(new,f))
@@ -436,7 +430,7 @@ def stage(name, key, nice=None, add=True, say=print):
     n = rpy(name, VIEW_PY, dict(views=views, links=links, texts={k: base64.b64encode(v).decode() for k, v in texts.items()}))
     say(f"那边的 {'、'.join(views)} 建好了（{n} 个文件）")
     if conf(name).get("adopt") and real.get("out"):  # 老数据目录里训到一半的存档拷过来，接着训
-        n = rpy(name, ADOPT_OUT_PY, dict(old=conf(name)["adopt"], real=real["out"], alias=alias["out"]))
+        n = rpy(name, ADOPT_OUT_PY, dict(old=conf(name)["adopt"], real=real["out"], alias=alias["out"], resume=real.get("resume") or []))
         if n:
             say(f"老数据目录里 {real['out']} 的存档拷过来了（{n} 个文件），接着训")
 
@@ -455,7 +449,7 @@ def stage(name, key, nice=None, add=True, say=print):
 # ---------------- 拉回（box 的 wait 组里跑） ----------------
 def place(src, D, written, real):
     """换回真名的结果（src 下）挪进数据目录：普通文件 → out 上一级里 fetch.extra 的文件（已有的不动）→ MANIFEST.json →
-    训完的标志（按 done 倒着放，第一项最后放：nnU-Net 的 summary.json 最后）。"""
+    训完的标志（按 done 倒着放，第一项最后放）。"""
     import fnmatch
     rout = real["out"].strip("/")
     par = os.path.dirname(rout)

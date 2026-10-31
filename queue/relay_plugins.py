@@ -610,6 +610,25 @@ def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
 TRANSLATORS = {"nnunet": (export_nnunet, import_nnunet), "nnunet_infer": (export_nnunet_infer, import_nnunet_infer)}
 
 
+def repo_files(trainer):
+    """训练器要读仓库里的病例子集（SPLITS_DIR，如 n470、frac）→ True：那边没有、也没换名，不领。"""
+    d = os.path.join(REPO, "research", "common", "nnunet", "trainers")
+    for f in os.listdir(d) if trainer else []:
+        if f.endswith(".py"):
+            src = open(os.path.join(d, f), encoding="utf-8").read()
+            if f"class {trainer}(" in src:
+                return "SPLITS_DIR" in src
+    return False
+
+
+def _accepts(params):
+    return not repo_files(params.get("trainer"))
+
+
+ACCEPTS = {"nnunet": _accepts, "nnunet_infer": _accepts}  # 插件能不能送这个任务（按参数；不在这里的都能送）
+VIEW_ROOTS = ["nnUNet/preprocessed"]  # 训练插件建视图的文件夹：relay_gc.py 除了登记过的视图，还清理这下面没人用的
+
+
 def _pair(spec):
     t = TRANSLATORS.get(spec.get("relay"))
     if t is None:

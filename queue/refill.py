@@ -11,7 +11,7 @@ advance.py 调用。
 lab 上的数据：
   自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json 的 transferred，按"还要不要用"和空间预算管（cleanup()，2026-10-24）：
   - 不删：lab 缓冲里所有任务的、总队列里分给 lab 的（assigned 是 lab 或 lab:<组>）任务的、lab 上活着的训练任务的、box 上正在传、
-    正在从 lab 拉回 / 归档的、lab 上训完还没归档的折的，以及 Dataset101；
+    正在从 lab 拉回 / 归档的、lab 上训完还没归档的折的，以及实验表的 KEEP_DATA；
   - 其余的：总队列里没有 lab 能训的任务（free、有环境、要卡、没有进度、lab 没跳过）要用了就删；还有任务要用的留着，
     盘剩的低于软线（硬线 × SOFT，硬线 = 盘的提醒线 + TRAIN_OUT_GB）时从最晚用到的删起。
   lab、box 连不上，或者总队列、lab 的缓冲读不到时什么都不删。
@@ -51,7 +51,7 @@ import taskq  # noqa: E402
 import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
-TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
+TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（存档、验证结果）留的空间
 SOFT = 2  # 自动传过去、留着以后用的数据：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
 KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
 STATE = os.path.expanduser("~/.cache/phd/refill.json")
@@ -226,7 +226,7 @@ def kept(s, name):
 
 def cleanup(s, name, run=None, dry=False):
     """自动传过去的数据（~/.cache/phd/refill.json 的 transferred）按"还要不要用"和空间预算管（2026-10-24，10/31 改）→ [说明]。
-    不删：Dataset101；这台机器缓冲里的、总队列里分给它的任务要用的（kept）；这台机器上训练任务在用的；box 上正在传、
+    不删：实验表的 KEEP_DATA；只删做法的 INPUT_ROOTS 下面的；这台机器缓冲里的、总队列里分给它的任务要用的（kept）；这台机器上训练任务在用的；box 上正在传、
     正在从这台机器拉回 / 归档的；训完还没归档的折的。其余的：
       - 总队列里没有这台机器能训的任务（candidates）要用了 → 删；
       - 还有任务要用的留着，但盘剩的要不低于软线（硬线 × SOFT）：低了就从"下次用到"最晚的删起。
@@ -253,14 +253,18 @@ def cleanup(s, name, run=None, dry=False):
     for t in candidates(s, name, tq, ready):
         for d in data_of(tq, t["key"]):
             when[d] = min(when.get(d, (9e9,)), rank(tq, t, ready))
+    import fnmatch
+    import recipes
+    roots = [r.strip("/").split("/") for r in recipes.INPUT_ROOTS]
+    pinned = E.keep_data()
     msgs, gone, later = [], [], []
     for p in list(lst):
         parts = p.split("/")
-        if (p.startswith("/") or ".." in parts or "" in parts or len(parts) < 3 or parts[:2] not in (["nnUNet", "preprocessed"], ["nnUNet", "raw"])
+        if (p.startswith("/") or ".." in parts or "" in parts or not any(len(parts) > len(r) and parts[:len(r)] == r for r in roots)
                 or not m.get("data")):
-            msgs.append(f"{L} 上自动传过去的记录 {p!r} 不是 nnUNet/preprocessed|raw/<数据集> 下的路径，不删")
+            msgs.append(f"{L} 上自动传过去的记录 {p!r} 不是 {'|'.join(recipes.INPUT_ROOTS)} 的下一级路径，不删")
             continue
-        if tag(p).startswith("Dataset101_") or p in keep or tag(p) in sync:
+        if any(fnmatch.fnmatch(tag(p), k) for k in pinned) or p in keep or tag(p) in sync:
             continue
         busy = any(t["status"] in LIVE and p in data_of(tq, kind_key(s, name, t)[1] or "") for t in s["pueue"][name]["tasks"])
         busy |= any(t["status"] in LIVE and moves(s, t, name, p) for t in box["tasks"])
@@ -292,9 +296,6 @@ def cleanup(s, name, run=None, dry=False):
     return msgs
 
 
-CACHE_DIR = re.compile(r"Dataset\d+_[A-Za-z0-9_-]+")
-
-
 def cache_cleanup(s, name, run=None, dry=False):
     """训练机自己从数据生成的缓存（做法的 cache，如 nnU-Net 的解压缓存，10/26）→ [说明]。要用时训练开始前重新生成
     （几分钟），所以只留这台机器缓冲里的、总队列里分给它的（kept）、pueue 里活着的训练任务的数据集用过的（缓存自己的数据集，
@@ -312,12 +313,12 @@ def cache_cleanup(s, name, run=None, dry=False):
     tq = s["taskq"][taskq.queue_host()]
     live = {kind_key(s, name, t)[1] for t in s["pueue"][name]["tasks"] if t["status"] in LIVE and kind_key(s, name, t)[0] == "train"}
     used = {tag(p) for p in k[1]} | {tag(p) for key in live - {None} for p in data_of(tq, key)}
-    roots = {c["root"]: c["depth"] for c in (r.get("cache") for r in recipes.RECIPES.values()) if c}
+    roots = {c["root"]: c for c in (r.get("cache") for r in recipes.RECIPES.values()) if c}
     msgs = []
     for p, users in have:
         root = next((r for r in roots if p.startswith(r + "/")), None)
         rest = p[len(root) + 1:].split("/") if root else []
-        if (not rest or len(rest) != roots[root] or not CACHE_DIR.fullmatch(rest[0])
+        if (not rest or len(rest) != roots[root]["depth"] or not re.fullmatch(roots[root].get("pattern") or r"[A-Za-z0-9_.-]+", rest[0])
                 or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) and x not in (".", "..") for x in rest)):
             msgs.append(f"{m['label']} 上的缓存 {p!r} 路径不对，不删")
             continue

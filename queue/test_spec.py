@@ -186,5 +186,27 @@ def bad(**kw):
 ok("_x：写错步骤名、oof 没给 splits、paired 不跟在 oof 后面、P1 没给 probe 都报错",
    bad(steps=["infer", "evl"]) and bad(steps=["oof"]) and bad(steps=["paired"], splits="s.json") and bad(steps=["p1"]))
 
+# 模型专用的读法放在 readers/（10/31）：本机加载后表里有；remote_collect 送到别处（经 stdin，没有 readers/ 目录）也能读
+ok("readers：nnunet_log、nnunet_debug 加载进 PROGRESS、INFO，有训完一轮的字样",
+   "nnunet_log" in S.PROGRESS and "nnunet_debug" in S.INFO and S.TRAINED)
+ok("readers：重名的报错", raises(lambda: S.load_readers({"a.py": "PROGRESS={'nnunet_log': None}"})))
+rr = tempfile.mkdtemp()
+ns = S.resolve("nnunet", {"dataset": "Dataset1_x", "trainer": "tr", "fold": "0"})
+od = os.path.join(rr, ns["out"])
+os.makedirs(od)
+open(os.path.join(od, "training_log_1.txt"), "w").write(
+    "2026-10-01 10:00:00.1: Epoch 0\n2026-10-01 10:05:00.1: Epoch time: 300 s\n2026-10-01 10:05:01.1: Epoch 1\n")
+os.makedirs(os.path.join(rr, ns["oldlogs"]["dir"]))
+open(os.path.join(rr, ns["oldlogs"]["dir"], ns["oldlogs"]["prefix"] + "123_seg1.log"), "w").write("作业 123_1\nx: Epoch time: 300 s\n")
+_run = S.subprocess.run
+S.subprocess.run = lambda cmd, **kw: _run([sys.executable, "-"], **kw)
+try:
+    rc = S.remote_collect("host", [{k: ns.get(k) for k in S.COLLECT_FIELDS}], rr)
+finally:
+    S.subprocess.run = _run
+ok("remote_collect：经 stdin 跑时 readers 一起送过去（nnunet_log 读出训完 1 轮，oldlogs 目录里的分段日志算训完一轮）",
+   rc and rc["folds"][ns["key"]]["runs"][0]["epochs_done"] == 1
+   and [x["trained"] for x in rc["seglogs"] if x["name"].startswith(ns["oldlogs"]["prefix"])] == [True])
+
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

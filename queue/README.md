@@ -102,7 +102,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - 只有这台能跑的（`machines=[那台]`：推理、评测、P1 / P2）马上送，不受个数限制；`after` 里在这台训完、已交还的折作为依赖记录一起送。
 - box 上训完（拉回、归档都做完）→ 删缓冲记录、总队列交还；总队列 `stop` → 缓冲里停，停下后删、交还；`set`、`set-nice` 同步过去。
 - 缓冲里失败、这台上没有进度的交还（`--skip <机器>`）；有进度的留着报出来；缓冲整个暂停时只报。连不上时什么都不交还，2 小时后报 `site:<机器>:down`。那边的代码不是最新时不送新任务。那边没有 `BUFFER` 时什么都不做。
-- lab 另外：`gpu1` 组里没有活着的 worker 就开一个（worker 手上没活、代码更新了时自己退出，下次检查重开；上一个失败了报 `site:lab:worker`，`pueue remove` 后重开）；lab 上自动传过去的数据（box `~/.cache/phd/refill.json`）按空间预算管（`refill.cleanup()`）：总队列里没有 lab 能用的任务要用了就删，盘剩的低于软线（硬线的 2 倍，100 GB）时从最晚用到的删起，放不下就不传；缓冲里的、分给 lab / `lab:*` 的、正在传的、拉回和归档在用的、Dataset101、以前手动放的不删。分给 `lab:gpu0` 的（0 号卡手动训）box 上训完、没在拷时交还。
+- lab 另外：`gpu1` 组里没有活着的 worker 就开一个（worker 手上没活、代码更新了时自己退出，下次检查重开；上一个失败了报 `site:lab:worker`，`pueue remove` 后重开）；lab 上自动传过去的数据（box `~/.cache/phd/refill.json`）按空间预算管（`refill.cleanup()`）：总队列里没有 lab 能用的任务要用了就删，盘剩的低于软线（硬线的 2 倍，100 GB）时从最晚用到的删起，放不下就不传；缓冲里的、分给 lab / `lab:*` 的、正在传的、拉回和归档在用的、实验表 `KEEP_DATA` 里的、以前手动放的不删。分给 `lab:gpu0` 的（0 号卡手动训）box 上训完、没在拷时交还。
 
 ### 补交 DICC 作业、管 lab 的盘（`refill.py`，健康检查每 30 分钟调用）
 
@@ -198,7 +198,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`src`（从哪拉回）、`to`、`paths`（传给谁、传什么）、`of`（传输为哪一步）、`out`、`needs`、`train_id`（10/31 以前在 lab pueue 里排的推理）。`refill.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删，有 `out` 的留到那边的结果清理完；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）、拉回（`fetch_task.sh <机器> <key>`）、归档（`archive_task.sh <机器> <key>`）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
-- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_seg<段>.log`，第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前 nnU-Net 的在 `nnUNet/results/logs/`，登记表两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
+- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_seg<段>.log`，第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前的按任务说明的 `oldlogs`：`dir` 下以 `prefix` 开头的，登记表、归档两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
 
 ## 常用命令
 
@@ -266,7 +266,7 @@ pueue 本身：`pueue log <号>`、`pueue follow <号>`、`pueue kill -s SIGTERM
 | `inputs` | 要用的文件或文件夹（相对数据目录，box 上先放好）；送到执行机之前传完、核对过 |
 | `out` | 结果文件夹（相对数据目录），做完拉回 box 的同一位置 |
 | `done` | 做完的标志：`out` 下的文件，每一项都要有（一项里 `a|b` 有一个就行） |
-| `progress` | `progress_json`：命令每做完一轮写 `out/PROGRESS.json`，内容 `{"done": 已做完的轮数, "total": 总轮数}`；不写 = 只看日志多久没更新 |
+| `progress` | `progress_json`：命令每做完一轮写 `out/PROGRESS.json`，内容 `{"done": 已做完的轮数, "total": 总轮数}`；不写 = 只看日志多久没更新；某种模型专用的读法（如 nnU-Net 的 `nnunet_log`）在 `readers/<名>.py` 的 `PROGRESS` 表里（`info` 同理，`INFO` 表），只用标准库，收集进度时随 `spec.py` 一起送到别的机器 |
 | `resume` | `out` 下的存档（glob）：有一个就算有进度，失败时留在那台机器上从存档接着做，不换机器重来 |
 | `log` | `out` 下的日志（glob），15 分钟没更新算没人在做 |
 | `res` | 资源：卡数、CPU 数、内存、显存（GB）；`wait_gpu`（分钟）：不在 Slurm 里时卡上有别人的进程（自己账号的 worker、显存填充不算）就每分钟看一次，最多等这么久，等不到算失败（0 = 不等，不写 = 一直等） |

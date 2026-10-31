@@ -201,35 +201,6 @@ def log_age(s, root):
     return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
 
 
-TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
-
-
-def nnunet_log(path):
-    """nnU-Net 的 training_log_*.txt（一个文件是一次启动）→ 开始、最后更新、训完的 epoch 数；
-    tl：每训完 10 个 epoch 记一个 [时间, 已训完 epoch 数]（最后一个 epoch 也记），用来画总进度随时间的曲线。"""
-    start = end = None
-    done = 0
-    cur = None
-    tl, last = [], None
-    with open(path, errors="replace") as f:
-        for line in f:
-            m = TS.match(line)
-            if m:
-                start = start or m.group(1)
-                end = m.group(1)
-            e = re.search(r": Epoch (\d+)\s*$", line)
-            if e:
-                cur = int(e.group(1))
-            elif cur is not None and ": Epoch time:" in line:
-                done = max(done, cur + 1)
-                if m and (cur + 1) % 10 == 0:
-                    tl.append([m.group(1), cur + 1])
-                last = [m.group(1), cur + 1] if m else None
-    if done and (not tl or tl[-1][1] != done) and last:
-        tl.append(last)
-    return dict(start=start, end=end, epochs_done=done, tl=tl)
-
-
 def eta_at(runs, nep, hours=3):
     """训练中的折：最近一次启动的训练日志里，最近 hours 小时的速度 → 训到 nep 个 epoch 的时刻；算不出来（不到两个点、
     速度不是正的、已经训到）→ None。"""
@@ -269,32 +240,36 @@ def plain_log(path):
     return dict(start=None, end=t, epochs_done=0, tl=[])
 
 
-def _num(v):
-    try:
-        f = float(v)
-        return int(f) if f.is_integer() else f
-    except (TypeError, ValueError):
-        return v
+# 进度、训练设置的读法：通用的在这里，某种模型专用的放在 readers/<名>.py（PROGRESS、INFO、TRAINED 三张表，只用标准库），
+# 加载时合进来（2026-10-31）。collect() 送到别的机器上跑时 remote_collect 把 readers/ 的内容一起送过去。
+PROGRESS = {"progress_json": plain_log, None: plain_log}  # progress_json：日志只看时间，进度另读
+INFO = {None: lambda fd: {}}
+TRAINED = []  # 分段日志里出现这些字样之一 = 至少做完了一轮（各 reader 的 TRAINED；另外 run_task.sh 写的"训完"开头的行也算）
 
 
-def nnunet_debug(fd):
-    """nnU-Net 训练器写的 debug.json（全部设置，记最后一次启动的）→ 登记表的参数列。"""
-    try:
-        d = {k: _num(v) for k, v in json.load(open(os.path.join(fd, "debug.json"))).items()}
-    except Exception:  # noqa: BLE001
-        return {}
-    cm = str(d.get("configuration_manager", ""))
-    patch = re.search(r"'patch_size': \[([^\]]*)\]", cm) or re.search(r"patch_size[^\[]*\[([^\]]*)\]", cm)
-    loss = re.sub(r"\s+", " ", str(d.get("loss", "")))[:120]
-    return {"initial_lr": d.get("initial_lr"), "num_epochs": d.get("num_epochs"), "batch_size": d.get("batch_size"),
-            "patch_size": patch.group(1).replace(" ", "") if patch else "", "iters_per_epoch": d.get("num_iterations_per_epoch"),
-            "oversample_fg": d.get("oversample_foreground_percent"), "weight_decay": d.get("weight_decay"), "loss": loss,
-            "DA进程": d.get("dataloader_train.num_processes"), "机器": d.get("hostname"), "GPU": d.get("gpu_name"),
-            "torch": d.get("torch_version")}
+def reader_sources():
+    """readers/*.py → {名: 源码}（没有这个文件夹时为空）。"""
+    d = os.path.join(HERE, "readers")
+    return {f[:-3]: open(os.path.join(d, f), encoding="utf-8").read()
+            for f in sorted(os.listdir(d) if os.path.isdir(d) else []) if f.endswith(".py") and not f.startswith("test_")}
 
 
-PROGRESS = {"nnunet_log": nnunet_log, "progress_json": plain_log, None: plain_log}  # progress_json：日志只看时间，进度另读
-INFO = {"nnunet_debug": nnunet_debug, None: lambda fd: {}}
+def load_readers(sources):
+    """把各 reader 的 PROGRESS、INFO、TRAINED 合进来（同名的报错，不覆盖）。"""
+    import types
+    for name, src in sources.items():
+        m = types.ModuleType(f"spec_reader_{name}")
+        exec(compile(src, f"readers/{name}.py", "exec"), m.__dict__)
+        for table, own in ((PROGRESS, getattr(m, "PROGRESS", {})), (INFO, getattr(m, "INFO", {}))):
+            dup = sorted(set(own) & set(table))
+            if dup:
+                raise SpecError(f"readers/{name}.py 的 {', '.join(map(str, dup))} 和已有的重名")
+            table.update(own)
+        TRAINED.extend(x for x in getattr(m, "TRAINED", []) if x not in TRAINED)
+
+
+if os.path.basename(__file__) == "spec.py":  # 经 ssh 送过去跑时（__file__ 不是 spec.py），由 remote_collect 另外调用
+    load_readers(reader_sources())
 
 
 def metrics(s, fd):
@@ -310,7 +285,7 @@ def metrics(s, fd):
     return out
 
 
-COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume")
+COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume", "oldlogs")
 
 
 def all_tasks(queue=()):
@@ -333,7 +308,8 @@ def task_specs(queue=()):
 
 def collect(specs, root):
     """这台机器上每个任务的情况（健康检查、登记表用）：{"folds": {key: …}, "seglogs": […]}。
-    specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。"""
+    specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。
+    分段日志在 logs/tasks/，加上说明里 oldlogs 的 dir（以前放在别处的）。"""
     out = {"folds": {}, "seglogs": []}
     for s in specs:
         fd = out_dir(s, root)
@@ -354,13 +330,14 @@ def collect(specs, root):
         out["folds"][s["key"]] = dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
                                       dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd),
                                       resumable=resumable(s, fd))
-    pats = [os.path.join(root, "nnUNet", "results", "logs", "*_seg*.log"), os.path.join(root, "logs", "tasks", "*_seg*.log")]
+    dirs = sorted({s["oldlogs"]["dir"] for s in specs if (s.get("oldlogs") or {}).get("dir")}) + [os.path.join("logs", "tasks")]
+    pats = [os.path.join(root, d, "*_seg*.log") for d in dirs]
     for p in (q for pat in pats for q in glob.glob(pat)):
         first, trained = "", False
         try:
             with open(p, errors="replace") as f:
                 first = f.readline().strip()
-                trained = any(": Epoch time:" in line or line.startswith("训完") for line in f)  # 至少训完 1 个 epoch
+                trained = any(line.startswith("训完") or any(x in line for x in TRAINED) for line in f)  # 至少做完 1 轮
         except Exception:  # noqa: BLE001
             pass
         out["seglogs"].append(dict(name=os.path.basename(p), first=first, trained=trained))
@@ -368,8 +345,9 @@ def collect(specs, root):
 
 
 def remote_collect(ssh, specs, root, timeout=600):
-    """ssh 到别的机器上跑 collect()：把本文件和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
+    """ssh 到别的机器上跑 collect()：把本文件、readers/ 和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
     prog = open(os.path.abspath(__file__), encoding="utf-8").read().replace('\nif __name__ == "__main__":', "\nif False:")
+    prog += f"\nload_readers(json.loads({json.dumps(json.dumps(reader_sources()))}))"
     prog += f"\njson_out(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r})))\n"
     try:
         r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ssh, "python3 -"], input=prog,

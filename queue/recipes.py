@@ -14,13 +14,14 @@
     out        结果文件夹（相对数据目录）。拉回、归档、登记表都看这里
     done       训完的标志：out 下的文件，每一项都要有；一项里用 | 分开的有一个就行
     log        out 下的训练日志（glob）：多久没更新用来判断有没有人在训
-    progress   进度的解析方法（spec.py 的 PROGRESS：nnunet_log = nnU-Net 的训练日志；progress_json = 任务自己写的
+    progress   进度的解析方法（spec.py 的 PROGRESS，模型专用的在 scripts/queue/readers/：nnunet_log = nnU-Net 的训练日志；progress_json = 任务自己写的
                out/PROGRESS.json，{"done": 已做完的轮数, "total": 总轮数}；None = 只看训完没、日志多久没更新）
     resume     out 下的存档（glob 列表）：有一个就算有进度，失败时留在那台机器上接着做，不交还跳过（2026-10-31）；None = 没有
     res        资源：gpus（卡数）、cpus、mem（如 "32G"）、gpu_mem（GB）；None 的项不限（2026-10-31）
                wait_gpu（分钟）= 不在 Slurm 里时卡上有别人的进程，最多等这么久，等不到算失败（0 = 不等）；不写 = 一直等（run_task.sh，10/31）
     owner      谁的任务（None = 自己的；别人请帮忙训练、测试的写名字）
-    info       训练设置的解析方法（spec.py 的 INFO，登记表的参数列；None = 不读）
+    info       训练设置的解析方法（spec.py 的 INFO，readers/ 里的；登记表的参数列；None = 不读）
+    oldlogs    以前放在别处的分段日志：dir（相对数据目录）、prefix（文件名前缀）。归档时一起备份，登记表一起数段数；None = 没有
     metrics    登记表的验证指标：{列名: (out 下的 JSON 文件, 键的路径列表)}（实验表里按数据给）
     checkpoint 登记表算校验和的文件（out 下；None = 不算）
     data       训练机上要有的输入（相对数据目录的文件或文件夹；送到执行机前先传好）。任务里写 inputs=… 和 data=… 一样（2026-10-31）
@@ -37,8 +38,14 @@
                （2026-10-25，DICC 训的折提前排的推理、评测）
     cache      训练机自己从 data 生成的缓存（10/26，nnU-Net 的解压缓存）：root（相对数据目录）、depth（root 下几层是一份缓存，
                第一层是数据集名）、users（每份缓存里记"哪些数据集用过它"的文件夹，里面一个数据集名一个空文件）。用过它的数据集和
-               它自己的数据集都没有在训、领着的折时，refill.py 的 cache_cleanup() 删掉；None = 没有
+               它自己的数据集都没有在训、领着的折时，refill.py 的 cache_cleanup() 删掉；pattern：第一层名字的格式（正则，
+               对不上的不删）；None = 没有
+
+INPUT_ROOTS：训练机上输入数据所在的文件夹（相对数据目录，下一级是一份数据）。自动传过去的数据只有在这些下面的才按空间预算删
+（refill.py 的 cleanup()）。
 """
+
+INPUT_ROOTS = ["nnUNet/preprocessed", "nnUNet/raw"]
 
 REQUIRED = object()
 
@@ -61,6 +68,7 @@ RECIPES = {
         res=dict(gpus=1),
         owner=None,
         info="nnunet_debug",
+        oldlogs=dict(dir="nnUNet/results/logs", prefix="{dataset}_{trainer}_fold{fold}_"),  # 10/18 前的分段日志
         metrics={},
         checkpoint="checkpoint_final.pth",
         data=["nnUNet/preprocessed/{dataset}"],
@@ -69,7 +77,7 @@ RECIPES = {
         machines=None,
         device="gpu",
         after=[],
-        cache=dict(root="nnUNet/npy_cache", depth=2, users=".used_by"),
+        cache=dict(root="nnUNet/npy_cache", depth=2, users=".used_by", pattern=r"Dataset\d+_[A-Za-z0-9_-]+"),
         relay="nnunet",
     ),
     # 什么都由任务自己给（非 nnU-Net 的训练可以直接用，或者照着写一种新的做法）
@@ -77,7 +85,7 @@ RECIPES = {
         params=dict(key=REQUIRED, cmd=REQUIRED, env=REQUIRED, out=REQUIRED, done=REQUIRED),
         open=True,
         key="{key}", env="{env}", cmd="{cmd}", vars={}, out="{out}", done="{done}", log="*.log",
-        progress=None, resume=None, res=dict(gpus=1), owner=None, info=None, metrics={}, checkpoint=None, data=[],
+        progress=None, resume=None, res=dict(gpus=1), owner=None, info=None, oldlogs=None, metrics={}, checkpoint=None, data=[],
         fetch=dict(exclude=[], extra=[]), archive=None, machines=None, device="gpu", after=[], cache=None, relay=None,
     ),
 }
