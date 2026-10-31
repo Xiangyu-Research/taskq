@@ -51,6 +51,18 @@ Q = "box"  # 总队列所在的机器（taskq.queue_host()，10/31）
 assert relay.taskq.queue_host() == Q
 
 
+def test_pueue_worker():
+    w = relay.conf("lab1")["worker"]
+    lab = f"worker:{w['id']}"
+    assert relay.topup("lab1", dict(jobs=None)) == ([], "读不到 pueue")
+    assert relay.topup("lab1", dict(jobs=[])) == ([("pueue", None, 1)], "")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]])) == ([], "worker 在")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]])) == ([("pueue", None, 1)], "")
+    subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]]))
+    assert not subs and why.startswith("上一个 worker")
+    ok("pueue 类（lab1）：组里没有活着的 worker 才开，上一个失败了不重开")
+
+
 def ok(msg):
     print("通过：" + msg)
 
@@ -264,6 +276,7 @@ def test_e2e():
 
 if __name__ == "__main__":
     test_plan()
+    test_pueue_worker()
     test_place()
     test_e2e()
     shutil.rmtree(T)

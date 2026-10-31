@@ -350,8 +350,9 @@ def check(s):
         for g, (_, gpu, _) in m["groups"].items():
             if gpu is None:
                 continue
-            if g in M.manual_groups(name) or (w and g == w["group"] and btq and btq.get("buffer")):
-                continue  # 只跑手动加的任务；worker 组上面看过
+            relayed = any(r.get("ssh") == m.get("ssh") and (r.get("worker") or {}).get("group") == g for r in M.RELAY.values())
+            if g in M.manual_groups(name) or (w and g == w["group"] and btq and btq.get("buffer")) or relayed:
+                continue  # 只跑手动加的任务；worker 组上面看过；RELAY 里的机器用的组由 relay.py 管
             ts = train_q.get((name, g), [])
             run = [n for st, n in ts if st == "Running"]
             if not ts:

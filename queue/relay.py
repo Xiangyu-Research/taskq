@@ -53,6 +53,7 @@ import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
+import relay_gc  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
 import relay_names as RN  # noqa: E402
@@ -168,18 +169,56 @@ STATUS_PY = HEAD + """import shutil,subprocess,taskq
 st=taskq.local_status()
 sp=[{k:t['spec'].get(k) for k in spec.COLLECT_FIELDS} for t in st['tasks'] if t.get('spec')]
 col=spec.collect(sp,os.environ['@DATA@'])
+sq=jobs=None
 try:
-    q=subprocess.run(['squeue','-u',os.environ.get('USER',''),'-h','-o','%i|%j|%T|%M|%q|%R'],capture_output=True,text=True,timeout=60)
-    sq=[l.split('|') for l in q.stdout.splitlines()] if q.returncode==0 else None
+    if A.get('sched')=='pueue':
+        q=subprocess.run([os.path.expanduser(A['pueue']),'status','--json'],capture_output=True,text=True,timeout=60)
+        jobs=[]
+        for i,t in sorted(json.loads(q.stdout)['tasks'].items(),key=lambda x:int(x[0])):
+            s_=t['status']
+            st_=s_ if isinstance(s_,str) else list(s_)[0]
+            res=(s_.get('Done') or {}).get('result') if isinstance(s_,dict) and isinstance(s_.get('Done'),dict) else None
+            if t['group']==A['group']:
+                jobs.append([int(i),t.get('label') or '',st_,str(res) if res is not None else None])
+    else:
+        q=subprocess.run(['squeue','-u',os.environ.get('USER',''),'-h','-o','%i|%j|%T|%M|%q|%R'],capture_output=True,text=True,timeout=60)
+        sq=[l.split('|') for l in q.stdout.splitlines()] if q.returncode==0 else None
 except Exception:
-    sq=None
-spec.json_out(dict(taskq=st,folds=col['folds'],squeue=sq,free=shutil.disk_usage(R).free,
+    sq=jobs=None
+spec.json_out(dict(taskq=st,folds=col['folds'],squeue=sq,jobs=jobs,free=shutil.disk_usage(R).free,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
 STATUS_PY = STATUS_PY.replace("@DATA@", RB.rename("BRAIN_TUMOR"))
 
 MISSING_PY = HEAD + "spec.json_out([i for i in A if not os.path.isfile(os.path.join(R,'blobs',i[:2],i))])\n"
+
+ADOPT_PY = HEAD + """import hashlib
+old=os.path.expanduser(A['old'])
+got=[]
+for h,(rel,size) in A['files'].items():
+    p=os.path.join(old,rel)
+    try:
+        if os.path.getsize(p)!=size:
+            continue
+    except OSError:
+        continue
+    x=hashlib.sha256()
+    with open(p,'rb') as f:
+        for b in iter(lambda:f.read(1<<22),b''):
+            x.update(b)
+    if x.hexdigest()!=h:
+        continue
+    t=os.path.join(R,'blobs',h[:2],h)
+    os.makedirs(os.path.dirname(t),exist_ok=True)
+    if not os.path.exists(t):
+        try:
+            os.link(os.path.realpath(p),t)
+        except OSError:
+            continue
+    got.append(h)
+spec.json_out(got)
+"""
 
 VIEW_PY = HEAD + """import base64
 D=os.path.join(R,'data')
@@ -241,8 +280,10 @@ spec.json_out(dict(done=spec.is_done(A,D),items=items))
 
 def remote_status(name):
     """→ 那边的状态 dict；连不上或出错 → None。"""
+    c = conf(name)
     try:
-        return rpy(name, STATUS_PY, {}, timeout=300)
+        return rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), group=(c.get("worker") or {}).get("group")),
+                   timeout=300)
     except RuntimeError:
         return None
 
@@ -313,6 +354,12 @@ def stage(name, key, nice=None, add=True, say=print):
     links = {rel: hs[p] for rel, p in ex["files"]}
     miss = rpy(name, MISSING_PY, sorted(set(links.values())))
     say(f"{key} → {alias['key']}：{len(links)} 个文件，那边缺 {len(miss)} 个")
+    if miss and conf(name).get("adopt"):  # 那边老数据目录里内容一样的文件硬链接进 blobs，不重传
+        by = {h: p for p, h in hs.items()}
+        files = {h: (os.path.relpath(by[h], D), os.path.getsize(by[h])) for h in miss if by[h].startswith(D.rstrip("/") + "/")}
+        got = set(rpy(name, ADOPT_PY, dict(old=conf(name)["adopt"], files=files), timeout=3 * 3600)) if files else set()
+        miss = [h for h in miss if h not in got]
+        say(f"那边老数据目录里收编了 {len(got)} 个，还缺 {len(miss)} 个")
     if miss:
         by = {h: p for p, h in hs.items()}
         os.makedirs(DIR, exist_ok=True)
@@ -332,7 +379,7 @@ def stage(name, key, nice=None, add=True, say=print):
 
     def rec(st):
         st.setdefault("keys", {}).setdefault(name, {})[key] = dict(
-            alias=alias["key"], recipe=real["recipe"], params=ex["params"], data=real.get("data") or [], staged=time.time())
+            alias=alias["key"], recipe=real["recipe"], params=ex["params"], data=real.get("data") or [], staged=time.time(), view=top)
     update_state(rec)
     if add:
         r = rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(RB.rename(x)) for x in S.kv_args(real["recipe"], ex["params"])))
@@ -525,9 +572,10 @@ def fill(s, name, rs, st, acts):
     cands = [t for t in refill.candidates(s, name, mtq, ready)
              if relayable(refill.info(mtq, t["key"]))]
     free = rs.get("free", 0) / 1e9
+    hard = (conf(name).get("budget") or (None, HARD_GB))[1]
     out, took = [], set()
     for _ in range(want - have):
-        t, need, gb, _ = refill.next_pick(mtq, cands, ready, free, HARD_GB, took)
+        t, need, gb, _ = refill.next_pick(mtq, cands, ready, free, hard, took)
         if t is None:
             break
         free -= gb
@@ -536,8 +584,22 @@ def fill(s, name, rs, st, acts):
     return out, "" if out else ("队列里没有能领的折" if not cands else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
 
 
+def worker_jobs(name, rs):
+    w = conf(name)["worker"]
+    return [j for j in rs.get("jobs") or [] if j[1] == f"worker:{w['id']}"]
+
+
 def topup(name, rs, run=None):
-    """→ [(QOS, 时限, 补几个)], 不补的原因。"""
+    """→ [(QOS, 时限, 补几个)], 不补的原因。pueue 类：组里没有活着的 worker 时开一个 → [("pueue", None, 1)]。"""
+    if conf(name)["scheduler"] == "pueue":
+        if rs.get("jobs") is None:
+            return [], "读不到 pueue"
+        mine = worker_jobs(name, rs)
+        if any(j[2] != "Done" for j in mine):
+            return [], "worker 在"
+        if mine and mine[-1][3] not in ("Success", "Killed"):
+            return [], f"上一个 worker（pueue 任务 {mine[-1][0]}）失败了（{mine[-1][3]}）"
+        return [("pueue", None, 1)], ""
     conf_ = P.SLURM.get(name) or {}
     if not conf_.get("gpu"):
         return [], "envs/policy.py 的 SLURM 里没有它"
@@ -616,6 +678,18 @@ def execute(name, acts, s, run_add=None):
 
 def submit(name, subs):
     L, msgs, stuck = conf(name)["label"], [], {}
+    if conf(name)["scheduler"] == "pueue":
+        c, r = conf(name), shlex.quote(root(name))
+        w, gpu = c["worker"], c["groups"][c["worker"]["group"]][1]
+        run = (f"R={r}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue WORKER_ID={w['id']} CUDA_VISIBLE_DEVICES={gpu}; "
+               f"exec bash $REPO/scripts/queue/{RB.rename('worker_start.sh')}")
+        for _ in subs:
+            rc, out, err = rsh(name, f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- bash -c {shlex.quote(run)}")
+            if rc:
+                stuck[f"site:{name}:worker"] = f"{L} 开 worker 出错：{(out + err)[-200:]}"
+            else:
+                msgs.append(f"{L} 开了 worker（{out.strip()[-80:]}）")
+        return msgs, stuck
     for q, t, n in subs:
         ids = []
         for _ in range(n):
@@ -698,9 +772,20 @@ def run_one(s, name, dry):
     if rs is not None and not dry:
         update_state(lambda x: x.setdefault("last_ok", {}).update({name: time.time()}))
         write_status(name, rs, load_state())
+    if rs is not None and not dry and live and conf(name).get("budget"):
+        try:
+            g = relay_gc.gc(name, [k["view"] for k in keys_of(load_state(), name).values() if k.get("view")], rpy)
+            if g and (g["removed_views"] or g["removed_blobs"]):
+                notes.append(f"{L} 清理：删了 {len(g['removed_views'])} 个数据集视图、{g['removed_blobs']} 个 blob，"
+                             f"放出 {g['freed'] / 1e9:.0f} GB，剩 {g['free'] / 1e9:.0f} GB")
+                rs = remote_status(name) or rs
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"{L} 清理出错：{e}")
     acts, stuck = plan(s, name, rs, st)
     more, why = (fill(s, name, rs, st, acts) if rs is not None else ([], "连不上"))
     subs, swhy = (topup(name, rs) if rs is not None else ([], "连不上"))
+    if swhy.startswith("上一个 worker"):
+        stuck[f"site:{name}:worker"] = f"{L} {swhy}；看那边的 pueue log，处理后 pueue remove 那个任务（下次检查重开）"
     todo = [a for a in acts if a["op"] != "beat"]
     desc = "；".join(f"{a['op']} {a['key']}" for a in todo + more)
     sdesc = "；".join(f"交 {q} {n} 个" for q, _, n in subs)

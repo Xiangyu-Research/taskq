@@ -29,7 +29,7 @@ def ok(msg, cond):
     fails += not cond
 
 
-ok("lab：worker 在 gpu1 组、一次训 1 个（machines.py）", M.MACHINES["lab"].get("slots") == 1 and (M.MACHINES["lab"].get("worker") or {}).get("group") == "gpu1")
+M.MACHINES["lab"].update(worker=dict(group="gpu1", id="lab-gpu1"), slots=1)  # pueue 类的缓冲执行机（10/31 起 lab 本身走 RELAY 的 lab1）
 
 D1, D2, D3 = (f"nnUNet/preprocessed/Dataset10{i}_X" for i in (1, 2, 3))
 

@@ -258,7 +258,7 @@ def run_remote(host, mode, plan, serve, total):
         sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
         import relay_bundle
         base = relay["root"].rstrip("/")
-        job = relay["transfer_job"] if mode == "_fetch" and total >= MIN_JOB else None
+        job = relay.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
         pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(relay_bundle.strip_py(src), base)
         jname, script = (relay.get("jobs") or {}).get("transfer") or f"tunnel{mode}", "xfer.py"
         hits = [w for w in relay_bundle.FORBIDDEN if w.lower() in src.lower()]

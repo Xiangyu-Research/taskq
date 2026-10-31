@@ -162,6 +162,7 @@ s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
 ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
 
 # lab 的缓冲（10/31）：worker 组看缓冲里 worker 有没有在做的
+H.M.MACHINES["lab"].update(worker=dict(group="gpu1", id="lab-gpu1"), slots=1)  # pueue 类的缓冲执行机（10/31 起 lab 本身走 RELAY 的 lab1）
 LW = H.M.MACHINES["lab"]["worker"]
 wk = task(30, LW["group"], "Running", f"WORKER_ID={LW['id']} bash scripts/queue/dicc_worker.sh", f"worker:{LW['id']}")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [wk]}},
@@ -178,6 +179,9 @@ ok("lab 缓冲里 worker 在训、0 号卡的 pueue 也在训同一折 → 同�
 s["taskq"]["lab"].pop("buffer")
 s["taskq"]["lab"]["enabled"] = False
 s["pueue"]["lab"]["tasks"] = []
+ok("RELAY 的 lab1 用着 gpu1 组：不按 pueue 组报空着", f"idle:lab:{LW['group']}" not in H.check(s))
+RELAY0 = dict(H.M.RELAY)
+H.M.RELAY.clear()
 ok("lab 还不是缓冲：照旧按 pueue 组看卡空着", f"idle:lab:{LW['group']}" in H.check(s) and "after" in H.check(s)[f"idle:lab:{LW['group']}"])
 H.time.time = time_orig
 

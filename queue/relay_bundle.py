@@ -273,8 +273,9 @@ def gen_machines(src, name, m):
     return "\n".join(lines)
 
 
-def gen_policy(name, stage_tmp=True):
-    return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\nGPU_AUG = {{}}\nGPU_AUG_LOADER = {{}}\nSTAGE_TMP = {{{name!r}: {stage_tmp!r}}}\n"
+def gen_policy(name, stage_tmp=True, gpu_aug=False, gpu_aug_loader=False):
+    return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\nGPU_AUG = {{{name!r}: {gpu_aug!r}}}\nGPU_AUG_LOADER = {{{name!r}: {gpu_aug_loader!r}}}\n"
+            f"STAGE_TMP = {{{name!r}: {stage_tmp!r}}}\n"
             "MANUAL = {}\nSLURM = {}\n")
 
 
@@ -333,7 +334,7 @@ def nnunet_python():
     return p if os.path.exists(p) else None
 
 
-def check(d, files):
+def check(d, files, allow=()):
     pys = [os.path.join(d, f) for f in files if f.endswith(".py")]
     prog = "import sys\nfor f in sys.argv[1:]:\n    compile(open(f, 'rb').read(), f, 'exec')\n"
     for py in filter(None, [sys.executable, nnunet_python()]):
@@ -345,15 +346,19 @@ def check(d, files):
             r = subprocess.run(["bash", "-n", os.path.join(d, f)], capture_output=True, text=True)
             if r.returncode:
                 raise BundleError(f"bash -n {f}：{r.stderr.strip()}")
-    hits = forbidden_hits(d, files)
+    hits = forbidden_hits(d, files, allow)
     if hits:
         raise BundleError("包里有不该出现的字样：" + "；".join(f"{f}:{n} {w}" for f, n, w in hits[:20]))
 
 
-def forbidden_hits(d, files):
+def forbidden_hits(d, files, allow=()):
+    """allow：这台机器自己的根目录，可以出现。"""
     out = []
     for f in files:
-        for n, ln in enumerate(open(os.path.join(d, f), encoding="utf-8").read().lower().split("\n"), 1):
+        text = open(os.path.join(d, f), encoding="utf-8").read()
+        for a in allow:
+            text = text.replace(a, "")
+        for n, ln in enumerate(text.lower().split("\n"), 1):
             out += [(f, n, w) for w in FORBIDDEN if w.lower() in ln]
     return out
 
@@ -375,7 +380,7 @@ def contents(name, commit="origin/main", root=None, entry=None):
         text = strip_py(text) if path.endswith(".py") else strip_sh(text)
         out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
     out["envs/machines.py"] = (home_paths(strip_py(gen_machines(read(commit, "envs/machines.py"), name, m)), root), True)
-    out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True)), False)
+    out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True), e.get("gpu_aug", False), e.get("gpu_aug_loader", False)), False)
     if m["scheduler"] == "slurm":
         out["scripts/queue/worker.sbatch"] = (gen_sbatch(read(commit, "scripts/queue/worker.sbatch"), m, root), False)
     return {rename_path(p): (rename(x), e) for p, (x, e) in out.items()}
@@ -406,7 +411,7 @@ def build(name, commit="origin/main", out=None, root=None, entry=None):
             with open(p, "w", encoding="utf-8") as f:
                 f.write(text)
             os.chmod(p, 0o755 if exe else 0o644)
-        check(tmp, sorted(files))
+        check(tmp, sorted(files), ((root or relay_entry(commit, name)["root"]).rstrip("/"),))
         os.chmod(tmp, 0o755)
         os.rename(tmp, path)
     except BaseException:
