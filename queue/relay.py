@@ -278,6 +278,21 @@ spec.json_out(dict(done=spec.is_done(A,D),items=items))
 """
 
 
+ADOPT_OUT_PY = HEAD + """import shutil
+old=os.path.join(os.path.expanduser(A['old']),A['real'])
+new=os.path.join(R,'data',A['alias'])
+n=0
+if os.path.isfile(os.path.join(old,'checkpoint_latest.pth')) and not any(os.path.exists(os.path.join(new,f)) for f in ('checkpoint_latest.pth','checkpoint_final.pth')):
+    os.makedirs(new,exist_ok=True)
+    for f in sorted(os.listdir(old),key=lambda f:f=='checkpoint_latest.pth'):
+        if os.path.isfile(os.path.join(old,f)):
+            shutil.copy2(os.path.join(old,f),os.path.join(new,f+'.relaytmp'))
+            os.replace(os.path.join(new,f+'.relaytmp'),os.path.join(new,f))
+            n+=1
+spec.json_out(n)
+"""
+
+
 def remote_status(name):
     """→ 那边的状态 dict；连不上或出错 → None。"""
     c = conf(name)
@@ -376,6 +391,10 @@ def stage(name, key, nice=None, add=True, say=print):
     top = os.path.commonpath(list(links) + list(ex["texts"]))
     n = rpy(name, VIEW_PY, dict(dir=top, links=links, texts={k: base64.b64encode(v).decode() for k, v in ex["texts"].items()}))
     say(f"那边的 {top} 建好了（{n} 个文件）")
+    if conf(name).get("adopt") and real.get("out"):  # 老数据目录里训到一半的存档拷过来，接着训
+        n = rpy(name, ADOPT_OUT_PY, dict(old=conf(name)["adopt"], real=real["out"], alias=alias["out"]))
+        if n:
+            say(f"老数据目录里 {real['out']} 的存档拷过来了（{n} 个文件），接着训")
 
     def rec(st):
         st.setdefault("keys", {}).setdefault(name, {})[key] = dict(

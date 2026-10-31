@@ -92,6 +92,26 @@ def ops(acts):
     return sorted((a["op"], a["key"]) for a in acts)
 
 
+def test_adopt_out():
+    """老数据目录里训到一半的存档拷进别名结果目录；那边已经有存档时不动。"""
+    import subprocess
+    old, R = os.path.join(T, "ao_old"), os.path.join(T, "ao_R")
+    src = os.path.join(old, "res", "fold_3")
+    os.makedirs(src)
+    for f, b in (("checkpoint_latest.pth", b"L"), ("checkpoint_best.pth", b"B"), ("training_log.txt", b"t")):
+        open(os.path.join(src, f), "wb").write(b)
+    run = lambda: S.json_in(subprocess.run(
+        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(old=old, real="res/fold_3", alias="a/fold_3")),
+        capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(HERE)), check=True).stdout)
+    assert run() == 3
+    new = os.path.join(R, "data", "a", "fold_3")
+    assert open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"L"
+    assert not [f for f in os.listdir(new) if f.endswith(".relaytmp")]
+    open(os.path.join(new, "checkpoint_latest.pth"), "wb").write(b"N")
+    assert run() == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"N"
+    ok("老目录的存档拷进别名结果目录；已有存档时不覆盖")
+
+
 def test_plan():
     K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
     st = keymap((K, A))
@@ -277,6 +297,7 @@ def test_e2e():
 if __name__ == "__main__":
     test_plan()
     test_pueue_worker()
+    test_adopt_out()
     test_place()
     test_e2e()
     shutil.rmtree(T)
