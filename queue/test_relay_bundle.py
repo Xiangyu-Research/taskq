@@ -134,9 +134,22 @@ def test_bundle(T):
     for a, _ in B.FILES:
         assert not [f for f in files if a in open(os.path.join(path, f), encoding="utf-8").read()], a
     for f in ("scripts/queue/refill.py", "scripts/queue/relay.py", "scripts/queue/relay_names.py", "scripts/queue/steps.py",
-              "envs/nnunet_paths.sh"):
+              "research/SEG/experiments.py", "scripts/sites/names.py"):
         assert f not in files, f
     assert not any(f.startswith("research/RQ") for f in files)
+    infer = ("research/SEG/analysis/infer_task.sh", "research/SEG/analysis/run_predict_eval.sh", "research/SEG/nnunet/predict.sh",
+             "research/common/sparsify_bg.sh", "envs/nnunet_paths.sh")
+    for f in infer + ("research/SEG/analysis/write_manifest.py", "research/common/sparsify_probs.py"):
+        assert f in files, f
+    for f in infer:
+        r = subprocess.run(["bash", "-n", os.path.join(path, f)], capture_output=True, text=True)
+        assert r.returncode == 0, (f, r.stderr)
+    pe = open(os.path.join(path, "research/SEG/analysis/run_predict_eval.sh"), encoding="utf-8").read()
+    assert "SEG_GPU_PAD=0" in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
+    pr = open(os.path.join(path, "research/SEG/nnunet/predict.sh"), encoding="utf-8").read()
+    assert "SEG_GPU_PAD=0" in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
+    np_ = open(os.path.join(path, "envs/nnunet_paths.sh"), encoding="utf-8").read()
+    assert "mem_keep_start.sh" in np_ and "gpu_pad" not in np_, np_[:300]
     assert not B.forbidden_hits(path, files)
     for f in files:
         text = open(os.path.join(path, f), encoding="utf-8").read()
@@ -144,7 +157,8 @@ def test_bundle(T):
             assert not comments(text), (f, comments(text)[:3])
             assert not [n for n in ast.walk(ast.parse(text)) if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef))
                         and ast.get_docstring(n)], f
-    ok("包里的文件：要用的都在，没有实验表、relay*.py、refill.py；Python 没有注释；没有 FORBIDDEN 的字样")
+    ok("包里的文件：要用的都在（含推理脚本，bash -n 过、显存填充改名、推理不开填充），没有实验表、relay*.py、refill.py、names.py；"
+       "Python 没有注释；没有 FORBIDDEN 的字样")
 
     os.symlink(bid, os.path.join(R, "code", "current"))
     for d in ("data", "queue"):

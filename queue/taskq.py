@@ -510,7 +510,10 @@ def read_sheets(path):
     nices = {x.get("nice") for x in sheets}
     if len(nices) > 1:
         raise S.SpecError(f"任务单 {path} 里的 nice 不一样：{sorted(map(str, nices))}")
-    new = [dict(exp=None, recipe=x.get("recipe", "command"), params={k: v for k, v in x.items() if k not in ("recipe", "nice")})
+    # 任务单加的 command 任务默认能交给执行机（只换路径）；调度自己加的 command 任务（推理、评测）默认不交
+    new = [dict(exp=None, recipe=x.get("recipe", "command"),
+                params={**({"relay": "path"} if x.get("recipe", "command") == "command" else {}),
+                        **{k: v for k, v in x.items() if k not in ("recipe", "nice")}})
            for x in sheets]
     nice = nices.pop()
     return new, (int(nice) if nice is not None else None)

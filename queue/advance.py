@@ -20,7 +20,10 @@
                  那边缺的输入是文件就先 offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；写了 have 的，那边
                  缺输入就用下一个地方。那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按 done 判断
   trainer        训这一折的执行机（feed.sites()）：总队列里这一折分给的那台（"lab:gpu0" 算 lab），分配已经结束的看哪台有这一折
-                 没归档的进度、模型；就当成 queue:<那台>（10/31）。训的不是执行机（中转执行机、box）、找不到时用下一个地方。
+                 没归档的进度、模型；就当成 queue:<那台>（10/31）。relay 机器（envs/machines.py 的 RELAY：中转执行机、lab 1 号卡）
+                 训的折：领着（训完还没交还）时也放进总队列、只给那台，relay.py 领到后连同模型和输入换名送过去（不查那边缺什么、
+                 不先传）；做完由 relay.py 拉回。训的不是执行机、但同一台主机上有开着的 relay 机器（lab 0 号卡手动训的折 → lab1，
+                 用 box 上拉回的模型）时给那台。训的是 box、找不到（如已交还）时用下一个地方。
                  lab 上做完的照常拉回（fetch_task.sh lab），box 上判断做完后删 lab 上的结果（训完要归档的机器，TRAINERS）；
                  这一折在 lab 上排着、没做完的步骤先做完再归档（归档会删 lab 上的模型）
   要知道每折的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage needs，打印相对数据目录的输入），或者步骤的
@@ -29,7 +32,7 @@
 提前排（10/25、10/31）：一折在总队列里分给了执行机（"lab:gpu0" 算 lab）、那边的代码是最新的（health 的 code 检查）时，每折的
   步骤里 PLACE 第一个用得上的地方是这台的任务队列的（trainer 也算），现在就加进队列，任务说明的 after 接上前一步（推理 after
   训练，评测 after 推理）；after 里的没做完时那个任务是 waiting，worker 不领，做完后训完的那个 worker 接着就能领到。
-  分给中转执行机、没人领的折不提前排。
+  分给 relay 机器的折一样提前排（不看代码，那边用的是代码包）；没人领的折不提前排。
 box 上排的任务（不连别的机器的）做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
 失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排；那边的任务、传输、拉回一样。
@@ -207,7 +210,8 @@ def plan(s, root=None):
         """这一步的结果还在往 box 上拷（任务队列的拉回、pull、push）：box 上的判断（如 MANIFEST）可能先对上，
         拷完再算做完，也不清理那边（10/24）。"""
         qd = st.get("queue")
-        return (bool(qd) and S.fill(qd["key"], names, keep=()) in live_fetch) or (st["name"], key) in moving
+        qk = S.fill(qd["key"], names, keep=()) if qd else None
+        return (bool(qd) and (qk in live_fetch or ("relay_fetch", qk) in live)) or (st["name"], key) in moving
 
     def is_push(x, st, key, mach, paths):
         """box 任务 x 是这一步的传输，或者往同一台机器传同一批文件的传输（同一个实验的另一步要的）。"""
@@ -239,6 +243,9 @@ def plan(s, root=None):
         if wait:
             return True
         mach = tg["machine"]
+        if mach in M.RELAY:  # relay.py 领到后连同输入一起换名送过去
+            todo.append(queue_item(t, st, label, n, mach))
+            return True
         if mach != hub:
             cmd = S.fill(st["cmd"], t["names"], keep=())
             needs = inputs_of(qd, t["names"]) if "inputs" in qd else step_needs(cmd)
@@ -273,6 +280,15 @@ def plan(s, root=None):
 
     tq_tasks = {h: {x["key"]: x for x in (tq or {}).get("tasks", [])} for h, tq in (s.get("taskq") or {}).items()}
     feed_sites = set(feed.sites())
+    relay_sites = {n for n in M.RELAY if n in P.READY}  # relay.py 替它领任务的机器（中转执行机、lab 1 号卡）
+
+    def site_of(h):
+        """训这一折的机器 → 放后续步骤的执行机：执行机、relay 机器就是它；别的（如 lab 0 号卡手动训的折，lab 不再是执行机）
+        → 同一台主机上开着的 relay 机器（lab1）；没有 → None。"""
+        if h in feed_sites or h in relay_sites:
+            return h
+        ssh = (M.MACHINES.get(h) or {}).get("ssh")
+        return next((r for r in sorted(relay_sites) if ssh and M.RELAY[r].get("ssh") == ssh and P.AUTO.get(r)), None)
     code = s.get("code") or {}
 
     def assigned_to(key):
@@ -287,6 +303,9 @@ def plan(s, root=None):
         h = assigned_to(key)
         if h:
             return h
+        r = ((tq_tasks.get(hub, {}).get(key) or {}).get("assigned") or "").partition(":")[0]
+        if r in relay_sites:  # relay 机器训完、box 上有了，还没交还
+            return r
         have = [h for h in sorted(src) if key in src[h] and not src[h][key].get("archived")]
         return next((h for h in have if src[h][key].get("final")), have[0] if have else None)
 
@@ -297,9 +316,10 @@ def plan(s, root=None):
         if not fold:
             return "不是每折的步骤"
         h = trainer_of(t["key"])
-        if h not in feed_sites:
+        site = site_of(h)
+        if not site:
             return f"训这一折的 {h} 不是执行机" if h else "找不到训这一折的机器"
-        return dict(tg, kind="queue", machine=h, trainer=True)
+        return dict(tg, kind="queue", machine=site, trainer=True)
 
     def qmach(qk):
         """总队列里这个任务（加上这次要加的）给了哪几台机器。"""
@@ -323,8 +343,8 @@ def plan(s, root=None):
     def prequeue(t, after):
         """这一折在总队列里分给了一台执行机（feed.py 的 sites）：每折的步骤里，PLACE 第一个用得上的地方是这台的，现在就加进
         总队列，after 接上前一步；feed.py 跟着训练送进那边的缓冲，训完的那个 worker 接着就能领到推理（10/25、10/31）。"""
-        h = assigned_to(t["key"])
-        if h not in feed_sites:
+        h = site_of(assigned_to(t["key"]))
+        if not h:
             return
         prev, items = t["key"], []
         for st in after:
@@ -342,7 +362,7 @@ def plan(s, root=None):
             prev = qk
         if not items:
             return
-        if not code.get("main") or (code.get("heads") or {}).get(h) != code["main"]:
+        if h not in relay_sites and (not code.get("main") or (code.get("heads") or {}).get(h) != code["main"]):
             NOTES.append(f"{t['lab']}：{h} 的代码不是最新的（不认 after），先不提前排")
             return
         todo.extend(items)

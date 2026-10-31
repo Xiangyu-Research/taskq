@@ -571,14 +571,43 @@ check("trainer：分给 lab 的折（1 号卡的 worker 训）→ 推理现在�
 INF3 = x[0]
 x = t3(A.plan(lsnap("lab:gpu0"))[0])
 check("trainer：0 号卡手动训的折（lab:gpu0）→ 也进 lab 的缓冲（1 号卡推理）", len(x) == 1 and 'machines=["lab"]' in x[0]["args"])
-check("trainer：中转执行机（dicc2）训的折 → 不提前排", not t3(A.plan(lsnap("dicc2"))[0]))
+A.feed.sites = lambda: ["dicc"]  # 10/31 起 lab 不再是执行机
+A.P.AUTO = dict(A.P.AUTO, lab1=True)
+x = t3(A.plan(lsnap("lab:gpu0"))[0])
+check("trainer：lab 不是执行机时，0 号卡训的折 → 推理给同一台主机上开着的 relay 机器（lab1），等训练",
+      len(x) == 1 and 'machines=["lab1"]' in x[0]["args"] and "after=" + json.dumps([K3]) in x[0]["args"])
+A.P.AUTO = dict(A.P.AUTO, lab1=False)
+check("trainer：lab1 关着 → 0 号卡训的折不提前排", not t3(A.plan(lsnap("lab:gpu0"))[0]))
+A.P.AUTO = dict(A.P.AUTO, lab1=True)
+A.feed.sites = lambda: ["dicc", "lab"]
+for r_ in ("dicc2", "lab1"):
+    x = t3(A.plan(lsnap(r_, heads={"dicc": H3, "lab": H3}))[0])
+    check(f"trainer：relay 机器（{r_}）训的折 → 推理现在就进总队列，只给它、等训练、带 relay=nnunet_infer（不看代码是不是最新）",
+          [(t["step"], t.get("op")) for t in x] == [("infer", "taskq")] and f'machines=["{r_}"]' in x[0]["args"]
+          and "after=" + json.dumps([K3]) in x[0]["args"] and "relay=nnunet_infer" in x[0]["args"] and x[0]["qnice"] == -100)
 todo, _ = A.plan(lsnap("lab", heads={"dicc": H3, "lab": "b" * 40}))
 check("trainer：lab 的代码不是最新 → 不提前排，记下原因", not t3(todo) and any("lab 的代码不是最新" in n_ for n_ in A.NOTES))
 check("trainer：推理已经在总队列里 → 不再加", not t3(A.plan(lsnap("lab", qrows=[qrow(INF3, "waiting")]))[0]))
 trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "3")
-x = t3(A.plan(lsnap("dicc2"))[0])
-check("trainer：中转执行机训完、拉回 box → 用下一个地方（DICC 的队列）",
+x = t3(A.plan(lsnap("lab1"))[0])
+check("trainer：relay 机器训完、拉回 box、还没交还 → 推理给它，不查那边缺什么、不先传，不接 after",
+      [(t["step"], t.get("op")) for t in x] == [("infer", "taskq")] and 'machines=["lab1"]' in x[0]["args"]
+      and not any(a_.startswith("after=") for a_ in x[0]["args"]))
+x = t3(A.plan(lsnap(state="done"))[0])
+check("trainer：relay 机器训的折已经交还（总队列里不再分给谁）→ 用下一个地方（DICC 的队列）",
       [(t["step"], t.get("op")) for t in x] == [("infer", "taskq")] and 'machines=["dicc"]' in x[0]["args"])
+s_ = lsnap("lab1", qrows=[qrow(INF3)])
+s_["pueue"]["box"]["tasks"].append(dict(id=98, status="Running", command=f"python3 scripts/queue/relay.py fetch lab1 {Q3}",
+                                        label=f"relay_fetch:{Q3}", group="wait", end=None))
+s_["records"] = [dict(machine="box", id=98, label=f"relay_fetch:{Q3}", step="relay_fetch", key=Q3)]
+x = t3(A.plan(s_)[0])
+check("trainer：relay 机器在拉回推理结果 → 不算做完、不再排", not x)
+inferred("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "3")
+check("trainer：推理结果在 box 上已经对得上、relay_fetch 还在跑 → 不算做完，不排评测", not t3(A.plan(s_)[0]))
+s_["pueue"]["box"]["tasks"][-1]["status"] = "Success"
+check("trainer：relay_fetch 做完了 → 推理算做完，排评测", [t["step"] for t in t3(A.plan(s_)[0])] == ["eval"])
+import shutil  # noqa: E402
+shutil.rmtree(f"{T}/{PRED3}")
 todo, _ = A.plan(lsnap("lab", fold=FIN))
 x = t3(todo)
 check("trainer：lab 训完、拉回了、推理还没排（如那时代码不是最新）→ 进 lab 的缓冲，不等归档；归档等推理做完",
@@ -587,6 +616,14 @@ check("trainer：lab 训完、拉回了、推理还没排（如那时代码不�
 x = t3(A.plan(lsnap(state="done", fold=FIN))[0])
 check("trainer：训练已经交还（总队列里不再分给谁）、lab 上有训完没归档的模型 → 也进 lab 的缓冲",
       [t["step"] for t in x] == ["infer"] and 'machines=["lab"]' in x[0]["args"])
+A.feed.sites = lambda: ["dicc"]
+x = t3(A.plan(lsnap("lab:gpu0", fold=FIN))[0])
+check("trainer：lab 不是执行机，0 号卡训完、拉回 box → 推理给 lab1（用 box 上的模型），不先传；lab 上照常归档（推理不用那边的模型）",
+      [(t["step"], t.get("op")) for t in x] == [("infer", "taskq"), ("archive", None)] and 'machines=["lab1"]' in x[0]["args"])
+x = t3(A.plan(lsnap(state="done", fold=FIN))[0])
+check("trainer：lab 不是执行机，0 号卡训的折已交还、lab 上有没归档的模型 → 也给 lab1",
+      [t["step"] for t in x] == ["infer", "archive"] and 'machines=["lab1"]' in x[0]["args"])
+A.feed.sites = lambda: ["dicc", "lab"]
 x = t3(A.plan(lsnap(fold=dict(final=True, archived=True)))[0])
 check("trainer：lab 上已经归档（模型删了）、没有分配 → 用下一个地方（DICC 的队列）",
       [t["step"] for t in x] == ["infer"] and 'machines=["dicc"]' in x[0]["args"])
@@ -843,7 +880,9 @@ check("DICC 在训：推理、评测一起进队列，推理等训练、评测�
 x = sb(A.plan(psnap(assigned="lab"))[0])
 check("分给 lab 的折：推理进 lab 的缓冲，评测写的是 DICC，不跟着提前排（10/31）",
       [t["step"] for t in x] == ["infer"] and 'machines=["lab"]' in x[0]["args"])
-check("分给中转执行机的折：不提前排", not sb(A.plan(psnap(assigned="dicc2"))[0]))
+x = sb(A.plan(psnap(assigned="dicc2", heads={}))[0])
+check("分给中转执行机的折：推理进总队列只给它（不看代码），评测写的是 DICC，不跟着提前排",
+      [t["step"] for t in x] == ["infer"] and 'machines=["dicc2"]' in x[0]["args"])
 check("还没分出去的折：不提前排", not sb(A.plan(psnap(state="free", assigned=None))[0]))
 x = sb(A.plan(psnap(buffer=[dict(key=SBK, nice=0, state="claimed", worker="492500")]))[0])
 check("缓冲里的同一个 key（档位不同）：以总队列为准", x and x[0]["nice"] == 60)

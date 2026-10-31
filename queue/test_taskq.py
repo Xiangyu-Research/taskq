@@ -650,6 +650,7 @@ check("add --file：一张任务单 → command 任务，档位用单子里的",
 sf = S.resolve(tf[0]["recipe"], tf[0]["params"])
 check("add --file：inputs 当 data、res、resume、owner 进了任务说明", sf["data"] == ["guest/alice/in"] and sf["inputs"] == sf["data"]
       and sf["res"] == dict(gpus=1, cpus=8, mem="32G") and sf["resume"] == ["ckpt_*.pt"] and sf["owner"] == "alice")
+check("add --file：任务单加的 command 任务默认只换路径交给执行机", sf["relay"] == "path")
 json.dump([dict(sheet, key="guest/alice/b", out="guest/alice/b"), dict(sheet, key="guest/alice/c", out="guest/alice/c")], open(fn, "w"))
 rc, out, _ = tqf("add", "--nice", "7", "--file", fn)
 tf = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))}

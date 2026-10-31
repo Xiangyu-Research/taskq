@@ -55,7 +55,7 @@ g = S.resolve("command", dict(G, inputs="guest/in", res={"gpus": "2", "mem": "16
                               progress="progress_json"))
 ok("任务单：inputs = data（字符串变列表）、res 转成数、resume 变列表、owner", g["data"] == ["guest/in"] and g["inputs"] == ["guest/in"]
    and g["res"] == {"gpus": 2, "mem": "16G"} and g["resume"] == ["ckpt_*.pt"] and g["owner"] == "bob")
-ok("任务单：command 默认化名方式 path、一张卡、没有存档", S.resolve("command", G)["relay"] == "path"
+ok("任务单：command 默认不交给执行机、一张卡、没有存档", S.resolve("command", G)["relay"] is None
    and S.resolve("command", G)["res"] == {"gpus": 1} and S.resolve("command", G)["resume"] is None)
 ok("任务单：inputs 和 data 都给 → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["a"], data=["b"]))))
 ok("任务单：res 写错字段、不是数、mem 格式不对 → 报错", raises(lambda: S.resolve("command", dict(G, res={"gpu": 1})))

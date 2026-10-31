@@ -30,6 +30,9 @@ OUT = "~/.cache/phd/relay/bundles"
 KEEP = [f"scripts/queue/{f}" for f in ("worker_start.sh", "gpu_pad_start.sh", "gpu_pad.py", "dicc_worker.sh", "taskq.py",
                                        "run_task.sh", "spec.py", "recipes.py", "experiments.py", "common.py")]
 KEEP += ["research/common/nnunet/train.sh", "research/common/nnunet/stage_tmp.sh"]
+# 推理（nnunet_infer，lab1 训的折在那边推理，10/31）
+KEEP += ["research/RQ1/analysis/infer_task.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/analysis/write_manifest.py",
+         "research/RQ1/nnunet/predict.sh", "research/common/sparsify_bg.sh", "research/common/sparsify_probs.py", "envs/nnunet_paths.sh"]
 KEEP_DIRS = ["research/common/nnunet/trainers", "research/common/nnunet/nets"]
 FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-host", "BEGIN OPENSSH",
              "PRIVATE KEY", "ntfy", "cloudflare", "trycloudflare", "cfargotunnel", "/data/others", "auto/PhD",
@@ -41,7 +44,12 @@ RENAME = [("BRAIN_TUMOR", "SEG_DATA"), ("RQ1", "SEG"), ("phd_stage", "seg_stage"
 FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad_start.sh", "mem_keep_start.sh"),
          ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh"), ("stage_tmp.sh", "copy_local.sh")]
 # 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
-PATCHES = []
+PE_SH = "research/RQ1/analysis/run_predict_eval.sh"
+PATCHES = [  # 推理：留出集的输入由 relay 建好送过去，那边不从训练集现建；评测不在那边做
+    (PE_SH, 'mkdir -p "$H"\n    python - "$RQ1/splits/gli_split_v2.json" "$nnUNet_raw/Dataset101_GLIrq1/imagesTr" "$H" << \'EOF\'',
+     'echo "没有留出集的输入 $H" >&2; exit 1\n    python - << \'EOF\''),
+    (PE_SH, '"$RQ1/analysis/rq1_model.R"', '"$RQ1/analysis/model.R"'),
+]
 
 
 class BundleError(Exception):
@@ -320,8 +328,16 @@ def rename(text):
 
 
 def rename_path(path):
+    """文件名按 FILES 换，目录名按 RENAME 换（和文件内容里的引用一致，如 research/RQ1/ → research/SEG/）。"""
     d, f = os.path.split(path)
+    d = "/".join(rename_dir(x) for x in d.split("/")) if d else d
     return os.path.join(d, dict(FILES).get(f, f))
+
+
+def rename_dir(x):
+    for a, b in RENAME:
+        x = x.replace(a, b)
+    return x
 
 
 # ---------------- 核对 ----------------

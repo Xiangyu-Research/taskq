@@ -265,7 +265,7 @@ pueue 本身：`pueue log <号>`、`pueue follow <号>`、`pueue kill -s SIGTERM
 | `log` | `out` 下的日志（glob），15 分钟没更新算没人在做 |
 | `res` | 资源：卡数、CPU 数、内存、显存（GB） |
 | `nice` | 档位（越小越先；命令行的 `--nice` 优先） |
-| `relay` | 化名方式，默认 `path`：执行机上只换路径、不动文件内容 |
+| `relay` | 化名方式，任务单加的默认 `path`：执行机上只换路径、不动文件内容；`null` = 只在 box、lab 这类直接用仓库的机器上跑 |
 | `device` | 默认 `gpu`；纯 CPU 的写 `cpu` |
 
 命令的写法：读 `inputs` 里的文件，每一轮存一次档（先写临时文件再改名）、写一次 `PROGRESS.json`，开始时有存档就从存档接着做，最后写 `done` 里的文件。一个 PyTorch 例子：
