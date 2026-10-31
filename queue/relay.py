@@ -363,6 +363,14 @@ def remote_status(name):
     return parse_sched(name, rs)
 
 
+def undeployed(name):
+    """连得上、但根目录里还没有代码包（新机器第一次）→ True：先部署，再读状态。"""
+    c = conf(name)
+    if c.get("ssh_master") and subprocess.run(ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
+        return False
+    return rsh(name, f"test -e {R.q(root(name))}/code/current", timeout=30)[0] == 1
+
+
 def parse_sched(name, rs):
     """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
     一次 ssh 读完、在 box 上用适配器解析（scripts/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
@@ -890,10 +898,13 @@ def run_one(s, name, dry):
         return [], {}
     rs = remote_status(name)
     notes = []
+    fresh = rs is None and not dry and (live or mine) and undeployed(name)
+    if fresh:
+        rs = {"bundle": None}
     if not dry and (live or mine) and rs is not None:
         try:
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
-            if rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
+            if fresh or rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
                 bid, path = RB.build(name, commit or "origin/main")
                 update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
                 if rs.get("bundle") != bid:
@@ -905,6 +916,8 @@ def run_one(s, name, dry):
                         notes.append(str(e))
         except Exception as e:  # noqa: BLE001
             notes.append(f"{L} 打包出错：{e}")
+    if fresh and rs == {"bundle": None}:
+        rs = None
     if rs is not None and not dry:
         update_state(lambda x: x.setdefault("last_ok", {}).update({name: time.time()}))
         write_status(name, rs, load_state())

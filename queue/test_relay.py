@@ -523,7 +523,48 @@ def test_adapters_in_relay():
     ok("relay：一次 ssh 读回原始输出、在 box 上用适配器解析；开 worker / 交作业用适配器，报警的编号照旧")
 
 
+def test_fresh_site():
+    """新机器第一次：连得上、根目录里还没有代码包（读状态失败）→ 先部署、再读状态；部署失败时这次当连不上。"""
+    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "deploy", "write_status", "update_state", "load_state", "plan", "fill", "topup", "log")}
+    build, auto = relay.RB.build, dict(relay.P.AUTO)
+    try:
+        for fail in (False, True):
+            calls, seq = [], [None, {"bundle": "b1", "jobs": [], "squeue": None}]
+            relay.remote_status = lambda n: seq.pop(0) if seq else None
+            relay.undeployed = lambda n: True
+            relay.RB.build = lambda n, c: ("b1", "/nonexistent")
+            def dep(n, b, p):
+                if fail:
+                    raise RuntimeError("推不过去")
+                calls.append(("deploy", n, b))
+            relay.deploy = dep
+            relay.write_status = lambda n, rs, st: calls.append(("status", rs.get("bundle")))
+            relay.update_state = lambda fn: None
+            relay.load_state = lambda: {}
+            relay.plan = lambda s, n, rs, st: calls.append(("plan", rs and rs.get("bundle"))) or ([], {})
+            relay.fill = lambda *a: ([], "")
+            relay.topup = lambda *a: ([], "")
+            relay.log = lambda lines: None
+            relay.P.AUTO["lab0"] = True
+            s = {"ok": {relay.M.hub(): True}, "taskq": {relay.taskq.queue_host(): {"tasks": []}}}
+            try:
+                relay.run_one(s, "lab0", False)
+            except Exception:  # noqa: BLE001  后面的步骤不在这里测
+                pass
+            if fail:
+                assert ("plan", None) in calls and not any(c[0] == "status" for c in calls), calls
+            else:
+                assert calls[:3] == [("deploy", "lab0", "b1"), ("status", "b1"), ("plan", "b1")], calls
+    finally:
+        for k, v in keep.items():
+            setattr(relay, k, v)
+        relay.RB.build = build
+        relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
+    print("通过：新机器还没有代码包时先部署再读状态；部署失败这次当连不上")
+
+
 if __name__ == "__main__":
+    test_fresh_site()
     test_plan()
     test_pueue_worker()
     test_slurm_topup_ready()
