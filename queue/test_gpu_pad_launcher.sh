@@ -32,15 +32,15 @@ EOF
 source_it() {
     local path=$1; shift
     (
-        export PATH=$path BRAIN_TUMOR=$T/bt RQ1_GPU_PAD_SCRIPT=$T/fake_pad.py \
-               RQ1_GPU_PAD_SWITCH=$T/switch RQ1_GPU_PAD_RETRY_DELAY=0.1 \
+        export PATH=$path TASKQ_DATA=$T/bt TASKQ_GPU_PAD_SCRIPT=$T/fake_pad.py \
+               TASKQ_GPU_PAD_SWITCH=$T/switch TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
                FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed nnUNet_n_proc_DA=1
         local kv
         for kv in "$@"; do export "$kv"; done
         source "$REPO/envs/nnunet_paths.sh"
     )
 }
-source_it_twice() {
+source_it_twice() {  # 旧名字（RQ1_GPU_PAD_*、BRAIN_TUMOR）照样认
     (
         export PATH=$T/bin BRAIN_TUMOR=$T/bt RQ1_GPU_PAD_SCRIPT=$T/fake_pad.py \
                RQ1_GPU_PAD_SWITCH=$T/switch RQ1_GPU_PAD_RETRY_DELAY=0.1 \
@@ -91,8 +91,12 @@ reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 TRAINER=nnune
 sleep 0.3; check "测试环境 RQ1_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/bin" SLURM_JOB_ID=1006 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet QUEUE_TEST_DIR=$T
 sleep 0.3; check "测试环境 QUEUE_TEST_DIR：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1007 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet RQ1_GPU_PAD=0
-sleep 0.3; check "RQ1_GPU_PAD=0：不启动" test "$(lines)" -eq 0
+reset; source_it "$T/bin" SLURM_JOB_ID=1007 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet TASKQ_GPU_PAD=0
+sleep 0.3; check "TASKQ_GPU_PAD=0：不启动" test "$(lines)" -eq 0
+reset; source_it "$T/bin" SLURM_JOB_ID=1011 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet RQ1_GPU_PAD=0
+sleep 0.3; check "旧名 RQ1_GPU_PAD=0：不启动" test "$(lines)" -eq 0
+reset; source_it "$T/bin" SLURM_JOB_ID=1012 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet RQ1_GPU_PAD_STARTED=1
+sleep 0.3; check "旧版启动器已经开过（RQ1_GPU_PAD_STARTED）：不再开" test "$(lines)" -eq 0
 reset; touch "$T/switch"
 source_it "$T/bin" SLURM_JOB_ID=1008 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
 sleep 0.3; check "DISABLED 开关：不启动" test "$(lines)" -eq 0
@@ -114,8 +118,9 @@ for f in research/common/nnunet/smoke/run_gpu_smoke.sh research/RQ1/nnunet/predi
          research/RQ1/analysis/run_sensitivity.sh research/RQ1/external/run_t19.sh research/RQ1/external/t19_eval.sh \
          research/RQ1/probe/p1_predict_model.sh research/RQ1/probe/p2_predict_model.sh \
          research/RQ1/analysis/validation_predict_eval.sh research/RQ1/analysis/validation_prep.sh \
-         research/RQ1/analysis/edema_intervention.sh research/RQ1/analysis/edema_ring_probe.sh; do
-    check "$f 有 RQ1_GPU_PAD=0" grep -q 'RQ1_GPU_PAD=0' "$REPO/$f"
+         research/RQ1/analysis/edema_intervention.sh research/RQ1/analysis/edema_ring_probe.sh \
+         research/common/nnunet/smoke/epoch_bench.sh; do
+    check "$f 有 TASKQ_GPU_PAD=0" grep -q 'TASKQ_GPU_PAD=0' "$REPO/$f"
 done
 
 reset

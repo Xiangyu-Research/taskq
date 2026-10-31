@@ -340,7 +340,7 @@ BUF, DATA = os.path.join(T, "buffer"), os.path.join(T, "data")
 os.makedirs(BUF), os.makedirs(DATA)
 for f in ("BUFFER", "ENABLED"):
     open(os.path.join(BUF, f), "w").close()
-ENV = dict(os.environ, TASKQ_DIR=BUF, BRAIN_TUMOR=DATA, TASKQ_MACHINE=NAME)
+ENV = dict(os.environ, TASKQ_DIR=BUF, BRAIN_TUMOR=DATA, TASKQ_DATA=DATA, TASKQ_MACHINE=NAME)
 ENV.pop("nnUNet_results", None)
 
 

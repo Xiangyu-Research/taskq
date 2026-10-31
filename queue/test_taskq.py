@@ -265,7 +265,7 @@ fake = os.path.join(T, "fakessh")
 open(fake, "w").write("#!/bin/bash\n# 假 ssh：去掉选项和主机名，命令里的仓库路径换成本仓库\n"
                       "while [[ $1 == -o ]]; do shift 2; done; shift\n"
                       f"cmd=${{1//\\~\\/Projects\\/PhD/{os.path.dirname(os.path.dirname(HERE))}}}\n"
-                      f"cmd=$(printf '%s' \"$cmd\" | sed 's#BRAIN_TUMOR=[^ ]*#BRAIN_TUMOR={DATA}#')\n"
+                      f"cmd=$(printf '%s' \"$cmd\" | sed -e 's#BRAIN_TUMOR=[^ ]*#BRAIN_TUMOR={DATA}#' -e 's#TASKQ_DATA=[^ ]*#TASKQ_DATA={DATA}#')\n"
                       f"export TASKQ_DIR={TQ2} TASKQ_MACHINE=dicc\nbash -c \"$cmd\"\n")
 os.chmod(fake, 0o755)
 os.environ["TASKQ_SSH"] = fake

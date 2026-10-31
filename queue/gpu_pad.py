@@ -14,8 +14,15 @@ FALLBACK_TARGET_MARGIN_MIB = 1500
 HEARTBEAT = 600
 
 
+def pad_env(name, default=None):
+    v = os.environ.get("TASKQ_GPU_PAD_" + name)
+    if v is None or v == "":
+        v = os.environ.get("RQ1_GPU_PAD_" + name)
+    return default if v is None or v == "" else v
+
+
 def env_int(name, default):
-    v = os.environ.get(name)
+    v = pad_env(name)
     if v is None or v == "":
         return default
     try:
@@ -25,11 +32,11 @@ def env_int(name, default):
 
 
 def default_base():
-    return os.environ.get("RQ1_GPU_PAD_BASE") or f"/tmp/gpu_pad_{os.environ.get('SLURM_JOB_ID', 'nojob')}"
+    return pad_env("BASE") or f"/tmp/gpu_pad_{os.environ.get('SLURM_JOB_ID', 'nojob')}"
 
 
 def env_float(name, default):
-    v = os.environ.get(name)
+    v = pad_env(name)
     if v is None or v == "":
         return default
     try:
@@ -328,20 +335,20 @@ class Pad:
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="DICC GPU 作业显存填充（只占显存，不训练）")
-    p.add_argument("--floor-mib", type=int, default=env_int("RQ1_GPU_PAD_FLOOR_MIB", 42000))
-    p.add_argument("--target-mib", type=int, default=env_int("RQ1_GPU_PAD_TARGET_MIB", 55000))
-    p.add_argument("--high-mib", type=int, default=env_int("RQ1_GPU_PAD_HIGH_MIB", 62000))
-    p.add_argument("--chunk-mib", type=int, default=env_int("RQ1_GPU_PAD_CHUNK_MIB", 1024))
-    p.add_argument("--interval", type=float, default=env_float("RQ1_GPU_PAD_INTERVAL", 10.0))
-    p.add_argument("--settle", type=float, default=env_float("RQ1_GPU_PAD_SETTLE", 120.0))
-    p.add_argument("--start-hold", type=float, default=env_float("RQ1_GPU_PAD_START_HOLD", 900.0))
-    p.add_argument("--min-free-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_FREE_MIB", 8000))
-    p.add_argument("--min-total-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_TOTAL_MIB", 60000))
-    p.add_argument("--release-hysteresis-mib", type=int, default=env_int("RQ1_GPU_PAD_HYSTERESIS_MIB", 2048))
-    p.add_argument("--min-train-mib", type=int, default=env_int("RQ1_GPU_PAD_MIN_TRAIN_MIB", 2000))
+    p.add_argument("--floor-mib", type=int, default=env_int("FLOOR_MIB", 42000))
+    p.add_argument("--target-mib", type=int, default=env_int("TARGET_MIB", 55000))
+    p.add_argument("--high-mib", type=int, default=env_int("HIGH_MIB", 62000))
+    p.add_argument("--chunk-mib", type=int, default=env_int("CHUNK_MIB", 1024))
+    p.add_argument("--interval", type=float, default=env_float("INTERVAL", 10.0))
+    p.add_argument("--settle", type=float, default=env_float("SETTLE", 120.0))
+    p.add_argument("--start-hold", type=float, default=env_float("START_HOLD", 900.0))
+    p.add_argument("--min-free-mib", type=int, default=env_int("MIN_FREE_MIB", 8000))
+    p.add_argument("--min-total-mib", type=int, default=env_int("MIN_TOTAL_MIB", 60000))
+    p.add_argument("--release-hysteresis-mib", type=int, default=env_int("HYSTERESIS_MIB", 2048))
+    p.add_argument("--min-train-mib", type=int, default=env_int("MIN_TRAIN_MIB", 2000))
     p.add_argument("--base", default=default_base())
-    p.add_argument("--switch", default=os.environ.get("RQ1_GPU_PAD_SWITCH",
-                                                      os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")))
+    p.add_argument("--switch", default=pad_env("SWITCH",
+                                         os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")))
     p.add_argument("--parent-pid", type=int, default=None)
     p.add_argument("--supervisor-pid", type=int, default=None)
     p.add_argument("--dry-run", action="store_true")

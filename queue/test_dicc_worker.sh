@@ -68,7 +68,7 @@ check "按任务说明换环境：swinunetr 用 ~/envs/swinunetr，nnunet 用 co
       'grep -q "^start .* t/b .*envs/swinunetr " $T/train.log && grep "^start .* t/c " $T/train.log | grep -q " 无 .*envs/nnunetv2/bin/python"'
 check "每个训练分到的 CPU 传给任务（TASK_CPUS）" 'grep -q "cpus=[0-9]" $T/train.log'
 check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
-check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $BRAIN_TUMOR/logs/tasks/t__a__900001_seg1.log ]] && head -1 $BRAIN_TUMOR/logs/tasks/t__a__900001_seg1.log | grep -q "^作业 900001_1 @ .*任务=t/a"'
+check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $BRAIN_TUMOR/logs/tasks/t__a__900001_part1.log ]] && head -1 $BRAIN_TUMOR/logs/tasks/t__a__900001_part1.log | grep -q "^作业 900001_1 @ .*任务=t/a"'
 
 # 1b. 本机没有的环境（hdbet 只在 DICC 上）不领
 reset
