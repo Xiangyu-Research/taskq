@@ -147,7 +147,7 @@ def code_heads():
 
 def gather(remote=True):
     """各机器的状态（只读）。remote=False：只看本机（不连别的机器）。"""
-    s = dict(now=datetime.now(), ok={}, probe={}, gpus={}, slurm={}, src={}, taskq={}, code=code_heads())
+    s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, slurm={}, src={}, taskq={}, code=code_heads())
     here = [n for n in M.MACHINES if remote or M.MACHINES[n]["ssh"] is None]
     pq = [n for n in M.names("pueue") if n in here]
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"] + ([] if remote else pq), timeout=180)
@@ -196,6 +196,11 @@ def gather(remote=True):
             r = spec.collect(specs, M.expand(m["data"])) if m["ssh"] is None else spec.remote_collect(m["ssh"], specs, m["data"])
             if r:
                 s["src"][name] = r
+            elif m["ssh"] is not None:  # 收集超时（多半是那边的存储挂住，10/31）：这次检查后面的步骤都当它连不上，不再去连
+                s["ok"][name] = False
+                s["why"][name] = "收集训练状态超时或出错（多半是那边的存储挂住）"
+                if name != hub:
+                    s["taskq"].pop(name, None)
     s["board_pending"] = open(H_PENDING).read().split() if os.path.exists(H_PENDING) else []
     return s
 
@@ -229,7 +234,8 @@ def check(s):
 
     for name, m in M.MACHINES.items():
         if not s["ok"].get(name):
-            add(f"down:{name}", f"{L(name)} 连不上（ssh {m['ssh']}）", after=60 if m["scheduler"] == "slurm" else 30)
+            add(f"down:{name}", f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(m['ssh'])}）",
+                after=60 if m["scheduler"] == "slurm" else 30)
     code = s.get("code") or {}
     for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了
         if head and code.get("main") and head != code["main"] and name in M.MACHINES:
