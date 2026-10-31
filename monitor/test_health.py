@@ -123,10 +123,11 @@ old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
 lab_men = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_men]}},
          src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
-         taskq={"dicc": dict(enabled=True, paused=False, tasks=[tqrow(MEN0, "claimed", "lab", since=old)])})
+         taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")]),
+                "dicc": dict(enabled=True, buffer=True, paused=False, tasks=[])})
 H.time.time = lambda: NOW.timestamp()
 P = H.check(s)
-ok("lab 领的折在 lab 上训：不算同一折两处，也不按 DICC 的日志判断卡住", f"dup:{MEN0}" not in P and f"stuck:dicc:{MEN0}" not in P)
+ok("总队列分给 lab、lab 在训：不算同一折两处，也不算卡住", f"dup:{MEN0}" not in P and not [k for k in P if k.startswith("stuck:") and MEN0 in k])
 s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
 s["slurm"] = sq(["train_worker", "486191_2", "RUNNING", "3:00:00", "None", "0"])
 ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
@@ -137,9 +138,9 @@ s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_l
 ok("推理任务：任务日志、结果文件夹 100 分钟没变，算卡住", "90 分钟没有变化" in H.check(s).get(f"stuck:dicc:{INF}", {}).get("msg", ""))
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=6000, out_age=300)]
 ok("推理任务：日志 100 分钟没更新、但预测文件夹 5 分钟前还在变（10/24）→ 不算卡住", f"stuck:dicc:{INF}" not in H.check(s))
-s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "claimed", "lab", since=old)]
+s["taskq"]["dicc"]["tasks"] = []
 s["pueue"]["lab"]["tasks"] = []
-ok("在跑的 DICC 作业没领到任务：lab 领的不算 DICC 作业", "tqidle:dicc" in H.check(s))
+ok("在跑的 DICC 作业、缓冲里没人领：报有卡空着", "tqidle:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "waiting", None), tqrow(MET2, "claimed", "491480", since=old, task_log_age=60)]
 s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
 ok("提前排的推理在等训练（waiting）：不报、不算没人训、不算有卡空着", not {f"tqblocked:{INF}", "tqorphan:dicc", "tqidle:dicc"} & ids(s))
@@ -154,9 +155,28 @@ s["slurm"] = sq(["train_worker", "487000_1", "PENDING", "0:00", "Priority", "0"]
 ok("排着不带折的 train_worker 作业也算：不提醒", "tqorphan:dicc" not in H.check(s))
 s["slurm"] = sq(["cpu_worker", "487001", "RUNNING", "1:00:00", "None", "0"])
 ok("只有 CPU worker 在跑：还是提醒没人训（作业名按 envs/machines.py 的 jobs）", "tqorphan:dicc" in H.check(s))
-s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "claimed", "lab", since=old)]
+s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None)]
 s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
 ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
+
+# lab 的缓冲（10/31）：worker 组看缓冲里 worker 有没有在做的
+LW = H.M.MACHINES["lab"]["worker"]
+wk = task(30, LW["group"], "Running", f"WORKER_ID={LW['id']} bash scripts/queue/dicc_worker.sh", f"worker:{LW['id']}")
+s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [wk]}},
+         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
+         taskq={"box": dict(enabled=True, tasks=[]), "lab": dict(enabled=True, buffer=True, paused=False, tasks=[tqrow(MEN0, "free")])})
+s["slurm"] = {}
+P = H.check(s)
+ok("lab 的 worker 手上没有任务：报 idle（等 30 分钟）", P.get(f"idle:lab:{LW['group']}", {}).get("after") == 30)
+s["taskq"]["lab"]["tasks"] = [tqrow(MEN0, "claimed", LW["id"], since=NOW.timestamp() - 600)]
+P = H.check(s)
+ok("lab 的 worker 在训：不报 idle", f"idle:lab:{LW['group']}" not in P)
+s["pueue"]["lab"]["tasks"] = [wk, task(31, "gpu0", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")]
+ok("lab 缓冲里 worker 在训、0 号卡的 pueue 也在训同一折 → 同一折两处、紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
+s["taskq"]["lab"].pop("buffer")
+s["taskq"]["lab"]["enabled"] = False
+s["pueue"]["lab"]["tasks"] = []
+ok("lab 还不是缓冲：照旧按 pueue 组看卡空着", f"idle:lab:{LW['group']}" in H.check(s) and "after" in H.check(s)[f"idle:lab:{LW['group']}"])
 H.time.time = time_orig
 
 # 总队列在 box（10/31）

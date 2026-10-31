@@ -95,7 +95,7 @@ def problem(pid, p):
     """健康检查的问题编号 → 推送的白话（出了什么事 + 影响）；没对上的用原来的说明。"""
     msg, part = p["msg"], pid.split(":")
     kind = part[0]
-    L = lambda n: M.MACHINES[n]["label"] if n in M.MACHINES else n  # noqa: E731
+    L = lambda n: M.machine(n)["label"] if n in M.MACHINES or n in M.RELAY else n  # noqa: E731
     num = lambda pat: (re.search(pat, msg) or [None, "?"])[1]  # noqa: E731
     try:
         if kind == "down":
@@ -146,13 +146,27 @@ def problem(pid, p):
         if kind == "board":
             return f"看板有新结果，要确认后才发布（{num(r'（(\d+) 个文件')} 个文件）。"
         if kind in ("refill", "advance") and part[1] == "error":
-            return "自动调度脚本出错了：" + ("lab 不会领新的训练。" if kind == "refill" else "训完的折不会自动推理、评测。")
-        if kind == "labsync":
-            return "给 lab 传训练数据出错了，lab 领的那一折开不了训练。"
-        if kind == "labclaim":
-            return f"lab 上 {fold(pid[9:])} 训练中途停了，要决定接着训还是放弃。"
-        if kind == "labskip":
-            return "lab 多次领到任务就失败，暂停给 lab 派任务，lab 的卡会空着。"
+            return "自动调度脚本出错了：" + ("DICC 不会补交作业，lab 上用完的数据不会清理。" if kind == "refill" else "训完的折不会自动推理、评测。")
+        if kind == "site":  # 执行机（feed.py、relay.py，10/31）：site:<机器>:<类>[:<key 或数据集>]
+            site, sub, key = L(part[1]), part[2], ":".join(part[3:])
+            if sub == "down":
+                return f"{site} 读不到了，看不到分给它的训练还在不在跑。"
+            if sub == "low":
+                return f"{site} 排着的训练不够（数据还没传到），卡可能会空着。"
+            if sub == "sync":
+                return f"给 {site} 传训练数据出错了，要这份数据的训练开不了。"
+            if sub == "worker":
+                return f"{site} 上的 worker 出错停了，那边的卡会空着，要看日志后重开。"
+            if sub == "fail" and not key:
+                return f"{site} 3 小时内训练失败太多次，暂停领新任务。"
+            if sub == "fail":
+                if "有进度" in msg:
+                    return f"{site} 上 {fold(key)} 训练失败了，有进度，要决定接着训还是放弃。"
+                return f"{site} 上 {fold(key)} 的任务出了问题，不会开始训练。"
+            if sub == "orphan":
+                if "认不出" in msg:
+                    return f"{site} 的队列里有一个认不出是哪一折的任务。"
+                return f"{site} 在训 {fold(key)}，但总队列里没分给它，可能重复训练。"
         if kind == "topup":
             return f"给 {L(part[1])} 补交作业出错，那边排队的作业会越来越少。"
         if kind == "advance":

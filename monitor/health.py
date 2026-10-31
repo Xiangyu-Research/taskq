@@ -23,8 +23,9 @@
 文件：~/.config/phd-health/ntfy_topic（ntfy 频道名，不进仓库）、~/.cache/phd-health/state.json（问题和推送记录，
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
 每次检查后还做两件事（10/18 起）：
-  - scripts/queue/refill.py：替 lab 从 DICC 的任务队列领任务、续上、交还；领了、交还了什么只记在 ~/refill.log，停住等人处理的报成问题。
-  - scripts/queue/relay.py：中转执行机（10/30）的领任务、传数据、拉回，同上。
+  - scripts/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
+  - scripts/queue/relay.py：中转执行机（10/30）的领任务、传数据、拉回；停住等人处理的报成问题。
+  - scripts/queue/feed.py：往执行机（DICC、lab）的缓冲送任务、交还（10/31），记在 ~/feed.log。
   - scripts/queue/advance.py：box 上按每一折的状态排下一步（拉回 → 推理 → 评测 → 五折分析）；失败停住的报成问题。
 """
 import argparse
@@ -179,6 +180,8 @@ def gather(remote=True):
             rc, out = run_on(m, script)
             have = C.parse_have(out) if C.HAVE_END in script else set()  # 输出被截断：这次算没读到，不当成数据不在
             ok = rc == 0 and "BOOT|" in out and have is not None
+            if ok and "train" in m["roles"] and m.get("worker"):  # 有缓冲的 pueue 执行机（lab，10/31）
+                s["taskq"][name] = taskq.remote_status(name)
             if ok:
                 lines = out.splitlines()
                 s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|", "HAVE|")))
@@ -218,8 +221,8 @@ def check(s):
     def add(pid, msg, level="normal", kind="state", after=0):
         P[pid] = dict(msg=msg, level=level, kind=kind, after=after)
 
-    claims = {}  # key → {机器: [描述]}（排队或在训）
-    busy = {}  # key → {机器}：在训，或段间等待（有进度、下一段在排队）
+    claims = {}  # key → {机器（pueue 的是"机器:组"，和同一台的缓冲分开）: [描述]}（排队或在训）
+    busy = {}  # key → {机器（同上）}：在训，或段间等待（有进度、下一段在排队）
 
     def claim(key, name, desc):
         claims.setdefault(key, {}).setdefault(name, []).append(desc)
@@ -243,35 +246,34 @@ def check(s):
         for t in ctq["tasks"]:
             if t["state"] == "blocked" and not t.get("assigned"):
                 add(f"tqblocked:{t['key']}", f"总队列任务 {t['key']} {t['note']}，不会开始")
-    # --- Slurm ---
-    for name, d in s["slurm"].items():
-        tq = s.get("taskq", {}).get(name)
+    # --- 执行机的缓冲（DICC、lab；10/31）：排队、在训都看缓冲（作业名、pueue 任务不对应训哪一折）---
+    for name in [n for n in s.get("taskq", {}) if n != hub]:
+        tq = s["taskq"][name]
+        if name in s["slurm"] and tq is None:
+            add(f"taskq:{name}", f"{L(name)} 读不到任务队列（~/.cache/phd/taskq/）")
         if tq and tq["enabled"]:
-            # 任务队列开着时，作业名不再对应训哪一折：排队、在训都看队列（scripts/queue/taskq.py）
-            pueue_workers = set(M.names("pueue")) | set(M.RELAY)
             for t in tq["tasks"]:
                 key, st = t["key"], t["state"]
-                if t.get("worker") in pueue_workers and st in ("claimed", "stale"):
-                    continue  # lab、中转执行机领的（box 替它们领）：lab 在训看 lab 的 pueue（下面），续上、交还由 refill.py / relay.py 管
                 if st in ("free", "stale", "claimed", "busy"):
                     claim(key, name, "队列" if st in ("free", "stale") else f"在训（{t['note']}）")
                 if st in ("claimed", "busy"):
                     busy.setdefault(key, set()).add(name)
                 ages = [a for a in (t["log_age"], t.get("task_log_age"), t.get("out_age")) if a is not None]
                 if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (not ages or min(ages) > 5400):
-                    add(f"stuck:{name}:{key}", f"{L(name)} 作业 {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
+                    add(f"stuck:{name}:{key}", f"{L(name)} {'作业' if name in s['slurm'] else 'worker'} {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
                         f"{'日志和结果文件夹 90 分钟没有变化' if ages else '还没有日志'}")
                 if st == "blocked":  # 提前排的推理、评测：前一步失败了或不在队列里（2026-10-25）
                     add(f"tqblocked:{key}", f"{L(name)} 队列任务 {key} {t['note']}，不会开始")
                 if t["failures"] and st != "done":  # 后来训完了就不再报
                     add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 失败 {t['failures']} 次"
                         + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
-            if tq.get("paused"):
-                add(f"tqpause:{name}", f"{L(name)} 任务队列 3 小时内失败 {tq.get('recent_failures')} 次，暂停领任务，"
-                    "作业空等 40 分钟就结束，排队的作业会一个个用掉（看 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
+    # --- Slurm ---
+    for name, d in s["slurm"].items():
+        tq = s.get("taskq", {}).get(name)
+        if tq and tq["enabled"]:
             # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
             run = [r for r in d["squeue"] if is_worker_job(name, r[0]) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
-            workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed" and t.get("worker") not in pueue_workers}
+            workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
                     "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
@@ -283,8 +285,6 @@ def check(s):
             for jid, jname, st, end, code in d["sacct"]:
                 add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
             continue
-        if name in s.get("taskq", {}) and tq is None:
-            add(f"taskq:{name}", f"{L(name)} 读不到任务队列（~/.cache/phd/taskq/）")
         for jid, jname, st, end, code in d["sacct"]:
             add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
 
@@ -304,9 +304,9 @@ def check(s):
             st = t["status"]
             if kind == "train":
                 if st in LIVE:
-                    claim(key, name, f"任务 {t['id']} {tname}（{st}）")
+                    claim(key, f"{name}:{t['group']}", f"任务 {t['id']} {tname}（{st}）")
                 if st == "Running":
-                    busy.setdefault(key, set()).add(name)
+                    busy.setdefault(key, set()).add(f"{name}:{t['group']}")
                     info = fold_info(s, key).get(name)
                     start = C.local_time(t["start"])
                     if start and now - start > timedelta(minutes=60) and \
@@ -329,14 +329,20 @@ def check(s):
     # --- 训练机的卡空了 ---
     holding = {t.get("worker") for t in (s.get("taskq", {}).get(taskq.queue_host()) or {}).get("tasks", []) if t.get("state") != "done"}
     for name in M.names("pueue"):
+        w, btq = M.MACHINES[name].get("worker"), s.get("taskq", {}).get(name)
+        if w and btq and btq.get("buffer") and btq.get("enabled") and s["ok"].get(name):  # worker 组：看缓冲里它有没有在做的
+            if not any(t.get("worker") == w["id"] and t["state"] in ("claimed", "busy") for t in btq["tasks"]):
+                gpu = M.MACHINES[name]["groups"][w["group"]][1]
+                add(f"idle:{name}:{w['group']}", f"{L(name)} 的 worker（{w['group']} 组）手上没有任务，{gpu} 号卡空着"
+                    "（缓冲里没有能做的？看 ~/feed.log；worker 的日志在那边数据目录的 logs/workers/）", after=30)
         m = M.MACHINES[name]
         if "train" not in m["roles"] or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
             continue
         for g, (_, gpu, _) in m["groups"].items():
             if gpu is None:
                 continue
-            if g in M.manual_groups(name):
-                continue  # 只跑手动加的任务
+            if g in M.manual_groups(name) or (w and g == w["group"] and btq and btq.get("buffer")):
+                continue  # 只跑手动加的任务；worker 组上面看过
             ts = train_q.get((name, g), [])
             run = [n for st, n in ts if st == "Running"]
             if not ts:
@@ -355,13 +361,13 @@ def check(s):
         if fin and fin[0]:
             if fin[2] and now - fin[2] > timedelta(minutes=90):
                 add(f"fetch:{key}", f"{key} 在 {L(src)} 上训完了，{L(host)} 还没拉回（任务 {t['id']}）")
-        elif s["ok"].get(src) and src not in claims.get(key, {}):
+        elif s["ok"].get(src) and src not in {n.split(":")[0] for n in claims.get(key, {})}:
             add(f"orphan:{key}", f"{L(host)} 在等 {key} 在 {L(src)} 上训完再拉回（任务 {t['id']}），但它不在 {L(src)} 上排队、训练")
 
     # --- 同一折两处 ---
     for key in sorted(k for k, v in claims.items() if len(v) >= 2):
         both = len(busy.get(key, ())) >= 2
-        add(f"dup:{key}", f"同一折在两处：{key}，" + "；".join(f"{L(n)} {'、'.join(v)}" for n, v in claims[key].items())
+        add(f"dup:{key}", f"同一折在两处：{key}，" + "；".join(f"{L(n.split(':')[0])}{' ' + n.split(':')[1] if ':' in n else ''} {'、'.join(v)}" for n, v in claims[key].items())
             + ("（两边都在训或有进度，同步时会互相覆盖存档）" if both else "（还没同时开训，取消一边前要确认作业号）"),
             level="urgent" if both else "normal")
 
@@ -471,10 +477,10 @@ def main():
     else:
         shift_err = None
     try:
-        import refill  # scripts/queue/refill.py：替 lab 从任务队列领任务、续上、交还
-        events, stuck, filled = refill.run_all(s, dry=a.dry_run)
+        import refill  # scripts/queue/refill.py：清理 lab 上用不着的数据
+        events, stuck, _ = refill.run_all(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
-        events, stuck, filled = [], {"refill:error": f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}, set()
+        events, stuck = [], {"refill:error": f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}
     events = shift_msgs + events
     if shift_err:
         stuck["shift:error"] = shift_err
@@ -523,15 +529,12 @@ def main():
     for pid, msg in {**stuck, **stuck2}.items():
         # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
-    if not a.dry_run:
-        for pid in [k for k in P if k.startswith("idle:") and k.split(":")[1] in filled]:
-            del P[pid]
     update(P, s["now"], dry=a.dry_run)
     if a.dry_run:
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\n补任务（lab 领任务、DICC 补作业、按时段开关组）：" + "；".join(events))
+        print("\n送任务、清理、补作业、按时段开关组：" + "；".join(events))
         print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
 
 

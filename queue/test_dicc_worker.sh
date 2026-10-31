@@ -238,6 +238,62 @@ rm -f "$TASKQ_DIR/tasks.jsonl"
 SLURM_JOB_ID=900009 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/dicc_worker.sh" nnUNetTrainer_save10 0 101 > "$T/w5.out" 2>&1; rc=$?
 check "队列出错：报出来、过一会儿结束作业" '[[ $rc == 0 ]] && grep -q "队列出错" $T/w5.out && grep -q "队列连续出错" $T/w5.out'
 
+# 6. 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当名字，按本机 slots（box 没写 → 1），只看 CUDA_VISIBLE_DEVICES 那张卡；
+#    空闲、队列出错、失败太多都不退出（RUN_TASK_TRIES=1：不在 Slurm 里 run_task.sh 自己会重试 3 次）；手上没有在训的时候提交号变了才退出（退出码 0），在训时变了等训完
+waitfor() { local i; for i in $(seq "$1"); do eval "$2" && return 0; sleep 1; done; return 1; }
+mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
+echo a > "$T/head"
+export TASKQ_HEAD_CMD="cat $T/head"
+reset
+table << EOF
+t/a nnunet
+t/b nnunet
+EOF
+check "lab 的 slots 写在 machines.py（1）" '[[ $(python3 "$HERE/../../envs/machines.py" get lab slots) == 1 ]]'
+(unset TASKQ_SLOTS; WORKER_ID=lab-test CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 PATH=$T/bin6:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/w6.out" 2>&1 &
+wpid=$!
+waitfor 60 '[[ $(grep -c ^end $T/train.log) == 2 ]]'
+check "不在 Slurm 里：按 slots 一次 1 个（GPU 不忙也不加第二个），两个先后训完" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]] && grep -q "作业 lab-test @ .*最多同时 1 个.*时限 无" $T/w6.out'
+check "不在 Slurm 里：nvidia-smi 只看 CUDA_VISIBLE_DEVICES 那张卡" '[[ -s $T/nvsmi.args ]] && ! grep -qv "^-i 1 " $T/nvsmi.args'
+sleep 6
+check "不在 Slurm 里：空闲超过 IDLE_MAX 也不退出" 'kill -0 $wpid 2> /dev/null && grep -q "没有能领的任务，每 1 秒再看" $T/w6.out && ! grep -q "结束作业" $T/w6.out'
+mv "$TASKQ_DIR/tasks.jsonl" "$TASKQ_DIR/tasks.jsonl.bak"
+sleep 6
+check "不在 Slurm 里：队列连续出错超过 ERR_MAX 也不退出" 'kill -0 $wpid 2> /dev/null && grep -q "队列出错" $T/w6.out && ! grep -q "队列连续出错" $T/w6.out'
+mv "$TASKQ_DIR/tasks.jsonl.bak" "$TASKQ_DIR/tasks.jsonl"
+echo b > "$T/head"
+waitfor 15 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了，退出让 feed.py 用新代码重开" $T/w6.out'
+
+reset
+table << EOF
+t/c nnunet
+EOF
+echo a > "$T/head"
+(WORKER_ID=lab-test TASKQ_IDLE_POLL=1 FAKE_SECS=5 exec bash "$HERE/dicc_worker.sh") > "$T/w6b.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q "^start .* t/c" $T/train.log'
+echo b > "$T/head"
+waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "不在 Slurm 里：在训时提交号变了，等训完再退出" '[[ $rc == 0 ]] && grep -q "^end .* t/c" $T/train.log && grep -q "代码更新了" $T/w6b.out && [[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
+
+reset
+table << EOF
+t/a nnunet
+t/b nnunet
+t/c nnunet
+EOF
+echo a > "$T/head"
+cp "$T/fake_train.sh" "$T/fake_train.sh.orig"; cp "$T/fail2.sh" "$T/fake_train.sh"
+(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 RUN_TASK_TRIES=1 exec bash "$HERE/dicc_worker.sh") > "$T/w6c.out" 2>&1 &
+wpid=$!
+waitfor 30 '[[ $(grep -c "^fail" $T/train.log) == 2 ]]'
+sleep 5
+check "不在 Slurm 里：两个开始不久就失败，不再领、也不退出" 'kill -0 $wpid 2> /dev/null && ! grep -q "start .* t/c" $T/train.log && grep -q "先不领" $T/w6c.out'
+kill -TERM $wpid; wait $wpid 2> /dev/null
+cp "$T/fake_train.sh.orig" "$T/fake_train.sh"
+unset TASKQ_HEAD_CMD
+
 # gpu_stats / pad_now 读真的文件（假 nvidia-smi）：只取 dicc_worker.sh 里这两个函数
 sed -n '/^gpu_stats() {/,/^can_add() {/p' "$HERE/dicc_worker.sh" | sed '$d' > "$T/fns.sh"
 mkdir -p "$T/bin"; printf '#!/bin/bash\necho "30000, 81920"\n' > "$T/bin/nvidia-smi"; chmod +x "$T/bin/nvidia-smi"
@@ -246,6 +302,8 @@ for i in $(seq 12); do echo "2026/10/18 10:$i, 0, 30000 MiB, 81920 MiB, $(( i <=
 source "$T/fns.sh"; unset WORKER_TEST_GPU
 check "gpu_stats：只看最近 10 条使用率（前面的 0% 不算），显存读 nvidia-smi" '[[ $(PATH=$T/bin:$PATH gpu_stats) == "60 10 30000 81920" ]]'
 check "gpu_stats：没有记录时样本数 0" '[[ $(GPUCSV=$T/none PATH=$T/bin:$PATH gpu_stats) == "0 0 30000 81920" ]]'
+printf '#!/bin/bash\n[[ "$*" == "-i 1 "* ]] && echo "5000, 24576" || echo "30000, 81920"\n' > "$T/bin/nvidia-smi"
+check "gpu_stats：NVSEL=(-i 1) 时只读那张卡的显存" '[[ $(NVSEL=(-i 1); PATH=$T/bin:$PATH gpu_stats) == "60 10 5000 24576" ]]'
 echo 12000 > "$PADBASE.mib"
 check "pad_now：<base>.mib 刚更新过，按它算" '[[ $(pad_now) == 12000 ]]'
 touch -d "-2 minutes" "$PADBASE.mib"

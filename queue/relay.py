@@ -417,8 +417,8 @@ def plan(s, name, rs, st, now=None):
         acts = [dict(op="beat", key=t["key"]) for t in mine if t["state"] != "done"]
         last = (st.get("last_ok") or {}).get(name, 0)
         if acts and now - last > DOWN_S:
-            stuck[f"relaydown:{name}"] = (f"{L} 连不上{f' {(now - last) / 3600:.0f} 小时' if last else ''}，领着 {len(acts)} 折；"
-                                          f"总队列的领取续着，那边的进度看不到")
+            stuck[f"site:{name}:down"] = (f"{L} 连不上{f' {(now - last) / 3600:.0f} 小时' if last else ''}，领着 {len(acts)} 折；"
+                                           f"总队列的领取续着，那边的进度看不到")
         return acts, stuck
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     folds = rs.get("folds") or {}
@@ -476,13 +476,13 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="rresume", key=key, alias=a["key"]))
         elif ast == "failed":
             if progress(folds.get(a["key"])):
-                stuck[f"relayfail:{key}"] = (f"{L} 上 {key}（{a['key']}）训练失败 {a.get('failures')} 次，有进度，领取保留；"
-                                             f"看那边的 logs/tasks/；放弃：taskq.py release --worker {name} {key}")
+                stuck[f"site:{name}:fail:{key}"] = (f"{L} 上 {key}（{a['key']}）训练失败 {a.get('failures')} 次，有进度，领取保留；"
+                                                    f"看那边的 logs/tasks/；放弃：taskq.py release --worker {name} {key}")
             else:
                 acts[-1] = dict(op="release", key=key, skip=f"{L} 上训练失败", why=f"{L} 上训练失败、没有进度，交还，{L} 不再领它")
                 acts.append(dict(op="drop", key=key, alias=a["key"], out=a["spec"]["out"]))
         elif ast in ("bad", "blocked"):
-            stuck[f"relaybad:{key}"] = f"{L} 队列里的 {a['key']}（{key}）{ast}：{a.get('note')}"
+            stuck[f"site:{name}:fail:{key}"] = f"{L} 队列里的 {a['key']}（{key}）{ast}：{a.get('note')}"
     rev = {v["alias"]: k for k, v in keys.items()}
     mt = {t["key"]: t for t in (mtq or {}).get("tasks", [])}
     for a in rs["taskq"]["tasks"]:
@@ -491,15 +491,15 @@ def plan(s, name, rs, st, now=None):
         real = rev.get(a["key"])
         m = mt.get(real) if real else None
         if real is None:
-            stuck[f"relayorphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪一折（{DIR}/state.json 里没有）"
+            stuck[f"site:{name}:orphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪一折（{DIR}/state.json 里没有）"
         elif a["state"] in ("claimed", "busy"):
-            stuck[f"relayorphan:{a['key']}"] = f"{L} 在训 {real}，但总队列里不是它领着；看总队列和 {L} 的队列"
+            stuck[f"site:{name}:orphan:{real}"] = f"{L} 在训 {real}，但总队列里不是它领着；看总队列和 {L} 的队列"
         elif m is None or m["state"] == "done":
             acts.append(dict(op="drop", key=real, alias=a["key"], out=a["spec"]["out"]))
         elif a["state"] != "stopped":
             acts.append(dict(op="rstop", key=real, alias=a["key"]))
     if rs["taskq"].get("paused"):
-        stuck[f"relaypause:{name}"] = f"{L} 的任务队列 3 小时内失败 {rs['taskq'].get('recent_failures')} 次，暂停领任务"
+        stuck[f"site:{name}:fail"] = f"{L} 的任务队列 3 小时内失败 {rs['taskq'].get('recent_failures')} 次，暂停领任务"
     return acts, stuck
 
 

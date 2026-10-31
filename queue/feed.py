@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""往执行机的缓冲送任务（2026-10-31）：box 是中心，总队列在 box（scripts/queue/taskq.py），每台执行机（现在是 DICC）有一份缓冲，
-是总队列里分给它的任务的原样副本，由那边的 worker（scripts/queue/dicc_worker.sh）领。box 的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用 run_all。
+"""往执行机的缓冲送任务（2026-10-31）：box 是中心，总队列在 box（scripts/queue/taskq.py），每台执行机（DICC、lab）有一份缓冲，
+是总队列里分给它的任务的原样副本，由那边的 worker（scripts/queue/dicc_worker.sh）领：DICC 上是 refill.py 补交的 Slurm 作业，
+lab 上是 pueue 的 worker 组（envs/machines.py 的 worker）里常驻的一个任务。box 的健康检查（scripts/monitor/health.py，每 30 分钟）
+调用 run_all。那边没有 BUFFER 标记时（还没改成缓冲）什么都不做。
 
 每次检查，对每台执行机：
   1. 总队列里分给它的（assigned）：
@@ -18,6 +19,12 @@
      只送数据已到位的：任务说明的 data 每个路径在那边的文件数、字节数都不少于 box 上的，没有 .incomplete，也没有在传；
      缺的排一个传输（box 的 wait 组，scripts/sync/sync_data.sh <机器> push <路径>），同时只传一份。
      别的机器上有进度的、这台跳过的（skips）不送。补不满、而总队列里还有能给它的任务时，持续 60 分钟后报出来。
+  pueue 类（lab）另外：
+     - worker 组里没有活着的 worker 任务 → 开一个（scripts/queue/q，用那边仓库的代码）；worker 手上没活、代码更新了时自己退出，
+       下次检查重开；上一个失败了 → 报出来，pueue remove 以后重开；
+     - 数据经隧道传（refill.transfer → scripts/sync/tunnel_push.sh，记进 refill.json，由 refill.cleanup 按空间预算删），
+       传完盘剩的不到"提醒线 + 10 GB"时先不传、报出来；
+     - 分给"<机器>:<组>"的（如 lab:gpu0，pueue 里手动训的，不进缓冲）：box 上训完、没在拷时交还。
   执行机连不上：什么都不动，分给它的也不交还；连不上 2 小时以上报出来。那边的代码不是最新的（health 的 code 检查）时不送新任务。
   先在缓冲里删成功，再在总队列交还；分过去后送不进缓冲时马上交还。
 开关 envs/policy.py 的 AUTO[机器]：False 时第 3、4 步只把"会送什么"记进 ~/feed.log。
@@ -52,8 +59,12 @@ LIVE = refill.LIVE
 
 
 def sites():
-    """执行机：有缓冲的 Slurm 训练机（第一阶段只有 DICC）。"""
-    return [n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"] and n in P.READY]
+    """执行机：有缓冲的训练机：Slurm 的（DICC，worker 是补交的作业），和 pueue 里常驻一个 worker 的（lab，machines.py 的 worker）。"""
+    return [n for n, m in M.MACHINES.items() if "train" in m["roles"] and n in P.READY and (m["scheduler"] == "slurm" or m.get("worker"))]
+
+
+def pueue_site(name):
+    return M.MACHINES[name]["scheduler"] == "pueue"
 
 
 def load_state():
@@ -191,6 +202,8 @@ def plan(s, name, st, data=None, now=None):
             stuck[f"site:{name}:down"] = (f"{L} 的缓冲读不到{f' {(now - last) / 3600:.0f} 小时' if last else ''}，分给它的 {len(mine)} 个任务"
                                           "留着不动（那边的 worker 照常训）")
         return [], stuck, "连不上"
+    if not btq.get("buffer"):
+        return [], {}, f"{L} 还没有缓冲（{L} 的 ~/.cache/phd/taskq 里没有 BUFFER）"
     ct = {t["key"]: t for t in ctq["tasks"]}
     bt = {t["key"]: t for t in btq["tasks"]}
     live = box_live(s)
@@ -242,6 +255,9 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="release", key=k, skip=f"{L} 上失败 {b.get('failures')} 次", why=f"{L} 上失败、没有进度，{L} 不再分它"))
         elif b["state"] in ("bad", "blocked"):
             stuck[f"site:{name}:fail:{k}"] = f"{L} 缓冲里的 {k} {b['state']}：{b.get('note')}"
+    for t in ctq["tasks"]:  # 分给这台机器上手动训的（如 lab:gpu0，pueue 里的训练任务）：box 上训完、没在拷时交还
+        if (t.get("assigned") or "").startswith(f"{name}:") and t["state"] == "done" and t["key"] not in copying:
+            acts.append(dict(op="release", key=t["key"], worker=t["assigned"], why="box 上有了"))
     assigned = {t["key"] for t in mine}
     for k, b in bt.items():
         if k in assigned or not removable(k) or k in gone:
@@ -261,6 +277,10 @@ def plan(s, name, st, data=None, now=None):
         return acts, stuck, "缓冲的总开关没开"
     if not code.get("main") or (code.get("heads") or {}).get(name) != code["main"]:
         return acts, stuck, f"{L} 的代码不是最新的，先不送新任务"
+    if pueue_site(name):
+        a, k = worker_plan(s, name)
+        acts += a
+        stuck.update(k)
     inbuf = set(bt) - gone
     for t in only_here(name, ctq):
         deps = spec(t).get("after") or []
@@ -290,7 +310,7 @@ def plan(s, name, st, data=None, now=None):
         return acts, stuck, "数据查不了"
     sync, sync_bad = refill.syncing(s, name)
     moving = bool(sync)
-    sent = 0
+    sent, room = 0, ""
     for t in cands[:need + 2]:
         paths = spec(t).get("data") or []
         busy = [p for p in paths if refill.tag(p) in sync]
@@ -307,16 +327,60 @@ def plan(s, name, st, data=None, now=None):
             stuck[f"site:{name}:sync:{refill.tag(bad[0])}"] = (f"给 {L} 传 {bad[0]} 的 box 任务 {b['id']} 出错了（{b['status']}）；"
                                                                f"看 pueue log {b['id']}，处理后 pueue remove {b['id']}（下次检查重传）")
         elif miss and not busy and not moving and all(isinstance((box or {}).get(p), tuple) and box[p][0] > 0 for p in miss):
-            acts.append(dict(op="sync", key=t["key"], paths=miss))
+            if not pueue_site(name):
+                acts.append(dict(op="sync", key=t["key"], paths=miss))
+                moving = True
+                continue
+            gb, free, hard = refill.data_gb(miss), disk_free(s, name), disk_hard(name)
+            if gb is None or free is None or free - gb < hard:  # 传完盘剩的不够（用不着的数据由 refill.cleanup 删）：这一折先不传
+                why_room = (f"{L} 盘剩 {free:.0f} GB，传 {' '.join(miss)}（{gb:.0f} GB）后低于 {hard:.0f} GB" if gb is not None and free is not None
+                            else f"不知道 {L} 盘还剩多少或数据多大")
+                room = room or why_room
+                continue
+            acts.append(dict(op="prefetch", key=t["key"], paths=miss, gb=gb))
             moving = True
     if sent < need:
         low.setdefault(name, now)
         if now - low[name] >= LOW_MIN * 60:
             stuck[f"site:{name}:low"] = (f"{L} 的缓冲只备了 {len(unclaimed) + sent} 个训练（要 {P.READY[name]} 个），总队列里还有 {len(cands)} 个"
-                                         f"能给它的，数据没到位（{(now - low[name]) / 60:.0f} 分钟；看 ~/feed.log 和 box 的 wait 组）")
+                                         f"能给它的，数据没到位（{(now - low[name]) / 60:.0f} 分钟{'；' + room if room else ''}；看 ~/feed.log 和 box 的 wait 组）")
     else:
         low.pop(name, None)
     return acts, stuck, ""
+
+
+def disk_free(s, name):
+    pr = (s.get("probe") or {}).get(name, {})
+    return int(pr["DISK"]) / 1e9 if str(pr.get("DISK", "")).isdigit() else None
+
+
+def disk_hard(name):
+    """传数据后盘至少要剩的：盘的提醒线 + 训练输出（refill.TRAIN_OUT_GB）。"""
+    d = M.MACHINES[name].get("disk")
+    return (d[1] if d else 0) + refill.TRAIN_OUT_GB
+
+
+def worker_plan(s, name):
+    """pueue 类执行机：worker 组（machines.py 的 worker）里要有一个活着的 worker 任务 → (动作, 卡住)。
+    worker 手上没活、代码更新了时自己退出（成功），下次检查用新代码重开；上一个失败了 → 报出来，pueue remove 它以后重开。"""
+    w, L = M.MACHINES[name]["worker"], M.MACHINES[name]["label"]
+    pq = s["pueue"].get(name) or {"error": 1}
+    if "error" in pq:
+        return [], {}
+    ws = sorted((t for t in pq.get("tasks", []) if (C.identify(name, t, s.get("records") or []) or {}).get("step") == "worker"),
+                key=lambda t: t["id"])
+    if any(t["status"] in LIVE for t in ws):
+        return [], {}
+    if ws and ws[-1]["status"] != "Success":
+        t = ws[-1]
+        return [], {f"site:{name}:worker": (f"{L} 上的 worker（pueue 任务 {t['id']}，{w['group']} 组）停了（{t['status']}），缓冲里的任务没人领；"
+                                            f"看 ssh {M.MACHINES[name]['ssh']} pueue log {t['id']}，处理后 pueue remove {t['id']}（下次检查重开）")}
+    return [dict(op="worker", key=w["id"])], {}
+
+
+def worker_cmd(name):
+    w = M.MACHINES[name]["worker"]
+    return f"WORKER_ID={w['id']} bash scripts/queue/dicc_worker.sh"
 
 
 def want_paths(s, name, st):
@@ -332,7 +396,7 @@ def want_paths(s, name, st):
 
 
 # ---------------- 做 ----------------
-def execute(name, acts, central=None, remote=None, add=None):
+def execute(name, acts, central=None, remote=None, add=None, transfer=None):
     """做动作 → [说明]。出错的那一步写进说明；交还只在缓冲里删成功（或不用删）后做。"""
     central = central or taskq.central
     add = add or refill.add
@@ -355,7 +419,7 @@ def execute(name, acts, central=None, remote=None, add=None):
             elif a["op"] == "release":
                 if k in failed:
                     continue
-                rc, out, err = central(["release", "--worker", name, k] + (["--skip", a["skip"]] if a.get("skip") else []))
+                rc, out, err = central(["release", "--worker", a.get("worker", name), k] + (["--skip", a["skip"]] if a.get("skip") else []))
                 msgs.append(f"总队列交还 {k}（{L}，{a['why']}）" if rc == 0 else f"总队列交还 {k} 出错：{(out + err)[-150:]}")
             elif a["op"] in ("bstop", "bresume"):
                 r = buf(("stop --why 总队列里停了 " if a["op"] == "bstop" else "resume ") + shlex.quote(k))
@@ -383,6 +447,13 @@ def execute(name, acts, central=None, remote=None, add=None):
                     cmd = refill.then_check(f"bash scripts/sync/sync_data.sh {name} push {shlex.quote(p)}", lab)
                     tids.append(add(M.hub(), lab, "sync", p, f"wait -p --label {lab} -- " + shlex.quote(cmd), to=name, group="wait"))
                 msgs.append(f"{k} 的数据还没到 {L}，传 {' '.join(a['paths'])}（box 任务 {' '.join(map(str, tids))}）")
+            elif a["op"] == "prefetch":
+                tids = (transfer or refill.transfer)(name, a["paths"])
+                msgs.append(f"{k} 的数据还没到 {L}，经隧道传 {' '.join(a['paths'])}（{a['gb']:.0f} GB，box 任务 {' '.join(map(str, tids))}）")
+            elif a["op"] == "worker":
+                g = M.MACHINES[name]["worker"]["group"]
+                tid = add(name, f"worker:{k}", "worker", k, f"{g} -p --label worker:{k} -- {shlex.quote(worker_cmd(name))}", group=g)
+                msgs.append(f"{L} 的 {g} 组里开了 worker {k}（pueue 任务 {tid}）")
         except Exception as e:  # noqa: BLE001
             msgs.append(f"{L} {a['op']} {k} 出错：{e}")
     return msgs
@@ -400,7 +471,7 @@ def run_one(s, name, dry=False, st=None, data_run=None):
     paths = want_paths(s, name, st)
     data = probe(name, paths, **({"run": data_run} if data_run else {})) if paths else ({}, {})
     acts, stuck, why = plan(s, name, st, data)
-    fresh = {"send", "sync"}
+    fresh = {"send", "sync", "prefetch", "worker"}
     upkeep = [a for a in acts if a["op"] not in fresh]
     new = [a for a in acts if a["op"] in fresh]
     L = M.MACHINES[name]["label"]

@@ -22,13 +22,18 @@
 # 存档是原子写的，下次从存档接着训。
 # 不管什么原因，手上没有在训的连续 40 分钟就结束作业、把卡还回去：DICC gpu-a100 分区 GPU 使用率连续 1 小时低于 40%
 # 会被自动取消（10/17 的新规定）。
+# 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当 worker 名（envs/machines.py 的 worker），同时训几个看本机的 slots；
+# 没有时限、不查 squeue、没有显存填充；没有在训的、领不到的、队列出错、本 worker 失败太多次都不退出，每 60 秒再看；
+# 手上没有在训的时候仓库的提交号变了就退出（退出码 0），由 box 的 scripts/queue/feed.py 用新代码重开。
+# GPU 记录只看 CUDA_VISIBLE_DEVICES 那张卡（lab 另一张卡别人在用）。
 # TASKQ_* 环境变量只给测试用（scripts/queue/test_dicc_worker.sh）。
 set -uo pipefail
 unset _envs
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
 TQPY="python3 $HERE/taskq.py"
-W=${SLURM_JOB_ID:?只在 Slurm 作业里用}
+if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
+W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
 DEVICE=${WORKER_DEVICE:-gpu}
 DATA=${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)}
 export BRAIN_TUMOR=$DATA
@@ -37,6 +42,9 @@ NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null 
 MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
 if [[ $DEVICE == cpu ]]; then
     SLOTS=1
+elif (( ! INSLURM )); then
+    SLOTS=${TASKQ_SLOTS:-$(python3 "$REPO/envs/machines.py" get . slots 2> /dev/null || true)}
+    [[ $SLOTS =~ ^[0-9]+$ ]] || SLOTS=1
 elif (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
     SLOTS=${TASKQ_SLOTS:-2}   # 最多同时训几个
 else
@@ -44,11 +52,12 @@ else
 fi
 ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过这么久才判断要不要再加一个
 UTIL_MAX=${TASKQ_UTIL_MAX:-90}          # 近 10 分钟 GPU 平均使用率低于这个才加
-PADBASE=${RQ1_GPU_PAD_BASE:-/tmp/gpu_pad_$W}
+PADBASE=${RQ1_GPU_PAD_BASE:-$( (( INSLURM )) && echo "/tmp/gpu_pad_$W" || echo /nonexistent/gpu_pad)}
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-$([[ $DEVICE == cpu ]] && echo 0 || echo 1200)}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
 IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
+IDLE_POLL=${TASKQ_IDLE_POLL:-60}        # 不在 Slurm 里、手上没有在训的时候隔多久再看
 MAX_OWN_FAIL=2
 EARLY_FAIL=${TASKQ_EARLY_FAIL:-600}     # 开始后这么久内就失败的才算本作业（节点、环境）的问题
 FAIL_WINDOW=${TASKQ_FAIL_WINDOW:-3600}  # 只数这么久以内的（10/24：隔很久的零星失败不让作业提前结束）
@@ -59,12 +68,17 @@ LOGDIR=$DATA/logs/workers
 mkdir -p "$LOGDIR"
 COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
 (cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
+head_now() { if [[ -n ${TASKQ_HEAD_CMD:-} ]]; then eval "$TASKQ_HEAD_CMD"; else git -C "$REPO" rev-parse HEAD 2> /dev/null; fi; }
+HEAD0=$(head_now)
+NVSEL=()  # 不在 Slurm 里：只看分给本 worker 的卡（Slurm 作业里只看得到自己的卡）
+(( ! INSLURM )) && [[ ${CUDA_VISIBLE_DEVICES:-} =~ ^[0-9]+$ ]] && NVSEL=(-i "$CUDA_VISIBLE_DEVICES")
 ts() { date '+%F %T'; }
 T0=$(date +%s)
 
 # 作业的结束时间：查不到（Slurm 偶尔超时）就记 0，当作时间还多，之后每轮再查
 END=0
 get_end() {
+    (( INSLURM )) || return 1
     local id e s
     for id in "$W" ${SLURM_ARRAY_JOB_ID:+"${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID:-}"}; do
         e=$(squeue -j "$id" -h -o %e 2> /dev/null | head -1)
@@ -77,11 +91,11 @@ get_end() {
 get_end
 left() { (( END == 0 )) && echo 999999 || echo $(( END - $(date +%s) )); }
 echo "$(ts) 任务队列 worker（$DEVICE）：作业 $W @ $(hostname -s)，最多同时 $SLOTS 个，CPU $NCPU，内存 ${MEMMB}M（每个训练 $TASK_CPUS 个 CPU），" \
-     "环境 $ENVS，时限 $( (( END )) && date -d @"$END" '+%F %T' || echo 查不到，之后再查)，代码 $COMMIT"
+     "环境 $ENVS，时限 $( (( END )) && date -d @"$END" '+%F %T' || { (( INSLURM )) && echo 查不到，之后再查 || echo 无; })，代码 $COMMIT"
 GPUCSV=$LOGDIR/worker_${W}_gpu.csv
 if [[ $DEVICE == gpu ]]; then
-    nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
-    ( while true; do nvidia-smi --query-gpu=timestamp,index,memory.used,memory.total,utilization.gpu --format=csv,noheader >> "$GPUCSV" 2> /dev/null; sleep 60; done ) &
+    nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
+    ( while true; do nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=timestamp,index,memory.used,memory.total,utilization.gpu --format=csv,noheader >> "$GPUCSV" 2> /dev/null; sleep 60; done ) &
     GPUMON=$!
 else
     GPUMON=
@@ -112,7 +126,7 @@ gpu_stats() {  # 近 10 分钟的 GPU 平均使用率、样本数；现在的显
     local ut mem
     ut=$(tail -n 10 "$GPUCSV" 2> /dev/null | awk -F', *' '{gsub(/[^0-9]/, "", $5); if ($5 != "") { u += $5; n++ } }
         END { if (n) printf "%d %d\n", u / n, n; else print "0 0" }')
-    mem=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2> /dev/null | head -1 | tr -d ' ' | tr ',' ' ')
+    mem=$(nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2> /dev/null | head -1 | tr -d ' ' | tr ',' ' ')
     echo "$ut ${mem:-0 0}"
 }
 pad_now() {
@@ -166,7 +180,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     { read -r key; read -r args; } <<< "$1"
     eval "local targs=($args)"
     pad_make_room
-    TASK_JOBTAG=$W TASK_SEG=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
+    TASK_JOBTAG=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)") TASK_SEG=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
     local pid=$! sh TASK_OUT= TASK_SAFE=
     KEY[$pid]=$key
     STARTED[$pid]=$(date +%s)
@@ -179,7 +193,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
 }
 kill_tree() { [[ -n $1 ]] || return 0; local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
 on_term() {
-    echo "$(ts) 收到停止信号（多半是到时限），停训练、交还任务"
+    echo "$(ts) 收到停止信号（$( (( INSLURM )) && echo 多半是到时限 || echo pueue kill)），停训练、交还任务"
     local p
     for p in "${!KEY[@]}"; do kill_tree "$p"; done
     for _ in $(seq 15); do
@@ -192,7 +206,8 @@ on_term() {
     kill_tree "$GPUMON"
     rm -f "$ERRF"
     rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"
-    exit 143
+    (( INSLURM )) && exit 143
+    exit 0  # 不在 Slurm 里：交还好了算正常结束，feed.py 照常重开（失败的 worker 它不重开）
 }
 trap on_term TERM INT
 
@@ -220,8 +235,8 @@ check_stops() {
     done
     (( n ))
 }
-nap() {
-    local end=$(( $(date +%s) + ${TASKQ_POLL:-30} )) d
+nap() {  # [秒数]（默认 TASKQ_POLL）
+    local end=$(( $(date +%s) + ${1:-${TASKQ_POLL:-30}} )) d
     while (( (d = end - $(date +%s)) > 0 )); do
         check_stops && return 0
         (( d > STOP_POLL )) && d=$STOP_POLL
@@ -309,9 +324,27 @@ while true; do
     if [[ -n $why_not && $why_not != "${last_why:-}" ]]; then echo "$(ts) 先不再加训练：$why_not"; fi
     last_why=$why_not
     if (( ${#KEY[@]} > 0 )); then
-        idle_since=0
+        idle_since=0 said_idle=
     else
         (( idle_since )) || idle_since=$now
+        if (( ! INSLURM )); then
+            if [[ -n $HEAD0 && $(head_now) != "$HEAD0" ]]; then
+                echo "$(ts) 代码更新了，退出让 feed.py 用新代码重开"; break
+            fi
+            msg=$why
+            (( OWN_FAILS >= MAX_OWN_FAIL )) && msg=own
+            if [[ $msg != "${said_idle:-}" ]]; then
+                case $msg in
+                    own) echo "$(ts) 本 worker $(( FAIL_WINDOW / 60 )) 分钟内有 $OWN_FAILS 个任务开始不久就失败，先不领，过了时间窗再领" ;;
+                    nothing|error) echo "$(ts) 没有能领的任务，每 $IDLE_POLL 秒再看" ;;
+                    paused) echo "$(ts) 队列暂停领任务（3 小时内失败太多次），空着等" ;;
+                    wait) echo "$(ts) 排在前面的任务刚停下，等它（最多到开始后 $(( PATIENCE / 60 )) 分钟）" ;;
+                esac
+                said_idle=$msg
+            fi
+            nap "$IDLE_POLL"
+            continue
+        fi
         if (( OWN_FAILS >= MAX_OWN_FAIL )); then
             echo "$(ts) 本作业失败太多次，作业结束"; break
         elif (( $(left) <= MIN_LEFT )); then

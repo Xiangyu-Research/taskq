@@ -3,9 +3,9 @@
 #   run_task.sh <做法> k=v…          （如 run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=1）
 # 按任务说明（scripts/queue/spec.py，做法在 scripts/queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
 # 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_seg<段>.log，第一行记作业、机器、
-# 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给 Slurm 作业号），否则"主机名-时间"。
+# 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每 5 分钟看一次；
-# 训练出错隔 5 分钟重来，最多 3 次（Slurm 里只跑 1 次，由 dicc_worker.sh 交还队列）。
+# 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
 # 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练再退出，下次从存档接着训。
@@ -29,7 +29,7 @@ LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_seg${SEG}.log
 COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
 (cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
 TRIES=3
-[[ -n ${SLURM_JOB_ID:-} ]] && TRIES=1
+[[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
 POLL=${RUN_TASK_POLL:-300}        # 只给测试用
 

@@ -126,8 +126,12 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed"), folds={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
-    assert ops(acts) == [("beat", K)] and f"relayfail:{K}" in stuck, acts
-    ok("那边失败：没有进度 → 交还（--skip）并删掉；有进度 → 保留、报")
+    assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, acts
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "bad")), st)
+    assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, stuck
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "claimed", "123"), paused=True), st)
+    assert f"site:{NAME}:fail" in stuck, stuck
+    ok("那边失败：没有进度 → 交还（--skip）并删掉；有进度、bad → 保留、报 site:<名字>:fail:<key>；那边暂停 → site:<名字>:fail")
 
     acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [("beat", K), ("rstop", K)], acts
@@ -146,11 +150,13 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K, "done", worker=None)]), NAME, RS(rtask(A, "stopped")), st)
     assert ops(acts) == [("drop", K)], acts
     acts, stuck = relay.plan(S0([]), NAME, RS(rtask("Dataset999_zz/tr/0", "free")), st)
-    assert ops(acts) == [] and stuck, stuck
-    ok("那边有、总队列里不归它的：不让它训；总队列训完了就删；认不出的报")
+    assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:Dataset999_zz/tr/0"], stuck
+    acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "claimed", "123")), st)
+    assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:{K}"], stuck
+    ok("那边有、总队列里不归它的：不让它训；总队列训完了就删；认不出的、在训的报 site:<名字>:orphan")
 
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 3 * 3600}))
-    assert ops(acts) == [("beat", K)] and f"relaydown:{NAME}" in stuck, stuck
+    assert ops(acts) == [("beat", K)] and f"site:{NAME}:down" in stuck, stuck
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 600}))
     assert ops(acts) == [("beat", K)] and not stuck
     ok("连不上：只续总队列的领取，2 小时以上报")

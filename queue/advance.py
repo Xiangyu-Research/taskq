@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由 envs/policy.py 的 PLACE 定）：box 上的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有在任务队列那台机器上训着的折提前排（见下）。
+（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的折提前排（见下）。
 步骤和判断都从实验表（research/*/experiments.py，经 scripts/queue/experiments.py 读）和任务说明（scripts/queue/spec.py）来，
 这里不认识具体模型。
 
@@ -19,16 +19,17 @@
   queue:<机器>   加进任务队列（taskq.py add --recipe command，参数是步骤 queue 里的，machines = 这台，nice = queue 的 nice）。
                  那边缺的输入是文件就先 offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；写了 have 的，那边
                  缺输入就用下一个地方。那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按 done 判断
-  trainer        训这一折的 pueue 机器（lab）、训练的那个组：这一折还在那边训（或刚训完、那个组里没有下一折）时排同样的标签
-                 （命令里的 {data}、{python} 换成那边的），加成 --priority 1，组里排了好几折时也在这一折训完后马上接着做；输入要都在那边（不传），否则用
-                 下一个地方。训练没训完就停了、这一步跟着失败的不算，接着训时重排。那边成功 → box wait 组 pull:<标签>
-                 （offload_io.sh pull，按校验和核对）→ box 上判断做完 → 删那边的结果
-  那边的步骤的记录留到那边的结果清理完。要知道每折的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage
-  needs，打印相对数据目录的输入），或者步骤的 queue 里写了 inputs。
+  trainer        训这一折的执行机（feed.sites()）：总队列里这一折分给的那台（"lab:gpu0" 算 lab），分配已经结束的看哪台有这一折
+                 没归档的进度、模型；就当成 queue:<那台>（10/31）。训的不是执行机（中转执行机、box）、找不到时用下一个地方。
+                 lab 上做完的照常拉回（fetch_task.sh lab），box 上判断做完后删 lab 上的结果（训完要归档的机器，TRAINERS）；
+                 这一折在 lab 上排着、没做完的步骤先做完再归档（归档会删 lab 上的模型）
+  要知道每折的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage needs，打印相对数据目录的输入），或者步骤的
+  queue 里写了 inputs。10/31 以前 trainer 排在 lab pueue 里的步骤（任务记录里有 out 的）照常认、拉回、清理，不再新排（Leftover）。
 
-提前排（10/25）：一折正被任务队列那台机器（DICC）的作业训着、那边的代码是最新的（health 的 code 检查）时，每折的步骤里 PLACE
-  第一个地方（不算 trainer）是这台的任务队列的，现在就加进队列，任务说明的 after 接上前一步（推理 after 训练，评测 after 推理）；
-  after 里的没做完时那个任务是 waiting，worker 不领，做完后训完的那个作业接着就能领到。被 lab 领着、没人领的折不提前排。
+提前排（10/25、10/31）：一折在总队列里分给了执行机（"lab:gpu0" 算 lab）、那边的代码是最新的（health 的 code 检查）时，每折的
+  步骤里 PLACE 第一个用得上的地方是这台的任务队列的（trainer 也算），现在就加进队列，任务说明的 after 接上前一步（推理 after
+  训练，评测 after 推理）；after 里的没做完时那个任务是 waiting，worker 不领，做完后训完的那个 worker 接着就能领到。
+  分给中转执行机、没人领的折不提前排。
 box 上排的任务（不连别的机器的）做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
 失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排；那边的任务、传输、拉回一样。
@@ -77,14 +78,14 @@ def python(name=None):
 
 # ---------------- 在哪里做（envs/policy.py 的 PLACE） ----------------
 def targets(step, group):
-    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group, have, manual)]；没写 → box 的这个组。写错了 → ValueError。"""
+    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group, have)]；没写 → box 的这个组。写错了 → ValueError。"""
     out = []
     for text in P.PLACE.get(step) or [f"{M.hub()}:{group}"]:
         w = text.split()
-        bad = [x for x in w[1:] if x not in ("have", "manual")]
+        bad = [x for x in w[1:] if x != "have"]
         if not w or bad:
             raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的条件 {bad}")
-        d = dict(text=text, have="have" in w, manual="manual" in w, machine=None, group=None)
+        d = dict(text=text, have="have" in w, machine=None, group=None)
         a, _, b = w[0].partition(":")
         if w[0] == "trainer":
             d["kind"] = "trainer"
@@ -190,7 +191,7 @@ def plan(s, root=None):
             return
         todo.append(dict(step=step, key=key, group=group, label=label, cmd=cmd, nice=n, src=src))
 
-    rem = Remote(s, root, ptasks, todo, stuck, recs)
+    old = Leftover(s, ptasks, todo, stuck, recs)
     remote_live = {}  # 别的 pueue 机器上活着的步骤 → (机器, 任务号)：都算在做、在用这一折
     for h, d in s["pueue"].items():
         if h == hub:
@@ -227,7 +228,7 @@ def plan(s, root=None):
         if after:
             q["after"] = after
         return dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
-                    args=S.kv_args("command", q)[1:], cmd=q["cmd"])
+                    args=S.kv_args("command", q)[1:], cmd=q["cmd"], qk=q["key"], machine=mach)
 
     def to_queue(t, st, label, n, wait, tg):
         """放进任务队列（见开头 queue:<机器>）→ True（排了、在等、报了），或者用不了的原因（have 的那边缺输入、连不上；
@@ -274,23 +275,66 @@ def plan(s, root=None):
     feed_sites = set(feed.sites())
     code = s.get("code") or {}
 
+    def assigned_to(key):
+        """总队列里这一折分给的机器（"lab:gpu0" → lab）；没分出去 → None。"""
+        x = tq_tasks.get(hub, {}).get(key) or {}
+        if x.get("state") != "claimed":
+            return None
+        return (x.get("assigned") or "").partition(":")[0] or None
+
+    def trainer_of(key):
+        """训这一折的机器：总队列里分给的那台；分配已经结束的看哪台有这一折没归档的进度、模型（训完的优先）。"""
+        h = assigned_to(key)
+        if h:
+            return h
+        have = [h for h in sorted(src) if key in src[h] and not src[h][key].get("archived")]
+        return next((h for h in have if src[h][key].get("final")), have[0] if have else None)
+
+    def where(t, tg, fold):
+        """PLACE 里的一项 → 地方（trainer 换成训这一折的执行机的 queue，带 trainer=True），或者用不了的原因。"""
+        if tg["kind"] != "trainer":
+            return tg
+        if not fold:
+            return "不是每折的步骤"
+        h = trainer_of(t["key"])
+        if h not in feed_sites:
+            return f"训这一折的 {h} 不是执行机" if h else "找不到训这一折的机器"
+        return dict(tg, kind="queue", machine=h, trainer=True)
+
+    def qmach(qk):
+        """总队列里这个任务（加上这次要加的）给了哪几台机器。"""
+        x = tq_tasks.get(hub, {}).get(qk) or {}
+        ms = (x.get("spec") or x.get("params") or {}).get("machines") or []
+        return set(ms) | {y["machine"] for y in todo if y.get("op") == "taskq" and y.get("qk") == qk}
+
+    cleans = {}  # (机器, 路径) → op="clean" 的一项：执行机上做完、box 上判断做完的步骤，删那边的结果
+
+    def finished(t, st, label):
+        """box 上判断这一步做完了：在训练机（TRAINERS，lab）的缓冲里做的，删那边的结果（那边有做完的标志时）。"""
+        old.finished(label)
+        qd = st.get("queue")
+        if not qd:
+            return
+        qk, out = (S.fill(qd[k], t["names"], keep=()) for k in ("key", "out"))
+        for h in TRAINERS:
+            if (src.get(h) or {}).get(qk, {}).get("final"):
+                cleans.setdefault((h, out), dict(op="clean", step="clean", key=t["key"], label=label, nice=NO_NICE, host=h, paths=[out]))
+
     def prequeue(t, after):
-        """这一折在总队列里分给了一台有缓冲的执行机（feed.py，现在是 DICC）：每折的步骤里，PLACE 第一个用得上的地方（不算
-        trainer：这一折不在 pueue 机器上训）是这台的，现在就加进总队列，after 接上前一步；feed.py 跟着训练送进那边的缓冲，
-        训完的那个作业接着就能领到推理（10/25、10/31）。"""
-        x = tq_tasks.get(hub, {}).get(t["key"]) or {}
-        h = x.get("assigned") if x.get("state") == "claimed" else None
+        """这一折在总队列里分给了一台执行机（feed.py 的 sites）：每折的步骤里，PLACE 第一个用得上的地方是这台的，现在就加进
+        总队列，after 接上前一步；feed.py 跟着训练送进那边的缓冲，训完的那个 worker 接着就能领到推理（10/25、10/31）。"""
+        h = assigned_to(t["key"])
         if h not in feed_sites:
             return
         prev, items = t["key"], []
         for st in after:
             label = f"{st['name']}:{t['lab']}"
             qd = st.get("queue")
-            tg = next((x for x in targets(st["name"], st["group"]) if x["kind"] != "trainer"), None)
+            tg = next((w for w in (where(t, y, True) for y in targets(st["name"], st["group"])) if not isinstance(w, str)), None)
             if not qd or not tg or tg["kind"] != "queue" or tg["machine"] != h or any(fnmatch(label, pat) for pat in P.HOLD):
                 break
             sk = (st["name"], t["key"])
-            if sk in live or sk in done or sk in remote_live or label in rem.state or st["done"].ok(root, t["names"]):
+            if sk in live or sk in done or sk in remote_live or (label in old.state and old.resume(label)) or st["done"].ok(root, t["names"]):
                 break
             qk = S.fill(qd["key"], t["names"], keep=())
             if qk not in qkeys:
@@ -317,7 +361,7 @@ def plan(s, root=None):
             if all(os.path.exists(os.path.join(out, d)) for d in qd["done"]):
                 stuck[f"advance:{st['name']}:{key}"] = f"{label}：任务队列的 {qk} 做完、拉回了，但 box 上核对还是没做完（{out}）"
             return
-        if label in rem.state and rem.resume(t, st, label, n, archiving):
+        if label in old.state and old.resume(label):
             return
         if sk in remote_live:
             h, i = remote_live[sk]
@@ -329,13 +373,16 @@ def plan(s, root=None):
             return
         why = []
         for tg in targets(st["name"], st["group"]):
-            if tg["kind"] == "box":
-                want(st["name"], key, label, cmd, tg["group"], n)
+            w = where(t, tg, fold)
+            if isinstance(w, str):
+                r = w
+            elif w["kind"] == "box":
+                want(st["name"], key, label, cmd, w["group"], n)
                 return
-            if tg["kind"] == "queue":
-                r = to_queue(t, st, label, n, archiving or archive_due, tg)
+            elif w.get("trainer"):  # 模型在那边：不等归档（归档等这一步做完），在归档时不用那边
+                r = f"{w['machine']} 上在归档这一折" if archiving else to_queue(t, st, label, n, False, w)
             else:
-                r = rem.trainer(t, st, label, n, archiving, src) if fold else "不是每折的步骤"
+                r = to_queue(t, st, label, n, archiving or archive_due, w)
             if r is True:
                 return
             why.append(f"{tg['text']}：{r}")
@@ -351,15 +398,6 @@ def plan(s, root=None):
             frm = next((h for h in sorted(src) if (src[h].get(key) or {}).get("final")), None)
             if frm:
                 want("fetch", key, f"fetch:{t['lab']}", f"bash scripts/queue/fetch_task.sh {frm} {key}", "wait", n, src=frm)
-            # 第一步写了 trainer 的：这一折还在那边训时就排在训练后面
-            st = after[0] if after else None
-            tg = next((x for x in targets(st["name"], st["group"]) if x["kind"] == "trainer"), None) if st else None
-            label = f"{st['name']}:{t['lab']}" if st else None
-            if tg and (st["name"], key) not in live and (st["name"], key) not in remote_live and not st["done"].ok(root, t["names"]):
-                if not (label in rem.state and rem.resume(t, st, label, n, archiving)):
-                    r = rem.trainer(t, st, label, n, archiving, src)
-                    if r is not True and any(key in (src.get(h) or {}) for h in TRAINERS):
-                        NOTES.append(f"{label}：训练期间不能接着在 {tg['text']} 做（{r}），训完再选地方")
             prequeue(t, after)
             continue
         archive_due = [h for h in TRAINERS if sp.get("archive") and (t["e"] or {}).get("archive", True) is not False
@@ -371,13 +409,19 @@ def plan(s, root=None):
             ok = not busy and st["done"].ok(root, t["names"])
             after_ok[(key, st["name"])] = ok
             if ok:
-                rem.finished(label)
+                finished(t, st, label)
             elif not blocked:
                 if not busy:
                     place(t, st, label, n, archiving, bool(archive_due), True)
                 blocked = True
-        if key not in rem.busy and key not in remote_busy:  # 那边在用这一折（归档会删那边的 checkpoint）时先不归档
+        # 那边在用这一折（归档会删那边的 checkpoint）时先不归档：旧的 lab pueue 步骤在做，或者有步骤排给了那台、box 上还没做完
+        pend = {m for st in after if st.get("queue") and not after_ok[(key, st["name"])]
+                for m in qmach(S.fill(st["queue"]["key"], t["names"], keep=()))}
+        if key not in old.busy and key not in remote_busy:
             for h in archive_due:
+                if h in pend:
+                    NOTES.append(f"archive:{t['lab']}：{h} 上还有这一折的步骤没做完，做完再归档")
+                    continue
                 want("archive", key, f"archive:{t['lab']}", f"bash scripts/queue/archive_task.sh {h} {key}", "wait", n, src=h)
 
     newest = 0  # rerun_if_newer 列出的步骤里最新的结果（决定要不要重跑最后的步骤）
@@ -404,7 +448,7 @@ def plan(s, root=None):
                     if not busy:
                         place(dict(key=e["id"], names=names), st, label, n, False, False, False)
                     break
-                rem.finished(label)
+                finished(dict(key=e["id"], names=names), st, label)
                 if st["name"] in watch:
                     newest = max(newest, st["done"].mtime(root, names))
     pending = any(t["step"] in group_steps for t in todo) or any(sk[0] in group_steps for sk in live)
@@ -416,7 +460,9 @@ def plan(s, root=None):
                 want(f["name"], "all", f["name"], cmd, f["group"])
         elif not f["done"].ok(root, names):
             want(f["name"], "all", f["name"], cmd, f["group"])
-    rem.close()
+    for c in old.close():
+        cleans.setdefault((c["host"], c["paths"][0]), c)
+    todo += [c for c in cleans.values() if ".." not in c["paths"][0].split("/") and len(c["paths"][0].strip("/").split("/")) >= 2]
     todo.sort(key=lambda t: (t["nice"], t["key"]))
     return todo, stuck
 
@@ -462,17 +508,15 @@ def remote_have(name, paths):
     return C.parse_have(out) if rc == 0 else None
 
 
-class Remote:
-    """plan() 里训练机上做的步骤（trainer，见开头）。往 todo 里加的除了 box 任务，还有 host=<机器> 的任务（带 out、needs、
-    train_id，记进任务记录，留到那边的结果清理完）、op="clean" 的清理。state：标签 → 这个标签最新的这种记录。"""
+class Leftover:
+    """10/31 以前 trainer 排在训练机 pueue 里的步骤（任务记录里有 out、train_id）：在排、在跑的照常认，做完拉回（box wait 组
+    pull:<标签>，offload_io.sh pull，按校验和核对），box 上判断做完后删那边的结果；不再新排。state：标签 → 这个标签最新的这种记录。"""
 
-    def __init__(self, s, root, ptasks, todo, stuck, recs):
-        self.recs = recs
+    def __init__(self, s, ptasks, todo, stuck, recs):
+        self.recs, self.s, self.ptasks, self.todo, self.stuck = recs, s, ptasks, todo, stuck
         self.state = {r["label"]: r for r in sorted((r for r in recs if r.get("out")), key=lambda r: r["added"])}
-        self.s, self.root, self.ptasks, self.todo, self.stuck = s, root, ptasks, todo, stuck
         self.cleaning = []
-        # 那边在做的步骤（任务活着、或读不到那边的 pueue）的任务：先不归档；这次新排的也加进来
-        self.busy = set()
+        self.busy = set()  # 那边在做的步骤（任务活着、或读不到那边的 pueue）的任务：先不归档
         for r in self.state.values():
             rts = self.rtasks(r["machine"])
             x = self.task_of(r, rts)
@@ -485,66 +529,8 @@ class Remote:
     def task_of(self, r, rts):
         return next((x for x in rts or [] if x["id"] == r.get("id") and (x.get("label") or "") == r["label"]), None)
 
-    def is_train(self, name, x, key=None):
-        r = C.identify(name, x, self.recs)
-        return bool(r) and r["step"] == "train" and key in (None, r["key"])
-
-    def trainings(self, name, rts, key):
-        return sorted((x for x in rts or [] if self.is_train(name, x, key)), key=lambda x: x["id"])
-
-    def trainer(self, t, st, label, n, archiving, src):
-        """trainer：训这一折的 pueue 机器、训练的那个组 → True（排了或在等），或者用不了的原因。"""
-        key = t["key"]
-        for h in TRAINERS:
-            cp = (src.get(h) or {}).get(key)
-            if cp is None:
-                continue
-            rts = self.rtasks(h)
-            if rts is None:
-                return f"读不到 {h} 的 pueue"
-            trs = self.trainings(h, rts, key)
-            tr = trs[-1] if trs else None
-            if not tr or cp.get("archived") or (tr["status"] != "Running" and not cp.get("final")):
-                return f"{h} 上没有在训这一折"
-            manual = any(x["kind"] == "trainer" and x["manual"] for x in targets(st["name"], st["group"]))
-            if tr.get("group") in P.MANUAL.get(h, []) and not manual:  # 只跑手动加的任务的组（10/25；trainer manual 时也做，10/28）
-                return f"{h} 的 {tr['group']} 组只跑手动加的任务"
-            if cp.get("final") and (archiving or any(y["status"] in LIVE_ST and y.get("group") == tr.get("group")
-                                                     and self.is_train(h, y) for y in rts)):
-                return f"{h} 上训完了，在归档或那个组在训下一折"
-            return self.start(t, st, label, n, archiving, h, tr["group"], t["spec"]["out"].rstrip("/") + "/", tr["id"])
-        return "这一折不在 pueue 机器上训"
-
-    def start(self, t, st, label, n, archiving, name, group, exclude, train_id):
-        """在 name 的 group 组里做这一步：输入都在那边就排上 → True（排了、报了），或者用不了的原因。"""
-        rts = self.rtasks(name)
-        if rts is None:
-            return f"读不到 {name} 的 pueue"
-        if archiving:  # 训练机上的同一折还在归档（会删那边的存档），归档完再说
-            return True
-        names = dict(t["names"], data=self.root)
-        out = os.path.dirname(S.fill(st["done"].path, names, keep=()))
-        qd = st.get("queue") or {}
-        cmd = S.fill(st["cmd"], names, keep=())
-        needs = inputs_of(qd, t["names"]) if "inputs" in qd else step_needs(cmd)
-        if needs is None:
-            self.stuck[f"advance:remote:{label}"] = f"{label}：{no_needs(cmd)}，不能在 {name} 上做（envs/policy.py 的 PLACE）"
-            return no_needs(cmd)
-        needs = [p for p in needs if not p.startswith(exclude)]
-        have = remote_have(name, needs)
-        if have is None:
-            return f"连不上 {name}"
-        missing = [p for p in needs if p not in have]
-        if missing:
-            return f"{name} 上缺 {' '.join(missing[:3])}{' 等' if len(missing) > 3 else ''}"
-        rnames = dict(names, data=M.MACHINES[name]["data"], python=python(name))
-        self.todo.append(dict(step=st["name"], key=t["key"], group=group, label=label, nice=n, host=name,
-                              cmd=S.fill(st["cmd"], rnames, keep=()), out=out, needs=needs, train_id=train_id))
-        self.busy.add(t["key"])
-        return True
-
-    def resume(self, t, st, label, n, archiving):
-        """记录里的：接着做 → True；记录作废（那边的任务删掉了、这一折又重训了、训练没训完就停了）→ False，重新选地方。"""
+    def resume(self, label):
+        """在排、在跑、做完了（拉回）、失败了（报出来）→ True；那边的任务删掉了、训练没训完就停了 → False，按 PLACE 重新选地方。"""
         r = self.state[label]
         name = r["machine"]
         rts = self.rtasks(name)
@@ -552,24 +538,21 @@ class Remote:
             self.stuck[f"advance:remote:{label}"] = f"{label}：读不到 {name} 的 pueue，这次不处理"
             return True
         x = self.task_of(r, rts)
-        trs = self.trainings(name, rts, r["key"]) if "train_id" in r else []
-        if x and trs and trs[-1]["id"] > x["id"]:
-            x = None  # 以前那次训练后面排的（这一折后来又在这台接着训了）
-        if x and x["status"] in LIVE_ST:
+        if not x:
+            return False
+        if x["status"] in LIVE_ST:
             return True
-        if x and x.get("result") == "Success":
-            self.pull_back(t, label)
+        if x.get("result") == "Success":
+            self.pull_back(label)
             return True
-        if x:
-            cp = ((self.s.get("src", {}).get(name) or {}).get("folds") or {}).get(r["key"]) or {}
-            if "train_id" in r and not cp.get("final"):
-                return False  # 训练没训完就停了，这一步跟着开始、失败了：不算
-            self.stuck[f"advance:remote:{label}"] = (f"{label}：{name} 任务 {x['id']} {x['status']}，不再自动重排（ssh {name} "
-                                                     f"pueue log {x['id']}；处理好以后在 {name} 上 pueue remove {x['id']}）")
-            return True
-        return False  # 那边的任务删掉了（处理好以后），或者没加上
+        cp = ((self.s.get("src", {}).get(name) or {}).get("folds") or {}).get(r["key"]) or {}
+        if "train_id" in r and not cp.get("final"):
+            return False  # 训练没训完就停了，这一步跟着开始、失败了：不算
+        self.stuck[f"advance:remote:{label}"] = (f"{label}：{name} 任务 {x['id']} {x['status']}，不再自动重排（ssh {name} "
+                                                 f"pueue log {x['id']}；处理好以后在 {name} 上 pueue remove {x['id']}）")
+        return True
 
-    def pull_back(self, t, label):
+    def pull_back(self, label):
         """那边做完了 → 拉回（box wait 组 pull:<标签>）。"""
         r = self.state[label]
         pulls = sorted((x for x in self.ptasks if (lambda p: bool(p) and p["step"] == "pull" and (p.get("of"), p["key"]) == (r["step"], r["key"]))
@@ -582,20 +565,17 @@ class Remote:
             self.stuck[f"advance:remote:{label}"] = (f"{label}（{r['machine']} 任务 {r.get('id')}）：{why}，不再自动重排"
                                                      f"（看 pueue log {x['id']}；处理好以后 pueue remove {x['id']}）")
             return
-        self.todo.append(dict(step="pull", key=t["key"], group="wait", label=f"pull:{label}", nice=NO_NICE, of=r["step"], src=r["machine"],
+        self.todo.append(dict(step="pull", key=r["key"], group="wait", label=f"pull:{label}", nice=NO_NICE, of=r["step"], src=r["machine"],
                               cmd=f"bash scripts/queue/offload_io.sh pull {r['machine']} {shlex.quote(r['out'])}"))
 
     def finished(self, label):
-        """box 上判断做完了：在别的机器上做的要清理那边。"""
         if label in self.state:
             self.cleaning.append(label)
 
     def close(self):
-        """清理做完的：那边的结果文件夹。"""
-        for lb in self.cleaning:
-            r = self.state[lb]
-            drop = [p for p in [r["out"]] if ".." not in p.split("/") and len(p.strip("/").split("/")) >= 2]
-            self.todo.append(dict(op="clean", step="clean", key=r["key"], label=lb, nice=NO_NICE, host=r["machine"], paths=drop))
+        """box 上判断做完了的 → op="clean"：删那边的结果文件夹（run 里删完再删记录）。"""
+        return [dict(op="clean", step="clean", key=self.state[lb]["key"], label=lb, nice=NO_NICE, host=self.state[lb]["machine"],
+                     paths=[self.state[lb]["out"]]) for lb in self.cleaning]
 
 
 # ---------------- 执行 ----------------
@@ -651,11 +631,9 @@ def run(s, dry=False, q=None, tq=None):
             try:
                 # 先记下来再加任务：加上了、没拿到任务号（断电、ssh 超时）时，下次按标签和创建时间找回
                 rec = C.new_record(host, t["label"], t["step"], t["key"], group=t["group"],
-                                   **{k: t.get(k) for k in ("src", "of", "to", "paths", "out", "needs", "train_id")})
-                cmd = t["cmd"] if t.get("host") else refill.then_check(t["cmd"], t["label"])
-                # trainer 的步骤加 --priority 1：组里排了好几折时也排在正在训的这一折后面，不排到最后（10/28）
-                pr = " --priority 1" if t.get("train_id") is not None else ""
-                tid = q(host, f"{t['group']} -p{pr}{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
+                                   **{k: t.get(k) for k in ("src", "of", "to", "paths")})
+                cmd = refill.then_check(t["cmd"], t["label"])
+                tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
                 C.set_record_id(rec, tid)
                 done.append(f"{where}{t['label']}（任务 {tid}{note}）")
                 lines.append(f"排了 {t['label']}（{where}{t['group']} 组，任务 {tid}{note}）：{t['cmd']}")
