@@ -49,6 +49,45 @@ ok("command：任务自己给 key、cmd、out、done，可以带别的参数", c
    and c["data"] == ["other/stuff"] and "{data}" in c["cmd"] and c["archive"] is None)
 ok("command：缺 cmd 报错", raises(lambda: S.resolve("command", {"key": "a", "env": "x", "out": "a", "done": "x"})))
 
+# ---------------- 10/31：任务单的通用字段 ----------------
+G = dict(key="guest/x", cmd="python3 t.py", env="nnunet", out="guest/x", done="DONE")
+g = S.resolve("command", dict(G, inputs="guest/in", res={"gpus": "2", "mem": "16G"}, resume="ckpt_*.pt", owner="bob",
+                              progress="progress_json"))
+ok("任务单：inputs = data（字符串变列表）、res 转成数、resume 变列表、owner", g["data"] == ["guest/in"] and g["inputs"] == ["guest/in"]
+   and g["res"] == {"gpus": 2, "mem": "16G"} and g["resume"] == ["ckpt_*.pt"] and g["owner"] == "bob")
+ok("任务单：command 默认化名方式 path、一张卡、没有存档", S.resolve("command", G)["relay"] == "path"
+   and S.resolve("command", G)["res"] == {"gpus": 1} and S.resolve("command", G)["resume"] is None)
+ok("任务单：inputs 和 data 都给 → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["a"], data=["b"]))))
+ok("任务单：res 写错字段、不是数、mem 格式不对 → 报错", raises(lambda: S.resolve("command", dict(G, res={"gpu": 1})))
+   and raises(lambda: S.resolve("command", dict(G, res={"cpus": "many"})))
+   and raises(lambda: S.resolve("command", dict(G, res={"mem": "lots"}))))
+ok("任务单：data 里有 .. → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["../etc"]))))
+ok("任务单：不认识的 progress → 报错", raises(lambda: S.resolve("command", dict(G, progress="tqdm"))))
+ok("nnunet：也有 inputs、resume、一张卡，进度读 nnU-Net 日志", s["inputs"] == s["data"] and s["resume"]
+   and s["res"] == {"gpus": 1} and s["progress"] == "nnunet_log" and s["relay"] == "nnunet")
+gr = tempfile.mkdtemp()
+gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
+gd = os.path.join(gr, "guest/x")
+os.makedirs(gd)
+open(os.path.join(gd, "train.log"), "w").write("starting\n")
+f0 = S.collect([gs], gr)["folds"]["guest/x"]
+ok("collect：还没写 PROGRESS.json、没有存档 → 没进度", not f0["resumable"] and all(r["epochs_done"] == 0 for r in f0["runs"]))
+open(os.path.join(gd, "PROGRESS.json"), "w").write('{"done": 3, "total": 10}')
+f1 = S.collect([gs], gr)["folds"]["guest/x"]
+ok("collect：PROGRESS.json → 做完 3 轮、共 10 轮", max(r["epochs_done"] for r in f1["runs"]) == 3
+   and any(r.get("total") == 10 for r in f1["runs"]))
+open(os.path.join(gd, "PROGRESS.json"), "w").write("{broken")
+ok("collect：PROGRESS.json 坏了 → 不报错、当没进度", max(r["epochs_done"] for r in S.collect([gs], gr)["folds"]["guest/x"]["runs"]) == 0)
+open(os.path.join(gd, "ckpt_0003.pt"), "w").close()
+ok("collect：有 resume 里的存档 → resumable", S.collect([gs], gr)["folds"]["guest/x"]["resumable"])
+import relay as RL  # noqa: E402
+import refill as RF  # noqa: E402
+ok("relay.progress：只有存档（没有轮数）也算有进度", RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))
+   and not RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=False)))
+src = {"src": {"lab": {"folds": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
+               "dicc": {"folds": {}}}}
+ok("refill.progress：只有存档也算有进度，按机器分", RF.progress(src, "guest/x", "lab") and not RF.progress(src, "guest/x", "dicc"))
+
 # ---------------- 训完的判断 ----------------
 root = tempfile.mkdtemp()
 out = os.path.join(root, s["out"])

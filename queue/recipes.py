@@ -14,16 +14,20 @@
     out        结果文件夹（相对数据目录）。拉回、归档、登记表都看这里
     done       训完的标志：out 下的文件，每一项都要有；一项里用 | 分开的有一个就行
     log        out 下的训练日志（glob）：多久没更新用来判断有没有人在训
-    progress   进度的解析方法（spec.py 的 PROGRESS，None = 只看训完没、日志多久没更新）
+    progress   进度的解析方法（spec.py 的 PROGRESS：nnunet_log = nnU-Net 的训练日志；progress_json = 任务自己写的
+               out/PROGRESS.json，{"done": 已做完的轮数, "total": 总轮数}；None = 只看训完没、日志多久没更新）
+    resume     out 下的存档（glob 列表）：有一个就算有进度，失败时留在那台机器上接着做，不交还跳过（2026-10-31）；None = 没有
+    res        资源：gpus（卡数）、cpus、mem（如 "32G"）、gpu_mem（GB）；None 的项不限（2026-10-31）
+    owner      谁的任务（None = 自己的；别人请帮忙训练、测试的写名字）
     info       训练设置的解析方法（spec.py 的 INFO，登记表的参数列；None = 不读）
     metrics    登记表的验证指标：{列名: (out 下的 JSON 文件, 键的路径列表)}（实验表里按数据给）
     checkpoint 登记表算校验和的文件（out 下；None = 不算）
-    data       训练机上要有的数据（相对数据目录；lab 没有时 refill.py 先传）
+    data       训练机上要有的输入（相对数据目录的文件或文件夹；送到执行机前先传好）。任务里写 inputs=… 和 data=… 一样（2026-10-31）
     fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）、
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
-    relay      能交给中转执行机（envs/machines.py 的 RELAY）训练时，数据和结果怎么改名（scripts/queue/relay_names.py 的
-               TRANSLATORS 里的名字）；None = 不交
+    relay      交给执行机（envs/machines.py 的 RELAY）时数据和结果的化名方式：path = 只换路径、不动文件内容（任何任务都能用）；
+               nnunet 等 = 另外改写文件内容（scripts/queue/relay_names.py 的 TRANSLATORS）；None = 不交
     machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc"]）；None = 有环境的都行
     device     gpu = 要卡（DICC 的 GPU worker、lab 领）；cpu = 纯 CPU（只由 DICC 的 CPU worker 领，scripts/queue/cpu_worker.sbatch，
                2026-10-24）
@@ -51,6 +55,9 @@ RECIPES = {
         done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"],
         log="training_log_*.txt",
         progress="nnunet_log",
+        resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
+        res=dict(gpus=1),
+        owner=None,
         info="nnunet_debug",
         metrics={},
         checkpoint="checkpoint_final.pth",
@@ -68,7 +75,7 @@ RECIPES = {
         params=dict(key=REQUIRED, cmd=REQUIRED, env=REQUIRED, out=REQUIRED, done=REQUIRED),
         open=True,
         key="{key}", env="{env}", cmd="{cmd}", vars={}, out="{out}", done="{done}", log="*.log",
-        progress=None, info=None, metrics={}, checkpoint=None, data=[], fetch=dict(exclude=[], extra=[]), archive=None,
-        machines=None, device="gpu", after=[], cache=None, relay=None,
+        progress=None, resume=None, res=dict(gpus=1), owner=None, info=None, metrics={}, checkpoint=None, data=[],
+        fetch=dict(exclude=[], extra=[]), archive=None, machines=None, device="gpu", after=[], cache=None, relay="path",
     ),
 }

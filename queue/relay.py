@@ -466,7 +466,9 @@ def box_task(s, step, key, since=0):
 
 
 def progress(f):
-    return bool(f) and (f.get("final") or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
+    """训完、有做完的轮数，或者有存档（任务说明的 resume）→ 有进度。"""
+    return bool(f) and bool(f.get("final") or f.get("resumable")
+                            or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
 
 
 def plan(s, name, rs, st, now=None):
