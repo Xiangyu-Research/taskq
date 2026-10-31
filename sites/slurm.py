@@ -1,0 +1,82 @@
+"""Slurm 类机器（我的 DICC、SITES 里 scheduler="slurm" 的执行机）的适配器（2026-10-31）：读各 QOS 的作业数、按 QOS 分配、交 worker 作业。
+和 pueue.py 对应：读状态 → 调用方按"先备好再开卡"算交几个（scripts/queue/refill.py 的 topup_plan）→ start_workers 交。
+交的是那台的 worker.sbatch，它转交 worker_start.sh（开显存填充 gpu_pad，gpu-a100 要求 >= 40GB）。
+run：fn(命令) → (退出码, 输出)，由调用方绑好机器（测试替换）。"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "envs"))
+import policy as P  # noqa: E402
+import machines as M  # noqa: E402
+
+SUBMIT_CAP = 10  # 读不到 QOS 的排队上限时按这个算
+
+
+def probe(name):
+    """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数|其中还在排（没开始）的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
+    "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
+    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM，作业名来自 envs/machines.py 的 jobs。"""
+    conf = P.SLURM[name]
+    out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
+        "ids=$(squeue -u $USER -h -r -q $q -o %i); pd=$(squeue -u $USER -h -r -q $q -t PD -o %i); " \
+        "echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)|$(printf '%s' \"$pd\" | grep -c . || true)\"; done"
+    if conf.get("cpu"):
+        out += f"; ids=$(squeue -u $USER -h -r -n {M.machine(name)['jobs']['cpu']} -o %i); " \
+            "echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
+            f"lim=$(sacctmgr -nP show qos {conf['cpu'][0]} format=maxsubmitpu); " \
+            "ids=$(squeue -u $USER -h -r -o %i); echo \"ALL|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\""
+    return out
+
+
+def parse(out):
+    """probe 的输出 → dict(counts={QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}, cpu=CPU worker 作业数或 None,
+    free=还剩几个提交名额或 None)；读不出数的 QOS 行不算（那个 QOS 当读不到）。"""
+    counts, cpu, free = {}, None, None
+    for ln in out.splitlines():
+        p = ln.split("|")
+        if len(p) == 5 and p[0] == "QOS" and p[3].isdigit() and p[4].isdigit():
+            counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]), int(p[4]))
+        elif len(p) == 2 and p[0] == "CPU" and p[1].isdigit():
+            cpu = int(p[1])
+        elif len(p) == 3 and p[0] == "ALL" and p[2].isdigit():
+            free = max(0, (int(p[1]) if p[1].isdigit() else SUBMIT_CAP) - int(p[2]))
+    return dict(counts=counts, cpu=cpu, free=free)
+
+
+def status(name, run):
+    """→ parse 的结果；读不到 → None。"""
+    rc, out = run(probe(name))
+    return None if rc else parse(out)
+
+
+def squeue(text):
+    """`squeue -h -o '%i|%j|%T|%M|%q|%R'` 的输出 → [[号, 名字, 状态, 已跑, QOS, 原因], …]。"""
+    return [ln.split("|") for ln in text.splitlines() if ln.strip()]
+
+
+def distribute(qos, counts, room, file):
+    """要再交 room 个时按 QOS 的顺序、各自的上限（减去留给本人的）分 → [(QOS, 每段时限, 交几个, sbatch 文件)]。"""
+    out = []
+    for q, v in qos.items():
+        t, keep = (v, 0) if isinstance(v, str) else v
+        lim, n = counts[q][0], counts[q][1]
+        k = min((lim or SUBMIT_CAP) - keep - n, room)
+        if k > 0:
+            out.append((q, t, k, file))
+            room -= k
+    return out
+
+
+def start_workers(cwd, subs, run):
+    """在 cwd（那边放 sbatch 文件的目录，shell 写法）交 subs → [dict(qos, time, n=要交几个, file, ids, err)]；一个 QOS 出错就停这个 QOS。"""
+    res = []
+    for q, t, n, f in subs:
+        ids, err = [], None
+        for _ in range(n):
+            rc, out = run(f"cd {cwd} && sbatch --parsable --qos={q} --time={t} {f}")
+            if rc:
+                err = out[-200:]
+                break
+            ids.append(out.strip().splitlines()[-1])
+        res.append(dict(qos=q, time=t, n=n, file=f, ids=ids, err=err))
+    return res

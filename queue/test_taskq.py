@@ -18,6 +18,7 @@ ENV.pop("nnUNet_results", None)
 sys.path.insert(0, HERE)
 os.environ.update(TASKQ_DIR=TQ)
 import taskq  # noqa: E402
+import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 
 ok = True
@@ -624,6 +625,45 @@ rc, out = tqb("put", feed=True, stdin=json.dumps(dict(r7[0], nice=-5, hold=False
 check("缓冲：put hold=false 不撤掉真正的停止（stop 的）", st7(BUF)[kt7]["state"] == "stopped")
 rc, out = tqb("status")
 check("缓冲：status 照常（只读）", rc == 0)
+
+# ---------------- 10/31：add --file（任务单） ----------------
+TQF = os.path.join(T, "taskqf")
+os.makedirs(TQF)
+open(os.path.join(TQF, "tasks.jsonl"), "w").close()
+
+
+def tqf(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQF),
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+sheet = dict(key="guest/alice/toy", owner="alice", env="nnunet", cmd="python3 train.py --data {data}/guest/alice/in --out {data}/guest/alice/toy",
+             inputs=["guest/alice/in"], out="guest/alice/toy", done=["DONE"], progress="progress_json", resume=["ckpt_*.pt"],
+             res=dict(gpus=1, cpus=8, mem="32G"), nice=40)
+fn = os.path.join(T, "job.json")
+json.dump(sheet, open(fn, "w"))
+rc, out, _ = tqf("add", "--file", fn)
+tf = taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))
+check("add --file：一张任务单 → command 任务，档位用单子里的", rc == 0 and len(tf) == 1 and tf[0]["key"] == "guest/alice/toy"
+      and tf[0]["recipe"] == "command" and tf[0]["nice"] == 40 and "nice" not in tf[0]["params"])
+sf = S.resolve(tf[0]["recipe"], tf[0]["params"])
+check("add --file：inputs 当 data、res、resume、owner 进了任务说明", sf["data"] == ["guest/alice/in"] and sf["inputs"] == sf["data"]
+      and sf["res"] == dict(gpus=1, cpus=8, mem="32G") and sf["resume"] == ["ckpt_*.pt"] and sf["owner"] == "alice")
+check("add --file：任务单加的 command 任务默认只换路径交给执行机", sf["relay"] == "path")
+json.dump([dict(sheet, key="guest/alice/b", out="guest/alice/b"), dict(sheet, key="guest/alice/c", out="guest/alice/c")], open(fn, "w"))
+rc, out, _ = tqf("add", "--nice", "7", "--file", fn)
+tf = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))}
+check("add --file：一列任务单、--nice 优先", rc == 0 and tf["guest/alice/b"]["nice"] == 7 and tf["guest/alice/c"]["nice"] == 7)
+json.dump(dict(sheet, key="guest/alice/d", res=dict(gpu=1)), open(fn, "w"))
+rc, out, _ = tqf("add", "--file", fn)
+check("add --file：res 写错字段报错、不加", rc == 2 and "res" in out and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
+json.dump(dict(sheet, key="guest/alice/e", nice=None), open(fn, "w"))
+rc, out, err = tqf("add", "--file", fn)
+check("add --file：单子和命令行都没有档位 → 报错、不加", rc != 0 and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
+open(fn, "w").write("{oops")
+rc, out, _ = tqf("add", "--nice", "1", "--file", fn)
+check("add --file：不是 JSON → 报错", rc == 2 and "任务单" in out)
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

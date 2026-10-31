@@ -239,7 +239,7 @@ SLURM_JOB_ID=900009 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/dicc_worker.sh" nnU
 check "队列出错：报出来、过一会儿结束作业" '[[ $rc == 0 ]] && grep -q "队列出错" $T/w5.out && grep -q "队列连续出错" $T/w5.out'
 
 # 6. 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当名字，按本机 slots（box 没写 → 1），只看 CUDA_VISIBLE_DEVICES 那张卡；
-#    空闲、队列出错、失败太多都不退出（RUN_TASK_TRIES=1：不在 Slurm 里 run_task.sh 自己会重试 3 次）；手上没有在训的时候提交号变了才退出（退出码 0），在训时变了等训完
+#    空闲不到 IDLE_EXIT（默认 30 分钟）、队列出错、失败太多都不退出（RUN_TASK_TRIES=1：不在 Slurm 里 run_task.sh 自己会重试 3 次）；手上没有在训的时候提交号变了才退出（退出码 0），在训时变了等训完
 waitfor() { local i; for i in $(seq "$1"); do eval "$2" && return 0; sleep 1; done; return 1; }
 mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
 echo a > "$T/head"
@@ -263,6 +263,12 @@ mv "$TASKQ_DIR/tasks.jsonl.bak" "$TASKQ_DIR/tasks.jsonl"
 echo b > "$T/head"
 waitfor 15 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了，退出让 feed.py 用新代码重开" $T/w6.out'
+
+reset
+(WORKER_ID=lab-test TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=3 exec bash "$HERE/dicc_worker.sh") > "$T/w6d.out" 2>&1 &
+wpid=$!
+waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "不在 Slurm 里：空闲超过 IDLE_EXIT 就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "退出（有备好的任务时下次检查再开）" $T/w6d.out'
 
 reset
 table << EOF

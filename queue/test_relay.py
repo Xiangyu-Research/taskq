@@ -54,13 +54,32 @@ assert relay.taskq.queue_host() == Q
 def test_pueue_worker():
     w = relay.conf("lab1")["worker"]
     lab = f"worker:{w['id']}"
-    assert relay.topup("lab1", dict(jobs=None)) == ([], "读不到 pueue")
-    assert relay.topup("lab1", dict(jobs=[])) == ([("pueue", None, 1)], "")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]])) == ([], "worker 在")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]])) == ([("pueue", None, 1)], "")
-    subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]]))
+    ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
+    none = dict(tasks=[dict(key="a/x/1", state="claimed")])
+    assert relay.topup("lab1", dict(jobs=None, taskq=ready)) == ([], "读不到 pueue")
+    assert relay.topup("lab1", dict(jobs=[], taskq=ready)) == ([("pueue", None, 1)], "")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=ready)) == ([], "worker 在")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]], taskq=ready)) == ([("pueue", None, 1)], "")
+    subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]], taskq=ready))
     assert not subs and why.startswith("上一个 worker")
     ok("pueue 类（lab1）：组里没有活着的 worker 才开，上一个失败了不重开")
+    assert relay.topup("lab1", dict(jobs=[], taskq=none)) == ([], "那边没有备好、没人领的任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=none)) == ([], "那边没有备好、没人领的任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=ready)) == ([("pueue", None, 1)], "")
+    ok("pueue 类：没有备好的任务不开 worker（空闲退出的那个不算失败），有了再开")
+
+
+def test_slurm_topup_ready():
+    two = dict(enabled=True, tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="free"), dict(key="a/x/2", state="claimed")])
+    probe = lambda out: (lambda name, cmd: (0, out, ""))  # noqa: E731
+    q = next(iter(relay.P.SLURM[NAME]["gpu"]))
+    subs, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|0|0\n"))
+    assert [n for _, _, n in subs] == [2], subs
+    subs, why = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|3|2\n"))
+    assert subs == [] and "排着的作业已有 2 个" in why
+    subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
+    assert subs == [] and "备好" in why
+    ok("Slurm 类（DICC2）：备好 2 个最多交 2 个，排着的够了不交，没备好不交")
 
 
 def ok(msg):
@@ -211,7 +230,8 @@ def test_plan():
 # ---------------- 2. 挪进数据目录的顺序 ----------------
 def test_place():
     src, D = os.path.join(T, "place_src"), os.path.join(T, "place_dst")
-    real = dict(out="nnUNet/results/X/tr/fold_0", done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"])
+    real = dict(out="nnUNet/results/X/tr/fold_0", done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"],
+                fetch=dict(extra=["*.json"]))
     written = ["nnUNet/results/X/tr/fold_0/validation/a.nii.gz", "nnUNet/results/X/tr/plans.json",
                "logs/tasks/k__1_seg1.log", "nnUNet/results/X/tr/fold_0/checkpoint_final.pth",
                "nnUNet/results/X/tr/fold_0/validation/summary.json"]
@@ -240,6 +260,26 @@ def test_place():
     assert seen[:2] == ["nnUNet/results/X/tr/fold_0/validation/a.nii.gz", "logs/tasks/k__1_seg1.log"], seen
     assert os.path.exists(os.path.join(D, real["out"], "validation/summary.json"))
     ok("拉回：训完的标志最后挪（中途出错时不算训完），上一级已有的 JSON 不覆盖")
+
+    src, D = os.path.join(T, "place2_src"), os.path.join(T, "place2_dst")
+    real = dict(out="predictions/m/fold_0", done=[".infer_done"], fetch=dict(extra=[]))
+    written = ["predictions/m/fold_0/.infer_done", "predictions/m/fold_0/MANIFEST.json", "predictions/m/fold_0/c1.nii.gz",
+               "predictions/m/note.txt"]
+    for w in written:
+        TN.wb(os.path.join(src, w), b"n")
+    seen = []
+
+    def spy2(a, b):
+        seen.append(os.path.relpath(b, D))
+        real_replace(a, b)
+    relay.os.replace = spy2
+    try:
+        relay.place(src, D, written, real)
+    finally:
+        relay.os.replace = real_replace
+    assert seen == ["predictions/m/fold_0/c1.nii.gz", "predictions/m/note.txt", "predictions/m/fold_0/MANIFEST.json",
+                    "predictions/m/fold_0/.infer_done"], seen
+    ok("拉回：MANIFEST.json 在训完的标志前、普通文件后挪")
 
 
 # ---------------- 3. 真跑 ----------------
@@ -292,13 +332,130 @@ def test_e2e():
     st = json.load(open(relay.STATUS))[NAME]
     assert sp["key"] in st["folds"] and st["folds"][sp["key"]]["final"], st
     ok("status.json 里有这一折（真 key）")
+    return pre
+
+
+def test_e2e_path(pre):
+    """通用换名的任务：和上面训练的视图同时在那边，传数据只动自己的视图；拉回一半不算做完。"""
+    before = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
+                    for dp, _, fs in os.walk(pre) for f in fs)
+    sp = TN.path_setup()
+    relay.lookup = lambda k: sp
+    akey = relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
+    assert akey.startswith("job/") and k["views"] == k["params"]["data"] and len(k["views"]) == 3, k
+    assert k["cleanup"] == [os.path.dirname(k["params"]["out"])], k
+    D = os.path.join(RROOT, "data")
+    a_in = k["views"][0]
+    assert open(os.path.join(D, a_in, "y_0000.nii.gz"), "rb").read() == b"yy"
+    assert open(os.path.join(D, a_in, "a", "x_0000.nii.gz"), "rb").read() == b"xa"
+    assert not any(os.path.exists(os.path.join(D, v, ".incomplete")) for v in k["views"])
+    after = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
+                   for dp, _, fs in os.walk(pre) for f in fs)
+    assert after == before, "训练的视图被动了"
+    reg = relay.load_state()["views"][NAME]
+    assert set(k["views"]) <= set(reg) and any(v.startswith("nnUNet/preprocessed/") for v in reg), reg
+    TN.wb(os.path.join(D, a_in, "stray.txt"), b"?")
+    relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    assert not os.path.exists(os.path.join(D, a_in, "stray.txt")) and after == sorted(
+        (os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
+        for dp, _, fs in os.walk(pre) for f in fs)
+    ok("通用换名传数据：每个输入一个视图（登记了），只在自己的视图里删多出来的文件，同时在那边的训练视图不动")
+
+    asp = S.resolve("command", k["params"])
+    TN.wb(os.path.join(D, asp["out"], "a.csv"), b"1")
+    TN.wb(os.path.join(D, os.path.dirname(asp["out"]), "plans.json"), b"{}")
+    TN.wb(os.path.join(D, "logs", "tasks", S.safe(asp["key"]) + "__9_seg1.log"), b"log")
+    try:
+        relay.fetch(NAME, sp["key"], say=lambda m: None)
+        raise AssertionError("少 .done 应报没做完")
+    except relay.RN.RelayError as e:
+        assert "还没" in str(e), e
+    assert not os.path.exists(os.path.join(TN.ROOT, sp["out"]))
+    TN.wb(os.path.join(D, asp["out"], ".done"), b"")
+    relay.fetch(NAME, sp["key"], say=lambda m: None)
+    out = os.path.join(TN.ROOT, sp["out"])
+    assert sorted(os.listdir(out)) == [".done", "a.csv"], os.listdir(out)
+    assert os.path.exists(os.path.join(TN.ROOT, "RQ1/analysis/thing/plans.json"))
+    assert os.path.exists(os.path.join(TN.ROOT, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"))
+    ok("通用换名拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志换回真名放进 box")
+
+    for bad in ("/etc", "a/../../x", "in"):
+        try:
+            relay.safe_rel(bad)
+            raise AssertionError(bad)
+        except relay.RN.RelayError:
+            pass
+    assert relay.views_of(dict(view="nnUNet/preprocessed/D1")) == ["nnUNet/preprocessed/D1"]
+    ok("要删的、要建的路径在数据目录里、至少两层；旧记录的 view 也认")
+
+
+def test_tilde_root():
+    """根目录写成 ~/…（dicc1 的 ~/st/…）：开头的 ~ 留给那边展开，其余加引号（10/31）。"""
+    c0 = M.RELAY[NAME]
+    M.RELAY[NAME] = dict(c0, root="~/st/t123")
+    try:
+        assert relay.prefix(NAME).startswith("cd ~/st/t123/code/current && TASKQ_DIR=~/st/t123/queue "), relay.prefix(NAME)
+        seen = []
+        relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "{}", ""))[1]), relay.rsh
+        try:
+            relay.rpy(NAME, "print(1)")
+        except RuntimeError:
+            pass
+        relay.rsh = rsh0
+        assert seen and seen[0].endswith(" ~/st/t123"), seen
+    finally:
+        M.RELAY[NAME] = c0
+    files = relay_bundle.contents(NAME, commit="HEAD", root="~/st/t123")
+    sb = next(t for p, (t, _) in files.items() if p.endswith("worker.sbatch"))
+    assert "#SBATCH --output=../../../../data/logs/workers/%x_%j.out" in sb and "\nR=~/st/t123\n" in sb, sb
+    assert relay_bundle.rename("worker_start.sh") in sb  # 显存填充那条路（worker.sbatch → worker_start.sh）不绕开
+    txt = "\n".join(t for t, _ in files.values())
+    assert "~/st/t123/queue" in txt or "$HOME/st/t123/queue" in txt
+    sh = "\n".join(t for p, (t, _) in files.items() if p.endswith((".sh", ".sbatch")))
+    assert '"~/st/t123' not in sh, "shell 双引号里的 ~ 不展开（Python 的 expanduser 里可以）"
+    assert relay_bundle.home_paths('a="$HOME/.cache/phd/taskq" b=~/.cache/phd/x', "~/st/t1") == 'a="$HOME/st/t1/queue" b=~/st/t1/state/x'
+    assert relay_bundle.home_paths('a="$HOME/.cache/phd/taskq"', "/scr/u/r") == 'a="/scr/u/r/queue"'
+    ok("根目录 ~/…：命令里 ~ 不加引号，sbatch 的日志用相对路径，包里 $HOME/~ 的写法照旧")
+
+
+def test_adapters_in_relay():
+    """调度器的读写都经 scripts/sites/pueue.py、slurm.py（10/31）。"""
+    raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status=dict(Done=dict(result="Success"))),
+                                 "4": dict(group="other", label="x", status="Running")}))
+    rs = relay.parse_sched("lab1", dict(sched_raw=raw, taskq={}))
+    assert rs["squeue"] is None and [j[0] for j in rs["jobs"]] == [3] and rs["jobs"][0][3] == "Success", rs
+    assert relay.parse_sched("lab1", dict(sched_raw=None))["jobs"] is None
+    rs = relay.parse_sched(NAME, dict(sched_raw="101|w|RUNNING|1:00|long|n1\n"))
+    assert rs["jobs"] is None and rs["squeue"] == [["101", "w", "RUNNING", "1:00", "long", "n1"]]
+    seen = []
+    relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append((name, cmd)), (0, "4870\n", ""))[1]), relay.rsh
+    try:
+        msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2)])
+        assert not stuck and len(seen) == 2 and all("sbatch --parsable --qos=long --time=1:00:00 worker.sbatch" in c for _, c in seen)
+        assert seen[0][1].startswith(f"cd {relay.R.q(relay.root(NAME))}/code/current/scripts/queue && ")
+        seen.clear()
+        msgs, stuck = relay.submit("lab1", [("pueue", None, 1)])
+        assert not stuck and len(seen) == 1 and " add -g " in seen[0][1] and "worker:" in seen[0][1], seen
+        relay.rsh = lambda name, cmd, input=None, timeout=300: (1, "boom", "")
+        _, stuck = relay.submit("lab1", [("pueue", None, 1)])
+        assert list(stuck) == ["site:lab1:worker"], stuck
+        _, stuck = relay.submit(NAME, [("long", "1:00:00", 1)])
+        assert list(stuck) == [f"topup:{NAME}:long"], stuck
+    finally:
+        relay.rsh = rsh0
+    assert not hasattr(relay, "worker_jobs")
+    ok("relay：一次 ssh 读回原始输出、在 box 上用适配器解析；开 worker / 交作业用适配器，报警的编号照旧")
 
 
 if __name__ == "__main__":
     test_plan()
     test_pueue_worker()
+    test_slurm_topup_ready()
+    test_tilde_root()
+    test_adapters_in_relay()
     test_adopt_out()
     test_place()
-    test_e2e()
+    test_e2e_path(test_e2e())
     shutil.rmtree(T)
     print("全部通过")

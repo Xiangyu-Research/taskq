@@ -84,6 +84,10 @@ def resolve(recipe, params, exp=None):
     if recipe not in R.RECIPES:
         raise SpecError(f"不认识的做法 {recipe}（有：{', '.join(R.RECIPES)}）")
     r = R.RECIPES[recipe]
+    if "inputs" in params:  # inputs 是 data 的另一个名字（2026-10-31）
+        if "data" in params:
+            raise SpecError("inputs 和 data 是同一个字段，只给一个")
+        params = {("data" if k == "inputs" else k): v for k, v in params.items()}
     fields = [k for k in r if k not in ("params", "open")]
     over = {k: v for k, v in params.items() if k in fields and k not in r["params"]}
     p = {k: v for k, v in r["params"].items()}
@@ -108,8 +112,46 @@ def resolve(recipe, params, exp=None):
         s[k] = fill(v, p)
     if isinstance(s["done"], str):
         s["done"] = [s["done"]]
+    _check(s)
     s.update(recipe=recipe, params={k: v for k, v in params.items()}, exp=exp, names=p)
     return s
+
+
+RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu")
+
+
+def _check(s):
+    """任务单的通用字段：data（= inputs）、resume、res、progress 统一格式并检查（2026-10-31）。"""
+    for k in ("data", "resume"):
+        v = s.get(k)
+        if isinstance(v, str):
+            v = [v]
+        if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) and x for x in v)):
+            raise SpecError(f"{k} 要是路径的列表：{v!r}")
+        if k == "data" and any(".." in x.split("/") for x in v or []):
+            raise SpecError(f"data 里不能有 ..：{v!r}")
+        s[k] = v if k == "resume" else (v or [])
+    s["inputs"] = s["data"]
+    res = dict(s.get("res") or {})
+    if set(res) - set(RES):
+        raise SpecError(f"res 只能有 {', '.join(RES)}：{res!r}")
+    for k, v in res.items():
+        if v is None:
+            continue
+        if k == "mem":
+            if not re.fullmatch(r"\d+[KMGT]?", str(v)):
+                raise SpecError(f"res.mem 要写成 32G 这样：{v!r}")
+            res[k] = str(v)
+            continue
+        try:
+            res[k] = float(v) if k == "gpu_mem" else int(v)
+        except (TypeError, ValueError):
+            raise SpecError(f"res.{k} 要是数：{v!r}") from None
+        if res[k] < 0:
+            raise SpecError(f"res.{k} 不能是负数：{v!r}")
+    s["res"] = res
+    if s.get("progress") not in PROGRESS:
+        raise SpecError(f"不认识的进度解析方法 {s.get('progress')}（有：{', '.join(k for k in PROGRESS if k)}）")
 
 
 def parse_kv(args):
@@ -203,6 +245,24 @@ def eta_at(runs, nep, hours=3):
     return b[0] + timedelta(seconds=(nep - b[1]) / rate)
 
 
+def progress_json(fd):
+    """任务自己写的 out/PROGRESS.json（{"done": n, "total": m}）→ 一段进度；没有或读不了 → None。"""
+    p = os.path.join(fd, "PROGRESS.json")
+    try:
+        d = json.load(open(p))
+        done = int(d.get("done") or 0)
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(p)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    total = d.get("total")
+    return dict(start=None, end=t, epochs_done=done, total=int(total) if isinstance(total, (int, float)) else None, tl=[[t, done]])
+
+
+def resumable(s, fd):
+    """out 下有任务说明 resume 里的存档（任何一个）。"""
+    return any(glob.glob(os.path.join(fd, g)) for g in s.get("resume") or [])
+
+
 def plain_log(path):
     """没有进度解析方法时：只记日志的修改时间。"""
     t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(path)))
@@ -233,7 +293,7 @@ def nnunet_debug(fd):
             "torch": d.get("torch_version")}
 
 
-PROGRESS = {"nnunet_log": nnunet_log, None: plain_log}
+PROGRESS = {"nnunet_log": nnunet_log, "progress_json": plain_log, None: plain_log}  # progress_json：日志只看时间，进度另读
 INFO = {"nnunet_debug": nnunet_debug, None: lambda fd: {}}
 
 
@@ -250,7 +310,7 @@ def metrics(s, fd):
     return out
 
 
-COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics")
+COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume")
 
 
 def all_tasks(queue=()):
@@ -287,8 +347,13 @@ def collect(specs, root):
                 runs.append(parse(p))
             except OSError:
                 pass
+        if s.get("progress") == "progress_json":
+            pj = progress_json(fd)
+            if pj:
+                runs.append(pj)
         out["folds"][s["key"]] = dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
-                                      dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd))
+                                      dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd),
+                                      resumable=resumable(s, fd))
     pats = [os.path.join(root, "nnUNet", "results", "logs", "*_seg*.log"), os.path.join(root, "logs", "tasks", "*_seg*.log")]
     for p in (q for pat in pats for q in glob.glob(pat)):
         first, trained = "", False
@@ -340,7 +405,8 @@ def shell_lines(s, data, repo=REPO):
     """run_task.sh 用：把说明变成 shell 变量（按本机的数据目录、仓库展开）。"""
     e = expand(s, data, repo)
     lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote(e['env'])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
-             f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}"]
+             f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
+             f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}"]
     lines += [f"export {k}={shlex.quote(str(v))}" for k, v in e["vars"].items()]
     return "\n".join(lines)
 

@@ -1,6 +1,7 @@
 """有盘空间预算的 relay 机器（envs/machines.py RELAY 条目的 budget）的清理（2026-10-31）：剩余低于软线时，先删总队列不再要的
-数据集视图（R/data/nnUNet/preprocessed/ 下不在 keep 里的目录），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
-硬链接收编、老目录还有一份的不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西。"""
+视图（state 里登记过的各任务的视图，加上 R/data/nnUNet/preprocessed/ 下的目录；不在 keep 里、没有 .incomplete（正在建）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
+硬链接收编、老目录还有一份的不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西。
+根目录经软链接到达时，视图里的软链接指的是软链接的路径，比较时都换成真实路径。"""
 import os
 import sys
 
@@ -45,27 +46,36 @@ def rmtree(d):
     os.rmdir(d)
 if free()<soft:
     keep={os.path.normpath(k) for k in A.get('keep') or []}
+    cand=set()
+    for v in A.get('views') or []:
+        v=os.path.normpath(v)
+        if not v.startswith('/') and '..' not in v.split('/') and len(v.split('/'))>=2:
+            cand.add(v)
     if os.path.isdir(P) and inside(P,D):
-        for n in sorted(os.listdir(P)):
-            rel=os.path.relpath(os.path.join(P,n),D)
-            if rel in keep:
-                continue
-            rmtree(os.path.join(P,n))
+        cand|={os.path.relpath(os.path.join(P,n),D) for n in os.listdir(P)}
+    for rel in sorted(cand):
+        d=os.path.join(D,rel)
+        if rel in keep or any(k.startswith(rel+'/') or rel.startswith(k+'/') for k in keep):
+            continue
+        if not os.path.lexists(d):
             out['removed_views'].append(rel)
+            continue
+        if os.path.exists(os.path.join(d,'.incomplete')) or not inside(d,D):
+            continue
+        rmtree(d)
+        out['removed_views'].append(rel)
 if free()<soft and os.path.isdir(B) and inside(B,R):
     used=set()
     for dp,dns,fns in os.walk(D):
         for f in fns+dns:
             p=os.path.join(dp,f)
             if os.path.islink(p):
-                t=os.readlink(p)
-                t=os.path.normpath(t if os.path.isabs(t) else os.path.join(dp,t))
-                used.add(t)
+                used.add(os.path.realpath(p))
     cand=[]
     for dp,_,fns in os.walk(B):
         for f in fns:
             p=os.path.normpath(os.path.join(dp,f))
-            if p in used or os.path.islink(p):
+            if os.path.realpath(p) in used or os.path.islink(p):
                 continue
             st=os.lstat(p)
             if st.st_nlink!=1:
@@ -90,12 +100,13 @@ def budget(name):
     return M.machine(name).get("budget")
 
 
-def gc(name, keep_dirs, rpy, soft_gb=None, free=None):
+def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=()):
     """name 这台的清理 → dict(freed, removed_views, removed_blobs, free)；没有 budget → None。
-    keep_dirs：总队列里分给这台、没训完的任务要用的别名数据集目录（相对 R/data）。rpy：relay.rpy。free 只给测试用。"""
+    keep_dirs：分给这台的任务要用的、刚建的视图（相对 R/data）。views：登记过的视图（relay.py 的 state）。rpy：relay.rpy。
+    free 只给测试用。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
     if soft_gb is None:
         b = budget(name)
         if not b:
             return None
         soft_gb = b[0]
-    return rpy(name, GC_PY, dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free))
+    return rpy(name, GC_PY, dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views)))

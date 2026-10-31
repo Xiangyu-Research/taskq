@@ -58,6 +58,7 @@ PATIENCE=${TASKQ_PATIENCE:-$([[ $DEVICE == cpu ]] && echo 0 || echo 1200)}      
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
 IDLE_MAX=${TASKQ_IDLE_MAX:-2400}        # 手上没有在训的连续这么久就结束作业（DICC：使用率连续 1 小时低于 40% 会被取消）
 IDLE_POLL=${TASKQ_IDLE_POLL:-60}        # 不在 Slurm 里、手上没有在训的时候隔多久再看
+IDLE_EXIT=${TASKQ_IDLE_EXIT:-1800}      # 不在 Slurm 里：手上没有在训的连续这么久就退出（退出码 0），有备好的任务时下次检查再开（10/31）
 MAX_OWN_FAIL=2
 EARLY_FAIL=${TASKQ_EARLY_FAIL:-600}     # 开始后这么久内就失败的才算本作业（节点、环境）的问题
 FAIL_WINDOW=${TASKQ_FAIL_WINDOW:-3600}  # 只数这么久以内的（10/24：隔很久的零星失败不让作业提前结束）
@@ -333,6 +334,9 @@ while true; do
             fi
             msg=$why
             (( OWN_FAILS >= MAX_OWN_FAIL )) && msg=own
+            if [[ $msg != own ]] && (( now - idle_since >= IDLE_EXIT )); then
+                echo "$(ts) 手上没有在训的已经 $(( (now - idle_since) / 60 )) 分钟，退出（有备好的任务时下次检查再开）"; break
+            fi
             if [[ $msg != "${said_idle:-}" ]]; then
                 case $msg in
                     own) echo "$(ts) 本 worker $(( FAIL_WINDOW / 60 )) 分钟内有 $OWN_FAILS 个任务开始不久就失败，先不领，过了时间窗再领" ;;
