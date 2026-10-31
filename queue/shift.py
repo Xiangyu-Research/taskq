@@ -114,15 +114,16 @@ def pause(host, g, name):
             break
         time.sleep(5)
     left = [i for i in run if tasks and tasks[i]["state"] == "Done" and "Success" not in json.dumps(tasks[i]["status"])]
+    to = next((r for r, c in M.RELAY.items() if c.get("ssh") == host and P.AUTO.get(r)), name)  # 同一台上开着的 RELAY 执行机（lab1）
     moved = [i for i in left if tasks[i]["label"].startswith("train:")
-             and hand_over(tasks[i]["label"][len("train:"):], f"{name}:{g}", name)]
+             and hand_over(tasks[i]["label"][len("train:"):], f"{name}:{g}", to)]
     back = [i for i in left if i not in moved]
     if moved:
         C.run(f"{PUEUE} remove {' '.join(map(str, moved))}", host, timeout=60)
     if back:
         C.run(f"{PUEUE} restart --in-place {' '.join(map(str, back))}", host, timeout=60)
     names = ", ".join(tasks[i]["label"] for i in run) if tasks else str(run)
-    return f"停了 {names}（交给 {name} 的缓冲：{moved or '无'}；放回队列：{back or '无'}）"
+    return f"停了 {names}（交给 {to}：{moved or '无'}；放回队列：{back or '无'}）"
 
 
 def run(s=None, dry=False, now=None):

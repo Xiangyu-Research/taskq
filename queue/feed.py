@@ -185,6 +185,12 @@ def only_here(name, ctq):
             and spec(t).get("machines") == [name] and runnable(name, t) and name not in (t.get("skipped_by") or [])]
 
 
+def manual_done(ctq, name, copying):
+    """分给这台机器上手动训的（"<机器>:<组>"，如 lab:gpu0，pueue 里的训练任务）：box 上训完、没在拷时交还 → release 动作。"""
+    return [dict(op="release", key=t["key"], worker=t["assigned"], why="box 上有了") for t in ctq["tasks"]
+            if (t.get("assigned") or "").startswith(f"{name}:") and t["state"] == "done" and t["key"] not in copying]
+
+
 def plan(s, name, st, data=None, now=None):
     """→ (动作, 卡住的 {问题编号: 说明}, 说明)。动作 dict(op=release|bremove|bstop|bresume|put|send|sync, key, …)。
     data：(box, 那边) 数据探查结果（probe），None = 这次不送训练（只算要查哪些路径，见 want_paths）。"""
@@ -255,9 +261,7 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="release", key=k, skip=f"{L} 上失败 {b.get('failures')} 次", why=f"{L} 上失败、没有进度，{L} 不再分它"))
         elif b["state"] in ("bad", "blocked"):
             stuck[f"site:{name}:fail:{k}"] = f"{L} 缓冲里的 {k} {b['state']}：{b.get('note')}"
-    for t in ctq["tasks"]:  # 分给这台机器上手动训的（如 lab:gpu0，pueue 里的训练任务）：box 上训完、没在拷时交还
-        if (t.get("assigned") or "").startswith(f"{name}:") and t["state"] == "done" and t["key"] not in copying:
-            acts.append(dict(op="release", key=t["key"], worker=t["assigned"], why="box 上有了"))
+    acts += manual_done(ctq, name, copying)
     assigned = {t["key"] for t in mine}
     for k, b in bt.items():
         if k in assigned or not removable(k) or k in gone:
@@ -501,6 +505,17 @@ def run_all(s, dry=False):
             ev, st_ = [], {f"feed:{name}": f"scripts/queue/feed.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
+    ctq = (s.get("taskq") or {}).get(M.hub())
+    for name in M.MACHINES:  # 有手动组、但不是执行机的机器（lab 的 1 号卡换成 RELAY 的 lab1 以后，10/31）
+        if name in P.OFFLINE or name in sites() or not M.manual_groups(name) or not ctq:
+            continue
+        acts = manual_done(ctq, name, {k for stp, k in box_live(s) if stp in COPYING})
+        if dry:
+            events += [f"{M.MACHINES[name]['label']}：会 {describe(acts)}"] if acts else []
+        elif acts:
+            msgs = execute(name, acts)
+            log(msgs)
+            events += msgs
     if not dry:
         save_state(st)
     return events, stuck

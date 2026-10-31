@@ -90,8 +90,10 @@ shift.group_tasks = lambda host, g: next(seq)
 moves = []
 shift.hand_over = lambda key, frm, to: (moves.append((key, frm, to)), key != "D/t/2")[1]
 calls.clear()
+shift.M.RELAY = {"r1": dict(ssh="lab")}
+shift.P.AUTO = dict(shift.P.AUTO, r1=True)
 msg = real_pause("lab", "gpu0", "lab")
-assert moves == [("D/t/1", "lab:gpu0", "lab"), ("D/t/2", "lab:gpu0", "lab")], moves
+assert moves == [("D/t/1", "lab:gpu0", "r1"), ("D/t/2", "lab:gpu0", "r1")], moves  # 同一台上开着的 RELAY 执行机
 assert any(c.endswith("remove 1") for c in calls) and any(c.endswith("restart --in-place 2 3") for c in calls), calls
 assert not any("remove" in c and "4" in c for c in calls), calls
 ok("时段结束：没训完的训练交给缓冲、pueue 里删掉；改分失败的和别的任务放回队列；排着的不动")
