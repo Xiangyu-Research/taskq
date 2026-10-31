@@ -163,14 +163,17 @@ def build_script(name, env):
           'echo "$H" > "$SD/$N.ok"', 'echo "== $(date "+%F %T") $N 建好、检查过"']
     text = "\n".join(L) + "\n"
     if name in M.RELAY:
-        hits = forbidden(text)
+        hits = forbidden(text, (m["root"], M.env_root(m)) if m.get("root") else ())
         if hits:
             raise EnvError(f"给 {name} 的建环境脚本里有不能出现的字样：{'、'.join(hits)}")
     return text
 
 
-def forbidden(text):
+def forbidden(text, allow=()):
+    """allow：这台机器自己的根目录（同代码包的核对），可以出现。"""
     import relay_bundle as RB
+    for a in sorted(allow, key=len, reverse=True):
+        text = text.replace(a.rstrip("/"), "")
     low = text.lower()
     return sorted({w for w in RB.FORBIDDEN if w.lower() in low and w.lower() not in ALLOW})
 

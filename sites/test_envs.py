@@ -57,6 +57,8 @@ M.RELAY["tsite"] = dict(label="测试", hostname=r"(?!)", ssh="tsite", scheduler
 M.RELAY["tslurm"] = dict(label="测试 Slurm", hostname=r"(?!)", ssh="tslurm", scheduler="slurm", root="/s/y",
                         conda=("/app/c", "pt"), envs={"nnunet": "spec"}, roles=("train",),
                         transfer_job="-p cpu-x --qos=normal -c 4 --mem=4G")
+SAVE_S = copy.deepcopy(M.SITES)
+M.SITES.update(tsite=M.RELAY["tsite"], tslurm=M.RELAY["tslurm"])  # machine() 读 SITES（10/31 起 RELAY 是它的一部分）
 
 a = M.activate("tsite", "umamba")
 ok("spec 环境的激活语句 = 根目录下的 .activate", "source /r/x1/envs/umamba/.activate" in a)
@@ -115,6 +117,20 @@ try:
     ok("不是按描述建的环境 → 报错", False)
 except E.EnvError:
     ok("不是按描述建的环境 → 报错", True)
+M.RELAY["tsite"]["root"] = "/mnt/disk1/datasets/x1"  # 根目录里有 FORBIDDEN 的字样（lab1 的真根目录就是这样）
+ok("根目录里有禁用字样也能生成（同代码包，根目录本身可以出现）", "ROOT=/mnt/disk1/datasets/x1/envs" in E.build_script("tsite", "umamba"))
+M.RELAY["tsite"]["envs"]["umamba"] = "spec"
+open_ck, ckd = E.check_file, tempfile.mkdtemp()
+open(f"{ckd}/c.py", "w").write("# /mnt/disk1 别处\n")
+E.check_file = lambda env: f"{ckd}/c.py"
+try:
+    E.build_script("tsite", "umamba")
+    ok("根目录以外的禁用字样照样报错", False)
+except E.EnvError as e_:
+    ok("根目录以外的禁用字样照样报错", "/mnt/disk1" in str(e_))
+E.check_file = open_ck
+shutil.rmtree(ckd)
+M.RELAY["tsite"]["root"] = "/r/x1"
 ok("dry-run 不跑命令", E.build("tsite", "umamba", dry=True,
                               run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("跑了")))[0] == 0)
 ok("生成的脚本 bash -n 过", all(subprocess.run(["bash", "-n"], input=E.build_script("tsite", n), text=True).returncode == 0
@@ -146,6 +162,7 @@ exec(compile(src, "machines.py", "exec"), ns)
 ok("生成的 machines.py 能用，spec 环境的激活语句对", "source /r/x1/envs/umamba/.activate" in ns["activate"]("tsite", "umamba"))
 M.MACHINES.clear(); M.MACHINES.update(SAVE_M)
 M.RELAY.clear(); M.RELAY.update(SAVE_R)
+M.SITES.clear(); M.SITES.update(SAVE_S)
 
 # ---------- 真建一个小环境（--real：在临时目录里，只有 numpy） ----------
 if "--real" in sys.argv:

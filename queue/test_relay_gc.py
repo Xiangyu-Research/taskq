@@ -133,6 +133,18 @@ def main():
         assert os.path.isdir(os.path.dirname(R)) and os.path.isdir(os.path.join(D, "in"))
         ok("登记过的任务视图也清理：keep 里的、正在建的（.incomplete）不删，那边已经没有的报出来让登记表去掉，越界的、只有一层的不认")
 
+        # 根目录经软链接到达（视图里的软链接指向软链接的路径）：在用的 blob 照样认得出来
+        real = tempfile.mkdtemp(dir=tmp)
+        R, _ = build(real)
+        link = os.path.join(tmp, "Rlink")
+        os.symlink(R, link)
+        pre = os.path.join(R, "data", "nnUNet", "preprocessed", "ds_keep", "plans_3d", "c1.npz")
+        os.remove(pre)
+        os.symlink(os.path.join(link, "blobs", "aa", "aa1"), pre)
+        r = G.gc("x", keep, local_rpy(link), soft_gb=1.0, free=0)
+        assert exists(R, "aa1") and exists(R, "ee1") and not exists(R, "dd1"), r
+        ok("根目录经软链接到达时，在用的 blob 也不删")
+
         assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
         ok("没有 budget 的机器不清理")
     finally:
