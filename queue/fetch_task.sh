@@ -1,9 +1,9 @@
 #!/bin/bash
 # 把某台机器（envs/machines.py 里的名字，如 dicc、lab）上训完的一个任务拉回 box（2026-10-18，取代 fetch_fold.sh）。
 # 由 box 上的 scripts/queue/advance.py 在那边训完以后放进 wait 组：
-#   q wait --label fetch:t14met_f0 -- 'bash scripts/queue/fetch_task.sh dicc Dataset121_GLIMETrq1/nnUNetTrainer_save10/0'
+#   q wait --label fetch:<标签> -- 'bash scripts/queue/fetch_task.sh <机器> <key>'
 # 结果文件夹、训完的标志、不拉的文件、上一级里还要拉的文件都按任务说明（scripts/queue/spec.py lookup <key>：实验表或训练队列）：
-#   out、done、fetch.exclude、fetch.extra（nnU-Net 是模型文件夹里的 plans.json 等，推理要用）、fetch.also（另外要拉的文件夹，
+#   out、done、fetch.exclude、fetch.extra（如模型文件夹里推理要用的配置文件）、fetch.also（另外要拉的文件夹，
 #   相对数据目录，先于 out 拉；如五折集成的预测）、log。
 # 那边还没训完时每 10 分钟查一次，每小时记一行最新训练日志的情况（pueue log 里能看到）；不设等待上限，没进展由健康检查提醒。
 # 只新增 / 更新，不删 box 上的文件；box 上已经训完（done 都有）时直接结束。训完的标志最后拉。拉回失败重试 3 次。

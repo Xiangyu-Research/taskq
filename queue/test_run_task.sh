@@ -35,5 +35,35 @@ child=$(pgrep -f "sleep 300" -P "$(pgrep -P $rp | head -1)" 2> /dev/null; pgrep 
 kill -TERM $rp; wait $rp; rc=$?
 sleep 1
 check "SIGTERM：退出码 143、训练进程一起停" "(( rc == 143 )) && ! pgrep -P $rp > /dev/null && ! ps -o args= -p ${child:-0} 2> /dev/null | grep -q 'sleep 300'"
+# 等卡（res.wait_gpu，10/31）：假 nvidia-smi，前 $T/gpu/busy 次查进程时报 $T/gpu/apps 里的进程，之后报空；PID 1 是别人（root）的
+mkdir -p "$T/bin" "$T/gpu"
+cat > "$T/bin/nvidia-smi" << 'FAKE'
+#!/bin/bash
+G=$BRAIN_TUMOR/gpu
+case "$*" in
+    *query-compute-apps*) n=$(cat "$G/n" 2> /dev/null || echo 0); echo $(( n + 1 )) > "$G/n"
+                          (( n < $(cat "$G/busy") )) && cat "$G/apps" ;;
+    *query-gpu*) cat "$G/used" ;;
+esac
+exit 0
+FAKE
+chmod +x "$T/bin/nvidia-smi"
+gpu() { echo "$1" > "$T/gpu/busy"; echo "$2" > "$T/gpu/apps"; echo "$3" > "$T/gpu/used"; rm -f "$T/gpu/n"; }
+G="env PATH=$T/bin:$PATH CUDA_VISIBLE_DEVICES=0 RUN_TASK_GPU_POLL=1"
+gpu 2 "1, 1000" 0
+$G $R command key=toy/w1 'cmd=touch $BRAIN_TUMOR/toy/w1/DONE' env=nnunet out=toy/w1 'done=["DONE"]' > /dev/null; rc=$?
+check "卡上有别人的进程：等到空出来再跑（没给 wait_gpu = 一直等），每次看都记进日志" "(( rc == 0 )) && (( \$(grep -c 等它空出来 $T/logs/tasks/toy__w1__test-1_seg1.log) == 2 ))"
+gpu 2 "1, 1000" 0
+$G $R command key=toy/w2 'cmd=touch $BRAIN_TUMOR/toy/w2/DONE' env=nnunet out=toy/w2 'done=["DONE"]' 'res={"wait_gpu": 5}' > /dev/null; rc=$?
+check "wait_gpu 以内空出来：照常跑" "(( rc == 0 ))"
+gpu 99 "1, 1000" 0
+$G $R command key=toy/w3 'cmd=touch $BRAIN_TUMOR/toy/w3/DONE' env=nnunet out=toy/w3 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "等满 wait_gpu 还被占：退出码 1、命令没跑、日志写原因" "(( rc == 1 )) && [[ ! -e $T/toy/w3/DONE ]] && grep -q '还没空出来，不跑' $T/logs/tasks/toy__w3__test-1_seg1.log"
+gpu 99 "$$, 3000" 3000
+$G $R command key=toy/w4 'cmd=touch $BRAIN_TUMOR/toy/w4/DONE' env=nnunet out=toy/w4 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "卡上只有自己的进程（worker、显存填充）：不等" "(( rc == 0 )) && ! grep -q 等它空出来 $T/logs/tasks/toy__w4__test-1_seg1.log"
+gpu 99 "1, 1000" 1000
+$G SLURM_JOB_ID=1 $R command key=toy/w5 'cmd=touch $BRAIN_TUMOR/toy/w5/DONE' env=nnunet out=toy/w5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "Slurm 里不查卡" "(( rc == 0 )) && [[ ! -e $T/gpu/n ]]"
 rm -rf "$T"
 (( ok )) && echo "全部通过" || { echo "有失败"; exit 1; }

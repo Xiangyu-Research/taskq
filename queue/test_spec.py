@@ -61,6 +61,11 @@ ok("任务单：inputs 和 data 都给 → 报错", raises(lambda: S.resolve("co
 ok("任务单：res 写错字段、不是数、mem 格式不对 → 报错", raises(lambda: S.resolve("command", dict(G, res={"gpu": 1})))
    and raises(lambda: S.resolve("command", dict(G, res={"cpus": "many"})))
    and raises(lambda: S.resolve("command", dict(G, res={"mem": "lots"}))))
+w = S.resolve("command", dict(G, res={"wait_gpu": "120"}))
+ok("任务单：res.wait_gpu 转成分钟数、和默认的卡数合在一起，shell 里给 TASK_WAIT_GPU；不写时为空、负数报错",
+   w["res"] == {"gpus": 1, "wait_gpu": 120} and "TASK_WAIT_GPU=120" in S.shell_lines(w, "/d").splitlines()
+   and "TASK_WAIT_GPU=" in S.shell_lines(S.resolve("command", G), "/d").splitlines()
+   and raises(lambda: S.resolve("command", dict(G, res={"wait_gpu": -1}))))
 ok("任务单：data 里有 .. → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["../etc"]))))
 ok("任务单：不认识的 progress → 报错", raises(lambda: S.resolve("command", dict(G, progress="tqdm"))))
 ok("nnunet：也有 inputs、resume、一张卡，进度读 nnU-Net 日志", s["inputs"] == s["data"] and s["resume"]

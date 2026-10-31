@@ -99,7 +99,7 @@ def main():
         jn = M.SITES["dicc2"]["jobs"]["gpu"]
         out = "\n".join(["QOS|long|10|8", "QOS|normal||1",
                          f"JOB|101|{jn}|RUNNING|1:00|long|gpu06", f"JOB|102|{jn}|PENDING|0:00|long|Priority",
-                         "JOB|103|seg_xfer|RUNNING|0:01|normal|cpu01"])
+                         "JOB|103|tq_xfer|RUNNING|0:01|normal|cpu01"])
         R.RUN = Fake([("sacctmgr", (0, out, ""))])
         st = SL.status("dicc2")
         assert st["counts"] == {"long": (10, 8), "normal": (None, 1)} and len(st["squeue"]) == 3

@@ -298,10 +298,10 @@ def test_infer():
     for a, r in ex["files"]:
         assert not any(w in a for w in words) and "RQ1" not in a, a
         assert os.path.isfile(r) and not os.path.islink(r)
-    rd = {d: d.replace("RQ1", "SEG") for d in INS}
+    rd = {d: RB.rename(d) for d in INS}
     assert ex["views"] == [f"{am}/fold_0"] + [rd[d] for d in sorted(INS)], ex["views"]
-    an = f"SEG/analysis/{alias}/{TD}/fold_0"
-    assert ex["cleanup"] == [f"{am}/fold_0", an] and RB.rename(f"RQ1/analysis/{alias}/{TD}/fold_0") == an, ex["cleanup"]
+    an = RB.rename(f"RQ1/analysis/{alias}/{TD}/fold_0")
+    assert ex["cleanup"] == [f"{am}/fold_0", an] and not an.startswith("RQ1"), ex["cleanup"]
     cm = names.case_map(RN.INFER_CASES)
     assert cm["BraTS-PED-00010-000"] == cm["BraTS-PED-00010-000"] and len(set(cm.values())) == len(cm) == 4
     assert fm[f"{rd['nnUNet/raw/RQ1_external/UCSF/imagesTs']}/{cm['UCSF-PDGM-0004']}_0002.nii.gz"].endswith("UCSF-PDGM-0004_0002.nii.gz")

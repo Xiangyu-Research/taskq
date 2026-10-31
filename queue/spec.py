@@ -117,7 +117,7 @@ def resolve(recipe, params, exp=None):
     return s
 
 
-RES = ("gpus", "cpus", "mem", "gpu_mem")
+RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu")
 
 
 def _check(s):
@@ -405,7 +405,8 @@ def shell_lines(s, data, repo=REPO):
     """run_task.sh 用：把说明变成 shell 变量（按本机的数据目录、仓库展开）。"""
     e = expand(s, data, repo)
     lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote(e['env'])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
-             f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}"]
+             f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
+             f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}"]
     lines += [f"export {k}={shlex.quote(str(v))}" for k, v in e["vars"].items()]
     return "\n".join(lines)
 
