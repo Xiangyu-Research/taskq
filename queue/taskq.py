@@ -174,9 +174,9 @@ def spec_of(t):
 
 
 def data_root():
-    """本机的数据目录：BRAIN_TUMOR（envs/nnunet_paths.sh 设的）> envs/machines.py。"""
-    if os.environ.get("BRAIN_TUMOR"):
-        return os.environ["BRAIN_TUMOR"]
+    """本机的数据目录：TASKQ_DATA（旧名 BRAIN_TUMOR，envs/nnunet_paths.sh 两个都设）> envs/machines.py。"""
+    if os.environ.get("TASKQ_DATA") or os.environ.get("BRAIN_TUMOR"):
+        return os.environ.get("TASKQ_DATA") or os.environ["BRAIN_TUMOR"]
     import machines as M
     me = M.whoami()
     if not me:
@@ -686,7 +686,8 @@ def task_log_age(root, key, worker):
     """领着这个任务的作业写的分段日志（run_task.sh）多久没更新（秒）；没有 → None。"""
     if not worker:
         return None
-    logs = glob.glob(os.path.join(root, "logs", "tasks", f"{glob.escape(safe(key))}__{glob.escape(str(worker))}_seg*.log"))
+    pre = os.path.join(root, "logs", "tasks", f"{glob.escape(safe(key))}__{glob.escape(str(worker))}_")
+    logs = glob.glob(pre + "part*.log") + glob.glob(pre + "seg*.log")  # _seg：10/31 前的名字
     try:
         return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
     except OSError:
@@ -737,7 +738,7 @@ def remote(host, args, timeout=120, env="", input=None):
     import machines as M
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
-    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"
+    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}TASKQ_DATA={m['data']} BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"
     rc, out, err = C.run(cmd, m["ssh"], timeout, ssh=ssh, input=input)
     return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 

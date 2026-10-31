@@ -146,7 +146,7 @@ def test_bundle(T):
         r = subprocess.run(["bash", "-n", os.path.join(path, f)], capture_output=True, text=True)
         assert r.returncode == 0, (f, r.stderr)
     pe = open(os.path.join(path, RB.rename("research/RQ1/analysis/run_predict_eval.sh")), encoding="utf-8").read()
-    assert RB.rename("RQ1_GPU_PAD=0") in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
+    assert "TASKQ_GPU_PAD=0" in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
     real_c = B.cohorts(open(os.path.join(HERE, "..", "..", B.PE_SH), encoding="utf-8").read())
     assert {"UCSF", "MEN", "PEDs-noskullstrip", "GLI_holdout", "GLI"} <= set(real_c), real_c
     assert "EXT=(${TS_EXT?})" in pe and RB.rename("RQ1_holdout") + "/${TS_HOLD:?}/imagesTs" in pe, pe[:400]
@@ -155,7 +155,7 @@ def test_bundle(T):
     assert not any(hits.values()), {f: h for f, h in hits.items() if h}
     assert B.cohort_hits("segment men MENx x-MEN", real_c) == [] and B.cohort_hits("a MEN b", real_c) == ["MEN"]
     pr = open(os.path.join(path, RB.rename("research/RQ1/nnunet/predict.sh")), encoding="utf-8").read()
-    assert RB.rename("RQ1_GPU_PAD=0") in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
+    assert "TASKQ_GPU_PAD=0" in pr and "RQ1_" not in pr and "BRAIN_TUMOR" not in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
     np_ = open(os.path.join(path, "envs/nnunet_paths.sh"), encoding="utf-8").read()
     assert "mem_keep_start.sh" in np_ and "gpu_pad" not in np_, np_[:300]
     assert not B.forbidden_hits(path, files)
@@ -195,13 +195,13 @@ def test_bundle(T):
     assert f"#SBATCH --job-name={e['jobs']['gpu']}" in sb
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
-    assert RB.rename("export TASKQ_DIR=$R/queue RQ1_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED") in sb
+    assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
     assert sb[-2] == 'exec bash "$REPO/scripts/queue/start.sh"' and "git" not in "\n".join(sb)
     assert run(["bash", "-n", os.path.join(cur, "scripts/queue/worker.sbatch")]).returncode == 0
     fake = os.path.join(T, "fakeR")
     os.makedirs(os.path.join(fake, "code", "b1", "scripts", "queue"))
     with open(os.path.join(fake, "code", "b1", "scripts", "queue", "start.sh"), "w") as f:
-        f.write(RB.rename('echo "$TASKQ_DIR|$RQ1_GPU_PAD_SWITCH|') + '$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
+        f.write(RB.rename('echo "$TASKQ_DIR|$TASKQ_GPU_PAD_SWITCH|') + '$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
     os.symlink("b1", os.path.join(fake, "code", "current"))
     body = "\n".join(sb).replace(f"R={R}", f"R={fake}")
     out = run(["bash", "-c", body]).stdout.strip()

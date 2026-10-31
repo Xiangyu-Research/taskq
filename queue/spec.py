@@ -354,7 +354,8 @@ def collect(specs, root):
         out["folds"][s["key"]] = dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
                                       dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd),
                                       resumable=resumable(s, fd))
-    pats = [os.path.join(root, "nnUNet", "results", "logs", "*_seg*.log"), os.path.join(root, "logs", "tasks", "*_seg*.log")]
+    pats = [os.path.join(root, "nnUNet", "results", "logs", "*_seg*.log"), os.path.join(root, "logs", "tasks", "*_seg*.log"),
+            os.path.join(root, "logs", "tasks", "*_part*.log")]
     for p in (q for pat in pats for q in glob.glob(pat)):
         first, trained = "", False
         try:
@@ -432,7 +433,7 @@ def main(argv):
     except SpecError as e:
         print(f"spec.py：{e}", file=sys.stderr)
         return 2
-    data = os.environ.get("BRAIN_TUMOR")
+    data = os.environ.get("TASKQ_DATA") or os.environ.get("BRAIN_TUMOR")
     if not data:
         import machines as M
         me = M.whoami()

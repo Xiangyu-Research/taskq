@@ -7,6 +7,7 @@ read -r CONDA_BASE CONDA_ENV < <(python3 "$REPO/envs/machines.py" get . conda) |
 [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]] || { echo "envs/machines.py 里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2; exit 1; }
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
-export BRAIN_TUMOR=$(python3 "$REPO/envs/machines.py" get . data)
+TASKQ_DATA=$(python3 "$REPO/envs/machines.py" get . data)
+export TASKQ_DATA BRAIN_TUMOR=$TASKQ_DATA
 source "$HERE/gpu_pad_start.sh"
 exec bash "$HERE/dicc_worker.sh"

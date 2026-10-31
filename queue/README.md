@@ -51,7 +51,9 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | box `~/.cache/phd/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `feed.py`、`refill.py`、`relay.py` 什么都不分 |
 | DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 缓冲的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`），`feed.py` 也不往里送 |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
-| `RQ1_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"） |
+| `TASKQ_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"）；`gpu_pad*` 的参数 `TASKQ_GPU_PAD_*`（10/31 改名，旧名 `RQ1_GPU_PAD*` 照样认） |
+| `TASKQ_DATA` | 环境变量 | 本机的数据目录（`run_task.sh`、`dicc_worker.sh`、`taskq.py` 先读它，没有再读旧名 `BRAIN_TUMOR`，再查 `envs/machines.py`；`envs/nnunet_paths.sh` 两个都设，10/31） |
+| `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它（旧名 `RQ1_WAIT_GPU`） |
 | `TASKQ_*` | 环境变量 | `dicc_worker.sh` 的阈值，默认值写在脚本开头：`SLOTS`（一个作业最多同时几个，GPU 2、CPU 1）、`ADD_AFTER`（900 秒）、`UTIL_MAX`（90%）、`MIN_LEFT`（3600 秒）、`PATIENCE`（1200 秒）、`ERR_MAX`（600 秒）、`IDLE_MAX`（2400 秒）、`EARLY_FAIL`（600 秒）、`FAIL_WINDOW`（3600 秒）、`STALL_MAX`（1800 秒）；`TASKQ_DIR`、`TASKQ_SSH`、`TASKQ_MACHINE` 只给测试用 |
 
 `envs/policy.py` 由 box 的健康检查每次读，在 `~/auto/PhD`（只给 cron 用的克隆，跟着 origin/main）里生效，所以改了要提交推送。写错了（不认识的地方、条件、步骤）时 `advance.py` 这次什么都不排，报到健康检查里。
@@ -133,7 +135,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 `gpu-a100` 要求作业显存占用 >= 40 GB（10/17 收到）。`gpu_pad.py` 只占显存、不计算，按 nvidia-smi 的 `memory.used`：作业开始后第一次有训练起，任何时候不低于 **42000 MiB**（floor）；训练占的显存 120 秒内变化不超过 1 GiB 后补到 **55000 MiB**（target）；超过 **62000 MiB** 放掉多出的。每次补、放 1 GB，给训练留至少 8 GB；总显存不到 60 GB 时不填。训练占的显存不到 2000 MiB 算没有训练。开始新训练时 `dicc_worker.sh` 删掉 `/tmp/gpu_pad_<作业号>.ready`、touch `.start`，pad 放到 floor 后写 `.ready`，worker 看到再开训（最多等 30 秒），新训练稳定后再补到 target（最多等 900 秒）。
 
 - 默认开启：`gpu_pad_start.sh`（`worker_start.sh` 直接调用，其他作业经 `envs/nnunet_paths.sh`）在所有 Slurm GPU 作业里启动它。日志 `<数据目录>/logs/workers/gpu_pad_<作业号>.log`。
-- `RQ1_GPU_PAD=0` 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`、`research/RQ1/probe/p1_predict_model.sh`、`research/RQ1/probe/p2_predict_model.sh`、`research/RQ1/analysis/validation_predict_eval.sh`、`research/RQ1/analysis/validation_prep.sh`、`research/RQ1/analysis/edema_intervention.sh`、`research/RQ1/analysis/edema_ring_probe.sh`。CPU 分区的作业本来就不启动。
+- `TASKQ_GPU_PAD=0` 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/common/nnunet/smoke/epoch_bench.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`、`research/RQ1/probe/p1_predict_model.sh`、`research/RQ1/probe/p2_predict_model.sh`、`research/RQ1/analysis/validation_predict_eval.sh`、`research/RQ1/analysis/validation_prep.sh`、`research/RQ1/analysis/edema_intervention.sh`、`research/RQ1/analysis/edema_ring_probe.sh`。CPU 分区的作业本来就不启动。
 - pad 异常退出时最多重启 3 次；父进程退出、收到 SIGTERM、`DISABLED` 出现时放掉显存退出。退出码：0 正常 / 开关 / 父进程退出，1 没有 GPU 或初始化失败，2 参数错误；启动失败只记日志，不影响训练。
 
 ### 执行机（DICC2、lab1，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
@@ -151,7 +153,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
    总队列显示训完（box 上有了）、拉回归档的任务成功了 → 交还，删掉那边的任务和结果
 ```
 
-- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，环境变量名 `BRAIN_TUMOR`、`RQ1_*` 换成和领域无关的 `TASKQ_DATA`、`P1_*`（`RENAME`，10/31 起）；作业名（`tq_fit`，传输作业 `tq_xfer`）、资源（30 核、60G，`envs/machines.py` 的 `sbatch`）、常驻脚本的文件名（`FILES`）和 DICC 的分开（10/30 DICC 管理员要求）；包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
+- **代码包**（`relay_bundle.py`）：从 origin/main 取那边要用的脚本，去掉注释，生成只有这一台机器的 `envs/machines.py`、`envs/policy.py` 和 `worker.sbatch`；所有 `.py` 编译、`.sh` 过 `bash -n`，旧的环境变量名 `BRAIN_TUMOR`、`RQ1_*`（领域脚本里还在用）换成和领域无关的 `TASKQ_DATA`、`P1_*`（`RENAME`，10/31 起）；作业名（`tq_fit`，传输作业 `tq_xfer`）、资源（30 核、60G，`envs/machines.py` 的 `sbatch`）、常驻脚本的文件名（`FILES`）和 DICC 的分开（10/30 DICC 管理员要求）；包里出现本机路径、账号、钥匙、仓库地址就不发。内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据集是软链接视图，JSON 改写过（`relay_names.py`，别名表在 box `~/.cache/phd/relay/names.json`，分配后不变）。拉回时 `validation/` 的病例要和这一折的划分一致，否则不收、报出来。
 - **传输**：都经隧道（`scripts/sync/tunnel.py`），在哪里收发和 DICC 一样（10/30 定）：往那边传 1 GB 以上的先交 CPU 作业（`tq_xfer`），10 分钟排不上就在登录节点下载；拉回在登录节点上传。地址用每次新开的临时 trycloudflare 地址（box 上的 cloudflared 容器，`envs/machines.py` hub 的 `quick`、`RELAY` 的 `quick_tunnel`），不用 box 的固定地址（10/30 定）。
 - **个数**：`envs/policy.py` 的 `SLURM["dicc2"]`（`gpu`：QOS 和时限；`ready`：那边备好、等 worker 领的折数）。
@@ -198,7 +200,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`src`（从哪拉回）、`to`、`paths`（传给谁、传什么）、`of`（传输为哪一步）、`out`、`needs`、`train_id`（10/31 以前在 lab pueue 里排的推理）。`refill.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删，有 `out` 的留到那边的结果清理完；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）、拉回（`fetch_task.sh <机器> <key>`）、归档（`archive_task.sh <机器> <key>`）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
-- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_seg<段>.log`，第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前 nnU-Net 的在 `nnUNet/results/logs/`，登记表两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
+- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_part<段>.log`（段号 `TASK_PART`；10/31 前叫 `_seg<段>.log`、`TASK_SEG`，旧版 worker 传 `TASK_SEG` 时照旧用旧名，读日志的地方两种都认），第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前 nnU-Net 的在 `nnUNet/results/logs/`，登记表两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
 
 ## 常用命令
 

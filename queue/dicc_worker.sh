@@ -35,8 +35,8 @@ TQPY="python3 $HERE/taskq.py"
 if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
 W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
 DEVICE=${WORKER_DEVICE:-gpu}
-DATA=${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)}
-export BRAIN_TUMOR=$DATA
+DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
+export TASKQ_DATA=$DATA BRAIN_TUMOR=$DATA
 ENVS=${TASKQ_ENVS:-$(python3 "$REPO/envs/machines.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
@@ -52,7 +52,7 @@ else
 fi
 ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过这么久才判断要不要再加一个
 UTIL_MAX=${TASKQ_UTIL_MAX:-90}          # 近 10 分钟 GPU 平均使用率低于这个才加
-PADBASE=${RQ1_GPU_PAD_BASE:-$( (( INSLURM )) && echo "/tmp/gpu_pad_$W" || echo /nonexistent/gpu_pad)}
+PADBASE=${TASKQ_GPU_PAD_BASE:-${RQ1_GPU_PAD_BASE:-$( (( INSLURM )) && echo "/tmp/gpu_pad_$W" || echo /nonexistent/gpu_pad)}}
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-$([[ $DEVICE == cpu ]] && echo 0 || echo 1200)}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
@@ -168,7 +168,7 @@ own_fails() {  # OWN_FAILS = FAIL_WINDOW 以内的次数
 quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变化；读不了时输出空
     local p=$1 now log m
     now=$(date +%s)
-    log=$DATA/logs/tasks/${SAFE[$p]}__${W}_seg1.log
+    log=$DATA/logs/tasks/${SAFE[$p]}__${W}_part1.log
     m=$(timeout 20 stat -c %Y "$log" 2> /dev/null) || return 0
     (( now - m < STALL_MAX )) && { echo $(( now - m )); return 0; }
     [[ -n ${OUTDIR[$p]:-} && -d ${OUTDIR[$p]} ]] || { echo $(( now - m )); return 0; }
@@ -181,7 +181,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     { read -r key; read -r args; } <<< "$1"
     eval "local targs=($args)"
     pad_make_room
-    TASK_JOBTAG=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)") TASK_SEG=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
+    TASK_JOBTAG=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)") TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
     local pid=$! sh TASK_OUT= TASK_SAFE=
     KEY[$pid]=$key
     STARTED[$pid]=$(date +%s)

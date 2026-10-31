@@ -11,7 +11,7 @@ REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show
 M="python3 $REPO/envs/machines.py"
 H=$($M get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以连过去的机器 $HOST" >&2; exit 2; }
-RD=$($M get "$HOST" data) LD=${BRAIN_TUMOR:-$($M get . data)}
+RD=$($M get "$HOST" data) LD=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}
 RD=${RD/#\~\//}
 for p in "$@"; do [[ $p != /* && $p != *..* && $p == */* ]] || { echo "路径要相对数据目录、至少两层：$p" >&2; exit 2; }; done
 

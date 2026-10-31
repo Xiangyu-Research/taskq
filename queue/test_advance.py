@@ -800,8 +800,8 @@ check("needs 不支持：原样说不支持", A.step_needs("true") is None and A
 # 每个实验的每折步骤都真跑一次 --stage needs，模型文件夹一个都不在本机（10/25：lab 训的新数据集第一折，box 上还没拉回）
 with tempfile.TemporaryDirectory() as R:
     os.makedirs(f"{R}/nnUNet/raw")
-    old_bt = os.environ.get("BRAIN_TUMOR")
-    os.environ["BRAIN_TUMOR"] = R
+    old_bt = {k: os.environ.get(k) for k in ("BRAIN_TUMOR", "TASKQ_DATA")}
+    os.environ.update(BRAIN_TUMOR=R, TASKQ_DATA=R)
     seen, bad = set(), []
     for t in A.candidates(R, sys.executable, [])[0]:
         for st in (t["e"] or {}).get("after", []):
@@ -812,10 +812,11 @@ with tempfile.TemporaryDirectory() as R:
             got = REAL_STEP_NEEDS(cmd)
             if not got or not any(x.endswith("/checkpoint_final.pth") for x in got):
                 bad.append(f"{t['lab']} {st['name']}：{A.no_needs(cmd)}")
-    if old_bt is None:
-        os.environ.pop("BRAIN_TUMOR")
-    else:
-        os.environ["BRAIN_TUMOR"] = old_bt
+    for k, v in old_bt.items():
+        if v is None:
+            os.environ.pop(k)
+        else:
+            os.environ[k] = v
     check(f"needs：{len(seen)} 个实验步骤在模型还没拉回时都能列出输入", seen and not bad)
     for b in bad[:5]:
         print("   ", b)

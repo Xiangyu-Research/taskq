@@ -23,7 +23,7 @@ import sys, time, torch
 x = torch.zeros(int(sys.argv[1]) * 1024 * 1024, dtype=torch.uint8, device=0)
 time.sleep(600)
 EOF
-export RQ1_GPU_PAD_SCRIPT=$T/pad/gpu_pad.py
+export TASKQ_GPU_PAD_SCRIPT=$T/pad/gpu_pad.py
 our_pids() { pgrep -f "$T/pad/" 2> /dev/null; }
 stop_pads() { local p; for p in $(pgrep -f "$T/pad/gpu_pad.py" 2> /dev/null); do kill "$p" 2> /dev/null; done; }
 stop_train() { [[ -n ${TRAINPID:-} ]] && kill "$TRAINPID" 2> /dev/null; TRAINPID=; sleep 2; }
@@ -74,23 +74,23 @@ aborted() {
     fi
 }
 
-export BRAIN_TUMOR=$T/bt
+export TASKQ_DATA=$T/bt
 export CUDA_VISIBLE_DEVICES=0
 export SLURM_JOB_ID=999001
 export nnUNet_n_proc_DA=4
-export RQ1_GPU_PAD_SWITCH=$T/switch
-export RQ1_GPU_PAD_BASE=$T/padsig
-export RQ1_GPU_PAD_FLOOR_MIB=5000
-export RQ1_GPU_PAD_TARGET_MIB=8000
-export RQ1_GPU_PAD_HIGH_MIB=9000
-export RQ1_GPU_PAD_MIN_FREE_MIB=2000
-export RQ1_GPU_PAD_MIN_TOTAL_MIB=2000
-export RQ1_GPU_PAD_MIN_TRAIN_MIB=1000
-export RQ1_GPU_PAD_SETTLE=4
-export RQ1_GPU_PAD_START_HOLD=6
-export RQ1_GPU_PAD_INTERVAL=1
-export RQ1_GPU_PAD_CHUNK_MIB=256
-PADLOG=$BRAIN_TUMOR/logs/workers/gpu_pad_999001.log
+export TASKQ_GPU_PAD_SWITCH=$T/switch
+export TASKQ_GPU_PAD_BASE=$T/padsig
+export TASKQ_GPU_PAD_FLOOR_MIB=5000
+export TASKQ_GPU_PAD_TARGET_MIB=8000
+export TASKQ_GPU_PAD_HIGH_MIB=9000
+export TASKQ_GPU_PAD_MIN_FREE_MIB=2000
+export TASKQ_GPU_PAD_MIN_TOTAL_MIB=2000
+export TASKQ_GPU_PAD_MIN_TRAIN_MIB=1000
+export TASKQ_GPU_PAD_SETTLE=4
+export TASKQ_GPU_PAD_START_HOLD=6
+export TASKQ_GPU_PAD_INTERVAL=1
+export TASKQ_GPU_PAD_CHUNK_MIB=256
+PADLOG=$TASKQ_DATA/logs/workers/gpu_pad_999001.log
 
 source "$REPO/envs/nnunet_paths.sh"
 SUP=$!
@@ -138,22 +138,22 @@ check "DISABLED 后 pad 退出" pad_gone
 kill "$SUP" 2> /dev/null; SUP=
 
 rm -f "$T/switch"
-unset RQ1_GPU_PAD_STARTED
-export SLURM_JOB_ID=999002 RQ1_GPU_PAD=0
+unset TASKQ_GPU_PAD_STARTED
+export SLURM_JOB_ID=999002 TASKQ_GPU_PAD=0
 source "$REPO/envs/nnunet_paths.sh"
 sleep 2
-check "RQ1_GPU_PAD=0 不启动" test ! -e "$BRAIN_TUMOR/logs/workers/gpu_pad_999002.log"
-unset RQ1_GPU_PAD RQ1_GPU_PAD_STARTED
+check "TASKQ_GPU_PAD=0 不启动" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999002.log"
+unset TASKQ_GPU_PAD TASKQ_GPU_PAD_STARTED
 
 touch "$T/switch"
 export SLURM_JOB_ID=999003
 source "$REPO/envs/nnunet_paths.sh"
 sleep 2
-check "DISABLED 开关在启动前生效" test ! -e "$BRAIN_TUMOR/logs/workers/gpu_pad_999003.log"
+check "DISABLED 开关在启动前生效" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999003.log"
 rm -f "$T/switch"
-unset RQ1_GPU_PAD_STARTED
+unset TASKQ_GPU_PAD_STARTED
 
-export SLURM_JOB_ID=999005 RQ1_GPU_PAD_BASE=$T/padsig5
+export SLURM_JOB_ID=999005 TASKQ_GPU_PAD_BASE=$T/padsig5
 start_train
 bash -c '
     source "$REPO/envs/nnunet_paths.sh"
@@ -162,7 +162,7 @@ bash -c '
 ' &
 PARENT=$!
 wait_for 30 filled
-PL=$BRAIN_TUMOR/logs/workers/gpu_pad_999005.log
+PL=$TASKQ_DATA/logs/workers/gpu_pad_999005.log
 U=$(used)
 aborted
 check "父进程测试：pad 先补到约 8GB（现在 ${U}MiB）" test "$U" -ge 7000

@@ -36,7 +36,7 @@ for d in (BD, PQ, BIN):
     os.makedirs(d)
 with open(FAKE, "w") as f:  # 假的 ssh：跳过 -o 和机器名，在本机跑；box 这边的变量不带过去
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nshift\n'
-            'cd / && exec env -u BRAIN_TUMOR -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
+            'cd / && exec env -u BRAIN_TUMOR -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
 with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # 不碰真的卡
     f.write("#!/bin/bash\nexit 0\n")
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):
@@ -46,7 +46,7 @@ s_.bind(("127.0.0.1", 0))
 PORT = s_.getsockname()[1]
 s_.close()
 os.environ.update(
-    RELAY_DIR=os.path.join(T, "relay"), TASKQ_DIR=os.path.join(T, "boxq"), BRAIN_TUMOR=BD,
+    RELAY_DIR=os.path.join(T, "relay"), TASKQ_DIR=os.path.join(T, "boxq"), BRAIN_TUMOR=BD, TASKQ_DATA=BD,
     RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1",
     TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"),
     RELAY_LOG=os.path.join(T, "relay.log"), PATH=BIN + ":" + os.environ["PATH"],

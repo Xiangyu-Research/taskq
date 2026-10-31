@@ -362,7 +362,7 @@ def infer_inputs(spec, root, model_rel, fold):
         raise RelayError(f"推理命令里没有脚本：{spec['cmd']}")
     pe = os.path.join(REPO, os.path.dirname(sh), "run_predict_eval.sh")
     r = subprocess.run(["bash", pe, "--stage", "needs", os.path.join(root, model_rel), fold], cwd=REPO, capture_output=True,
-                       text=True, timeout=300, env=dict(os.environ, BRAIN_TUMOR=root))
+                       text=True, timeout=300, env=dict(os.environ, TASKQ_DATA=root, BRAIN_TUMOR=root))
     if r.returncode:
         raise RelayError(f"--stage needs 出错：{(r.stderr.strip().splitlines() or ['?'])[-1]}")
     return [ln.strip().rstrip("/") for ln in r.stdout.splitlines() if ln.strip().startswith("nnUNet/raw/")]
