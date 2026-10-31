@@ -3,7 +3,8 @@ taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后�
 分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
 
 实验的字段：id、exp、label、model、hours、recipe、params、fields、folds、after、group_after、names（见 RQ1 的表），
-另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。"""
+另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。
+表的模块里另外可以有 FINAL（所有实验做完后的步骤）、KEEP_DATA（keep_data()）。"""
 import glob
 import importlib.util
 import os
@@ -22,7 +23,7 @@ def load():
     """→ (实验列表, 结束步骤列表)。每个实验加上 rq（所在的研究问题文件夹）。id、任务名重复时报错。"""
     if "exps" in _cache:
         return _cache["exps"], _cache["final"]
-    exps, final = [], []
+    exps, final, keep = [], [], []
     for path in sorted(glob.glob(os.path.join(REPO, "research", "*", "experiments.py"))):
         rq = os.path.basename(os.path.dirname(path))
         sp = importlib.util.spec_from_file_location(f"experiments_{rq}", path)
@@ -31,12 +32,19 @@ def load():
         for e in mod.EXPERIMENTS:
             exps.append(dict(e, rq=rq))
         final += [dict(f, rq=rq) for f in getattr(mod, "FINAL", [])]
+        keep += [k for k in getattr(mod, "KEEP_DATA", []) if k not in keep]
     ids = [e["id"] for e in exps]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:
         raise spec.SpecError(f"实验表里 id 重复：{', '.join(dup)}")
-    _cache["exps"], _cache["final"] = exps, final
+    _cache["exps"], _cache["final"], _cache["keep"] = exps, final, keep
     return exps, final
+
+
+def keep_data():
+    """各实验表的 KEEP_DATA：自动传到训练机后不按空间预算删的数据（最后一级目录名的 fnmatch 模式）。"""
+    load()
+    return list(_cache.get("keep") or [])
 
 
 def experiment(eid):

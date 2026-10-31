@@ -120,7 +120,8 @@ def test_adopt_out():
     for f, b in (("checkpoint_latest.pth", b"L"), ("checkpoint_best.pth", b"B"), ("training_log.txt", b"t")):
         open(os.path.join(src, f), "wb").write(b)
     run = lambda: S.json_in(subprocess.run(
-        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(old=old, real="res/fold_3", alias="a/fold_3")),
+        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(old=old, real="res/fold_3", alias="a/fold_3",
+                                                          resume=["checkpoint_latest.pth", "checkpoint_final.pth"])),
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(HERE)), check=True).stdout)
     assert run() == 3
     new = os.path.join(R, "data", "a", "fold_3")

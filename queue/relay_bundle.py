@@ -34,7 +34,7 @@ KEEP += ["research/common/nnunet/train.sh", "research/common/nnunet/stage_tmp.sh
 # 推理（nnunet_infer，lab1 训的折在那边推理，10/31）
 KEEP += ["research/RQ1/analysis/infer_task.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/analysis/write_manifest.py",
          "research/RQ1/nnunet/predict.sh", "research/common/sparsify_bg.sh", "research/common/sparsify_probs.py", "envs/nnunet_paths.sh"]
-KEEP_DIRS = ["research/common/nnunet/trainers", "research/common/nnunet/nets"]
+KEEP_DIRS = ["scripts/queue/readers", "research/common/nnunet/trainers", "research/common/nnunet/nets"]
 FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-host", "BEGIN OPENSSH",
              "PRIVATE KEY", "ntfy", "cloudflare", "trycloudflare", "cfargotunnel", "/data/others", "auto/PhD",
              "Projects/PhD", "miniforge", "vps-x", "jump-x", "203.0.113.10", "203.0.113.20", ".cache/phd", "@gmail",

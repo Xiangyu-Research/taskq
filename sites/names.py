@@ -158,6 +158,12 @@ def import_path(alias_spec, real_spec, src, dst, root, names):
 
 
 PLUGINS = {"path": (export_path, import_path), **RN.TRANSLATORS}
+ACCEPTS = dict(RN.ACCEPTS)  # 插件 → 能不能送这个任务（参数 → bool）；没列的插件都能送
+VIEW_ROOTS = list(RN.VIEW_ROOTS)  # 插件建视图的文件夹（相对数据目录，下一级是一个视图）
+
+
+def accepts(plugin, params):
+    return plugin in PLUGINS and ACCEPTS.get(plugin, lambda p: True)(params or {})
 
 
 def _pair(spec):

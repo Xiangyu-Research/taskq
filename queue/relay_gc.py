@@ -1,5 +1,5 @@
 """有盘空间预算的 relay 机器（envs/machines.py RELAY 条目的 budget）的清理（2026-10-31）：剩余低于软线时，先删总队列不再要的
-视图（state 里登记过的各任务的视图，加上 R/data/nnUNet/preprocessed/ 下的目录；不在 keep 里、没有 .incomplete（正在建）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
+视图（state 里登记过的各任务的视图，加上内容插件建视图的文件夹（scripts/sites/names.py 的 VIEW_ROOTS）下的目录；不在 keep 里、没有 .incomplete（正在建）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
 硬链接收编、老目录还有一份的不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西。
 根目录经软链接到达时，视图里的软链接指的是软链接的路径，比较时都换成真实路径。"""
 import os
@@ -16,7 +16,6 @@ A=json.load(sys.stdin)
 soft=int(A['soft_gb']*1e9)
 D=os.path.join(R,'data')
 B=os.path.join(R,'blobs')
-P=os.path.join(D,'nnUNet','preprocessed')
 def inside(p,base):
     p=os.path.realpath(p)
     return p==base or p.startswith(base.rstrip('/')+'/')
@@ -51,8 +50,10 @@ if free()<soft:
         v=os.path.normpath(v)
         if not v.startswith('/') and '..' not in v.split('/') and len(v.split('/'))>=2:
             cand.add(v)
-    if os.path.isdir(P) and inside(P,D):
-        cand|={os.path.relpath(os.path.join(P,n),D) for n in os.listdir(P)}
+    for sc in A.get('scan') or []:
+        P=os.path.join(D,sc)
+        if os.path.isdir(P) and inside(P,D):
+            cand|={os.path.relpath(os.path.join(P,n),D) for n in os.listdir(P)}
     for rel in sorted(cand):
         d=os.path.join(D,rel)
         if rel in keep or any(k.startswith(rel+'/') or rel.startswith(k+'/') for k in keep):
@@ -109,4 +110,6 @@ def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=()):
         if not b:
             return None
         soft_gb = b[0]
-    return rpy(name, GC_PY, dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views)))
+    sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+    import names as N
+    return rpy(name, GC_PY, dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS))

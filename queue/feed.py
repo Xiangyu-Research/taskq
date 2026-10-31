@@ -47,6 +47,7 @@ import policy as P  # noqa: E402
 import common as C  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
+import recipes  # noqa: E402
 from common import write_json  # noqa: E402
 
 STATE = os.path.expanduser(os.environ.get("FEED_STATE", "~/.cache/phd/feed.json"))  # 环境变量只给测试用
@@ -54,7 +55,9 @@ LOG = os.path.expanduser(os.environ.get("FEED_LOG", "~/feed.log"))
 LOW_MIN = 60   # 补不满持续这么多分钟才报
 DOWN_S = 2 * 3600  # 连不上这么久才报
 COPYING = ("fetch", "archive", "relay_fetch")  # box 上这些步骤在跑时，这一折的结果还在拷
-EXCLUDE = ("*.tmp", ".DS_Store", "checkpoint_latest.pth", ".incomplete")
+# 比较两边的数据时不算的文件：临时文件，加上各做法拉回时不拉的（fetch.exclude，box 上本来就没有）
+EXCLUDE = ("*.tmp", ".DS_Store", ".incomplete") + tuple(sorted({x for r in recipes.RECIPES.values()
+                                                             for x in ((r.get("fetch") or {}).get("exclude") or []) if "{" not in x}))
 LIVE = refill.LIVE
 
 
