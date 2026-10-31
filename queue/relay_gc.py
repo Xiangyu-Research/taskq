@@ -1,6 +1,7 @@
 """有盘空间预算的 relay 机器（envs/machines.py RELAY 条目的 budget）的清理（2026-10-31）：剩余低于软线时，先删总队列不再要的
 视图（state 里登记过的各任务的视图，加上 R/data/nnUNet/preprocessed/ 下的目录；不在 keep 里、没有 .incomplete（正在建）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
-硬链接收编、老目录还有一份的不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西。"""
+硬链接收编、老目录还有一份的不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西。
+根目录经软链接到达时，视图里的软链接指的是软链接的路径，比较时都换成真实路径。"""
 import os
 import sys
 
@@ -69,14 +70,12 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
         for f in fns+dns:
             p=os.path.join(dp,f)
             if os.path.islink(p):
-                t=os.readlink(p)
-                t=os.path.normpath(t if os.path.isabs(t) else os.path.join(dp,t))
-                used.add(t)
+                used.add(os.path.realpath(p))
     cand=[]
     for dp,_,fns in os.walk(B):
         for f in fns:
             p=os.path.normpath(os.path.join(dp,f))
-            if p in used or os.path.islink(p):
+            if os.path.realpath(p) in used or os.path.islink(p):
                 continue
             st=os.lstat(p)
             if st.st_nlink!=1:
