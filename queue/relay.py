@@ -703,7 +703,7 @@ def submit(name, subs):
         run = (f"R={r}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue WORKER_ID={w['id']} CUDA_VISIBLE_DEVICES={gpu}; "
                f"exec bash $REPO/scripts/queue/{RB.rename('worker_start.sh')}")
         for _ in subs:
-            rc, out, err = rsh(name, f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- bash -c {shlex.quote(run)}")
+            rc, out, err = rsh(name, f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- {shlex.quote('bash -c ' + shlex.quote(run))}")  # pueue 把参数用空格拼起来再交给 sh
             if rc:
                 stuck[f"site:{name}:worker"] = f"{L} 开 worker 出错：{(out + err)[-200:]}"
             else:
