@@ -1,6 +1,7 @@
 """relay_names.py 的测试：假的数据集和训练结果，改名送出、改回拉回。
 跑法：python3 scripts/queue/test_relay_names.py（checkpoint 那一段用本机的 nnunet 环境）"""
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -285,7 +286,14 @@ def test_infer():
     assert asp["key"] == f"infer/{alias}/{TD}/fold_0" and asp["out"] == f"predictions/{alias}/{TD}/fold_0", asp
     assert asp["cmd"] == f"bash research/RQ1/analysis/infer_task.sh {{data}}/nnUNet/models/{alias}/{TD} 0", asp["cmd"]
     assert "machines" not in pa and "after" not in pa and asp["relay"] == "nnunet_infer"
-    assert asp["vars"] == dict(SKIP_EXT="MEN", ONLY_EXT="", MODEL_ENV="nnunet"), asp["vars"]
+    real_c = {d: OUTNAME.get(d, d.split("/")[-2]) for d in INS}
+    ta = names.cohort_map()
+    assert sorted(ta) == sorted(real_c.values()) and all(re.fullmatch(r"t[0-9a-f]{10}", a) for a in ta.values()), ta
+    assert len(set(ta.values())) == len(ta)
+    ext = " ".join(ta[real_c[d]] for d in sorted(INS) if real_c[d] != "GLI_holdout")
+    assert asp["vars"] == dict(SKIP_EXT="", ONLY_EXT="", MODEL_ENV="nnunet", TS_HOLD=ta["GLI_holdout"], TS_EXT=ext), asp["vars"]
+    assert RB.cohort_hits(json.dumps(pa) + "\n".join(ex["views"]) + "\n".join(a for a, _ in ex["files"]),
+                          list(real_c.values()) + ["GLI"]) == []
     am = f"nnUNet/models/{alias}/{TD}"
     assert set(ex["texts"]) == {f"{am}/dataset.json", f"{am}/plans.json"}
     dsj = json.loads(ex["texts"][f"{am}/dataset.json"])
@@ -298,7 +306,7 @@ def test_infer():
     for a, r in ex["files"]:
         assert not any(w in a for w in words) and "RQ1" not in a, a
         assert os.path.isfile(r) and not os.path.islink(r)
-    rd = {d: d.replace("RQ1", "SEG") for d in INS}
+    rd = {d: "/".join(d.replace("RQ1", "SEG").split("/")[:3] + [ta[real_c[d]], "imagesTs"]) for d in INS}
     assert ex["views"] == [f"{am}/fold_0"] + [rd[d] for d in sorted(INS)], ex["views"]
     an = f"SEG/analysis/{alias}/{TD}/fold_0"
     assert ex["cleanup"] == [f"{am}/fold_0", an] and RB.rename(f"RQ1/analysis/{alias}/{TD}/fold_0") == an, ex["cleanup"]
@@ -315,14 +323,14 @@ def test_infer():
     ex2 = RN.export(sp, ROOT, names)
     assert ex2["files"] == ex["files"] and os.stat(ack).st_mtime_ns == m0
     ok("推理送出：模型、checkpoint、输入换成别名（几个测试集同一个病例同一个别名），参数里是别名、去掉 machines 和 after，"
-       "跳过的外部集和环境放进 vars；别名版 checkpoint 缓存着")
+       "测试集文件夹也换成别名（要推理的别名放进 vars 的 TS_HOLD、TS_EXT）；别名版 checkpoint 缓存着")
 
     src = os.path.join(TMP, "isrc")
     aout = os.path.join(src, asp["out"])
     rr = "/remote/data"
     cohorts = {}
     for d in sorted(INS):
-        c = OUTNAME.get(d, d.split("/")[-2])
+        c = ta[real_c[d]]
         acs = sorted({os.path.basename(a)[:-len("_0000.nii.gz")] for a in fm if a.startswith(rd[d] + "/")})
         for a in acs:
             for e in (".nii.gz", ".npz", ".pkl"):
@@ -356,7 +364,13 @@ def test_infer():
             p = os.path.join(dp, f)
             assert alias not in p and not f.endswith(".relaytmp") and not any(a in f for a in back), p
             assert alias.encode() not in open(p, "rb").read() or f == "MANIFEST.json", p
+    for dp, _, fs in os.walk(dst):
+        for f in fs:
+            p = os.path.join(dp, f)
+            assert not any(a in p or a.encode() in open(p, "rb").read() for a in ta.values()), p
     m = json.load(open(os.path.join(dst, out, "MANIFEST.json")))
+    assert sorted(m["cohorts"]) == sorted(real_c.values()), m["cohorts"]
+    assert m["cohorts"]["UCSF"]["nnunet_args"]["list_of_lists_or_source_folder"].endswith("/UCSF/imagesTs")
     rck = os.path.join(ROOT, "nnUNet", "results", REAL2, TD, "fold_0", "checkpoint_final.pth")
     assert m["dataset"] == REAL2 and m["model_dir"] == os.path.dirname(os.path.dirname(rck))
     assert m["checkpoints"][0]["file"] == rck and m["checkpoints"][0]["sha256"] == RN._sha256(rck) != asha
@@ -381,19 +395,23 @@ def test_infer():
         if fix:
             fix()
     a1 = cm["UCSF-PDGM-0004"]
-    p = os.path.join(aout, "UCSF", a1 + ".npz")
+    p = os.path.join(aout, ta["UCSF"], a1 + ".npz")
     os.rename(p, p + ".x")
     fails("少一个概率图应报错", lambda: os.rename(p + ".x", p))
     wj(os.path.join(aout, "MANIFEST.json"), dict(man, checkpoints=[dict(man["checkpoints"][0], sha256="0" * 64)]))
     fails("那边用的 checkpoint 不是送过去的应报错", lambda: wj(os.path.join(aout, "MANIFEST.json"), man))
-    q = os.path.join(aout, "UCSF", "zzz.tmp.npz")
+    q = os.path.join(aout, ta["UCSF"], "zzz.tmp.npz")
     wb(q, b"")
     fails("认不出的文件应报错", lambda: os.remove(q))
-    shutil.rmtree(os.path.join(aout, "PEDs-noskullstrip"))
-    c2 = {k: v for k, v in cohorts.items() if k != "PEDs-noskullstrip"}
+    os.rename(os.path.join(aout, ta["UCSF"]), os.path.join(aout, "t0000000000"))
+    wj(os.path.join(aout, "MANIFEST.json"), dict(man, cohorts={("t0000000000" if k == ta["UCSF"] else k): v for k, v in cohorts.items()}))
+    fails("认不出的测试集文件夹应报错", lambda: (os.rename(os.path.join(aout, "t0000000000"), os.path.join(aout, ta["UCSF"])),
+                                     wj(os.path.join(aout, "MANIFEST.json"), man)))
+    shutil.rmtree(os.path.join(aout, ta["PEDs-noskullstrip"]))
+    c2 = {k: v for k, v in cohorts.items() if k != ta["PEDs-noskullstrip"]}
     wj(os.path.join(aout, "MANIFEST.json"), dict(man, cohorts=c2))
     fails("少一个测试集应报错")
-    ok("推理拉回：少文件、checkpoint 对不上、认不出的文件、少测试集都报错，目标目录不动")
+    ok("推理拉回：少文件、checkpoint 对不上、认不出的文件或测试集文件夹、少测试集都报错，目标目录不动")
 
 
 # ---------------- 通用的换名（scripts/sites/names.py 的 path） ----------------

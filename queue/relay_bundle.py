@@ -45,11 +45,32 @@ FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad
          ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh"), ("stage_tmp.sh", "copy_local.sh")]
 # 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
 PE_SH = "research/RQ1/analysis/run_predict_eval.sh"
+PE_EXT = "EXT=(UCSF UPENN SSA PEDs MEN MET-Yale MET-UCSF MET-Multi MET-UCSD PEDs-noskullstrip)"
 PATCHES = [  # 推理：留出集的输入由 relay 建好送过去，那边不从训练集现建；评测不在那边做
     (PE_SH, 'mkdir -p "$H"\n    python - "$RQ1/splits/gli_split_v2.json" "$nnUNet_raw/Dataset101_GLIrq1/imagesTr" "$H" << \'EOF\'',
      'echo "没有留出集的输入 $H" >&2; exit 1\n    python - << \'EOF\''),
-    (PE_SH, '"$RQ1/analysis/rq1_model.R"', '"$RQ1/analysis/model.R"'),
+    # 测试集的名字那边也看不到（10/31）：要推理的测试集（别名）由任务的 TS_EXT、TS_HOLD 给（relay_names.export_nnunet_infer）
+    (PE_SH, PE_EXT, 'EXT=(${TS_EXT?})'),
+    (PE_SH, 'echo "${R}RQ1_holdout/GLI/imagesTs"', 'echo "${R}RQ1_holdout/$TS_HOLD/imagesTs"'),
+    (PE_SH, 'H=$nnUNet_raw/RQ1_holdout/GLI/imagesTs', 'H=$nnUNet_raw/RQ1_holdout/${TS_HOLD:?}/imagesTs'),
+    (PE_SH, 'predict GLI_holdout "$(in_dir "$H")"\nsparsify_bg "$PRED/GLI_holdout"',
+     'predict "$TS_HOLD" "$(in_dir "$H")"\nsparsify_bg "$PRED/$TS_HOLD"'),
+    # 评测不在那边做：推理做完就结束，后面的（评测用的测试集名、回归脚本）不进包
+    (PE_SH, '[[ $STAGE == infer ]] && { log "推理完成"; exit 0; }', '[[ $STAGE == infer ]] || { echo "这里只做推理" >&2; exit 1; }\nlog "推理完成"; exit 0', "cut"),
 ]
+
+
+def cohorts(text):
+    """run_predict_eval.sh 的原文 → 测试集的真名（外部集、GLI 留出集），包里和那边的路径里都不能出现。"""
+    m = re.search(r"^EXT=\(([^)]*)\)$", text, re.M)
+    if not m:
+        raise BundleError(f"{PE_SH} 里找不到 EXT=(…)")
+    return m.group(1).split() + ["GLI_holdout", "GLI"]
+
+
+def cohort_hits(text, names):
+    """text 里作为单独的词出现的测试集真名（前后不是字母、数字、_、-）。"""
+    return sorted({c for c in names if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(c) + r"(?![A-Za-z0-9_-])", text)})
 
 
 class BundleError(Exception):
@@ -388,15 +409,21 @@ def contents(name, commit="origin/main", root=None, entry=None):
     root = (root or e["root"]).rstrip("/")
     m = machine_entry(name, e, root, entry)
     out = {}
-    for path, (raw, exe) in source_files(commit).items():
+    src = source_files(commit)
+    names = cohorts(src[PE_SH][0].decode()) if PE_SH in src else []
+    for path, (raw, exe) in src.items():
         text = raw.decode()
-        for f, old, new in PATCHES:
+        for f, old, new, *how in PATCHES:
             if f == path:
                 if text.count(old) != 1:
                     raise BundleError(f"{path} 里 {old!r} 出现了 {text.count(old)} 次（应为 1 次）")
-                text = text.replace(old, new.format(data=m["data"]))
+                new = new.format(data=m["data"]) if "{data}" in new else new
+                text = text[:text.index(old)] + new + "\n" if how == ["cut"] else text.replace(old, new)
         text = strip_py(text) if path.endswith(".py") else strip_sh(text)
         out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
+        bad = cohort_hits(out[path][0], names)
+        if bad:
+            raise BundleError(f"{path} 里还有测试集的真名：{', '.join(bad)}")
     out["envs/machines.py"] = (home_paths(strip_py(gen_machines(read(commit, "envs/machines.py"), name, m)), root), True)
     out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True), e.get("gpu_aug", False), e.get("gpu_aug_loader", False)), False)
     if m["scheduler"] == "slurm":
