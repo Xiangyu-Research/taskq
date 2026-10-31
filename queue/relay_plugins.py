@@ -1,15 +1,21 @@
 """中转执行机（dicc2）上数据集和病例改名（2026-10-30）：送去训练的数据集名、病例名换成别名，拉回的结果换回真名。
 别名记在 ~/.cache/phd/relay/names.json（数据集 → Dataset9xx_<6 位十六进制>，病例 → c0001…，每个数据集各自编号），
-一旦分配就不变。每种做法（recipes.py 的 relay 字段）一对函数：export 列出要送的文件和改写过的小文件，import_ 把拉回的结果换回真名。"""
+一旦分配就不变。每种做法（recipes.py 的 relay 字段）一对函数：export 列出要送的文件和改写过的小文件，import_ 把拉回的结果换回真名。
+export 还可以给 views（那边只放这次列出的文件的文件夹，多出来的删掉）和 cleanup（任务交还后那边可以删的，相对数据目录）。
+推理（nnunet_infer，10/31）：模型和测试集的输入换名送过去，推理结果拉回后换回真名，MANIFEST 里的存档换成 box 上的那个。"""
+import datetime
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -167,7 +173,8 @@ def export_nnunet(spec, root, names):
 
 
 def _torch_fix(jobs, real_dsj):
-    """checkpoint_*.pth 里的数据集名换回真名：在本机的 nnunet 环境里用 torch 读写。jobs: [(源, 目标)]。"""
+    """checkpoint_*.pth 里的数据集名换成 real_dsj 的（拉回时换回真名，推理送出时换成别名，别名的 dataset.json 没有 description）：
+    在本机的 nnunet 环境里用 torch 读写。jobs: [(源, 目标)]。"""
     sys.path.insert(0, os.path.join(REPO, "envs"))
     import machines as M
     act = M.activate(M.whoami(), "nnunet")
@@ -185,6 +192,8 @@ for src, dst in a["jobs"]:
         dj = ia["dataset_json"]
         same = {k: v for k, v in dj.items() if k not in ("name", "description")} == {k: v for k, v in a["dsj"].items() if k not in ("name", "description")}
         ia["dataset_json"] = a["dsj"] if same else {**dj, "name": a["real"]}
+        if "description" not in a["dsj"]:
+            ia["dataset_json"].pop("description", None)
     tmp = dst + ".tmp"
     torch.save(ck, tmp)
     st = os.stat(src)
@@ -306,7 +315,244 @@ def import_nnunet(alias_spec, real_spec, src, dst, root, names):
     return written
 
 
-TRANSLATORS = {"nnunet": (export_nnunet, import_nnunet)}
+# ---------------- nnU-Net 推理（RQ1 的 infer_task.sh，10/31） ----------------
+PRED_RE = re.compile(r"^predictions/(Dataset\d{3}_[^/]+)/([^/]+)/fold_(\w+)$")
+IMG_RE = re.compile(r"^(.+)_(\d{4})\.nii\.gz$")
+INFER_CASES = "raw:infer"  # 推理输入的病例共用一套别名（同一个病例在几个测试集里是同一个别名）
+INFER_MODELS = "nnUNet/models"  # 那边放推理用的模型的地方（不和训练结果放在一起：训练的结果交还时会删）
+
+
+def _sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 22), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def _where(spec):
+    m = PRED_RE.match(spec["out"])
+    if not m:
+        raise RelayError(f"认不出推理的结果文件夹 {spec['out']}（应为 predictions/<数据集>/<训练器文件夹>/fold_<k>）")
+    return m.groups()
+
+
+def infer_inputs(spec, root, model_rel, fold):
+    """推理要的输入文件夹（相对数据目录）：任务命令所在目录的 run_predict_eval.sh --stage needs。"""
+    sh = next((t for t in shlex.split(spec["cmd"]) if t.endswith(".sh")), None)
+    if sh is None:
+        raise RelayError(f"推理命令里没有脚本：{spec['cmd']}")
+    pe = os.path.join(REPO, os.path.dirname(sh), "run_predict_eval.sh")
+    r = subprocess.run(["bash", pe, "--stage", "needs", os.path.join(root, model_rel), fold], cwd=REPO, capture_output=True,
+                       text=True, timeout=300, env=dict(os.environ, BRAIN_TUMOR=root))
+    if r.returncode:
+        raise RelayError(f"--stage needs 出错：{(r.stderr.strip().splitlines() or ['?'])[-1]}")
+    return [ln.strip().rstrip("/") for ln in r.stdout.splitlines() if ln.strip().startswith("nnUNet/raw/")]
+
+
+def infer_vars(model_rel):
+    """别名下实验表查不到这个模型：跳过、只测哪些外部集和模型的环境在这里查好，作为任务的环境变量送过去。"""
+    import experiments as QE
+    skip, only = QE.names_of(model_rel, "skip_ext", "only_ext")
+    return dict(SKIP_EXT=skip, ONLY_EXT=only, MODEL_ENV=QE.env_of(model_rel))
+
+
+def _cases_in(d):
+    out = {}
+    for f in sorted(os.listdir(d)):
+        m = IMG_RE.match(f)
+        if not m:
+            raise RelayError(f"{d} 里认不出的文件 {f}")
+        out.setdefault(m.group(1), []).append(m.group(2))
+    return out
+
+
+def _alias_ckpt(src, dst, alias_dsj, real):
+    """别名版的 checkpoint（缓存在 dst，旁边的 .src 记着源的大小、修改时间和两边的 sha256）→ (别名版 sha256, 源 sha256)。"""
+    st = os.stat(src)
+    tag = f"{os.path.realpath(src)}|{st.st_size}|{st.st_mtime_ns}"
+    side = dst + ".src"
+    try:
+        d = _jload(side)
+        if d["tag"] == tag and os.path.isfile(dst) and os.path.getsize(dst) == d["bytes"]:
+            return d["alias_sha256"], d["sha256"]
+    except (OSError, ValueError, KeyError):
+        pass
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    _torch_fix([(src, dst)], alias_dsj)
+    with zipfile.ZipFile(dst) as z:
+        pk = b"".join(z.read(n) for n in z.namelist() if n.endswith("data.pkl"))
+    if real.encode() in pk:
+        os.remove(dst)
+        raise RelayError(f"别名版 checkpoint 里还有 {real}")
+    d = dict(tag=tag, bytes=os.path.getsize(dst), alias_sha256=_sha256(dst), sha256=_sha256(src))
+    write_json(side, d)
+    return d["alias_sha256"], d["sha256"]
+
+
+def export_nnunet_infer(spec, root, names):
+    import relay_bundle as RB
+    real, td, fold = _where(spec)
+    model_rel = f"nnUNet/results/{real}/{td}"
+    model = os.path.join(root, model_rel)
+    ck = os.path.join(model, f"fold_{fold}", "checkpoint_final.pth")
+    for p in (os.path.join(model, "dataset.json"), os.path.join(model, "plans.json"), ck):
+        if not os.path.isfile(p):
+            raise RelayError(f"box 上没有 {os.path.relpath(p, root)}")
+    alias = names.dataset(real, used_ids(root))
+    amodel = f"{INFER_MODELS}/{alias}/{td}"
+    dsj = {k: v for k, v in _jload(os.path.join(model, "dataset.json")).items() if k != "description"}
+    dsj["name"] = alias
+    plans = _jload(os.path.join(model, "plans.json"))
+    plans["dataset_name"] = alias
+    texts = {f"{amodel}/dataset.json": _jdump(dsj), f"{amodel}/plans.json": _jdump(plans).replace(real.encode(), alias.encode())}
+    ack = os.path.join(RELAY_DIR, "ckpt", alias, td, f"fold_{fold}", "checkpoint_final.pth")
+    _alias_ckpt(ck, ack, dsj, real)
+    files = [(f"{amodel}/fold_{fold}/checkpoint_final.pth", ack)]
+    ins = infer_inputs(spec, root, model_rel, fold)
+    if not ins:
+        raise RelayError(f"{model_rel} 没有要推理的测试集")
+    per = {d: _cases_in(os.path.join(root, d)) for d in ins}
+    cm = names.cases(INFER_CASES, sorted({c for v in per.values() for c in v}))
+    views = [f"{amodel}/fold_{fold}"]
+    for d, cases in per.items():
+        rd = RB.rename(d)
+        views.append(rd)
+        for c, chs in cases.items():
+            files += [(f"{rd}/{cm[c]}_{ch}.nii.gz", os.path.realpath(os.path.join(root, d, f"{c}_{ch}.nii.gz"))) for ch in chs]
+    vs = dict(spec.get("vars") or {})
+    for k, v in infer_vars(model_rel).items():
+        vs.setdefault(k, v)
+    params = {k: v for k, v in spec["params"].items() if k not in ("machines", "after")}
+    for k, v in params.items():
+        if isinstance(v, str):
+            params[k] = v.replace(model_rel, amodel).replace(real, alias)
+    params["vars"] = vs
+    _check_clean(list(texts.values()) + [json.dumps(params, ensure_ascii=False).encode()],
+                 [a for a, _ in files] + list(texts), [real])
+    bad = [a for a, _ in files[1:] if not re.fullmatch(r"c\d{4,}_\d{4}\.nii\.gz", os.path.basename(a))]
+    if bad:
+        raise RelayError(f"改名后的输入文件名不对：{bad[:3]}")
+    return dict(params=params, files=files, texts=texts, views=views, cleanup=[f"{amodel}/fold_{fold}"])
+
+
+def _put(dst, written, rel, data=None, srcp=None):
+    p = os.path.join(dst, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".relaytmp"
+    if os.path.lexists(tmp):
+        os.remove(tmp)
+    if data is None:
+        try:
+            os.link(srcp, tmp)
+        except OSError:
+            shutil.copy2(srcp, tmp)
+    else:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        if srcp:
+            st = os.stat(srcp)
+            os.utime(tmp, (st.st_atime, st.st_mtime))
+    os.replace(tmp, p)
+    written.append(rel)
+
+
+def _swap(o, a, b):
+    if isinstance(o, str):
+        return o.replace(a, b)
+    if isinstance(o, list):
+        return [_swap(x, a, b) for x in o]
+    if isinstance(o, dict):
+        return {k: _swap(v, a, b) for k, v in o.items()}
+    return o
+
+
+def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
+    real, td, fold = _where(real_spec)
+    alias, atd, afold = _where(alias_spec)
+    if names.real_dataset(alias) != real or (atd, afold) != (td, fold):
+        raise RelayError(f"{alias_spec['out']} 不是 {real_spec['out']} 的别名")
+    back = {a: c for c, a in names.case_map(INFER_CASES).items()}
+    model_rel = f"nnUNet/results/{real}/{td}"
+    model = os.path.join(root, model_rel)
+    sfold, rout = os.path.join(src, alias_spec["out"]), real_spec["out"]
+    for f in (".infer_done", "MANIFEST.json"):
+        if not os.path.isfile(os.path.join(sfold, f)):
+            raise RelayError(f"{alias_spec['key']} 的结果里没有 {f}")
+    ins = {d: set(_cases_in(os.path.join(root, d))) for d in infer_inputs(real_spec, root, model_rel, fold)}
+    man = _jload(os.path.join(sfold, "MANIFEST.json"))
+    cohorts = sorted(d for d in os.listdir(sfold) if os.path.isdir(os.path.join(sfold, d)))
+    if sorted(man.get("cohorts") or {}) != cohorts:
+        raise RelayError(f"{alias_spec['key']}：MANIFEST 里的测试集 {sorted(man.get('cohorts') or {})} 和文件夹 {cohorts} 不一样")
+    jobs, free = [], dict(ins)
+    for c in cohorts:
+        d = os.path.join(sfold, c)
+        segs, probs, pkls, other = set(), set(), set(), []
+        for f in os.listdir(d):
+            for ext, bag in ((".nii.gz", segs), (".npz", probs), (".pkl", pkls)):
+                if f.endswith(ext) and f[:-len(ext)] in back:
+                    bag.add(f[:-len(ext)])
+                    break
+            else:
+                if f not in ("dataset.json", "plans.json", "predict_from_raw_data_args.json"):
+                    other.append(f)
+        if other:
+            raise RelayError(f"{alias_spec['key']} 的 {c} 里有认不出的文件：{sorted(other)[:5]}")
+        v = man["cohorts"][c]
+        got = {back[a] for a in segs}
+        hit = next((k for k, cs in free.items() if cs == got), None)
+        if hit is None or probs != segs or pkls != segs or v.get("n_segmentations") != len(segs) or v.get("n_probabilities") != len(probs):
+            raise RelayError(f"{alias_spec['key']} 的 {c} 对不上：分割 {len(segs)}、概率图 {len(probs)}、pkl {len(pkls)}，"
+                             f"MANIFEST 记 {v.get('n_segmentations')} / {v.get('n_probabilities')}，"
+                             f"{'和 box 上的输入一致' if hit else 'box 上没有病例完全一样的输入文件夹'}")
+        free.pop(hit)
+        jobs.append((c, d, segs))
+    if free:
+        raise RelayError(f"{alias_spec['key']}：box 上的输入 {sorted(free)} 没有对应的预测")
+    ck = os.path.join(model, f"fold_{fold}", "checkpoint_final.pth")
+    ack = os.path.join(RELAY_DIR, "ckpt", alias, td, f"fold_{fold}", "checkpoint_final.pth")
+    try:
+        side = _jload(ack + ".src")
+    except (OSError, ValueError):
+        side = {}
+    st = os.stat(ck)
+    if side.get("tag") != f"{os.path.realpath(ck)}|{st.st_size}|{st.st_mtime_ns}":
+        raise RelayError(f"box 上的 {model_rel}/fold_{fold}/checkpoint_final.pth 和送过去的不是同一个（{ack}.src 对不上）")
+    sent = [x.get("sha256") for x in man.get("checkpoints") or []]
+    if sent != [side["alias_sha256"]]:
+        raise RelayError(f"{alias_spec['key']}：那边推理用的 checkpoint 不是送过去的那个")
+    rdsj = os.path.join(model, "dataset.json")
+
+    def text(p):
+        with open(p, "rb") as f:
+            return f.read().replace(alias.encode(), real.encode())
+    written = []
+    for c, d, segs in jobs:
+        for a in sorted(segs):
+            for ext in (".nii.gz", ".npz", ".pkl"):
+                _put(dst, written, f"{rout}/{c}/{back[a]}{ext}", srcp=os.path.join(d, a + ext))
+        for f in ("plans.json", "predict_from_raw_data_args.json"):
+            if os.path.exists(os.path.join(d, f)):
+                _put(dst, written, f"{rout}/{c}/{f}", text(os.path.join(d, f)), os.path.join(d, f))
+        if os.path.exists(os.path.join(d, "dataset.json")):
+            _put(dst, written, f"{rout}/{c}/dataset.json", srcp=rdsj)
+    ldir = os.path.join(src, "logs", "tasks")
+    pa, pr = S.safe(alias_spec["key"]) + "__", S.safe(real_spec["key"]) + "__"
+    if os.path.isdir(ldir):
+        for f in sorted(os.listdir(ldir)):
+            if f.startswith(pa):
+                _put(dst, written, f"logs/tasks/{pr}{f[len(pa):]}", text(os.path.join(ldir, f)), os.path.join(ldir, f))
+    man = _swap(man, alias, real)
+    man.update(model_dir=model, dataset=real, trainer=td, relayed=dict(dataset=alias, checkpoint_sha256=side["alias_sha256"]))
+    man["checkpoints"] = [dict(fold=int(fold), file=ck, bytes=st.st_size,
+                               mtime=datetime.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"), sha256=side["sha256"])]
+    mp = os.path.join(sfold, "MANIFEST.json")
+    _put(dst, written, f"{rout}/MANIFEST.json", (json.dumps(man, indent=1, ensure_ascii=False)).encode(), mp)
+    _put(dst, written, f"{rout}/.infer_done", text(os.path.join(sfold, ".infer_done")), os.path.join(sfold, ".infer_done"))
+    return written
+
+
+TRANSLATORS = {"nnunet": (export_nnunet, import_nnunet), "nnunet_infer": (export_nnunet_infer, import_nnunet_infer)}
 
 
 def _pair(spec):

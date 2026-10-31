@@ -23,7 +23,7 @@
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
     relay      能交给中转执行机（envs/machines.py 的 RELAY）训练时，数据和结果怎么改名（scripts/queue/relay_names.py 的
-               TRANSLATORS 里的名字）；None = 不交
+               TRANSLATORS 里的名字：nnunet 训练，nnunet_infer 推理）；None = 不交。command 做法由任务给（如实验表里推理的 queue）
     machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc"]）；None = 有环境的都行
     device     gpu = 要卡（DICC 的 GPU worker、lab 领）；cpu = 纯 CPU（只由 DICC 的 CPU worker 领，scripts/queue/cpu_worker.sbatch，
                2026-10-24）
