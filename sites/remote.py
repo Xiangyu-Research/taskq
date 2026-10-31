@@ -14,7 +14,8 @@ RUN = None  # 测试替换：fn(ssh名, 命令, input, timeout) → (退出码, 
 
 
 def conf(name):
-    return M.SITES[name]
+    """执行机（RELAY、SITES）或 MACHINES 里的一台（envs/machines.py 的 machine）。"""
+    return M.machine(name)
 
 
 def ssh_argv():

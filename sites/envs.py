@@ -177,7 +177,7 @@ def forbidden(text):
 
 def runner(name):
     """→ (在那台机器上跑的命令, ssh 名（None = 本机）)。命令把标准输入存成状态目录里的临时文件再跑（建环境的 conda、pip 不会读到
-    脚本后面的内容），只在 CPU 上跑：Slurm 用条目的 env_job（没有就用 transfer_job）在 CPU 分区 srun，其余 nice、看不到卡。"""
+    脚本后面的内容），只在 CPU 上跑：Slurm 用条目的 env_job（没有就用 transfer_job；没写时限时加 BUILD_MIN）在 CPU 分区 srun，其余 nice、看不到卡。"""
     m = M.machine(name)
     if m["scheduler"] == "slurm":
         job = m.get("env_job") or m.get("transfer_job")
@@ -186,7 +186,8 @@ def runner(name):
         args = shlex.split(job)
         if any(a in ("--gres", "-G") or a.startswith(("--gres=", "--gpus", "-G")) or "gpu" in a.lower() for a in args):
             raise EnvError(f"{name} 的 env_job 要了 GPU：{job}")
-        launch = f"srun -I600 {job} -t {BUILD_MIN}"
+        timed = any(a in ("-t", "--time") or a.startswith("--time=") for a in args)
+        launch = f"srun -I600 {job}" + ("" if timed else f" -t {BUILD_MIN}")
     else:
         launch = "nice -n 10 env CUDA_VISIBLE_DEVICES="
     sd = sh_path(state_dir(m))

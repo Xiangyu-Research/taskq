@@ -390,10 +390,70 @@ def test_e2e_path(pre):
     ok("要删的、要建的路径在数据目录里、至少两层；旧记录的 view 也认")
 
 
+def test_tilde_root():
+    """根目录写成 ~/…（dicc1 的 ~/st/…）：开头的 ~ 留给那边展开，其余加引号（10/31）。"""
+    c0 = M.RELAY[NAME]
+    M.RELAY[NAME] = dict(c0, root="~/st/t123")
+    try:
+        assert relay.prefix(NAME).startswith("cd ~/st/t123/code/current && TASKQ_DIR=~/st/t123/queue "), relay.prefix(NAME)
+        seen = []
+        relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "{}", ""))[1]), relay.rsh
+        try:
+            relay.rpy(NAME, "print(1)")
+        except RuntimeError:
+            pass
+        relay.rsh = rsh0
+        assert seen and seen[0].endswith(" ~/st/t123"), seen
+    finally:
+        M.RELAY[NAME] = c0
+    files = relay_bundle.contents(NAME, commit="HEAD", root="~/st/t123")
+    sb = next(t for p, (t, _) in files.items() if p.endswith("worker.sbatch"))
+    assert "#SBATCH --output=../../../../data/logs/workers/%x_%j.out" in sb and "\nR=~/st/t123\n" in sb, sb
+    assert relay_bundle.rename("worker_start.sh") in sb  # 显存填充那条路（worker.sbatch → worker_start.sh）不绕开
+    txt = "\n".join(t for t, _ in files.values())
+    assert "~/st/t123/queue" in txt or "$HOME/st/t123/queue" in txt
+    sh = "\n".join(t for p, (t, _) in files.items() if p.endswith((".sh", ".sbatch")))
+    assert '"~/st/t123' not in sh, "shell 双引号里的 ~ 不展开（Python 的 expanduser 里可以）"
+    assert relay_bundle.home_paths('a="$HOME/.cache/phd/taskq" b=~/.cache/phd/x', "~/st/t1") == 'a="$HOME/st/t1/queue" b=~/st/t1/state/x'
+    assert relay_bundle.home_paths('a="$HOME/.cache/phd/taskq"', "/scr/u/r") == 'a="/scr/u/r/queue"'
+    ok("根目录 ~/…：命令里 ~ 不加引号，sbatch 的日志用相对路径，包里 $HOME/~ 的写法照旧")
+
+
+def test_adapters_in_relay():
+    """调度器的读写都经 scripts/sites/pueue.py、slurm.py（10/31）。"""
+    raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status=dict(Done=dict(result="Success"))),
+                                 "4": dict(group="other", label="x", status="Running")}))
+    rs = relay.parse_sched("lab1", dict(sched_raw=raw, taskq={}))
+    assert rs["squeue"] is None and [j[0] for j in rs["jobs"]] == [3] and rs["jobs"][0][3] == "Success", rs
+    assert relay.parse_sched("lab1", dict(sched_raw=None))["jobs"] is None
+    rs = relay.parse_sched(NAME, dict(sched_raw="101|w|RUNNING|1:00|long|n1\n"))
+    assert rs["jobs"] is None and rs["squeue"] == [["101", "w", "RUNNING", "1:00", "long", "n1"]]
+    seen = []
+    relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append((name, cmd)), (0, "4870\n", ""))[1]), relay.rsh
+    try:
+        msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2)])
+        assert not stuck and len(seen) == 2 and all("sbatch --parsable --qos=long --time=1:00:00 worker.sbatch" in c for _, c in seen)
+        assert seen[0][1].startswith(f"cd {relay.R.q(relay.root(NAME))}/code/current/scripts/queue && ")
+        seen.clear()
+        msgs, stuck = relay.submit("lab1", [("pueue", None, 1)])
+        assert not stuck and len(seen) == 1 and " add -g " in seen[0][1] and "worker:" in seen[0][1], seen
+        relay.rsh = lambda name, cmd, input=None, timeout=300: (1, "boom", "")
+        _, stuck = relay.submit("lab1", [("pueue", None, 1)])
+        assert list(stuck) == ["site:lab1:worker"], stuck
+        _, stuck = relay.submit(NAME, [("long", "1:00:00", 1)])
+        assert list(stuck) == [f"topup:{NAME}:long"], stuck
+    finally:
+        relay.rsh = rsh0
+    assert not hasattr(relay, "worker_jobs")
+    ok("relay：一次 ssh 读回原始输出、在 box 上用适配器解析；开 worker / 交作业用适配器，报警的编号照旧")
+
+
 if __name__ == "__main__":
     test_plan()
     test_pueue_worker()
     test_slurm_topup_ready()
+    test_tilde_root()
+    test_adapters_in_relay()
     test_adopt_out()
     test_place()
     test_e2e_path(test_e2e())

@@ -390,8 +390,10 @@ got = {}
 H.gather, H.update = (lambda: snap()), (lambda P, now, dry=False: got.update(P))
 sys.modules["refill"] = None  # import 出错
 fd = types.ModuleType("feed")
-fd.run_all = lambda s, dry=False: ([], {})
+feed_calls = []
+fd.run_all = lambda s, dry=False, relay=True: (feed_calls.append(relay), ([], {}))[1]
 sys.modules["feed"] = fd
+sys.modules["relay"] = None  # health.py 不直接调 relay.py（10/31：送任务只从 feed.run_all 进）
 adv = types.ModuleType("advance")
 adv.run = lambda s, dry=False: 1 / 0
 sys.modules["advance"] = adv
@@ -399,6 +401,8 @@ sys.argv = ["health.py"]
 H.main()
 ok("refill.py import 出错、advance.py 运行出错：都报出来，健康检查照常写完",
    "refill:error" in got and "advance:error" in got and "ZeroDivisionError" in got["advance:error"]["msg"])
+ok("送任务只有一个入口：feed.run_all 第一次带上 relay，健康检查不直接 import relay",
+   feed_calls[:1] == [True] and "relay:error" not in got)
 rf = types.ModuleType("refill")
 rf.run_all = lambda s, dry=False: (["lab 领了 x", "lab 交还 y"], {}, set())
 rf.topup_all = lambda s, dry=False: ([], {})

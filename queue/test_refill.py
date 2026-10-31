@@ -290,7 +290,8 @@ p, _ = R.topup_plan(snap(queue=two)["taskq"]["box"], {"long": (10, 9, 0), "norma
 ok("备好 2 个：long 剩 1 个位置交 1 个，normal 交剩下的 1 个", p == [("long", "1-12:00:00", 1, "worker.sbatch"), ("normal", "08:00:00", 1, "worker.sbatch")])
 p, why = R.topup_plan(snap(queue=done_q)["taskq"]["box"], {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 0)})
 ok("一个都没备好：不交", p == [] and "备好" in why)
-ok("parse_qos：5 段才算，少一段当读不到", R.parse_qos("QOS|long|10|3|1\nQOS|normal|10|2\n") == {"long": (10, 3, 1)})
+ok("slurm.parse：5 段才算，少一段当读不到", R.SL.parse("QOS|long|10|3|1\nQOS|normal|10|2\n")["counts"] == {"long": (10, 3, 1)})
+ok("refill 里和 scripts/sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
 
 # 纯 CPU 任务（device=cpu，10/24）：GPU worker 不为它们补，有这类任务时才交 CPU worker
 K_EV = "eval/Dataset101_GLIrq1/x/fold_0"
@@ -374,7 +375,7 @@ ok("已经有 CPU worker 排着：不再交", not sub and not st)
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|8|0\nCPU|0\nALL|10|10\n"))
 ok("所有作业已占满 10 个提交名额：不交 CPU worker、不报错", not sub and not st)
 R.P.AUTO["dicc"] = False
-probe = R.topup_probe("dicc")
+probe = R.SL.probe("dicc")
 ok("查作业数用 envs/policy.py 的 QOS、envs/machines.py 的作业名",
    "show qos normal " in probe and "-n cpu_worker " in probe and "for q in long;" in probe)
 

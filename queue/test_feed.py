@@ -316,6 +316,25 @@ s_["probe"][LAB]["DISK"] = str(int(200e9))
 ok("lab：放得下 → 传", [a for a in F.plan(s_, LAB, {}, (box_d, {}))[0] if a["op"] == "prefetch"])
 F.refill.data_gb = ogb
 
+# ---------------- 送任务只有一个入口（10/31）：feed.run_all 先转给 relay.py，再处理有缓冲的执行机 ----------------
+import types  # noqa: E402
+rl, rcalls = types.ModuleType("relay"), []
+rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["lab1 领了 a/x/0"], {"site:lab1:x": "y"}))[1]
+sys.modules["relay"] = rl
+P.OFFLINE, off0 = set(M.MACHINES) | set(P.OFFLINE), P.OFFLINE
+ev, st = F.run_all(dict(taskq={}, ok={}), dry=False)
+ok("relay=True：先跑 relay.run_all，说明和问题并进来，feed.log 里有一行指向 ~/relay.log",
+   rcalls == [False] and ev == ["lab1 领了 a/x/0"] and st == {"site:lab1:x": "y"} and "见 ~/relay.log" in open(F.LOG).read())
+ev, st = F.run_all(dict(taskq={}, ok={}), dry=False, relay=False)
+ok("relay=False（advance 之后的第二遍）：不跑 relay", rcalls == [False] and ev == [] and st == {})
+rl.run_all = lambda s, dry=False: 1 / 0
+ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)
+ok("relay.py 出错：报 relay:error，feed 照常", list(st) == ["relay:error"] and "ZeroDivisionError" in st["relay:error"])
+P.OFFLINE = off0
+del sys.modules["relay"]
+ok("DICC、lab 的环境（conda / venv）没有收集器上报 envs_ok 也算就绪",
+   all(F.runnable(n, ct("k", machines=[n])) for n in ("dicc", "lab")) and F.envs_ok(dict(src={}), "dicc") is None)
+
 # ---------------- box 不在线：缓冲上的 worker 照常领、交还 ----------------
 BUF, DATA = os.path.join(T, "buffer"), os.path.join(T, "data")
 os.makedirs(BUF), os.makedirs(DATA)

@@ -497,9 +497,20 @@ def run_one(s, name, dry=False, st=None, data_run=None):
     return msgs, stuck
 
 
-def run_all(s, dry=False):
-    """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。"""
+def run_all(s, dry=False, relay=True):
+    """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。送任务的唯一入口（10/31）：relay=True 时先处理 SITES 里 relay=True 的执行机
+    （scripts/queue/relay.py，细节记 ~/relay.log，这里记一行指过去），再给有缓冲的执行机（sites()）送任务。"""
     events, stuck = [], {}
+    if relay:
+        try:
+            import relay as RL  # scripts/queue/relay.py
+            ev, st_ = RL.run_all(s, dry=dry)
+        except Exception as e:  # noqa: BLE001
+            ev, st_ = [], {"relay:error": f"scripts/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
+        events += ev
+        stuck.update(st_)
+        if ev and not dry:
+            log([f"执行机 {'、'.join(sorted(M.RELAY))}（relay.py）：{len(ev)} 条，见 ~/relay.log"])
     st = load_state()
     for name in sites():
         if name in P.OFFLINE:
@@ -527,6 +538,11 @@ def run_all(s, dry=False):
 
 
 if __name__ == "__main__":
+    import argparse
     import health as H  # noqa: E402
-    ev, st = run_all(H.gather(), dry=True)
+    ap = argparse.ArgumentParser(description="往执行机送任务（health.py 每次检查调用）；不带参数时也只看、不改")
+    ap.add_argument("--dry", action="store_true", help="只打印会做什么（默认就是）")
+    ap.add_argument("--no-relay", action="store_true", help="不处理 relay.py 管的执行机")
+    a = ap.parse_args()
+    ev, st = run_all(H.gather(), dry=True, relay=not a.no_relay)
     print("\n".join(ev + [f"卡住：{v}" for v in st.values()]))
