@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shift  # noqa: E402
 
 TZ = shift.TZ
-shift.STATE = os.path.join(tempfile.mkdtemp(), "shift.json")
+_d = tempfile.mkdtemp()
+shift.STATE, shift.LOG = os.path.join(_d, "shift.json"), os.path.join(_d, "refill.log")
 shift.P.SHIFT = {"lab": {"gpu0": ("18:00", "09:00")}}
 
 
