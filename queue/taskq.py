@@ -36,6 +36,7 @@ worker 调用（缓冲上）：
 box 上（总队列；在别的机器上跑这些命令时退出码 2，缓冲上只有带 TASKQ_FEED=1 的 feed.py 能改）：
     taskq.py add [--nice <档位>] --exp <实验 id> [--folds 0 1 …]   从实验表加（已有的跳过；不给 --nice 用表里的档位）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
+    taskq.py add [--nice <档位>] --file <任务单.json>               按任务单加（别人的训练、测试；不给 --nice 用单子里的）
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
@@ -496,6 +497,25 @@ def _insert(new, nice):
     return 0
 
 
+def read_sheets(path):
+    """任务单文件（JSON：一张 {字段: 值} 或一列）→ ([dict(exp, recipe, params)], 档位)。recipe 不写 = command；
+    nice 写在单子里（几张单子的 nice 要一样）；其余字段都是做法的参数（scripts/queue/README.md 的"别人的任务"）。"""
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise S.SpecError(f"读不了任务单 {path}：{e}") from None
+    sheets = d if isinstance(d, list) else [d]
+    if not sheets or not all(isinstance(x, dict) for x in sheets):
+        raise S.SpecError(f"任务单 {path} 要是一个 JSON 对象或一列对象")
+    nices = {x.get("nice") for x in sheets}
+    if len(nices) > 1:
+        raise S.SpecError(f"任务单 {path} 里的 nice 不一样：{sorted(map(str, nices))}")
+    new = [dict(exp=None, recipe=x.get("recipe", "command"), params={k: v for k, v in x.items() if k not in ("recipe", "nice")})
+           for x in sheets]
+    nice = nices.pop()
+    return new, (int(nice) if nice is not None else None)
+
+
 def cmd_add(a):
     import experiments as E
     try:
@@ -509,8 +529,12 @@ def cmd_add(a):
                 print(f"档位用实验表里的 {a.nice}")
         elif a.recipe:
             new = [dict(exp=None, recipe=a.recipe, params=S.parse_kv(a.args))]
+        elif a.file:
+            new, nice = read_sheets(a.file)
+            if a.nice is None:
+                a.nice = nice
         else:
-            sys.exit("要给 --exp 或 --recipe")
+            sys.exit("要给 --exp、--recipe 或 --file")
         if a.nice is None:
             sys.exit("要给 --nice")
         return _insert(new, a.nice)
@@ -799,6 +823,7 @@ def main(argv):
     p.add_argument("--exp")
     p.add_argument("--folds", nargs="*")
     p.add_argument("--recipe")
+    p.add_argument("--file", help="任务单（JSON），不写 recipe 时是 command 做法")
     p.add_argument("args", nargs="*", help="--recipe 的 k=v")
     p = sub.add_parser("set")
     p.add_argument("key")

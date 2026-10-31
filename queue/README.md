@@ -228,3 +228,63 @@ pueue 本身：`pueue log <号>`、`pueue follow <号>`、`pueue kill -s SIGTERM
 - **新机器**：`envs/machines.py` 的 `MACHINES` 加一项；pueue 机器上跑一次 `setup.sh`，box 上配好 ssh。要让某些步骤放过去，`PLACE` 现有的写法（`trainer`、`queue:<机器>`、`box:<组>`）表达不了时，给 `advance.py` 加一种地方。
 - **不是 nnU-Net 的训练**：实验表里 `recipe="command"`，`params` 写 `key`、`cmd`、`env`、`out`、`done`（还可以写 `data`、`log`、`vars`）；同一类多了在 `recipes.py` 加一种做法。命令要能"重跑就接着训"。
 - **实验表以外的临时任务**：`taskq.py add --nice <档> --recipe <做法> k=v…`（只拉回、归档，没有后续步骤）。
+- **别人的任务**：写一张任务单，`taskq.py add --file job.json`，见下一节。
+
+## 别人的任务（任务单，10/31）
+
+帮别人训练、测试东西（不是 nnU-Net、不进实验表），写一张 JSON 任务单，在 box 上 `taskq.py add --file job.json`。一张单子就是 `command` 做法的参数（`recipes.py`），一个文件里可以放一张，也可以放一列。
+
+```json
+{
+  "key": "guest/alice/resnet-a",
+  "owner": "alice",
+  "env": "nnunet",
+  "cmd": "python3 {data}/guest/alice/code/train.py --data {data}/guest/alice/cifar --out {data}/guest/alice/resnet-a --epochs 50",
+  "inputs": ["guest/alice/code", "guest/alice/cifar"],
+  "out": "guest/alice/resnet-a",
+  "done": ["DONE"],
+  "progress": "progress_json",
+  "resume": ["ckpt_*.pt"],
+  "log": "*.log",
+  "res": {"gpus": 1, "cpus": 8, "mem": "32G", "gpu_mem": 20},
+  "nice": 120
+}
+```
+
+| 字段 | 意思 |
+|---|---|
+| `key` | 任务名，队列里唯一；别人的任务用 `guest/<名字>/…` |
+| `owner` | 谁的任务 |
+| `env` | 环境名（`envs/machines.py` 的 `envs`；没有这个环境的机器不领） |
+| `cmd` | 在仓库根目录用 bash 跑的命令；`{data}` 是那台机器的数据目录。重跑要能从存档接着做 |
+| `inputs` | 要用的文件或文件夹（相对数据目录，box 上先放好）；送到执行机之前传完、核对过 |
+| `out` | 结果文件夹（相对数据目录），做完拉回 box 的同一位置 |
+| `done` | 做完的标志：`out` 下的文件，每一项都要有（一项里 `a|b` 有一个就行） |
+| `progress` | `progress_json`：命令每做完一轮写 `out/PROGRESS.json`，内容 `{"done": 已做完的轮数, "total": 总轮数}`；不写 = 只看日志多久没更新 |
+| `resume` | `out` 下的存档（glob）：有一个就算有进度，失败时留在那台机器上从存档接着做，不换机器重来 |
+| `log` | `out` 下的日志（glob），15 分钟没更新算没人在做 |
+| `res` | 资源：卡数、CPU 数、内存、显存（GB） |
+| `nice` | 档位（越小越先；命令行的 `--nice` 优先） |
+| `relay` | 化名方式，默认 `path`：执行机上只换路径、不动文件内容 |
+| `device` | 默认 `gpu`；纯 CPU 的写 `cpu` |
+
+命令的写法：读 `inputs` 里的文件，每一轮存一次档（先写临时文件再改名）、写一次 `PROGRESS.json`，开始时有存档就从存档接着做，最后写 `done` 里的文件。一个 PyTorch 例子：
+
+```python
+import argparse, glob, json, os, torch
+p = argparse.ArgumentParser(); p.add_argument("--data"); p.add_argument("--out"); p.add_argument("--epochs", type=int)
+a = p.parse_args(); os.makedirs(a.out, exist_ok=True)
+model = torch.nn.Linear(10, 2).cuda(); opt = torch.optim.Adam(model.parameters())
+start = 0
+ckpts = sorted(glob.glob(f"{a.out}/ckpt_*.pt"))
+if ckpts:
+    st = torch.load(ckpts[-1]); model.load_state_dict(st["model"]); opt.load_state_dict(st["opt"]); start = st["epoch"] + 1
+for ep in range(start, a.epochs):
+    ...  # 读 a.data 训一轮
+    torch.save(dict(model=model.state_dict(), opt=opt.state_dict(), epoch=ep), f"{a.out}/ckpt.tmp")
+    os.replace(f"{a.out}/ckpt.tmp", f"{a.out}/ckpt_{ep:04d}.pt")
+    for old in sorted(glob.glob(f"{a.out}/ckpt_*.pt"))[:-1]:
+        os.remove(old)
+    json.dump({"done": ep + 1, "total": a.epochs}, open(f"{a.out}/PROGRESS.json", "w"))
+open(f"{a.out}/DONE", "w").close()
+```

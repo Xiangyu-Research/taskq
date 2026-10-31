@@ -79,9 +79,12 @@ def tag(path):
 
 
 def progress(s, key, host=None):
-    """这一折有没有训练进度（训完或有 epoch）：host=None 时看所有机器。"""
+    """这一折有没有训练进度（训完、有 epoch，或者有存档：任务说明的 resume）：host=None 时看所有机器。"""
     from health import fold_info
-    return any(v[0] or v[1] > 0 for h, v in fold_info(s, key).items() if host in (None, h))
+    if any(v[0] or v[1] > 0 for h, v in fold_info(s, key).items() if host in (None, h)):
+        return True
+    return any(((d.get("folds") or {}).get(key) or {}).get("resumable") for h, d in (s.get("src") or {}).items()
+               if host in (None, h))
 
 
 def syncing(s, name):
