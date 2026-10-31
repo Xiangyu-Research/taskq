@@ -14,7 +14,6 @@ import io
 import os
 import pprint
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -24,7 +23,9 @@ import tokenize
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "envs"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
 import machines as M  # noqa: E402
+import remote as RM  # noqa: E402
 
 OUT = "~/.cache/phd/relay/bundles"
 KEEP = [f"scripts/queue/{f}" for f in ("worker_start.sh", "gpu_pad_start.sh", "gpu_pad.py", "dicc_worker.sh", "taskq.py",
@@ -322,10 +323,11 @@ def gen_sbatch(real, m, root):
     job = (m.get("jobs") or {}).get("gpu")
     if not job:
         raise BundleError("RELAY 里没有 jobs.gpu（worker 的作业名）")
-    r = shlex.quote(root)
+    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/scripts/queue 交，往上 4 级是根目录）
+    logs = ("../../../.." if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
     return "\n".join(["#!/bin/bash", f"#SBATCH --job-name={job}", *keep,
-                      f"#SBATCH --output={root}/data/logs/workers/%x_%j.out",
-                      f"R={r}",
+                      f"#SBATCH --output={logs}",
+                      f"R={RM.q(root)}",
                       'REPO=$(readlink -f "$R/code/current")',
                       'export TASKQ_DIR=$R/queue RQ1_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED',
                       'exec bash "$REPO/scripts/queue/worker_start.sh"', ""])
@@ -334,9 +336,10 @@ def gen_sbatch(real, m, root):
 def home_paths(text, root):
     """家目录下的 ~/.cache/phd/… 换成根目录下的：任务队列 → queue/，显存填充的开关 → queue/gpu_pad_DISABLED，其余 → state/。"""
     for pre in ("$HOME/", "~/"):
-        text = text.replace(pre + ".cache/phd/taskq", f"{root}/queue")
-        text = text.replace(pre + ".cache/phd/gpu_pad/DISABLED", f"{root}/queue/gpu_pad_DISABLED")
-        text = text.replace(pre + ".cache/phd/", f"{root}/state/")
+        r = pre + root[2:] if root.startswith("~/") else root  # 根目录在家目录下时沿用原来的写法（双引号里的 ~ 不展开）
+        text = text.replace(pre + ".cache/phd/taskq", f"{r}/queue")
+        text = text.replace(pre + ".cache/phd/gpu_pad/DISABLED", f"{r}/queue/gpu_pad_DISABLED")
+        text = text.replace(pre + ".cache/phd/", f"{r}/state/")
     return text
 
 

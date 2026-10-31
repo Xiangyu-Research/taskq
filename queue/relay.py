@@ -9,7 +9,7 @@
   R/blobs/<id[:2]>/<id>           数据文件，id = sha256（内容相同的只传一次）
   R/data/                         数据目录：每个任务的视图（指向 blobs 的软链接 + 改写过的小文件，换名见 scripts/sites/names.py），
                                   结果用别名
-每次健康检查（scripts/monitor/health.py，每 30 分钟）调用 run_all：
+每次健康检查（scripts/monitor/health.py，每 30 分钟）经 scripts/queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
   1. ssh 一次读那边的队列、各折进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
   2. 总队列里 worker 是它的每一折：
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（翻译、补传缺的数据、建软链接、加进那边的队列）；
@@ -58,6 +58,9 @@ import common as C  # noqa: E402
 import relay_gc  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
+import remote as R  # noqa: E402
+import pueue as PQ  # noqa: E402
+import slurm as SL  # noqa: E402
 import relay_names as RN  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import names as N  # noqa: E402
@@ -160,7 +163,7 @@ def rsh(name, cmd, input=None, timeout=300):
 
 
 def prefix(name):
-    r = shlex.quote(root(name))
+    r = R.q(root(name))
     return f"cd {r}/code/current && TASKQ_DIR={r}/queue {RB.rename('BRAIN_TUMOR')}={r}/data"
 
 
@@ -172,7 +175,7 @@ def rtq(name, args, timeout=180):
 
 def rpy(name, code, data=None, timeout=600):
     """在那边跑一段 Python（第一个参数是根目录，data 以 JSON 经标准输入）→ 它 json_out 的结果。出错 → RuntimeError。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {shlex.quote(root(name))}",
+    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {R.q(root(name))}",
                        input=json.dumps(data), timeout=timeout)
     res = S.json_in(out)
     if rc or res is None:
@@ -186,25 +189,18 @@ STATUS_PY = HEAD + """import shutil,subprocess,taskq
 st=taskq.local_status()
 sp=[{k:t['spec'].get(k) for k in spec.COLLECT_FIELDS} for t in st['tasks'] if t.get('spec')]
 col=spec.collect(sp,os.environ['@DATA@'])
-sq=jobs=None
+raw=None
 try:
     if A.get('sched')=='pueue':
         q=subprocess.run([os.path.expanduser(A['pueue']),'status','--json'],capture_output=True,text=True,timeout=60)
-        jobs=[]
-        for i,t in sorted(json.loads(q.stdout)['tasks'].items(),key=lambda x:int(x[0])):
-            s_=t['status']
-            st_=s_ if isinstance(s_,str) else list(s_)[0]
-            res=(s_.get('Done') or {}).get('result') if isinstance(s_,dict) and isinstance(s_.get('Done'),dict) else None
-            if t['group']==A['group']:
-                jobs.append([int(i),t.get('label') or '',st_,str(res) if res is not None else None])
     else:
         q=subprocess.run(['squeue','-u',os.environ.get('USER',''),'-h','-o','%i|%j|%T|%M|%q|%R'],capture_output=True,text=True,timeout=60)
-        sq=[l.split('|') for l in q.stdout.splitlines()] if q.returncode==0 else None
+    raw=q.stdout if q.returncode==0 else None
 except Exception:
-    sq=jobs=None
+    raw=None
 ed=os.path.join(R,'state','envs')
 oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
-spec.json_out(dict(taskq=st,folds=col['folds'],squeue=sq,jobs=jobs,free=shutil.disk_usage(R).free,envs_ok=oks,
+spec.json_out(dict(taskq=st,folds=col['folds'],sched_raw=raw,free=shutil.disk_usage(R).free,envs_ok=oks,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
@@ -329,16 +325,28 @@ def remote_status(name):
     """→ 那边的状态 dict；连不上或出错 → None。"""
     c = conf(name)
     try:
-        return rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), group=(c.get("worker") or {}).get("group")),
-                   timeout=300)
+        rs = rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue")), timeout=300)
     except RuntimeError:
         return None
+    return parse_sched(name, rs)
+
+
+def parse_sched(name, rs):
+    """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
+    一次 ssh 读完、在 box 上用适配器解析（scripts/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
+    raw, c = rs.pop("sched_raw", None), conf(name)
+    rs["jobs"] = rs["squeue"] = None
+    if raw is not None and c["scheduler"] == "pueue":
+        rs["jobs"] = PQ.parse(raw, (c.get("worker") or {}).get("group"))
+    elif raw is not None:
+        rs["squeue"] = SL.squeue(raw)
+    return rs
 
 
 # ---------------- 代码包 ----------------
 def deploy(name, bid, path):
     """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。"""
-    r = shlex.quote(root(name))
+    r = R.q(root(name))
     b = shlex.quote(bid)
     tar = subprocess.run(["tar", "-C", path, "-cf", "-", "."], capture_output=True, check=True).stdout
     cmd = (f"set -e; R={r}; mkdir -p $R/code $R/queue $R/blobs $R/tmp $R/state $R/data/logs/tasks $R/data/logs/workers; "
@@ -650,32 +658,28 @@ def fill(s, name, rs, st, acts):
     return out, "" if out else ("队列里没有能领的折" if not cands else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
 
 
-def worker_jobs(name, rs):
-    w = conf(name)["worker"]
-    return [j for j in rs.get("jobs") or [] if j[1] == f"worker:{w['id']}"]
-
-
 def topup(name, rs, run=None):
-    """→ [(QOS, 时限, 补几个)], 不补的原因。pueue 类：组里没有活着的 worker、那边有备好没人领的任务时开一个 → [("pueue", None, 1)]；
-    Slurm 类：排着没开始的作业不超过备好的任务数（refill.topup_plan）。"""
+    """→ [(QOS, 时限, 补几个)], 不补的原因。"要几个"只在这里算（先备好再开卡，10/31 定），适配器只读状态、照着开。
+    pueue 类：组里没有活着的 worker、上一个没失败、那边有备好没人领的任务时开一个 → [("pueue", None, 1)]；
+    Slurm 类：排着没开始的作业不超过备好的任务数（refill.topup_plan）。run：fn(名字, 命令) → (退出码, 输出, 错误)，测试替换。"""
     if conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
             return [], "读不到 pueue"
-        mine = worker_jobs(name, rs)
+        mine = PQ.workers(name, rs["jobs"])
         if any(j[2] != "Done" for j in mine):
             return [], "worker 在"
         if mine and mine[-1][3] not in ("Success", "Killed"):
             return [], f"上一个 worker（pueue 任务 {mine[-1][0]}）失败了（{mine[-1][3]}）"
         if not refill.unclaimed(rs["taskq"], "gpu"):
-            return [], "那边没有备好、没人领的任务"  # 先备好再开卡（10/31 定）；worker 空闲 30 分钟自己退出，有了再开
+            return [], "那边没有备好、没人领的任务"  # worker 空闲 30 分钟自己退出，有了再开
         return [("pueue", None, 1)], ""
     conf_ = P.SLURM.get(name) or {}
     if not conf_.get("gpu"):
         return [], "envs/policy.py 的 SLURM 里没有它"
-    rc, out, _ = (run or rsh)(name, refill.topup_probe(name))
-    if rc:
+    st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or rsh)(name, c)))
+    if st is None:
         return [], "读不到作业数"
-    subs, why = refill.topup_plan(rs["taskq"], refill.parse_qos(out), conf_["gpu"])
+    subs, why = refill.topup_plan(rs["taskq"], st["counts"], conf_["gpu"])
     return [(q, t, n) for q, t, n, _ in subs], why
 
 
@@ -725,7 +729,7 @@ def execute(name, acts, s, run_add=None):
                 msgs.append(f"{L} 训完了 {k}，排了拉回、归档（box 任务 {tid}）")
             elif a["op"] == "drop":
                 r = rtq(name, f"remove {shlex.quote(a['alias'])}")
-                rr = shlex.quote(root(name))
+                rr = R.q(root(name))
                 extra = [safe_rel(c) for c in (keys_of(load_state(), name).get(k) or {}).get("cleanup") or []]
                 rc, out, err = rsh(name, f"rm -rf {rr}/data/{shlex.quote(a['out'])} {rr}/data/logs/tasks/{shlex.quote(S.safe(a['alias']))}__*"
                                    + "".join(f" {rr}/data/{shlex.quote(c)}" for c in extra))
@@ -744,29 +748,23 @@ def execute(name, acts, s, run_add=None):
 
 
 def submit(name, subs):
+    """照 topup 算好的开 worker（scripts/sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
     L, msgs, stuck = conf(name)["label"], [], {}
+    run = lambda c: (lambda r: (r[0], r[1] + r[2]))(rsh(name, c))  # noqa: E731
     if conf(name)["scheduler"] == "pueue":
-        c, r = conf(name), shlex.quote(root(name))
-        w, gpu = c["worker"], c["groups"][c["worker"]["group"]][1]
-        run = (f"R={r}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue WORKER_ID={w['id']} CUDA_VISIBLE_DEVICES={gpu}; "
-               f"exec bash $REPO/scripts/queue/{RB.rename('worker_start.sh')}")
         for _ in subs:
-            rc, out, err = rsh(name, f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- {shlex.quote('bash -c ' + shlex.quote(run))}")  # pueue 把参数用空格拼起来再交给 sh
-            if rc:
-                stuck[f"site:{name}:worker"] = f"{L} 开 worker 出错：{(out + err)[-200:]}"
+            ok, out = PQ.start_worker(name, run)
+            if ok:
+                msgs.append(f"{L} 开了 worker（{out[-80:]}）")
             else:
-                msgs.append(f"{L} 开了 worker（{out.strip()[-80:]}）")
+                stuck[f"site:{name}:worker"] = f"{L} 开 worker 出错：{out}"
         return msgs, stuck
-    for q, t, n in subs:
-        ids = []
-        for _ in range(n):
-            rc, out, err = rsh(name, f"cd {shlex.quote(root(name))}/code/current/scripts/queue && sbatch --parsable --qos={q} --time={t} worker.sbatch")
-            if rc:
-                stuck[f"topup:{name}:{q}"] = f"{L} {q} 补交 worker 作业出错：{(out + err)[-200:]}"
-                break
-            ids.append(out.strip().splitlines()[-1])
-        if ids:
-            msgs.append(f"{L} {q} 交了 {len(ids)} 个 worker 作业 {'、'.join(ids)}（每个 {t}）")
+    cwd = R.q(root(name)) + "/code/current/scripts/queue"
+    for r in SL.start_workers(cwd, [(q, t, n, "worker.sbatch") for q, t, n in subs], run):
+        if r["err"] is not None:
+            stuck[f"topup:{name}:{r['qos']}"] = f"{L} {r['qos']} 补交 worker 作业出错：{r['err']}"
+        if r["ids"]:
+            msgs.append(f"{L} {r['qos']} 交了 {len(r['ids'])} 个 worker 作业 {'、'.join(r['ids'])}（每个 {r['time']}）")
     return msgs, stuck
 
 

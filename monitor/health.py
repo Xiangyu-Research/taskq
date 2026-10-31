@@ -24,8 +24,8 @@
   make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
 每次检查后还做两件事（10/18 起）：
   - scripts/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
-  - scripts/queue/relay.py：中转执行机（10/30）的领任务、传数据、拉回；停住等人处理的报成问题。
-  - scripts/queue/feed.py：往执行机（DICC、lab）的缓冲送任务、交还（10/31），记在 ~/feed.log。
+  - scripts/queue/feed.py：送任务的唯一入口（10/31）。SITES 里 relay=True 的执行机交给 scripts/queue/relay.py（领任务、传数据、
+    拉回，记在 ~/relay.log；停住等人处理的报成问题），其余往缓冲送任务、交还，记在 ~/feed.log。
   - scripts/queue/advance.py：box 上按每一折的状态排下一步（拉回 → 推理 → 评测 → 五折分析）；失败停住的报成问题。
 """
 import argparse
@@ -495,28 +495,21 @@ def main():
     if shift_err:
         stuck["shift:error"] = shift_err
     try:
-        import relay  # scripts/queue/relay.py：中转执行机（envs/machines.py 的 RELAY）领任务、传数据、拉回
-        ev3, st4 = relay.run_all(s, dry=a.dry_run)
-        events += ev3
-        stuck.update(st4)
-    except Exception as e:  # noqa: BLE001
-        stuck["relay:error"] = f"scripts/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]
-    try:
         import feed  # scripts/queue/feed.py：往执行机的缓冲送任务（10/31）
     except Exception as e:  # noqa: BLE001
         feed, stuck["feed:error"] = None, f"scripts/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
 
-    def run_feed():
+    def run_feed(relay):
         if feed is None:
             return
         try:
-            ev, st = feed.run_all(s, dry=a.dry_run)
+            ev, st = feed.run_all(s, dry=a.dry_run, relay=relay)
             events.extend(ev)
             stuck.update(st)
         except Exception as e:  # noqa: BLE001
             stuck["feed:error"] = f"scripts/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
 
-    run_feed()
+    run_feed(relay=True)  # 送任务只从 feed.py 进：SITES 里 relay=True 的由它转给 relay.py
     try:
         import advance  # scripts/queue/advance.py：box 上按状态排下一步
         done, stuck2 = advance.run(s, dry=a.dry_run)
@@ -532,7 +525,7 @@ def main():
         for name in feed.sites() if feed else []:
             if s["ok"].get(name) and name in s["taskq"]:
                 s["taskq"][name] = taskq.remote_status(name)
-        run_feed()
+        run_feed(relay=False)
     try:
         # 缓冲有了任务、而那边没有排着的作业时补交 worker（送任务之后再补，10/31）
         for name in s.get("taskq", {}):
