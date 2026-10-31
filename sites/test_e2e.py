@@ -224,9 +224,9 @@ def place_rec(src, D, written, real):
 
 def fake_add(host, lab, step_, key, args, run=None, **rec):
     if step_ == "relay_stage":
-        relay.stage(NAME, key, nice=int(re.search(r"--nice (-?\d+)", args).group(1)), say=LOG.append)
+        relay.stage(rec.get("to") or NAME, key, nice=int(re.search(r"--nice (-?\d+)", args).group(1)), say=LOG.append)
     elif step_ == "relay_fetch":
-        relay.fetch(NAME, key, say=LOG.append)
+        relay.fetch(rec.get("to") or NAME, key, say=LOG.append)
     else:
         raise AssertionError(f"没想到的 box 任务 {step_} {key}")
     LOG.append(f"box 任务 {step_} {key}")
@@ -238,8 +238,8 @@ def snapshot():
                 src={n: dict(folds={}) for n in M.names("train")})
 
 
-def check():
-    msgs, stuck = relay.run_one(snapshot(), NAME, False)
+def check(name=NAME):
+    msgs, stuck = relay.run_one(snapshot(), name, False)
     LOG.extend(msgs)
     bad = [m for m in msgs if "出错" in m]
     if bad:
@@ -431,6 +431,101 @@ def step_gc():
          and os.path.isfile(os.path.join(RROOT, "state/envs/toy.ok")), top)
 
 
+# ---------------- 按时段的执行机（lab0 的晚班）：时段外不领，时段里领、开 worker，结束时交给同一台上的 lab1 接着做 ----------------
+NAME0 = "lab0"
+RLINK0 = tempfile.mktemp(prefix="e2e_r0_", dir="/tmp")
+K6 = "guest/e2e/t6"
+
+
+def keys0():
+    return relay.keys_of(relay.load_state(), NAME0)
+
+
+def out0(key):
+    return os.path.join(RLINK0, "data", keys0()[key]["params"]["out"])
+
+
+def step_shift():
+    import datetime as dt
+    import shift
+    os.makedirs(os.path.join(T, "r0"))
+    os.symlink(os.path.join(T, "r0"), RLINK0)
+    shift.STATE, shift.LOG = os.path.join(T, "shift.json"), os.path.join(T, "shift.log")
+    shift.others_on = lambda host, gpu: []
+    shift.C = type("C", (), {"run": staticmethod(lambda cmd, host=None, timeout=60, **kw: run_local(cmd, host, timeout))})
+    rc, out = pq("group", "add", "gpu0")
+    assert rc == 0, out
+    pq("pause", "-g", "gpu0")
+    e0 = dict(ENTRY, groups={"gpu0": (1, None, {})}, worker=dict(group="gpu0", id="wtest0"), env_root=RLINK0 + "/envs")
+    c0 = dict(M.SITES[NAME0], root=RLINK0, ssh="lab", adopt=[NAME], budget=(0, 0), transfer_job=None, **e0)
+    M.SITES[NAME0] = M.RELAY[NAME0] = c0
+    relay.conf(NAME).update(adopt=[NAME0], budget=(0, 0))
+    relay.VIEW_KEEP_S = 3600
+    P.AUTO.update({NAME0: True, NAME: True})
+    P.READY.update({NAME0: 1, NAME: 0})  # 夜里 lab1 不领（让 lab0 领到）；交接时直接改分，不用它领
+    bid, path = RB.build(NAME0, None, os.path.join(T, "bundles0"), root=RLINK0, entry=e0)
+    relay.deploy(NAME0, bid, path)
+    commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+    relay.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME0}:{commit}": bid}))
+    rc, out = E.build(NAME0, "toy", run=run_local)
+    assert rc == 0, out
+    sheet = dict(key=K6, owner="alice", env="toy", inputs=["guest/e2e/code", "guest/e2e/d1"],
+                 cmd="python3 {data}/guest/e2e/code/toy.py --data {data}/guest/e2e/d1 --out {data}/guest/e2e/r/t6 --pause 600",
+                 out="guest/e2e/r/t6", done=["DONE"], progress="progress_json", resume=["ckpt_*.json"], log="train.log",
+                 res={"gpus": 1}, nice=50)
+    wb(os.path.join(T, "job6.json"), json.dumps([sheet], ensure_ascii=False))
+    central(f"add --file {T}/job6.json")
+    now = dt.datetime.now(shift.TZ)
+    hm = lambda d: (now + dt.timedelta(hours=d)).strftime("%H:%M")  # noqa: E731
+    P.SHIFT = {NAME0: (hm(1), hm(2))}
+    shift.run(now=now)
+    check(NAME0)
+    check(NAME0)
+    t6 = box_tasks()[K6]
+    gpu0 = [t for t in pueue_tasks().values() if t["group"] == "gpu0"]
+    step("lab0 时段外：不领任务、不开 worker", t6["state"] == "free" and not t6["worker"] and not gpu0 and not shift.allowed(NAME0),
+         (t6, gpu0))
+    P.SHIFT = {NAME0: (hm(-1), hm(2))}
+    shift.run(now=now)
+    st = shift.load()
+    step("lab0 时段开始、卡空着：恢复 worker 组，allowed() 放行", shift.allowed(NAME0) and st[NAME0].get("started"), st)
+    check(NAME0)
+    t6 = box_tasks()[K6]
+    step("lab0 时段里：领了 t6、数据传过去", t6["worker"] == NAME0 and K6 in keys0(), (t6, LOG[-8:]))
+    check(NAME0)
+    jobs = [t for t in pueue_tasks().values() if t["group"] == "gpu0"]
+    step("下一次检查：lab0 开了 worker", len(jobs) == 1 and jobs[0]["label"] == "worker:wtest0", jobs)
+    wait(lambda: os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), 120, "t6 在 lab0 上做完第 2 轮")
+    check(NAME0)  # 读一次状态（status.json：在训）
+    msgs = shift.run(now=now + dt.timedelta(hours=3))
+    t6 = box_tasks()[K6]
+    step("时段结束：停 lab0 的 worker，有进度的 t6 改分给 lab1", t6["worker"] == NAME and t6["state"] == "claimed", (t6, msgs))
+    step("时段结束后 lab0 不再领任务", not shift.allowed(NAME0))
+    wait(lambda: all(t["status"] != "Running" for t in pueue_tasks().values() if t["group"] == "gpu0"), 60, "lab0 的 worker 停下")
+    check(NAME0)
+    a0 = keys0().get(K6) or {}
+    rq0 = relay.remote_status(NAME0)["taskq"]["tasks"]
+    step("lab0：队列里删掉 t6（unq），结果目录留着给 lab1 收编",
+         a0.get("unq") and not rq0 and os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), (a0, rq0))
+
+    def done6():
+        return box_tasks()[K6]["state"] == "done"
+    check()  # lab1 收编 lab0 的存档、加进队列
+    o1 = os.path.join(RLINK, "data", keys()[K6]["params"]["out"])
+    step("lab1 收编了 lab0 的存档，刚停的日志让那边的队列先当它有人在训（busy，15 分钟），不马上开 worker",
+         os.path.exists(os.path.join(o1, "ckpt_02.json")) and relay.remote_status(NAME)["taskq"]["tasks"][0]["state"] == "busy")
+    old = time.time() - 20 * 60  # 下一次检查（30 分钟后）时日志已经停了一阵
+    for f in os.listdir(o1):
+        os.utime(os.path.join(o1, f), (old, old))
+    wait(done6, 300, "lab1 从 lab0 的存档接着做完、拉回", every=2, act=check)
+    res = json.load(open(os.path.join(BD, "guest/e2e/r/t6/result.json")))
+    step("t6：lab1 从第 2 轮的存档接着做（lab0 的存档带过来了），结果对",
+         res["start"] == 2 and res["total"] == 3 * sum(text_of(1).encode()), res)
+    check(NAME0)
+    step("总队列训完以后，lab0 上 t6 的结果删了、记录清掉",
+         K6 not in keys0() and not os.path.exists(os.path.join(RLINK0, "data", a0["params"]["out"])), keys0())
+
+
 def cleanup():
     if DAEMON is not None:
         pq("kill", "--all")
@@ -450,6 +545,8 @@ def cleanup():
                 pass
     if not os.environ.get("E2E_KEEP"):
         os.remove(RLINK)
+        if os.path.islink(RLINK0):
+            os.remove(RLINK0)
         shutil.rmtree(T, ignore_errors=True)
 
 
@@ -461,6 +558,7 @@ def main():
         step_stop()
         step_finish()
         step_gc()
+        step_shift()
         print("nnU-Net 小折：跳过（box 上没有 1–2 个 epoch 能训完的预处理数据集；nnU-Net 的换名、拉回见 scripts/queue/test_relay.py）")
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:

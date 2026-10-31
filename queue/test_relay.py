@@ -19,13 +19,16 @@ import test_relay_names as TN  # noqa: E402  （设了 RELAY_DIR、建了临时�
 T = TN.TMP
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
-    f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nshift\ncd / && exec bash -c "$*"\n')
+    f.write(f'#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\n[[ $1 == -O ]] && {{ [[ -e {T}/master_down ]] && exit 255; exit 0; }}\n'
+            'shift\ncd / && exec bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
 BIN = os.path.join(T, "bin")
 os.makedirs(BIN)
 with open(os.path.join(BIN, "srun"), "w") as f:  # 假的 srun：跳过选项，从 python3 那一项起照跑
-    f.write(f"#!{sys.executable}\nimport os,sys\na=sys.argv[1:]\ni=next(i for i,x in enumerate(a) if x.endswith('python3'))\n"
-            "os.execv(a[i],a[i:])\n")
+    f.write(f"#!{sys.executable}\nimport os,sys\na=sys.argv[1:]\n"
+            f"open({os.path.join(T, 'srun_args')!r},'a').write(' '.join(a)+chr(10))\n"
+            f"if os.path.exists({os.path.join(T, 'no_slot')!r}):\n    sys.stderr.write('srun: error: Unable to allocate resources: Immediate')\n    sys.exit(1)\n"
+            "i=next(i for i,x in enumerate(a) if x.endswith('python3') or x=='bash')\nos.execvp(a[i],a[i:])\n")
 os.chmod(os.path.join(BIN, "srun"), 0o755)
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
@@ -112,23 +115,40 @@ def ops(acts):
 
 
 def test_adopt_out():
-    """老数据目录里训到一半的存档拷进别名结果目录；那边已经有存档时不动。"""
+    """老数据目录、别的执行机里训到一半的存档（最新的那份）拷进别名结果目录；这边已有更新的存档或训完了时不动。"""
     import subprocess
-    old, R = os.path.join(T, "ao_old"), os.path.join(T, "ao_R")
-    src = os.path.join(old, "res", "fold_3")
+    old, sib, R = os.path.join(T, "ao_old"), os.path.join(T, "ao_sib"), os.path.join(T, "ao_R")
+    src, ssrc = os.path.join(old, "res", "fold_3"), os.path.join(sib, "data", "a", "fold_3")
     os.makedirs(src)
     for f, b in (("checkpoint_latest.pth", b"L"), ("checkpoint_best.pth", b"B"), ("training_log.txt", b"t")):
         open(os.path.join(src, f), "wb").write(b)
+    dirs = [ssrc, src]
     run = lambda: S.json_in(subprocess.run(
-        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(old=old, real="res/fold_3", alias="a/fold_3")),
+        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, alias="a/fold_3", resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
+                                                                         done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"])),
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(HERE)), check=True).stdout)
-    assert run() == 3
+    r = run()
+    assert r["n"] == 3 and r["src"] == src, r
     new = os.path.join(R, "data", "a", "fold_3")
     assert open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"L"
     assert not [f for f in os.listdir(new) if f.endswith(".relaytmp")]
     open(os.path.join(new, "checkpoint_latest.pth"), "wb").write(b"N")
-    assert run() == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"N"
-    ok("老目录的存档拷进别名结果目录；已有存档时不覆盖")
+    assert run()["n"] == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"N"
+    ok("老目录的存档拷进别名结果目录；已有更新的存档时不覆盖")
+    os.makedirs(ssrc)
+    open(os.path.join(ssrc, "checkpoint_latest.pth"), "wb").write(b"S")
+    t = time.time() + 60
+    os.utime(os.path.join(ssrc, "checkpoint_latest.pth"), (t, t))
+    r = run()
+    assert r["src"] == ssrc and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"S", r
+    ok("另一台执行机（同一个盘、换卡）的存档更新 → 拷它的，接着训")
+    open(os.path.join(new, "checkpoint_final.pth"), "wb").write(b"F")
+    wb_ = os.path.join(new, "validation", "summary.json")
+    os.makedirs(os.path.dirname(wb_))
+    open(wb_, "w").write("{}")
+    os.utime(os.path.join(ssrc, "checkpoint_latest.pth"), (t + 60, t + 60))
+    assert run()["n"] == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"S"
+    ok("这边已经训完（任务说明的 done 都在）→ 不动")
 
 
 def test_plan():
@@ -206,6 +226,17 @@ def test_plan():
     assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:{K}"], stuck
     ok("那边有、总队列里不归它的：不让它训；总队列训完了就删；认不出的、在训的报 site:<名字>:orphan")
 
+    acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "free")), st)
+    assert ops(acts) == [("unq", K)] and acts[0]["to"] == "other" and not stuck, acts
+    ust = dict(keys={NAME: {K: dict(st["keys"][NAME][K], recipe="nnunet", params=dict(dataset="Dataset901_ab", fold="0"), unq=1.0)}})
+    acts, _ = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(), ust)
+    assert ops(acts) == [], acts
+    acts, _ = relay.plan(S0([mtask(K, "done", "other")]), NAME, RS(), ust)
+    assert ops(acts) == [("drop", K)] and acts[0].get("gone") and acts[0]["out"], acts
+    acts, _ = relay.plan(S0([]), NAME, RS(), ust)
+    assert ops(acts) == [("drop", K)] and acts[0].get("gone"), acts
+    ok("总队列里改分给了别的执行机（换卡）→ 那边队列里删掉（unq）、结果留着给它收编；总队列训完了再删结果（不再删队列）")
+
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 3 * 3600}))
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:down" in stuck, stuck
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 600}))
@@ -225,6 +256,26 @@ def test_plan():
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=105e9), st, [])
     assert more == [] and "放不下" in why, why
     ok("补任务：那边排着的（含在传数据的）不够 READY 个才领，按档位，只领能翻译的做法，放不下不领")
+
+    relay.PLANNED.clear()
+    a1, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
+    disk = next(iter(relay.PLANNED))
+    relay.PLANNED[disk] = 395.0
+    more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
+    assert a1 and more == [] and "放不下" in why, (a1, more, why)
+    relay.PLANNED.clear()
+    ok("同一个盘上的几台（lab0、lab1）：这次检查里已经计划传的算进去")
+
+    rule0, allowed0 = relay.shift.rule, relay.shift.allowed
+    relay.shift.allowed = lambda n, now=None: False
+    try:
+        more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
+        assert more == [] and why, (more, why)
+        subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[dict(key="a/x/0", state="free")])), run=lambda n, c: (0, "", ""))
+        assert subs == [] and why, (subs, why)
+    finally:
+        relay.shift.rule, relay.shift.allowed = rule0, allowed0
+    ok("按时段的执行机（lab0）时段外：不领任务、不开 worker")
 
 
 # ---------------- 2. 挪进数据目录的顺序 ----------------
@@ -293,6 +344,30 @@ def test_e2e():
     rs = relay.remote_status(NAME)
     assert rs and rs["bundle"] == bid and rs["taskq"]["enabled"] and rs["taskq"]["tasks"] == [], rs
     ok(f"代码包 {bid} 推过去、切换 current，那边的队列开着、是空的")
+
+    c0 = M.RELAY[NAME]
+    M.RELAY[NAME] = dict(c0, ssh_master=True)
+    open(os.path.join(T, "master_down"), "w").close()
+    assert relay.remote_status(NAME) is None
+    os.remove(os.path.join(T, "master_down"))
+    assert relay.remote_status(NAME)["bundle"] == bid
+    M.RELAY[NAME] = c0
+    ok("ssh_master：长连接断着 → 当连不上，不另起连接；通着照常读")
+
+    if os.path.exists(os.path.join(T, "srun_args")):
+        os.remove(os.path.join(T, "srun_args"))
+    assert relay.rpy(NAME, relay.MISSING_PY, ["ab" * 32], job="-p cpu -t 10") == ["ab" * 32]
+    sa = open(os.path.join(T, "srun_args")).read()
+    assert f"-I{relay.JOB_WAIT} -p cpu -t 10 -J " in sa and " bash -c " in sa, sa
+    open(os.path.join(T, "no_slot"), "w").close()
+    try:
+        relay.rpy(NAME, relay.MISSING_PY, [], job="-p cpu")
+        raise AssertionError("应出 NoSlot")
+    except relay.NoSlot:
+        pass
+    finally:
+        os.remove(os.path.join(T, "no_slot"))
+    ok("adopt_job：收编在 srun 的 CPU 作业里跑（-I 等排队）；排不上 → NoSlot（这次不传）")
 
     akey = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
     alias = akey.split("/")[0]

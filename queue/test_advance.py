@@ -87,7 +87,8 @@ A.taskq_add = lambda nice, args: (0, "")  # 不真的加进总队列
 A.feed.sites = lambda: ["dicc", "lab"]  # 执行机（10/31 第二阶段起 lab 也有缓冲）
 REAL_PLACE = dict(A.P.PLACE, eval=["queue:dicc have", "box:cpu"], ens=["queue:dicc have", "box:cpu"])  # 按平时的写法测（DICC 停机时 policy 临时改过）
 A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组）；第 9 节起测别的地方
-A.P.AUTO = dict(A.P.AUTO, advance=False)
+A.P.AUTO = dict(A.P.AUTO, advance=False, dicc=True, dicc1=False)  # 按 DICC 换成 dicc1 之前测；换过去以后第 10b 节测
+A.P.OFFLINE = {}
 A.P.HOLD = []
 # 实验一级带 queue 的几串（10/23，P1 / P2 重跑）也先拿掉，第 11 节再放回来测
 PROBE_STEPS = ("p1", "p2", "p2cmp")
@@ -476,6 +477,28 @@ x = tc(todo)
 check("queue：DICC 上缺模型文件 → box wait 组先传过去，不加任务", len(x) == 1 and x[0]["step"] == "push" and x[0]["group"] == "wait"
       and x[0]["cmd"] == f"bash scripts/queue/offload_io.sh push dicc {TCM}/fold_2/checkpoint_final.pth")
 pq = [("Failed (1)", x[0]["cmd"], None)]
+# 10b. DICC 换成接替它的 dicc1（machines.py 的 replaces）、暂停检查（OFFLINE）
+REMOTE["have"] = set(TNEEDS)
+A.P.AUTO = dict(A.P.AUTO, dicc=False, dicc1=True)
+trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
+x = tc(A.plan(snap())[0])
+check("queue:dicc，DICC 换成了 dicc1 → 进总队列只给 dicc1（relay.py 连同输入送过去，不先传）",
+      len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["dicc1"]' in x[0]["args"])
+A.P.PLACE = dict(BASE, infer=["queue:dicc have", "box:gpu"])
+x = tc(A.plan(snap())[0])
+check("queue:dicc have，换成了 dicc1 → 用不了（relay 机器上查不了现成的输入），用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
+A.P.PLACE = dict(BASE, infer=["queue:dicc", "box:gpu"])
+A.P.OFFLINE = {"dicc1": "停机"}
+x = tc(A.plan(snap())[0])
+check("queue:dicc，dicc1 暂停检查（OFFLINE）→ 跳过，用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
+A.P.AUTO = dict(A.P.AUTO, dicc=True, dicc1=False)
+A.P.OFFLINE = {"dicc": "停机"}
+x = tc(A.plan(snap())[0])
+check("queue:dicc，还没换、DICC 暂停检查 → 跳过，用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
+A.P.OFFLINE = {}
+A.P.PLACE = dict(BASE)
+REMOTE["have"] = set(TNEEDS) - {f"{TCM}/fold_2/checkpoint_final.pth"}
+trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
 s_ = snap(pq)
 s_["pueue"]["box"]["tasks"][0]["label"] = "push:infer:t1c_f2"
 todo, stuck = A.plan(s_)
@@ -578,7 +601,11 @@ check("trainer：lab 不是执行机时，0 号卡训的折 → 推理给同一�
       len(x) == 1 and 'machines=["lab1"]' in x[0]["args"] and "after=" + json.dumps([K3]) in x[0]["args"])
 A.P.AUTO = dict(A.P.AUTO, lab1=False)
 check("trainer：lab1 关着 → 0 号卡训的折不提前排", not t3(A.plan(lsnap("lab:gpu0"))[0]))
-A.P.AUTO = dict(A.P.AUTO, lab1=True)
+A.P.AUTO = dict(A.P.AUTO, lab1=True, lab0=True)
+x = t3(A.plan(lsnap("lab0"))[0])
+check("trainer：按时段的 relay 机器（lab0，晚班）训的折 → 推理给同一台主机上不按时段的 lab1，等训练",
+      len(x) == 1 and 'machines=["lab1"]' in x[0]["args"] and "after=" + json.dumps([K3]) in x[0]["args"])
+A.P.AUTO = dict(A.P.AUTO, lab1=True, lab0=False)
 A.feed.sites = lambda: ["dicc", "lab"]
 for r_ in ("dicc2", "lab1"):
     x = t3(A.plan(lsnap(r_, heads={"dicc": H3, "lab": H3}))[0])

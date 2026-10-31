@@ -145,6 +145,23 @@ def main():
         assert exists(R, "aa1") and exists(R, "ee1") and not exists(R, "dd1"), r
         ok("根目录经软链接到达时，在用的 blob 也不删")
 
+        # 同一个盘上的另一台执行机（lab0 / lab1）：两边的 blobs 互相硬链接收编
+        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        sib = tempfile.mkdtemp(dir=tmp)
+        for h in ("gg1", "hh1", "ii1"):
+            os.makedirs(os.path.join(sib, "blobs", h[:2]), exist_ok=True)
+        g = blob(R, "gg1", 100)
+        os.link(g, os.path.join(sib, "blobs", "gg", "gg1"))
+        h_ = blob(R, "hh1", 100)
+        os.link(h_, os.path.join(tmp, "old", "hh1_copy"))
+        i_ = blob(R, "ii1", 100)
+        os.link(i_, os.path.join(sib, "blobs", "ii", "ii1"))
+        os.symlink(i_, os.path.join(R, "data", "nnUNet", "preprocessed", "ds_keep", "plans_3d", "c9.npz"))
+        r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0, siblings=[sib])
+        assert not exists(R, "gg1") and os.path.exists(os.path.join(sib, "blobs", "gg", "gg1")), r
+        assert exists(R, "hh1") and exists(R, "ii1") and r.get("unlinked") == 1, r
+        ok("还不够时：自己不用、另一个链接在同一个盘上别的执行机 blobs 里的，只删自己这个链接；老目录的硬链接、自己在用的不碰")
+
         assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
         ok("没有 budget 的机器不清理")
     finally:
