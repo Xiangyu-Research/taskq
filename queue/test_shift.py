@@ -37,12 +37,13 @@ shift.others_on = lambda host, gpu: world["who"]
 shift.C.run = lambda cmd, host=None, timeout=0: (calls.append(cmd), (0, "", ""))[1]
 
 
-def pause_stub(host, g):
+def pause_stub(host, g, name):
     calls.append("PAUSE")
     world["group"] = "Paused"
     return "停了"
 
 
+real_pause = shift.pause
 shift.pause = pause_stub
 
 world["who"] = ["jun"]
@@ -75,5 +76,24 @@ shift.run(now=T(31, "18:05"))
 shift.run(now=dt.datetime(2026, 11, 1, 9, 5, tzinfo=TZ))
 assert not calls, calls
 ok("时段开始时已经手动开着：不动，结束时也不暂停")
+
+# 真的 pause()：在训的训练交给缓冲（总队列改分、pueue 里删），别的放回组的队列；改分失败的也放回
+seq = iter([("Running", {1: dict(state="Running", status="Running", label="train:D/t/1", priority=0),
+                         2: dict(state="Running", status="Running", label="train:D/t/2", priority=0),
+                         3: dict(state="Running", status="Running", label="p1:x", priority=0),
+                         4: dict(state="Queued", status="Queued", label="train:D/t/3", priority=0)})]
+           + [("Paused", {1: dict(state="Done", status={"Done": {"result": {"Failed": 143}}}, label="train:D/t/1", priority=0),
+                          2: dict(state="Done", status={"Done": {"result": {"Failed": 143}}}, label="train:D/t/2", priority=0),
+                          3: dict(state="Done", status={"Done": {"result": {"Failed": 143}}}, label="p1:x", priority=0),
+                          4: dict(state="Queued", status="Queued", label="train:D/t/3", priority=0)})] * 3)
+shift.group_tasks = lambda host, g: next(seq)
+moves = []
+shift.hand_over = lambda key, frm, to: (moves.append((key, frm, to)), key != "D/t/2")[1]
+calls.clear()
+msg = real_pause("lab", "gpu0", "lab")
+assert moves == [("D/t/1", "lab:gpu0", "lab"), ("D/t/2", "lab:gpu0", "lab")], moves
+assert any(c.endswith("remove 1") for c in calls) and any(c.endswith("restart --in-place 2 3") for c in calls), calls
+assert not any("remove" in c and "4" in c for c in calls), calls
+ok("时段结束：没训完的训练交给缓冲、pueue 里删掉；改分失败的和别的任务放回队列；排着的不动")
 
 print("全部通过")

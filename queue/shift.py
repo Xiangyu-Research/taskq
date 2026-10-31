@@ -3,8 +3,8 @@
 
 每个时段只动两次，中间手动的暂停、恢复都不管：
   - 时段开始后：组暂停着、这张卡上没有别的用户的进程 → 恢复（有人在用就下次检查再看，直到时段结束）；
-  - 时段结束后：这个时段是这里恢复的、组还开着 → 暂停，在跑的任务 SIGTERM 后放回队列（训练从存档接着训），
-    给还没训完的折预排的推理（advance.py 加的带优先级的任务）删掉，下次开训后 advance.py 重排。
+  - 时段结束后：这个时段是这里恢复的、组还开着 → 暂停，在跑的任务 SIGTERM；没训完的训练交给这台机器的缓冲
+    （总队列里 lab:gpu0 改分给 lab，pueue 里删掉），白天由 worker 从存档接着训（10/31）；别的任务放回组的队列。
 做了什么记在 ~/.cache/phd/shift.json（每个组最近一次恢复、暂停的时段日期），日志 ~/refill.log。
 """
 import datetime as dt
@@ -91,29 +91,38 @@ def group_tasks(host, g):
     return d["groups"][g]["status"], tasks
 
 
-def pause(host, g):
-    """暂停组，停掉在跑的任务并放回队列 → 说明。"""
+def hand_over(key, frm, to):
+    """总队列里把分给 frm 的 key 改分给 to（box 上，10/31）→ 是否成功。"""
+    import taskq
+    taskq.central(["release", "--worker", frm, key])
+    rc, _, _ = taskq.central(["take", "--worker", to, "--assign", key])
+    return rc == 0
+
+
+def pause(host, g, name):
+    """暂停组，停掉在跑的任务 → 说明。没训完的训练交给这台的缓冲（总队列里 <机器>:<组> 改分给 <机器>，pueue 里删掉），
+    worker 从存档接着训（10/31）；交不出去的和别的任务放回这个组的队列。"""
     C.run(f"{PUEUE} pause -g {g} --wait", host, timeout=60)
     _, tasks = group_tasks(host, g)
     run = [i for i, t in (tasks or {}).items() if t["state"] == "Running"]
-    if run:
-        C.run(f"{PUEUE} kill -s SIGTERM {' '.join(map(str, run))}", host, timeout=60)
-        for _ in range(60):
-            _, tasks = group_tasks(host, g)
-            if tasks and all(tasks[i]["state"] == "Done" for i in run):
-                break
-            time.sleep(5)
-        back = [i for i in run if tasks and tasks[i]["state"] == "Done"
-                and "Success" not in json.dumps(tasks[i]["status"])]
-        if back:
-            C.run(f"{PUEUE} restart --in-place {' '.join(map(str, back))}", host, timeout=60)
-        pre = [i for i, t in (tasks or {}).items() if t["state"] == "Queued" and t["priority"] > 0
-               and t["label"].startswith("infer:") and i not in back]
-        if pre and any(tasks[i]["label"].startswith("train:") for i in back):
-            C.run(f"{PUEUE} remove {' '.join(map(str, pre))}", host, timeout=60)
-        names = ", ".join(tasks[i]["label"] for i in run) if tasks else str(run)
-        return f"停了 {names}（放回队列：{back or '无'}；删掉预排的推理：{pre or '无'}）"
-    return "没有在跑的任务"
+    if not run:
+        return "没有在跑的任务"
+    C.run(f"{PUEUE} kill -s SIGTERM {' '.join(map(str, run))}", host, timeout=60)
+    for _ in range(60):
+        _, tasks = group_tasks(host, g)
+        if tasks and all(tasks[i]["state"] == "Done" for i in run):
+            break
+        time.sleep(5)
+    left = [i for i in run if tasks and tasks[i]["state"] == "Done" and "Success" not in json.dumps(tasks[i]["status"])]
+    moved = [i for i in left if tasks[i]["label"].startswith("train:")
+             and hand_over(tasks[i]["label"][len("train:"):], f"{name}:{g}", name)]
+    back = [i for i in left if i not in moved]
+    if moved:
+        C.run(f"{PUEUE} remove {' '.join(map(str, moved))}", host, timeout=60)
+    if back:
+        C.run(f"{PUEUE} restart --in-place {' '.join(map(str, back))}", host, timeout=60)
+    names = ", ".join(tasks[i]["label"] for i in run) if tasks else str(run)
+    return f"停了 {names}（交给 {name} 的缓冲：{moved or '无'}；放回队列：{back or '无'}）"
 
 
 def run(s=None, dry=False, now=None):
@@ -158,7 +167,7 @@ def run(s=None, dry=False, now=None):
                     msgs.append(f"{k}：读不到 pueue 组的状态，下次再暂停")
                     continue
                 rec["paused"] = ended
-                msgs.append(f"{k}：{end} 时段结束，" + (pause(host, g) if gs == "Running" else "组已经停着，不动"))
+                msgs.append(f"{k}：{end} 时段结束，" + (pause(host, g, name) if gs == "Running" else "组已经停着，不动"))
     if not dry:
         save(st)
         if msgs:
