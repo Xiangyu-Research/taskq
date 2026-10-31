@@ -70,7 +70,7 @@ SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y|%P'; echo '=====';"
 
 
 def is_worker_job(machine, job):
-    return job == M.MACHINES[machine]["jobs"]["gpu"]  # scripts/queue/worker.sbatch（CPU worker 不算）
+    return job in M.worker_jobs(machine)  # scripts/queue/worker.sbatch，和以前用过的名字（CPU worker 不算）
 
 
 def data_candidates(queue=()):

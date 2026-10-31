@@ -15,13 +15,13 @@ SUBMIT_CAP = 10  # 读不到 QOS 的排队上限时按这个算
 def probe(name):
     """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数|其中还在排（没开始）的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
     "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
-    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM，作业名来自 envs/machines.py 的 jobs。"""
+    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM，作业名来自 envs/machines.py 的 jobs（加上 jobs_legacy 里以前用过的）。"""
     conf = P.SLURM[name]
     out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
         "ids=$(squeue -u $USER -h -r -q $q -o %i); pd=$(squeue -u $USER -h -r -q $q -t PD -o %i); " \
         "echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)|$(printf '%s' \"$pd\" | grep -c . || true)\"; done"
     if conf.get("cpu"):
-        out += f"; ids=$(squeue -u $USER -h -r -n {M.machine(name)['jobs']['cpu']} -o %i); " \
+        out += f"; ids=$(squeue -u $USER -h -r -n {','.join(M.worker_jobs(name, 'cpu'))} -o %i); " \
             "echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
             f"lim=$(sacctmgr -nP show qos {conf['cpu'][0]} format=maxsubmitpu); " \
             "ids=$(squeue -u $USER -h -r -o %i); echo \"ALL|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\""

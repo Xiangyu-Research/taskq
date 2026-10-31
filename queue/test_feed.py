@@ -20,6 +20,8 @@ import machines as M  # noqa: E402
 P = F.P
 NAME, HUB = "dicc", M.hub()
 P.READY[NAME] = 2
+P.AUTO.update({NAME: True, "dicc1": False})  # 按换成接替它的 dicc1 之前测；换过去以后单独一节
+P.OFFLINE = {}
 fails = 0
 
 
@@ -185,6 +187,20 @@ acts, _, _ = plan(snap(c5, [], box=[AR], recs=[ARR], src={NAME: {"folds": {K[0]:
 ok("拷到一半 5：依赖还在归档（拷）：下游不送", ("send", INF) not in ops(acts))
 ok("推理要的环境这台没有：不送", ("send", "infer/y") not in ops(plan(snap([dict(ct("infer/y", machines=[NAME]), spec=dict(ct("infer/y")["spec"], env="nope", machines=[NAME]))], []))[0]))
 
+# ---------------- 换成了接替它的执行机（machines.py 的 replaces：dicc → dicc1）----------------
+P.AUTO.update({NAME: False, "dicc1": True})
+c6 = [mine(K[0]), mine(K[1]), mine(K[2]), mine(K[3], "done"), mine(K[4], "stopped")]
+b6 = [bt(K[0]), bt(K[1], "claimed", "123"), bt(K[3], "done"), bt(K[4], "stopped")]
+acts, _, _ = plan(snap(c6, b6, src={NAME: {"folds": {K[2]: fold(epochs=40)}}}))
+ok("换成了 dicc1：没人领的从缓冲删掉、交还；有进度的改分给 dicc1；在训的等它交还；训完、停了的照旧",
+   ops(acts) == [("bremove", K[0]), ("release", K[0]), ("handover", K[2]), ("bremove", K[3]), ("release", K[3]),
+                 ("bremove", K[4]), ("release", K[4])] and acts[2]["to"] == "dicc1" or print(ops(acts)))
+P.OFFLINE = {"dicc1": "停机"}
+acts, _, _ = plan(snap(c6, b6))
+ok("dicc1 暂停检查（OFFLINE）：不交出去", ("release", K[0]) not in ops(acts))
+P.OFFLINE = {}
+P.AUTO.update({NAME: True, "dicc1": False})
+
 # ---------------- 连不上 ----------------
 acts, stuck, why = plan(snap([mine(K[0])], None), st={"last_ok": {NAME: time.time() - 600}})
 ok("缓冲读不到：什么都不动、不交还", acts == [] and not stuck and why == "连不上")
@@ -226,6 +242,11 @@ ok("缓冲里删不成（连不上）：总队列先不交还", not [c for c in 
 calls.clear()
 F.execute(NAME, [dict(op="release", key=K[0], why="x", skip="DICC 上失败 2 次")], central=central(), remote=buf())
 ok("交还带 --skip", calls == [("central", ["release", "--worker", NAME, K[0], "--skip", "DICC 上失败 2 次"])])
+
+calls.clear()
+F.execute(NAME, [dict(op="handover", key=K[0], to="dicc1", why="x")], central=central(), remote=buf())
+ok("handover：总队列里交还、再分给接替的那台", [c[1] for c in calls if c[0] == "central"]
+   == [["release", "--worker", NAME, K[0]], ["take", "--worker", "dicc1", "--assign", K[0]]])
 
 # ---------------- 开关没开：维护照做，新送的只记日志 ----------------
 P.AUTO[NAME] = False
