@@ -113,7 +113,7 @@ def main():
     ok("remote.conf：执行机和我的 DICC（MACHINES）都查得到")
 
     # ---- SITES / RELAY ----
-    assert set(M.RELAY) == {k for k, v in M.SITES.items() if v.get("relay")} and "lab0" not in M.RELAY and "dicc1" not in M.RELAY
+    assert set(M.RELAY) == {k for k, v in M.SITES.items() if v.get("relay")} and {"lab0", "dicc1", "lab1", "dicc2"} <= set(M.RELAY)
     for n, c in M.SITES.items():
         assert c["scheduler"] in ("slurm", "pueue") and c.get("root")
         assert c["scheduler"] != "pueue" or (c.get("worker") and c["worker"]["group"] in c["groups"])

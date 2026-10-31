@@ -115,7 +115,7 @@ def candidates(s, name, tq, ready, oks=None):
     oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
     envs = M.ready_envs(name, oks)
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
-             and name in (info(tq, t["key"])["spec"].get("machines") or [name])
+             and M.serves(name, info(tq, t["key"])["spec"].get("machines"))
              and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu"
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
     return sorted(cands, key=lambda t: rank(tq, t, ready))

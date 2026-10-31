@@ -25,6 +25,8 @@ lab 上是 pueue 的 worker 组（envs/machines.py 的 worker）里常驻的一�
      - 数据经隧道传（refill.transfer → scripts/sync/tunnel_push.sh，记进 refill.json，由 refill.cleanup 按空间预算删），
        传完盘剩的不到"提醒线 + 10 GB"时先不传、报出来；
      - 分给"<机器>:<组>"的（如 lab:gpu0，pueue 里手动训的，不进缓冲）：box 上训完、没在拷时交还。
+  这台已经换成接替它的执行机（envs/machines.py 的 replaces，接替的那台 AUTO 开着、这台关着）：分给这台、没人在做的从缓冲里删掉，
+  有进度的在总队列里改分给接替的那台（它从老数据目录收编存档，接着训），其余交还。
   执行机连不上：什么都不动，分给它的也不交还；连不上 2 小时以上报出来。那边的代码不是最新的（health 的 code 检查）时不送新任务。
   先在缓冲里删成功，再在总队列交还；分过去后送不进缓冲时马上交还。
 开关 envs/policy.py 的 AUTO[机器]：False 时第 3、4 步只把"会送什么"记进 ~/feed.log。
@@ -231,6 +233,8 @@ def plan(s, name, st, data=None, now=None):
     def removable(k):
         return not (refs.get(k, set()) - gone - {k})
 
+    heir = M.successor(name)  # 接替这台的执行机（machines.py 的 replaces）开着、这台关着：分给这台的都交出去
+    heir = heir if heir and P.AUTO.get(heir) and not P.AUTO.get(name) and heir not in P.OFFLINE else None
     for t in mine:
         k, b = t["key"], bt.get(t["key"])
         if t["state"] == "done":
@@ -240,6 +244,17 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="bremove", key=k))
                 gone.add(k)
             acts.append(dict(op="release", key=k, why="box 上有了"))
+            continue
+        if heir and t["state"] != "stopped":
+            if b and b.get("worker"):
+                continue  # 还有人在做：做完或交还以后再交出去
+            if b:
+                acts.append(dict(op="bremove", key=k))
+                gone.add(k)
+            if refill.progress(s, k, name):
+                acts.append(dict(op="handover", key=k, to=heir, why=f"换成了 {heir}，这一折在 {L} 上有进度，从存档接着训"))
+            else:
+                acts.append(dict(op="release", key=k, why=f"换成了 {heir}"))
             continue
         if t["state"] == "stopped":
             if b is None or (b["state"] in ("stopped", "done") and not b.get("worker")):
@@ -433,6 +448,12 @@ def execute(name, acts, central=None, remote=None, add=None, transfer=None):
                     continue
                 rc, out, err = central(["release", "--worker", a.get("worker", name), k] + (["--skip", a["skip"]] if a.get("skip") else []))
                 msgs.append(f"总队列交还 {k}（{L}，{a['why']}）" if rc == 0 else f"总队列交还 {k} 出错：{(out + err)[-150:]}")
+            elif a["op"] == "handover":
+                if k in failed:
+                    continue
+                central(["release", "--worker", name, k])
+                rc, out, err = central(["take", "--worker", a["to"], "--assign", k])
+                msgs.append(f"总队列里 {k} 改分给 {a['to']}（{a['why']}）" if rc == 0 else f"{k} 改分给 {a['to']} 出错：{(out + err)[-150:]}")
             elif a["op"] in ("bstop", "bresume"):
                 r = buf(("stop --why 总队列里停了 " if a["op"] == "bstop" else "resume ") + shlex.quote(k))
                 what = "停" if a["op"] == "bstop" else "撤销停止"

@@ -181,7 +181,8 @@ class Serve:
 
 
 def relay_of(host):
-    return next((m for m in machines().RELAY.values() if m.get("ssh") == host), None)
+    """中转执行机那一类的执行机（送去的脚本换名、不带注释）；接替 MACHINES 里一台的（replaces，同一个账号）照那台的走法。"""
+    return next((m for m in machines().RELAY.values() if m.get("ssh") == host and not m.get("replaces")), None)
 
 
 def quick_tunnel(bind):

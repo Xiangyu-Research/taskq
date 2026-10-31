@@ -47,7 +47,9 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `GPU_AUG` | 机器 → True | 这台机器上训练集的数据增强在 GPU 上做（`train.sh` 设 `RQ1_GPU_AUG=1`）；新开始或续训的段生效。单个任务可以预先设 `RQ1_GPU_AUG=0 / 1` |
 | `envs/policy.py` `GPU_AUG_LOADER` | 机器 → True | GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集（`gpu_aug_loader.py`，`train.sh` 设 `RQ1_GPU_AUG_LOADER=1`，训练前补齐解压缓存，`refill.py` 的 `cache_cleanup()` 删不再用的）；单个任务可以预先设 |
 | `envs/policy.py` `SLURM` | 每台 Slurm 机器的 QOS、时限、个数 | `refill.py` 补交多少 GPU / CPU worker 作业 |
-| `envs/policy.py` `SHIFT` | 机器 → {组: (开始, 结束)} | `shift.py` 跟着健康检查在时段开始时恢复组（卡上有别人的进程就等）、结束时暂停，在训没训完的训练交给这台的缓冲（总队列里 `<机器>:<组>` 改分给 `<机器>`、pueue 里删掉，worker 从存档接着训），别的任务放回组的队列；每个时段只动这两次，记录在 box `~/.cache/phd/shift.json`，日志 `~/refill.log` |
+| `envs/policy.py` `SHIFT` | 执行机 → (开始, 结束, 第一个, 最后一个)；或机器 → {组: (…)} | `shift.py` 跟着健康检查在时段开始时恢复执行机的 worker 组（卡上有别人的进程就等），`allowed()` 放行后 `relay.py` 才替它领任务、开 worker；结束时停 worker（等它交还），有进度的折在总队列里改分给同一台上不按时段的执行机（`adopt` 收编存档、接着训），没开始的交还总队列，这台的队列里删掉（`unq`），那台训完后删这边的结果。组的写法：在训的交给这台的执行机，最后一个时段结束时排着的也交还。每个时段只动这两次，记录在 box `~/.cache/phd/shift.json`，日志 `~/refill.log` |
+| `envs/policy.py` `OFFLINE_UNTIL` | 机器 → (到期时间, 原因) | 到期前健康检查、送任务、补交作业、拉回前的查看、代码同步都不连它，`advance.py` 不往它排（`OFFLINE` 由它算出）；到期后自动恢复 |
+| `envs/machines.py` `replaces` | 执行机 → 被它接替的机器 | 被接替的 AUTO 关、它的 AUTO 开、它不在 `OFFLINE` 时：`advance.py` 把 `queue:<旧>` 换成它（`have` 用不了）；`feed.py` 把旧缓冲里分给旧机器、没在训的交还（有进度的改分给它）；排着的旧 worker 作业开始时 `worker_start.sh` 转到它根目录的代码包；`refill.py`、`slurm.py`、`health.py` 按 `jobs_legacy` 认旧作业名 |
 | box `~/.cache/phd/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `feed.py`、`refill.py`、`relay.py` 什么都不分 |
 | DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 缓冲的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`），`feed.py` 也不往里送 |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
@@ -78,7 +80,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | box | `cpu` | 2 | 评测、五折集成评测、删单折概率图、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等）。同时 2 个不看内存：两个大任务加上 box 上别的服务可能用光 61 GB 内存（10/25 出过一次） |
 | box | `wait` | 不限 | 拉回（`fetch_task.sh`）、归档（`archive_task.sh`）、传输（`offload_io.sh`、`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡：常驻的 worker（`dicc_worker.sh`，`WORKER_ID=lab-gpu1`），从 lab 的缓冲领训练和推理（lab 训的折，含 0 号卡训的） |
-| lab | `gpu0` | 1 | 0 号卡：只跑手动加的训练（`MANUAL`，总队列里分给 `lab:gpu0`）；晚班 18:00–9:00 由 `shift.py` 开关（`SHIFT`） |
+| lab | `gpu0` | 1 | 0 号卡：执行机 lab0 的 worker（10/31 晚起，`SHIFT` 的晚班 18:00–9:00 里由 `shift.py` 开组、`relay.py` 替它领任务）；以前手动加的训练（`MANUAL`，总队列里分给 `lab:gpu0`）由 `feed.py` 交还 |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
 
 ## 怎么运转

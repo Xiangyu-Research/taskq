@@ -23,6 +23,9 @@
      数据传过去后那边至少还剩 HARD_GB）；
   4. 那边排着和在跑的 worker 作业不够、又有备好没人领的任务时补交（refill.py 的 topup_plan：排着没开始的作业不超过备好的任务数，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的折照常推进。
+按时段的执行机（envs/policy.py 的 SHIFT，scripts/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
+每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的折，那边的队列里删掉任务
+（结果留着，接手的那台收编存档，见 machines.py 的 adopt），总队列里训完了再删结果。
 连不上它时只续总队列的领取；领着折、连不上 2 小时以上报出来。
 
     python3 scripts/queue/relay.py                         看现在会做什么（不改任何东西）
@@ -64,6 +67,7 @@ import slurm as SL  # noqa: E402
 import relay_names as RN  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import names as N  # noqa: E402
+import shift  # noqa: E402
 from common import write_json  # noqa: E402
 
 DIR = RN.RELAY_DIR
@@ -76,6 +80,13 @@ DOWN_S = 2 * 3600  # 领着折、连不上这么久就报
 LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就报
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传完、还没加进队列或刚交还）
+STATUS_S = 90  # 读状态的超时：那边的存储挂住时跳过这台，不等
+JOB_WAIT = 600  # 在 CPU 作业里跑（machines.py 的 adopt_job）时最多等这么久排上
+PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记：同一个盘上的几台合起来算
+
+
+class NoSlot(RuntimeError):
+    """CPU 作业这次排不上。"""
 
 
 def conf(name):
@@ -163,10 +174,17 @@ def rtq(name, args, timeout=180):
     return None if rc in (124, 255) else (rc, (out + err).strip())
 
 
-def rpy(name, code, data=None, timeout=600):
-    """在那边跑一段 Python（第一个参数是根目录，data 以 JSON 经标准输入）→ 它 json_out 的结果。出错 → RuntimeError。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {R.q(root(name))}",
-                       input=json.dumps(data), timeout=timeout)
+def rpy(name, code, data=None, timeout=600, job=None):
+    """在那边跑一段 Python（第一个参数是根目录，data 以 JSON 经标准输入）→ 它 json_out 的结果。出错 → RuntimeError。
+    job：Slurm 的 srun 参数（machines.py 的 adopt_job），在 CPU 节点上跑；排不上 → NoSlot。"""
+    cmd = f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {R.q(root(name))}"
+    if job:
+        jname = (conf(name).get("jobs") or {}).get("transfer") or "tq_xfer"
+        cmd = f"srun -I{JOB_WAIT} {job} -J {jname} bash -c {shlex.quote(cmd)}"
+        timeout += JOB_WAIT
+    rc, out, err = rsh(name, cmd, input=json.dumps(data), timeout=timeout)
+    if job and rc and S.json_in(out) is None and any(x in err for x in ("Unable to allocate", "Immediate", "revoked")):
+        raise NoSlot(f"{conf(name)['label']} 的 CPU 作业排不上：{err.strip()[-200:]}")
     res = S.json_in(out)
     if rc or res is None:
         raise RuntimeError(f"{conf(name)['label']} 上出错（{rc}）：{(err or out).strip()[-300:]}")
@@ -190,7 +208,7 @@ except Exception:
     raw=None
 ed=os.path.join(R,'state','envs')
 oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
-spec.json_out(dict(taskq=st,folds=col['folds'],sched_raw=raw,free=shutil.disk_usage(R).free,envs_ok=oks,
+spec.json_out(dict(taskq=st,folds=col['folds'],sched_raw=raw,free=shutil.disk_usage(R).free,dev=os.stat(R).st_dev,envs_ok=oks,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
@@ -199,29 +217,33 @@ STATUS_PY = STATUS_PY.replace("@DATA@", RB.rename("BRAIN_TUMOR"))
 MISSING_PY = HEAD + "spec.json_out([i for i in A if not os.path.isfile(os.path.join(R,'blobs',i[:2],i))])\n"
 
 ADOPT_PY = HEAD + """import hashlib
-old=os.path.expanduser(A['old'])
-got=[]
-for h,(rel,size) in A['files'].items():
-    p=os.path.join(old,rel)
-    try:
-        if os.path.getsize(p)!=size:
-            continue
-    except OSError:
-        continue
+def sha(p):
     x=hashlib.sha256()
     with open(p,'rb') as f:
         for b in iter(lambda:f.read(1<<22),b''):
             x.update(b)
-    if x.hexdigest()!=h:
-        continue
+    return x.hexdigest()
+got=[]
+for h,(rel,size) in A['files'].items():
     t=os.path.join(R,'blobs',h[:2],h)
-    os.makedirs(os.path.dirname(t),exist_ok=True)
-    if not os.path.exists(t):
+    for s in A['srcs']:
+        base=os.path.expanduser(s['path'])
+        p=os.path.join(base,'blobs',h[:2],h) if s.get('site') else (os.path.join(base,rel) if rel else None)
         try:
-            os.link(os.path.realpath(p),t)
+            if not p or os.path.getsize(p)!=size:
+                continue
         except OSError:
             continue
-    got.append(h)
+        if not s.get('site') and sha(p)!=h:
+            continue
+        os.makedirs(os.path.dirname(t),exist_ok=True)
+        if not os.path.exists(t):
+            try:
+                os.link(os.path.realpath(p),t)
+            except OSError:
+                continue
+        got.append(h)
+        break
 spec.json_out(got)
 """
 
@@ -296,30 +318,46 @@ spec.json_out(dict(done=spec.is_done(A,D),items=items))
 """
 
 
-ADOPT_OUT_PY = HEAD + """import fnmatch,glob,shutil
-old=os.path.join(os.path.expanduser(A['old']),A['real'])
+ADOPT_OUT_PY = HEAD + """import glob,shutil
 new=os.path.join(R,'data',A['alias'])
+def mt(d):
+    ts=[os.path.getmtime(p) for g in A['resume'] for p in glob.glob(os.path.join(glob.escape(d),g)) if os.path.isfile(p)]
+    return max(ts) if ts else None
+best,bt=None,mt(new)
+if A['done'] and all(any(os.path.exists(os.path.join(new,x)) for x in it.split('|')) for it in A['done']):
+    bt=float('inf')
+for d in A['srcs']:
+    d=os.path.expanduser(d)
+    if os.path.realpath(d)==os.path.realpath(new):
+        continue
+    m=mt(d)
+    if m is not None and (bt is None or m>bt):
+        best,bt=d,m
 n=0
-res=A.get('resume') or []
-def rk(f):
-    return next((len(res)-i for i,x in enumerate(res) if fnmatch.fnmatch(f,x)),0)
-has=lambda d,xs:any(glob.glob(os.path.join(glob.escape(d),x)) for x in xs)
-if res and has(old,res[:1]) and not has(new,res):
+if best:
     os.makedirs(new,exist_ok=True)
-    for f in sorted(os.listdir(old),key=rk):
-        if os.path.isfile(os.path.join(old,f)):
-            shutil.copy2(os.path.join(old,f),os.path.join(new,f+'.relaytmp'))
+    rs={os.path.basename(p) for g in A['resume'] for p in glob.glob(os.path.join(glob.escape(best),g))}
+    for f in sorted(os.listdir(best),key=lambda f:f in rs):
+        if os.path.isfile(os.path.join(best,f)):
+            shutil.copy2(os.path.join(best,f),os.path.join(new,f+'.relaytmp'))
             os.replace(os.path.join(new,f+'.relaytmp'),os.path.join(new,f))
             n+=1
-spec.json_out(n)
+spec.json_out(dict(n=n,src=best))
 """
+
+
+def adopt_srcs(name):
+    """收编来源（machines.py 的 adopt）：同一个盘上别的执行机的根目录在前（按哈希直接认，不重算），老数据目录在后。"""
+    return sorted(M.adopt_sources(name), key=lambda x: not x["site"])
 
 
 def remote_status(name):
     """→ 那边的状态 dict；连不上或出错 → None。"""
     c = conf(name)
+    if c.get("ssh_master") and subprocess.run(ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
+        return None  # 长连接断着：不另起连接（中转执行机认证失败多了会被锁）
     try:
-        rs = rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue")), timeout=300)
+        rs = rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue")), timeout=STATUS_S)
     except RuntimeError:
         return None
     return parse_sched(name, rs)
@@ -403,12 +441,17 @@ def stage(name, key, nice=None, add=True, say=print):
     links = {rel: hs[p] for rel, p in ex["files"]}
     miss = rpy(name, MISSING_PY, sorted(set(links.values())))
     say(f"{key} → {alias['key']}：{len(links)} 个文件，那边缺 {len(miss)} 个")
-    if miss and conf(name).get("adopt"):  # 那边老数据目录里内容一样的文件硬链接进 blobs，不重传
+    srcs, job = adopt_srcs(name), conf(name).get("adopt_job")
+    if miss and srcs:  # 那边老数据目录、同一个盘上别的执行机里内容一样的文件硬链接进 blobs，不重传
         by = {h: p for p, h in hs.items()}
-        files = {h: (os.path.relpath(by[h], D), os.path.getsize(by[h])) for h in miss if by[h].startswith(D.rstrip("/") + "/")}
-        got = set(rpy(name, ADOPT_PY, dict(old=conf(name)["adopt"], files=files), timeout=3 * 3600)) if files else set()
+        files = {h: (os.path.relpath(by[h], D) if by[h].startswith(D.rstrip("/") + "/") else None, os.path.getsize(by[h])) for h in miss}
+        try:
+            got = set(rpy(name, ADOPT_PY, dict(srcs=srcs, files=files), timeout=3 * 3600, job=job))
+        except NoSlot as e:
+            say(f"{e}；这次不传，下次检查再来")
+            return None
         miss = [h for h in miss if h not in got]
-        say(f"那边老数据目录里收编了 {len(got)} 个，还缺 {len(miss)} 个")
+        say(f"那边已有的数据里收编了 {len(got)} 个，还缺 {len(miss)} 个")
     if miss:
         by = {h: p for p, h in hs.items()}
         os.makedirs(DIR, exist_ok=True)
@@ -429,10 +472,15 @@ def stage(name, key, nice=None, add=True, say=print):
     texts = {k: (v if isinstance(v, bytes) else v.encode()) for k, v in ex["texts"].items()}
     n = rpy(name, VIEW_PY, dict(views=views, links=links, texts={k: base64.b64encode(v).decode() for k, v in texts.items()}))
     say(f"那边的 {'、'.join(views)} 建好了（{n} 个文件）")
-    if conf(name).get("adopt") and real.get("out"):  # 老数据目录里训到一半的存档拷过来，接着训
-        n = rpy(name, ADOPT_OUT_PY, dict(old=conf(name)["adopt"], real=real["out"], alias=alias["out"], resume=real.get("resume") or []))
-        if n:
-            say(f"老数据目录里 {real['out']} 的存档拷过来了（{n} 个文件），接着训")
+    if srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
+        dirs = [f"{x['path']}/data/{alias['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
+        try:
+            r = rpy(name, ADOPT_OUT_PY, dict(srcs=dirs, alias=alias["out"], resume=real["resume"], done=real.get("done") or []), job=job)
+        except NoSlot as e:
+            say(f"{e}；这次不加进队列，下次检查再来")
+            return None
+        if r["n"]:
+            say(f"{r['src']} 的存档拷过来了（{r['n']} 个文件），接着训")
 
     def rec(st):
         st.setdefault("keys", {}).setdefault(name, {})[key] = dict(
@@ -611,8 +659,20 @@ def plan(s, name, rs, st, now=None):
             stuck[f"site:{name}:orphan:{real}"] = f"{L} 在训 {real}，但总队列里不是它领着；看总队列和 {L} 的队列"
         elif m is None or m["state"] == "done":
             acts.append(dict(op="drop", key=real, alias=a["key"], out=a["spec"]["out"]))
+        elif a["state"] != "stopped" and m.get("worker") and m["worker"] != name:  # 改分给了别的执行机：结果留给它收编
+            acts.append(dict(op="unq", key=real, alias=a["key"], to=m["worker"]))
         elif a["state"] != "stopped":
             acts.append(dict(op="rstop", key=real, alias=a["key"]))
+    mk = {t["key"] for t in mine}
+    for real, k in keys.items():  # 那边队列里已经删了（unq）、只剩结果的折：总队列里训完了再删结果
+        m = mt.get(real)
+        if real not in mk and k["alias"] not in rt and k.get("unq") and (m is None or m["state"] == "done"):
+            try:
+                out = S.resolve(k["recipe"], k["params"]).get("out")
+            except S.SpecError:
+                out = None
+            if out:
+                acts.append(dict(op="drop", key=real, alias=k["alias"], out=out, gone=True))
     if rs["taskq"].get("paused"):
         stuck[f"site:{name}:fail"] = f"{L} 的任务队列 3 小时内失败 {rs['taskq'].get('recent_failures')} 次，暂停领任务"
     return acts, stuck
@@ -623,6 +683,8 @@ def fill(s, name, rs, st, acts):
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
+    if not shift.allowed(name):
+        return [], "不在时段里（envs/policy.py 的 SHIFT）"
     if any(n not in s["src"] and n not in P.OFFLINE for n in M.names("train")):  # 暂停检查的机器不算
         return [], "有训练机的进度读不到"
     want = P.READY.get(name, 1)
@@ -639,7 +701,8 @@ def fill(s, name, rs, st, acts):
     ready = {p for k in keys.values() for p in k.get("data") or []}
     cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"))
              if relayable(refill.info(mtq, t["key"]))]
-    free = rs.get("free", 0) / 1e9
+    disk = (conf(name)["ssh"], rs.get("dev"))
+    free = rs.get("free", 0) / 1e9 - PLANNED.get(disk, 0)
     hard = (conf(name).get("budget") or (None, HARD_GB))[1]
     out, took = [], set()
     for _ in range(want - have):
@@ -647,6 +710,7 @@ def fill(s, name, rs, st, acts):
         if t is None:
             break
         free -= gb
+        PLANNED[disk] = PLANNED.get(disk, 0) + gb
         took.add(t["key"])
         out.append(dict(op="take", key=t["key"], nice=t["nice"]))
     return out, "" if out else ("队列里没有能领的折" if not cands else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
@@ -656,6 +720,8 @@ def topup(name, rs, run=None):
     """→ [(QOS, 时限, 补几个)], 不补的原因。"要几个"只在这里算（先备好再开卡，10/31 定），适配器只读状态、照着开。
     pueue 类：组里没有活着的 worker、上一个没失败、那边有备好没人领的任务时开一个 → [("pueue", None, 1)]；
     Slurm 类：排着没开始的作业不超过备好的任务数（refill.topup_plan）。run：fn(名字, 命令) → (退出码, 输出, 错误)，测试替换。"""
+    if not shift.allowed(name):
+        return [], "不在时段里（envs/policy.py 的 SHIFT）"
     if conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
             return [], "读不到 pueue"
@@ -706,6 +772,9 @@ def execute(name, acts, s, run_add=None):
                     msgs.append(f"{L} 没领到 {k}：{(r or [0, 'ssh 不通'])[1].strip()[-150:]}")
                     continue
                 msgs.append(f"{L} 领了 {k}（档位 {a['nice']}）")
+                for t in (s.get("taskq", {}).get(taskq.queue_host()) or {}).get("tasks", []):  # 这次检查里后面的执行机别再挑它
+                    if t["key"] == k:
+                        t.update(worker=name, assigned=name, state="claimed")
                 a = dict(a, op="stage")
             if a["op"] == "stage":
                 lab = label("relay_stage", k)
@@ -721,8 +790,15 @@ def execute(name, acts, s, run_add=None):
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完了 {k}，排了拉回、归档（box 任务 {tid}）")
-            elif a["op"] == "drop":
+            elif a["op"] == "unq":
                 r = rtq(name, f"remove {shlex.quote(a['alias'])}")
+                if r and r[0] == 0:
+                    update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(k) or {}).update(unq=time.time()))
+                    msgs.append(f"{L} 的队列里删了 {k}（总队列里分给了 {a['to']}，结果留着给它收编）")
+                else:
+                    msgs.append(f"{L} 的队列里删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
+            elif a["op"] == "drop":
+                r = (0, "") if a.get("gone") else rtq(name, f"remove {shlex.quote(a['alias'])}")
                 rr = R.q(root(name))
                 extra = [safe_rel(c) for c in (keys_of(load_state(), name).get(k) or {}).get("cleanup") or []]
                 rc, out, err = rsh(name, f"rm -rf {rr}/data/{shlex.quote(a['out'])} {rr}/data/logs/tasks/{shlex.quote(S.safe(a['alias']))}__*"
@@ -790,6 +866,7 @@ def log(lines):
 def run_all(s, dry=False):
     """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。"""
     events, stuck = [], {}
+    PLANNED.clear()
     for name in M.RELAY:
         if name in P.OFFLINE:
             continue
@@ -835,9 +912,9 @@ def run_one(s, name, dry):
         try:
             st = load_state()
             reg = (st.get("views") or {}).get(name) or {}
-            keep = {v for k in keys_of(st, name).values() for v in views_of(k)}
+            keep = {v for k in keys_of(st, name).values() if not k.get("unq") for v in views_of(k)}
             keep |= {v for v, t in reg.items() if time.time() - t < VIEW_KEEP_S}
-            g = relay_gc.gc(name, keep, rpy, views=reg)
+            g = relay_gc.gc(name, keep, rpy, views=reg, siblings=[x["path"] for x in M.adopt_sources(name) if x["site"]])
             if g and g["removed_views"]:
                 update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
             if g and (g["removed_views"] or g["removed_blobs"]):

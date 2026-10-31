@@ -61,6 +61,7 @@ import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 import refill  # noqa: E402
 import feed  # noqa: E402
+import shift  # noqa: E402
 import common as C  # noqa: E402
 
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
@@ -283,12 +284,12 @@ def plan(s, root=None):
     relay_sites = {n for n in M.RELAY if n in P.READY}  # relay.py 替它领任务的机器（中转执行机、lab 1 号卡）
 
     def site_of(h):
-        """训这一折的机器 → 放后续步骤的执行机：执行机、relay 机器就是它；别的（如 lab 0 号卡手动训的折，lab 不再是执行机）
-        → 同一台主机上开着的 relay 机器（lab1）；没有 → None。"""
-        if h in feed_sites or h in relay_sites:
+        """训这一折的机器 → 放后续步骤的执行机：执行机、relay 机器就是它；按时段的 relay 机器（lab0，envs/policy.py 的 SHIFT）
+        和别的（如以前 lab 0 号卡手动训的折，lab 不再是执行机）→ 同一台主机上开着、不按时段的 relay 机器（lab1）；没有 → None。"""
+        if h in feed_sites or (h in relay_sites and not shift.limited(h)):
             return h
-        ssh = (M.MACHINES.get(h) or {}).get("ssh")
-        return next((r for r in sorted(relay_sites) if ssh and M.RELAY[r].get("ssh") == ssh and P.AUTO.get(r)), None)
+        ssh = (M.RELAY.get(h) or M.MACHINES.get(h) or {}).get("ssh")
+        return shift.day_site(ssh) if ssh else None
     code = s.get("code") or {}
 
     def assigned_to(key):
@@ -310,7 +311,19 @@ def plan(s, root=None):
         return next((h for h in have if src[h][key].get("final")), have[0] if have else None)
 
     def where(t, tg, fold):
-        """PLACE 里的一项 → 地方（trainer 换成训这一折的执行机的 queue，带 trainer=True），或者用不了的原因。"""
+        """PLACE 里的一项 → 地方（trainer 换成训这一折的执行机的 queue，带 trainer=True），或者用不了的原因。
+        queue:<机器>：那台暂停检查（OFFLINE）时用不了；那台已经换成接替它的 relay 机器（machines.py 的 replaces，它的 AUTO 开着、
+        那台的关着）时用接替的那台，have 的用不了（relay 机器上的结果拉回 box 后就删，查不了）。"""
+        if tg["kind"] == "queue":
+            m = tg["machine"]
+            r = M.successor(m)
+            if r and P.AUTO.get(r) and not P.AUTO.get(m):
+                if tg["have"]:
+                    return f"{m} 换成了 {r}，那边没有现成的输入"
+                m, tg = r, dict(tg, machine=r)
+            if m in P.OFFLINE:
+                return f"{m} 暂停检查（{P.OFFLINE[m]}）"
+            return tg
         if tg["kind"] != "trainer":
             return tg
         if not fold:

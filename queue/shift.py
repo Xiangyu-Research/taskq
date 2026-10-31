@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""按时段开关 pueue 组（envs/policy.py 的 SHIFT，2026-10-30）：health.py 每次检查时调用。
+"""按时段开关（envs/policy.py 的 SHIFT，2026-10-30）：health.py 每次检查时、送任务之前调用。
 
-每个时段只动两次，中间手动的暂停、恢复都不管：
-  - 时段开始后：组暂停着、这张卡上没有别的用户的进程 → 恢复（有人在用就下次检查再看，直到时段结束）；
-  - 时段结束后：这个时段是这里恢复的、组还开着 → 暂停，在跑的任务 SIGTERM；没训完的训练交给这台机器的缓冲
-    （总队列里 lab:gpu0 改分给 lab，pueue 里删掉），白天由 worker 从存档接着训（10/31）；别的任务放回组的队列。
-做了什么记在 ~/.cache/phd/shift.json（每个组最近一次恢复、暂停的时段日期），日志 ~/refill.log。
+执行机（SITES 里的名字，10/31）：只在时段里领任务、开 worker（relay.py 看 allowed()）。
+  - 时段开始后：卡上没有别的用户的进程 → 恢复它的 pueue 组、记下这个时段开了（有人在用就下次检查再看，直到时段结束）；
+  - 时段结束后：暂停组、停掉 worker（SIGTERM，worker 交还手上的任务）；总队列里分给它、没训完的折：有进度（在训、训过几轮）的
+    改分给同一台上不按时段的执行机（day_site，从存档接着训，relay.py 的收编把存档带过去），其余交还总队列。
+pueue 组（"<机器>": {"<组>": …}，只跑手动任务的组）：每个时段只动两次，中间手动的暂停、恢复都不管：
+  - 时段开始后：组暂停着、卡上没有别的用户的进程 → 恢复；
+  - 时段结束后：这个时段是这里恢复的、组还开着 → 暂停，在跑的任务 SIGTERM；没训完的训练交给同一台的执行机
+    （总队列里 <机器>:<组> 改分给它，pueue 里删掉）；最后一个时段结束时排着的训练也交还总队列、从组里删掉；别的任务放回组的队列。
+做了什么记在 ~/.cache/phd/shift.json（每项最近一次开、停的时段日期），日志 ~/refill.log。
 """
 import datetime as dt
 import json
@@ -44,6 +48,42 @@ def window(now, start, end):
     return None, None
 
 
+def dated(now, start, end, first=None, last=None):
+    """window()，只算开始日期在 [first, last] 里的时段（None = 不限）。"""
+    cur, ended = window(now, start, end)
+
+    def inside(d):
+        return d is not None and (first is None or d >= first) and (last is None or d <= last)
+    return (cur if inside(cur) else None), (ended if inside(ended) else None)
+
+
+def rule(name):
+    """执行机 name 的时段 (开始, 结束, 第一个, 最后一个)；不按时段 → None。"""
+    v = getattr(P, "SHIFT", {}).get(name)
+    if not isinstance(v, (tuple, list)):
+        return None
+    return tuple(v) + (None,) * (4 - len(v))
+
+
+def limited(name):
+    return rule(name) is not None
+
+
+def allowed(name, now=None):
+    """执行机现在能不能领任务、开 worker：不按时段 → True；按时段的要在时段里、这个时段已经由 run() 开了（卡空着）。"""
+    r = rule(name)
+    if r is None:
+        return True
+    cur, _ = dated(now or dt.datetime.now(TZ), *r)
+    rec = load().get(name) or {}
+    return bool(cur) and rec.get("started") == cur and rec.get("paused") != cur
+
+
+def day_site(host, but=None):
+    """同一台主机上开着、不按时段的执行机（白天接手的）；没有 → None。"""
+    return next((r for r in sorted(M.RELAY) if r != but and M.RELAY[r].get("ssh") == host and P.AUTO.get(r) and not limited(r)), None)
+
+
 def load():
     try:
         with open(STATE) as f:
@@ -76,8 +116,8 @@ def others_on(host, gpu):
     return who if apps else (["?"] if mem > 1024 else [])
 
 
-def group_tasks(host, g):
-    rc, out, _ = C.run(f"{PUEUE} status -g {g} --json", host, timeout=60)
+def group_tasks(host, g, pueue=PUEUE):
+    rc, out, _ = C.run(f"{pueue} status -g {g} --json", host, timeout=60)
     if rc:
         return None, None
     d = json.loads(out)
@@ -99,31 +139,120 @@ def hand_over(key, frm, to):
     return rc == 0
 
 
-def pause(host, g, name):
-    """暂停组，停掉在跑的任务 → 说明。没训完的训练交给这台的缓冲（总队列里 <机器>:<组> 改分给 <机器>，pueue 里删掉），
-    worker 从存档接着训（10/31）；交不出去的和别的任务放回这个组的队列。"""
-    C.run(f"{PUEUE} pause -g {g} --wait", host, timeout=60)
-    _, tasks = group_tasks(host, g)
+def give_back(key, frm):
+    """总队列里交还分给 frm 的 key → 是否成功。"""
+    import taskq
+    rc, _, _ = taskq.central(["release", "--worker", frm, key])
+    return rc == 0
+
+
+def central_mine(name):
+    """总队列里分给 name、没训完、没停的任务 → [key]。"""
+    import taskq
+    st = taskq.local_status() or {}
+    return [t["key"] for t in st.get("tasks", []) if t.get("worker") == name and t["state"] not in ("done", "stopped")]
+
+
+def site_folds(name):
+    """relay.py 最近一次读到的这台的各折（~/.cache/phd/relay/status.json）→ {真 key: dict(state, runs, final)}。"""
+    import relay_names as RN
+    try:
+        with open(os.path.join(RN.RELAY_DIR, "status.json")) as f:
+            return (json.load(f).get(name) or {}).get("folds") or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def has_progress(f):
+    return bool(f) and (f.get("state") in ("claimed", "busy") or bool(f.get("final"))
+                        or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
+
+
+def stop_group(host, g, pueue, wait=False):
+    """暂停组、SIGTERM 在跑的任务、等它们结束 → (在跑的任务号, 结束后的任务表)。"""
+    C.run(f"{pueue} pause -g {g}" + (" --wait" if wait else ""), host, timeout=60)
+    _, tasks = group_tasks(host, g, pueue)
     run = [i for i, t in (tasks or {}).items() if t["state"] == "Running"]
-    if not run:
+    if run:
+        C.run(f"{pueue} kill -s SIGTERM {' '.join(map(str, run))}", host, timeout=60)
+        for _ in range(60):
+            _, tasks = group_tasks(host, g, pueue)
+            if tasks and all(tasks[i]["state"] == "Done" for i in run if i in tasks):
+                break
+            time.sleep(5)
+    return run, tasks or {}
+
+
+def pause(host, g, name, last=False):
+    """暂停组，停掉在跑的任务 → 说明。没训完的训练交给同一台的执行机（总队列里 <机器>:<组> 改分给它，pueue 里删掉），
+    worker 从存档接着训（10/31）；交不出去的和别的任务放回这个组的队列。last：最后一个时段，排着的训练也交还总队列、从组里删掉。"""
+    run, tasks = stop_group(host, g, PUEUE, wait=True)
+    queued = [i for i, t in tasks.items() if t["state"] in ("Queued", "Paused", "Stashed") and t["label"].startswith("train:")] if last else []
+    if not run and not queued:
         return "没有在跑的任务"
-    C.run(f"{PUEUE} kill -s SIGTERM {' '.join(map(str, run))}", host, timeout=60)
-    for _ in range(60):
-        _, tasks = group_tasks(host, g)
-        if tasks and all(tasks[i]["state"] == "Done" for i in run):
-            break
-        time.sleep(5)
-    left = [i for i in run if tasks and tasks[i]["state"] == "Done" and "Success" not in json.dumps(tasks[i]["status"])]
-    to = next((r for r, c in M.RELAY.items() if c.get("ssh") == host and P.AUTO.get(r)), name)  # 同一台上开着的 RELAY 执行机（lab1）
+    left = [i for i in run if i in tasks and tasks[i]["state"] == "Done" and "Success" not in json.dumps(tasks[i]["status"])]
+    to = day_site(host) or name  # 同一台上开着、不按时段的执行机（lab1）
     moved = [i for i in left if tasks[i]["label"].startswith("train:")
              and hand_over(tasks[i]["label"][len("train:"):], f"{name}:{g}", to)]
+    gave = [i for i in queued if give_back(tasks[i]["label"][len("train:"):], f"{name}:{g}")]
     back = [i for i in left if i not in moved]
-    if moved:
-        C.run(f"{PUEUE} remove {' '.join(map(str, moved))}", host, timeout=60)
+    if moved or gave:
+        C.run(f"{PUEUE} remove {' '.join(map(str, moved + gave))}", host, timeout=60)
     if back:
         C.run(f"{PUEUE} restart --in-place {' '.join(map(str, back))}", host, timeout=60)
-    names = ", ".join(tasks[i]["label"] for i in run) if tasks else str(run)
-    return f"停了 {names}（交给 {to}：{moved or '无'}；放回队列：{back or '无'}）"
+    names = ", ".join(tasks[i]["label"] for i in run if i in tasks) or "无"
+    return (f"停了 {names}（交给 {to}：{moved or '无'}；放回队列：{back or '无'}"
+            + (f"；排着的交还总队列：{gave or '无'}" if last else "") + "）")
+
+
+def stop_site(name):
+    """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的折：有进度的交给白天的执行机，其余交还 → 说明。"""
+    c = M.RELAY[name]
+    host, g = c["ssh"], c["worker"]["group"]
+    run, _ = stop_group(host, g, c.get("pueue") or PUEUE, wait=True)
+    folds, to = site_folds(name), day_site(host, but=name)
+    moved, gave = [], []
+    for k in central_mine(name):
+        if to and has_progress(folds.get(k)) and hand_over(k, name, to):
+            moved.append(k)
+        elif give_back(k, name):
+            gave.append(k)
+    return (f"停了 worker（pueue 任务 {run or '无'}）；交给 {to or '（没有白天的执行机）'}：{', '.join(moved) or '无'}；"
+            f"交还总队列：{', '.join(gave) or '无'}")
+
+
+def run_site(name, r, now, st, dry):
+    """按时段的执行机 → 说明列表。"""
+    c, msgs = M.RELAY.get(name), []
+    if not c or not P.AUTO.get(name) or name in getattr(P, "OFFLINE", {}):
+        return msgs
+    host, g = c["ssh"], c["worker"]["group"]
+    rec = st.setdefault(name, {})
+    cur, ended = dated(now, *r)
+    if cur and rec.get("started") != cur:
+        gs, _ = group_tasks(host, g, c.get("pueue") or PUEUE)
+        if gs is None:
+            return [f"{name}：读不到 pueue 组的状态，下次再看"]
+        who = others_on(host, c["groups"][g][1])
+        if who is None:
+            msgs.append(f"{name}：读不到卡上的进程，下次再看")
+        elif who:
+            if rec.get("busy") != cur:
+                msgs.append(f"{name}：时段开始，卡上有别人的进程（{', '.join(sorted(set(who)))}），等下次检查")
+                rec["busy"] = cur
+        elif dry:
+            msgs.append(f"{name}：会开始领任务（{r[0]}–{r[1]}）")
+        else:
+            if gs != "Running":
+                C.run(f"{c.get('pueue') or PUEUE} start -g {g}", host, timeout=60)
+            rec["started"] = cur
+            msgs.append(f"{name}：{r[0]} 时段开始，卡空着，开始领任务、开 worker")
+    elif ended and rec.get("started") == ended and rec.get("paused") != ended:
+        if dry:
+            return [f"{name}：会停 worker、交出没训完的折（{r[1]} 时段结束）"]
+        rec["paused"] = ended
+        msgs.append(f"{name}：{r[1]} 时段结束，" + stop_site(name))
+    return msgs
 
 
 def run(s=None, dry=False, now=None):
@@ -131,11 +260,17 @@ def run(s=None, dry=False, now=None):
     now = now or dt.datetime.now(TZ)
     st, msgs = load(), []
     for name, groups in getattr(P, "SHIFT", {}).items():
+        if rule(name):
+            msgs += run_site(name, rule(name), now, st, dry)
+            continue
+        if name in getattr(P, "OFFLINE", {}):
+            continue
         host = M.MACHINES[name]["ssh"]
-        for g, (start, end) in groups.items():
+        for g, sp in groups.items():
+            start, end, first, last = tuple(sp) + (None,) * (4 - len(sp))
             k = f"{name}:{g}"
             rec = st.setdefault(k, {})
-            cur, ended = window(now, start, end)
+            cur, ended = dated(now, start, end, first, last)
             if cur and rec.get("started") != cur:
                 gs, tasks = group_tasks(host, g)
                 if gs is None:
@@ -168,7 +303,7 @@ def run(s=None, dry=False, now=None):
                     msgs.append(f"{k}：读不到 pueue 组的状态，下次再暂停")
                     continue
                 rec["paused"] = ended
-                msgs.append(f"{k}：{end} 时段结束，" + (pause(host, g, name) if gs == "Running" else "组已经停着，不动"))
+                msgs.append(f"{k}：{end} 时段结束，" + (pause(host, g, name, last=ended == last) if gs == "Running" else "组已经停着，不动"))
     if not dry:
         save(st)
         if msgs:
