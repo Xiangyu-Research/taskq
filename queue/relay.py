@@ -658,6 +658,8 @@ def run_all(s, dry=False):
     """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。"""
     events, stuck = [], {}
     for name in M.RELAY:
+        if name in P.OFFLINE:
+            continue
         try:
             ev, st_ = run_one(s, name, dry)
         except Exception as e:  # noqa: BLE001

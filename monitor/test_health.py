@@ -16,6 +16,8 @@ os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不�
 os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
 import health as H  # noqa: E402
 
+H.policy.OFFLINE = {}  # 不受线上 envs/policy.py 的暂停检查影响
+
 NOW = datetime(2026, 10, 16, 12, 0)
 MET2 = "Dataset116_METrq1/nnUNetTrainer_save10/2"
 MEN0 = "Dataset111_MENrq1/nnUNetTrainer_save10_n470/0"
@@ -269,6 +271,14 @@ ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留�
    and g["gpus"]["lab"] == [dict(gpu="0", uuid="GPU-a", util="37", mem="1200", apps=[dict(pid="42", mem="1100", args="python x|y")])])
 ok("gather：squeue 每行 7 项（最后是分区），格式不对的行不要",
    g["slurm"]["dicc"]["squeue"] == [["train_worker", "123", "RUNNING", "1:00", "None", "0", "gpu-a100"]])
+calls.clear()
+H.policy.OFFLINE = {"dicc": "停机维护"}
+g = H.gather()
+P_off = H.check(dict(g, now=NOW))
+ok("gather：暂停检查的机器不连（不探查、不读缓冲），算连不上，但不报 down",
+   not [c for c in calls if c[0] == "run_on" and c[1] == H.M.MACHINES["dicc"]["label"]] and g["ok"]["dicc"] is False
+   and "暂停检查" in g["why"]["dicc"] and "down:dicc" not in P_off)
+H.policy.OFFLINE = {}
 cut = True
 g = H.gather()
 ok("gather：训练机的 HAVE 没有结束标记（输出被截断）→ 这台算没读到", g["ok"]["lab"] is False and "lab" not in g["probe"])

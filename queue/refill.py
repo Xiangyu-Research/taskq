@@ -361,7 +361,7 @@ def topup_all(s, dry=False):
     """每台 Slurm 训练机补交 worker 作业 → (dry 时的说明, 出错的 {问题编号: 说明})。"""
     events, stuck = [], {}
     for name in M.names("slurm"):
-        if "train" in M.MACHINES[name]["roles"] and P.SLURM.get(name):
+        if "train" in M.MACHINES[name]["roles"] and P.SLURM.get(name) and name not in P.OFFLINE:
             ev, st = topup(s, name, dry=dry)
             events += ev
             stuck.update(st)

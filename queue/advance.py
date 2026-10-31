@@ -503,6 +503,8 @@ def no_needs(cmd):
 
 def remote_have(name, paths):
     """这台机器上已经有的（文件夹里有 .incomplete 的是没传完的，不算）→ set；连不上 → None。"""
+    if name in P.OFFLINE:
+        return None
     m = M.MACHINES[name]
     rc, out, _ = C.run("bash -s", m["ssh"], input=C.have_script(paths, m["data"]))
     return C.parse_have(out) if rc == 0 else None

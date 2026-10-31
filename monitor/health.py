@@ -42,6 +42,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
+import policy  # noqa: E402
 import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
 import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
 import taskq  # noqa: E402  scripts/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
@@ -148,7 +149,9 @@ def code_heads():
 def gather(remote=True):
     """各机器的状态（只读）。remote=False：只看本机（不连别的机器）。"""
     s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, slurm={}, src={}, taskq={}, code=code_heads())
-    here = [n for n in M.MACHINES if remote or M.MACHINES[n]["ssh"] is None]
+    here = [n for n in M.MACHINES if (remote or M.MACHINES[n]["ssh"] is None) and n not in policy.OFFLINE]
+    for n in set(M.MACHINES) & set(policy.OFFLINE):
+        s["ok"][n], s["why"][n] = False, f"暂停检查：{policy.OFFLINE[n]}"
     pq = [n for n in M.names("pueue") if n in here]
     rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"] + ([] if remote else pq), timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in pq}
@@ -233,12 +236,12 @@ def check(s):
         claims.setdefault(key, {}).setdefault(name, []).append(desc)
 
     for name, m in M.MACHINES.items():
-        if not s["ok"].get(name):
+        if not s["ok"].get(name) and name not in policy.OFFLINE:
             add(f"down:{name}", f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(m['ssh'])}）",
                 after=60 if m["scheduler"] == "slurm" else 30)
     code = s.get("code") or {}
     for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了
-        if head and code.get("main") and head != code["main"] and name in M.MACHINES:
+        if head and code.get("main") and head != code["main"] and name in M.MACHINES and name not in policy.OFFLINE:
             add(f"code:{name}", f"{L(name)} 的代码停在 {head[:7]}，GitHub 上是 {code['main'][:7]}"
                 f"（{M.MACHINES[name].get('repo')} 快进不了？auto_refresh.sh 每 30 分钟快进一次）", after=120)
     # --- 总队列（box，10/31）---
@@ -520,7 +523,14 @@ def main():
         done, stuck2 = [], {"advance:error": f"scripts/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
     if not a.dry_run and any(d.startswith("任务队列") for d in done):
         # 刚加进总队列的（如评测）这一次就送到执行机，不等下一次检查（10/25、10/31）
+        # 第一遍送过的任务、排过的传输都要重读，不然会再送一遍、再传一遍（10/31 同一份数据传了两次）
         s["taskq"][M.hub()] = taskq.local_status() or s["taskq"].get(M.hub())
+        rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
+        if rc == 0:
+            s["pueue"] = json.loads(out)
+        for name in feed.sites() if feed else []:
+            if s["ok"].get(name) and name in s["taskq"]:
+                s["taskq"][name] = taskq.remote_status(name)
         run_feed()
     try:
         # 缓冲有了任务、而那边没有排着的作业时补交 worker（送任务之后再补，10/31）

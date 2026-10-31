@@ -493,6 +493,8 @@ def run_all(s, dry=False):
     events, stuck = [], {}
     st = load_state()
     for name in sites():
+        if name in P.OFFLINE:
+            continue
         try:
             ev, st_ = run_one(s, name, dry, st)
         except Exception as e:  # noqa: BLE001
