@@ -51,10 +51,10 @@ ok("没有的描述 → 哈希 None", M.spec_hash("没有这个") is None)
 
 # ---------- 假机器 ----------
 SAVE_M, SAVE_R = copy.deepcopy(M.MACHINES), copy.deepcopy(M.RELAY)
-M.RELAY["tsite"] = dict(label="测试", hostname=r"(?!)", ssh="tsite", scheduler="pueue", root="/r/x1",
+M.RELAY["tsite"] = M.SITES["tsite"] = dict(label="测试", hostname=r"(?!)", ssh="tsite", scheduler="pueue", root="/r/x1",
                        conda=("/opt/c", "base"), envs={"nnunet": ("spec", "cu128"), "umamba": "spec", "old": ("conda", "o")},
                        roles=("train",))
-M.RELAY["tslurm"] = dict(label="测试 Slurm", hostname=r"(?!)", ssh="tslurm", scheduler="slurm", root="/s/y",
+M.RELAY["tslurm"] = M.SITES["tslurm"] = dict(label="测试 Slurm", hostname=r"(?!)", ssh="tslurm", scheduler="slurm", root="/s/y",
                         conda=("/app/c", "pt"), envs={"nnunet": "spec"}, roles=("train",),
                         transfer_job="-p cpu-x --qos=normal -c 4 --mem=4G")
 
