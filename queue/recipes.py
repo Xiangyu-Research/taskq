@@ -18,6 +18,7 @@
                out/PROGRESS.json，{"done": 已做完的轮数, "total": 总轮数}；None = 只看训完没、日志多久没更新）
     resume     out 下的存档（glob 列表）：有一个就算有进度，失败时留在那台机器上接着做，不交还跳过（2026-10-31）；None = 没有
     res        资源：gpus（卡数）、cpus、mem（如 "32G"）、gpu_mem（GB）；None 的项不限（2026-10-31）
+               wait_gpu（分钟）= 不在 Slurm 里时卡上有别人的进程，最多等这么久，等不到算失败（0 = 不等）；不写 = 一直等（run_task.sh，10/31）
     owner      谁的任务（None = 自己的；别人请帮忙训练、测试的写名字）
     info       训练设置的解析方法（spec.py 的 INFO，登记表的参数列；None = 不读）
     metrics    登记表的验证指标：{列名: (out 下的 JSON 文件, 键的路径列表)}（实验表里按数据给）

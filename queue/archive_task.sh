@@ -3,7 +3,7 @@
 # 三份核对一致后删掉训练机上的大文件（2026-10-18，取代 archive_fold.sh；规则同 10/16 定的，lab 的盘几乎满了）。
 #   archive_task.sh <机器> <key> [--dry-run]
 # 拉回以后由 box 上的 scripts/queue/advance.py 放进 wait 组（和推理并行）：
-#   q wait --label archive:t15men_f1 -- 'bash scripts/queue/archive_task.sh lab Dataset111_MENrq1/nnUNetTrainer_save10_n470/1'
+#   q wait --label archive:<标签> -- 'bash scripts/queue/archive_task.sh <机器> <key>'
 # 结果文件夹、要删的文件按任务说明（scripts/queue/spec.py lookup <key>）：out、fetch（extra：上一级里一起备份的文件；
 # exclude：没拉回 box 的文件，核对时跳过）、archive（drop 匹配、keep 不匹配的才删）。
 # 步骤：

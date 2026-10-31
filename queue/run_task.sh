@@ -1,10 +1,11 @@
 #!/bin/bash
 # 跑一个训练任务（2026-10-18）：所有机器共用（DICC 的 dicc_worker.sh、lab 的 pueue 任务、手动跑）。
-#   run_task.sh <做法> k=v…          （如 run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=1）
+#   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
 # 按任务说明（scripts/queue/spec.py，做法在 scripts/queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
 # 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_seg<段>.log，第一行记作业、机器、
 # 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
-# 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每 5 分钟看一次；
+# 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
+# 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；
 # 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
 # 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
@@ -32,6 +33,7 @@ TRIES=3
 [[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
 POLL=${RUN_TASK_POLL:-300}        # 只给测试用
+GPU_POLL=${RUN_TASK_GPU_POLL:-60} # 只给测试用
 
 gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算，10/19 起）
     [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
@@ -43,6 +45,18 @@ gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（�
         mine=$(( mine + ${pm:-0} ))
     done < <(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2> /dev/null)
     (( ${used:-0} - mine <= 500 ))
+}
+wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1。每次看都往任务日志写一行（dicc_worker.sh 按日志判断卡没卡住）
+    local waited=0
+    while ! gpu_free; do
+        if [[ -n ${TASK_WAIT_GPU:-} ]] && (( waited >= TASK_WAIT_GPU * 60 )); then
+            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着，等了 $TASK_WAIT_GPU 分钟还没空出来，不跑" | tee -a "$LOG"
+            return 1
+        fi
+        echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着，等它空出来（已等 $(( waited / 60 )) 分钟${TASK_WAIT_GPU:+，最多 $TASK_WAIT_GPU 分钟}）" | tee -a "$LOG"
+        sleep "$GPU_POLL" & wait $!
+        waited=$(( waited + GPU_POLL ))
+    done
 }
 kill_tree() { local c; for c in $(pgrep -P "$1"); do kill_tree "$c"; done; kill -TERM "$1" 2> /dev/null; }
 pid=
@@ -56,7 +70,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 echo "作业 ${JOBTAG}_${SEG} @ $(hostname -s)，任务=$TASK_KEY，第 $SEG 段，环境 $TASK_ENV，代码 $COMMIT，$(ts)" >> "$LOG"
 echo "$(ts) 开始：$TASK_KEY（环境 $TASK_ENV，日志 $LOG）"
 for (( try = 1; ; try++ )); do
-    while ! gpu_free; do echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被占，5 分钟后再看"; sleep "$POLL" & wait $!; done
+    wait_gpu || exit 1
     ( eval "$ACT" && cd "$REPO" && exec bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
     pid=$!
     wait "$pid"; rc=$?; pid=

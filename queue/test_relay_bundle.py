@@ -19,6 +19,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "envs"))
 import machines as M  # noqa: E402
 import relay_bundle as B  # noqa: E402
+RB = B
 
 NAME = "dicc2"
 
@@ -28,7 +29,7 @@ def ok(msg):
 
 
 def run(cmd, env=None, **kw):
-    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", "SEG_DATA", "TASKQ_DIR", "TASKQ_MACHINE")}
+    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", RB.rename("BRAIN_TUMOR"), "TASKQ_DIR", "TASKQ_MACHINE")}
     e.update(env or {})
     return subprocess.run(cmd, capture_output=True, text=True, env=e, **kw)
 
@@ -134,27 +135,27 @@ def test_bundle(T):
     for a, _ in B.FILES:
         assert not [f for f in files if a in open(os.path.join(path, f), encoding="utf-8").read()], a
     for f in ("scripts/queue/refill.py", "scripts/queue/relay.py", "scripts/queue/relay_names.py", "scripts/queue/steps.py",
-              "research/SEG/experiments.py", "scripts/sites/names.py"):
+              RB.rename("research/RQ1/experiments.py"), "scripts/sites/names.py"):
         assert f not in files, f
     assert not any(f.startswith("research/RQ") for f in files)
-    infer = ("research/SEG/analysis/infer_task.sh", "research/SEG/analysis/run_predict_eval.sh", "research/SEG/nnunet/predict.sh",
+    infer = (RB.rename("research/RQ1/analysis/infer_task.sh"), RB.rename("research/RQ1/analysis/run_predict_eval.sh"), RB.rename("research/RQ1/nnunet/predict.sh"),
              "research/common/sparsify_bg.sh", "envs/nnunet_paths.sh")
-    for f in infer + ("research/SEG/analysis/write_manifest.py", "research/common/sparsify_probs.py"):
+    for f in infer + (RB.rename("research/RQ1/analysis/write_manifest.py"), "research/common/sparsify_probs.py"):
         assert f in files, f
     for f in infer:
         r = subprocess.run(["bash", "-n", os.path.join(path, f)], capture_output=True, text=True)
         assert r.returncode == 0, (f, r.stderr)
-    pe = open(os.path.join(path, "research/SEG/analysis/run_predict_eval.sh"), encoding="utf-8").read()
-    assert "SEG_GPU_PAD=0" in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
+    pe = open(os.path.join(path, RB.rename("research/RQ1/analysis/run_predict_eval.sh")), encoding="utf-8").read()
+    assert RB.rename("RQ1_GPU_PAD=0") in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
     real_c = B.cohorts(open(os.path.join(HERE, "..", "..", B.PE_SH), encoding="utf-8").read())
     assert {"UCSF", "MEN", "PEDs-noskullstrip", "GLI_holdout", "GLI"} <= set(real_c), real_c
-    assert "EXT=(${TS_EXT?})" in pe and "RQ1_holdout/${TS_HOLD:?}/imagesTs" in pe.replace("SEG_holdout", "RQ1_holdout"), pe[:400]
+    assert "EXT=(${TS_EXT?})" in pe and RB.rename("RQ1_holdout") + "/${TS_HOLD:?}/imagesTs" in pe, pe[:400]
     assert pe.rstrip().endswith('log "推理完成"; exit 0') and "model.R" not in pe, pe[-300:]
     hits = {f: B.cohort_hits(open(os.path.join(path, f), encoding="utf-8").read(), real_c) for f in files}
     assert not any(hits.values()), {f: h for f, h in hits.items() if h}
     assert B.cohort_hits("segment men MENx x-MEN", real_c) == [] and B.cohort_hits("a MEN b", real_c) == ["MEN"]
-    pr = open(os.path.join(path, "research/SEG/nnunet/predict.sh"), encoding="utf-8").read()
-    assert "SEG_GPU_PAD=0" in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
+    pr = open(os.path.join(path, RB.rename("research/RQ1/nnunet/predict.sh")), encoding="utf-8").read()
+    assert RB.rename("RQ1_GPU_PAD=0") in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
     np_ = open(os.path.join(path, "envs/nnunet_paths.sh"), encoding="utf-8").read()
     assert "mem_keep_start.sh" in np_ and "gpu_pad" not in np_, np_[:300]
     assert not B.forbidden_hits(path, files)
@@ -194,20 +195,20 @@ def test_bundle(T):
     assert f"#SBATCH --job-name={e['jobs']['gpu']}" in sb
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
-    assert "export TASKQ_DIR=$R/queue SEG_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
+    assert RB.rename("export TASKQ_DIR=$R/queue RQ1_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED") in sb
     assert sb[-2] == 'exec bash "$REPO/scripts/queue/start.sh"' and "git" not in "\n".join(sb)
     assert run(["bash", "-n", os.path.join(cur, "scripts/queue/worker.sbatch")]).returncode == 0
     fake = os.path.join(T, "fakeR")
     os.makedirs(os.path.join(fake, "code", "b1", "scripts", "queue"))
     with open(os.path.join(fake, "code", "b1", "scripts", "queue", "start.sh"), "w") as f:
-        f.write('echo "$TASKQ_DIR|$SEG_GPU_PAD_SWITCH|$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
+        f.write(RB.rename('echo "$TASKQ_DIR|$RQ1_GPU_PAD_SWITCH|') + '$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
     os.symlink("b1", os.path.join(fake, "code", "current"))
     body = "\n".join(sb).replace(f"R={R}", f"R={fake}")
     out = run(["bash", "-c", body]).stdout.strip()
     assert out == f"{fake}/queue|{fake}/queue/gpu_pad_DISABLED|{fake}/code/b1", out
     ok("worker.sbatch：CPU、内存、作业名、输出位置按账号，其余资源和原来一样；开始时按 current 的实际包跑，队列和显存开关在根目录下")
 
-    env = dict(SEG_DATA=f"{R}/data", TASKQ_DIR=f"{R}/queue")
+    env = {RB.rename("BRAIN_TUMOR"): f"{R}/data", "TASKQ_DIR": f"{R}/queue"}
     tq = ["python3", os.path.join(cur, "scripts/queue/taskq.py")]
     key = "Dataset999_abcdef/nnUNetTrainer_save10/0"
     r = run(tq + ["add", "--nice", "0", "--recipe", "nnunet", "dataset=Dataset999_abcdef", "fold=0"], env)
@@ -229,7 +230,7 @@ def test_bundle(T):
     assert run(tq + ["resume", key], env).returncode == 0
     assert run(tq + ["remove", key], env).returncode == 0
     assert not open(f"{R}/queue/tasks.jsonl").read().strip()
-    r = run(tq + ["--json-status"], {"SEG_DATA": f"{R}/data"})
+    r = run(tq + ["--json-status"], {RB.rename("BRAIN_TUMOR"): f"{R}/data"})
     assert r.returncode == 0 and '"enabled": false' in r.stdout
     ok("包里的 taskq.py：add → --json-status → next（0；再领 10）→ beat → stop → release → resume → remove；"
        "不设 TASKQ_DIR 也用根目录下的 queue/")
