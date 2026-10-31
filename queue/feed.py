@@ -164,25 +164,30 @@ def progress_elsewhere(s, key, name):
     return any(refill.progress(s, key, h) for h in s.get("src", {}) if h != name)
 
 
-def runnable(name, t):
-    """这台机器能跑这个任务：有环境、machines 允许、说明没坏。"""
+def runnable(name, t, oks=None):
+    """这台机器能跑这个任务：环境就绪（envs/machines.py 的 ready_envs）、machines 允许、说明没坏。"""
     sp = spec(t)
-    envs = set(M.machine(name).get("envs") or {})
+    envs = M.ready_envs(name, oks)
     return bool(sp) and not t.get("bad") and t["state"] != "bad" and sp.get("env") in envs and name in (sp.get("machines") or [name])
 
 
 def candidates(s, name, ctq):
     """可以送去训练的：总队列里 free / stale、没分出去、这台能跑、要卡、这台没跳过、别的机器上没有进度；按（档位，先后）排。"""
-    out = [t for t in ctq["tasks"] if t["state"] in ("free", "stale") and not t.get("assigned") and runnable(name, t)
+    out = [t for t in ctq["tasks"] if t["state"] in ("free", "stale") and not t.get("assigned") and runnable(name, t, envs_ok(s, name))
            and spec(t).get("device", "gpu") == "gpu" and spec(t).get("machines") != [name]
            and name not in (t.get("skipped_by") or []) and not progress_elsewhere(s, t["key"], name)]
     return sorted(out, key=lambda t: (t["nice"], t["order"]))
 
 
-def only_here(name, ctq):
+def only_here(name, ctq, oks=None):
     """只有这台能跑、还没分出去的（free / stale / waiting）。"""
     return [t for t in ctq["tasks"] if t["state"] in ("free", "stale", "waiting") and not t.get("assigned")
-            and spec(t).get("machines") == [name] and runnable(name, t) and name not in (t.get("skipped_by") or [])]
+            and spec(t).get("machines") == [name] and runnable(name, t, oks) and name not in (t.get("skipped_by") or [])]
+
+
+def envs_ok(s, name):
+    """那台机器上按描述建好、检查过的环境 {名: 哈希}（收集的状态里的 envs_ok；没有 → None）。"""
+    return ((s.get("src") or {}).get(name) or {}).get("envs_ok")
 
 
 def manual_done(ctq, name, copying):
@@ -286,7 +291,7 @@ def plan(s, name, st, data=None, now=None):
         acts += a
         stuck.update(k)
     inbuf = set(bt) - gone
-    for t in only_here(name, ctq):
+    for t in only_here(name, ctq, envs_ok(s, name)):
         deps = spec(t).get("after") or []
         extra = []
         for d in deps:

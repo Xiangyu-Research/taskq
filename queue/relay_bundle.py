@@ -252,6 +252,7 @@ def machine_entry(name, e, root, entry=None):
              data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=dict(e.get("jobs") or {}), sbatch=dict(e.get("sbatch") or {}))
     m.update({k: e[k] for k in ("slots", "worker") if k in e})
+    m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/sites/envs.py）在根目录下
     m.update(entry or {})
     return m
 
