@@ -20,7 +20,7 @@
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
   3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一折（只领能翻译的做法，
      数据传过去后那边至少还剩 HARD_GB）；
-  4. 那边排着和在跑的 worker 作业不够时补交（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
+  4. 那边排着和在跑的 worker 作业不够、又有备好没人领的任务时补交（refill.py 的 topup_plan：排着没开始的作业不超过备好的任务数，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的折照常推进。
 连不上它时只续总队列的领取；领着折、连不上 2 小时以上报出来。
 
@@ -609,7 +609,8 @@ def worker_jobs(name, rs):
 
 
 def topup(name, rs, run=None):
-    """→ [(QOS, 时限, 补几个)], 不补的原因。pueue 类：组里没有活着的 worker 时开一个 → [("pueue", None, 1)]。"""
+    """→ [(QOS, 时限, 补几个)], 不补的原因。pueue 类：组里没有活着的 worker、那边有备好没人领的任务时开一个 → [("pueue", None, 1)]；
+    Slurm 类：排着没开始的作业不超过备好的任务数（refill.topup_plan）。"""
     if conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
             return [], "读不到 pueue"
@@ -618,6 +619,8 @@ def topup(name, rs, run=None):
             return [], "worker 在"
         if mine and mine[-1][3] not in ("Success", "Killed"):
             return [], f"上一个 worker（pueue 任务 {mine[-1][0]}）失败了（{mine[-1][3]}）"
+        if not refill.unclaimed(rs["taskq"], "gpu"):
+            return [], "那边没有备好、没人领的任务"  # 先备好再开卡（10/31 定）；worker 空闲 30 分钟自己退出，有了再开
         return [("pueue", None, 1)], ""
     conf_ = P.SLURM.get(name) or {}
     if not conf_.get("gpu"):
@@ -625,12 +628,7 @@ def topup(name, rs, run=None):
     rc, out, _ = (run or rsh)(name, refill.topup_probe(name))
     if rc:
         return [], "读不到作业数"
-    counts = {}
-    for ln in out.splitlines():
-        p = ln.split("|")
-        if len(p) == 4 and p[0] == "QOS" and p[3].isdigit():
-            counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]))
-    subs, why = refill.topup_plan(rs["taskq"], counts, conf_["gpu"])
+    subs, why = refill.topup_plan(rs["taskq"], refill.parse_qos(out), conf_["gpu"])
     return [(q, t, n) for q, t, n, _ in subs], why
 
 
