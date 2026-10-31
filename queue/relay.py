@@ -574,7 +574,7 @@ def fill(s, name, rs, st, acts):
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
-    if any(n not in s["src"] for n in M.names("train")):
+    if any(n not in s["src"] and n not in P.OFFLINE for n in M.names("train")):  # 暂停检查的机器不算
         return [], "有训练机的进度读不到"
     want = P.READY.get(name, 1)
     keys = keys_of(st, name)
