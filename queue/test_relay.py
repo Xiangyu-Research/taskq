@@ -47,8 +47,8 @@ CONDA = os.path.join(T, "conda")
 os.makedirs(os.path.join(CONDA, "bin"))
 os.symlink(relay_bundle.nnunet_python(), os.path.join(CONDA, "bin", "python3"))
 M.RELAY[NAME] = dict(M.RELAY[NAME], root=RROOT, conda=(CONDA, "pt"), transfer_job="-p test")
-Q = "dicc"  # 总队列所在的机器（refill.queue_host()）
-assert relay.refill.queue_host() == Q
+Q = "box"  # 总队列所在的机器（taskq.queue_host()，10/31）
+assert relay.taskq.queue_host() == Q
 
 
 def ok(msg):
@@ -114,7 +114,14 @@ def test_plan():
 
     acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("drop", K), ("release", K)], acts
-    ok("总队列显示训完 → 交还、删那边的任务和结果")
+    fdone = [dict(id=8, label=frec["label"], status="Success")]
+    acts, _ = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
+    assert ops(acts) == [("drop", K), ("release", K)], acts
+    acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Running")], [frec]), NAME, RS(rtask(A, "done")), st)
+    assert ops(acts) == [("beat", K)] and not stuck, acts
+    acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
+    assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
+    ok("总队列显示训完（box 上有了）→ 交还、删那边的任务和结果；拉回、归档还在跑 → 等；出错 → 报、不删")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
@@ -151,7 +158,7 @@ def test_plan():
     K2, K3 = "Dataset2_y/tr/0", "Dataset3_z/tr/0"
     cands = [mtask(K2, "free", None, nice=3), mtask(K3, "free", None, nice=4), mtask("Dataset4_c/tr/0", "free", None, relay_=None)]
     relay.refill.data_gb = lambda paths: 10.0
-    relay.P.SLURM[NAME] = dict(relay.P.SLURM.get(NAME) or {}, ready=2)
+    relay.P.READY[NAME] = 2
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "claimed", "1")), st, [])
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
@@ -160,7 +167,7 @@ def test_plan():
     assert more == [] and "排着 2" in why, (more, why)
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=105e9), st, [])
     assert more == [] and "放不下" in why, why
-    ok("补任务：那边排着的（含在传数据的）不够 ready 个才领，按档位，只领能翻译的做法，放不下不领")
+    ok("补任务：那边排着的（含在传数据的）不够 READY 个才领，按档位，只领能翻译的做法，放不下不领")
 
 
 # ---------------- 2. 挪进数据目录的顺序 ----------------

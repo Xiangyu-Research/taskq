@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import machines as M  # noqa: E402
 import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
 import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
-import taskq  # noqa: E402  scripts/queue/taskq.py：DICC 自己的任务队列（10/17）
+import taskq  # noqa: E402  scripts/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
 import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
 import common as C  # noqa: E402  scripts/queue/common.py
 from common import write_json  # noqa: E402
@@ -156,9 +156,11 @@ def gather(remote=True):
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
             t.update(status="Success", result="Success", code=0)
-    # 先查 Slurm 集群（任务队列在那里）：收集训练状态、查训练机上的数据都要用队列里的任务
+    # 总队列在 box（10/31）：收集训练状态、查训练机上的数据都要用队列里的任务；执行机的缓冲是其中一部分的副本
+    hub = M.hub()
+    s["taskq"][hub] = taskq.local_status()
+    queue = list((s["taskq"][hub] or {}).get("tasks", []))
     order = sorted(here, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
-    queue = []
     for name in order:
         m = M.MACHINES[name]
         if m["scheduler"] == "slurm":
@@ -170,7 +172,8 @@ def gather(remote=True):
                                         sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
                 if "train" in m["roles"]:
                     s["taskq"][name] = taskq.remote_status(name)
-                    queue += (s["taskq"][name] or {}).get("tasks", [])
+                    seen = {t["key"] for t in queue}
+                    queue += [t for t in (s["taskq"][name] or {}).get("tasks", []) if t["key"] not in seen]
         else:
             script = probe_script(m, data_candidates(queue))
             rc, out = run_on(m, script)
@@ -229,6 +232,17 @@ def check(s):
         if head and code.get("main") and head != code["main"] and name in M.MACHINES:
             add(f"code:{name}", f"{L(name)} 的代码停在 {head[:7]}，GitHub 上是 {code['main'][:7]}"
                 f"（{M.MACHINES[name].get('repo')} 快进不了？auto_refresh.sh 每 30 分钟快进一次）", after=120)
+    # --- 总队列（box，10/31）---
+    hub = M.hub()
+    ctq = s.get("taskq", {}).get(hub)
+    if hub in s.get("taskq", {}) and ctq is None:
+        add(f"taskq:{hub}", f"{L(hub)} 读不到总队列（~/.cache/phd/taskq/）")
+    elif ctq and not ctq.get("enabled"):
+        add(f"tqoff:{hub}", f"{L(hub)} 的总队列关着（~/.cache/phd/taskq/ENABLED 不在），不会往执行机送任务", after=60)
+    elif ctq:
+        for t in ctq["tasks"]:
+            if t["state"] == "blocked" and not t.get("assigned"):
+                add(f"tqblocked:{t['key']}", f"总队列任务 {t['key']} {t['note']}，不会开始")
     # --- Slurm ---
     for name, d in s["slurm"].items():
         tq = s.get("taskq", {}).get(name)
@@ -313,8 +327,7 @@ def check(s):
                 level="info" if stopped(t) else "normal", kind="event")
 
     # --- 训练机的卡空了 ---
-    qh = next((n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"]), None)
-    holding = {t.get("worker") for t in (s.get("taskq", {}).get(qh) or {}).get("tasks", []) if t.get("state") != "done"}
+    holding = {t.get("worker") for t in (s.get("taskq", {}).get(taskq.queue_host()) or {}).get("tasks", []) if t.get("state") != "done"}
     for name in M.names("pueue"):
         m = M.MACHINES[name]
         if "train" not in m["roles"] or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
@@ -473,19 +486,40 @@ def main():
     except Exception as e:  # noqa: BLE001
         stuck["relay:error"] = f"scripts/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]
     try:
+        import feed  # scripts/queue/feed.py：往执行机的缓冲送任务（10/31）
+    except Exception as e:  # noqa: BLE001
+        feed, stuck["feed:error"] = None, f"scripts/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
+
+    def run_feed():
+        if feed is None:
+            return
+        try:
+            ev, st = feed.run_all(s, dry=a.dry_run)
+            events.extend(ev)
+            stuck.update(st)
+        except Exception as e:  # noqa: BLE001
+            stuck["feed:error"] = f"scripts/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
+
+    run_feed()
+    try:
         import advance  # scripts/queue/advance.py：box 上按状态排下一步
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"scripts/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
     if not a.dry_run and any(d.startswith("任务队列") for d in done):
-        # 刚加进任务队列的（如评测）这一次就补交 worker 作业，不等下一次检查（10/25）
-        try:
-            for name in s.get("taskq", {}):
+        # 刚加进总队列的（如评测）这一次就送到执行机，不等下一次检查（10/25、10/31）
+        s["taskq"][M.hub()] = taskq.local_status() or s["taskq"].get(M.hub())
+        run_feed()
+    try:
+        # 缓冲有了任务、而那边没有排着的作业时补交 worker（送任务之后再补，10/31）
+        for name in s.get("taskq", {}):
+            if name != M.hub():
                 s["taskq"][name] = taskq.remote_status(name) or s["taskq"][name]
-            ev2, st3 = refill.topup_all(s)
-            stuck.update(st3)
-        except Exception as e:  # noqa: BLE001
-            stuck["refill:error"] = f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
+        ev2, st3 = refill.topup_all(s, dry=a.dry_run)
+        events.extend(ev2)
+        stuck.update(st3)
+    except Exception as e:  # noqa: BLE001
+        stuck["refill:error"] = f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
     for pid, msg in {**stuck, **stuck2}.items():
         # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=0)

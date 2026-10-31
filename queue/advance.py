@@ -56,6 +56,7 @@ import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 import refill  # noqa: E402
+import feed  # noqa: E402
 import common as C  # noqa: E402
 
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
@@ -138,7 +139,9 @@ def plan(s, root=None):
     NOTES.clear()
     if ptasks is None:
         return [], {}  # box 的 pueue 读不到：这次什么都不做
-    queue_tasks = [t for tq in (s.get("taskq") or {}).values() if tq for t in tq.get("tasks", [])]
+    # 总队列（box）在前：执行机的缓冲是其中一部分的副本，同一个 key 以总队列为准（10/31）
+    tqs = s.get("taskq") or {}
+    queue_tasks = list({t["key"]: t for h in sorted(tqs, key=lambda h: h == hub) if tqs[h] for t in tqs[h].get("tasks", [])}.values())
     nice = {t["key"]: t["nice"] for t in queue_tasks}
     py = python()
     tasks, groups, final = candidates(root, py, queue_tasks)
@@ -268,15 +271,16 @@ def plan(s, root=None):
         return True
 
     tq_tasks = {h: {x["key"]: x for x in (tq or {}).get("tasks", [])} for h, tq in (s.get("taskq") or {}).items()}
-    pueue_names = set(M.names("pueue"))
+    feed_sites = set(feed.sites())
     code = s.get("code") or {}
 
     def prequeue(t, after):
-        """这一折正被任务队列那台机器（DICC）的作业训着：每折的步骤里，PLACE 第一个用得上的地方（不算 trainer：这一折不在
-        pueue 机器上训）是这台的任务队列的，现在就加进队列，after 接上前一步；训完的那个作业接着就能领到推理（10/25）。"""
-        h = next((h for h, byk in tq_tasks.items() if (byk.get(t["key"]) or {}).get("state") == "claimed"
-                  and byk[t["key"]].get("worker") not in pueue_names), None)
-        if h is None:
+        """这一折在总队列里分给了一台有缓冲的执行机（feed.py，现在是 DICC）：每折的步骤里，PLACE 第一个用得上的地方（不算
+        trainer：这一折不在 pueue 机器上训）是这台的，现在就加进总队列，after 接上前一步；feed.py 跟着训练送进那边的缓冲，
+        训完的那个作业接着就能领到推理（10/25、10/31）。"""
+        x = tq_tasks.get(hub, {}).get(t["key"]) or {}
+        h = x.get("assigned") if x.get("state") == "claimed" else None
+        if h not in feed_sites:
             return
         prev, items = t["key"], []
         for st in after:
@@ -342,7 +346,7 @@ def plan(s, root=None):
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
         after = (t["e"] or {}).get("after", [])
         trained[key] = S.is_done(sp, root)
-        archiving = ("archive", key) in live
+        archiving = ("archive", key) in live or ("relay_fetch", key) in live
         if not trained[key]:
             frm = next((h for h in sorted(src) if (src[h].get(key) or {}).get("final")), None)
             if frm:
@@ -596,7 +600,7 @@ class Remote:
 
 # ---------------- 执行 ----------------
 def taskq_add(nice, args):
-    """加进训练的任务队列（box 上的 taskq.py 自动经 ssh 转到 DICC）→ (退出码, 输出)。"""
+    """加进总队列（box 上本地的 taskq.py，10/31）→ (退出码, 输出)；feed.py 再送到执行机的缓冲。"""
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", str(nice), "--recipe", "command", *args],
                        cwd=REPO, capture_output=True, text=True, timeout=300)
     return r.returncode, (r.stdout + r.stderr).strip()

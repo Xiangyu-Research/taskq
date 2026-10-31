@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""中转执行机（envs/machines.py 的 RELAY，现在是 dicc2；10/30）的接力：由 box 替它在总队列（DICC 上的任务队列）领任务、
+"""中转执行机（envs/machines.py 的 RELAY，现在是 dicc2；10/30）的接力：由 box 替它在总队列（box 上的任务队列，10/31 起）领任务、
 把数据换成别名传过去、放进它自己的任务队列，训完拉回、换回真名、归档。两边不直接通信，一切经 box。
 
 那边（根目录 R，machines.py 的 root）：
@@ -14,11 +14,11 @@
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（翻译、补传缺的数据、建软链接、加进那边的队列）；
      - 在那边排着、在训 → 续上（beat）；
      - 那边训完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、换回真名、备份到 DICC）；
-     - 总队列显示训完（DICC 上有了存档）→ 交还，删掉那边的任务和结果；
+     - 总队列显示训完（box 上有了），而且拉回、归档的 box 任务成功了 → 交还，删掉那边的任务和结果；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
-  3. 那边排着没人领的任务少于 envs/policy.py 的 SLURM[名字]["ready"] 时，按 refill.py 的挑法领下一折（只领能翻译的做法，
+  3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一折（只领能翻译的做法，
      数据传过去后那边至少还剩 HARD_GB）；
   4. 那边排着和在跑的 worker 作业不够时补交（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的折照常推进。
@@ -66,7 +66,7 @@ HASHES = os.path.join(DIR, "hashes.json")
 LOG = os.path.expanduser(os.environ.get("RELAY_LOG", "~/relay.log"))
 HARD_GB = 100  # 领之前：传过去以后那边至少还剩这么多
 DOWN_S = 2 * 3600  # 领着折、连不上这么久就报
-LATE_S = 3600  # 拉回、归档做完这么久了总队列还没显示训完，就报
+LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就报
 LIVE = refill.LIVE
 
 
@@ -407,7 +407,7 @@ def plan(s, name, rs, st, now=None):
     """→ (动作, 卡住的 {问题编号: 说明})。rs：那边的状态（None = 连不上）；st：load_state()。
     动作 dict(op=beat|release|stage|fetch|drop|rstop|rresume, key, …)。"""
     now = now or time.time()
-    mtq = s.get("taskq", {}).get(refill.queue_host())
+    mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = conf(name)["label"], keys_of(st, name)
     mine = [t for t in (mtq or {}).get("tasks", []) if t.get("worker") == name]
     acts, stuck = [], {}
@@ -430,7 +430,16 @@ def plan(s, name, rs, st, now=None):
         if a:
             owned.add(a["key"])
         if t["state"] == "done":
-            acts.append(dict(op="release", key=key, why="训完了，DICC 上有了存档"))
+            ft = box_task(s, "relay_fetch", key, t.get("since") or 0)
+            if ft is not None and ft["status"] in LIVE:  # box 上有了，但拉回、归档还没做完：等
+                acts.append(dict(op="beat", key=key))
+                continue
+            if ft is not None and ft["status"] != "Success":
+                acts.append(dict(op="beat", key=key))
+                stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回、归档 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），box 上有了、领取保留；"
+                                              f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
+                continue
+            acts.append(dict(op="release", key=key, why="训完了，box 上有了、归档到 DICC 了"))
             if a:
                 acts.append(dict(op="drop", key=key, alias=a["key"], out=a["spec"]["out"]))
             continue
@@ -458,8 +467,8 @@ def plan(s, name, rs, st, now=None):
             elif ft["status"] == "Success":
                 end = C.local_time(ft.get("end"))
                 if end is not None and now - end.timestamp() > LATE_S:
-                    stuck[f"relayfetch:{key}"] = (f"{L} 训完的 {key} 已拉回、归档（box 任务 {ft['id']}），总队列还没显示训完；"
-                                                  f"看 DICC 上的结果文件夹")
+                    stuck[f"relayfetch:{key}"] = (f"{L} 训完的 {key} 拉回并归档成功了（box 任务 {ft['id']}），box 上却还不算训完；"
+                                                  f"看 box 上的结果文件夹")
             elif ft["status"] not in LIVE:
                 stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），领取保留；"
                                               f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
@@ -495,13 +504,13 @@ def plan(s, name, rs, st, now=None):
 
 
 def fill(s, name, rs, st, acts):
-    """那边备好、没人领的任务不够 ready 个时领下一折 → take 动作；不领 → ([], 原因)。"""
-    mtq = s.get("taskq", {}).get(refill.queue_host())
+    """那边备好、没人领的任务不够 READY 个时领下一折 → take 动作；不领 → ([], 原因)。"""
+    mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
     if any(n not in s["src"] for n in M.names("train")):
         return [], "有训练机的进度读不到"
-    want = (P.SLURM.get(name) or {}).get("ready", 1)
+    want = P.READY.get(name, 1)
     keys = keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
 
@@ -550,12 +559,12 @@ def label(op, key):
 
 def execute(name, acts, s, run_add=None):
     """做动作 → [说明]。出错的那一步写进说明，后面的照做。"""
-    qh, L, msgs = refill.queue_host(), conf(name)["label"], []
+    L, msgs = conf(name)["label"], []
     add = run_add or refill.add
 
     def master(args):
-        r = taskq.remote(qh, args)
-        return (r[0], r[1] + r[2]) if r else None
+        r = taskq.central(args)
+        return r[0], r[1] + r[2]
     beats = [a["key"] for a in acts if a["op"] == "beat"]
     if beats:
         r = master(f"beat --worker {name} " + " ".join(shlex.quote(k) for k in beats))
@@ -568,7 +577,7 @@ def execute(name, acts, s, run_add=None):
                 r = master(f"release --worker {name} {shlex.quote(k)}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
                 msgs.append(f"{L} 交还 {k}：{a['why']}" if r and r[0] == 0 else f"{L} 交还 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "take":
-                r = master(f"take --worker {name} --ttl {refill.TTL} {shlex.quote(k)}")
+                r = master(f"take --worker {name} --assign {shlex.quote(k)}")
                 if r is None or r[0]:
                     msgs.append(f"{L} 没领到 {k}：{(r or [0, 'ssh 不通'])[1].strip()[-150:]}")
                     continue
@@ -660,7 +669,7 @@ def run_all(s, dry=False):
 
 def run_one(s, name, dry):
     live = bool(P.AUTO.get(name))
-    mtq = s.get("taskq", {}).get(refill.queue_host())
+    mtq = s.get("taskq", {}).get(taskq.queue_host())
     mine = [t for t in (mtq or {}).get("tasks", []) if t.get("worker") == name]
     L, st = conf(name)["label"], load_state()
     if not mine and not live and not dry:

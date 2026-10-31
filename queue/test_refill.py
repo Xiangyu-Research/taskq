@@ -67,7 +67,7 @@ def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_
     return dict(ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=copy.deepcopy(SQ), sacct=[])},
                 probe={"lab": {"DISK": str(int(disk)), "HAVE": prep}},
                 src={"box": {"folds": {}}, "lab": {"folds": lab_folds or {}}, "dicc": {"folds": {}}},
-                taskq={"dicc": dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {})},
+                taskq={h: dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {}) for h in ("box", "dicc")},  # 总队列、DICC 的缓冲
                 pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": groups or {}, "tasks": list(lab_tasks)}},
                 records=[sync_record(t) for t in box_tasks if t["label"].startswith("sync_")])
 
@@ -106,7 +106,7 @@ acts, _, _ = R.plan(s, "lab")
 ok("有进度的折不领（留在原机器）", ops(acts) == [("take", K_T1C[1])])
 q3 = [dict(t, state="claimed", worker="486191_2") if t["key"] == K_UM else t for t in QUEUE]
 ok("别人领了的不领", ops(R.plan(snap(queue=q3), "lab")[0]) == [("take", K_T1C[0])])
-ok("队列没开 / 读不到：什么都不做", R.plan(snap(enabled=False), "lab")[0] == [] and R.plan(dict(snap(), taskq={"dicc": None}), "lab")[0] == [])
+ok("队列没开 / 读不到：什么都不做", R.plan(snap(enabled=False), "lab")[0] == [] and R.plan(dict(snap(), taskq={"box": None}), "lab")[0] == [])
 s = snap()
 s["ok"]["lab"] = False
 ok("lab 连不上：什么都不做（不续、不交还）", R.plan(s, "lab")[0] == [])
@@ -192,8 +192,8 @@ msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 tr = [r for r in R.C.load_records() if r["step"] == "train"]
 ok("开始训练的任务记进任务记录（step=train、key、组、任务号）",
    len(tr) == 1 and tr[0]["machine"] == "lab" and tr[0]["key"] == K_UM and tr[0]["group"] == "gpu1" and isinstance(tr[0]["id"], int))
-ok("领：take --worker lab --ttl 604800，成功后在 lab gpu1 加训练任务（不暂存、不带优先级）",
-   rem == [f"take --worker lab --ttl 604800 {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
+ok("领：take --worker lab --assign，成功后在 lab gpu1 加训练任务（不暂存、不带优先级）",
+   rem == [f"take --worker lab --assign {K_UM}"] and len(cmds) == 1 and cmds[0][0] == "lab"
    and f"gpu1 -p --label train:{K_UM} -- 'bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=1'" in cmds[0][1]
    and "--stashed" not in cmds[0][1] and "priority" not in cmds[0][1] and "领了" in msgs[0])
 # 停止的（taskq.py stop，10/30）：停掉 lab 上的训练（SIGTERM）、交还，不续
@@ -262,16 +262,16 @@ ok("交还后去掉记下的组", K_UM not in json.load(open(R.STATE))["slot"]["
 cmds.clear(), rem.clear()
 
 # ---------------- 开关 ----------------
-R.taskq.remote = lambda h, a: (_ for _ in ()).throw(AssertionError("开关没开时不应该连 DICC"))
+R.taskq.central = lambda a: (_ for _ in ()).throw(AssertionError("开关没开时不应该改总队列"))
 ev, _, filled = R.run_all(snap())
 ok("开关（LAB）没开：只记'会做什么'，不推送、不连 DICC、不加任务", ev == [] and not filled and "开关没开" in open(R.LOG).read())
 R.run_all(snap())
 ok("影子日志和上次一样就不再写", open(R.LOG).read().count("开关没开") == 1)
 called = []
-R.taskq.remote = lambda h, a: called.append(a) or (0, "", "")
+R.taskq.central = lambda a: called.append(a) or (0, "", "")
 ev, _, filled = R.run_all(snap([train(5, 101, 1, "Running", UM)], queue=mine))
 ok("开关没开、lab 领着在训的折：照样续（不让领取过期），别的不做", called == [f"beat --worker lab {K_UM}"] and not filled)
-R.taskq.remote = lambda h, a: (_ for _ in ()).throw(AssertionError("dry-run 不应该连 DICC"))
+R.taskq.central = lambda a: (_ for _ in ()).throw(AssertionError("dry-run 不应该改总队列"))
 ev, _, _ = R.run_all(snap(), dry=True)
 ok("--dry-run：打印会做什么", "会 take" in ev[0])
 
@@ -412,7 +412,7 @@ ok("在训的这一折 40 分钟内训完、下一折数据在：提前领，排
    and acts[1]["group"] == "gpu1" and acts[1]["after"] == K_UM)
 cmds.clear(), rem.clear()
 msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
-ok("提前领：take，再在 gpu1 加训练任务（排在后面）", rem[-1] == f"take --worker lab --ttl 604800 {K_T1C[0]}"
+ok("提前领：take，再在 gpu1 加训练任务（排在后面）", rem[-1] == f"take --worker lab --assign {K_T1C[0]}"
    and cmds[-1][0] == "lab" and f"gpu1 -p --label train:{K_T1C[0]}" in cmds[-1][1] and "提前领了" in msgs[-1])
 ok("还要 100 分钟才训完：不提前领", ops(R.plan(snap_a(prep=P3, eta_min=100), "lab")[0]) == [("beat", K_UM)])
 ok("训完时间算不出来：不提前领", ops(R.plan(snap_a(prep=P3), "lab")[0]) == [("beat", K_UM)])
@@ -429,41 +429,41 @@ cmds.clear(), rem.clear()
 msgs = R.execute(acts, "lab", remote=fake_remote(), run=fake_run)
 ok("数据正在传时领到：不加训练任务，等传完", cmds == [] and "传完开始训" in msgs[-1])
 mineq = [dict(t, state="claimed", worker="lab") if t["key"] == K_T1C[0] else t for t in idle]
-acts, _, _ = R.plan(dict(snap_a((), box_tasks=[SY], prep=P3, queue=idle), taskq={"dicc": dict(enabled=True, tasks=mineq, recent_skips={})}), "lab")
+acts, _, _ = R.plan(dict(snap_a((), box_tasks=[SY], prep=P3, queue=idle), taskq={"box": dict(enabled=True, tasks=mineq, recent_skips={})}), "lab")
 ok("领着、数据还在传：只续", ops(acts) == [("beat", K_T1C[0])])
 
 # ---------------- DICC 补作业 ----------------
 QOS = {"long": "1-12:00:00", "normal": "08:00:00"}
-p, why = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 216), "normal": (10, 138)}, QOS)
+p, why = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 216), "normal": (10, 138)}, QOS)
 ok("现在：旧作业远超上限，不补", p == [] and "排满" in why)
-p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 9), "normal": (10, 3)}, QOS)
+p, _ = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 9), "normal": (10, 3)}, QOS)
 ok("long 空 1 个、normal 空 7 个：各补满", p == [("long", "1-12:00:00", 1, "worker.sbatch"), ("normal", "08:00:00", 7, "worker.sbatch")])
-p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (None, 4), "normal": (10, 10)}, QOS)
+p, _ = R.topup_plan(snap()["taskq"]["box"], {"long": (None, 4), "normal": (10, 10)}, QOS)
 ok("QOS 没设排队上限：按 SUBMIT_CAP", p == [("long", "1-12:00:00", R.SUBMIT_CAP - 4, "worker.sbatch")])
-p, _ = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 6)}, {"long": ("3-00:00:00", 2)})
+p, _ = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 6)}, {"long": ("3-00:00:00", 2)})
 ok("留 2 个名额：上限 10、现有 6，补 2", p == [("long", "3-00:00:00", 2, "worker.sbatch")])
-p, why = R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 8)}, {"long": ("3-00:00:00", 2)})
+p, why = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 8)}, {"long": ("3-00:00:00", 2)})
 ok("留 2 个名额：现有 8 就不补", p == [] and "排满" in why)
 done_q = [tq(K_T14, 0, 1, "done"), tq(K_UM, 50, 2, "claimed", "486191")]
-ok("队列里没有没人领的任务：不补", R.topup_plan(snap(queue=done_q)["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
-ok("领取过期的（stale）也算没人领", R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "stale")])["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 10)}, QOS)[0] != [])
-ok("总开关不在：不补", R.topup_plan(snap(enabled=False)["taskq"]["dicc"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
-paused = snap()["taskq"]["dicc"] | {"paused": True}
+ok("队列里没有没人领的任务：不补", R.topup_plan(snap(queue=done_q)["taskq"]["box"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
+ok("领取过期的（stale）也算没人领", R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "stale")])["taskq"]["box"], {"long": (10, 0), "normal": (10, 10)}, QOS)[0] != [])
+ok("总开关不在：不补", R.topup_plan(snap(enabled=False)["taskq"]["box"], {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
+paused = snap()["taskq"]["box"] | {"paused": True}
 ok("队列暂停：不补", R.topup_plan(paused, {"long": (10, 0), "normal": (10, 0)}, QOS)[0] == [])
-ok("读不到某个 QOS 的作业数：都不补", R.topup_plan(snap()["taskq"]["dicc"], {"long": (10, 0)}, QOS)[0] == [])
+ok("读不到某个 QOS 的作业数：都不补", R.topup_plan(snap()["taskq"]["box"], {"long": (10, 0)}, QOS)[0] == [])
 
 # 纯 CPU 任务（device=cpu，10/24）：GPU worker 不为它们补，有这类任务时才交 CPU worker
 K_EV = "eval/Dataset101_GLIrq1/x/fold_0"
 ev_spec = dict(key=K_EV, env="nnunet", machines=["dicc"], device="cpu")
 cpu_q = [tq(K_T14, 0, 1, "done"), dict(tq(K_EV, -100, 2), spec=ev_spec), dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b"))]
-cq = snap(queue=cpu_q)["taskq"]["dicc"]
+cq = snap(queue=cpu_q)["taskq"]["box"]
 p, why = R.topup_plan(cq, {"long": (10, 0)}, {"long": ("3-00:00:00", 2)})
 ok("只有纯 CPU 任务没人领：不补 GPU worker", p == [] and "要卡" in why)
 ok("纯 CPU 任务 2 个、最多 1 个、现有 0：交 1 个 CPU worker", R.cpu_plan(cq, 0, ("normal", "08:00:00", 1), 5) == ([("normal", "08:00:00", 1, "cpu_worker.sbatch")], ""))
 ok("最多 3 个：按任务数交 2 个", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 5)[0] == [("normal", "08:00:00", 2, "cpu_worker.sbatch")])
 ok("已有 1 个 CPU worker：不交", R.cpu_plan(cq, 1, ("normal", "08:00:00", 1), 5)[0] == [])
 ok("读不到 CPU worker 作业数：不交", R.cpu_plan(cq, None, ("normal", "08:00:00", 1), 5)[0] == [])
-ok("没有纯 CPU 任务：不交", R.cpu_plan(snap()["taskq"]["dicc"], 0, ("normal", "08:00:00", 1), 5)[0] == [])
+ok("没有纯 CPU 任务：不交", R.cpu_plan(snap()["taskq"]["box"], 0, ("normal", "08:00:00", 1), 5)[0] == [])
 ok("队列暂停：不交", R.cpu_plan(cq | {"paused": True}, 0, ("normal", "08:00:00", 1), 5)[0] == [])
 ok("最多 3 个、只剩 1 个提交名额：交 1 个", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 1)[0] == [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
 ok("提交名额用完：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 0) == ([], "提交名额用完了"))

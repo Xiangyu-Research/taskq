@@ -278,13 +278,16 @@ os.makedirs(EMPTY)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "nnunet",
                     "dataset=Dataset113_PEDsrq1", "trainer=nnUNetTrainer_save10", "fold=0"],
                    env=dict(os.environ, TASKQ_DIR=EMPTY, TASKQ_MACHINE="box"), capture_output=True, text=True)
-check("在 box 上（不是队列所在的机器）add 转到 DICC 那份（不在本机另建）", r.returncode == 0 and "加入" in r.stdout
-      and not os.path.exists(os.path.join(EMPTY, "tasks.jsonl")) and "Dataset113_PEDsrq1" in open(os.path.join(TQ2, "tasks.jsonl")).read())
+check("在 box 上（总队列所在的机器）add：本机建总队列（10/31 起不再转发）", r.returncode == 0 and "加入" in r.stdout
+      and "Dataset113_PEDsrq1" in open(os.path.join(EMPTY, "tasks.jsonl")).read())
+NOWHERE = os.path.join(T, "no_queue_here")
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "nnunet",
+                    "dataset=Dataset113_PEDsrq1", "trainer=nnUNetTrainer_save10", "fold=0"],
+                   env=dict(os.environ, TASKQ_DIR=NOWHERE, TASKQ_MACHINE="lab"), capture_output=True, text=True)
+check("不在 box、本机也没有队列：add 退出码 2，提示总队列在 box，不建目录", r.returncode == 2 and "总队列在 box" in r.stdout
+      and not os.path.exists(NOWHERE))
 r = taskq.remote("dicc", "nosuchcmd")
 check("remote：标准输出、标准错误分开返回", r is not None and r[0] == 2 and r[1] == "" and "nosuchcmd" in r[2])
-r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--json", "nosuch/key"],
-                   env=dict(os.environ, TASKQ_MACHINE="box"), capture_output=True, text=True)
-check("转发：那边的标准输出、退出码照样传回来", r.returncode == 1 and "队列里没有" in r.stdout)
 J = '{"tasks": [], "enabled": true}'
 check("@@JSON 行前后混着别的输出：只读那一行", taskq.S.json_in(f"警告：x {{1}}\n@@JSON {J}\n{{别的}}\n") == json.loads(J))
 check("没有 @@JSON 行：不认（不找第一个 {）", taskq.S.json_in(f"x\n{J}\n") is None)
@@ -525,6 +528,102 @@ rc, out = tq6("remove", "infer/x/fold_4", "eval/x/fold_4")
 s6 = st6()
 check("remove：连同依赖它的一起删 → 都删掉，别的不动", rc == 0 and "infer/x/fold_4" not in s6 and "eval/x/fold_4" not in s6
       and kt in s6 and "free/z" in s6)
+
+# ---------------- 10/31：总队列在 box、执行机的缓冲（BUFFER、put、take --assign） ----------------
+TQ7 = os.path.join(T, "taskq7")
+os.makedirs(TQ7)
+kt7 = "Dataset121_X/nnUNetTrainer_save10/3"
+r7 = [dict(order=1, nice=0, key=kt7, exp=None, recipe="nnunet", params=dict(dataset="Dataset121_X", trainer="nnUNetTrainer_save10", fold="3")),
+      cmdtask(2, "infer/x/fold_3", [kt7])]
+with open(os.path.join(TQ7, "tasks.jsonl"), "w") as f:
+    f.writelines(json.dumps(r) + "\n" for r in r7)
+
+
+def tq7(*args, env=None, stdin=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ7, BRAIN_TUMOR=DATA, **(env or {})),
+                       capture_output=True, text=True, input=stdin)
+    return r.returncode, r.stdout.strip()
+
+
+def st7(d=TQ7):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=dict(ENV, TASKQ_DIR=d, BRAIN_TUMOR=DATA),
+                       capture_output=True, text=True)
+    return {t["key"]: t for t in taskq.S.json_in(r.stdout)["tasks"]}
+
+
+rc, out = tq7("take", "--worker", "dicc", "--assign", "infer/x/fold_3")
+s7 = st7()
+check("take --assign：waiting 的也能分出去（提前送到执行机）", rc == 0 and s7["infer/x/fold_3"]["assigned"] == "dicc"
+      and s7["infer/x/fold_3"]["state"] == "waiting")
+rc, out = tq7("take", "--worker", "dicc", "--assign", kt7)
+ci7 = json.load(open(os.path.join(TQ7, "claims", taskq.safe(kt7), "info")))
+ci7["beat"] = time.time() - 30 * 86400
+json.dump(ci7, open(os.path.join(TQ7, "claims", taskq.safe(kt7), "info"), "w"))
+s7 = st7()
+check("take --assign：分出去的不过期（心跳 30 天前也还是 claimed）", rc == 0 and s7[kt7]["state"] == "claimed" and "ttl" not in ci7
+      and s7[kt7]["assigned"] == "dicc")
+rc, out = tq7("take", "--worker", "dicc", "--assign", kt7)
+check("take --assign：已经分给自己的再分一次照样成功", rc == 0)
+rc, out = tq7("take", "--worker", "lab", "--assign", kt7)
+check("take --assign：分给别人的不能再分", rc == 10)
+rc, out = tq7("next", "--worker", "960", "--envs", ALL)
+check("总队列里分出去的任务 worker 不领", rc == 10)
+rc, out = tq7("remove", kt7, "infer/x/fold_3")
+check("remove：分出去的不删，提示先 stop", rc == 1 and "先 stop" in out)
+rc, out = tq7("stop", kt7)
+check("stop：分出去的提示由 box 下次检查时停", rc == 0 and "分给了 dicc" in out)
+tq7("resume", kt7)
+
+BUF = os.path.join(T, "buffer7")
+os.makedirs(BUF)
+open(os.path.join(BUF, "BUFFER"), "w").close()
+open(os.path.join(BUF, "ENABLED"), "w").close()
+
+
+def tqb(*args, feed=False, stdin=None):
+    env = dict(ENV, TASKQ_DIR=BUF, BRAIN_TUMOR=DATA)
+    if feed:
+        env["TASKQ_FEED"] = "1"
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=env, capture_output=True, text=True, input=stdin)
+    return r.returncode, r.stdout.strip()
+
+
+rc, out = tqb("put", stdin="[]")
+check("缓冲：不带 TASKQ_FEED 的 put 不做（退出码 2，提示去 box）", rc == 2 and "缓冲" in out)
+for cmd in (["add", "--nice", "1", "--recipe", "nnunet", "dataset=Dataset121_X", "trainer=nnUNetTrainer_save10", "fold=1"],
+            ["set-nice", "--nice", "5", kt7], ["stop", kt7], ["remove", kt7]):
+    rc, out = tqb(*cmd)
+    check(f"缓冲：不带 TASKQ_FEED 的 {cmd[0]} 不做", rc == 2)
+rc, out = tqb("put", feed=True, stdin=json.dumps(r7))
+sb = st7(BUF)
+check("缓冲：put 原样写进记录（order、nice、params 不变）", rc == 0 and sb[kt7]["order"] == 1 and sb[kt7]["nice"] == 0
+      and sb["infer/x/fold_3"]["params"] == r7[1]["params"])
+bad = dict(r7[0], params=dict(r7[0]["params"], fold="2"))
+rc, out = tqb("put", feed=True, stdin=json.dumps(bad))
+check("缓冲：put 的参数算出的任务名和 key 不一样 → 退出码 2，不写", rc == 2 and len(st7(BUF)) == 2)
+rc, out = tqb("put", feed=True, stdin=json.dumps(dict(r7[0], nice=-5)))
+check("缓冲：put 已有的记录 → 改档位", rc == 0 and st7(BUF)[kt7]["nice"] == -5)
+# worker 那一组在缓冲上照常用（不带 TASKQ_FEED）
+rc, out = tqb("next", "--worker", "961", "--envs", ALL)
+check("缓冲：worker 的 next 照常领", rc == 0 and out.startswith(kt7 + "\n"))
+rc, _ = tqb("beat", "--worker", "961", kt7)
+check("缓冲：worker 的 beat 照常", rc == 0)
+rc, _ = tqb("release", "--worker", "961", kt7)
+check("缓冲：worker 的 release 照常", rc == 0 and st7(BUF)[kt7]["state"] == "free")
+dep = dict(order=0, nice=0, key="Dataset121_X/nnUNetTrainer_save10/2", exp=None, recipe="nnunet",
+           params=dict(dataset="Dataset121_X", trainer="nnUNetTrainer_save10", fold="2"), hold=True)
+rc, out = tqb("put", feed=True, stdin=json.dumps(dep))
+sb = st7(BUF)
+check("缓冲：put hold → 依赖记录（停止着、held），worker 不领", rc == 0 and sb[dep["key"]]["state"] == "stopped" and sb[dep["key"]]["held"])
+tqb("stop", kt7, feed=True)
+rc, out = tqb("next", "--worker", "962", "--envs", ALL)
+check("缓冲：依赖记录和停止的都不领", rc == 10)
+rc, out = tqb("put", feed=True, stdin=json.dumps(dict(dep, hold=False)))
+check("缓冲：put hold=false → 撤掉依赖记录的停止", st7(BUF)[dep["key"]]["state"] == "free")
+rc, out = tqb("put", feed=True, stdin=json.dumps(dict(r7[0], nice=-5, hold=False)))
+check("缓冲：put hold=false 不撤掉真正的停止（stop 的）", st7(BUF)[kt7]["state"] == "stopped")
+rc, out = tqb("status")
+check("缓冲：status 照常（只读）", rc == 0)
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

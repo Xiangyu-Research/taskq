@@ -1,43 +1,51 @@
 #!/usr/bin/env python3
-"""训练任务队列（2026-10-17 起，在 DICC 上；10/18 起任务不限于 nnU-Net）：Slurm 上排着的作业只负责申卡，开始后由
-scripts/queue/dicc_worker.sh 从这里按顺序领任务（GPU 不忙、显存够时一张卡同时训 2 个），训完一个再领下一个，没有能领的就退出；
-lab 由 box 上的 scripts/queue/refill.py 替它领。
+"""训练任务队列（2026-10-17 起；10/18 起任务不限于 nnU-Net；10/31 起总队列在 box，各执行机有自己的缓冲）。
+
+总队列（box 的 ~/.cache/phd/taskq/）：所有训练和要进队列的步骤。只有 box 写它（实验表加任务、改档位、停止都在 box 上做）；
+  分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（scripts/queue/feed.py 交还）。
+缓冲（每台执行机的 ~/.cache/phd/taskq/，中转执行机是它自己的 R/queue/）：总队列里分给它的任务的原样副本（order、nice、exp、
+  recipe、params 不变），加一个 BUFFER 标记。worker（scripts/queue/dicc_worker.sh）在缓冲上领、心跳、交还，box 不在线时照常跑。
+  缓冲里改任务只由 feed.py 做（带 TASKQ_FEED=1）。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
 
 每个任务 = 做法 + 参数（scripts/queue/recipes.py，解析在 scripts/queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
 任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。
 
-队列目录（DICC 上，家目录各节点共用）：~/.cache/phd/taskq/
+队列目录（总队列和缓冲一样）：
   tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}
-  claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号，或 lab）、主机、领取和最近一次心跳的时间，
-                可选 ttl（心跳多久不更新算过期，默认 20 分钟；box 替 lab 领的是 7 天，见 scripts/queue/refill.py）
+  claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号等）、主机、领取和最近一次心跳的时间，
+                可选 ttl（心跳多久不更新算过期，默认 20 分钟）；总队列里是 assigned（分给哪台执行机，不过期）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
-  skips/<key>   某台机器训不了的任务（release --skip，现在只有 lab 用）：这台机器不再领它，别的机器照常领；不算失败
+  skips/<key>   某台机器训不了的任务（release --skip）：这台机器不再领它，别的机器照常领；不算失败
   released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
-  stopped/<key> 停止的任务（taskq.py stop，10/30）：不再领；在训的 worker 每 5 秒看一次，30 秒内停下、交还
+  stopped/<key> 停止的任务（taskq.py stop，10/30）：不再领；在训的 worker 每 5 秒看一次，30 秒内停下、交还。
+                缓冲里"依赖记录"（put 的 hold）也是停止的：只给别的任务的 after 看，不训
   ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（scripts/queue/worker_start.sh）
+  BUFFER        这是执行机的缓冲
   lock          改队列时的锁（mkdir）
 不领的任务：已经训完（任务说明的 done）；别处正在训（claims 里有、心跳在 ttl 内，或者训练日志 15 分钟内更新过）；
   说明解析不了的（参数写错，status 里显示 bad）。
 
-DICC 上（worker 调用）：
+worker 调用（缓冲上）：
     taskq.py next --worker <作业号> --envs <环境,…> [--device gpu|cpu] [--free-slots N] [--patience-until 时间] [--exclude key...]
         领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领；只领 device 和 --device 一样的，默认 gpu）→ 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
         排在前面的刚停下、还在等它（--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
-box 上（不是队列所在的机器（envs/machines.py 里用 Slurm、能训练的那台）时自动经 ssh 在那边跑）：
+box 上（总队列；在别的机器上跑这些命令时退出码 2，缓冲上只有带 TASKQ_FEED=1 的 feed.py 能改）：
     taskq.py add [--nice <档位>] --exp <实验 id> [--folds 0 1 …]   从实验表加（已有的跳过；不给 --nice 用表里的档位）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
-    taskq.py remove <key>...         删掉没人领着的任务（after 里有它的任务要一起删；结果文件不动）
+    taskq.py remove <key>...         删掉没人领着的任务（after 里有它的任务要一起删；结果文件不动；分出去的先 stop）
     taskq.py stop [--why 原因] <key>...   停止任务（10/30）：在训的 30 秒内停下、交还（存档是原子写的，从存档接着训），
-                                      之后不再领它；lab、中转执行机上训的由 box 下次检查时停（refill.py / relay.py）
+                                      之后不再领它；分给执行机的由 box 下次检查时在那边停（feed.py / refill.py / relay.py）
     taskq.py resume <key>...         撤销停止，照常排
-    taskq.py take --worker lab --ttl 604800 <key>       领指定的一个（box 替 lab 领）：领到退出码 0，领不到 10
+    taskq.py take --worker <机器> --assign <key>   分给一台执行机（free / stale / waiting 的）：分到退出码 0，分不到 10
+    taskq.py put                      标准输入里的任务记录（JSON，一个或一列）原样写进本机队列（缓冲；feed.py 用）；
+                                      hold: true = 依赖记录（停止着，只给 after 看），false = 撤掉依赖记录的停止
     taskq.py status                   打印队列
 """
 import argparse
@@ -66,6 +74,7 @@ HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过�
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
+FEED_ONLY = ("add", "set", "set-nice", "remove", "stop", "resume", "put")  # 缓冲上只有 feed.py（TASKQ_FEED=1）能做
 safe = S.safe
 
 
@@ -75,6 +84,13 @@ def tasks_path():
 
 def have_queue():
     return os.path.exists(tasks_path())
+
+
+def is_buffer():
+    return os.path.exists(os.path.join(TQ, "BUFFER"))
+
+
+HOLD_WHY = "依赖记录"
 
 
 # ---------------- 文件 ----------------
@@ -275,6 +291,8 @@ def state(t, root):
         if time.time() - os.stat(os.path.join(TQ, "claims", safe(t["key"]))).st_mtime > HALF_CLAIM:
             return "stale", "领取记录不完整（只有目录，没有 info）"
         return "claimed", "正在领"
+    if ci and ci.get("assigned"):
+        return "claimed", f"分给 {ci['assigned']}"
     if ci:
         if time.time() - ci.get("beat", 0) < ci.get("ttl", STALE_BEAT) or (age is not None and age < FRESH_LOG):
             return "claimed", f"作业 {ci.get('worker')} @ {ci.get('host')}"
@@ -382,7 +400,8 @@ def cmd_release(a):
 
 
 def cmd_take(a):
-    """领指定的一个（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。"""
+    """领指定的一个（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。
+    --assign（10/31）：分给执行机 a.worker，不过期；waiting 的也能分（提前送到那边，after 做完后那边接着做）。"""
     root = data_root()
     err = root_error(root)
     if err:
@@ -396,7 +415,8 @@ def cmd_take(a):
         ci = claim_info(a.key)
         mine = bool(ci) and str(ci.get("worker")) == str(a.worker)
         st, note = state(t, root)
-        if st in ("done", "stopped") or (not mine and st not in ("free", "stale")):
+        ok = ("free", "stale", "waiting") if a.assign else ("free", "stale")
+        if st in ("done", "stopped") or (not mine and st not in ok):
             print(f"{a.key}：{st} {note}")
             return NOTHING
         d = os.path.join(TQ, "claims", safe(a.key))
@@ -409,10 +429,48 @@ def cmd_take(a):
             print(f"{a.key}：刚被别人领走")
             return NOTHING
         now = time.time()
-        write_json(os.path.join(d, "info"), dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now,
-                                                 beat=now, ttl=a.ttl), indent=None)
+        info = dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now, beat=now)
+        info.update(assigned=a.worker) if a.assign else info.update(ttl=a.ttl)
+        write_json(os.path.join(d, "info"), info, indent=None)
         print(t["key"])
         return 0
+
+
+def cmd_put(a):
+    """标准输入的任务记录（一个 dict 或一列）原样写进本机队列（10/31，feed.py 往缓冲里送）：没有的加上，有的改 order、nice、
+    exp、recipe、params。参数算出的任务名要和 key 一样。hold 见开头。"""
+    import experiments as E
+    recs = json.loads(sys.stdin.read() or "[]")
+    recs = [recs] if isinstance(recs, dict) else recs
+    for r in recs:
+        s = E.resolve_task(r["recipe"], r.get("params") or {}, r.get("exp"))
+        if s["key"] != r["key"]:
+            print(f"{r['key']}：参数算出的任务名是 {s['key']}")
+            return 2
+    with Lock():
+        tasks = read_tasks()
+        by = {t["key"]: t for t in tasks}
+        for r in recs:
+            sp = os.path.join(TQ, "stopped", safe(r["key"]))
+            if r.get("hold") and not os.path.exists(sp):  # 先停再写记录：worker 不会在中间领走
+                os.makedirs(os.path.dirname(sp), exist_ok=True)
+                with open(sp, "w", encoding="utf-8") as f:
+                    f.write(f"{time.strftime('%F %T')}\t{HOLD_WHY}\n")
+            elif r.get("hold") is False and (stopped_info(r["key"]) or "").endswith(HOLD_WHY):
+                os.remove(sp)
+            t = by.get(r["key"])
+            new = {k: r.get(k) for k in ("order", "nice", "key", "exp", "recipe")}
+            new["params"] = r.get("params") or {}
+            new["order"], new["nice"] = int(new["order"]), int(new["nice"])
+            if t is None:
+                tasks.append(new)
+                by[r["key"]] = new
+                print(f"加入：{r['key']}")
+            elif any(t.get(k) != new[k] for k in new):
+                t.update(new)
+                print(f"改了：{r['key']}")
+        write_tasks(tasks)
+    return 0
 
 
 # ---------------- 加、改 ----------------
@@ -513,7 +571,10 @@ def cmd_remove(a):
         for k in a.keys:
             if k in by:
                 st, _ = state(by[k], root)
-                if st in ("claimed", "busy"):
+                ci = claim_info(k) or {}
+                if ci.get("assigned"):
+                    bad.append(f"{k}：分给了 {ci['assigned']}，先 stop，交还后再删")
+                elif st in ("claimed", "busy"):
                     bad.append(f"{k}：{st}，有人在做")
         for t in tasks:
             if t["key"] in a.keys:
@@ -548,7 +609,9 @@ def cmd_stop(a):
             with open(os.path.join(TQ, "stopped", safe(k)), "w", encoding="utf-8") as f:
                 f.write(f"{time.strftime('%F %T')}\t{a.why or ''}\n")
             w = str((ci or {}).get("worker", ""))
-            if not ci:
+            if (ci or {}).get("assigned"):
+                print(f"停止：{k}（分给了 {ci['assigned']}，由 box 下次检查时在那边停、交还）")
+            elif not ci:
                 print(f"停止：{k}（没人在做，以后不领）")
             elif w.isdigit():
                 print(f"停止：{k}（作业 {w} 30 秒内停下、交还）")
@@ -619,13 +682,14 @@ def local_status():
         s = spec_of(t)
         ci = claim_info(t["key"]) or {}
         out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
+                        assigned=ci.get("assigned"), held=(stopped_info(t["key"]) or "").endswith(HOLD_WHY),
                         beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None,
                         task_log_age=task_log_age(root, t["key"], ci.get("worker")),
                         out_age=out_age(s, root) if s and st == "claimed" else None, failures=failures(t["key"]),
                         skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
-    return dict(enabled=os.path.exists(os.path.join(TQ, "ENABLED")), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,
+    return dict(enabled=os.path.exists(os.path.join(TQ, "ENABLED")), buffer=is_buffer(), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,
                 recent_skips={w: day.count(w) for w in set(day)})
 
 
@@ -638,19 +702,37 @@ def remote_status(host):
     return S.json_in(out) if rc == 0 else None
 
 
-def remote(host, args, timeout=120):
-    """box 上：在 host（DICC）的仓库里跑 taskq.py <args> → (退出码, 标准输出, 标准错误)，ssh 不通时 None。"""
+def remote(host, args, timeout=120, env="", input=None):
+    """box 上：在 host 的仓库里跑 taskq.py <args>（env：前面加的环境变量，如 TASKQ_FEED=1）→ (退出码, 标准输出, 标准错误)，
+    ssh 不通时 None。"""
     import machines as M
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
-    rc, out, err = C.run(f"cd {m['repo']} && BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}", m["ssh"], timeout, ssh=ssh)
+    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"
+    rc, out, err = C.run(cmd, m["ssh"], timeout, ssh=ssh, input=input)
     return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 
 
+def central(args, timeout=300):
+    """box 上改总队列：本机跑 taskq.py <args>（参数列表或 shell 写法的字符串）→ (退出码, 标准输出, 标准错误)。"""
+    import subprocess
+    argv = shlex.split(args) if isinstance(args, str) else list(args)
+    r = subprocess.run([sys.executable, os.path.abspath(__file__)] + argv, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def status(name):
+    """一台机器的队列状态：本机直接读，别的机器 ssh 过去 → dict 或 None。"""
+    return local_status() if name == here() or (name == queue_host() and have_queue()) else remote_status(name)
+
+
 def queue_host():
-    """队列所在的机器：envs/machines.py 里用 Slurm、能训练的那台。"""
+    """总队列所在的机器：envs/machines.py 的 hub（box）；没有 hub 时（中转执行机上的代码包）是本机。"""
     import machines as M
-    return next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
+    try:
+        return M.hub()
+    except StopIteration:
+        return here()
 
 
 def here():
@@ -659,7 +741,7 @@ def here():
 
 
 def cmd_status(a):
-    s = local_status() if here() == queue_host() else remote_status(queue_host())
+    s = local_status() if have_queue() or here() == queue_host() else None
     if s is None:
         print("读不到队列")
         return 1
@@ -679,16 +761,14 @@ def main(argv):
     if argv[:1] == ["--json-status"]:
         S.json_out(local_status())
         return 0
-    if argv[:1] and argv[0] in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume") and here() != queue_host():
-        # 不在队列所在的机器上（box）：转到那边去改（不在本机另建一份）
-        host = queue_host()
-        r = remote(host, " ".join(shlex.quote(x) for x in argv))
-        if r is None:
-            print(f"连不上 {host}")
-            return 1
-        print(r[1], end="")
-        print(r[2], end="", file=sys.stderr)
-        return r[0]
+    cmd = argv[0] if argv else ""
+    if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "put", "status") \
+            and not have_queue() and not is_buffer() and here() != queue_host():
+        print(f"总队列在 {queue_host()}，在那边跑（本机没有 {tasks_path()}）")
+        return 2
+    if cmd in FEED_ONLY and is_buffer() and not os.environ.get("TASKQ_FEED"):
+        print(f"这里是执行机的缓冲（{TQ}），任务由 box 的 feed.py 送来：在 {queue_host()} 上改总队列")
+        return 2
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("next")
@@ -709,7 +789,9 @@ def main(argv):
     p = sub.add_parser("take")
     p.add_argument("--worker", required=True)
     p.add_argument("--ttl", type=int, default=STALE_BEAT)
+    p.add_argument("--assign", action="store_true", help="分给执行机：不过期，waiting 的也能分（10/31）")
     p.add_argument("key")
+    sub.add_parser("put")
     p = sub.add_parser("add")
     p.add_argument("--nice", type=int, help="档位；--exp 时不给就用实验表里的 nice")
     p.add_argument("--exp")
@@ -736,7 +818,7 @@ def main(argv):
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,
-                stop=cmd_stop, resume=cmd_resume)[a.cmd.replace("-", "_")](a)
+                stop=cmd_stop, resume=cmd_resume, put=cmd_put)[a.cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

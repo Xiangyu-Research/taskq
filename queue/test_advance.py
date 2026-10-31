@@ -83,7 +83,7 @@ def plan_with_records(s, *a, **kw):
 
 A.plan = plan_with_records
 
-A.taskq_add = lambda nice, args: (0, "")  # 不经 ssh 真的加进 DICC 的队列
+A.taskq_add = lambda nice, args: (0, "")  # 不真的加进总队列
 REAL_PLACE = dict(A.P.PLACE, eval=["queue:dicc have", "box:cpu"], ens=["queue:dicc have", "box:cpu"])  # 按平时的写法测（DICC 停机时 policy 临时改过）
 A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组）；第 9 节起测别的地方
 A.P.AUTO = dict(A.P.AUTO, advance=False)
@@ -136,7 +136,7 @@ def pruned(ds, tr):
 def snap(tasks=(), remote=None):
     rows = [dict(id=i, status=st, command=c, label="", group="x", end=end) for i, (st, c, end) in enumerate(tasks)]
     return dict(pueue={"box": dict(tasks=rows)}, src={h: dict(folds=f) for h, f in (remote or {}).items()},
-                taskq={"dicc": dict(tasks=[dict(key=f"Dataset121_GLIMETrq1/nnUNetTrainer_save10/{k}", nice=0) for k in range(5)])})
+                taskq={"box": dict(tasks=[dict(key=f"Dataset121_GLIMETrq1/nnUNetTrainer_save10/{k}", nice=0) for k in range(5)])})
 
 
 def steps(todo):
@@ -385,7 +385,7 @@ check("评测、oof、配对、集成、compare_all 的命令逐字和以前一�
 adhoc = dict(key="runs/x/0", nice=5, recipe="command", exp=None,
              params=dict(key="runs/x/0", cmd="python t.py", env="nnunet", out="runs/x/0", done=["DONE"]))
 s_ = snap(remote={"dicc": {"runs/x/0": FIN}})
-s_["taskq"]["dicc"]["tasks"].append(adhoc)
+s_["taskq"]["box"]["tasks"].append(adhoc)
 todo, _ = A.plan(s_)
 check("队列里不属于实验的任务：训完了也拉回（标签 fetch:<key>）",
       [(t["label"], t["cmd"]) for t in todo if t["key"] == "runs/x/0"] == [("fetch:runs/x/0", "bash scripts/queue/fetch_task.sh dicc runs/x/0")])
@@ -484,7 +484,7 @@ todo, stuck = A.plan(snap())
 check("queue：DICC 上缺测试集文件夹 → 报出来", not tc(todo) and "imagesTs" in stuck.get(f"advance:infer:{TC}/2", ""))
 REMOTE["have"] = set(TNEEDS)
 s_ = snap()
-s_["taskq"]["dicc"]["tasks"].append(dict(key=TCQ, nice=-100))
+s_["taskq"]["box"]["tasks"].append(dict(key=TCQ, nice=-100))
 todo, stuck = A.plan(s_)
 check("queue：队列里已经有 → 不再加", not tc(todo) and f"advance:infer:{TC}/2" not in stuck)
 touch(f"{T}/predictions/Dataset103_GLIrq1_t1c/nnUNetTrainer_save10__{P}/fold_2/.infer_done")
@@ -710,7 +710,7 @@ check("probe：DICC 上缺一折的模型文件 → 先传过去（只排一次�
       and x[0]["label"] in ("push:p1:t3men", "push:p2:t3men"))
 REMOTE["have"] = set(PIN)
 s_ = snap()
-s_["taskq"]["dicc"]["tasks"] += [dict(key="probe/p1_t3men", nice=-100), dict(key="probe/p2_t3men", nice=-100)]
+s_["taskq"]["box"]["tasks"] += [dict(key="probe/p1_t3men", nice=-100), dict(key="probe/p2_t3men", nice=-100)]
 todo, stuck = A.plan(s_)
 check("probe：队列里已经有 → 不再加", pr(todo) == [] and "advance:p2:t3men" not in stuck)
 touch(f"{T}/RQ1/probe/p2_t3men/.probe_done")
@@ -791,9 +791,12 @@ SBI = f"infer/{SBM}/fold_1"
 HEAD = "a" * 40
 
 
-def psnap(state="claimed", worker="492500", heads=None, extra=()):
+def psnap(state="claimed", assigned="dicc", heads=None, extra=(), buffer=None):
+    """总队列里这一折分给了 assigned（10/31）；buffer：DICC 缓冲里的行。"""
     s_ = snap()
-    s_["taskq"]["dicc"]["tasks"] += [dict(key=SBK, nice=60, state=state, worker=worker)] + list(extra)
+    s_["taskq"]["box"]["tasks"] += [dict(key=SBK, nice=60, state=state, worker=assigned, assigned=assigned)] + list(extra)
+    if buffer is not None:
+        s_["taskq"]["dicc"] = dict(tasks=list(buffer))
     s_["code"] = dict(main=HEAD, heads={"dicc": HEAD, "lab": HEAD} if heads is None else heads)
     return s_
 
@@ -807,8 +810,10 @@ check("DICC 在训：推理、评测一起进队列，推理等训练、评测�
       [(t["step"], t.get("op")) for t in x] == [("infer", "taskq"), ("eval", "taskq")]
       and "after=" + json.dumps([SBK]) in x[0]["args"] and "after=" + json.dumps([SBI]) in x[1]["args"]
       and x[0]["qnice"] == x[1]["qnice"] == -100 and "device=cpu" in x[1]["args"] and 'machines=["dicc"]' in x[0]["args"])
-check("lab 领着的折：不提前排", not sb(A.plan(psnap(worker="lab"))[0]))
-check("还没人领的折：不提前排", not sb(A.plan(psnap(state="free", worker=None))[0]))
+check("分给 lab 的折：不提前排（lab 没有缓冲）", not sb(A.plan(psnap(assigned="lab"))[0]))
+check("还没分出去的折：不提前排", not sb(A.plan(psnap(state="free", assigned=None))[0]))
+x = sb(A.plan(psnap(buffer=[dict(key=SBK, nice=0, state="claimed", worker="492500")]))[0])
+check("缓冲里的同一个 key（档位不同）：以总队列为准", x and x[0]["nice"] == 60)
 todo, _ = A.plan(psnap(heads={"dicc": "b" * 40}))
 check("DICC 的代码不是最新（不认 after）：不提前排，记下原因", not sb(todo) and any("代码不是最新" in n_ for n_ in A.NOTES))
 x = sb(A.plan(psnap(extra=[dict(key=SBI, nice=-100, state="waiting")]))[0])
@@ -850,7 +855,7 @@ check("集成：DICC 上缺一折的推理 → box 的 cpu 组", [(t["group"], t
 REMOTE["have"] = set(ENSIN)
 evaluated(S18, "nnUNetTrainer_save10", "folds_0-1-2-3-4")  # 报告先拷到了 box，集成的预测、.ens_done 还在拉
 s_ = snap([("Running", f"bash scripts/queue/fetch_task.sh dicc ens/{S18M}", None)])
-s_["taskq"]["dicc"]["tasks"].append(dict(key=f"ens/{S18M}", nice=-100, state="done"))
+s_["taskq"]["box"]["tasks"].append(dict(key=f"ens/{S18M}", nice=-100, state="done"))
 todo, stuck = A.plan(s_)
 check("集成：还在从 DICC 拉回（报告已经到了）→ 不算做完，不排删单折概率图、不重排集成",
       not [t for t in todo if t["key"] == "t18"] and not any(k_.endswith(":t18") for k_ in stuck))

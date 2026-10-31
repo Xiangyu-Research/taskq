@@ -159,6 +159,13 @@ s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
 ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
 H.time.time = time_orig
 
+# 总队列在 box（10/31）
+ok("box 的总队列读不到 → 报", "taskq:box" in H.check(snap(taskq={"box": None})))
+ok("总队列关着（没有 ENABLED）→ 持续 60 分钟后报", H.check(snap(taskq={"box": dict(enabled=False, tasks=[])})).get("tqoff:box", {}).get("after") == 60)
+bq = [dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次"), dict(tqrow(MET2, "claimed", "dicc"), assigned="dicc")]
+P = H.check(snap(taskq={"box": dict(enabled=True, paused=False, tasks=bq)}))
+ok("总队列里没分出去的任务 blocked → 报；分给执行机的不算同一折两处", f"tqblocked:{INF}" in P and f"dup:{MET2}" not in P)
+
 # ---------------- 通用的任务（10/18）：run_task.sh、fetch_task.sh、数据清单 ----------------
 def tk(cmd):
     r = H.C.from_command(cmd)
@@ -210,7 +217,8 @@ ok("GPU 探查实跑：每张卡一项，卡上的进程带命令行，对不上
    and [(a["pid"], a["mem"], a["args"]) for a in gp[0]["apps"]] == [(str(sl.pid), "1100", "sleep 30")] and gp[1]["apps"] == [])
 ok("探查脚本里有 GPU 那几行", H.GPU_PROBE in H.probe_script(H.M.MACHINES["box"]))
 calls = []
-saved = (H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect)
+saved = (H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect, H.taskq.local_status)
+H.taskq.local_status = lambda: dict(enabled=True, tasks=[])  # box 上的总队列（10/31）
 
 
 def fake_sh(cmd, inp=None, timeout=120):
@@ -250,8 +258,8 @@ g = H.gather(remote=False)
 qs_call = next(c[1] for c in calls if c[0] == "sh" and c[1][0] != "git")
 ok("gather(remote=False)：只探查本机，qs 只问本机，不碰 Slurm",
    [c for c in calls if c[0] == "run_on"] == [("run_on", "box")] and qs_call[1:] == ["--json", "box"]
-   and set(g["ok"]) == {"box"} and not g["slurm"] and not g["taskq"] and set(g["pueue"]) == {"box"})
-H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect = saved
+   and set(g["ok"]) == {"box"} and not g["slurm"] and set(g["taskq"]) == {"box"} and set(g["pueue"]) == {"box"})
+H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect, H.taskq.local_status = saved
 
 s = snap()
 s["probe"]["lab"]["DISK"] = str(int(10e9))
@@ -278,9 +286,9 @@ s["pueue"]["lab"]["tasks"] = s["pueue"]["lab"]["tasks"][:1]
 ok("lab 1 号卡没有训练任务（暂存的不算）→ 报", "idle:lab:gpu1" in ids(s))
 s3 = dict(s, pueue=dict(s["pueue"], lab=dict(s["pueue"]["lab"], groups={"gpu1": "Running", "gpu0": "Running"})))
 ok("lab 0 号卡（只跑手动任务的组）开着、空着 → 不报", "idle:lab:gpu1" in ids(s3) and not any(k.startswith("idle:lab:gpu0") for k in ids(s3)))
-s2 = dict(s, taskq={"dicc": dict(enabled=True, paused=False, tasks=[tqrow(MET2, "claimed", "lab")])})
+s2 = dict(s, taskq={"box": dict(enabled=True, paused=False, tasks=[tqrow(MET2, "claimed", "lab")])})
 ok("lab 领着折（在传数据或停了等人处理，refill.py 另外报）：卡空着不另报", "idle:lab:gpu1" not in ids(s2))
-s2["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "done", "lab")]
+s2["taskq"]["box"]["tasks"] = [tqrow(MET2, "done", "lab")]
 ok("lab 领着的折已训完（等交还）：卡空着照报", "idle:lab:gpu1" in ids(s2))
 s["pueue"]["lab"]["tasks"].append(dict(id=2, group="gpu1", status="Running", label="t15men_f4", deps=[], start=None, end=None,
                                        command="bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=4"))
@@ -347,6 +355,9 @@ import types  # noqa: E402
 got = {}
 H.gather, H.update = (lambda: snap()), (lambda P, now, dry=False: got.update(P))
 sys.modules["refill"] = None  # import 出错
+fd = types.ModuleType("feed")
+fd.run_all = lambda s, dry=False: ([], {})
+sys.modules["feed"] = fd
 adv = types.ModuleType("advance")
 adv.run = lambda s, dry=False: 1 / 0
 sys.modules["advance"] = adv
@@ -356,6 +367,7 @@ ok("refill.py import 出错、advance.py 运行出错：都报出来，健康检
    "refill:error" in got and "advance:error" in got and "ZeroDivisionError" in got["advance:error"]["msg"])
 rf = types.ModuleType("refill")
 rf.run_all = lambda s, dry=False: (["lab 领了 x", "lab 交还 y"], {}, set())
+rf.topup_all = lambda s, dry=False: ([], {})
 sys.modules["refill"] = rf
 got.clear()
 H.main()

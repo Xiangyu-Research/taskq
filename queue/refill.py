@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""给训练机补活（2026-10-18）：pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，现在是 lab）从 DICC 的
-任务队列领任务；Slurm 训练机（DICC）排着的作业不够时补交 worker 作业（最后一节）。
-由 box 上的健康检查（scripts/monitor/health.py，每 30 分钟）调用。lab 连不上 DICC，所以由 box 替它领、续、交还。
+"""给训练机补活（2026-10-18）：pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，现在是 lab）从 box 的
+总队列领任务；Slurm 训练机（DICC）排着的作业不够时补交 worker 作业（最后一节）。
+由 box 上的健康检查（scripts/monitor/health.py，每 30 分钟）调用，box 替 lab 领（take --assign，不过期）、交还。
 
-待办只有一份：DICC 上的 ~/.cache/phd/taskq/tasks.jsonl（scripts/queue/taskq.py）；谁在训哪一折只看 claims/。
+待办只有一份：box 上的总队列 ~/.cache/phd/taskq/tasks.jsonl（scripts/queue/taskq.py，10/31 起）；谁在训哪一折只看 claims/。
 每次检查，对每台这样的机器：
   1. 维护它已经领的折（领取记录 worker = 机器名；只看领取之后开始的训练任务）：
      - 训练任务还在（pueue 里 Running / Queued / Stashed / Paused / Locked），或者数据还在传 → 续上（beat）；
-     - 这台机器上训完了 → 继续续着，等 box 拉回、archive_task.sh 备份到 DICC、队列显示"训完"后再交还
-       （提前交还的话 DICC 作业会把它当成没训过、从头训）；这样续着的不影响领下一折；
+     - 这台机器上训完了 → 继续领着，等 box 拉回、总队列显示"训完"后再交还（提前交还的话会被分给别处从头训）；
+       这样领着的不影响领下一折；
      - 任务没了、没训完：这台机器上一点进度都没有 → 交还，回到队列；有进度 → 领取保留、报出来（存档在这台，只让它接着训）；
      - 传数据出错 → 领取保留、报出来（数据可能只传了一半，不开始训）。
-     这台机器、box 或任何一台训练机连不上时什么都不动（领取 7 天内有效，过期后 DICC 才能领：box 在时停了的折马上交还，
-     有效期只管 box 关机、断电的时候，设长一些免得 box 离线一天多时 DICC 把 lab 在训的折再训一遍；10/25）。
+     这台机器、box 或任何一台训练机连不上时什么都不动（分给 lab 的不过期，只靠这里交还）。
   2. 卡空了（有卡的组里没有活着的训练任务、也没有领着没训完的折）就给这个组领下一折（10/19 起每个有卡的组各领各的；
      组停着、或者是 envs/policy.py 的 MANUAL 组时不领）：队列里 free、任何机器上都没有进度、这台机器没跳过的，按（档位，先后）
      取第一个。训练没开始就失败、又没有进度（多半是这台机器放不下这个模型）时用 release --skip 交还：记在 skips/，
@@ -64,7 +63,6 @@ import taskq  # noqa: E402
 import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
-TTL = 7 * 86400  # lab 的领取多久不续就过期（秒）
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（checkpoint、验证集预测）留的空间
 SOFT = 2  # 自动传过去、留着以后用的数据和预传：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
 KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
@@ -74,11 +72,6 @@ STATE = os.path.expanduser("~/.cache/phd/refill.json")
 SUBMIT_CAP = 10  # QOS 没设排队上限时，每个 QOS 最多排这么多段
 LOG = os.path.expanduser("~/refill.log")
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
-
-
-def queue_host():
-    """任务队列在哪台 Slurm 机器上（角色 train 的 Slurm 机器，现在是 dicc）。"""
-    return next(n for n in M.names("slurm") if "train" in M.MACHINES[n]["roles"])
 
 
 def gpu_groups(name):
@@ -182,7 +175,7 @@ def failed_here(s, name, tid):
 
 def plan(s, name):
     """→ (动作列表, 卡住的 {问题编号: 说明}, 不领的原因)。动作：dict(op=beat|release|start|transfer|take, key, …)。"""
-    m, host = M.MACHINES[name], queue_host()
+    m, host = M.MACHINES[name], taskq.queue_host()
     tq = s.get("taskq", {}).get(host)
     if not s["ok"].get(name) or not s["ok"].get(M.hub()) or "error" in (s["pueue"].get(name) or {"error": 1}) \
             or any(n not in s["src"] for n in M.names("train")):
@@ -214,9 +207,9 @@ def plan(s, name):
                              why="停止（taskq.py stop）" + (f"，停了训练任务 {' '.join(map(str, ids))}" if ids else "")))
             continue
         if t["state"] == "done":
-            acts.append(dict(op="release", key=key, why="训完了，DICC 上有了存档"))
+            acts.append(dict(op="release", key=key, why="训完了，box 上有了"))
         elif s["src"].get(name, {}).get("folds", {}).get(key, {}).get("final"):
-            # lab 训完了，但要等 box 拉回、archive_task.sh 备份到 DICC 后队列才看得到"训完"；这之前交还的话 DICC 作业会从头重训
+            # lab 训完了，要等 box 拉回后总队列才算训完；这之前交还的话会被分给别处从头重训
             acts.append(dict(op="keep", key=key))
         elif live:
             acts.append(dict(op="beat", key=key))
@@ -420,11 +413,9 @@ def transfer(name, paths, run=sh):
 def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
     """按动作做 → [说明]。出错的那一步写进说明，后面的照做。ok（set）：记下领到或开始训的 key。"""
     ok = set() if ok is None else ok
-    host = queue_host()
-
     def dicc(a):
-        r = taskq.remote(host, a)
-        return r and (r[0], r[1] + r[2])  # 出错的说明在标准错误里
+        r = taskq.central(a)
+        return r[0], r[1] + r[2]  # 出错的说明在标准错误里
 
     remote = remote or dicc
     tq = tq or {}
@@ -454,7 +445,7 @@ def execute(acts, name, remote=None, run=sh, ok=None, tq=None):
                 msgs.append(f"{L} 卡在训，下一折多半是 {k}，提前传 {' '.join(a['paths'])}（{a['gb']:.0f} GB，box 任务 "
                             f"{transfer(name, a['paths'], run)}）")
             elif a["op"] == "take":
-                r = remote(f"take --worker {name} --ttl {TTL} {k}")
+                r = remote(f"take --worker {name} --assign {k}")
                 if r is None or r[0]:
                     msgs.append(f"{L} 没领到 {k}：{(r or ['', 'ssh 不通'])[1].strip()[-150:]}")
                     continue
@@ -503,7 +494,7 @@ def cleanup(s, name, run=sh, acts=None, dry=False):
             acts.remove(pf)
         return []
     box = s["pueue"].get(M.hub()) or {"error": 1}
-    tq = s.get("taskq", {}).get(queue_host()) or {}
+    tq = s.get("taskq", {}).get(taskq.queue_host()) or {}
     if "error" in box or not tq.get("tasks"):
         if pf:
             acts.remove(pf)
@@ -597,7 +588,7 @@ def cache_cleanup(s, name, run=sh, acts=(), dry=False):
     raw = (s["probe"].get(name) or {}).get("CACHE")
     if raw is None or not raw.endswith(C.CACHE_END) or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
         return []
-    tq = s.get("taskq", {}).get(queue_host()) or {}
+    tq = s.get("taskq", {}).get(taskq.queue_host()) or {}
     have = [x.split(":", 1) for x in raw[:-len(C.CACHE_END)].split()]
     if not have or not tq.get("tasks") or any(len(x) != 2 for x in have):
         return []
@@ -639,7 +630,7 @@ def shadow_log(name, line):
 
 def run_all(s, dry=False):
     """health.py 调用：→ (事件说明列表, 卡住的 {问题编号: 说明}, 这次领了任务的机器)。"""
-    events, stuck, filled = topup_all(s, dry) + (set(),)
+    events, stuck, filled = [], {}, set()
     live = bool(P.AUTO.get("lab")) and not dry
     for name in M.names("pueue"):
         if "train" not in M.MACHINES[name]["roles"]:
@@ -663,7 +654,7 @@ def run_all(s, dry=False):
         ok = set()
         msgs = cleanup(s, name, acts=acts)  # 先腾地方；提前传放不下时从 acts 里去掉
         msgs += cache_cleanup(s, name, acts=acts)
-        msgs += execute(acts, name, ok=ok, tq=s.get("taskq", {}).get(queue_host()))
+        msgs += execute(acts, name, ok=ok, tq=s.get("taskq", {}).get(taskq.queue_host()))
         log(msgs)
         events += msgs
         if ok:
