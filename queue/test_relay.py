@@ -54,13 +54,32 @@ assert relay.taskq.queue_host() == Q
 def test_pueue_worker():
     w = relay.conf("lab1")["worker"]
     lab = f"worker:{w['id']}"
-    assert relay.topup("lab1", dict(jobs=None)) == ([], "读不到 pueue")
-    assert relay.topup("lab1", dict(jobs=[])) == ([("pueue", None, 1)], "")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]])) == ([], "worker 在")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]])) == ([("pueue", None, 1)], "")
-    subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]]))
+    ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
+    none = dict(tasks=[dict(key="a/x/1", state="claimed")])
+    assert relay.topup("lab1", dict(jobs=None, taskq=ready)) == ([], "读不到 pueue")
+    assert relay.topup("lab1", dict(jobs=[], taskq=ready)) == ([("pueue", None, 1)], "")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=ready)) == ([], "worker 在")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]], taskq=ready)) == ([("pueue", None, 1)], "")
+    subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]], taskq=ready))
     assert not subs and why.startswith("上一个 worker")
     ok("pueue 类（lab1）：组里没有活着的 worker 才开，上一个失败了不重开")
+    assert relay.topup("lab1", dict(jobs=[], taskq=none)) == ([], "那边没有备好、没人领的任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=none)) == ([], "那边没有备好、没人领的任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=ready)) == ([("pueue", None, 1)], "")
+    ok("pueue 类：没有备好的任务不开 worker（空闲退出的那个不算失败），有了再开")
+
+
+def test_slurm_topup_ready():
+    two = dict(enabled=True, tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="free"), dict(key="a/x/2", state="claimed")])
+    probe = lambda out: (lambda name, cmd: (0, out, ""))  # noqa: E731
+    q = next(iter(relay.P.SLURM[NAME]["gpu"]))
+    subs, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|0|0\n"))
+    assert [n for _, _, n in subs] == [2], subs
+    subs, why = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|3|2\n"))
+    assert subs == [] and "排着的作业已有 2 个" in why
+    subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
+    assert subs == [] and "备好" in why
+    ok("Slurm 类（DICC2）：备好 2 个最多交 2 个，排着的够了不交，没备好不交")
 
 
 def ok(msg):
@@ -297,6 +316,7 @@ def test_e2e():
 if __name__ == "__main__":
     test_plan()
     test_pueue_worker()
+    test_slurm_topup_ready()
     test_adopt_out()
     test_place()
     test_e2e()

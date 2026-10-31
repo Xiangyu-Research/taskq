@@ -372,12 +372,13 @@ GPU_FILE, CPU_FILE = "worker.sbatch", "cpu_worker.sbatch"
 
 
 def topup_probe(name):
-    """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
+    """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数|其中还在排（没开始）的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
     "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
     有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM，作业名来自 envs/machines.py 的 jobs。"""
     conf = P.SLURM[name]
     out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
-        "ids=$(squeue -u $USER -h -r -q $q -o %i); echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\"; done"
+        "ids=$(squeue -u $USER -h -r -q $q -o %i); pd=$(squeue -u $USER -h -r -q $q -t PD -o %i); " \
+        "echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)|$(printf '%s' \"$pd\" | grep -c . || true)\"; done"
     if conf.get("cpu"):
         out += f"; ids=$(squeue -u $USER -h -r -n {M.MACHINES[name]['jobs']['cpu']} -o %i); " \
             "echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
@@ -391,25 +392,42 @@ def unclaimed(tq, device):
     return sum(1 for t in tq["tasks"] if t["state"] in ("free", "stale") and info(tq, t["key"])["spec"].get("device", "gpu") == device)
 
 
+def parse_qos(out):
+    """topup_probe 的输出 → {QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}；读不出数的行不算（那个 QOS 当读不到）。"""
+    counts = {}
+    for ln in out.splitlines():
+        p = ln.split("|")
+        if len(p) == 5 and p[0] == "QOS" and p[3].isdigit() and p[4].isdigit():
+            counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]), int(p[4]))
+    return counts
+
+
 def topup_plan(tq, counts, qos):
-    """→ ([(QOS, 每段时限, 补几段)], 不补的原因)。counts：{QOS: (排队上限或 None, 现有段数)}。"""
+    """→ ([(QOS, 每段时限, 补几段)], 不补的原因)。counts：{QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}。
+    先备好再开卡（10/31 定）：排着没开始的作业数不超过缓冲里备好、没人领的 GPU 任务数（缓冲里的训练是数据到位后才送的，
+    推理只在训练所在的执行机跑、输入是那边自己训出来的），一个都没备好就不交。"""
     if not tq:
         return [], "读不到任务队列"
     if not tq.get("enabled"):
         return [], "任务队列的总开关不在"
     if tq.get("paused"):
         return [], "任务队列失败太多、暂停中"
-    if not unclaimed(tq, "gpu"):
-        return [], "队列里没有没人领的要卡的任务"
+    ready = unclaimed(tq, "gpu")
+    if not ready:
+        return [], "队列里没有备好、没人领的要卡的任务"
+    if any(q not in counts for q in qos):
+        return [], f"读不到 {next(q for q in qos if q not in counts)} 的作业数"
+    room = ready - sum(counts[q][2] for q in qos)
+    if room <= 0:
+        return [], f"备好的任务 {ready} 个，排着的作业已有 {ready - room} 个"
     out = []
     for q, v in qos.items():
         t, keep = (v, 0) if isinstance(v, str) else v
-        if q not in counts:
-            return [], f"读不到 {q} 的作业数"
-        lim, n = counts[q]
-        cap = (lim or SUBMIT_CAP) - keep
-        if cap > n:
-            out.append((q, t, cap - n, GPU_FILE))
+        lim, n, _ = counts[q]
+        k = min((lim or SUBMIT_CAP) - keep - n, room)
+        if k > 0:
+            out.append((q, t, k, GPU_FILE))
+            room -= k
     return out, "" if out else "各 QOS 都排满了"
 
 
@@ -436,12 +454,10 @@ def topup(s, name, dry=False, run=None):
     rc, out = run(topup_probe(name), m["ssh"])
     if rc:
         return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
-    counts, ncpu, free = {}, None, None
+    counts, ncpu, free = parse_qos(out), None, None
     for ln in out.splitlines():
         p = ln.split("|")
-        if len(p) == 4 and p[0] == "QOS" and p[3].isdigit():
-            counts[p[1]] = (int(p[2]) if p[2].isdigit() else None, int(p[3]))
-        elif len(p) == 2 and p[0] == "CPU" and p[1].isdigit():
+        if len(p) == 2 and p[0] == "CPU" and p[1].isdigit():
             ncpu = int(p[1])
         elif len(p) == 3 and p[0] == "ALL" and p[2].isdigit():
             free = max(0, (int(p[1]) if p[1].isdigit() else SUBMIT_CAP) - int(p[2]))
