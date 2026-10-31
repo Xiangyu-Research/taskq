@@ -185,7 +185,9 @@ try:
         sq=[l.split('|') for l in q.stdout.splitlines()] if q.returncode==0 else None
 except Exception:
     sq=jobs=None
-spec.json_out(dict(taskq=st,folds=col['folds'],squeue=sq,jobs=jobs,free=shutil.disk_usage(R).free,
+ed=os.path.join(R,'state','envs')
+oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
+spec.json_out(dict(taskq=st,folds=col['folds'],squeue=sq,jobs=jobs,free=shutil.disk_usage(R).free,envs_ok=oks,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
@@ -588,7 +590,7 @@ def fill(s, name, rs, st, acts):
     if have >= want:
         return [], f"那边排着 {have} 个"
     ready = {p for k in keys.values() for p in k.get("data") or []}
-    cands = [t for t in refill.candidates(s, name, mtq, ready)
+    cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"))
              if relayable(refill.info(mtq, t["key"]))]
     free = rs.get("free", 0) / 1e9
     hard = (conf(name).get("budget") or (None, HARD_GB))[1]

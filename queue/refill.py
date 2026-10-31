@@ -105,9 +105,10 @@ def rank(tq, t, ready):
     return (t["nice"], any(p not in ready for p in data_of(tq, t["key"])), t["order"])
 
 
-def candidates(s, name, tq, ready):
-    """这台机器能领的任务，按领的先后排：free、没标成有问题、有环境、没限定在别的机器、要卡、任何机器上都没有进度、这台机器没跳过。"""
-    envs = set(M.machine(name).get("envs") or {})
+def candidates(s, name, tq, ready, oks=None):
+    """这台机器能领的任务，按领的先后排：free、没标成有问题、环境就绪、没限定在别的机器、要卡、任何机器上都没有进度、这台机器没跳过。
+    oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
+    envs = M.ready_envs(name, oks)
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
              and name in (info(tq, t["key"])["spec"].get("machines") or [name])
              and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu"
