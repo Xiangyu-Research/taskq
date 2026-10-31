@@ -776,9 +776,9 @@ def run_one(s, name, dry):
     if not dry and (live or mine) and rs is not None:
         try:
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
-            if rs.get("bundle") != st.get("bundle_for", {}).get(commit):
+            if rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
                 bid, path = RB.build(name, commit or "origin/main")
-                update_state(lambda x: x.setdefault("bundle_for", {}).update({commit: bid}))
+                update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
                 if rs.get("bundle") != bid:
                     try:
                         deploy(name, bid, path)
