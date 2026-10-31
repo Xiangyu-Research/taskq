@@ -257,7 +257,7 @@ def machine_entry(name, e, root, entry=None):
 
 
 def gen_machines(src, name, m):
-    """把 envs/machines.py 的 MACHINES 换成只有这一项，删掉 RELAY。"""
+    """把 envs/machines.py 的 MACHINES 换成只有这一项，删掉 SITES、RELAY。"""
     lines = src.split("\n")
     spans = {}
     for node in ast.parse(src).body:
@@ -266,8 +266,9 @@ def gen_machines(src, name, m):
     if "MACHINES" not in spans:
         raise BundleError("envs/machines.py 里找不到 MACHINES")
     repl = {spans["MACHINES"]: "MACHINES = " + pprint.pformat({name: m}, sort_dicts=False, width=120)}
-    if "RELAY" in spans:
-        repl[spans["RELAY"]] = None
+    for k in ("SITES", "RELAY"):  # 执行机表（10/31 起 RELAY = SITES 里 relay=True 的）
+        if k in spans:
+            repl[spans[k]] = None
     for (r0, r1), text in sorted(repl.items(), reverse=True):
         lines[r0:r1 + 1] = [] if text is None else text.split("\n")
     return "\n".join(lines)
