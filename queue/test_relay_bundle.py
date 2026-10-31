@@ -146,6 +146,13 @@ def test_bundle(T):
         assert r.returncode == 0, (f, r.stderr)
     pe = open(os.path.join(path, "research/SEG/analysis/run_predict_eval.sh"), encoding="utf-8").read()
     assert "SEG_GPU_PAD=0" in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
+    real_c = B.cohorts(open(os.path.join(HERE, "..", "..", B.PE_SH), encoding="utf-8").read())
+    assert {"UCSF", "MEN", "PEDs-noskullstrip", "GLI_holdout", "GLI"} <= set(real_c), real_c
+    assert "EXT=(${TS_EXT?})" in pe and "RQ1_holdout/${TS_HOLD:?}/imagesTs" in pe.replace("SEG_holdout", "RQ1_holdout"), pe[:400]
+    assert pe.rstrip().endswith('log "推理完成"; exit 0') and "model.R" not in pe, pe[-300:]
+    hits = {f: B.cohort_hits(open(os.path.join(path, f), encoding="utf-8").read(), real_c) for f in files}
+    assert not any(hits.values()), {f: h for f, h in hits.items() if h}
+    assert B.cohort_hits("segment men MENx x-MEN", real_c) == [] and B.cohort_hits("a MEN b", real_c) == ["MEN"]
     pr = open(os.path.join(path, "research/SEG/nnunet/predict.sh"), encoding="utf-8").read()
     assert "SEG_GPU_PAD=0" in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
     np_ = open(os.path.join(path, "envs/nnunet_paths.sh"), encoding="utf-8").read()

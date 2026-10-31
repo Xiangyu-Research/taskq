@@ -43,6 +43,7 @@ class Names:
             d = {}
         d.setdefault("datasets", {})
         d.setdefault("cases", {})
+        d.setdefault("cohorts", {})
         return d
 
     def _change(self, fn):
@@ -84,6 +85,23 @@ class Names:
 
     def case_map(self, real_ds):
         return dict(self._load()["cases"].get(real_ds, {}))
+
+    def cohorts(self, reals):
+        """测试集（外部集、留出集）的真名 → 别名（t + 10 位十六进制），稳定、不重复。"""
+        def fn(d):
+            m, new = d["cohorts"], [c for c in dict.fromkeys(reals) if c not in d["cohorts"]]
+            rng, taken = random.SystemRandom(), set(m.values())
+            for c in new:
+                a = f"t{rng.getrandbits(40):010x}"
+                while a in taken:
+                    a = f"t{rng.getrandbits(40):010x}"
+                m[c] = a
+                taken.add(a)
+            return {c: m[c] for c in reals}, bool(new)
+        return self._change(fn)
+
+    def cohort_map(self):
+        return dict(self._load()["cohorts"])
 
 
 def used_ids(root):
@@ -357,6 +375,20 @@ def infer_vars(model_rel):
     return dict(SKIP_EXT=skip, ONLY_EXT=only, MODEL_ENV=QE.env_of(model_rel))
 
 
+HOLD_IN = "nnUNet/raw/RQ1_holdout/GLI/imagesTs"
+EXT_IN = re.compile(r"nnUNet/raw/RQ1_external/([^/]+)/imagesTs")
+
+
+def _cohort_of(d):
+    """推理的输入目录 → 测试集的名字（和那边预测文件夹的名字一样）。"""
+    if d == HOLD_IN:
+        return "GLI_holdout"
+    m = EXT_IN.fullmatch(d)
+    if not m:
+        raise RelayError(f"认不出推理的输入目录 {d}")
+    return m.group(1)
+
+
 def _cases_in(d):
     out = {}
     for f in sorted(os.listdir(d)):
@@ -414,15 +446,23 @@ def export_nnunet_infer(spec, root, names):
         raise RelayError(f"{model_rel} 没有要推理的测试集")
     per = {d: _cases_in(os.path.join(root, d)) for d in ins}
     cm = names.cases(INFER_CASES, sorted({c for v in per.values() for c in v}))
+    coh = {d: _cohort_of(d) for d in ins}
+    ta = names.cohorts(list(coh.values()))
+    hold = [ta[c] for c in coh.values() if c == "GLI_holdout"]
+    if len(hold) != 1:
+        raise RelayError(f"{model_rel} 的推理输入里没有留出集")
     views = [f"{amodel}/fold_{fold}"]
     for d, cases in per.items():
-        rd = RB.rename(d)
+        top = "nnUNet/raw/RQ1_holdout" if coh[d] == "GLI_holdout" else "nnUNet/raw/RQ1_external"
+        rd = f"{RB.rename(top)}/{ta[coh[d]]}/imagesTs"
         views.append(rd)
         for c, chs in cases.items():
             files += [(f"{rd}/{cm[c]}_{ch}.nii.gz", os.path.realpath(os.path.join(root, d, f"{c}_{ch}.nii.gz"))) for ch in chs]
     vs = dict(spec.get("vars") or {})
     for k, v in infer_vars(model_rel).items():
         vs.setdefault(k, v)
+    # 那边的脚本按 TS_HOLD、TS_EXT（别名）推理；要测哪些外部集已经在 box 上按 SKIP_EXT / ONLY_EXT 挑好（infer_inputs）
+    vs.update(TS_HOLD=hold[0], TS_EXT=" ".join(ta[c] for c in coh.values() if c != "GLI_holdout"), SKIP_EXT="", ONLY_EXT="")
     params = {k: v for k, v in spec["params"].items() if k not in ("machines", "after")}
     for k, v in params.items():
         if isinstance(v, str):
@@ -433,6 +473,11 @@ def export_nnunet_infer(spec, root, names):
     bad = [a for a, _ in files[1:] if not re.fullmatch(r"c\d{4,}_\d{4}\.nii\.gz", os.path.basename(a))]
     if bad:
         raise RelayError(f"改名后的输入文件名不对：{bad[:3]}")
+    blob = "\n".join([json.dumps(params, ensure_ascii=False)] + [a for a, _ in files] + list(texts) + views
+                      + [t.decode(errors="replace") for t in texts.values()])
+    left = RB.cohort_hits(blob, list(coh.values()) + ["GLI"])
+    if left:
+        raise RelayError(f"改名后还留着测试集的真名：{', '.join(left)}")
     return dict(params=params, files=files, texts=texts, views=views,
                 cleanup=[f"{amodel}/fold_{fold}", RB.rename(f"RQ1/analysis/{alias}/{td}/fold_{fold}")])
 
@@ -458,13 +503,13 @@ def _put(dst, written, rel, data=None, srcp=None):
     written.append(rel)
 
 
-def _swap(o, a, b):
+def _swap(o, a, b, keys=False):
     if isinstance(o, str):
         return o.replace(a, b)
     if isinstance(o, list):
-        return [_swap(x, a, b) for x in o]
+        return [_swap(x, a, b, keys) for x in o]
     if isinstance(o, dict):
-        return {k: _swap(v, a, b) for k, v in o.items()}
+        return {(k.replace(a, b) if keys else k): _swap(v, a, b, keys) for k, v in o.items()}
     return o
 
 
@@ -474,6 +519,7 @@ def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
     if names.real_dataset(alias) != real or (atd, afold) != (td, fold):
         raise RelayError(f"{alias_spec['out']} 不是 {real_spec['out']} 的别名")
     back = {a: c for c, a in names.case_map(INFER_CASES).items()}
+    tback = {a: c for c, a in names.cohort_map().items()}
     model_rel = f"nnUNet/results/{real}/{td}"
     model = os.path.join(root, model_rel)
     sfold, rout = os.path.join(src, alias_spec["out"]), real_spec["out"]
@@ -485,9 +531,12 @@ def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
     cohorts = sorted(d for d in os.listdir(sfold) if os.path.isdir(os.path.join(sfold, d)))
     if sorted(man.get("cohorts") or {}) != cohorts:
         raise RelayError(f"{alias_spec['key']}：MANIFEST 里的测试集 {sorted(man.get('cohorts') or {})} 和文件夹 {cohorts} 不一样")
+    odd = [c for c in cohorts if c not in tback]
+    if odd:
+        raise RelayError(f"{alias_spec['key']}：认不出的测试集文件夹 {odd}")
     jobs, free = [], dict(ins)
-    for c in cohorts:
-        d = os.path.join(sfold, c)
+    for ac in cohorts:
+        c, d = tback[ac], os.path.join(sfold, ac)
         segs, probs, pkls, other = set(), set(), set(), []
         for f in os.listdir(d):
             for ext, bag in ((".nii.gz", segs), (".npz", probs), (".pkl", pkls)):
@@ -499,7 +548,7 @@ def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
                     other.append(f)
         if other:
             raise RelayError(f"{alias_spec['key']} 的 {c} 里有认不出的文件：{sorted(other)[:5]}")
-        v = man["cohorts"][c]
+        v = man["cohorts"][ac]
         got = {back[a] for a in segs}
         hit = next((k for k, cs in free.items() if cs == got), None)
         if hit is None or probs != segs or pkls != segs or v.get("n_segmentations") != len(segs) or v.get("n_probabilities") != len(probs):
@@ -526,7 +575,10 @@ def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
 
     def text(p):
         with open(p, "rb") as f:
-            return f.read().replace(alias.encode(), real.encode())
+            b = f.read().replace(alias.encode(), real.encode())
+        for a, c in tback.items():
+            b = b.replace(a.encode(), c.encode())
+        return b
     written = []
     for c, d, segs in jobs:
         for a in sorted(segs):
@@ -544,6 +596,8 @@ def import_nnunet_infer(alias_spec, real_spec, src, dst, root, names):
             if f.startswith(pa):
                 _put(dst, written, f"logs/tasks/{pr}{f[len(pa):]}", text(os.path.join(ldir, f)), os.path.join(ldir, f))
     man = _swap(man, alias, real)
+    for a, c in tback.items():
+        man = _swap(man, a, c, keys=True)
     man.update(model_dir=model, dataset=real, trainer=td, relayed=dict(dataset=alias, checkpoint_sha256=side["alias_sha256"]))
     man["checkpoints"] = [dict(fold=int(fold), file=ck, bytes=st.st_size,
                                mtime=datetime.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"), sha256=side["sha256"])]
