@@ -117,20 +117,7 @@ try:
     ok("不是按描述建的环境 → 报错", False)
 except E.EnvError:
     ok("不是按描述建的环境 → 报错", True)
-M.RELAY["tsite"]["root"] = "/mnt/disk1/datasets/x1"  # 根目录里有 FORBIDDEN 的字样（lab1 的真根目录就是这样）
-ok("根目录里有禁用字样也能生成（同代码包，根目录本身可以出现）", "ROOT=/mnt/disk1/datasets/x1/envs" in E.build_script("tsite", "umamba"))
 M.RELAY["tsite"]["envs"]["umamba"] = "spec"
-open_ck, ckd = E.check_file, tempfile.mkdtemp()
-open(f"{ckd}/c.py", "w").write("# /mnt/disk1 别处\n")
-E.check_file = lambda env: f"{ckd}/c.py"
-try:
-    E.build_script("tsite", "umamba")
-    ok("根目录以外的禁用字样照样报错", False)
-except E.EnvError as e_:
-    ok("根目录以外的禁用字样照样报错", "/mnt/disk1" in str(e_))
-E.check_file = open_ck
-shutil.rmtree(ckd)
-M.RELAY["tsite"]["root"] = "/r/x1"
 ok("dry-run 不跑命令", E.build("tsite", "umamba", dry=True,
                               run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("跑了")))[0] == 0)
 ok("生成的脚本 bash -n 过", all(subprocess.run(["bash", "-n"], input=E.build_script("tsite", n), text=True).returncode == 0

@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""relay_bundle.py 的测试（2026-10-30）：去注释、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑原来的测试。
+"""relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑原来的测试。
 包从工作区建（commit=None），根目录换成临时目录。
     python3 scripts/queue/test_relay_bundle.py
 """
-import ast
-import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import tokenize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -19,7 +16,6 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "envs"))
 import machines as M  # noqa: E402
 import relay_bundle as B  # noqa: E402
-RB = B
 
 NAME = "dicc2"
 
@@ -29,144 +25,64 @@ def ok(msg):
 
 
 def run(cmd, env=None, **kw):
-    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", RB.rename("BRAIN_TUMOR"), "TASKQ_DIR", "TASKQ_MACHINE")}
+    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", "TASKQ_DIR", "TASKQ_MACHINE")}
     e.update(env or {})
     return subprocess.run(cmd, capture_output=True, text=True, env=e, **kw)
 
 
-def comments(src):
-    return [t.string for t in tokenize.generate_tokens(io.StringIO(src).readline)
-            if t.type == tokenize.COMMENT and not (t.start[0] == 1 and t.string.startswith("#!"))]
-
-
-def test_strip_py():
-    src = '''#!/usr/bin/env python3
-"""模块说明
-多行"""
-import os  # 注释
-X = "# 不是注释"  # 是注释
-Y = f"{X}#{os.sep}"
-
-
-# 整行注释
-def f():
-    """只有说明"""
-
-
-class A:
-    """说明"""
-    s = """多行字符串
-# 里面的井号留着
-"""
-
-    def g(self):  # 注释
-        """说明"""
-        return 1  # 注释
-'''
-    out = B.strip_py(src)
-    assert out.startswith("#!/usr/bin/env python3\n"), out
-    assert not comments(out), comments(out)
-    assert "模块说明" not in out and "只有说明" not in out and "说明" not in out.replace("多行字符串", ""), out
-    assert '"# 不是注释"' in out and "# 里面的井号留着" in out and 'f"{X}#{os.sep}"' in out, out
-    ns = {}
-    exec(compile(out, "t", "exec"), ns)
-    assert ns["f"]() is None and ns["A"]().g() == 1 and ns["A"].s.startswith("多行字符串\n# 里")
-    py311 = B.nnunet_python()
-    if py311:
-        r = subprocess.run([py311, "-c", "import sys; compile(sys.stdin.read(), 't', 'exec')"], input=out, text=True)
-        assert r.returncode == 0
-    ok("strip_py：去掉注释和文档字符串，字符串里的 # 留着，函数体只剩说明时换成 pass，两个 Python 版本都能编译")
-
-
-def test_strip_sh():
-    src = r'''#!/bin/bash
-#SBATCH --job-name=x
-# 整行注释
-set -u  # 行尾注释
-n=${#ARR[@]} m=$# s='# 引号里' d="a # b"
-read -r a b <<< "$(echo 1 2)"  # 注释
-x=$(echo a |  # 子命令里的注释留着
-    tr a b)
-cat << 'EOF'
-# heredoc 里的留着
-EOF
-echo a \
-# 续行（是参数还是注释由 bash 定，不动）
-y=$(awk '{ if ($1 != "") print "#" }' <<< "1")  # 注释
-echo done
-'''
-    out = B.strip_sh(src)
-    lines = out.split("\n")
-    assert lines[:2] == ["#!/bin/bash", "#SBATCH --job-name=x"], lines
-    assert "整行注释" not in out and "行尾注释" not in out and out.count("# 注释") == 0, out
-    assert "# 引号里" in out and '"a # b"' in out and "${#ARR[@]}" in out and "m=$#" in out
-    assert "# 子命令里的注释留着" in out and "# heredoc 里的留着" in out and "# 续行" in out, out
-    assert "set -u\n" in out and 'read -r a b <<< "$(echo 1 2)"\n' in out, out
-    ok("strip_sh：去掉整行和行尾注释，引号、heredoc、子命令、续行里的不动，<<< 不当 heredoc；declare -f 前后一样")
-
-
 def test_source_files_from_commit():
     files = B.source_files("HEAD")
-    assert set(B.KEEP) <= set(files)
-    assert "research/common/nnunet/trainers/nnUNetTrainer_save10.py" in files
-    assert not any("__pycache__" in f or os.path.basename(f).startswith("test_") for f in files)
-    head = subprocess.run(["git", "-C", REPO, "show", "HEAD:scripts/queue/taskq.py"], capture_output=True).stdout
-    assert files["scripts/queue/taskq.py"][0] == head
-    ok("从提交取文件：git show 的内容，不带测试和 __pycache__")
+    for f in ("scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh", "research/common/nnunet/trainers/nnUNetTrainer_save10.py",
+              "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/experiments.py", "envs/machines.py"):
+        assert f in files, f
+    assert any(f.endswith(".R") for f in files) and not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
+    assert not any("__pycache__" in f for f in files) and all(len(files[f][0]) <= B.SMALL_MAX for f in files if f.endswith(B.SMALL))
+    head = subprocess.run(["git", "-C", REPO, "show", "HEAD:research/RQ1/analysis/run_predict_eval.sh"], capture_output=True).stdout
+    assert files["research/RQ1/analysis/run_predict_eval.sh"] == (head, False)
+    ok("从提交取文件：scripts/、envs/、research/ 下的代码和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
+
+
+def test_secrets():
+    sk = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+    tok = "ghp_" + "a1" * 18
+    assert B.secret_hits({"a.sh": ("x\n" + sk + "\n", False), "b.py": (f"T = '{tok}'", False), "c.py": ("ok = 'ghp_short'", False)}) \
+        == [("a.sh", 2, sk[:12]), ("b.py", 1, tok[:12])]
+    saved = B.source_files
+    B.source_files = lambda c: dict(saved(c), **{"scripts/x.sh": (f"echo {tok}".encode(), False)})
+    try:
+        B.contents(NAME, None)
+        raise AssertionError("有钥匙应报错")
+    except B.BundleError as e:
+        assert "scripts/x.sh:1" in str(e) and tok not in str(e), e
+    finally:
+        B.source_files = saved
+    ok("钥匙：私钥、GitHub token 报错（报错里不带整个钥匙），短的不算")
 
 
 def test_bundle(T):
     R = os.path.join(T, "R")
     bid, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R)
-    assert path == os.path.join(R, "code", bid) and len(bid) == 12
+    assert path == os.path.join(R, "code", bid) and bid.startswith("worktree-") and len(bid) == len("worktree-") + 8, bid
     bid2, path2 = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R)
     assert (bid2, path2) == (bid, path)
     assert not [n for n in os.listdir(os.path.join(R, "code")) if n.startswith(".")]
-    ok("建包：包名 12 位，同样的内容再建一次用原来的包、不留临时目录")
+    ok("建包：包名 worktree-<内容哈希>，同样的内容再建一次用原来的包、不留临时目录")
 
     files = sorted(os.path.relpath(os.path.join(d, f), path) for d, _, fs in os.walk(path) for f in fs)
-    for f in ("envs/machines.py", "envs/policy.py", "scripts/queue/worker.sbatch", "scripts/queue/taskq.py",
-              "research/common/nnunet/fit.sh", "research/common/nnunet/trainers/gpu_aug_loader.py",
-              "scripts/queue/loop.sh", "scripts/queue/job_run.sh", "scripts/queue/mem_keep.py", "scripts/queue/start.sh"):
+    src = B.source_files(None)
+    for f in ("envs/machines.py", "envs/policy.py", "scripts/queue/worker.sbatch", "scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh",
+              "research/common/nnunet/train.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/experiments.py"):
         assert f in files, f
-    for f in files:
-        if os.path.basename(f) in dict(B.FILES):
-            raise AssertionError(f"没改名：{f}")
-    for a, _ in B.FILES:
-        assert not [f for f in files if a in open(os.path.join(path, f), encoding="utf-8").read()], a
-    for f in ("scripts/queue/refill.py", "scripts/queue/relay.py", "scripts/queue/relay_names.py", "scripts/queue/steps.py",
-              RB.rename("research/RQ1/experiments.py"), "scripts/sites/names.py"):
-        assert f not in files, f
-    assert not any(f.startswith("research/RQ") for f in files)
-    infer = (RB.rename("research/RQ1/analysis/infer_task.sh"), RB.rename("research/RQ1/analysis/run_predict_eval.sh"), RB.rename("research/RQ1/nnunet/predict.sh"),
-             "research/common/sparsify_bg.sh", "envs/nnunet_paths.sh")
-    for f in infer + (RB.rename("research/RQ1/analysis/write_manifest.py"), "research/common/sparsify_probs.py"):
-        assert f in files, f
-    for f in infer:
-        r = subprocess.run(["bash", "-n", os.path.join(path, f)], capture_output=True, text=True)
-        assert r.returncode == 0, (f, r.stderr)
-    pe = open(os.path.join(path, RB.rename("research/RQ1/analysis/run_predict_eval.sh")), encoding="utf-8").read()
-    assert "TASKQ_GPU_PAD=0" in pe and "RQ1" not in pe and "nnunet_paths.sh" in pe, pe[:400]
-    real_c = B.cohorts(open(os.path.join(HERE, "..", "..", B.PE_SH), encoding="utf-8").read())
-    assert {"UCSF", "MEN", "PEDs-noskullstrip", "GLI_holdout", "GLI"} <= set(real_c), real_c
-    assert "EXT=(${TS_EXT?})" in pe and RB.rename("RQ1_holdout") + "/${TS_HOLD:?}/imagesTs" in pe, pe[:400]
-    assert pe.rstrip().endswith('log "推理完成"; exit 0') and "model.R" not in pe, pe[-300:]
-    hits = {f: B.cohort_hits(open(os.path.join(path, f), encoding="utf-8").read(), real_c) for f in files}
-    assert not any(hits.values()), {f: h for f, h in hits.items() if h}
-    assert B.cohort_hits("segment men MENx x-MEN", real_c) == [] and B.cohort_hits("a MEN b", real_c) == ["MEN"]
-    pr = open(os.path.join(path, RB.rename("research/RQ1/nnunet/predict.sh")), encoding="utf-8").read()
-    assert "TASKQ_GPU_PAD=0" in pr and "RQ1_" not in pr and "BRAIN_TUMOR" not in pr and 'dirname "${BASH_SOURCE[0]}"' in pr, pr[:400]
+    assert "scripts/queue/cpu_worker.sbatch" not in files, "这台没有 jobs.cpu"
+    for f in ("research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/nnunet/predict.sh", "scripts/queue/taskq.py"):
+        assert open(os.path.join(path, f), encoding="utf-8").read() == B.home_paths(src[f][0].decode(), R), f"{f} 和提交的不一样"
+        assert os.access(os.path.join(path, f), os.X_OK) == (src[f][1] or f.endswith(".sh")), f
+    assert open(os.path.join(path, "research/RQ1/analysis/run_predict_eval.sh"), "rb").read() == src["research/RQ1/analysis/run_predict_eval.sh"][0]
+    for ln, tgt in B.LINKS.items():
+        assert os.readlink(os.path.join(path, ln)) == tgt and os.path.isfile(os.path.join(path, ln)), ln
     np_ = open(os.path.join(path, "envs/nnunet_paths.sh"), encoding="utf-8").read()
-    assert "mem_keep_start.sh" in np_ and "gpu_pad" not in np_, np_[:300]
-    assert not B.forbidden_hits(path, files)
-    for f in files:
-        text = open(os.path.join(path, f), encoding="utf-8").read()
-        if f.endswith(".py"):
-            assert not comments(text), (f, comments(text)[:3])
-            assert not [n for n in ast.walk(ast.parse(text)) if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef))
-                        and ast.get_docstring(n)], f
-    ok("包里的文件：要用的都在（含推理脚本，bash -n 过、显存填充改名、推理不开填充），没有实验表、relay*.py、refill.py、names.py；"
-       "Python 没有注释；没有 FORBIDDEN 的字样")
+    assert ".cache/phd" not in np_, np_[:300]
+    ok("包里的文件：提交里的代码原样（run_predict_eval.sh、predict.sh 等不改），~/.cache/phd 换成根目录下的，start.sh、loop.sh 指向新名字")
 
     os.symlink(bid, os.path.join(R, "code", "current"))
     for d in ("data", "queue"):
@@ -196,19 +112,19 @@ def test_bundle(T):
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
     assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
-    assert sb[-2] == 'exec bash "$REPO/scripts/queue/start.sh"' and "git" not in "\n".join(sb)
+    assert sb[-2] == 'exec bash "$REPO/scripts/queue/worker_start.sh"' and "git" not in "\n".join(sb)
     assert run(["bash", "-n", os.path.join(cur, "scripts/queue/worker.sbatch")]).returncode == 0
     fake = os.path.join(T, "fakeR")
     os.makedirs(os.path.join(fake, "code", "b1", "scripts", "queue"))
-    with open(os.path.join(fake, "code", "b1", "scripts", "queue", "start.sh"), "w") as f:
-        f.write(RB.rename('echo "$TASKQ_DIR|$TASKQ_GPU_PAD_SWITCH|') + '$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
+    with open(os.path.join(fake, "code", "b1", "scripts", "queue", "worker_start.sh"), "w") as f:
+        f.write('echo "$TASKQ_DIR|$TASKQ_GPU_PAD_SWITCH|$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
     os.symlink("b1", os.path.join(fake, "code", "current"))
     body = "\n".join(sb).replace(f"R={R}", f"R={fake}")
     out = run(["bash", "-c", body]).stdout.strip()
     assert out == f"{fake}/queue|{fake}/queue/gpu_pad_DISABLED|{fake}/code/b1", out
     ok("worker.sbatch：CPU、内存、作业名、输出位置按账号，其余资源和原来一样；开始时按 current 的实际包跑，队列和显存开关在根目录下")
 
-    env = {RB.rename("BRAIN_TUMOR"): f"{R}/data", "TASKQ_DIR": f"{R}/queue"}
+    env = {"BRAIN_TUMOR": f"{R}/data", "TASKQ_DIR": f"{R}/queue"}
     tq = ["python3", os.path.join(cur, "scripts/queue/taskq.py")]
     key = "Dataset999_abcdef/nnUNetTrainer_save10/0"
     r = run(tq + ["add", "--nice", "0", "--recipe", "nnunet", "dataset=Dataset999_abcdef", "fold=0"], env)
@@ -230,45 +146,61 @@ def test_bundle(T):
     assert run(tq + ["resume", key], env).returncode == 0
     assert run(tq + ["remove", key], env).returncode == 0
     assert not open(f"{R}/queue/tasks.jsonl").read().strip()
-    r = run(tq + ["--json-status"], {RB.rename("BRAIN_TUMOR"): f"{R}/data"})
+    r = run(tq + ["--json-status"], {"BRAIN_TUMOR": f"{R}/data"})
     assert r.returncode == 0 and '"enabled": false' in r.stdout
     ok("包里的 taskq.py：add → --json-status → next（0；再领 10）→ beat → stop → release → resume → remove；"
        "不设 TASKQ_DIR 也用根目录下的 queue/")
     return path
 
 
+def test_cpu_sbatch(T):
+    """jobs 里有 cpu 的 Slurm 执行机：另外生成 cpu_worker.sbatch（作业名、资源按 sbatch.cpu，WORKER_DEVICE=cpu）。"""
+    R = "~/st/abc"
+    entry = dict(jobs=dict(gpu="tq_fit", cpu="tq_cpu"), sbatch=dict(gpu=dict(cpus=30, mem="60G"), cpu=dict(cpus=8, mem="16G")))
+    files = B.contents(NAME, None, root=R, entry=entry)
+    sb = files["scripts/queue/cpu_worker.sbatch"][0].split("\n")
+    real = open(os.path.join(REPO, "scripts/queue/cpu_worker.sbatch")).read()
+    for ln in real.split("\n"):
+        if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
+            assert ln in sb, ln
+    assert "#SBATCH --job-name=tq_cpu" in sb and "#SBATCH --cpus-per-task=8" in sb and "#SBATCH --mem=16G" in sb, sb
+    assert "#SBATCH --output=../../../../data/logs/workers/%x_%j.out" in sb and "R=~/st/abc" in sb, sb
+    assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED WORKER_DEVICE=cpu" in sb
+    assert sb[-2] == 'exec bash "$REPO/scripts/queue/worker_start.sh"' and "git" not in "\n".join(sb)
+    gsb = files["scripts/queue/worker.sbatch"][0]
+    assert "#SBATCH --cpus-per-task=30" in gsb and "WORKER_DEVICE" not in gsb
+    old = B.contents(NAME, None, root=R, entry=dict(jobs=dict(gpu="tq_fit", cpu="tq_cpu"), sbatch=dict(cpus=30, mem="60G")))
+    assert "#SBATCH --cpus-per-task=30" in old["scripts/queue/worker.sbatch"][0]
+    assert "#SBATCH --cpus-per-task=30" not in old["scripts/queue/cpu_worker.sbatch"][0]
+    ok("cpu_worker.sbatch：jobs.cpu 有时生成，作业名、资源按 sbatch.cpu（老写法的 sbatch 只算 gpu），WORKER_DEVICE=cpu，入口 worker_start.sh")
+
+
 def test_pueue_site(T):
-    """pueue 的执行机（lab 那样，10/31）：不生成 worker.sbatch；slots、worker、组照抄；worker 从包里的 start.sh 开。"""
+    """pueue 的执行机（lab 那样，10/31）：不生成 sbatch；slots、worker、组照抄。"""
     R = os.path.join(T, "pueue_site")
     entry = dict(scheduler="pueue", groups={"g1": (1, "1", {})}, slots=1, worker=dict(group="g1", id="w1"))
     files = B.contents(NAME, None, root=R, entry=entry)
-    assert "scripts/queue/worker.sbatch" not in files and "scripts/queue/start.sh" in files, sorted(files)
+    assert not [f for f in files if f.startswith("scripts/queue/") and f.endswith(".sbatch")], sorted(files)
+    assert "scripts/queue/worker_start.sh" in files
     _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=entry)
     os.makedirs(os.path.join(R, "data"))
     mp = os.path.join(path, "envs", "machines.py")
     assert run(["python3", mp, "get", ".", "slots"]).stdout.strip() == "1"
     assert run(["python3", mp, "names", "pueue"]).stdout.split() == [NAME]
-    assert not B.forbidden_hits(path, sorted(files))
-    ok("pueue 的执行机：没有 worker.sbatch，slots、组照抄，禁用词查过")
+    ok("pueue 的执行机：没有 worker.sbatch、cpu_worker.sbatch，slots、组照抄")
 
 
 def test_dicc_worker_in_bundle(T):
     """包里的 dicc_worker.sh、run_task.sh、taskq.py 跑原来的 test_dicc_worker.sh（环境换成本机的，好真激活）。"""
     R = os.path.join(T, "R2")
     me = M.MACHINES[M.whoami()]
-    saved = B.FORBIDDEN
-    B.FORBIDDEN = [w for w in saved if w != "miniforge"]  # 本机的 conda 位置
-    try:
-        _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R,
-                          entry=dict(conda=me["conda"], envs=me["envs"]))
-    finally:
-        B.FORBIDDEN = saved
+    _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=dict(conda=me["conda"], envs=me["envs"]))
     os.makedirs(os.path.join(R, "data"))
     test = open(os.path.join(HERE, "test_dicc_worker.sh")).read()
     assert "TASKQ_MACHINE=dicc " in test
-    dst = os.path.join(path, "scripts", "queue", "test_loop.sh")
+    dst = os.path.join(path, "scripts", "queue", "test_in_bundle.sh")
     with open(dst, "w") as f:
-        f.write(B.rename(test).replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
+        f.write(test.replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
     r = run(["bash", dst], timeout=1800)
     assert r.returncode == 0 and "全部通过" in r.stdout and not [ln for ln in r.stdout.splitlines() if ln.startswith("失败：")], r.stdout[-3000:] + r.stderr[-2000:]
     ok(f"包里的 dicc_worker.sh 跑原来的 test_dicc_worker.sh：{r.stdout.count('通过：')} 项全部通过")
@@ -277,10 +209,10 @@ def test_dicc_worker_in_bundle(T):
 def main():
     T = tempfile.mkdtemp(prefix="test_relay_bundle.")
     try:
-        test_strip_py()
-        test_strip_sh()
         test_source_files_from_commit()
+        test_secrets()
         test_bundle(T)
+        test_cpu_sbatch(T)
         test_pueue_site(T)
         test_dicc_worker_in_bundle(T)
     except BaseException:

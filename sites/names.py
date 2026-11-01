@@ -1,57 +1,52 @@
-"""执行机上的化名（2026-10-31）：送去执行机的任务、数据、结果换成别名，拉回的结果换回真名。分两层：
-  path（通用，任何任务、任何文件格式）：只换路径，不动文件内容。每个输入（数据目录下的文件夹或文件，或 box 上的绝对路径）
-       换成 in/<别名>/，结果文件夹换成 out/<别名>/o（上一级 out/<别名>/ 只属于这个任务，fetch.extra 放在这里），任务名换成
-       job/<别名>；命令、环境变量等参数里出现的这些路径按同一张表替换。别名记在 names.json 的 paths 里，一旦分配就不变。
-  内容插件（scripts/queue/relay_names.py 的 nnunet、nnunet_infer）：nnU-Net 的数据集名、病例名写在文件内容里，插件改写内容。
-任务用哪种：说明的 relay 字段（scripts/queue/recipes.py；spec 的 names 是参数表，不是插件名）。
+"""送到执行机的任务（2026-11-01 起都用真名）：执行机的数据目录 R/data 和 box 的数据目录同样布局，任务要的文件以软链接放在
+同样的相对路径，参数原样送过去，结果在同样的相对路径拉回。唯一的换法：box 上数据目录外的绝对路径输入放到 abs/<路径>，
+参数里换成 {data}/abs/<路径>。
+  path（通用，任何任务）：输入（spec 的 inputs 或 data）是数据目录下的文件夹（视图）、文件或 glob（展开成文件），或 box 上的绝对路径。
+  nnunet、nnunet_infer（scripts/queue/relay_plugins.py）：nnU-Net 训练、推理按参数列出要的文件，拉回后核对。
+任务用哪种：说明的 relay 字段（scripts/queue/recipes.py）。
 
-每种都有 export(spec, root, names) → dict(params, files, texts, views, cleanup)：
-  params   那边加任务用的参数（别名）
-  files    [(那边的相对路径, box 上的真实文件)]，按 sha256 放进 blobs、视图里是软链接
-  texts    {那边的相对路径: 内容}（改写过的小文件）
-  views    这次建的视图文件夹（相对那边的数据目录）：只在这些文件夹里删多出来的文件
-  cleanup  任务交还后那边可以删的文件夹（相对那边的数据目录）
-和 import_(alias_spec, real_spec, src, dst, root, names) → 写到 dst 下的文件（相对路径，真名）；结果不全时报 RelayError。"""
+export(spec, root) → dict(params, files, texts, views, outs, cleanup)：
+  params   那边加任务用的参数
+  files    [(相对路径, box 上的真实文件)]，按 sha256 放进 blobs、在那边是软链接
+  texts    {相对路径: 内容}（现在的插件都不用）
+  views    视图文件夹：那边按这次列出的文件同步，多出来的删掉
+  outs     要拉回的文件夹（outs(spec)：out 和 fetch.also）
+  cleanup  任务交还后那边可以删的文件夹（默认 = outs）
+import_(spec, src, dst, root) → 放进 dst 的文件（相对路径）：src 下是拉回的文件（真的相对路径），认不出的、
+done 不全的、插件核对不过的报 RelayError，这时 dst 不动。"""
+import fnmatch
+import glob
 import os
 import re
-import secrets
 import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
-import relay_names as RN  # noqa: E402
+import relay_plugins as RN  # noqa: E402
 import spec as S  # noqa: E402
 
 RelayError = RN.RelayError
-Names = RN.Names
 SKIP = ("machines", "after")  # 只在 box 的总队列里有意义的参数，不送过去
+ABS = "abs"  # box 上数据目录外的输入在那边的位置
 
 
 def plugin_of(spec):
     return spec.get("relay")
 
 
-def alias_path(names, real, kind):
-    """真的路径或 key → <kind>/<12 位十六进制>（names.json 的 paths，分配后不变）。"""
-    def fn(d):
-        m = d.setdefault("paths", {})
-        k = f"{kind}:{real}"
-        if k in m:
-            return m[k], False
-        used = set(m.values())
-        while True:
-            a = f"{kind}/{secrets.token_hex(6)}"
-            if a not in used:
-                break
-        m[k] = a
-        return a, True
-    return names._change(fn)
+def outs(spec):
+    """要拉回的文件夹（相对数据目录）：out，加上 fetch.also。"""
+    return [os.path.normpath(o.strip("/")) for o in [spec["out"]] + list((spec.get("fetch") or {}).get("also") or [])]
+
+
+def _inside(a, b):
+    return a == b or a.startswith(b.rstrip("/") + "/")
 
 
 def _sub(v, table):
-    """字符串里的真路径按 table（[(真, 别名)]，长的先换）换成别名；路径两边不能紧挨着字母、数字、. - _。"""
+    """字符串里的绝对路径按 table（[(真, 换成)]，长的先换）换掉；路径两边不能紧挨着字母、数字、. - _。"""
     if isinstance(v, str):
         for a, b in table:
             v = re.sub(r"(?<![\w.-])" + re.escape(a) + r"(?![\w.-])", lambda m, b=b: b, v)
@@ -63,60 +58,33 @@ def _sub(v, table):
     return v
 
 
-def _walk(p):
-    out = []
-    for dp, dns, fns in os.walk(p, followlinks=True):
-        dns.sort()
-        for f in sorted(fns):
-            out.append(os.path.relpath(os.path.join(dp, f), p))
-    return out
-
-
-def _inside(a, b):
-    return a == b or a.startswith(b.rstrip("/") + "/")
-
-
-def export_path(spec, root, names):
-    ins = list(spec.get("inputs") or spec.get("data") or [])
-    out, key = spec["out"].strip("/"), spec["key"]
-    files, table, views = [], [], []
-    for i in ins:
-        absp = os.path.isabs(i)
-        rel = os.path.normpath(i if absp else i.strip("/"))
-        p = rel if absp else os.path.join(root, rel)
-        if not os.path.exists(p):
-            raise RelayError(f"box 上没有输入 {i}")
-        a = alias_path(names, rel, "in")
-        if os.path.isdir(p):
-            fs = _walk(p)
-            if not fs:
-                raise RelayError(f"输入 {i} 是空的")
-            files += [(f"{a}/{f}", os.path.realpath(os.path.join(p, f))) for f in fs]
-            target = a
+def export_path(spec, root):
+    files, views, table, rels = [], [], [], {}
+    roots = (os.path.normpath(root), os.path.realpath(root))
+    for i in spec.get("inputs") or spec.get("data") or []:
+        if os.path.isabs(i):
+            a = os.path.normpath(i)
+            inner = next((os.path.relpath(x, r) for x, r in zip((a, os.path.realpath(a)), roots) if x != r and _inside(x, r)), None)
+            base, sub, pre = (root, inner, "") if inner else ("/", a.lstrip("/"), ABS + "/")
+            rels[i] = pre + sub
+            table.append((a, "{data}/" + rels[i]))
         else:
-            target = f"{a}/{os.path.basename(rel)}"
-            files.append((target, os.path.realpath(p)))
-        views.append(a)
-        table.append((rel, "{data}/" + target if absp else target))
-    aout = alias_path(names, out, "out") + "/o"
-    table.append((out, aout))
-    parent = os.path.dirname(out)
-    if parent and not any(_inside(r, parent) or _inside(parent, r) for r, _ in table[:-1]):
-        table.append((parent, os.path.dirname(aout)))
+            base, sub, pre = root, os.path.normpath(i.strip("/")), ""
+        if any(ch in sub for ch in "*?["):
+            hits = sorted(p for p in glob.glob(os.path.join(base, sub)) if os.path.isfile(p))
+            if not hits:
+                raise RelayError(f"box 上没有和 {i} 对得上的文件")
+            files += [(pre + os.path.relpath(p, base), os.path.realpath(p)) for p in hits]
+            continue
+        fs, v = RN.expand(base, sub)
+        files += [(pre + f, p) for f, p in fs]
+        views += [pre + v] if v else []
     table.sort(key=lambda x: -len(x[0]))
-    params = {k: v for k, v in spec["params"].items() if k not in SKIP}
-    params = {k: (v if k == "key" else _sub(v, table)) for k, v in params.items()}
-    if "key" in params:
-        params["key"] = alias_path(names, key, "job")
-    params["out"] = aout
+    params = {k: _sub(v, table) for k, v in spec["params"].items() if k not in SKIP}
     for k in ("inputs", "data"):
-        if k in params:
-            params[k] = list(views)
-    blob = repr(params)
-    left = [r for r, _ in table if re.search(r"(?<![\w.-])" + re.escape(r) + r"(?![\w.-])", blob)]
-    if left:
-        raise RelayError(f"{key}：参数里还留着真的路径 {left[:3]}")
-    return dict(params=params, files=files, texts={}, views=views, cleanup=[os.path.dirname(aout)])
+        if isinstance(params.get(k), list):
+            params[k] = [rels.get(x, x) for x in spec["params"][k]]
+    return dict(params=params, files=files, views=views)
 
 
 def _put(dst, written, rel, srcp):
@@ -133,31 +101,7 @@ def _put(dst, written, rel, srcp):
     written.append(rel)
 
 
-def import_path(alias_spec, real_spec, src, dst, root, names):
-    aout, rout = alias_spec["out"].strip("/"), real_spec["out"].strip("/")
-    apar, rpar = os.path.dirname(aout), os.path.dirname(rout)
-    la, lr = f"logs/tasks/{S.safe(alias_spec['key'])}__", f"logs/tasks/{S.safe(real_spec['key'])}__"
-    written, odd = [], []
-    for rel in _walk(src):
-        sp = os.path.join(src, rel)
-        if _inside(rel, aout):
-            _put(dst, written, rout + rel[len(aout):], sp)
-        elif os.path.dirname(rel) == apar and rpar:
-            _put(dst, written, f"{rpar}/{os.path.basename(rel)}", sp)
-        elif rel.startswith(la):
-            _put(dst, written, lr + rel[len(la):], sp)
-        else:
-            odd.append(rel)
-    if odd:
-        raise RelayError(f"{real_spec['key']} 拉回的文件里有认不出的：{odd[:5]}")
-    got = set(written)
-    miss = [d for d in real_spec["done"] if not any(f"{rout}/{alt}" in got for alt in d.split("|"))]
-    if miss:
-        raise RelayError(f"{real_spec['key']} 拉回的结果不全：没有 {miss}")
-    return written
-
-
-PLUGINS = {"path": (export_path, import_path), **RN.TRANSLATORS}
+PLUGINS = {"path": (export_path, None), **RN.PLUGINS}
 ACCEPTS = dict(RN.ACCEPTS)  # 插件 → 能不能送这个任务（参数 → bool）；没列的插件都能送
 VIEW_ROOTS = list(RN.VIEW_ROOTS)  # 插件建视图的文件夹（相对数据目录，下一级是一个视图）
 
@@ -173,17 +117,56 @@ def _pair(spec):
     return t
 
 
-def export(spec, root, names):
-    ex = _pair(spec)[0](spec, root, names)
-    views = [os.path.normpath(v) for v in ex.get("views") or []]
-    bad = [v for v in views if v.startswith(("/", "..")) or len(v.split("/")) < 2]
-    if not views or bad:
-        raise RelayError(f"{spec['key']} 的视图文件夹不对：{bad or '没有'}（要在数据目录里、至少两层）")
-    for rel in [a for a, _ in ex["files"]] + list(ex["texts"]):
-        if os.path.normpath(rel).startswith(("/", "..")):
-            raise RelayError(f"{spec['key']}：{rel} 不在数据目录里")
-    return dict(ex, views=views, cleanup=[os.path.normpath(c) for c in ex.get("cleanup") or []])
+def _rel(spec, what, r, depth=1):
+    r = os.path.normpath(r)
+    if r.startswith("/") or ".." in r.split("/") or len(r.split("/")) < depth:
+        raise RelayError(f"{spec['key']} 的{what} {r} 不对（要在数据目录里{'、至少两层' if depth > 1 else ''}）")
+    return r
 
 
-def import_(alias_spec, real_spec, src, dst, root, names):
-    return _pair(real_spec)[1](alias_spec, real_spec, src, dst, root, names)
+def export(spec, root):
+    ex = _pair(spec)[0](spec, root)
+    files, seen = [], {}
+    for a, p in ex["files"]:
+        a = _rel(spec, "文件", a)
+        if seen.setdefault(a, p) != p:
+            raise RelayError(f"{spec['key']}：{a} 对应 box 上两个不同的文件（{seen[a]}、{p}）")
+        if len(files) < len(seen):
+            files.append((a, p))
+    views = list(dict.fromkeys(_rel(spec, "视图", v, 2) for v in ex.get("views") or []))
+    os_ = [_rel(spec, "结果文件夹", o, 2) for o in outs(spec)]
+    bad = [(v, o) for v in views for o in os_ if _inside(v, o) or _inside(o, v)]
+    if bad:
+        raise RelayError(f"{spec['key']}：视图 {bad[0][0]} 和结果 {bad[0][1]} 重叠（同步视图时会删掉结果）")
+    params = ex.get("params")
+    if params is None:
+        params = {k: v for k, v in spec["params"].items() if k not in SKIP}
+    cleanup = [_rel(spec, "要删的文件夹", c, 2) for c in (ex["cleanup"] if "cleanup" in ex else os_)]
+    return dict(params=params, files=files, texts=dict(ex.get("texts") or {}), views=views, outs=os_, cleanup=cleanup)
+
+
+def import_(spec, src, dst, root):
+    os_, out = outs(spec), os.path.normpath(spec["out"].strip("/"))
+    par = os.path.dirname(out)
+    extra = (spec.get("fetch") or {}).get("extra") or []
+    logs = f"logs/tasks/{S.safe(spec['key'])}__"
+    got, odd = [], []
+    for rel in RN.walk(src):
+        if any(_inside(rel, o) for o in os_) or rel.startswith(logs) or (
+                par and os.path.dirname(rel) == par and any(fnmatch.fnmatch(os.path.basename(rel), x) for x in extra)):
+            got.append(rel)
+        else:
+            odd.append(rel)
+    if odd:
+        raise RelayError(f"{spec['key']} 拉回的文件里有认不出的：{odd[:5]}")
+    have = set(got)
+    miss = [d for d in spec["done"] if not any(f"{out}/{alt}" in have for alt in d.split("|"))]
+    if miss:
+        raise RelayError(f"{spec['key']} 拉回的结果不全：没有 {miss}")
+    check = _pair(spec)[1]
+    if check:
+        check(spec, src, root)
+    written = []
+    for rel in got:
+        _put(dst, written, rel, os.path.join(src, rel))
+    return written

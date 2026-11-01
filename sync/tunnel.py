@@ -257,16 +257,13 @@ def run_remote(host, mode, plan, serve, total):
     pyx = "python3"
     with open(__file__) as f:
         src = f.read()
-    if relay:  # 中转执行机（scripts/queue/relay.py）：工作目录在它的根目录下，送去的脚本不带注释；在哪里跑同其他 Slurm 机器
+    if relay:  # 执行机（scripts/queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
         sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
         import relay_bundle
         base = relay["root"].rstrip("/")
         job = relay.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
-        pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(relay_bundle.strip_py(src), base)
+        pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(src, base)
         jname, script = (relay.get("jobs") or {}).get("transfer") or f"tunnel{mode}", "xfer.py"
-        hits = [w for w in relay_bundle.FORBIDDEN if w.lower() in src.lower().replace(base.lower(), "")]  # 根目录本身不算（lab1 的在 /mnt/disk1 下）
-        if hits:
-            raise RuntimeError(f"送去 {host} 的 tunnel.py 里有不该出现的字样：{hits}")
         base += "/tmp"
     else:
         job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None

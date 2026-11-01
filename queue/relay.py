@@ -65,7 +65,7 @@ import refill  # noqa: E402
 import remote as R  # noqa: E402
 import pueue as PQ  # noqa: E402
 import slurm as SL  # noqa: E402
-import relay_names as RN  # noqa: E402
+import relay_plugins as RN  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import names as N  # noqa: E402
 import shift  # noqa: E402
@@ -166,7 +166,7 @@ def rsh(name, cmd, input=None, timeout=300):
 
 def prefix(name):
     r = R.q(root(name))
-    return f"cd {r}/code/current && TASKQ_DIR={r}/queue {RB.rename('BRAIN_TUMOR')}={r}/data"
+    return f"cd {r}/code/current && TASKQ_DIR={r}/queue BRAIN_TUMOR={r}/data"
 
 
 def rtq(name, args, timeout=180):
@@ -213,7 +213,7 @@ spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=ra
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
-STATUS_PY = STATUS_PY.replace("@DATA@", RB.rename("BRAIN_TUMOR"))
+STATUS_PY = STATUS_PY.replace("@DATA@", "BRAIN_TUMOR")
 
 MISSING_PY = HEAD + "spec.json_out([i for i in A if not os.path.isfile(os.path.join(R,'blobs',i[:2],i))])\n"
 
@@ -522,7 +522,7 @@ def _stage(name, key, nice, add, say, real, D, ex, alias, hs, links):
             alias=alias["key"], recipe=real["recipe"], params=ex["params"], data=real.get("data") or [], staged=time.time(), views=views, cleanup=cleanup)
     update_state(rec)
     if add:
-        r = rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(RB.rename(x)) for x in S.kv_args(real["recipe"], ex["params"])))
+        r = rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(x) for x in S.kv_args(real["recipe"], ex["params"])))
         if r is None or r[0]:
             raise RuntimeError(f"加进 {conf(name)['label']} 的队列出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
         say(r[1])

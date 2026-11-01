@@ -28,8 +28,6 @@ import machines as M  # noqa: E402
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'
 STALE_S = 6 * 3600  # .building 这么久没动就当已经停了
 BUILD_MIN = 180     # Slurm 上建环境的时限（分钟）
-# 中转执行机（RELAY）那边的文字不能出现的字样，同代码包；第三方的公开下载地址（github.com 的 releases）可以
-ALLOW = ("github",)
 
 
 class EnvError(Exception):
@@ -161,21 +159,7 @@ def build_script(name, env):
     L += [f"python3 - {sh_path(code) if code else ''} {heredoc('CHECK_EOF', chk)}",
           'ln -sfn "$(basename "$P")" "$ROOT/.$N.new" && mv -T "$ROOT/.$N.new" "$ROOT/$N"',
           'echo "$H" > "$SD/$N.ok"', 'echo "== $(date "+%F %T") $N 建好、检查过"']
-    text = "\n".join(L) + "\n"
-    if name in M.RELAY:
-        hits = forbidden(text, (m["root"], M.env_root(m)) if m.get("root") else ())
-        if hits:
-            raise EnvError(f"给 {name} 的建环境脚本里有不能出现的字样：{'、'.join(hits)}")
-    return text
-
-
-def forbidden(text, allow=()):
-    """allow：这台机器自己的根目录（同代码包的核对），可以出现。"""
-    import relay_bundle as RB
-    for a in sorted(allow, key=len, reverse=True):
-        text = text.replace(a.rstrip("/"), "")
-    low = text.lower()
-    return sorted({w for w in RB.FORBIDDEN if w.lower() in low and w.lower() not in ALLOW})
+    return "\n".join(L) + "\n"
 
 
 def runner(name):

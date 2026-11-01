@@ -155,7 +155,7 @@ def central_mine(name):
 
 def site_tasks(name):
     """relay.py 最近一次读到的这台的各任务（~/.cache/phd/relay/status.json）→ {真 key: dict(state, runs, final)}。"""
-    import relay_names as RN
+    import relay_plugins as RN
     try:
         with open(os.path.join(RN.RELAY_DIR, "status.json")) as f:
             return (json.load(f).get(name) or {}).get("tasks") or {}

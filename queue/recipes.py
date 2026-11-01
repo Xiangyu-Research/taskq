@@ -31,9 +31,9 @@
     fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）、
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
-    relay      交给执行机（envs/machines.py 的 RELAY）时数据和结果的化名方式：path = 只换路径、不动文件内容（任何任务都能用，
-               scripts/sites/names.py）；nnunet（训练）、nnunet_infer（推理）= 另外改写文件内容（scripts/queue/relay_names.py 的
-               TRANSLATORS）；None = 不交
+    relay      交给执行机（envs/machines.py 的 RELAY）时按哪个插件列输入、核对结果：path = 输入就是 inputs / data 里的文件、文件夹、
+               glob（任何任务都能用，scripts/sites/names.py）；nnunet（训练）、nnunet_infer（推理）= 按 nnU-Net 的参数列要的文件，
+               拉回后核对（scripts/queue/relay_plugins.py）；None = 不交
     machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc"]）；None = 有环境的都行
     device     gpu = 要卡（DICC 的 GPU worker、lab 领）；cpu = 纯 CPU（只由 DICC 的 CPU worker 领，scripts/queue/cpu_worker.sbatch，
                2026-10-24）

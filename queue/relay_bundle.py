@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""中转执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30）：从某个提交取出 worker 训练要用的脚本，去掉注释和文档字符串，
-envs/machines.py 换成只有那个账号的一项、envs/policy.py 只留 STAGE_TMP、worker.sbatch 不靠 git 找代码；家目录下的
-~/.cache/phd/… 换成那边根目录下的 queue/、state/。改动都核对过：去注释前后语法树相同（Python 比 ast，shell 比
-declare -f），两个 Python 版本都能编译，bash -n 通过，没有 FORBIDDEN 里的字样。包名 = 内容的哈希，同样的内容只建一次。
+"""执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/1 起就是这个提交的代码，不改名、不去注释）：
+提交里跟踪的 scripts/、envs/、research/ 下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），
+另外生成只有这一台的 envs/machines.py、envs/policy.py，Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，
+cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的 ~/.cache/phd/… 换成那边根目录下的 queue/、state/。
+核对：两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。包名 = <提交号前 10 位>-<内容哈希前 8 位>，
+同样的内容只建一次。
 
     relay_bundle.py build <名字> [--commit 提交] [--out 目录]   → 打印"包名 路径"
     （--commit 默认 origin/main；--commit '' = 工作区，只给测试用）
@@ -10,7 +12,6 @@ declare -f），两个 Python 版本都能编译，bash -n 通过，没有 FORBI
 import argparse
 import ast
 import hashlib
-import io
 import os
 import pprint
 import re
@@ -18,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tokenize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -28,51 +28,25 @@ import machines as M  # noqa: E402
 import remote as RM  # noqa: E402
 
 OUT = "~/.cache/phd/relay/bundles"
-KEEP = [f"scripts/queue/{f}" for f in ("worker_start.sh", "gpu_pad_start.sh", "gpu_pad.py", "dicc_worker.sh", "taskq.py",
-                                       "run_task.sh", "spec.py", "recipes.py", "experiments.py", "common.py", "inputs.py")]
-KEEP += ["research/common/nnunet/train.sh"]
-# 推理（nnunet_infer，lab1 训的任务在那边推理，10/31）
-KEEP += ["research/RQ1/analysis/infer_task.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/analysis/write_manifest.py",
-         "research/RQ1/nnunet/predict.sh", "research/common/sparsify_bg.sh", "research/common/sparsify_probs.py", "envs/nnunet_paths.sh"]
-KEEP_DIRS = ["scripts/queue/readers", "research/common/nnunet/trainers", "research/common/nnunet/nets"]
-FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-host", "BEGIN OPENSSH",
-             "PRIVATE KEY", "ntfy", "cloudflare", "trycloudflare", "cfargotunnel", "/data/others", "auto/PhD",
-             "Projects/PhD", "miniforge", "vps-x", "jump-x", "203.0.113.10", "203.0.113.20", ".cache/phd", "@gmail",
-             "name-z", "BRAIN_TUMOR", "RQ1", "rq1", "phd", "PHD", "/mnt/disk1", "lesion-miss"]
-# 包里所有文件统一换掉的标识符（环境变量名、目录名）；relay.py 在那边设变量、加任务时用同样的换法（rename）
-# 换成和任何领域都无关的名字（调度是通用的，10/31 定）
-RENAME = [("BRAIN_TUMOR", "TASKQ_DATA"), ("RQ1_GPU_PAD", "TASKQ_GPU_PAD"), ("RQ1_WAIT_GPU", "TASK_WAIT_GPU"), ("RQ1", "P1"), ("phd_stage", "taskq_stage"), ("PHD_", "TASKQ_")]
-# 包里改名的脚本（常驻进程的名字和 DICC 的分开，10/30 DICC 管理员要求）：文件名和所有引用一起换
-FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad_start.sh", "mem_keep_start.sh"),
-         ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh")]
-# 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
-PE_SH = "research/RQ1/analysis/run_predict_eval.sh"
-PE_EXT = "EXT=(UCSF UPENN SSA PEDs MEN MET-Yale MET-UCSF MET-Multi MET-UCSD PEDs-noskullstrip)"
-PATCHES = [  # 推理：留出集的输入由 relay 建好送过去，那边不从训练集现建；评测不在那边做
-    (PE_SH, 'mkdir -p "$H"\n    python - "$RQ1/splits/gli_split_v2.json" "$nnUNet_raw/Dataset101_GLIrq1/imagesTr" "$H" << \'EOF\'',
-     'echo "没有留出集的输入 $H" >&2; exit 1\n    python - << \'EOF\''),
-    # 测试集的名字那边也看不到（10/31）：要推理的测试集（别名）由任务的 TS_EXT、TS_HOLD 给（relay_names.export_nnunet_infer）
-    (PE_SH, PE_EXT, 'EXT=(${TS_EXT?})'),
-    (PE_SH, 'echo "${R}RQ1_holdout/GLI/imagesTs"', 'echo "${R}RQ1_holdout/$TS_HOLD/imagesTs"'),
-    (PE_SH, 'H=$nnUNet_raw/RQ1_holdout/GLI/imagesTs', 'H=$nnUNet_raw/RQ1_holdout/${TS_HOLD:?}/imagesTs'),
-    (PE_SH, 'predict GLI_holdout "$(in_dir "$H")"\nsparsify_bg "$PRED/GLI_holdout"',
-     'predict "$TS_HOLD" "$(in_dir "$H")"\nsparsify_bg "$PRED/$TS_HOLD"'),
-    # 评测不在那边做：推理做完就结束，后面的（评测用的测试集名、回归脚本）不进包
-    (PE_SH, '[[ $STAGE == infer ]] && { log "推理完成"; exit 0; }', '[[ $STAGE == infer ]] || { echo "这里只做推理" >&2; exit 1; }\nlog "推理完成"; exit 0', "cut"),
+TOPS = ("scripts", "envs", "research")
+CODE = (".py", ".sh", ".R", ".sbatch")
+SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
+SMALL_MAX = 1 << 20
+SBATCH = {"gpu": "scripts/queue/worker.sbatch", "cpu": "scripts/queue/cpu_worker.sbatch"}  # worker 的种类 → 模板（也是包里的位置）
+# 已经交给 Slurm、还在排队的老作业脚本里写的是改名时的 start.sh；running 的老 worker 换包时找 loop.sh
+# 等 2026-11 前交的作业都结束后删
+LINKS = {"scripts/queue/start.sh": "worker_start.sh", "scripts/queue/loop.sh": "dicc_worker.sh"}
+SECRETS = [
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{60,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    re.compile(r"\btk_[a-z0-9]{29}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"),
 ]
-
-
-def cohorts(text):
-    """run_predict_eval.sh 的原文 → 测试集的真名（外部集、GLI 留出集），包里和那边的路径里都不能出现。"""
-    m = re.search(r"^EXT=\(([^)]*)\)$", text, re.M)
-    if not m:
-        raise BundleError(f"{PE_SH} 里找不到 EXT=(…)")
-    return m.group(1).split() + ["GLI_holdout", "GLI"]
-
-
-def cohort_hits(text, names):
-    """text 里作为单独的词出现的测试集真名（前后不是字母、数字、_、-）。"""
-    return sorted({c for c in names if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(c) + r"(?![A-Za-z0-9_-])", text)})
 
 
 class BundleError(Exception):
@@ -80,31 +54,44 @@ class BundleError(Exception):
 
 
 # ---------------- 取文件 ----------------
-def git(*args, binary=False):
-    r = subprocess.run(["git", "-C", REPO, *args], capture_output=True)
+def git(*args, binary=False, input=None):
+    r = subprocess.run(["git", "-C", REPO, *args], capture_output=True, input=input)
     if r.returncode:
         raise BundleError(f"git {' '.join(args)}：{r.stderr.decode(errors='replace').strip()}")
     return r.stdout if binary else r.stdout.decode()
 
 
+def _wanted(path, size):
+    return (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX) and "__pycache__" not in path
+
+
 def source_files(commit):
     """{相对路径: (内容 bytes, 可执行)}；commit 为 None 时读工作区（git 跟踪的文件）。"""
-    if commit is None:
-        names = git("ls-files", "--", *KEEP, *KEEP_DIRS).splitlines()
-    else:
-        names = [ln.split("\t", 1)[1] for ln in git("ls-tree", "-r", commit, "--", *KEEP, *KEEP_DIRS).splitlines()]
-    names = [n for n in names if "__pycache__" not in n and not os.path.basename(n).startswith("test_")
-             and n.endswith((".py", ".sh"))]
-    missing = sorted(set(KEEP) - set(names))
-    if missing:
-        raise BundleError(f"{commit or '工作区'} 里没有：{', '.join(missing)}")
     out = {}
-    for n in names:
-        if commit is None:
-            p = os.path.join(REPO, n)
-            out[n] = (open(p, "rb").read(), os.access(p, os.X_OK))
-        else:
-            out[n] = (git("show", f"{commit}:{n}", binary=True), n.endswith(".sh"))
+    if commit is None:
+        for ent in git("ls-files", "-z", "-s", "--", *TOPS).split("\0"):
+            if not ent:
+                continue
+            meta, path = ent.split("\t", 1)
+            p = os.path.join(REPO, path)
+            if meta.startswith("100") and os.path.isfile(p) and _wanted(path, os.path.getsize(p)):
+                out[path] = (open(p, "rb").read(), os.access(p, os.X_OK))
+        return out
+    objs = []
+    for ent in git("ls-tree", "-r", "-l", "-z", commit, "--", *TOPS).split("\0"):
+        if not ent:
+            continue
+        meta, path = ent.split("\t", 1)
+        mode, kind, oid, size = meta.split()
+        if kind == "blob" and mode.startswith("100") and _wanted(path, int(size)):
+            objs.append((path, oid, mode == "100755"))
+    data = git("cat-file", "--batch", binary=True, input="".join(f"{o}\n" for _, o, _ in objs).encode())
+    pos = 0
+    for path, oid, exe in objs:
+        nl = data.index(b"\n", pos)
+        n = int(data[pos:nl].split()[2])
+        out[path] = (data[nl + 1:nl + 1 + n], exe)
+        pos = nl + 1 + n + 1
     return out
 
 
@@ -119,162 +106,6 @@ def relay_entry(commit, name):
     if name not in relay:
         raise BundleError(f"{commit or '工作区'} 的 envs/machines.py 的 RELAY 里没有 {name}")
     return relay[name]
-
-
-# ---------------- 去注释 ----------------
-def _docstrings(tree):
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
-            b = node.body[0]
-            if isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant) and isinstance(b.value.value, str):
-                yield node, b
-
-
-def _no_docstrings(tree):
-    for node, b in list(_docstrings(tree)):
-        node.body = node.body[1:] or [ast.Pass()]
-    return tree
-
-
-def strip_py(src):
-    """去掉注释（第一行的 #! 留下）和文档字符串（函数体只有文档字符串时换成 pass），别的字符原样。"""
-    lines = src.split("\n")
-    drop = set()
-    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-        if tok.type == tokenize.COMMENT and not (tok.start[0] == 1 and tok.string.startswith("#!")):
-            r, c = tok.start[0] - 1, tok.start[1]
-            lines[r] = lines[r][:c].rstrip()
-            if not lines[r]:
-                drop.add(r)
-    for node, b in _docstrings(ast.parse(src)):
-        r0, r1 = b.lineno - 1, b.end_lineno - 1
-        c0 = len(lines[r0].encode()[:b.col_offset].decode())
-        c1 = len(lines[r1].encode()[:b.end_col_offset].decode())
-        new = lines[r0][:c0] + ("pass" if len(node.body) == 1 else "") + lines[r1][c1:]
-        lines[r0] = new
-        drop.update(range(r0 + 1, r1 + 1))
-        if not new.strip():
-            drop.add(r0)
-    out = "\n".join(ln for i, ln in enumerate(lines) if i not in drop)
-    if ast.dump(ast.parse(out)) != ast.dump(_no_docstrings(ast.parse(src))):
-        raise BundleError("去注释后语法树变了")
-    return out
-
-
-_WORD_END = " \t;&|()<>"
-_HEREDOC = re.compile(r"<<(-?)\s*(?:'([^']+)'|\"([^\"]+)\"|\\?([^\s;&|<>()'\"]+))")
-
-
-def strip_sh(src):
-    """去掉 shell 的整行注释（第一行 #! 和 #SBATCH 留下）和引号、heredoc 外的行尾注释；核对 declare -f 的结果不变。"""
-    out, stack, pending, here, cont = [], [], [], None, False
-    for i, line in enumerate(src.split("\n")):
-        if here is not None:
-            out.append(line)
-            if (line.lstrip("\t") if here[1] else line) == here[0]:
-                here = pending.pop(0) if pending else None
-            continue
-        s = line.lstrip()
-        if not stack and not cont and s.startswith("#") and not (i == 0 and s.startswith("#!")) \
-                and not s.startswith("#SBATCH"):
-            continue
-        keep = cont or (not stack and (i == 0 and s.startswith("#!") or s.startswith("#SBATCH")))
-        cut, j, n = None, 0, 0 if keep and not stack and s.startswith("#") else len(line)
-        while j < n:
-            ch, ctx = line[j], (stack[-1][0] if stack else "top")
-            two = line[j:j + 2]
-            if ctx in ("top", "cmd", "brace"):
-                if ch == "\\":
-                    j += 2
-                    continue
-                if two == "$(":
-                    stack.append(["cmd", 1])
-                    j += 2
-                    continue
-                if two == "${":
-                    stack.append(["brace", 0])
-                    j += 2
-                    continue
-                if two == "$'":
-                    stack.append(["asq", 0])
-                    j += 2
-                    continue
-                if ch == "'" and not (ctx == "brace" and len(stack) > 1 and stack[-2][0] == "dq"):
-                    stack.append(["sq", 0])
-                elif ch == '"':
-                    stack.append(["dq", 0])
-                elif ch == "`":
-                    stack.append(["bt", 0])
-                elif ctx == "brace" and ch == "}":
-                    stack.pop()
-                elif ctx == "cmd" and ch == "(":
-                    stack[-1][1] += 1
-                elif ctx == "cmd" and ch == ")":
-                    stack[-1][1] -= 1
-                    if stack[-1][1] == 0:
-                        stack.pop()
-                elif ctx != "brace" and ch == "#" and (j == 0 or line[j - 1] in _WORD_END):
-                    if not stack:
-                        cut = j
-                    break
-                elif ctx != "brace" and line[j:j + 3] == "<<<":
-                    j += 3
-                    continue
-                elif ctx != "brace" and two == "<<":
-                    m = _HEREDOC.match(line, j)
-                    if m:
-                        pending.append((m.group(2) or m.group(3) or m.group(4), bool(m.group(1))))
-                        j = m.end()
-                        continue
-            elif ctx == "dq":
-                if ch == "\\":
-                    j += 2
-                    continue
-                if two == "$(":
-                    stack.append(["cmd", 1])
-                    j += 2
-                    continue
-                if two == "${":
-                    stack.append(["brace", 0])
-                    j += 2
-                    continue
-                if ch == '"':
-                    stack.pop()
-                elif ch == "`":
-                    stack.append(["bt", 0])
-            elif ctx == "sq":
-                if ch == "'":
-                    stack.pop()
-            elif ctx in ("asq", "bt"):
-                if ch == "\\":
-                    j += 2
-                    continue
-                if ch == ("'" if ctx == "asq" else "`"):
-                    stack.pop()
-            j += 1
-        if cut is not None and not keep:
-            line = line[:cut].rstrip()
-        cont = not stack and line.endswith("\\") and not line.endswith("\\\\")
-        out.append(line)
-        if pending and here is None:
-            here = pending.pop(0)
-    res = "\n".join(out)
-    if _declared(src) != _declared(res):
-        raise BundleError("去注释后 bash 解析的结果变了")
-    return res
-
-
-def _declared(text):
-    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-        f.write(text)
-    try:
-        r = subprocess.run(["bash", "-c", 'eval "__relay_f() {\n$(cat "$1")\n}" && declare -f __relay_f', "_", f.name],
-                           capture_output=True, text=True)
-    finally:
-        os.remove(f.name)
-    if r.returncode:
-        raise BundleError(f"bash 读不了：{r.stderr.strip()}")
-    return r.stdout
 
 
 # ---------------- 生成的文件 ----------------
@@ -298,7 +129,7 @@ def gen_machines(src, name, m):
     if "MACHINES" not in spans:
         raise BundleError("envs/machines.py 里找不到 MACHINES")
     repl = {spans["MACHINES"]: "MACHINES = " + pprint.pformat({name: m}, sort_dicts=False, width=120)}
-    for k in ("SITES", "RELAY"):  # 执行机表（10/31 起 RELAY = SITES 里 relay=True 的）
+    for k in ("SITES", "RELAY"):
         if k in spans:
             repl[spans[k]] = None
     for (r0, r1), text in sorted(repl.items(), reverse=True):
@@ -312,25 +143,33 @@ def gen_policy(name, stage_tmp=True, gpu_aug=False, gpu_aug_loader=False):
             "SLURM = {}\n")
 
 
-def gen_sbatch(real, m, root):
+def sbatch_over(m, kind):
+    """machines.py 条目的 sbatch 里这种 worker 的 CPU、内存（老格式 sbatch=dict(cpus=…, mem=…) 算 gpu 的）。"""
     sb = m.get("sbatch") or {}
-    over = {"cpus-per-task": sb.get("cpus"), "mem": sb.get("mem")}
+    if isinstance(sb.get(kind), dict):
+        return sb[kind]
+    return sb if kind == "gpu" and not any(isinstance(v, dict) for v in sb.values()) else {}
+
+
+def gen_sbatch(real, m, root, kind="gpu"):
+    over = {"cpus-per-task": sbatch_over(m, kind).get("cpus"), "mem": sbatch_over(m, kind).get("mem")}
     keep = []
     for ln in real.splitlines():
         o = re.match(r"#SBATCH\s+--([\w-]+)", ln)
         if not o or o.group(1) in ("job-name", "output"):
             continue
         keep.append(f"#SBATCH --{o.group(1)}={over[o.group(1)]}" if over.get(o.group(1)) else ln)
-    job = (m.get("jobs") or {}).get("gpu")
+    job = (m.get("jobs") or {}).get(kind)
     if not job:
-        raise BundleError("RELAY 里没有 jobs.gpu（worker 的作业名）")
+        raise BundleError(f"RELAY 里没有 jobs.{kind}（worker 的作业名）")
     # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/scripts/queue 交，往上 4 级是根目录）
     logs = ("../../../.." if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
     return "\n".join(["#!/bin/bash", f"#SBATCH --job-name={job}", *keep,
                       f"#SBATCH --output={logs}",
                       f"R={RM.q(root)}",
                       'REPO=$(readlink -f "$R/code/current")',
-                      'export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED',
+                      'export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED'
+                      + (" WORKER_DEVICE=cpu" if kind == "cpu" else ""),
                       'exec bash "$REPO/scripts/queue/worker_start.sh"', ""])
 
 
@@ -342,27 +181,6 @@ def home_paths(text, root):
         text = text.replace(pre + ".cache/phd/gpu_pad/DISABLED", f"{r}/queue/gpu_pad_DISABLED")
         text = text.replace(pre + ".cache/phd/", f"{r}/state/")
     return text
-
-
-def rename(text):
-    for a, b in RENAME:
-        text = text.replace(a, b)
-    for a, b in FILES:
-        text = re.sub(r"(?<![\w.-])" + re.escape(a), b, text)
-    return text
-
-
-def rename_path(path):
-    """文件名按 FILES 换，目录名按 RENAME 换（和文件内容里的引用一致，如 research/RQ1/ → research/P1/）。"""
-    d, f = os.path.split(path)
-    d = "/".join(rename_dir(x) for x in d.split("/")) if d else d
-    return os.path.join(d, dict(FILES).get(f, f))
-
-
-def rename_dir(x):
-    for a, b in RENAME:
-        x = x.replace(a, b)
-    return x
 
 
 # ---------------- 核对 ----------------
@@ -377,7 +195,16 @@ def nnunet_python():
     return p if os.path.exists(p) else None
 
 
-def check(d, files, allow=()):
+def secret_hits(files):
+    """{路径: (文本, …)} 里像钥匙的地方 → [(路径, 行号, 命中的前 12 个字符)]。"""
+    out = []
+    for f, (text, *_) in sorted(files.items()):
+        for n, ln in enumerate(text.split("\n"), 1):
+            out += [(f, n, m.group(0)[:12]) for rx in SECRETS for m in rx.finditer(ln)]
+    return out
+
+
+def check(d, files):
     pys = [os.path.join(d, f) for f in files if f.endswith(".py")]
     prog = "import sys\nfor f in sys.argv[1:]:\n    compile(open(f, 'rb').read(), f, 'exec')\n"
     for py in filter(None, [sys.executable, nnunet_python()]):
@@ -389,64 +216,50 @@ def check(d, files, allow=()):
             r = subprocess.run(["bash", "-n", os.path.join(d, f)], capture_output=True, text=True)
             if r.returncode:
                 raise BundleError(f"bash -n {f}：{r.stderr.strip()}")
-    hits = forbidden_hits(d, files, allow)
-    if hits:
-        raise BundleError("包里有不该出现的字样：" + "；".join(f"{f}:{n} {w}" for f, n, w in hits[:20]))
-
-
-def forbidden_hits(d, files, allow=()):
-    """allow：这台机器自己的根目录，可以出现。"""
-    out = []
-    for f in files:
-        text = open(os.path.join(d, f), encoding="utf-8").read()
-        for a in allow:
-            text = text.replace(a, "")
-        for n, ln in enumerate(text.lower().split("\n"), 1):
-            out += [(f, n, w) for w in FORBIDDEN if w.lower() in ln]
-    return out
 
 
 # ---------------- 建包 ----------------
 def contents(name, commit="origin/main", root=None, entry=None):
-    """→ {相对路径: (文本, 可执行)}。root、entry（覆盖生成的 machines.py 那一项的字段）只给测试用。"""
+    """→ {相对路径: (文本, 可执行)}（不含 LINKS 的软链接）。root、entry（覆盖生成的 machines.py 那一项的字段）只给测试用。"""
     e = relay_entry(commit, name)
     root = (root or e["root"]).rstrip("/")
     m = machine_entry(name, e, root, entry)
     out = {}
-    src = source_files(commit)
-    names = cohorts(src[PE_SH][0].decode()) if PE_SH in src else []
-    for path, (raw, exe) in src.items():
-        text = raw.decode()
-        for f, old, new, *how in PATCHES:
-            if f == path:
-                if text.count(old) != 1:
-                    raise BundleError(f"{path} 里 {old!r} 出现了 {text.count(old)} 次（应为 1 次）")
-                new = new.format(data=m["data"]) if "{data}" in new else new
-                text = text[:text.index(old)] + new + "\n" if how == ["cut"] else text.replace(old, new)
-        text = strip_py(text) if path.endswith(".py") else strip_sh(text)
+    for path, (raw, exe) in source_files(commit).items():
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError as err:
+            raise BundleError(f"{path} 不是 UTF-8：{err}") from None
         out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
-        bad = cohort_hits(out[path][0], names)
-        if bad:
-            raise BundleError(f"{path} 里还有测试集的真名：{', '.join(bad)}")
-    out["envs/machines.py"] = (home_paths(strip_py(gen_machines(read(commit, "envs/machines.py"), name, m)), root), True)
+    out["envs/machines.py"] = (home_paths(gen_machines(read(commit, "envs/machines.py"), name, m), root), True)
     out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True), e.get("gpu_aug", False), e.get("gpu_aug_loader", False)), False)
+    for tpl in SBATCH.values():
+        out.pop(tpl, None)
     if m["scheduler"] == "slurm":
-        out["scripts/queue/worker.sbatch"] = (gen_sbatch(read(commit, "scripts/queue/worker.sbatch"), m, root), False)
-    return {rename_path(p): (rename(x), e) for p, (x, e) in out.items()}
+        for kind, tpl in SBATCH.items():
+            if (m.get("jobs") or {}).get(kind):
+                out[tpl] = (gen_sbatch(read(commit, tpl), m, root, kind), False)
+    hits = secret_hits(out)
+    if hits:
+        raise BundleError("包里有像钥匙的内容：" + "；".join(f"{f}:{n} {w}…" for f, n, w in hits[:10]))
+    return out
 
 
-def bundle_id(files):
+def bundle_id(files, commit=None):
     h = hashlib.sha256()
     for path in sorted(files):
         data = files[path][0].encode()
-        h.update(f"{path}\0{len(data)}\0".encode() + data)
-    return h.hexdigest()[:12]
+        h.update(f"{path}\0{len(data)}\0{int(bool(files[path][1]))}\0".encode() + data)
+    for path, target in sorted(LINKS.items()):
+        h.update(f"{path}\0->{target}\0".encode())
+    head = git("rev-parse", "--short=10", commit).strip() if commit else "worktree"
+    return f"{head}-{h.hexdigest()[:8]}"
 
 
 def build(name, commit="origin/main", out=None, root=None, entry=None):
     """建包 → (包名, 路径)。commit=None：读工作区（只给测试用）。已经有同名的包时直接用。"""
     files = contents(name, commit, root, entry)
-    bid = bundle_id(files)
+    bid = bundle_id(files, commit)
     out = os.path.expanduser(out or OUT)
     path = os.path.join(out, bid)
     if os.path.isdir(path):
@@ -460,7 +273,10 @@ def build(name, commit="origin/main", out=None, root=None, entry=None):
             with open(p, "w", encoding="utf-8") as f:
                 f.write(text)
             os.chmod(p, 0o755 if exe else 0o644)
-        check(tmp, sorted(files), ((root or relay_entry(commit, name)["root"]).rstrip("/"),))
+        for rel, target in LINKS.items():
+            if os.path.dirname(rel) + "/" + target in files and rel not in files:
+                os.symlink(target, os.path.join(tmp, rel))
+        check(tmp, sorted(files))
         os.chmod(tmp, 0o755)
         os.rename(tmp, path)
     except BaseException:

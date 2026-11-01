@@ -98,7 +98,7 @@ def problem(pid, p):
         if kind == "down":
             return f"{L(part[1])} 读不到状态了（网络断了，或那边的存储挂住），看不到上面的训练还在不在跑。"
         if kind == "unread":
-            return f"{L(part[1])} 上 {num(r'上 (\d+) 个任务')} 个任务的文件读不动（多半是那边的存储挂住），这些任务先不分出去，别的照常。"
+            return f"{L(part[1])} 上 {num(r'上 ([0-9]+) 个任务')} 个任务的文件读不动（多半是那边的存储挂住），这些任务先不分出去，别的照常。"
         if kind == "stuck":
             m = re.search(r"train:(\S+?)：", msg) or re.search(r"（(\S+/\S+)）", msg)
             what = fold(m.group(1)) if m else (fold(part[2]) if "/" in part[2] else "一个训练")
@@ -106,7 +106,7 @@ def problem(pid, p):
         if kind == "tqfail":
             again = "，不会再自动重试" if "不再领" in msg else "，会自动重试"
             step = {"infer": "推理", "eval": "评测"}.get(pid[7:].split("/")[0], "训练")
-            return f"{fold(pid[7:])} {step}失败了 {num(r'失败 (\d+) 次')} 次{again}。"
+            return f"{fold(pid[7:])} {step}失败了 {num(r'失败 ([0-9]+) 次')} 次{again}。"
         if kind == "tqblocked":
             step = {"infer": "推理", "eval": "评测"}.get(pid[10:].split("/")[0], "任务")
             return f"{fold(pid[10:])} 的{step}在等的前一步失败了（或不在队列里），不会自己开始。"
@@ -115,7 +115,7 @@ def problem(pid, p):
         if kind == "tqidle":
             return f"{L(part[1])} 有作业占着 GPU 却没在训练。"
         if kind == "tqorphan":
-            return f"{L(part[1])} 还有 {num(r'还有 (\d+) 个')} 个任务没训，但已经没有作业在排队，训练会停下来。"
+            return f"{L(part[1])} 还有 {num(r'还有 ([0-9]+) 个')} 个任务没训，但已经没有作业在排队，训练会停下来。"
         if kind == "taskq":
             return f"读不到 {L(part[1])} 的任务队列，看不到那边的训练情况。"
         if kind == "pueued":
@@ -143,7 +143,7 @@ def problem(pid, p):
         if kind == "boot":
             return f"{L(part[1])} {pid.split(':', 2)[2][5:16]} 重启过，被打断的任务已自动放回队列，要确认训练接上了。"
         if kind == "board":
-            return f"看板有新结果，要确认后才发布（{num(r'（(\d+) 个文件')} 个文件）。"
+            return f"看板有新结果，要确认后才发布（{num(r'（([0-9]+) 个文件')} 个文件）。"
         if kind in ("refill", "advance") and part[1] == "error":
             return "自动调度脚本出错了：" + ("DICC 不会补交作业，lab 上用完的数据不会清理。" if kind == "refill" else "训完的任务不会自动推理、评测。")
         if kind == "site":  # 执行机（feed.py、relay.py，10/31）：site:<机器>:<类>[:<key 或数据集>]

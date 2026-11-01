@@ -11,11 +11,6 @@ import remote as R
 sys.path.insert(0, os.path.join(R.REPO, "scripts", "queue"))
 
 
-def _rename(s):
-    import relay_bundle as RB
-    return RB.rename(s)
-
-
 def parse(raw, group):
     """`pueue status --json` 的输出（文本或已解析的 dict）→ [[任务号, 标签, 状态, 结果或 None], …]（只要这个组的）；读不出 → None。"""
     try:
@@ -44,7 +39,7 @@ def worker_cmd(name):
     c = R.conf(name)
     w, gpu = c["worker"], c["groups"][c["worker"]["group"]][1]
     run = (f"R={R.q(c['root'].rstrip('/'))}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue WORKER_ID={w['id']} "
-           f"CUDA_VISIBLE_DEVICES={gpu}; exec bash $REPO/scripts/queue/{_rename('worker_start.sh')}")
+           f"CUDA_VISIBLE_DEVICES={gpu}; exec bash $REPO/scripts/queue/worker_start.sh")
     return f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- {shlex.quote('bash -c ' + shlex.quote(run))}"
 
 
