@@ -343,6 +343,10 @@ rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=
 check("add --recipe：实验表以外的任务", rc == 0 and "toy/a" in out and "环境 rstats" in out)
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "nnunet", "dataset=Dataset101_GLIrq1", "fold=0", "trainr=x")
 check("add --recipe：写错参数名报错、不加", rc == 2 and "trainr" in out and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
+rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy__a", "cmd=python3 -c 1", "env=rstats", "out=toy/a2", 'done=["DONE"]')
+check("add：转成文件名和已有任务重名（toy/a 与 toy__a）→ 报错、不加", rc == 2 and "文件名" in out
+      and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
+check("same_file：同一批里两个 key 转成同一个文件名也拦", taskq.same_file(["x/y", "x__y"], set()) and not taskq.same_file(["x/y"], {"x/y"}))
 rc, out, _ = tq3("next", "--worker", "700", "--envs", "nnunet,swinunetr")
 lines = out.splitlines()
 check("next：打印 key 和 run_task.sh 的参数", rc == 0 and lines[0] == "Dataset111_MENrq1/nnUNetTrainer_save10_n470/1"

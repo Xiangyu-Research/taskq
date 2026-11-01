@@ -111,6 +111,17 @@ ino = lambda p: os.stat(p).st_ino  # noqa: E731
 ok("别的作业：本节点已有的硬链接过来，不重拷", rc == 0 and "硬链接 6 个" in out and "新拷 1 个" in out
    and ino(os.path.join(L8, "views", "k3", "in", "ds1", "sub/c2.b2nd")) == ino(os.path.join(L7, "views", "k1", "in", "ds1", "sub/c2.b2nd")))
 
+# 同一路径、大小不变、内容改了（改动时间变了）：不复用本地旧副本（11/1）
+dj = os.path.join(V, "dataset.json")
+st0 = os.stat(dj)
+open(dj, "w").write('{"a": 2}')
+os.utime(dj, ns=(st0.st_atime_ns, st0.st_mtime_ns + 10 ** 9))
+rc, out, err = run("prepare", DATA, "k6", L7, V, env=env)
+todo6 = json.load(open(os.path.join(L7, "views", "k6.todo.json")))
+ok("同一路径内容改了（大小不变）：不用本地旧副本，读到新内容", rc == 0 and "in/ds1/dataset.json" in [x[0] for x in todo6]
+   and open(os.path.join(L7, "views", "k6", "in", "ds1", "dataset.json")).read() == '{"a": 2}')
+open(dj, "w").write('{"a": 1}')
+
 # 盘不够：不拷，照旧读原处
 rc, out, err = run("prepare", DATA, "k4", os.path.join(TMP, "phd_stage_9"), V, env=dict(env, STAGE_KEEP_GB="1e9"))
 rc, out, err = run("copy", os.path.join(TMP, "phd_stage_9"), "k4", env=dict(env, STAGE_KEEP_GB="1e9"))

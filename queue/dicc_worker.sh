@@ -76,6 +76,8 @@ head_now() {
 }
 code_changed() { (( ! INSLURM )) && [[ -n $HEAD0 && $(head_now) != "$HEAD0" ]]; }
 HEAD0=$(head_now)
+RESTART=
+[[ -L $(dirname "$REPO")/current ]] && touch "$REPO" 2> /dev/null  # 在用的代码包：开始时和每次心跳更新时间戳
 NVSEL=()  # 不在 Slurm 里：只看分给本 worker 的卡（Slurm 作业里只看得到自己的卡）
 (( ! INSLURM )) && [[ ${CUDA_VISIBLE_DEVICES:-} =~ ^[0-9]+$ ]] && NVSEL=(-i "$CUDA_VISIBLE_DEVICES")
 ts() { date '+%F %T'; }
@@ -105,6 +107,13 @@ if [[ $DEVICE == gpu ]]; then
     GPUMON=$!
 else
     GPUMON=
+fi
+# 任务的 res 超过这里给得起的不领（11/1）：每个任务的 CPU、内存，卡的显存（GB）
+RESARGS=(--cpus "$TASK_CPUS")
+(( MEMMB > 0 )) && RESARGS+=(--mem-mb $(( MEMMB / SLOTS )))
+if [[ $DEVICE == gpu ]]; then
+    g=$(nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=memory.total --format=csv,noheader,nounits 2> /dev/null | head -1 | tr -d ' ')
+    [[ $g =~ ^[0-9]+$ ]] && RESARGS+=(--gpu-mem $(( (g + 512) / 1024 )))
 fi
 
 declare -A KEY=()         # 训练的 pid → key
@@ -326,8 +335,10 @@ while true; do
         kill_tree "$p"
     done
     (( END )) || get_end
-    if (( now - last_beat >= 300 && ${#KEY[@]} > 0 )); then
+    if (( now - last_beat >= 300 )); then
         for p in "${!KEY[@]}"; do tq beat "${KEY[$p]}"; done
+        # 代码包：更新时间戳，清理旧包时不删还有 worker 在用的（只删 4 天没动过的，11/1）
+        [[ -L $(dirname "$REPO")/current ]] && touch "$REPO" 2> /dev/null
         last_beat=$now
     fi
     # 领新的
@@ -336,7 +347,7 @@ while true; do
     while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && ! code_changed && can_add; do
         tried=1
         # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的任务留位置
-        t=$($TQPY next --worker "$W" --envs "$ENVS" --device "$DEVICE" --free-slots 1 \
+        t=$($TQPY next --worker "$W" --envs "$ENVS" --device "$DEVICE" "${RESARGS[@]}" --free-slots 1 \
                        --patience-until $(( T0 + PATIENCE )) --exclude ${EXCL[@]+"${EXCL[@]}"} 2> "$ERRF")
         rc=$?
         case $rc in
@@ -357,7 +368,7 @@ while true; do
         (( idle_since )) || idle_since=$now
         if (( ! INSLURM )); then
             if code_changed; then
-                echo "$(ts) 代码更新了，退出让 feed.py 用新代码重开"; break
+                echo "$(ts) 代码更新了"; RESTART=1; break
             fi
             msg=$why
             (( OWN_FAILS >= MAX_OWN_FAIL )) && msg=own
@@ -397,4 +408,11 @@ done
 kill_tree "$GPUMON"
 rm -f "$ERRF"
 rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
+# 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；不是代码包的退出，由 feed.py 重开
+NEW=$(readlink -f "$(dirname "$REPO")/current" 2> /dev/null)
+if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $NEW/scripts/queue/worker_start.sh ]]; then
+    echo "$(ts) 换成新代码 $(basename "$NEW") 接着跑"
+    exec bash "$NEW/scripts/queue/worker_start.sh"
+fi
+[[ -n $RESTART ]] && echo "$(ts) 退出，由 feed.py 用新代码重开"
 exit 0

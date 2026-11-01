@@ -292,7 +292,7 @@ check "不在 Slurm 里：队列连续出错超过 ERR_MAX 也不退出" 'kill -
 mv "$TASKQ_DIR/tasks.jsonl.bak" "$TASKQ_DIR/tasks.jsonl"
 echo b > "$T/head"
 waitfor 15 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了，退出让 feed.py 用新代码重开" $T/w6.out'
+check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了" $T/w6.out && grep -q "退出，由 feed.py 用新代码重开" $T/w6.out'
 
 reset
 (WORKER_ID=lab-test TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=3 exec bash "$HERE/dicc_worker.sh") > "$T/w6d.out" 2>&1 &
@@ -329,6 +329,24 @@ check "不在 Slurm 里：两个开始不久就失败，不再领、也不退出
 kill -TERM $wpid; wait $wpid 2> /dev/null
 cp "$T/fake_train.sh.orig" "$T/fake_train.sh"
 unset TASKQ_HEAD_CMD
+
+# 代码包（<根>/code/<包>、current 指向在用的）：current 换了，空闲时直接 exec 新包的 worker_start.sh，同一进程接着跑（11/1）
+reset
+mkdir -p "$T/code/a" "$T/code/b/scripts/queue"
+cp -r "$HERE/../../scripts" "$HERE/../../envs" "$T/code/a/"
+mkdir -p "$T/code/a/research"; cp -r "$HERE/../../research/common" "$T/code/a/research/"
+printf '#!/bin/bash
+echo "新包的 start $WORKER_ID"
+' > "$T/code/b/scripts/queue/worker_start.sh"
+ln -sfn a "$T/code/current"
+touch -d "5 days ago" "$T/code/a"
+(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 exec bash "$T/code/a/scripts/queue/dicc_worker.sh") > "$T/w6e.out" 2>&1 &
+wpid=$!
+waitfor 20 'grep -q "没有能领的任务" $T/w6e.out'
+ln -sfn b "$T/code/current"
+waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "代码包换了：空闲时 exec 新包的 worker_start.sh 接着跑，不退出等重开" '[[ $rc == 0 ]] && grep -q "换成新代码 b 接着跑" $T/w6e.out && grep -q "新包的 start lab-test" $T/w6e.out'
+check "代码包：worker 在用的包更新了时间戳（清理只删 4 天没动过的）" '[[ -n $(find "$T/code/a" -maxdepth 0 -mtime -1) ]]'
 
 # gpu_stats / pad_now 读真的文件（假 nvidia-smi）：只取 dicc_worker.sh 里这两个函数
 sed -n '/^gpu_stats() {/,/^can_add() {/p' "$HERE/dicc_worker.sh" | sed '$d' > "$T/fns.sh"

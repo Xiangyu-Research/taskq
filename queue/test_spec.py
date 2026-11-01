@@ -53,12 +53,17 @@ ok("command：缺 cmd 报错", raises(lambda: S.resolve("command", {"key": "a", 
 
 # ---------------- 10/31：任务单的通用字段 ----------------
 G = dict(key="guest/x", cmd="python3 t.py", env="nnunet", out="guest/x", done="DONE")
-g = S.resolve("command", dict(G, inputs="guest/in", res={"gpus": "2", "mem": "16G"}, resume="ckpt_*.pt", owner="bob",
+g = S.resolve("command", dict(G, inputs="guest/in", res={"gpus": "1", "mem": "16G"}, resume="ckpt_*.pt", owner="bob",
                               progress="progress_json"))
 ok("任务单：inputs = data（字符串变列表）、res 转成数、resume 变列表、owner", g["data"] == ["guest/in"] and g["inputs"] == ["guest/in"]
-   and g["res"] == {"gpus": 2, "mem": "16G"} and g["resume"] == ["ckpt_*.pt"] and g["owner"] == "bob")
+   and g["res"] == {"gpus": 1, "mem": "16G"} and g["resume"] == ["ckpt_*.pt"] and g["owner"] == "bob")
 ok("任务单：command 默认不交给执行机、一张卡、没有存档", S.resolve("command", G)["relay"] is None
    and S.resolve("command", G)["res"] == {"gpus": 1} and S.resolve("command", G)["resume"] is None)
+ok("res.gpus > 1 → 报错（worker 只给一张卡，11/1）", raises(lambda: S.resolve("command", dict(G, res={"gpus": 2}))))
+ok("fits：worker 没说的不查；CPU、内存、显存超了不领", S.fits({"cpus": 64, "mem": "200G", "gpu_mem": 90})[0]
+   and not S.fits({"cpus": 64}, cpus=16)[0] and not S.fits({"mem": "200G"}, mem_mb_=64 * 1024)[0]
+   and not S.fits({"gpu_mem": 40}, gpu_mem=32)[0] and S.fits({"cpus": 8, "mem": "32G", "gpu_mem": 20}, 16, 64 * 1024, 80)[0]
+   and S.mem_mb("2T") == 2 * 1024 ** 2)
 ok("任务单：inputs 和 data 都给 → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["a"], data=["b"]))))
 ok("任务单：res 写错字段、不是数、mem 格式不对 → 报错", raises(lambda: S.resolve("command", dict(G, res={"gpu": 1})))
    and raises(lambda: S.resolve("command", dict(G, res={"cpus": "many"})))

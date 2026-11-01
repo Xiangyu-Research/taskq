@@ -52,17 +52,18 @@ def entries(data, inp):
 
 
 def look(p):
-    """→ (大小, 真实路径)；指不到文件 → None。"""
+    """→ (大小, 真实路径, 改动时间 ns, inode)；指不到文件 → None。"""
     try:
         st = os.stat(p)
     except OSError:
         return None
-    return (st.st_size, os.path.realpath(p)) if os.path.isfile(p) else None
+    return (st.st_size, os.path.realpath(p), st.st_mtime_ns, st.st_ino) if os.path.isfile(p) else None
 
 
-def blob_id(real, size):
+def blob_id(real, size, mtime=0, ino=0):
+    """sha256 名的文件按名字；其余按路径、大小、改动时间和 inode（同一路径内容换了不复用旧副本，11/1）。"""
     b = os.path.basename(real)
-    return b if HEX.fullmatch(b) else "p" + hashlib.sha1(f"{real}\0{size}".encode()).hexdigest()
+    return b if HEX.fullmatch(b) else "p" + hashlib.sha1(f"{real}\0{size}\0{mtime}\0{ino}".encode()).hexdigest()
 
 
 def live_jobs():
@@ -124,8 +125,8 @@ def prepare(data, key, root, inputs):
     shutil.rmtree(view, ignore_errors=True)
     os.makedirs(blobs, exist_ok=True)
     todo = []
-    for (rel, _), (size, real) in zip(found, info):
-        bid = blob_id(real, size)
+    for (rel, _), (size, real, mtime, ino) in zip(found, info):
+        bid = blob_id(real, size, mtime, ino)
         local = os.path.join(blobs, bid)
         p = os.path.join(view, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)

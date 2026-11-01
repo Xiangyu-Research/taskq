@@ -152,9 +152,28 @@ def _check(s):
             raise SpecError(f"res.{k} 要是数：{v!r}") from None
         if res[k] < 0:
             raise SpecError(f"res.{k} 不能是负数：{v!r}")
+    if (res.get("gpus") or 0) > 1:
+        raise SpecError(f"res.gpus 最多 1（worker 每个任务只给一张卡，11/1）：{res['gpus']!r}")
     s["res"] = res
     if s.get("progress") not in PROGRESS:
         raise SpecError(f"不认识的进度解析方法 {s.get('progress')}（有：{', '.join(k for k in PROGRESS if k)}）")
+
+
+def mem_mb(v):
+    """"32G" 这样的 → MB；None → None。"""
+    if v is None:
+        return None
+    m = re.fullmatch(r"(\d+)([KMGT]?)", str(v))
+    return int(m.group(1)) * {"K": 1 / 1024, "": 1, "M": 1, "G": 1024, "T": 1024 ** 2}[m.group(2)]
+
+
+def fits(res, cpus=None, mem_mb_=None, gpu_mem=None):
+    """任务的 res 在 worker 给得起的范围里（worker 没说的那项不查，11/1）→ (能不能, 不够的说明)。"""
+    res = res or {}
+    need = [("cpus", res.get("cpus"), cpus, "个 CPU"), ("mem", mem_mb(res.get("mem")), mem_mb_, " MB 内存"),
+            ("gpu_mem", res.get("gpu_mem"), gpu_mem, " GB 显存")]
+    short = [f"{k} 要 {n}{u}、只有 {h}" for k, n, h, u in need if n is not None and h is not None and n > h]
+    return not short, "；".join(short)
 
 
 def parse_kv(args):

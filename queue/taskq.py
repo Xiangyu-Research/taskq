@@ -384,6 +384,8 @@ def cmd_next(a):
         s = spec_of(t)
         if s["env"] not in envs or (s.get("machines") and me not in s["machines"]) or s.get("device", "gpu") != a.device:
             return None
+        if not S.fits(s.get("res"), a.cpus, a.mem_mb, a.gpu_mem)[0]:
+            return None
         return t["key"] + "\n" + " ".join(shlex.quote(x) for x in S.kv_args(t["recipe"], t["params"]))
     rc, out = _claim(a, pick)
     if rc == 0:
@@ -515,6 +517,10 @@ def cmd_put(a):
     with Lock():
         tasks = read_tasks()
         by = {t["key"]: t for t in tasks}
+        bad = same_file([r["key"] for r in recs], by)
+        if bad:
+            print("；".join(bad))
+            return 2
         for r in recs:
             sp = os.path.join(TQ, "stopped", safe(r["key"]))
             if r.get("hold") and not os.path.exists(sp):  # 先停再写记录：worker 不会在中间领走
@@ -539,6 +545,16 @@ def cmd_put(a):
 
 
 # ---------------- 加、改 ----------------
+def same_file(keys, have):
+    """新 key 转成文件名（safe）后和队列里或这一批里另一个 key 相同 → 说明列表（领取、失败、日志都按文件名，11/1）。"""
+    seen, bad = {safe(k): k for k in have}, []
+    for k in keys:
+        o = seen.setdefault(safe(k), k)
+        if o != k:
+            bad.append(f"{k} 和 {o} 转成文件名都是 {safe(k)}")
+    return bad
+
+
 def _insert(new, nice):
     """把新任务（dict(key, exp, recipe, params)）加进队列，已有的跳过。先解析一遍，写错参数的不加。"""
     import experiments as E
@@ -546,6 +562,11 @@ def _insert(new, nice):
         tasks = read_tasks()
         have = {t["key"] for t in tasks}
         order = max([t["order"] for t in tasks] or [0])
+        keys = [E.resolve_task(t["recipe"], t["params"], t.get("exp"))["key"] for t in new]
+        bad = same_file(keys, have)
+        if bad:
+            print("加不进去：" + "；".join(bad))
+            return 2
         for t in new:
             s = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
             if s["key"] in have:
@@ -881,6 +902,9 @@ def main(argv):
     p.add_argument("--exclude", nargs="*", default=[])
     p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
     p.add_argument("--device", default="gpu", choices=["gpu", "cpu"], help="只领任务说明里 device 是这个的（2026-10-24）")
+    p.add_argument("--cpus", type=int, help="这个 worker 每个任务给的 CPU 数；任务的 res.cpus 更多的不领（11/1，不给不查）")
+    p.add_argument("--mem-mb", type=int, help="每个任务给的内存（MB）；res.mem 更多的不领")
+    p.add_argument("--gpu-mem", type=float, help="卡的显存（GB）；res.gpu_mem 更多的不领")
     tok = "next 打印的第三行；给了就只动这一轮的领取（11/1）"
     p = sub.add_parser("beat")
     p.add_argument("--worker", required=True)
