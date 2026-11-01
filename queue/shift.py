@@ -51,6 +51,10 @@ def window(now, start, end):
 def dated(now, start, end, first=None, last=None):
     """window()，只算开始日期在 [first, last] 里的时段（None = 不限）。"""
     cur, ended = window(now, start, end)
+    if cur is not None and ended is None:  # 首尾相接的时段（开始 = 结束）：上一个时段已经结束、这一个开始了
+        prev = dt.date.fromisoformat(cur) - dt.timedelta(days=1)
+        if start == end:
+            ended = prev.isoformat()
 
     def inside(d):
         return d is not None and (first is None or d >= first) and (last is None or d <= last)

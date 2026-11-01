@@ -14,8 +14,9 @@
   2. 总队列里 worker 是它的每一折：
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（翻译、补传缺的数据、建软链接、加进那边的队列）；
      - 在那边排着、在训 → 续上（beat）；
-     - 那边训完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、换回真名、备份到 DICC）；
+     - 那边训完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、换回真名、备份到 DICC；备份机暂停检查时只拉回）；
      - 总队列显示训完（box 上有了），而且拉回、归档的 box 任务成功了 → 交还，删掉那边的任务和结果；
+       拉回时没归档或归档失败的，备份机能用时单独排 archive_task.sh box（relay_archive），之前领取保留、那边的结果不删；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
@@ -602,14 +603,31 @@ def plan(s, name, rs, st, now=None):
             owned.add(a["key"])
         if t["state"] == "done":
             ft = box_task(s, "relay_fetch", key, t.get("since") or 0)
-            if ft is not None and ft["status"] in LIVE:  # box 上有了，但拉回、归档还没做完：等
+            at = box_task(s, "relay_archive", key, t.get("since") or 0)
+            if any(x is not None and x["status"] in LIVE for x in (ft, at)):  # box 上有了，但拉回、归档还没做完：等
                 acts.append(dict(op="beat", key=key))
                 continue
-            if ft is not None and ft["status"] != "Success":
+            if at is not None and at["status"] != "Success":
                 acts.append(dict(op="beat", key=key))
-                stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回、归档 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），box 上有了、领取保留；"
-                                              f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
+                stuck[f"relayfetch:{key}"] = (f"{key} 归档到备份机的 box 任务 {at['id']} 出错了（{at['status']}），box 上有了、领取保留；"
+                                              f"看 pueue log {at['id']}，处理后 pueue remove {at['id']}（下次检查重排）")
                 continue
+            # 拉回时没归档（备份机暂停检查），或拉回成功、归档那一半失败了：备份机能用时单独归档，之前领取保留、那边的结果不删
+            if at is None and ft is not None and (ft["status"] != "Success" or "archive_task.sh" not in (ft.get("command") or "")):
+                try:
+                    want = bool(lookup(key).get("archive"))
+                except (RN.RelayError, S.SpecError):
+                    want = False
+                if want:
+                    acts.append(dict(op="beat", key=key))
+                    if not C.backup_down():
+                        acts.append(dict(op="archive", key=key))
+                    continue
+                if ft["status"] != "Success":
+                    acts.append(dict(op="beat", key=key))
+                    stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），box 上有了、领取保留；"
+                                                  f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
+                    continue
             acts.append(dict(op="release", key=key, why="训完了，box 上有了、归档到 DICC 了"))
             if a:
                 acts.append(dict(op="drop", key=key, alias=a["key"], out=a["spec"]["out"]))
@@ -798,11 +816,17 @@ def execute(name, acts, s, run_add=None):
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
                 cmd = f"python3 scripts/queue/relay.py fetch {name} {shlex.quote(k)}"
-                if lookup(k).get("archive"):
+                if lookup(k).get("archive") and not C.backup_down():
                     cmd += f" && bash scripts/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完了 {k}，排了拉回、归档（box 任务 {tid}）")
+            elif a["op"] == "archive":
+                lab = label("relay_archive", k)
+                cmd = f"bash scripts/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
+                tid = add(M.hub(), lab, "relay_archive", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
+                          to=name, group="wait")
+                msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
             elif a["op"] == "unq":
                 r = rtq(name, f"remove {shlex.quote(a['alias'])}")
                 if r and r[0] == 0:

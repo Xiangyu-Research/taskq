@@ -224,3 +224,10 @@ def from_command(cmd):
         if b in ("fetch_task.sh", "archive_task.sh") and len(rest) >= 2:
             return dict(step="fetch" if b == "fetch_task.sh" else "archive", src=rest[0], key=rest[1])
     return None
+
+
+def backup_down():
+    """备份机（machines.py 里角色 backup 的）暂停检查（policy.py 的 OFFLINE）→ 说明；能用 → None。"""
+    import machines as M
+    import policy as P
+    return next((f"{b} 暂停检查（{P.OFFLINE[b]}）" for b in M.names("backup") if b != M.hub() and b in P.OFFLINE), None)

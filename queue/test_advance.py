@@ -345,6 +345,11 @@ todo, _ = A.plan(snap(remote={"lab": {T0K: dict(final=True, archived=True)}}))
 check("T0 nnU-Net 的 lab 副本已归档：不排归档", not [t for t in todo if t["step"] == "archive"])
 todo, _ = A.plan(snap(remote={"lab": {T0K: FIN}}))
 check("T0 nnU-Net 的 lab 副本没归档：照常归档", ("archive", T0K) in steps(todo))
+_down = A.C.backup_down
+A.C.backup_down = lambda: "dicc 暂停检查（停机）"
+todo, _ = A.plan(snap(remote={"lab": {T0K: FIN}}))
+A.C.backup_down = _down
+check("备份机暂停检查：先不排归档", ("archive", T0K) not in steps(todo))
 UMK = "Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/3"
 trained("Dataset101_GLIrq1", "nnUNetTrainer_UMambaEnc", "3")
 todo, _ = A.plan(snap(remote={"lab": {UMK: FIN}}))
