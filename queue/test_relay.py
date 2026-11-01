@@ -616,7 +616,35 @@ def test_fresh_site():
     print("通过：新机器还没有代码包时先部署再读状态；部署失败这次当连不上")
 
 
+def test_forget():
+    """推理任务在那边删掉后，box 上为它做的别名 checkpoint 也删掉；训练任务、别的任务的不动（11/1）。"""
+    K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
+    top = os.path.join(relay.RN.RELAY_DIR, "ckpt")
+    mine = os.path.join(top, "Dataset901_ab", "tr", "fold_0")
+    other = os.path.join(top, "Dataset901_ab", "tr", "fold_1")
+    for d in (mine, other):
+        os.makedirs(d, exist_ok=True)
+        for f in ("checkpoint_final.pth", "checkpoint_final.pth.src"):
+            open(os.path.join(d, f), "w").close()
+    seen = []
+    rsh0, rtq0 = relay.rsh, relay.rtq
+    relay.rsh = lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "", ""))[1]
+    relay.rtq = lambda name, cmd: (0, "")
+    try:
+        msgs = relay.execute(NAME, [dict(op="drop", key=K, alias=A, out="predictions/Dataset901_ab/tr/fold_0")], S0([]))
+        assert not os.path.exists(mine) and os.path.isfile(os.path.join(other, "checkpoint_final.pth")), msgs
+        relay.rsh = lambda name, cmd, input=None, timeout=300: (1, "", "boom")
+        msgs = relay.execute(NAME, [dict(op="drop", key=K, alias=A, out="predictions/Dataset901_ab/tr/fold_1")], S0([]))
+        assert os.path.isfile(os.path.join(other, "checkpoint_final.pth")), msgs
+        assert relay.RN.forget("nnUNet/results/Dataset901_ab/tr/fold_0") == []
+    finally:
+        relay.rsh, relay.rtq = rsh0, rtq0
+    shutil.rmtree(os.path.join(top, "Dataset901_ab"))
+    ok("推理任务那边删掉后删 box 上的别名 checkpoint；那边没删掉时留着；训练任务的结果路径不碰")
+
+
 if __name__ == "__main__":
+    test_forget()
     test_fresh_site()
     test_plan()
     test_pueue_worker()

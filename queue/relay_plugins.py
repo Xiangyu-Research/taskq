@@ -422,6 +422,26 @@ def _alias_ckpt(src, dst, alias_dsj, real):
     return d["alias_sha256"], d["sha256"]
 
 
+def forget(alias_out):
+    """那边的任务和结果删掉以后，box 上为它做的别名副本（推理用的 checkpoint，export_nnunet_infer）也删掉 → 删了的文件。"""
+    m = PRED_RE.match(alias_out or "")
+    if not m:
+        return []
+    alias, td, fold = m.groups()
+    top = os.path.join(RELAY_DIR, "ckpt")
+    d = os.path.join(top, alias, td, f"fold_{fold}")
+    gone = []
+    for f in ("checkpoint_final.pth", "checkpoint_final.pth.src"):
+        p = os.path.join(d, f)
+        if os.path.isfile(p):
+            os.remove(p)
+            gone.append(p)
+    while d != top and os.path.isdir(d) and not os.listdir(d):
+        os.rmdir(d)
+        d = os.path.dirname(d)
+    return gone
+
+
 def export_nnunet_infer(spec, root, names):
     import relay_bundle as RB
     real, td, fold = _where(spec)

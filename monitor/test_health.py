@@ -161,28 +161,6 @@ s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None)]
 s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
 ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
 
-# lab 的缓冲（10/31）：worker 组看缓冲里 worker 有没有在做的
-H.M.MACHINES["lab"].update(worker=dict(group="gpu1", id="lab-gpu1"), slots=1)  # pueue 类的缓冲执行机（10/31 起 lab 本身走 RELAY 的 lab1）
-LW = H.M.MACHINES["lab"]["worker"]
-wk = task(30, LW["group"], "Running", f"WORKER_ID={LW['id']} bash scripts/queue/dicc_worker.sh", f"worker:{LW['id']}")
-s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [wk]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
-         taskq={"box": dict(enabled=True, tasks=[]), "lab": dict(enabled=True, buffer=True, paused=False, tasks=[tqrow(MEN0, "free")])})
-s["slurm"] = {}
-P = H.check(s)
-ok("lab 的 worker 手上没有任务：报 idle（等 30 分钟）", P.get(f"idle:lab:{LW['group']}", {}).get("after") == 30)
-s["taskq"]["lab"]["tasks"] = [tqrow(MEN0, "claimed", LW["id"], since=NOW.timestamp() - 600)]
-P = H.check(s)
-ok("lab 的 worker 在训：不报 idle", f"idle:lab:{LW['group']}" not in P)
-s["pueue"]["lab"]["tasks"] = [wk, task(31, "gpu0", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")]
-ok("lab 缓冲里 worker 在训、0 号卡的 pueue 也在训同一折 → 同一折两处、紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
-s["taskq"]["lab"].pop("buffer")
-s["taskq"]["lab"]["enabled"] = False
-s["pueue"]["lab"]["tasks"] = []
-ok("RELAY 的 lab1 用着 gpu1 组：不按 pueue 组报空着", f"idle:lab:{LW['group']}" not in H.check(s))
-RELAY0 = dict(H.M.RELAY)
-H.M.RELAY.clear()
-ok("lab 还不是缓冲：照旧按 pueue 组看卡空着", f"idle:lab:{LW['group']}" in H.check(s) and "after" in H.check(s)[f"idle:lab:{LW['group']}"])
 H.time.time = time_orig
 
 # 总队列在 box（10/31）
@@ -314,22 +292,6 @@ P = H.check(s)
 ok("box 重启过 → 报（带上放回的任务），lab 很久前重启的不报", [p["msg"] for k, p in P.items() if k.startswith("boot:")] == ["box 10-16 10:00 重启过：开机：放回队列 3 4"])
 ok("看板有结果等确认 → 报", "board" in P)
 
-s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [
-    dict(id=1, group="gpu1", status="Stashed", label="umamba_f0", deps=[], start=None, end=None, command="bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_UMambaEnc env=umamba fold=0")]}})
-s["pueue"]["lab"]["tasks"] = s["pueue"]["lab"]["tasks"][:1]
-ok("lab 1 号卡没有训练任务（暂存的不算）→ 报", "idle:lab:gpu1" in ids(s))
-s3 = dict(s, pueue=dict(s["pueue"], lab=dict(s["pueue"]["lab"], groups={"gpu1": "Running", "gpu0": "Running"})))
-ok("lab 0 号卡（只跑手动任务的组）开着、空着 → 不报", "idle:lab:gpu1" in ids(s3) and not any(k.startswith("idle:lab:gpu0") for k in ids(s3)))
-s2 = dict(s, taskq={"box": dict(enabled=True, paused=False, tasks=[tqrow(MET2, "claimed", "lab")])})
-ok("lab 领着折（在传数据或停了等人处理，refill.py 另外报）：卡空着不另报", "idle:lab:gpu1" not in ids(s2))
-s2["taskq"]["box"]["tasks"] = [tqrow(MET2, "done", "lab")]
-ok("lab 领着的折已训完（等交还）：卡空着照报", "idle:lab:gpu1" in ids(s2))
-s["pueue"]["lab"]["tasks"].append(dict(id=2, group="gpu1", status="Running", label="t15men_f4", deps=[], start=None, end=None,
-                                       command="bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=4"))
-P = H.check(s)
-ok("只剩在训的一个 → 只记（训完后自动领下一折），不推送", "只剩在训的 t15men_f4" in P.get("idle:lab:gpu1", {}).get("msg", "")
-   and P["idle:lab:gpu1"]["level"] == "info")
-ok("还有排着的 → 不报", "idle:lab:gpu1" not in ids(snap()))
 
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),

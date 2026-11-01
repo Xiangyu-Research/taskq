@@ -31,8 +31,6 @@ def ok(msg, cond):
     fails += not cond
 
 
-M.MACHINES["lab"].update(worker=dict(group="gpu1", id="lab-gpu1"), slots=1)  # pueue 类的缓冲执行机（10/31 起 lab 本身走 RELAY 的 lab1）
-
 D1, D2, D3 = (f"nnUNet/preprocessed/Dataset10{i}_X" for i in (1, 2, 3))
 
 
@@ -266,81 +264,14 @@ ok("dry：只说会做什么，什么都不做", not done and "会" in ev[0])
 F.execute = orig
 
 
-# ---------------- pueue 类执行机（lab）----------------
-LAB = "lab"
-W = M.MACHINES[LAB]["worker"]
-P.READY[LAB] = 2
-ok("sites()：DICC 和 lab", set(F.sites()) >= {"dicc", "lab"} and "box" not in F.sites())
-
-
-def lsnap(c, b=(), lab_tasks=(), recs=(), box=(), src=None):
-    return dict(taskq={HUB: dict(enabled=True, tasks=list(c)), LAB: dict(enabled=True, buffer=True, tasks=list(b), paused=False, recent_failures=0)},
-                pueue={HUB: dict(tasks=list(box)), LAB: dict(tasks=list(lab_tasks))}, records=list(recs), src=src or {},
-                code=dict(main="a", heads={LAB: "a"}), ok={HUB: True, LAB: True})
-
-
-def wtask(tid, status):
-    t = dict(id=tid, label=f"worker:{W['id']}", status=status, group=W["group"], command="x")
-    r = dict(machine=LAB, id=tid, label=t["label"], step="worker", key=W["id"], group=W["group"], created_at=0)
-    return t, r
-
-
-def lplan(s, data=READY):
-    return F.plan(s, LAB, {}, data)
-
-
-acts, stuck, _ = lplan(lsnap([]))
-ok("lab：worker 组里没有 worker → 开一个", ("worker", W["id"]) in ops(acts) and not stuck)
-t, r = wtask(7, "Running")
-ok("lab：worker 在跑 → 不另开", ("worker", W["id"]) not in ops(lplan(lsnap([], lab_tasks=[t], recs=[r]))[0]))
-t, r = wtask(7, "Success")
-ok("lab：上一个 worker 正常退出（代码更新了）→ 重开", ("worker", W["id"]) in ops(lplan(lsnap([], lab_tasks=[t], recs=[r]))[0]))
-t, r = wtask(7, "Failed")
-acts, stuck, _ = lplan(lsnap([], lab_tasks=[t], recs=[r]))
-ok("lab：上一个 worker 失败了 → 不重开，报 site:lab:worker", ("worker", W["id"]) not in ops(acts) and "site:lab:worker" in stuck)
-t2 = dict(t, label="worker:lab-gpu1")
-ok("lab：同标签、没有任务记录的手动任务不当 worker", ("worker", W["id"]) in ops(lplan(lsnap([], lab_tasks=[t2]))[0]))
-s_ = lsnap([])
-s_["pueue"][LAB] = {"error": "x"}
-ok("lab：pueue 读不到 → 不开 worker", ("worker", W["id"]) not in ops(lplan(s_)[0]))
-G0 = f"{LAB}:gpu0"
-acts, _, _ = lplan(lsnap([ct(K[1], "done", assigned=G0)]))
-rel = [a for a in acts if a["op"] == "release"]
-ok("lab:gpu0 手动训的：box 上训完 → 用 lab:gpu0 交还", rel and rel[0]["key"] == K[1] and rel[0]["worker"] == G0)
-FE2 = dict(FE, label=f"fetch:{K[1]}")
-FR2 = dict(FR, label=FE2["label"], key=K[1], src=LAB)
-acts, _, _ = lplan(lsnap([ct(K[1], "done", assigned=G0)], box=[FE2], recs=[FR2]))
-ok("lab:gpu0 手动训的：还在拉回 → 不交还", not [a for a in acts if a["op"] == "release"])
-acts, _, _ = lplan(lsnap([ct(K[1], "claimed", assigned=G0)]))
-ok("lab:gpu0 手动训的：不往缓冲 put", not [a for a in acts if a["key"] == K[1]])
-INF2 = "infer/y/fold_0"
-acts, _, _ = lplan(lsnap([ct(K[1], "claimed", assigned=G0), ct(INF2, "waiting", machines=[LAB], after=[K[1]], nice=-100)],
-                         src={LAB: {"tasks": {K[1]: fold(final=True)}}}))
-s6 = [a for a in acts if a["op"] == "send"]
-ok("0 号卡训完的折的推理：带依赖记录送进 lab 缓冲（1 号卡的 worker 做）", s6 and s6[0]["key"] == INF2 and [d["key"] for d in s6[0]["deps"]] == [K[1]])
-
-added, sent = [], []
-F.execute(LAB, [dict(op="worker", key=W["id"]), dict(op="prefetch", key=K[0], paths=[D1], gb=3.0)], central=central(), remote=buf(),
-          add=lambda *a, **kw: added.append((a, kw)) or 9, transfer=lambda name, paths: sent.append((name, paths)) or [10])
-ok("execute worker：在 worker 组用 q 加 WORKER_ID 的 worker（有任务记录）", added and added[0][0][2] == "worker"
-   and f"WORKER_ID={W['id']}" in added[0][0][4] and added[0][0][4].startswith(W["group"] + " ") and added[0][1]["group"] == W["group"])
-ok("execute prefetch：refill.transfer（tunnel_push）", sent == [(LAB, [D1])])
-calls.clear()
-F.execute(LAB, [dict(op="release", key=K[1], worker=G0, why="x")], central=central(), remote=buf())
-ok("交还 lab:gpu0 的用它的名字", calls == [("central", ["release", "--worker", G0, K[1]])])
-
-s_ = lsnap([ct(K[0])])
-s_["probe"] = {LAB: {"DISK": str(int(45e9))}}
-ogb = F.refill.data_gb
-F.refill.data_gb = lambda paths: 10.0
-st_ = {}
-acts, stuck, _ = F.plan(s_, LAB, st_, (box_d, {}))
-ok("lab：传完盘剩的不到提醒线 + 10 GB → 不传", not [a for a in acts if a["op"] == "prefetch"])
-_, stuck, _ = F.plan(s_, LAB, st_, (box_d, {}), now=time.time() + 61 * 60)
-ok("lab：放不下持续 60 分钟 → site:lab:low 里写明盘剩多少", "盘剩 45 GB" in stuck.get("site:lab:low", ""))
-s_["probe"][LAB]["DISK"] = str(int(200e9))
-ok("lab：放得下 → 传", [a for a in F.plan(s_, LAB, {}, (box_d, {}))[0] if a["op"] == "prefetch"])
-F.refill.data_gb = ogb
+# ---------------- 分给了不是执行机的名字（执行机改名、撤掉以后留下的）----------------
+q_ = dict(tasks=[ct("a/x/0", "claimed", assigned="lab"), ct("a/x/1", "claimed", assigned="lab1"), ct("a/x/2", "claimed", assigned="dicc"),
+                 ct("a/x/3", "done", assigned="old")])
+ok("sites()：只有 Slurm 的（DICC）", F.sites() == ["dicc"])
+nb = F.nobody(q_)
+ok("分给 lab（不是执行机）的报 feed:nobody:lab，带交还的命令；分给执行机、relay 机器的不报；做完的不报",
+   list(nb) == ["feed:nobody:lab"] and "release --worker lab" in nb["feed:nobody:lab"] and "a/x/0" in nb["feed:nobody:lab"])
+ok("总队列读不到：不报", F.nobody(None) == {})
 
 # ---------------- 送任务只有一个入口（10/31）：feed.run_all 先转给 relay.py，再处理有缓冲的执行机 ----------------
 import types  # noqa: E402

@@ -5,7 +5,7 @@
     scripts/queue/qs <机器>     只看一台（如 qs lab）
     scripts/queue/qs --json     机器 → 任务列表（scripts/monitor/health.py 用）：status 是给人看的（如 "Failed (1)"），
                                 程序看 result（Success / Failed / Killed / …，没结束是 None）和 code（退出码，没有是 None）
-wait 组里在跑的任务（等训完再拉回）下面多一行：输出的最后一行（fetch_fold.sh 每小时记远端训到第几个 epoch）。
+wait 组里在跑的任务（等训完再拉回）下面多一行：输出的最后一行（fetch_task.sh 每小时记远端训到第几个 epoch）。
 单个任务的输出：pueue log <编号>（别的机器上：ssh lab ~/.local/bin/pueue log <编号>）。
 """
 import datetime as dt

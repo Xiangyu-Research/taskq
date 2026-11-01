@@ -19,17 +19,17 @@
   queue:<机器>   加进任务队列（taskq.py add --recipe command，参数是步骤 queue 里的，machines = 这台，nice = queue 的 nice）。
                  那边缺的输入是文件就先 offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；写了 have 的，那边
                  缺输入就用下一个地方。那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按 done 判断
-  trainer        训这个任务的执行机（feed.sites()）：总队列里这个任务分给的那台（"lab:gpu0" 算 lab），分配已经结束的看哪台有这个任务
+  trainer        训这个任务的执行机（feed.sites()）：总队列里这个任务分给的那台，分配已经结束的看哪台有这个任务
                  没归档的进度、模型；就当成 queue:<那台>（10/31）。relay 机器（envs/machines.py 的 RELAY：中转执行机、lab 1 号卡）
                  训的任务：领着（训完还没交还）时也放进总队列、只给那台，relay.py 领到后连同模型和输入换名送过去（不查那边缺什么、
-                 不先传）；做完由 relay.py 拉回。训的不是执行机、但同一台主机上有开着的 relay 机器（lab 0 号卡手动训的任务 → lab1，
-                 用 box 上拉回的模型）时给那台。训的是 box、找不到（如已交还）时用下一个地方。
+                 不先传）；做完由 relay.py 拉回。训的不是执行机、但同一台主机上有开着的 relay 机器（按时段的 lab0、10/31 前
+                 lab 老路训的任务 → lab1，用 box 上拉回的模型）时给那台。训的是 box、找不到（如已交还）时用下一个地方。
                  lab 上做完的照常拉回（fetch_task.sh lab），box 上判断做完后删 lab 上的结果（训完要归档的机器，TRAINERS）；
                  这个任务在 lab 上排着、没做完的步骤先做完再归档（归档会删 lab 上的模型）
   要知道每个任务的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage needs，打印相对数据目录的输入），或者步骤的
   queue 里写了 inputs。10/31 以前 trainer 排在 lab pueue 里的步骤（任务记录里有 out 的）照常认、拉回、清理，不再新排（Leftover）。
 
-提前排（10/25、10/31）：一个任务在总队列里分给了执行机（"lab:gpu0" 算 lab）、那边的代码是最新的（health 的 code 检查）时，每个任务的
+提前排（10/25、10/31）：一个任务在总队列里分给了执行机、那边的代码是最新的（health 的 code 检查）时，每个任务的
   步骤里 PLACE 第一个用得上的地方是这台的任务队列的（trainer 也算），现在就加进队列，任务说明的 after 接上前一步（推理 after
   训练，评测 after 推理）；after 里的没做完时那个任务是 waiting，worker 不领，做完后训完的那个 worker 接着就能领到。
   分给 relay 机器的任务一样提前排（不看代码，那边用的是代码包）；没人领的任务不提前排。
@@ -286,7 +286,7 @@ def plan(s, root=None):
 
     def site_of(h):
         """训这个任务的机器 → 放后续步骤的执行机：执行机、relay 机器就是它；按时段的 relay 机器（lab0，envs/policy.py 的 SHIFT）
-        和别的（如以前 lab 0 号卡手动训的任务，lab 不再是执行机）→ 同一台主机上开着、不按时段的 relay 机器（lab1）；没有 → None。"""
+        和别的（如 10/31 前 lab 老路训的任务，lab 不再是执行机）→ 同一台主机上开着、不按时段的 relay 机器（lab1）；没有 → None。"""
         if h in feed_sites or (h in relay_sites and not shift.limited(h)):
             return h
         ssh = (M.RELAY.get(h) or M.MACHINES.get(h) or {}).get("ssh")
@@ -294,18 +294,18 @@ def plan(s, root=None):
     code = s.get("code") or {}
 
     def assigned_to(key):
-        """总队列里这个任务分给的机器（"lab:gpu0" → lab）；没分出去 → None。"""
+        """总队列里这个任务分给的机器；没分出去 → None。"""
         x = tq_tasks.get(hub, {}).get(key) or {}
         if x.get("state") != "claimed":
             return None
-        return (x.get("assigned") or "").partition(":")[0] or None
+        return x.get("assigned") or None
 
     def trainer_of(key):
         """训这个任务的机器：总队列里分给的那台；分配已经结束的看哪台有这个任务没归档的进度、模型（训完的优先）。"""
         h = assigned_to(key)
         if h:
             return h
-        r = ((tq_tasks.get(hub, {}).get(key) or {}).get("assigned") or "").partition(":")[0]
+        r = (tq_tasks.get(hub, {}).get(key) or {}).get("assigned")
         if r in relay_sites:  # relay 机器训完、box 上有了，还没交还
             return r
         have = [h for h in sorted(src) if key in src[h] and not src[h][key].get("archived")]

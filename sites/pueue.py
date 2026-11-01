@@ -2,9 +2,13 @@
 和 slurm.py 对应：读状态 → 调用方按"先备好再开卡"定开不开（scripts/queue/relay.py 的 topup）→ start_worker 开。
 pueue 的原始输出由那边的状态脚本一次读回（relay.py 的 STATUS_PY），这里只解析。"""
 import json
+import os
 import shlex
+import sys
 
 import remote as R
+
+sys.path.insert(0, os.path.join(R.REPO, "scripts", "queue"))
 
 
 def _rename(s):

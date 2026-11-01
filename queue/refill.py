@@ -3,14 +3,14 @@
 （scripts/monitor/health.py，每 30 分钟）调用：run_all 管 pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，
 现在是 lab）上的数据，topup_all 给 Slurm 训练机（DICC）补交 worker 作业。
 
-lab 的训练（10/31 起）：box 上的 scripts/queue/feed.py 把总队列里的任务分给 lab（assigned = lab）、送进 lab 的缓冲，
-lab 上常驻的 worker（scripts/queue/dicc_worker.sh）领着训；0 号卡手动训的任务在总队列里分给 lab:gpu0。
+lab 的两张卡 10/31 起是 RELAY 的执行机 lab1、lab0（scripts/queue/relay.py，数据由 relay_gc.py 清理）；下面"lab 上的数据"只管
+10/31 前的老数据目录，等那里剩下的存档备份到 DICC 后删掉。
 传数据（transfer）、box 任务（add、then_check）、挑下一个任务（candidates、next_pick）这些共用的函数在这里，feed.py、relay.py、
 advance.py 调用。
 
 lab 上的数据：
   自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json 的 transferred，按"还要不要用"和空间预算管（cleanup()，2026-10-24）：
-  - 不删：lab 缓冲里所有任务的、总队列里分给 lab 的（assigned 是 lab 或 lab:<组>）任务的、lab 上活着的训练任务的、box 上正在传、
+  - 不删：lab 缓冲里所有任务的、总队列里分给 lab 的任务的、lab 上活着的训练任务的、box 上正在传、
     正在从 lab 拉回 / 归档的、lab 上训完还没归档的任务的，以及实验表的 KEEP_DATA；
   - 其余的：总队列里没有 lab 能训的任务（free、有环境、要卡、没有进度、lab 没跳过）要用了就删；还有任务要用的留着，
     盘剩的低于软线（硬线 × SOFT，硬线 = 盘的提醒线 + TRAIN_OUT_GB）时从最晚用到的删起。
@@ -209,13 +209,13 @@ def moves(s, t, name, p):
 
 def kept(s, name):
     """这台机器还要用的任务 → (key 的集合, 它们要的数据的集合)；总队列或这台的缓冲读不到 → None（10/31）。
-    算上缓冲里所有的任务，和总队列里分给它的（assigned 冒号前那段是它：lab、lab:gpu0）。"""
+    算上缓冲里所有的任务，和总队列里分给它的。"""
     tqs = s.get("taskq") or {}
     ctq, btq = tqs.get(taskq.queue_host()), tqs.get(name)
     if not ctq or not ctq.get("tasks") or not isinstance(btq, dict) or btq.get("tasks") is None:
         return None
     keys, data = set(), set()
-    for tq, ts in ((btq, btq["tasks"]), (ctq, [t for t in ctq["tasks"] if (t.get("assigned") or "").split(":")[0] == name])):
+    for tq, ts in ((btq, btq["tasks"]), (ctq, [t for t in ctq["tasks"] if t.get("assigned") == name])):
         for t in ts:
             keys.add(t["key"])
             data |= set(data_of(tq, t["key"]))

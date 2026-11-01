@@ -84,6 +84,6 @@ RECIPES = {
         open=True,
         key="{key}", env="{env}", cmd="{cmd}", vars={}, out="{out}", done="{done}", log="*.log",
         progress=None, resume=None, res=dict(gpus=1), owner=None, info=None, oldlogs=None, metrics={}, checkpoint=None, data=[],
-        fetch=dict(exclude=[], extra=[]), archive=None, machines=None, device="gpu", after=[], cache=None, relay=None,
+        fetch=dict(exclude=[], extra=[]), archive=None, machines=None, device="gpu", after=[], relay=None,
     ),
 }

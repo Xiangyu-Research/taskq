@@ -21,7 +21,6 @@ D = tempfile.mkdtemp()
 R.LOG, R.STATE = f"{D}/refill.log", f"{D}/refill.json"
 # 测试用固定的配置，不跟着 envs/policy.py 变
 R.P.AUTO = dict(advance=False, lab=False, dicc=False)
-R.P.MANUAL = {"lab": ["gpu0"]}
 R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")  # run_all 里补作业那一步
 R.C.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("测试里不应该在真机器上跑命令"))
 GB = {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0, "stuff": 1.0}
@@ -133,9 +132,8 @@ ok("lab 上还有训完没归档的折：不删",
    R.cleanup(snap(queue=NO103, lab_tasks_st={K_T1C[0]: dict(final=True, archived=False, runs=[])}), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲里任务的数据不删", R.cleanup(snap(queue=NO103, buf=[tq(K_T1C[1], 50, 4, "claimed", "lab-gpu1")]), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲里训完、还没删掉的记录的数据也不删", R.cleanup(snap(queue=NO103, buf=[tq(K_T1C[1], 50, 4, "done")]), "lab", run=fake_run) == [] and not cmds)
-for who in ("lab", "lab:gpu0"):
-    asg = NO103 + [dict(tq(K_T1C[2], 100, 5, "claimed", "lab"), assigned=who)]
-    ok(f"总队列里分给 {who} 的数据不删", R.cleanup(snap(queue=asg), "lab", run=fake_run) == [] and not cmds)
+asg = NO103 + [dict(tq(K_T1C[2], 100, 5, "claimed", "lab"), assigned="lab")]
+ok("总队列里分给 lab 的数据不删", R.cleanup(snap(queue=asg), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲读不到：不删", R.cleanup(snap(queue=NO103, buf=None), "lab", run=fake_run) == [] and not cmds)
 ok("总队列读不到：不删", R.cleanup(dict(snap(queue=NO103), taskq={"box": None, "lab": dict(tasks=[])}), "lab", run=fake_run) == [] and not cmds)
 s = snap(queue=NO103)

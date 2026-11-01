@@ -597,15 +597,13 @@ check("trainer：分给 lab 的折（1 号卡的 worker 训）→ 推理现在�
       [(t["step"], t.get("op")) for t in x] == [("infer", "taskq")] and 'machines=["lab"]' in x[0]["args"]
       and "after=" + json.dumps([K3]) in x[0]["args"] and x[0]["qnice"] == -100 and f"key={Q3}" in x[0]["args"])
 INF3 = x[0]
-x = t3(A.plan(lsnap("lab:gpu0"))[0])
-check("trainer：0 号卡手动训的折（lab:gpu0）→ 也进 lab 的缓冲（1 号卡推理）", len(x) == 1 and 'machines=["lab"]' in x[0]["args"])
 A.feed.sites = lambda: ["dicc"]  # 10/31 起 lab 不再是执行机
 A.P.AUTO = dict(A.P.AUTO, lab1=True)
-x = t3(A.plan(lsnap("lab:gpu0"))[0])
-check("trainer：lab 不是执行机时，0 号卡训的折 → 推理给同一台主机上开着的 relay 机器（lab1），等训练",
+x = t3(A.plan(lsnap("lab"))[0])
+check("trainer：lab 不是执行机时，分给 lab 的折 → 推理给同一台主机上开着的 relay 机器（lab1），等训练",
       len(x) == 1 and 'machines=["lab1"]' in x[0]["args"] and "after=" + json.dumps([K3]) in x[0]["args"])
 A.P.AUTO = dict(A.P.AUTO, lab1=False)
-check("trainer：lab1 关着 → 0 号卡训的折不提前排", not t3(A.plan(lsnap("lab:gpu0"))[0]))
+check("trainer：lab1 关着 → 分给 lab 的折不提前排", not t3(A.plan(lsnap("lab"))[0]))
 A.P.AUTO = dict(A.P.AUTO, lab1=True, lab0=True)
 x = t3(A.plan(lsnap("lab0"))[0])
 check("trainer：按时段的 relay 机器（lab0，晚班）训的折 → 推理给同一台主机上不按时段的 lab1，等训练",
@@ -649,11 +647,11 @@ x = t3(A.plan(lsnap(state="done", fold=FIN))[0])
 check("trainer：训练已经交还（总队列里不再分给谁）、lab 上有训完没归档的模型 → 也进 lab 的缓冲",
       [t["step"] for t in x] == ["infer"] and 'machines=["lab"]' in x[0]["args"])
 A.feed.sites = lambda: ["dicc"]
-x = t3(A.plan(lsnap("lab:gpu0", fold=FIN))[0])
-check("trainer：lab 不是执行机，0 号卡训完、拉回 box → 推理给 lab1（用 box 上的模型），不先传；lab 上照常归档（推理不用那边的模型）",
+x = t3(A.plan(lsnap("lab", fold=FIN))[0])
+check("trainer：lab 不是执行机，lab 上训完、拉回 box → 推理给 lab1（用 box 上的模型），不先传；lab 上照常归档（推理不用那边的模型）",
       [(t["step"], t.get("op")) for t in x] == [("infer", "taskq"), ("archive", None)] and 'machines=["lab1"]' in x[0]["args"])
 x = t3(A.plan(lsnap(state="done", fold=FIN))[0])
-check("trainer：lab 不是执行机，0 号卡训的折已交还、lab 上有没归档的模型 → 也给 lab1",
+check("trainer：lab 不是执行机，lab 上训的折已交还、lab 上有没归档的模型 → 也给 lab1",
       [t["step"] for t in x] == ["infer", "archive"] and 'machines=["lab1"]' in x[0]["args"])
 A.feed.sites = lambda: ["dicc", "lab"]
 x = t3(A.plan(lsnap(fold=dict(final=True, archived=True)))[0])
@@ -715,7 +713,7 @@ check("旧记录：lab 训完、box 拉回了、旧的推理在跑 → 不归档
 no_recs()
 todo, stuck = A.plan(lsnap("lab", fold=FIN, lab=[(30, "Running", INFL, "infer:t1c_f3", "gpu1")]))
 check("lab pueue 里有这一折的推理在跑、没有它的记录 → 不归档（归档会删那边的模型），报出来",
-      not [t for t in t3(todo) if t["step"] == "archive"] and "不是这一折现在的记录" in stuck.get("advance:remote:infer:t1c_f3", ""))
+      not [t for t in t3(todo) if t["step"] == "archive"] and "不是这个任务现在的记录" in stuck.get("advance:remote:infer:t1c_f3", ""))
 A.C.update_records(lambda recs: [dict(REC30)])
 DONEL = [(30, "Success", INFL, "infer:t1c_f3", "gpu1")]
 x = t3(A.plan(lsnap("lab", fold=FIN, lab=DONEL))[0])

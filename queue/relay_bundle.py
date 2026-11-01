@@ -309,7 +309,7 @@ def gen_machines(src, name, m):
 def gen_policy(name, stage_tmp=True, gpu_aug=False, gpu_aug_loader=False):
     return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\nGPU_AUG = {{{name!r}: {gpu_aug!r}}}\nGPU_AUG_LOADER = {{{name!r}: {gpu_aug_loader!r}}}\n"
             f"STAGE_TMP = {{{name!r}: {stage_tmp!r}}}\n"
-            "MANUAL = {}\nSLURM = {}\n")
+            "SLURM = {}\n")
 
 
 def gen_sbatch(real, m, root):

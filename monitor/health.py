@@ -181,8 +181,6 @@ def gather(remote=True):
             rc, out = run_on(m, script)
             have = C.parse_have(out) if C.HAVE_END in script else set()  # 输出被截断：这次算没读到，不当成数据不在
             ok = rc == 0 and "BOOT|" in out and have is not None
-            if ok and "train" in m["roles"] and m.get("worker"):  # 有缓冲的 pueue 执行机（lab，10/31）
-                s["taskq"][name] = taskq.remote_status(name)
             if ok:
                 lines = out.splitlines()
                 s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|", "HAVE|")))
@@ -296,7 +294,7 @@ def check(s):
             add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
 
     # --- pueue ---
-    waits, train_q, running_g = [], {}, set()
+    waits = []
     for name in M.names("pueue"):
         if not s["ok"].get(name):
             continue
@@ -321,10 +319,6 @@ def check(s):
                         add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
             if kind == "fetch" and st == "Running":
                 waits.append((name, t, key, r.get("src")))
-            if kind == "train" and st in ("Running", "Queued"):
-                train_q.setdefault((name, t["group"]), []).append((st, tname))
-            if st == "Running":
-                running_g.add((name, t["group"]))
             if st in LIVE or st == "Success":
                 continue
             end = C.local_time(t["end"])
@@ -332,33 +326,6 @@ def check(s):
                 continue
             add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if stopped(t) else "normal", kind="event")
-
-    # --- 训练机的卡空了 ---
-    holding = {t.get("worker") for t in (s.get("taskq", {}).get(taskq.queue_host()) or {}).get("tasks", []) if t.get("state") != "done"}
-    for name in M.names("pueue"):
-        w, btq = M.MACHINES[name].get("worker"), s.get("taskq", {}).get(name)
-        if w and btq and btq.get("buffer") and btq.get("enabled") and s["ok"].get(name):  # worker 组：看缓冲里它有没有在做的
-            if not any(t.get("worker") == w["id"] and t["state"] in ("claimed", "busy") for t in btq["tasks"]):
-                gpu = M.MACHINES[name]["groups"][w["group"]][1]
-                add(f"idle:{name}:{w['group']}", f"{L(name)} 的 worker（{w['group']} 组）手上没有任务，{gpu} 号卡空着"
-                    "（缓冲里没有能做的？看 ~/feed.log；worker 的日志在那边数据目录的 logs/workers/）", after=30)
-        m = M.MACHINES[name]
-        if "train" not in m["roles"] or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
-            continue
-        for g, (_, gpu, _) in m["groups"].items():
-            if gpu is None:
-                continue
-            relayed = any(r.get("ssh") == m.get("ssh") and (r.get("worker") or {}).get("group") == g for r in M.RELAY.values())
-            if g in M.manual_groups(name) or (w and g == w["group"] and btq and btq.get("buffer")) or relayed:
-                continue  # 只跑手动加的任务；worker 组上面看过；RELAY 里的机器用的组由 relay.py 管
-            ts = train_q.get((name, g), [])
-            run = [n for st, n in ts if st == "Running"]
-            if not ts:
-                if name not in holding and (name, g) not in running_g:  # 在跑别的（训完接着做的推理，10/24）不算空着  # 领着任务时（在传数据、或停了等人处理）refill.py 另外报
-                    add(f"idle:{name}:{g}", f"{L(name)} {g} 组没有训练任务，{gpu} 号卡空着（任务队列里没有能领的？看 ~/refill.log）")
-            elif len(ts) == len(run):
-                add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练（训完后由 refill.py 领下一个任务）",
-                    level="info")
 
     # --- 拉回 ---
     for host, t, key, src in waits:
@@ -542,7 +509,7 @@ def main():
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\n送任务、清理、补作业、按时段开关组：" + "；".join(events))
+        print("\n送任务、清理、补作业、按时段开关：" + "；".join(events))
         print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
 
 

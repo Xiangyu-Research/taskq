@@ -880,6 +880,7 @@ def execute(name, acts, s, run_add=None):
                                    + "".join(f" {rr}/data/{shlex.quote(c)}" for c in extra))
                 if r and r[0] == 0 and rc == 0:
                     update_state(lambda st: (st.get("keys") or {}).get(name, {}).pop(k, None))
+                    RN.forget(a["out"])
                     msgs.append(f"{L} 上删了 {k} 的任务和结果")
                 else:
                     msgs.append(f"{L} 上删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]} {err[-150:]}")
