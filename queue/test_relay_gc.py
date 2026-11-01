@@ -114,6 +114,19 @@ def main():
         ok("再删没人指的 blob，最旧的先删，在用的和硬链接收编的不碰，R 外面的不碰")
 
         R, _ = build(tempfile.mkdtemp(dir=tmp))
+        os.makedirs(os.path.join(R, "state", "pins"))
+        with open(os.path.join(R, "state", "pins", "t__a.json"), "w") as f:
+            json.dump(["dd1"], f)
+        part = blob(R, "gg1.tunnelpart", 4000)
+        r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
+        assert exists(R, "dd1") and os.path.exists(part) and not exists(R, "bb1"), r
+        os.utime(os.path.join(R, "state", "pins", "t__a.json"), (1000, 1000))
+        os.utime(part, (1000, 1000))
+        r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
+        assert not exists(R, "dd1") and not os.path.exists(part), r
+        ok("正在传的任务钉住的块、传到一半的临时文件不删；钉住记录过了 12 小时、临时文件放了一天以上就不再认")
+
+        R, _ = build(tempfile.mkdtemp(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1")
         assert not exists(R, "bb1") and not exists(R, "dd1") and r["removed_blobs"] == 2

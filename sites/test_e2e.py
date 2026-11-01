@@ -410,7 +410,7 @@ def step_finish():
         step(f"{k} 的分段日志换回真名", bool(logs), os.listdir(os.path.join(BD, "logs/tasks")))
     words = [BD, "guest/e2e", "guest_e2e", "alice/"]
     r = subprocess.run(["grep", "-rlF", *sum((["-e", w] for w in words), []), RROOT], capture_output=True, text=True)
-    names = [os.path.join(dp, f) for dp, dns, fs in os.walk(RROOT) for f in dns + fs if "guest" in f or "e2e" in os.path.relpath(os.path.join(dp, f), RROOT)]
+    names = [os.path.join(dp, f) for dp, dns, fs in os.walk(RROOT) for f in dns + fs if "guest" in f or "e2e" in os.path.relpath(os.path.join(dp, f), RROOT).split("/")]
     links = [os.readlink(os.path.join(dp, f)) for dp, dns, fs in os.walk(RROOT) for f in dns + fs if os.path.islink(os.path.join(dp, f))]
     step("执行机根目录里 grep 不到 box 数据目录和输入的真名（文件内容、文件名、软链接）",
          r.stdout.strip() == "" and not names and not any(BD in t or "guest" in t for t in links), (r.stdout[:500], names[:5]))

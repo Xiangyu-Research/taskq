@@ -1,6 +1,6 @@
 """有盘空间预算的 relay 机器（envs/machines.py RELAY 条目的 budget）的清理（2026-10-31）：剩余低于软线时，先删总队列不再要的
 视图（state 里登记过的各任务的视图，加上内容插件建视图的文件夹（scripts/sites/names.py 的 VIEW_ROOTS）下的目录；不在 keep 里、没有 .incomplete（正在建）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
-硬链接收编、老目录还有一份的不碰），直到剩余回到软线以上。还不够时，自己不用、另一个链接在同一个盘上别的执行机（siblings）
+硬链接收编、老目录还有一份的不碰；正在传、视图还没建好的任务钉住的（R/state/pins/，relay.py stage 写，12 小时内的）和传到一半的临时文件不碰，11/1），直到剩余回到软线以上。还不够时，自己不用、另一个链接在同一个盘上别的执行机（siblings）
 blobs 里的 blob 删掉自己这个链接（那台不用了它下次清理时删）。只碰根目录 R 里面的东西。
 根目录经软链接到达时，视图里的软链接指的是软链接的路径，比较时都换成真实路径。"""
 import os
@@ -66,6 +66,25 @@ if free()<soft:
             continue
         rmtree(d)
         out['removed_views'].append(rel)
+import time
+pinned=set()
+PD=os.path.join(R,'state','pins')
+for f in (os.listdir(PD) if os.path.isdir(PD) else []):
+    try:
+        p=os.path.join(PD,f)
+        if f.endswith('.json') and time.time()-os.path.getmtime(p)<12*3600:
+            pinned|=set(json.load(open(p)))
+    except (OSError,ValueError):
+        continue
+def skip(p,f):
+    if f in pinned:
+        return True
+    if '.' in f:
+        try:
+            return time.time()-os.lstat(p).st_mtime<86400
+        except OSError:
+            return True
+    return False
 if free()<soft and os.path.isdir(B) and inside(B,R):
     used=set()
     for dp,dns,fns in os.walk(D):
@@ -77,9 +96,12 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
     for dp,_,fns in os.walk(B):
         for f in fns:
             p=os.path.normpath(os.path.join(dp,f))
-            if os.path.realpath(p) in used or os.path.islink(p):
+            if os.path.realpath(p) in used or os.path.islink(p) or skip(p,f):
                 continue
-            st=os.lstat(p)
+            try:
+                st=os.lstat(p)
+            except OSError:
+                continue
             if st.st_nlink!=1:
                 continue
             cand.append((max(st.st_atime,st.st_mtime),p,st.st_size))
@@ -88,7 +110,10 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
             break
         if not inside(p,B):
             continue
-        os.remove(p)
+        try:
+            os.remove(p)
+        except OSError:
+            continue
         out['freed']+=sz
         out['removed_blobs']+=1
 if free()<soft and os.path.isdir(B) and inside(B,R):
@@ -96,9 +121,12 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
     for dp,_,fns in os.walk(B):
         for f in fns:
             p=os.path.normpath(os.path.join(dp,f))
-            if os.path.realpath(p) in used or os.path.islink(p) or not inside(p,B):
+            if os.path.realpath(p) in used or os.path.islink(p) or not inside(p,B) or skip(p,f):
                 continue
-            st=os.lstat(p)
+            try:
+                st=os.lstat(p)
+            except OSError:
+                continue
             if st.st_nlink!=2:
                 continue
             for sb in sib:

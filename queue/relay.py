@@ -217,6 +217,19 @@ STATUS_PY = STATUS_PY.replace("@DATA@", RB.rename("BRAIN_TUMOR"))
 
 MISSING_PY = HEAD + "spec.json_out([i for i in A if not os.path.isfile(os.path.join(R,'blobs',i[:2],i))])\n"
 
+PIN_PY = HEAD + """d=os.path.join(R,'state','pins')
+os.makedirs(d,exist_ok=True)
+p=os.path.join(d,A['key']+'.json')
+if A.get('hashes') is None:
+    if os.path.exists(p):
+        os.remove(p)
+else:
+    with open(p+'.tmp','w') as f:
+        json.dump(A['hashes'],f)
+    os.replace(p+'.tmp',p)
+spec.json_out(1)
+"""
+
 ADOPT_PY = HEAD + """import hashlib
 def sha(p):
     x=hashlib.sha256()
@@ -442,12 +455,24 @@ def lookup(key):
 
 def stage(name, key, nice=None, add=True, say=print):
     """box 上的数据 → 那边（别名）；add 时再加进那边的队列。→ 别名的 key。"""
-    import tunnel
     real, D = lookup(key), box_data()
     ex = N.export(real, D, RN.Names())
     alias = S.resolve(real["recipe"], ex["params"])
     hs = sha256s(sorted({p for _, p in ex["files"]}))
     links = {rel: hs[p] for rel, p in ex["files"]}
+    pin = S.safe(key)
+    rpy(name, PIN_PY, dict(key=pin, hashes=sorted(set(links.values()))))  # 视图建好前那边的清理不删这些块（11/1）
+    try:
+        return _stage(name, key, nice, add, say, real, D, ex, alias, hs, links)
+    finally:
+        try:
+            rpy(name, PIN_PY, dict(key=pin, hashes=None))
+        except RuntimeError as e:
+            say(f"撤掉 {key} 的钉住记录没成（{e}），清理 12 小时后不再认它")
+
+
+def _stage(name, key, nice, add, say, real, D, ex, alias, hs, links):
+    import tunnel
     miss = rpy(name, MISSING_PY, sorted(set(links.values())))
     say(f"{key} → {alias['key']}：{len(links)} 个文件，那边缺 {len(miss)} 个")
     srcs, job = adopt_srcs(name), conf(name).get("adopt_job")
