@@ -33,10 +33,20 @@ PARTIAL = ".partial."
 
 
 def entries(data, inp):
-    """一个输入 → ([(相对数据目录的路径, 绝对路径)], [缺的说明])。"""
+    """一个输入 → ([(相对数据目录的路径, 绝对路径)], [缺的说明])。带通配符的展开成匹配到的文件，一个都没有算缺。"""
     rel = os.path.relpath(inp, data)
     if rel.startswith(".."):
         return [], [f"{inp} 不在数据目录里"]
+    if glob.has_magic(rel):
+        hits = sorted(glob.glob(inp))
+        if not hits:
+            return [], [f"{rel}（一个都没有）"]
+        out, miss = [], []
+        for h in hits:
+            e, m = entries(data, h)
+            out += e
+            miss += m
+        return out, miss
     if os.path.isdir(inp):
         if os.path.exists(os.path.join(inp, ".incomplete")):
             return [], [f"{rel}（建到一半）"]

@@ -221,8 +221,8 @@ def plan(s, root=None):
         return bool(r) and r["step"] == "push" and ((r.get("of"), r["key"]) == (st["name"], key)
                                                     or (r.get("to") == mach and sorted(r.get("paths") or []) == sorted(paths)))
 
-    def queue_item(t, st, label, n, mach, after=None):
-        """任务队列里的一项（taskq.py add --recipe command 的参数，machines = mach；after = 先要做完的任务）。"""
+    def queue_item(t, st, label, n, mach, after=None, inputs=None):
+        """任务队列里的一项（taskq.py add --recipe command 的参数，machines = mach；after = 先要做完的任务；inputs = 执行机要准备的输入）。"""
         qd = st["queue"]
         q = {}
         for k, v in qd.items():
@@ -233,6 +233,8 @@ def plan(s, root=None):
         q.setdefault("machines", [mach])
         if after:
             q["after"] = after
+        if inputs:
+            q["inputs"] = inputs
         return dict(op="taskq", step=st["name"], key=t["key"], group="taskq", label=label, nice=n, qnice=qd.get("nice", 0),
                     args=S.kv_args("command", q)[1:], cmd=q["cmd"], qk=q["key"], machine=mach)
 
@@ -245,8 +247,12 @@ def plan(s, root=None):
         if wait:
             return True
         mach = tg["machine"]
-        if mach in M.RELAY:  # relay.py 领到后连同输入一起换名送过去
-            todo.append(queue_item(t, st, label, n, mach))
+        if mach in M.RELAY:  # relay.py 领到后连同输入一起送过去：输入按命令的 --stage needs:<阶段> 列出，不支持的用 queue 的 inputs
+            cmd = S.fill(st["cmd"], t["names"], keep=())
+            needs = step_needs(cmd)
+            if needs is None and "inputs" in qd:
+                needs = inputs_of(qd, t["names"], t.get("each") or ())
+            todo.append(queue_item(t, st, label, n, mach, inputs=needs))
             return True
         if mach != hub:
             cmd = S.fill(st["cmd"], t["names"], keep=())
@@ -314,13 +320,11 @@ def plan(s, root=None):
     def where(t, tg, per_task):
         """PLACE 里的一项 → 地方（trainer 换成训这个任务的执行机的 queue，带 trainer=True），或者用不了的原因。
         queue:<机器>：那台暂停检查（OFFLINE）时用不了；那台已经换成接替它的 relay 机器（machines.py 的 replaces，它的 AUTO 开着、
-        那台的关着）时用接替的那台，have 的用不了（relay 机器上的结果拉回 box 后就删，查不了）。"""
+        那台的关着）时用接替的那台（输入由 relay.py 传过去）。"""
         if tg["kind"] == "queue":
             m = tg["machine"]
             r = M.successor(m)
             if r and P.AUTO.get(r) and not P.AUTO.get(m):
-                if tg["have"]:
-                    return f"{m} 换成了 {r}，那边没有现成的输入"
                 m, tg = r, dict(tg, machine=r)
             if m in P.OFFLINE:
                 return f"{m} 暂停检查（{P.OFFLINE[m]}）"
@@ -524,12 +528,18 @@ def inputs_of(qd, names, each=()):
 
 
 def step_needs(cmd):
-    """步骤的命令 → 要用的输入（相对数据目录）；不支持 --stage needs 或运行出错 → None（原因见 no_needs）。"""
+    """步骤的命令 → 要用的输入（相对数据目录，带 * 的是通配）；不支持 --stage needs 或运行出错 → None（原因见 no_needs）。
+    --stage <阶段> 换成 --stage needs:<阶段>；命令开头的 X=… 当环境变量。"""
     tok = shlex.split(cmd)
     if "--stage" not in tok or tok.index("--stage") + 1 >= len(tok):
         return None
-    tok[tok.index("--stage") + 1] = "needs"
-    r = subprocess.run(tok, cwd=REPO, capture_output=True, text=True, timeout=120)
+    i = tok.index("--stage") + 1
+    tok[i] = "needs:" + tok[i]
+    env = dict(os.environ)
+    while tok and "=" in tok[0] and tok[0].split("=", 1)[0].isidentifier():
+        k, v = tok.pop(0).split("=", 1)
+        env[k] = v
+    r = subprocess.run(tok, cwd=REPO, capture_output=True, text=True, timeout=120, env=env)
     if r.returncode != 0:
         err = (r.stderr.strip().splitlines() or [f"退出码 {r.returncode}"])[-1]
         NEEDS_ERR[cmd] = f"--stage needs 出错（{err}）"

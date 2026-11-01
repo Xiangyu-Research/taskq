@@ -389,7 +389,7 @@ want_cmds = {
     ("oof", "t3met"): f"{PY} research/RQ1/analysis/oof_eval.py {M5}",
     ("paired", "t3met"): f"{PY} research/RQ1/analysis/paired_compare.py --ref {T}/RQ1/analysis/Dataset101_GLIrq1/nnUNetTrainer_save10__{P}/folds_0-1-2-3-4 "
                          f"--cmp T3={T}/RQ1/analysis/Dataset116_METrq1/nnUNetTrainer_save10__{P}/oof/eval --out {T}/RQ1/analysis/Dataset116_METrq1/nnUNetTrainer_save10__{P}/oof/paired",
-    ("ens", "t14met"): f"ENSEMBLE_ONLY=1 bash research/RQ1/analysis/run_predict_eval.sh {T}/nnUNet/results/Dataset121_GLIMETrq1/nnUNetTrainer_save10__{P} '0 1 2 3 4'",
+    ("ens", "t14met"): f"ENSEMBLE_ONLY=1 bash research/RQ1/analysis/run_predict_eval.sh --stage all {T}/nnUNet/results/Dataset121_GLIMETrq1/nnUNetTrainer_save10__{P} '0 1 2 3 4'",
     ("compare_all", "all"): f"{PY} research/RQ1/analysis/compare_all.py",
 }
 inv = {v: k for k, v in by_cmd.items()}
@@ -494,9 +494,12 @@ trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
 x = tc(A.plan(snap())[0])
 check("queue:dicc，DICC 换成了 dicc1 → 进总队列只给 dicc1（relay.py 连同输入送过去，不先传）",
       len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["dicc1"]' in x[0]["args"])
+check("给执行机的任务单带上命令列出的输入（--stage needs:<阶段>，relay.py 按真名传过去）",
+      any(y.startswith("inputs=") and f"{TCM}/fold_2/checkpoint_final.pth" in y for y in x[0]["args"]))
 A.P.PLACE = dict(BASE, infer=["queue:dicc have", "box:gpu"])
 x = tc(A.plan(snap())[0])
-check("queue:dicc have，换成了 dicc1 → 用不了（relay 机器上查不了现成的输入），用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
+check("queue:dicc have，换成了 dicc1 → 照样给 dicc1（执行机用真名，输入由 relay.py 传过去，11/1）",
+      len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["dicc1"]' in x[0]["args"])
 A.P.PLACE = dict(BASE, infer=["queue:dicc", "box:gpu"])
 A.P.OFFLINE = {"dicc1": "停机"}
 x = tc(A.plan(snap())[0])
@@ -845,7 +848,8 @@ with tempfile.TemporaryDirectory() as R:
                 continue
             seen.add((t["exp"], st["name"]))
             got = REAL_STEP_NEEDS(cmd)
-            if not got or not any(x.endswith("/checkpoint_final.pth") for x in got):
+            want = "/checkpoint_final.pth" if "--stage infer" in cmd else "/dataset.json"
+            if not got or not any(x.endswith(want) for x in got):
                 bad.append(f"{t['lab']} {st['name']}：{A.no_needs(cmd)}")
     for k, v in old_bt.items():
         if v is None:

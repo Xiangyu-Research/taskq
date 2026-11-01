@@ -23,8 +23,7 @@ PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
 
 T = tempfile.mkdtemp(prefix="e2e_", dir=os.environ.get("E2E_TMP") or None)
 BD = os.path.join(T, "box")        # box 的数据目录
-# 执行机的根目录：实际在 T/r；临时目录的路径里可能有 FORBIDDEN 的字样（如 PhD），tunnel.py 送去的脚本只认不带它们的路径，
-# 所以经系统临时目录里的一个软链接用（结束时删掉）
+# 执行机的根目录：实际在 T/r，经系统临时目录里的一个软链接用（根目录经软链接到达的情况也测到；结束时删掉）
 os.makedirs(os.path.join(T, "r"))
 RLINK = tempfile.mktemp(prefix="e2e_r_", dir="/tmp")
 os.symlink(os.path.join(T, "r"), RLINK)
@@ -322,23 +321,28 @@ def step_stage():
          len(blobs) == 6 and vf and all(t and t.startswith(os.path.join(RROOT, "blobs")) and os.path.isfile(os.path.join(D, p))
                                         for p, t in vf.items()), (len(blobs), vf))
     k1 = keys()[SLOW]
-    step("视图在 in/<别名>、结果在 out/<别名>/o、key 是 job/<别名>",
-         all(v.startswith("in/") for v in k1["views"]) and k1["params"]["out"].startswith("out/") and k1["params"]["out"].endswith("/o")
-         and k1["alias"].startswith("job/"), k1)
+    rs = relay.remote_status(NAME)
+    step("和 box 一样的路径：视图是输入的文件夹、结果在 out 原样、那边的 key 就是总队列的 key（11/1 起不换名）",
+         k1["views"] == ["guest/e2e/code", "guest/e2e/d1"] and k1["params"]["out"] == "guest/e2e/r/t1" and k1["outs"] == ["guest/e2e/r/t1"]
+         and "alias" not in k1 and sorted(t["key"] for t in rs["taskq"]["tasks"]) == KEYS, k1)
     step("那边还没开 worker（这次检查开始时还没有备好的任务）", pueue_tasks() == {}, pueue_tasks())
     # 两个任务的视图同时在：一个重新传数据只清自己的视图
     k2 = keys()[KEYS[1]]
     own2 = [v for v in k2["views"] if v not in k1["views"]][0]
     own1 = [v for v in k1["views"] if v not in k2["views"]][0]
-    wb(os.path.join(D, own2, "stray2.txt"), "x")
-    wb(os.path.join(D, own1, "stray1.txt"), "x")
+    blob = next(os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs)
+    os.symlink(blob, os.path.join(D, own2, "stray2.txt"))
+    os.symlink(blob, os.path.join(D, own1, "stray1.txt"))
+    os.symlink(blob, os.path.join(D, "guest/e2e/code", "stray0.txt"))
     before = view_files()
     relay.stage(NAME, SLOW, nice=50, add=False, say=LOG.append)
     after = view_files()
-    step("两个任务的视图共存：t1 重新传数据删了自己视图里多出来的，不碰 t2 的",
-         not os.path.exists(os.path.join(D, own1, "stray1.txt")) and os.path.exists(os.path.join(D, own2, "stray2.txt"))
+    step("几个任务的视图共存：t1 重新传数据只删自己独占的视图里多出来的链接，不碰 t2 的、大家共用的",
+         not os.path.lexists(os.path.join(D, own1, "stray1.txt")) and os.path.lexists(os.path.join(D, own2, "stray2.txt"))
+         and os.path.lexists(os.path.join(D, "guest/e2e/code", "stray0.txt"))
          and all(after.get(p) == t for p, t in before.items() if not p.endswith("stray1.txt")), after)
     os.remove(os.path.join(D, own2, "stray2.txt"))
+    os.remove(os.path.join(D, "guest/e2e/code", "stray0.txt"))
     check()
     jobs = pueue_tasks()
     step("下一次检查：有备好的任务了，开了一个 worker", len(jobs) == 1 and next(iter(jobs.values()))["label"] == f"worker:{WID}", jobs)
@@ -358,7 +362,7 @@ def progress_of(key):
 def step_stop():
     wait(lambda: progress_of(SLOW) == 2, 120, "t1 做完第 2 轮")
     central(f"stop --why 测试 {SLOW}")
-    alias = keys()[SLOW]["alias"]
+    alias = SLOW
 
     def released():
         t = box_tasks()[SLOW]
@@ -378,7 +382,7 @@ def step_stop():
     # 别的任务还在用视图时清理：只删不要的
     before = view_files()
     reg = (relay.load_state().get("views") or {}).get(NAME) or {}
-    keep = {v for k in keys().values() for v in relay.views_of(k)}
+    keep = {v for k in keys().values() for v in relay.paths_of(k)}
     g = relay_gc.gc(NAME, keep, relay.rpy, soft_gb=1e9, views=reg)
     step("还有任务要用时 relay_gc 清理：要用的视图和 blob 一个不删",
          g["removed_views"] == [] and view_files() == before and all(os.path.isfile(os.path.join(RROOT, "data", p)) for p in before), g)
@@ -407,13 +411,9 @@ def step_finish():
              and json.load(open(os.path.join(out, "PROGRESS.json")))["done"] == 3 and os.path.exists(os.path.join(out, "DONE")), res)
         step(f"{k} 拉回时 DONE 最后放", ORDER.get(k) and ORDER[k][-1] == f"guest/e2e/r/t{i}/DONE", ORDER.get(k))
         logs = [f for f in os.listdir(os.path.join(BD, "logs/tasks")) if f.startswith(S.safe(k) + "__")]
-        step(f"{k} 的分段日志换回真名", bool(logs), os.listdir(os.path.join(BD, "logs/tasks")))
-    words = [BD, "guest/e2e", "guest_e2e", "alice/"]
-    r = subprocess.run(["grep", "-rlF", *sum((["-e", w] for w in words), []), RROOT], capture_output=True, text=True)
-    names = [os.path.join(dp, f) for dp, dns, fs in os.walk(RROOT) for f in dns + fs if "guest" in f or "e2e" in os.path.relpath(os.path.join(dp, f), RROOT).split("/")]
-    links = [os.readlink(os.path.join(dp, f)) for dp, dns, fs in os.walk(RROOT) for f in dns + fs if os.path.islink(os.path.join(dp, f))]
-    step("执行机根目录里 grep 不到 box 数据目录和输入的真名（文件内容、文件名、软链接）",
-         r.stdout.strip() == "" and not names and not any(BD in t or "guest" in t for t in links), (r.stdout[:500], names[:5]))
+        step(f"{k} 的分段日志拉回了", bool(logs), os.listdir(os.path.join(BD, "logs/tasks")))
+    r = subprocess.run(["grep", "-rlF", BD, os.path.join(RROOT, "data")], capture_output=True, text=True)
+    step("执行机的数据目录里没有 box 的绝对路径（命令里的 {data} 在那边展开）", r.stdout.strip() == "", r.stdout[:500])
 
 
 def step_gc():

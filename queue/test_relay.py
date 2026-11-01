@@ -3,7 +3,8 @@
   1. 每次检查的决策（plan / fill）：假的总队列、那边的状态、box 的任务；
   2. 拉回时挪进数据目录的顺序：中途出错时训完的标志不在（不会被当成训完）；
   3. 真跑一遍：本机模拟"那边"（假的 ssh、srun 在本地跑，服务开在 127.0.0.1），推代码包、传数据（stage）、
-     那边的队列、拉回（fetch）、换回真名。
+     那边的队列、拉回（fetch），和 box 一样的真名路径；
+  4. 删任务时按引用计数只删别的任务不用的路径；redo（重新传）。
 跑法：python3 scripts/queue/test_relay.py（在 box 上；checkpoint 用本机的 nnunet 环境）"""
 import json
 import os
@@ -14,7 +15,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import test_relay_names as TN  # noqa: E402  （设了 RELAY_DIR、建了临时目录 TN.TMP）
+import test_relay_plugins as TN  # noqa: E402  （设了 RELAY_DIR、建了临时目录 TN.TMP）
 
 T = TN.TMP
 FAKE = os.path.join(T, "fake_ssh")
@@ -39,6 +40,7 @@ os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1
                   PHD_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
                   PATH=BIN + ":" + os.environ["PATH"])
 
+sys.path.insert(0, os.path.join(HERE, "..", "..", "envs"))
 import machines as M  # noqa: E402
 import spec as S  # noqa: E402
 import relay  # noqa: E402
@@ -100,14 +102,19 @@ def rtask(key, state, worker=None):
     return dict(key=key, state=state, worker=worker, nice=5, order=1, note="", failures=0, spec=dict(out=f"out/{key}"))
 
 
+def record(k, **kw):
+    return dict(dict(recipe="nnunet", params={}, data=[f"nnUNet/preprocessed/{k.split('/')[0]}"], views=[f"nnUNet/preprocessed/{k.split('/')[0]}"],
+                     outs=[f"out/{k}"]), **kw)
+
+
 def S0(mt, box=(), recs=()):
     return dict(taskq={Q: dict(enabled=True, tasks=mt)}, pueue={M.hub(): dict(tasks=list(box))}, records=list(recs),
                 ok={M.hub(): True}, src={n: dict(tasks={}) for n in M.names("train")})
 
 
 def keymap(*pairs):
-    return dict(keys={NAME: {k: dict(alias=a, recipe="nnunet", params={}, data=[f"nnUNet/preprocessed/{k.split('/')[0]}"])
-                             for k, a in pairs}})
+    """(key, 那边的 key)：两个一样 = 11/1 起的真名记录；不一样 = 之前换名的老记录（alias）。"""
+    return dict(keys={NAME: {k: record(k, **(dict(alias=a) if a != k else {})) for k, a in pairs}})
 
 
 def ops(acts):
@@ -115,7 +122,7 @@ def ops(acts):
 
 
 def test_adopt_out():
-    """老数据目录、别的执行机里训到一半的存档（最新的那份）拷进别名结果目录；这边已有更新的存档或训完了时不动。"""
+    """老数据目录、别的执行机里训到一半的存档（最新的那份）拷进结果目录；这边已有更新的存档或训完了时不动。"""
     import subprocess
     old, sib, R = os.path.join(T, "ao_old"), os.path.join(T, "ao_sib"), os.path.join(T, "ao_R")
     src, ssrc = os.path.join(old, "res", "fold_3"), os.path.join(sib, "data", "a", "fold_3")
@@ -124,7 +131,7 @@ def test_adopt_out():
         open(os.path.join(src, f), "wb").write(b)
     dirs = [ssrc, src]
     run = lambda: S.json_in(subprocess.run(
-        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, alias="a/fold_3", resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
+        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/fold_3", resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
                                                                          done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"])),
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(HERE)), check=True).stdout)
     r = run()
@@ -134,7 +141,7 @@ def test_adopt_out():
     assert not [f for f in os.listdir(new) if f.endswith(".relaytmp")]
     open(os.path.join(new, "checkpoint_latest.pth"), "wb").write(b"N")
     assert run()["n"] == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"N"
-    ok("老目录的存档拷进别名结果目录；已有更新的存档时不覆盖")
+    ok("老目录的存档拷进结果目录；已有更新的存档时不覆盖")
     os.makedirs(ssrc)
     open(os.path.join(ssrc, "checkpoint_latest.pth"), "wb").write(b"S")
     t = time.time() + 60
@@ -152,7 +159,7 @@ def test_adopt_out():
 
 
 def test_plan():
-    K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
+    K = A = "Dataset1_x/tr/0"
     st = keymap((K, A))
     RS = lambda *ts, **kw: dict(taskq=dict(tasks=list(ts), paused=kw.get("paused", False)), tasks=kw.get("tasks", {}), free=500e9)  # noqa: E731
 
@@ -278,10 +285,32 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(), ust)
     assert ops(acts) == [], acts
     acts, _ = relay.plan(S0([mtask(K, "done", "other")]), NAME, RS(), ust)
-    assert ops(acts) == [("drop", K)] and acts[0].get("gone") and acts[0]["out"], acts
+    assert ops(acts) == [("drop", K)] and acts[0].get("gone") and acts[0]["rkey"] == A, acts
     acts, _ = relay.plan(S0([]), NAME, RS(), ust)
     assert ops(acts) == [("drop", K)] and acts[0].get("gone"), acts
     ok("总队列里改分给了别的执行机（换卡）→ 那边队列里删掉（unq）、结果留着给它收编；总队列训完了再删结果（不再删队列）")
+
+    old = keymap((K, "Dataset901_ab/tr/0"))
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "123")), old)
+    assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
+    acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask("Dataset901_ab/tr/0", "done")), old)
+    assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "drop"][0]["rkey"] == "Dataset901_ab/tr/0", acts
+    ok("11/1 前换名的老记录：那边的 key 是别名，照样续、删")
+
+    red = dict(keys={NAME: {K: record(K, alias="Dataset901_ab/tr/0", redo=1.0)}})
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "free")), red)
+    assert ops(acts) == [("beat", K), ("redo", K)] and not acts[1]["busy"] and acts[1]["rkey"] == "Dataset901_ab/tr/0", acts
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "123")), red)
+    assert ops(acts) == [("beat", K), ("redo", K), ("rstop", K)] and acts[1]["busy"], acts
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), red)
+    assert ops(acts) == [("beat", K), ("redo", K)], acts
+    acts, _ = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("Dataset901_ab/tr/0", "free")), red)
+    assert ops(acts) == [("drop", K)] and not acts[0]["gone"], acts
+    acts, _ = relay.plan(S0([]), NAME, RS(), red)
+    assert ops(acts) == [("drop", K)] and acts[0]["gone"], acts
+    acts, stuck = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "1")), red)
+    assert ops(acts) == [("rstop", K)], acts
+    ok("redo：领着的 → 那边没人领着时删掉、下次重新传，在训的先停；不归它的 → 删掉（那边在训的先停）")
 
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 3 * 3600}))
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:down" in stuck, stuck
@@ -389,7 +418,7 @@ def test_place():
 # ---------------- 3. 真跑 ----------------
 def test_e2e():
     TN.setup()
-    sp = S.resolve("nnunet", dict(dataset=TN.REAL, fold="0"))
+    sp = S.resolve("nnunet", dict(dataset=TN.DS, fold="0"))
     relay.lookup = lambda k: sp
     relay.box_data = lambda: TN.ROOT
     bid, path = relay_bundle.build(NAME, None, os.path.join(T, "bundles"), root=RROOT)
@@ -422,39 +451,46 @@ def test_e2e():
         os.remove(os.path.join(T, "no_slot"))
     ok("adopt_job：收编在 srun 的 CPU 作业里跑（-I 等排队）；排不上 → NoSlot（这次不传）")
 
-    akey = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
-    alias = akey.split("/")[0]
-    pre = os.path.join(RROOT, "data", "nnUNet", "preprocessed", alias)
+    rkey_ = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
+    assert rkey_ == sp["key"]
+    pre = os.path.join(RROOT, "data", "nnUNet", "preprocessed", TN.DS)
     links = [os.path.join(dp, f) for dp, _, fs in os.walk(pre) for f in fs]
     assert links and all(os.path.isfile(p) for p in links), links
     assert not os.path.exists(os.path.join(pre, ".incomplete"))
     gt = sorted(os.listdir(os.path.join(pre, "gt_segmentations")))
-    assert gt == ["c0001.nii.gz", "c0002.nii.gz", "c0003.nii.gz", "c0004.nii.gz"], gt
-    assert open(os.path.join(pre, "gt_segmentations", "c0001.nii.gz"), "rb").read() == b"gt100101A"
-    assert TN.REAL not in open(os.path.join(pre, "dataset.json")).read()
+    assert gt == sorted(c + ".nii.gz" for c in TN.CASES), gt
+    assert open(os.path.join(pre, "gt_segmentations", TN.CASES[0] + ".nii.gz"), "rb").read() == b"gt" + TN.CASES[0].encode()
     blobs = sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs")))
     rs = relay.remote_status(NAME)
-    assert [(t["key"], t["state"]) for t in rs["taskq"]["tasks"]] == [(akey, "free")], rs["taskq"]["tasks"]
-    ok(f"传数据：{blobs} 个文件按内容存、软链接视图、别名，加进那边的队列")
+    assert [(t["key"], t["state"]) for t in rs["taskq"]["tasks"]] == [(sp["key"], "free")], rs["taskq"]["tasks"]
+    k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
+    assert k["views"] == [f"nnUNet/preprocessed/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
+    ok(f"传数据：{blobs} 个文件按内容存、软链接放在和 box 一样的路径，key 和参数原样，加进那边的队列")
 
-    akey2 = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
-    assert akey2 == akey and sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs"))) == blobs
+    rkey2 = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
+    assert rkey2 == sp["key"] and sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs"))) == blobs
     ok("再传一次：不重传、不重复加")
 
-    asp = S.resolve("nnunet", relay.keys_of(relay.load_state(), NAME)[sp["key"]]["params"])
-    TN.fake_output(os.path.join(RROOT, "data"), asp, alias)
-    TN.wb(os.path.join(RROOT, "data", asp["out"], "checkpoint_latest.pth"), b"latest")
+    rout = os.path.join(RROOT, "data", sp["out"])
+    for c in TN.CASES[:2]:
+        TN.wb(os.path.join(rout, "validation", c + ".nii.gz"), b"p")
+    TN.wj(os.path.join(rout, "validation", "summary.json"), dict(metric_per_case=[{}, {}]))
+    TN.wb(os.path.join(rout, "checkpoint_final.pth"), b"ck")
+    TN.wb(os.path.join(rout, "checkpoint_latest.pth"), b"latest")
+    TN.wb(os.path.join(rout, "debug.json"), b"{}")
+    TN.wj(os.path.join(os.path.dirname(rout), "plans.json"), {})
+    TN.wb(os.path.join(RROOT, "data", "logs", "tasks", S.safe(sp["key"]) + "__12345_seg1.log"), b"log")
     relay.fetch(NAME, sp["key"], say=lambda m: None)
     out = os.path.join(TN.ROOT, sp["out"])
     assert os.path.exists(os.path.join(out, "validation", "summary.json"))
-    assert sorted(f for f in os.listdir(os.path.join(out, "validation")) if f.endswith(".nii.gz")) == ["100101A.nii.gz", "100101A_ig.nii.gz"]
+    assert sorted(f for f in os.listdir(os.path.join(out, "validation")) if f.endswith(".nii.gz")) == sorted(c + ".nii.gz" for c in TN.CASES[:2])
     assert not os.path.exists(os.path.join(out, "checkpoint_latest.pth"))
     assert os.path.exists(os.path.join(out, "checkpoint_final.pth"))
-    assert alias not in open(os.path.join(out, "debug.json")).read()
+    assert os.path.exists(os.path.join(os.path.dirname(out), "plans.json"))
     assert not os.listdir(os.path.join(TN.ROOT, ".relay_in"))
     logs = os.listdir(os.path.join(TN.ROOT, "logs", "tasks"))
     assert logs == [S.safe(sp["key"]) + "__12345_seg1.log"], logs
-    ok("拉回：真名、不拉 checkpoint_latest、分段日志改名、临时目录删掉")
+    ok("拉回：同样的相对路径、不拉 checkpoint_latest、上一级的 json 和分段日志、临时目录删掉")
 
     relay.write_status(NAME, relay.remote_status(NAME), relay.load_state())
     st = json.load(open(relay.STATUS))[NAME]
@@ -469,44 +505,53 @@ def test_e2e_path(pre):
                     for dp, _, fs in os.walk(pre) for f in fs)
     sp = TN.path_setup()
     relay.lookup = lambda k: sp
-    akey = relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    rk = relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
     k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
-    assert akey.startswith("job/") and k["views"] == k["params"]["data"] and len(k["views"]) == 3, k
-    assert k["cleanup"] == [os.path.dirname(k["params"]["out"])], k
     D = os.path.join(RROOT, "data")
-    a_in = k["views"][0]
-    assert open(os.path.join(D, a_in, "y_0000.nii.gz"), "rb").read() == b"yy"
-    assert open(os.path.join(D, a_in, "a", "x_0000.nii.gz"), "rb").read() == b"xa"
-    assert not any(os.path.exists(os.path.join(D, v, ".incomplete")) for v in k["views"])
+    assert rk == sp["key"] and k["views"] == ["proj/inputs/cohortA"], k
+    assert set(k["outs"]) == {sp["out"], "proj/analysis/thing/shared"}, k
+    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.nii.gz" in k["inputs"] and not any("t1" in x for x in k["inputs"]), k
+    assert open(os.path.join(D, "proj/inputs/cohortA", "y_0000.nii.gz"), "rb").read() == b"yy"
+    assert open(os.path.join(D, "proj/inputs/cohortA", "a", "x_0000.nii.gz"), "rb").read() == b"xa"
+    assert open(os.path.join(D, "raw/Set/c2/c2-seg.nii.gz"), "rb").read() == b"sc2"
+    assert not os.path.exists(os.path.join(D, "proj/inputs/cohortA", ".incomplete"))
     after = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
                    for dp, _, fs in os.walk(pre) for f in fs)
     assert after == before, "训练的视图被动了"
-    reg = relay.load_state()["views"][NAME]
-    assert set(k["views"]) <= set(reg) and any(v.startswith("nnUNet/preprocessed/") for v in reg), reg
-    TN.wb(os.path.join(D, a_in, "stray.txt"), b"?")
+    TN.wb(os.path.join(D, "proj/inputs/cohortA", "stray.txt"), b"?")
+    blob = next(os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs)
+    os.symlink(blob, os.path.join(D, "proj/inputs/cohortA", "stale"))
     relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
-    assert not os.path.exists(os.path.join(D, a_in, "stray.txt")) and after == sorted(
-        (os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
-        for dp, _, fs in os.walk(pre) for f in fs)
-    ok("通用换名传数据：每个输入一个视图（登记了），只在自己的视图里删多出来的文件，同时在那边的训练视图不动")
+    assert not os.path.lexists(os.path.join(D, "proj/inputs/cohortA", "stale"))
+    assert os.path.exists(os.path.join(D, "proj/inputs/cohortA", "stray.txt"))  # 不是指向 blobs 的链接：不碰
+    os.remove(os.path.join(D, "proj/inputs/cohortA", "stray.txt"))
+    ok("通用插件传数据：文件夹是视图、文件和通配符展开的文件放在同样的路径；视图里只删多出来的指向 blobs 的链接；训练的视图不动")
 
-    asp = S.resolve("command", k["params"])
-    TN.wb(os.path.join(D, asp["out"], "a.csv"), b"1")
-    TN.wb(os.path.join(D, os.path.dirname(asp["out"]), "plans.json"), b"{}")
-    TN.wb(os.path.join(D, "logs", "tasks", S.safe(asp["key"]) + "__9_seg1.log"), b"log")
+    TN.wb(os.path.join(D, sp["out"], "a.csv"), b"1")
+    TN.wb(os.path.join(D, os.path.dirname(sp["out"]), "plans.json"), b"{}")
+    TN.wb(os.path.join(D, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"), b"log")
     try:
         relay.fetch(NAME, sp["key"], say=lambda m: None)
         raise AssertionError("少 .done 应报没做完")
     except relay.RN.RelayError as e:
         assert "还没" in str(e), e
     assert not os.path.exists(os.path.join(TN.ROOT, sp["out"]))
-    TN.wb(os.path.join(D, asp["out"], ".done"), b"")
+    TN.wb(os.path.join(D, sp["out"], ".done"), b"")
     relay.fetch(NAME, sp["key"], say=lambda m: None)
     out = os.path.join(TN.ROOT, sp["out"])
     assert sorted(os.listdir(out)) == [".done", "a.csv"], os.listdir(out)
-    assert os.path.exists(os.path.join(TN.ROOT, "RQ1/analysis/thing/plans.json"))
+    assert os.path.exists(os.path.join(TN.ROOT, "proj/analysis/thing/plans.json"))
     assert os.path.exists(os.path.join(TN.ROOT, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"))
-    ok("通用换名拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志换回真名放进 box")
+    ok("通用插件拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志放进 box")
+
+    keys = relay.keys_of(relay.load_state(), NAME)
+    tk = next(r for r in keys if r != sp["key"])
+    assert relay.droppable(keys, sp["key"], relay.paths_of(keys[sp["key"]])) == sorted(relay.paths_of(keys[sp["key"]]))
+    relay.drop_remote(NAME, sp["key"], sp["key"], gone=True)
+    assert not os.path.lexists(os.path.join(D, "raw/Set/c1/c1-seg.nii.gz")) and not os.path.exists(os.path.join(D, "proj/inputs"))
+    assert not os.path.exists(os.path.join(D, sp["out"])) and os.listdir(pre) and sp["key"] not in relay.keys_of(relay.load_state(), NAME)
+    assert not [f for f in os.listdir(os.path.join(D, "logs", "tasks")) if f.startswith(S.safe(sp["key"]))]
+    ok(f"删任务：它独占的输入、产出、日志删掉，空了的上级目录删掉；别的任务（{tk}）的视图不动")
 
     for bad in ("/etc", "a/../../x", "in"):
         try:
@@ -537,7 +582,7 @@ def test_tilde_root():
     files = relay_bundle.contents(NAME, commit="HEAD", root="~/st/t123")
     sb = next(t for p, (t, _) in files.items() if p.endswith("worker.sbatch"))
     assert "#SBATCH --output=../../../../data/logs/workers/%x_%j.out" in sb and "\nR=~/st/t123\n" in sb, sb
-    assert relay_bundle.rename("worker_start.sh") in sb  # 显存填充那条路（worker.sbatch → worker_start.sh）不绕开
+    assert "worker_start.sh" in sb  # 显存填充那条路（worker.sbatch → worker_start.sh）不绕开
     txt = "\n".join(t for t, _ in files.values())
     assert "~/st/t123/queue" in txt or "$HOME/st/t123/queue" in txt
     sh = "\n".join(t for p, (t, _) in files.items() if p.endswith((".sh", ".sbatch")))
@@ -616,60 +661,70 @@ def test_fresh_site():
     print("通过：新机器还没有代码包时先部署再读状态；部署失败这次当连不上")
 
 
-def test_forget():
-    """推理任务在那边删掉后，box 上为它做的别名 checkpoint 也删掉；训练任务、别的任务的不动（11/1）。"""
-    K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
-    top = os.path.join(relay.RN.RELAY_DIR, "ckpt")
-    mine = os.path.join(top, "Dataset901_ab", "tr", "fold_0")
-    other = os.path.join(top, "Dataset901_ab", "tr", "fold_1")
-    for d in (mine, other):
-        os.makedirs(d, exist_ok=True)
-        for f in ("checkpoint_final.pth", "checkpoint_final.pth.src"):
-            open(os.path.join(d, f), "w").close()
-    seen = []
-    rsh0, rtq0 = relay.rsh, relay.rtq
-    relay.rsh = lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "", ""))[1]
+def test_refcount():
+    """删一个任务时只删别的任务不用的路径：同一个数据集的几折共用视图，推理的输入在训练的产出下面（11/1）。"""
+    keys = {"t0": dict(views=["pre/X"], outs=["res/X/tr/fold_0"]),
+            "t1": dict(views=["pre/X"], outs=["res/X/tr/fold_1"]),
+            "inf": dict(inputs=["res/X/tr/fold_0/checkpoint_final.pth", "res/X/tr/dataset.json", "raw/A/img/a.nii.gz"],
+                        outs=["pred/X/tr/fold_0"]),
+            "ev": dict(inputs=["pred/X/tr/fold_0/a.nii.gz", "raw/A/lab/a.nii.gz"], outs=["an/X/fold_0/eval"])}
+    P = lambda k: relay.paths_of(keys[k])  # noqa: E731
+    assert relay.droppable(keys, "t0", P("t0")) == []
+    assert relay.droppable(keys, "t1", P("t1")) == ["res/X/tr/fold_1"]
+    assert relay.droppable(keys, "inf", P("inf")) == ["raw/A/img/a.nii.gz", "res/X/tr/dataset.json"]
+    assert relay.droppable(keys, "ev", P("ev")) == ["an/X/fold_0/eval", "raw/A/lab/a.nii.gz"]
+    k2 = {k: v for k, v in keys.items() if k not in ("t1", "inf")}
+    assert relay.droppable(k2, "t0", P("t0")) == ["pre/X", "res/X/tr/fold_0"]
+    assert relay.overlaps("a/b", {"a/b/c"}, relay.ancestors({"a/b/c"})) and relay.overlaps("a/b/c/d", {"a/b"}, set())
+    assert not relay.overlaps("a/bc", {"a/b"}, relay.ancestors({"a/b"}))
+    ok("引用计数：共用的视图、别的任务输入所在的产出不删；只是名字前缀相同的不算")
+
+    seen, rpy0, rtq0, st0 = [], relay.rpy, relay.rtq, relay.load_state
+    relay.rpy = lambda name, code, data=None, **kw: (seen.append((code, data)), 1)[1]
     relay.rtq = lambda name, cmd: (0, "")
+    relay.load_state = lambda: dict(keys={NAME: keys})
+    up0 = relay.update_state
+    relay.update_state = lambda fn: None
     try:
-        msgs = relay.execute(NAME, [dict(op="drop", key=K, alias=A, out="predictions/Dataset901_ab/tr/fold_0")], S0([]))
-        assert not os.path.exists(mine) and os.path.isfile(os.path.join(other, "checkpoint_final.pth")), msgs
-        relay.rsh = lambda name, cmd, input=None, timeout=300: (1, "", "boom")
-        msgs = relay.execute(NAME, [dict(op="drop", key=K, alias=A, out="predictions/Dataset901_ab/tr/fold_1")], S0([]))
-        assert os.path.isfile(os.path.join(other, "checkpoint_final.pth")), msgs
-        assert relay.RN.forget("nnUNet/results/Dataset901_ab/tr/fold_0") == []
+        msgs = relay.execute(NAME, [dict(op="drop", key="inf", rkey="inf")], S0([]))
+        assert seen and seen[-1][0] == relay.DROP_PY and seen[-1][1] == dict(paths=["raw/A/img/a.nii.gz", "res/X/tr/dataset.json"], logs="inf"), (seen, msgs)
+        seen.clear()
+        msgs = relay.execute(NAME, [dict(op="redo", key="ev", rkey="ev", busy=True)], S0([]))
+        assert not seen and "等它停下" in msgs[0], msgs
+        msgs = relay.execute(NAME, [dict(op="redo", key="ev", rkey="ev", busy=False)], S0([]))
+        assert seen[-1][1]["paths"] == ["an/X/fold_0/eval", "raw/A/lab/a.nii.gz"] and "重新传" in msgs[0], msgs
     finally:
-        relay.rsh, relay.rtq = rsh0, rtq0
-    shutil.rmtree(os.path.join(top, "Dataset901_ab"))
-    ok("推理任务那边删掉后删 box 上的别名 checkpoint；那边没删掉时留着；训练任务的结果路径不碰")
+        relay.rpy, relay.rtq, relay.load_state, relay.update_state = rpy0, rtq0, st0, up0
+    ok("drop / redo 只删算出来能删的路径和自己的日志；redo 时那边还领着就等")
 
 
 def test_drop_refused():
     """那边拒绝删任务（有人在训）时不删结果、总队列里也不交还；上次删了任务没删完结果的照常删（审查 11/1）。"""
-    K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
+    K = "Dataset1_x/tr/0"
     seen, central = [], []
-    rsh0, rtq0, cen0 = relay.rsh, relay.rtq, relay.taskq.central
-    relay.rsh = lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "", ""))[1]
+    rpy0, rtq0, cen0 = relay.rpy, relay.rtq, relay.taskq.central
+    relay.rpy = lambda name, code, data=None, **kw: (seen.append(data), 1)[1]
     relay.taskq.central = lambda args, timeout=300: (central.append(args), (0, "", ""))[1]
-    acts = [dict(op="drop", key=K, alias=A, out="predictions/Dataset901_ab/tr/fold_0"), dict(op="release", key=K, why="测试")]
+    acts = [dict(op="drop", key=K, rkey=K), dict(op="release", key=K, why="测试")]
     try:
-        for r in [(1, f"不删：{A}：claimed，有人在做"), None]:
+        for r in [(1, f"不删：{K}：claimed，有人在做"), None]:
             seen.clear(); central.clear()
             relay.rtq = lambda name, cmd, r=r: r
             msgs = relay.execute(NAME, acts, S0([]))
-            assert not any("rm -rf" in c for c in seen), (r, seen)
+            assert not seen, (r, seen)
             assert not central, (r, central, msgs)
         seen.clear()
-        relay.rtq = lambda name, cmd: (1, f"队列里没有：{A}")
+        relay.rtq = lambda name, cmd: (1, f"队列里没有：{K}")
         msgs = relay.execute(NAME, acts, S0([]))
-        assert any("rm -rf" in c for c in seen) and central, (seen, central, msgs)
+        assert seen and central, (seen, central, msgs)
     finally:
-        relay.rsh, relay.rtq, relay.taskq.central = rsh0, rtq0, cen0
+        relay.rpy, relay.rtq, relay.taskq.central = rpy0, rtq0, cen0
     ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果")
 
 
 if __name__ == "__main__":
     test_drop_refused()
-    test_forget()
+    test_refcount()
     test_fresh_site()
     test_plan()
     test_pueue_worker()
