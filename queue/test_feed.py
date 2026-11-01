@@ -84,7 +84,7 @@ acts, _, _ = plan(snap(c, [bt(K[4], "claimed", "123"), bt(K[5], "claimed", "124"
 ok("缓冲里的都在训：照样补满（在训的不算备着的）", [a["key"] for a in acts if a["op"] == "send"] == [K[2], K[0]])
 c2 = [ct(K[0], skipped=[NAME]), ct(K[1]), ct(K[2], data=(D2,))]
 ok("这台跳过的不送", [a["key"] for a in plan(snap(c2))[0] if a["op"] == "send"] == [K[1], K[2]])
-acts, _, _ = plan(snap(c, src={"lab": {"folds": {K[2]: fold(epochs=30)}}}))
+acts, _, _ = plan(snap(c, src={"lab": {"tasks": {K[2]: fold(epochs=30)}}}))
 ok("别的机器上有进度的不送", [a["key"] for a in acts if a["op"] == "send"] == [K[0], K[1]])
 ok("代码不是最新的：不送新任务", not [a for a in plan(snap(c, head="b"))[0] if a["op"] == "send"])
 ok("缓冲总开关没开：不送", not [a for a in plan(snap(c, benabled=False))[0] if a["op"] == "send"])
@@ -159,7 +159,7 @@ ok("依赖记录后来真分给它了：put hold=false 撤掉停止", ops(acts)[
 acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)]))
 rel = [a for a in acts if a["op"] == "release"]
 ok("缓冲里失败、这台没有进度：删记录、交还（--skip）", ("bremove", K[0]) in ops(acts) and rel and rel[0].get("skip"))
-acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], src={NAME: {"folds": {K[0]: fold(epochs=50)}}}))
+acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], src={NAME: {"tasks": {K[0]: fold(epochs=50)}}}))
 ok("失败、有进度：留着、报出来", not [a for a in acts if a["op"] == "release"] and f"site:dicc:fail:{K[0]}" in stuck)
 acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], paused=True))
 ok("缓冲整个暂停：不交还，只报", not [a for a in acts if a["op"] == "release"] and "site:dicc:fail" in stuck)
@@ -180,7 +180,7 @@ c4 = [mine(K[0]), ct(INF, "waiting", machines=[NAME], after=[K[0]], nice=-100)]
 acts, _, _ = plan(snap(c4 + [ct(k, "claimed", assigned=NAME) for k in K[4:]] + [ct(K[2])], [bt(K[0], "claimed", "123"), bt(K[4]), bt(K[5])]))
 ok("推理（machines=[dicc]）、训练在缓冲里：马上送，不受 READY 限制", ("send", INF) in ops(acts) and not [a for a in acts if a["op"] == "send" and a["key"] != INF])
 c5 = [ct(K[0], "done"), ct(INF, "free", machines=[NAME], after=[K[0]], nice=-100)]
-acts, _, _ = plan(snap(c5, [], src={NAME: {"folds": {K[0]: fold(final=True)}}}))
+acts, _, _ = plan(snap(c5, [], src={NAME: {"tasks": {K[0]: fold(final=True)}}}))
 s5 = [a for a in acts if a["op"] == "send"]
 ok("训练在这台训完、已交还：推理带上依赖记录（hold）一起送", s5 and s5[0]["key"] == INF and [d["key"] for d in s5[0]["deps"]] == [K[0]]
    and s5[0]["deps"][0]["hold"] is True)
@@ -188,7 +188,7 @@ acts, _, _ = plan(snap(c5, []))
 ok("训练不是在这台训的：推理不送", ("send", INF) not in ops(acts))
 AR = dict(id=51, label=f"archive:{K[0]}", status="Running", group="wait", command="x")
 ARR = dict(machine=HUB, id=51, label=AR["label"], step="archive", key=K[0], created_at=0)
-acts, _, _ = plan(snap(c5, [], box=[AR], recs=[ARR], src={NAME: {"folds": {K[0]: fold(final=True)}}}))
+acts, _, _ = plan(snap(c5, [], box=[AR], recs=[ARR], src={NAME: {"tasks": {K[0]: fold(final=True)}}}))
 ok("拷到一半 5：依赖还在归档（拷）：下游不送", ("send", INF) not in ops(acts))
 ok("推理要的环境这台没有：不送", ("send", "infer/y") not in ops(plan(snap([dict(ct("infer/y", machines=[NAME]), spec=dict(ct("infer/y")["spec"], env="nope", machines=[NAME]))], []))[0]))
 
@@ -196,7 +196,7 @@ ok("推理要的环境这台没有：不送", ("send", "infer/y") not in ops(pla
 P.AUTO.update({NAME: False, "dicc1": True})
 c6 = [mine(K[0]), mine(K[1]), mine(K[2]), mine(K[3], "done"), mine(K[4], "stopped")]
 b6 = [bt(K[0]), bt(K[1], "claimed", "123"), bt(K[3], "done"), bt(K[4], "stopped")]
-acts, _, _ = plan(snap(c6, b6, src={NAME: {"folds": {K[2]: fold(epochs=40)}}}))
+acts, _, _ = plan(snap(c6, b6, src={NAME: {"tasks": {K[2]: fold(epochs=40)}}}))
 ok("换成了 dicc1：没人领的从缓冲删掉、交还；有进度的改分给 dicc1；在训的等它交还；训完、停了的照旧",
    ops(acts) == [("bremove", K[0]), ("release", K[0]), ("handover", K[2]), ("bremove", K[3]), ("release", K[3]),
                  ("bremove", K[4]), ("release", K[4])] and acts[2]["to"] == "dicc1" or print(ops(acts)))
@@ -315,7 +315,7 @@ acts, _, _ = lplan(lsnap([ct(K[1], "claimed", assigned=G0)]))
 ok("lab:gpu0 手动训的：不往缓冲 put", not [a for a in acts if a["key"] == K[1]])
 INF2 = "infer/y/fold_0"
 acts, _, _ = lplan(lsnap([ct(K[1], "claimed", assigned=G0), ct(INF2, "waiting", machines=[LAB], after=[K[1]], nice=-100)],
-                         src={LAB: {"folds": {K[1]: fold(final=True)}}}))
+                         src={LAB: {"tasks": {K[1]: fold(final=True)}}}))
 s6 = [a for a in acts if a["op"] == "send"]
 ok("0 号卡训完的折的推理：带依赖记录送进 lab 缓冲（1 号卡的 worker 做）", s6 and s6[0]["key"] == INF2 and [d["key"] for d in s6[0]["deps"]] == [K[1]])
 

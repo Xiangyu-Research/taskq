@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
 """按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由 envs/policy.py 的 PLACE 定）：box 上的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的折提前排（见下）。
+（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的任务提前排（见下）。
 步骤和判断都从实验表（research/*/experiments.py，经 scripts/queue/experiments.py 读）和任务说明（scripts/queue/spec.py）来，
 这里不认识具体模型。
 
 每个任务（实验表里的，加上队列里不属于任何实验的）：
   fetch    别的机器上训完了（说明里的 done），box 上还没有 → scripts/queue/fetch_task.sh <机器> <key>（wait 组）
-  after    实验表里每折的步骤（如推理 → 评测），按顺序做第一个没做完的
+  after    实验表里每个任务的步骤（如推理 → 评测），按顺序做第一个没做完的
   archive  pueue 训练机（lab）上训完、拉回 box 以后，那边还没归档 → scripts/queue/archive_task.sh <机器> <key>（wait 组：
-           备份、核对后删那边的大文件）。那边还在用这一折做别的步骤时等；要进任务队列的步骤等归档做完再加
-一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs = 要每折都做完的步骤）。
+           备份、核对后删那边的大文件）。那边还在用这个任务做别的步骤时等；要进任务队列的步骤等归档做完再加
+一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs = 要每个任务都做完的步骤）。
 最后：FINAL 的步骤（如所有实验的汇总比较，在 box 上）。有 rerun_if_newer 的，列出的步骤有比它开始时更新的结果、这些步骤（和同一串
 里排在它们前面的）都没有在排 / 在跑时重跑。队列里不属于任何实验的任务只拉回、归档。
 
-在哪里做（每折的步骤、group_after 的步骤）：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有）就接着那边的；
+在哪里做（每个任务的步骤、group_after 的步骤）：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有）就接着那边的；
 否则按 PLACE[步骤] 的顺序用第一个现在能用的（写法见 envs/policy.py），都用不了时写进 ~/advance.log。没写的步骤在 box 上：
   box:<组>       box pueue 里排（标签 <步骤>:<实验 id>_f<fold>，实验一级的 <步骤>:<实验 id>）
   queue:<机器>   加进任务队列（taskq.py add --recipe command，参数是步骤 queue 里的，machines = 这台，nice = queue 的 nice）。
                  那边缺的输入是文件就先 offload_io.sh push 过去（wait 组 push:<标签>），缺文件夹就报出来；写了 have 的，那边
                  缺输入就用下一个地方。那边做完后按"队列里不属于任何实验的任务"拉回（fetch_task.sh），拉回后照常按 done 判断
-  trainer        训这一折的执行机（feed.sites()）：总队列里这一折分给的那台（"lab:gpu0" 算 lab），分配已经结束的看哪台有这一折
+  trainer        训这个任务的执行机（feed.sites()）：总队列里这个任务分给的那台（"lab:gpu0" 算 lab），分配已经结束的看哪台有这个任务
                  没归档的进度、模型；就当成 queue:<那台>（10/31）。relay 机器（envs/machines.py 的 RELAY：中转执行机、lab 1 号卡）
-                 训的折：领着（训完还没交还）时也放进总队列、只给那台，relay.py 领到后连同模型和输入换名送过去（不查那边缺什么、
-                 不先传）；做完由 relay.py 拉回。训的不是执行机、但同一台主机上有开着的 relay 机器（lab 0 号卡手动训的折 → lab1，
+                 训的任务：领着（训完还没交还）时也放进总队列、只给那台，relay.py 领到后连同模型和输入换名送过去（不查那边缺什么、
+                 不先传）；做完由 relay.py 拉回。训的不是执行机、但同一台主机上有开着的 relay 机器（lab 0 号卡手动训的任务 → lab1，
                  用 box 上拉回的模型）时给那台。训的是 box、找不到（如已交还）时用下一个地方。
                  lab 上做完的照常拉回（fetch_task.sh lab），box 上判断做完后删 lab 上的结果（训完要归档的机器，TRAINERS）；
-                 这一折在 lab 上排着、没做完的步骤先做完再归档（归档会删 lab 上的模型）
-  要知道每折的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage needs，打印相对数据目录的输入），或者步骤的
+                 这个任务在 lab 上排着、没做完的步骤先做完再归档（归档会删 lab 上的模型）
+  要知道每个任务的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage needs，打印相对数据目录的输入），或者步骤的
   queue 里写了 inputs。10/31 以前 trainer 排在 lab pueue 里的步骤（任务记录里有 out 的）照常认、拉回、清理，不再新排（Leftover）。
 
-提前排（10/25、10/31）：一折在总队列里分给了执行机（"lab:gpu0" 算 lab）、那边的代码是最新的（health 的 code 检查）时，每折的
+提前排（10/25、10/31）：一个任务在总队列里分给了执行机（"lab:gpu0" 算 lab）、那边的代码是最新的（health 的 code 检查）时，每个任务的
   步骤里 PLACE 第一个用得上的地方是这台的任务队列的（trainer 也算），现在就加进队列，任务说明的 after 接上前一步（推理 after
   训练，评测 after 推理）；after 里的没做完时那个任务是 waiting，worker 不领，做完后训完的那个 worker 接着就能领到。
-  分给 relay 机器的折一样提前排（不看代码，那边用的是代码包）；没人领的折不提前排。
+  分给 relay 机器的任务一样提前排（不看代码，那边用的是代码包）；没人领的任务不提前排。
 box 上排的任务（不连别的机器的）做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
 失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排；那边的任务、传输、拉回一样。
@@ -43,6 +43,7 @@ envs/policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/adv
 
     python3 scripts/queue/advance.py           看现在会排什么（不改任何东西）
 """
+import itertools
 import os
 import shlex
 import subprocess
@@ -121,7 +122,7 @@ def candidates(root, py, queue_tasks):
     tasks = []
     for key, t in table.items():
         e = E.experiment(t["exp"])
-        lab = f"{e['id']}_f{t['fold']}" if t["fold"] is not None else e["id"]
+        lab = E.label(e, t)
         tasks.append(dict(key=key, exp=t["exp"], e=e, spec=t["spec"], names=E.task_names(t, root, py), lab=lab))
     for q in queue_tasks:
         if q["key"] in table or not q.get("recipe"):
@@ -174,7 +175,7 @@ def plan(s, root=None):
                 live_fetch.add(r["key"])
         else:
             done.setdefault(sk, []).append(t)
-    src = {h: d["folds"] for h, d in s.get("src", {}).items() if h != hub}
+    src = {h: d["tasks"] for h, d in s.get("src", {}).items() if h != hub}
     rerun = {f["name"] for f in final if f.get("rerun_if_newer")}
     todo, stuck = [], {}
 
@@ -196,7 +197,7 @@ def plan(s, root=None):
         todo.append(dict(step=step, key=key, group=group, label=label, cmd=cmd, nice=n, src=src))
 
     old = Leftover(s, ptasks, todo, stuck, recs)
-    remote_live = {}  # 别的 pueue 机器上活着的步骤 → (机器, 任务号)：都算在做、在用这一折
+    remote_live = {}  # 别的 pueue 机器上活着的步骤 → (机器, 任务号)：都算在做、在用这个任务
     for h, d in s["pueue"].items():
         if h == hub:
             continue
@@ -249,7 +250,7 @@ def plan(s, root=None):
             return True
         if mach != hub:
             cmd = S.fill(st["cmd"], t["names"], keep=())
-            needs = inputs_of(qd, t["names"]) if "inputs" in qd else step_needs(cmd)
+            needs = inputs_of(qd, t["names"], t.get("each") or ()) if "inputs" in qd else step_needs(cmd)
             if needs is None:
                 if tg["have"]:
                     return no_needs(cmd)
@@ -284,8 +285,8 @@ def plan(s, root=None):
     relay_sites = {n for n in M.RELAY if n in P.READY}  # relay.py 替它领任务的机器（中转执行机、lab 1 号卡）
 
     def site_of(h):
-        """训这一折的机器 → 放后续步骤的执行机：执行机、relay 机器就是它；按时段的 relay 机器（lab0，envs/policy.py 的 SHIFT）
-        和别的（如以前 lab 0 号卡手动训的折，lab 不再是执行机）→ 同一台主机上开着、不按时段的 relay 机器（lab1）；没有 → None。"""
+        """训这个任务的机器 → 放后续步骤的执行机：执行机、relay 机器就是它；按时段的 relay 机器（lab0，envs/policy.py 的 SHIFT）
+        和别的（如以前 lab 0 号卡手动训的任务，lab 不再是执行机）→ 同一台主机上开着、不按时段的 relay 机器（lab1）；没有 → None。"""
         if h in feed_sites or (h in relay_sites and not shift.limited(h)):
             return h
         ssh = (M.RELAY.get(h) or M.MACHINES.get(h) or {}).get("ssh")
@@ -293,14 +294,14 @@ def plan(s, root=None):
     code = s.get("code") or {}
 
     def assigned_to(key):
-        """总队列里这一折分给的机器（"lab:gpu0" → lab）；没分出去 → None。"""
+        """总队列里这个任务分给的机器（"lab:gpu0" → lab）；没分出去 → None。"""
         x = tq_tasks.get(hub, {}).get(key) or {}
         if x.get("state") != "claimed":
             return None
         return (x.get("assigned") or "").partition(":")[0] or None
 
     def trainer_of(key):
-        """训这一折的机器：总队列里分给的那台；分配已经结束的看哪台有这一折没归档的进度、模型（训完的优先）。"""
+        """训这个任务的机器：总队列里分给的那台；分配已经结束的看哪台有这个任务没归档的进度、模型（训完的优先）。"""
         h = assigned_to(key)
         if h:
             return h
@@ -310,8 +311,8 @@ def plan(s, root=None):
         have = [h for h in sorted(src) if key in src[h] and not src[h][key].get("archived")]
         return next((h for h in have if src[h][key].get("final")), have[0] if have else None)
 
-    def where(t, tg, fold):
-        """PLACE 里的一项 → 地方（trainer 换成训这一折的执行机的 queue，带 trainer=True），或者用不了的原因。
+    def where(t, tg, per_task):
+        """PLACE 里的一项 → 地方（trainer 换成训这个任务的执行机的 queue，带 trainer=True），或者用不了的原因。
         queue:<机器>：那台暂停检查（OFFLINE）时用不了；那台已经换成接替它的 relay 机器（machines.py 的 replaces，它的 AUTO 开着、
         那台的关着）时用接替的那台，have 的用不了（relay 机器上的结果拉回 box 后就删，查不了）。"""
         if tg["kind"] == "queue":
@@ -326,12 +327,12 @@ def plan(s, root=None):
             return tg
         if tg["kind"] != "trainer":
             return tg
-        if not fold:
-            return "不是每折的步骤"
+        if not per_task:
+            return "不是每个任务的步骤"
         h = trainer_of(t["key"])
         site = site_of(h)
         if not site:
-            return f"训这一折的 {h} 不是执行机" if h else "找不到训这一折的机器"
+            return f"训这个任务的 {h} 不是执行机" if h else "找不到训这个任务的机器"
         return dict(tg, kind="queue", machine=site, trainer=True)
 
     def qmach(qk):
@@ -354,7 +355,7 @@ def plan(s, root=None):
                 cleans.setdefault((h, out), dict(op="clean", step="clean", key=t["key"], label=label, nice=NO_NICE, host=h, paths=[out]))
 
     def prequeue(t, after):
-        """这一折在总队列里分给了一台执行机（feed.py 的 sites）：每折的步骤里，PLACE 第一个用得上的地方是这台的，现在就加进
+        """这个任务在总队列里分给了一台执行机（feed.py 的 sites）：每个任务的步骤里，PLACE 第一个用得上的地方是这台的，现在就加进
         总队列，after 接上前一步；feed.py 跟着训练送进那边的缓冲，训完的那个 worker 接着就能领到推理（10/25、10/31）。"""
         h = site_of(assigned_to(t["key"]))
         if not h:
@@ -380,7 +381,7 @@ def plan(s, root=None):
             return
         todo.extend(items)
 
-    def place(t, st, label, n, archiving, archive_due, fold):
+    def place(t, st, label, n, archiving, archive_due, per_task):
         """这一步没做完、没在往 box 上拷：接着已经在做的地方，否则按 PLACE 选一个排上。"""
         key, names = t["key"], t["names"]
         sk = (st["name"], key)
@@ -398,7 +399,7 @@ def plan(s, root=None):
             return
         if sk in remote_live:
             h, i = remote_live[sk]
-            stuck[f"advance:remote:{label}"] = (f"{label}：{h} 任务 {i} 在做，但不是这一折现在的记录里的那个任务，做完不会自动拉回"
+            stuck[f"advance:remote:{label}"] = (f"{label}：{h} 任务 {i} 在做，但不是这个任务现在的记录里的那个任务，做完不会自动拉回"
                                                 f"（等它做完、在 {h} 上 pueue remove {i} 后重排）")
             return
         if sk in done:  # box 上做过：失败的、成功了结果还不对的报出来
@@ -406,14 +407,14 @@ def plan(s, root=None):
             return
         why = []
         for tg in targets(st["name"], st["group"]):
-            w = where(t, tg, fold)
+            w = where(t, tg, per_task)
             if isinstance(w, str):
                 r = w
             elif w["kind"] == "box":
                 want(st["name"], key, label, cmd, w["group"], n)
                 return
             elif w.get("trainer"):  # 模型在那边：不等归档（归档等这一步做完），在归档时不用那边
-                r = f"{w['machine']} 上在归档这一折" if archiving else to_queue(t, st, label, n, False, w)
+                r = f"{w['machine']} 上在归档这个任务" if archiving else to_queue(t, st, label, n, False, w)
             else:
                 r = to_queue(t, st, label, n, archiving or archive_due, w)
             if r is True:
@@ -447,13 +448,13 @@ def plan(s, root=None):
                 if not busy:
                     place(t, st, label, n, archiving, bool(archive_due), True)
                 blocked = True
-        # 那边在用这一折（归档会删那边的 checkpoint）时先不归档：旧的 lab pueue 步骤在做，或者有步骤排给了那台、box 上还没做完
+        # 那边在用这个任务（归档会删那边的 checkpoint）时先不归档：旧的 lab pueue 步骤在做，或者有步骤排给了那台、box 上还没做完
         pend = {m for st in after if st.get("queue") and not after_ok[(key, st["name"])]
                 for m in qmach(S.fill(st["queue"]["key"], t["names"], keep=()))}
         if key not in old.busy and key not in remote_busy:
             for h in archive_due:
                 if h in pend:
-                    NOTES.append(f"archive:{t['lab']}：{h} 上还有这一折的步骤没做完，做完再归档")
+                    NOTES.append(f"archive:{t['lab']}：{h} 上还有这个任务的步骤没做完，做完再归档")
                     continue
                 down = C.backup_down()
                 if down:
@@ -483,7 +484,7 @@ def plan(s, root=None):
                 busy = fetching(st, names, e["id"])
                 if busy or not st["done"].ok(root, names):
                     if not busy:
-                        place(dict(key=e["id"], names=names), st, label, n, False, False, False)
+                        place(dict(key=e["id"], names=names, each=e.get("each") or {}), st, label, n, False, False, False)
                     break
                 finished(dict(key=e["id"], names=names), st, label)
                 if st["name"] in watch:
@@ -508,12 +509,15 @@ def plan(s, root=None):
 NEEDS_ERR = {}
 
 
-def inputs_of(qd, names):
-    """步骤 queue 里的 inputs → 相对数据目录的路径；实验一级的步骤（没有 fold）里带 {fold} 的按实验的每一折展开。"""
+def inputs_of(qd, names, each=()):
+    """步骤 queue 里的 inputs → 相对数据目录的路径；实验一级的步骤里带 {<参数>}（each 的参数，names 里没有它）的按 <参数>_list
+    的每个取值展开。"""
     out = []
     for p in qd["inputs"]:
-        if "{fold}" in p and "fold" not in names:
-            out += [S.fill(p, dict(names, fold=f), keep=()) for f in names.get("folds", "").split()]
+        ks = [k for k in each if "{" + k + "}" in p and k not in names]
+        if ks:
+            out += [S.fill(p, dict(names, **dict(zip(ks, vs))), keep=())
+                    for vs in itertools.product(*(names.get(f"{k}_list", "").split() for k in ks))]
         else:
             out.append(S.fill(p, names, keep=()))
     return out
@@ -584,7 +588,7 @@ class Leftover:
         if x.get("result") == "Success":
             self.pull_back(label)
             return True
-        cp = ((self.s.get("src", {}).get(name) or {}).get("folds") or {}).get(r["key"]) or {}
+        cp = ((self.s.get("src", {}).get(name) or {}).get("tasks") or {}).get(r["key"]) or {}
         if "train_id" in r and not cp.get("final"):
             return False  # 训练没训完就停了，这一步跟着开始、失败了：不算
         self.stuck[f"advance:remote:{label}"] = (f"{label}：{name} 任务 {x['id']} {x['status']}，不再自动重排（ssh {name} "

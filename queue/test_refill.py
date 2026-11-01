@@ -64,14 +64,14 @@ QUEUE = [tq(K_T14, 0, 1), tq(K_UM, 50, 2), tq(K_T1C[0], 50, 3), tq(K_T1C[1], 50,
 SQ = [["rq1_t1c_f0", "485145_1", "PENDING", "0:00", "Priority", "50"]]  # DICC 上只有 nnunet 的作业
 
 
-def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_folds=None, enabled=True, skips=None,
+def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_tasks_st=None, enabled=True, skips=None,
          groups=None, buf=()):
     """buf：lab 缓冲里的任务（None = 读不到）。"""
     tqs = {h: dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {}) for h in ("box", "dicc")}  # 总队列、DICC 的缓冲
     tqs["lab"] = None if buf is None else dict(enabled=True, buffer=True, tasks=copy.deepcopy(list(buf)), recent_skips={})
     return dict(ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=copy.deepcopy(SQ), sacct=[])},
                 probe={"lab": {"DISK": str(int(disk)), "HAVE": prep}},
-                src={"box": {"folds": {}}, "lab": {"folds": lab_folds or {}}, "dicc": {"folds": {}}},
+                src={"box": {"tasks": {}}, "lab": {"tasks": lab_tasks_st or {}}, "dicc": {"tasks": {}}},
                 taskq=tqs,
                 pueue={"box": {"groups": {}, "tasks": list(box_tasks)}, "lab": {"groups": groups or {}, "tasks": list(lab_tasks)}},
                 records=[sync_record(t) for t in box_tasks if t["label"].startswith("sync_")])
@@ -130,7 +130,7 @@ arch = task(40, "wait", "Queued", "bash scripts/queue/archive_task.sh lab Datase
 ok("box 上还有这台机器的归档任务：不删", R.cleanup(snap(queue=NO103, box_tasks=[arch]), "lab", run=fake_run) == [] and not cmds)
 ok("box 上还在往 lab 传这个数据集：不删", R.cleanup(snap(queue=NO103, box_tasks=[SY]), "lab", run=fake_run) == [] and not cmds)
 ok("lab 上还有训完没归档的折：不删",
-   R.cleanup(snap(queue=NO103, lab_folds={K_T1C[0]: dict(final=True, archived=False, runs=[])}), "lab", run=fake_run) == [] and not cmds)
+   R.cleanup(snap(queue=NO103, lab_tasks_st={K_T1C[0]: dict(final=True, archived=False, runs=[])}), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲里任务的数据不删", R.cleanup(snap(queue=NO103, buf=[tq(K_T1C[1], 50, 4, "claimed", "lab-gpu1")]), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲里训完、还没删掉的记录的数据也不删", R.cleanup(snap(queue=NO103, buf=[tq(K_T1C[1], 50, 4, "done")]), "lab", run=fake_run) == [] and not cmds)
 for who in ("lab", "lab:gpu0"):

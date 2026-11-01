@@ -202,7 +202,7 @@ def log_age(s, root):
 
 
 def eta_at(runs, nep, hours=3):
-    """训练中的折：最近一次启动的训练日志里，最近 hours 小时的速度 → 训到 nep 个 epoch 的时刻；算不出来（不到两个点、
+    """训练中的任务：最近一次启动的训练日志里，最近 hours 小时的速度 → 训到 nep 个 epoch 的时刻；算不出来（不到两个点、
     速度不是正的、已经训到）→ None。"""
     tl = max(runs, key=lambda r: r["end"] or "").get("tl") or [] if runs else []
     pts = [(datetime.strptime(t, "%Y-%m-%d %H:%M:%S"), e) for t, e in tl]
@@ -307,10 +307,10 @@ def task_specs(queue=()):
 
 
 def collect(specs, root):
-    """这台机器上每个任务的情况（健康检查、登记表用）：{"folds": {key: …}, "seglogs": […]}。
+    """这台机器上每个任务的情况（健康检查、登记表用）：{"tasks": {key: …}, "seglogs": […]}。
     specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。
     分段日志在 logs/tasks/，加上说明里 oldlogs 的 dir（以前放在别处的）。"""
-    out = {"folds": {}, "seglogs": []}
+    out = {"tasks": {}, "seglogs": []}
     for s in specs:
         fd = out_dir(s, root)
         if not os.path.isdir(fd):
@@ -327,7 +327,7 @@ def collect(specs, root):
             pj = progress_json(fd)
             if pj:
                 runs.append(pj)
-        out["folds"][s["key"]] = dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
+        out["tasks"][s["key"]] = dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
                                       dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd),
                                       resumable=resumable(s, fd))
     dirs = sorted({s["oldlogs"]["dir"] for s in specs if (s.get("oldlogs") or {}).get("dir")})

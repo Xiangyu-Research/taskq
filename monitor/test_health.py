@@ -65,7 +65,7 @@ def snap(**kw):
     s = dict(now=NOW, ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=[], sacct=[])},
              probe={"box": {"DISK": str(int(500e9)), "BOOT": "2026-10-01 08:00:00|"},
                     "lab": {"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "BOOT": "2026-10-01 08:00:00|"}},
-             src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {}}},
+             src={"box": {"tasks": {}}, "lab": {"tasks": {}}, "dicc": {"tasks": {}}},
              pueue={"box": {"groups": {}, "tasks": []}, "lab": LAB_BUSY})
     s.update(kw)
     return s
@@ -100,9 +100,9 @@ ok("DICC 作业失败", "dicc:486300_1" in ids(s))
 
 lab_train = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
-         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
-s["src"]["lab"]["folds"][MEN0] = fold(end=NOW - timedelta(minutes=5))
+s["src"]["lab"]["tasks"][MEN0] = fold(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 
 fetch = task(9, "wait", "Running", f"bash scripts/queue/fetch_task.sh dicc {MET2}", "fetch_t3met_f2")
@@ -111,7 +111,7 @@ ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
 s["slurm"], s["ok"]["dicc"] = {}, False
 ok("DICC 连不上时不判断是否在排队", f"orphan:{MET2}" not in ids(s) and "down:dicc" in ids(s))
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}},
-         src={"box": {"folds": {}}, "lab": {"folds": {}}, "dicc": {"folds": {MET2: fold(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
+         src={"box": {"tasks": {}}, "lab": {"tasks": {}}, "dicc": {"tasks": {MET2: fold(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
 ok("训完 90 分钟还没拉回 → 报", f"fetch:{MET2}" in ids(s))
 
 
@@ -124,7 +124,7 @@ def tqrow(key, state, worker=None, since=None, log_age=None, kind="nnunet", task
 old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
 lab_men = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_men]}},
-         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
          taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")]),
                 "dicc": dict(enabled=True, buffer=True, paused=False, tasks=[])})
 H.time.time = lambda: NOW.timestamp()
@@ -166,7 +166,7 @@ H.M.MACHINES["lab"].update(worker=dict(group="gpu1", id="lab-gpu1"), slots=1)  #
 LW = H.M.MACHINES["lab"]["worker"]
 wk = task(30, LW["group"], "Running", f"WORKER_ID={LW['id']} bash scripts/queue/dicc_worker.sh", f"worker:{LW['id']}")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [wk]}},
-         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
          taskq={"box": dict(enabled=True, tasks=[]), "lab": dict(enabled=True, buffer=True, paused=False, tasks=[tqrow(MEN0, "free")])})
 s["slurm"] = {}
 P = H.check(s)
@@ -209,7 +209,7 @@ ok("fetch_task.sh <机器> <key> → 拉回", H.C.from_command(f"bash scripts/qu
 lab_rt = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0",
               "train:" + MEN0)
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
-         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "lab": {"folds": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
 ok("lab 上 run_task.sh 的训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
 cand = H.data_candidates([dict(key="x/y", spec=dict(data=["other/stuff"]))])
 ok("要查的数据：实验表里的 + 队列里临时任务的", "nnUNet/preprocessed/Dataset111_MENrq1" in cand and "other/stuff" in cand)
@@ -267,8 +267,8 @@ cut = False
 
 H.sh, H.run_on = fake_sh, fake_run_on
 H.taskq.remote_status = lambda n: dict(enabled=True, tasks=[])
-H.spec.remote_collect = lambda ssh, specs, root: {"folds": {}, "seglogs": []}
-H.spec.collect = lambda specs, root: {"folds": {}, "seglogs": []}
+H.spec.remote_collect = lambda ssh, specs, root: {"tasks": {}, "seglogs": []}
+H.spec.collect = lambda specs, root: {"tasks": {}, "seglogs": []}
 g = H.gather()
 ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留着",
    g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123", "HAVE": "a b nnUNet/x"}
@@ -336,8 +336,8 @@ H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", sch
                             groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
 fk = task(3, "gpu0", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
-         src={"box": {"folds": {}}, "dicc": {"folds": {}}, "fake": {"folds": {}},
-              "lab": {"folds": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "fake": {"tasks": {}},
+              "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
 s["ok"]["fake"] = True
 s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|"}
 s["code"] = dict(main="a" * 40, heads={"fake": "b" * 40})
@@ -410,6 +410,18 @@ sys.modules["refill"] = rf
 got.clear()
 H.main()
 ok("lab 领了 / 交还了：只记 refill.log，不进推送", not any(k.startswith("refill:") for k in got))
+
+# ---------------- 白话（plain.py）：标签、任务 key → 实验名 + 任务简称 ----------------
+import plain as PL  # noqa: E402
+import experiments as EX  # noqa: E402
+_k, _t = next(iter(EX.tasks().items()))
+_e = EX.experiment(_t["exp"])
+_n = PL.exp_name(_e)
+ok("白话：任务 key → 实验名 + 简称（如 f0）", PL.fold(_k) == f"{_n} {EX.short(_t)}" and EX.short(_t))
+ok("白话：每个任务的步骤的标签 → (实验名, 步骤, 简称)；实验一级的 → 简称 None",
+   PL.label(f"eval:{EX.label(_e, _t)}") == (_n, PL.STEP["eval"], EX.short(_t)) and PL.label(f"eval:{_e['id']}") == (_n, PL.STEP["eval"], None))
+ok("白话：认不出的标签 → 其他", PL.label("eval:nope_f1") == ("其他", "eval:nope_f1", None))
+ok("白话：推送里的一句话带简称", PL.task(f"infer:{EX.label(_e, _t)}") == f"{_n} {EX.short(_t)} 的{PL.STEP['infer']}")
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

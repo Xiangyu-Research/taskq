@@ -10,8 +10,8 @@
   R/data/                         数据目录：每个任务的视图（指向 blobs 的软链接 + 改写过的小文件，换名见 scripts/sites/names.py），
                                   结果用别名
 每次健康检查（scripts/monitor/health.py，每 30 分钟）经 scripts/queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
-  1. ssh 一次读那边的队列、各折进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
-  2. 总队列里 worker 是它的每一折：
+  1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
+  2. 总队列里 worker 是它的每个任务：
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（翻译、补传缺的数据、建软链接、加进那边的队列）；
      - 在那边排着、在训 → 续上（beat）；
      - 那边训完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、换回真名、备份到 DICC；备份机暂停检查时只拉回）；
@@ -20,18 +20,18 @@
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
-  3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一折（只领能翻译的做法，
+  3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一个任务（只领能翻译的做法，
      数据传过去后那边至少还剩 HARD_GB）；
   4. 那边排着和在跑的 worker 作业不够、又有备好没人领的任务时补交（refill.py 的 topup_plan：排着没开始的作业不超过备好的任务数，QOS 和个数见 SLURM[名字]["gpu"]）。
-开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的折照常推进。
+开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
 按时段的执行机（envs/policy.py 的 SHIFT，scripts/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
-每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的折，那边的队列里删掉任务
+每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的任务，那边的队列里删掉任务
 （结果留着，接手的那台收编存档，见 machines.py 的 adopt），总队列里训完了再删结果。
-连不上它时只续总队列的领取；领着折、连不上 2 小时以上报出来。
+连不上它时只续总队列的领取；领着任务、连不上 2 小时以上报出来。
 
     python3 scripts/queue/relay.py                         看现在会做什么（不改任何东西）
     python3 scripts/queue/relay.py stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
-    python3 scripts/queue/relay.py fetch <名字> <key>      拉回训完的一折、换回真名，放进 box 的数据目录
+    python3 scripts/queue/relay.py fetch <名字> <key>      拉回训完的任务、换回真名，放进 box 的数据目录
     python3 scripts/queue/relay.py bundle <名字> [--commit C]   打包、推过去、切换 current
     python3 scripts/queue/relay.py status <名字>           那边的队列
 """
@@ -77,7 +77,7 @@ STATUS = os.path.join(DIR, "status.json")
 HASHES = os.path.join(DIR, "hashes.json")
 LOG = os.path.expanduser(os.environ.get("RELAY_LOG", "~/relay.log"))
 HARD_GB = 100  # 领之前：传过去以后那边至少还剩这么多
-DOWN_S = 2 * 3600  # 领着折、连不上这么久就报
+DOWN_S = 2 * 3600  # 领着任务、连不上这么久就报
 LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就报
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传完、还没加进队列或刚交还）
@@ -209,7 +209,7 @@ except Exception:
     raw=None
 ed=os.path.join(R,'state','envs')
 oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
-spec.json_out(dict(taskq=st,folds=col['folds'],sched_raw=raw,free=shutil.disk_usage(R).free,dev=os.stat(R).st_dev,envs_ok=oks,
+spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=raw,free=shutil.disk_usage(R).free,dev=os.stat(R).st_dev,envs_ok=oks,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
@@ -620,10 +620,10 @@ def plan(s, name, rs, st, now=None):
         last = (st.get("last_ok") or {}).get(name, 0)
         if acts and now - last > DOWN_S:
             stuck[f"site:{name}:down"] = (f"{L} 读不到状态{f' {(now - last) / 3600:.0f} 小时' if last else ''}（ssh 不通，或那边的存储挂住），"
-                                           f"领着 {len(acts)} 折，那边的进度看不到")
+                                           f"领着 {len(acts)} 个任务，那边的进度看不到")
         return acts, stuck
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
-    folds = rs.get("folds") or {}
+    tasks = rs.get("tasks") or {}
     owned = set()
     for t in mine:
         key = t["key"]
@@ -701,7 +701,7 @@ def plan(s, name, rs, st, now=None):
                 stuck[f"relaystage:{key}"] = (f"给 {L} 补传 {key} 缺的输入的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
                                               f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）")
         elif ast == "failed":
-            if progress(folds.get(a["key"])):
+            if progress(tasks.get(a["key"])):
                 stuck[f"site:{name}:fail:{key}"] = (f"{L} 上 {key}（{a['key']}）训练失败 {a.get('failures')} 次，有进度，领取保留；"
                                                     f"看那边的 logs/tasks/；放弃：taskq.py release --worker {name} {key}")
             else:
@@ -717,7 +717,7 @@ def plan(s, name, rs, st, now=None):
         real = rev.get(a["key"])
         m = mt.get(real) if real else None
         if real is None:
-            stuck[f"site:{name}:orphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪一折（{DIR}/state.json 里没有）"
+            stuck[f"site:{name}:orphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪个任务（{DIR}/state.json 里没有）"
         elif a["state"] in ("claimed", "busy"):
             stuck[f"site:{name}:orphan:{real}"] = f"{L} 在训 {real}，但总队列里不是它领着；看总队列和 {L} 的队列"
         elif m is None or m["state"] == "done":
@@ -727,7 +727,7 @@ def plan(s, name, rs, st, now=None):
         elif a["state"] != "stopped":
             acts.append(dict(op="rstop", key=real, alias=a["key"]))
     mk = {t["key"] for t in mine}
-    for real, k in keys.items():  # 那边队列里已经删了（unq）、只剩结果的折：总队列里训完了再删结果
+    for real, k in keys.items():  # 那边队列里已经删了（unq）、只剩结果的任务：总队列里训完了再删结果
         m = mt.get(real)
         if real not in mk and k["alias"] not in rt and k.get("unq") and (m is None or m["state"] == "done"):
             try:
@@ -742,7 +742,7 @@ def plan(s, name, rs, st, now=None):
 
 
 def fill(s, name, rs, st, acts):
-    """那边备好、没人领的任务不够 READY 个时领下一折 → take 动作；不领 → ([], 原因)。"""
+    """那边备好、没人领的任务不够 READY 个时领下一个任务 → take 动作；不领 → ([], 原因)。"""
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
@@ -780,7 +780,7 @@ def fill(s, name, rs, st, acts):
             out.append(dict(op="take", key=t["key"], nice=t["nice"]))
     if out:
         return out, ""
-    return out, ("队列里没有能领的折" if not cands else f"那边排着 {have} 个" if have >= want
+    return out, ("队列里没有能领的任务" if not cands else f"那边排着 {have} 个" if have >= want
                  else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
 
 
@@ -916,18 +916,18 @@ def submit(name, subs):
 def write_status(name, rs, st):
     keys = keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
-    folds = {}
+    out = {}
     for real, k in keys.items():
         a = rt.get(k["alias"])
         if a:
-            f = (rs.get("folds") or {}).get(k["alias"]) or {}
-            folds[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
+            f = (rs.get("tasks") or {}).get(k["alias"]) or {}
+            out[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
                                debug=f.get("debug") or {})
     try:
         allst = json.load(open(STATUS))
     except (OSError, ValueError):
         allst = {}
-    allst[name] = dict(time=time.time(), label=conf(name)["label"], folds=folds, squeue=rs.get("squeue"), free=rs.get("free"),
+    allst[name] = dict(time=time.time(), label=conf(name)["label"], tasks=out, squeue=rs.get("squeue"), free=rs.get("free"),
                        bundle=rs.get("bundle"))
     write_json(STATUS, allst)
 

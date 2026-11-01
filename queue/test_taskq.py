@@ -175,8 +175,8 @@ os.makedirs(TQ2)
 write_jsonl(os.path.join(TQ2, "tasks.jsonl"), [(486191, 0, "Dataset116_METrq1/nnUNetTrainer_save10/4"),
                                                (486300, 2000, "Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0", "swinunetr")])
 os.environ["TASKQ_DIR"] = TQ2
-rc, out = tq2("add", "--nice", "50", "--exp", "umamba", "--folds", "0")
-rc2, out2 = tq2("add", "--nice", "50", "--exp", "umamba", "--folds", "0")
+rc, out = tq2("add", "--nice", "50", "--exp", "umamba", "--only", "fold=0")
+rc2, out2 = tq2("add", "--nice", "50", "--exp", "umamba", "--only", "fold=0")
 ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
 um = ts[1]
 check("add --exp：照实验表（U-Mamba：环境 umamba、实验 umamba），按档位排进去，已有的跳过",
@@ -319,9 +319,9 @@ def tq3(*args):
 
 os.makedirs(TQ3)
 open(os.path.join(TQ3, "tasks.jsonl"), "w").close()
-rc, out, _ = tq3("add", "--nice", "0", "--exp", "t15men", "--folds", "1", "2")
+rc, out, _ = tq3("add", "--nice", "0", "--exp", "t15men", "--only", "fold=1,2")
 ts = taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))
-check("add --exp --folds：从实验表展开、记下实验 id", rc == 0 and [t["key"] for t in ts] ==
+check("add --exp --only：从实验表展开、记下实验 id", rc == 0 and [t["key"] for t in ts] ==
       ["Dataset111_MENrq1/nnUNetTrainer_save10_n470/1", "Dataset111_MENrq1/nnUNetTrainer_save10_n470/2"] and ts[0]["exp"] == "t15men")
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=rstats", "out=toy/a", 'done=["DONE"]')
 check("add --recipe：实验表以外的任务", rc == 0 and "toy/a" in out and "环境 rstats" in out)
@@ -396,7 +396,7 @@ def tq3b(*args):
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
-rc, out, _ = tq3b("add", "--exp", "t15met", "--folds", "0")
+rc, out, _ = tq3b("add", "--exp", "t15met", "--only", "fold=0")
 ts = taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))
 check("add --exp 不给 --nice：用实验表里的档位", rc == 0 and [t["key"] for t in ts] == ["Dataset116_METrq1/nnUNetTrainer_save10_n470/0"]
       and ts[0]["nice"] == E.experiment("t15met")["nice"])

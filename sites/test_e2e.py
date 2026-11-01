@@ -235,7 +235,7 @@ def fake_add(host, lab, step_, key, args, run=None, **rec):
 
 def snapshot():
     return dict(taskq={Q: taskq.local_status()}, pueue={M.hub(): dict(tasks=[])}, records=[], ok={M.hub(): True},
-                src={n: dict(folds={}) for n in M.names("train")})
+                src={n: dict(tasks={}) for n in M.names("train")})
 
 
 def check(name=NAME):
@@ -366,7 +366,7 @@ def step_stop():
     wait(released, 90, "总队列里停了 t1 后，那边停下、box 交还", every=2, act=check)
     rs = relay.remote_status(NAME)
     a = next(t for t in rs["taskq"]["tasks"] if t["key"] == alias)
-    f = (rs.get("folds") or {}).get(alias)
+    f = (rs.get("tasks") or {}).get(alias)
     t = box_tasks()[SLOW]
     skips = os.path.join(os.environ["TASKQ_DIR"], "skips")
     step("停下后：那边是 stopped、没人领，按存档算有进度（resumable），box 交还时不带 skip",

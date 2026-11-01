@@ -12,8 +12,8 @@
   - pueue：常驻进程连不上；任务失败（手动停的 143 / Killed 只记进登记表，不推送）。
   - Slurm：过去 24 小时 FAILED / OUT_OF_MEMORY / NODE_FAIL 的作业（到时限停的段不算）。
   - 训练卡住：Slurm 在跑的作业、pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
-  - 拉回：box 上在等的折既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
-  - 同一折两处：同一折在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
+  - 拉回：box 上在等的任务既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
+  - 同一个任务两处：同一个任务在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
   - 训练机的卡空了：pueue 训练机（角色 train）上有卡的组里没有排着的训练任务（只剩在训的一个，或者全空），这次也没领到新的。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
   - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
@@ -26,7 +26,7 @@
   - scripts/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
   - scripts/queue/feed.py：送任务的唯一入口（10/31）。SITES 里 relay=True 的执行机交给 scripts/queue/relay.py（领任务、传数据、
     拉回，记在 ~/relay.log；停住等人处理的报成问题），其余往缓冲送任务、交还，记在 ~/feed.log。
-  - scripts/queue/advance.py：box 上按每一折的状态排下一步（拉回 → 推理 → 评测 → 五折分析）；失败停住的报成问题。
+  - scripts/queue/advance.py：box 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
 """
 import argparse
 import json
@@ -206,11 +206,11 @@ def gather(remote=True):
     return s
 
 
-def fold_info(s, key):
-    """各机器上这一折：(是否训完, 训完的 epoch 数, 最后一个 epoch 的时间)。"""
+def task_info(s, key):
+    """各机器上这个任务：(是否训完, 训完的 epoch 数, 最后一个 epoch 的时间)。"""
     out = {}
     for host, data in s["src"].items():
-        f = data["folds"].get(key)
+        f = data["tasks"].get(key)
         if f:
             ends = [r["end"] for r in f["runs"] if r["end"]]
             out[host] = (f["final"], max([r["epochs_done"] for r in f["runs"]] or [0]),
@@ -253,7 +253,7 @@ def check(s):
         for t in ctq["tasks"]:
             if t["state"] == "blocked" and not t.get("assigned"):
                 add(f"tqblocked:{t['key']}", f"总队列任务 {t['key']} {t['note']}，不会开始")
-    # --- 执行机的缓冲（DICC、lab；10/31）：排队、在训都看缓冲（作业名、pueue 任务不对应训哪一折）---
+    # --- 执行机的缓冲（DICC、lab；10/31）：排队、在训都看缓冲（作业名、pueue 任务不对应训哪个任务）---
     for name in [n for n in s.get("taskq", {}) if n != hub]:
         tq = s["taskq"][name]
         if name in s["slurm"] and tq is None:
@@ -283,7 +283,7 @@ def check(s):
             workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
-                    "（看作业的 .out：可能在等刚停下的折、队列暂停或出错）")
+                    "（看作业的 .out：可能在等刚停下的任务、队列暂停或出错）")
             # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了：refill.py 应该已经补交了 worker.sbatch
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
             if left and not any(is_worker_job(name, r[0]) for r in d["squeue"]):
@@ -314,7 +314,7 @@ def check(s):
                     claim(key, f"{name}:{t['group']}", f"任务 {t['id']} {tname}（{st}）")
                 if st == "Running":
                     busy.setdefault(key, set()).add(f"{name}:{t['group']}")
-                    info = fold_info(s, key).get(name)
+                    info = task_info(s, key).get(name)
                     start = C.local_time(t["start"])
                     if start and now - start > timedelta(minutes=60) and \
                             (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
@@ -354,10 +354,10 @@ def check(s):
             ts = train_q.get((name, g), [])
             run = [n for st, n in ts if st == "Running"]
             if not ts:
-                if name not in holding and (name, g) not in running_g:  # 在跑别的（训完接着做的推理，10/24）不算空着  # 领着折时（在传数据、或停了等人处理）refill.py 另外报
+                if name not in holding and (name, g) not in running_g:  # 在跑别的（训完接着做的推理，10/24）不算空着  # 领着任务时（在传数据、或停了等人处理）refill.py 另外报
                     add(f"idle:{name}:{g}", f"{L(name)} {g} 组没有训练任务，{gpu} 号卡空着（任务队列里没有能领的？看 ~/refill.log）")
             elif len(ts) == len(run):
-                add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练（训完后由 refill.py 领下一折）",
+                add(f"idle:{name}:{g}", f"{L(name)} {g} 组只剩在训的 {'、'.join(run)}，后面没有排着的训练（训完后由 refill.py 领下一个任务）",
                     level="info")
 
     # --- 拉回 ---
@@ -365,17 +365,17 @@ def check(s):
         start = C.local_time(t["start"])
         if not start or now - start < timedelta(minutes=60) or src not in M.MACHINES:
             continue
-        fin = fold_info(s, key).get(src)
+        fin = task_info(s, key).get(src)
         if fin and fin[0]:
             if fin[2] and now - fin[2] > timedelta(minutes=90):
                 add(f"fetch:{key}", f"{key} 在 {L(src)} 上训完了，{L(host)} 还没拉回（任务 {t['id']}）")
         elif s["ok"].get(src) and src not in {n.split(":")[0] for n in claims.get(key, {})}:
             add(f"orphan:{key}", f"{L(host)} 在等 {key} 在 {L(src)} 上训完再拉回（任务 {t['id']}），但它不在 {L(src)} 上排队、训练")
 
-    # --- 同一折两处 ---
+    # --- 同一个任务两处 ---
     for key in sorted(k for k, v in claims.items() if len(v) >= 2):
         both = len(busy.get(key, ())) >= 2
-        add(f"dup:{key}", f"同一折在两处：{key}，" + "；".join(f"{L(n.split(':')[0])}{' ' + n.split(':')[1] if ':' in n else ''} {'、'.join(v)}" for n, v in claims[key].items())
+        add(f"dup:{key}", f"同一个任务在两处：{key}，" + "；".join(f"{L(n.split(':')[0])}{' ' + n.split(':')[1] if ':' in n else ''} {'、'.join(v)}" for n, v in claims[key].items())
             + ("（两边都在训或有进度，同步时会互相覆盖存档）" if both else "（还没同时开训，取消一边前要确认作业号）"),
             level="urgent" if both else "normal")
 
@@ -535,7 +535,7 @@ def main():
     except Exception as e:  # noqa: BLE001
         stuck["refill:error"] = f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
     for pid, msg in {**stuck, **stuck2}.items():
-        # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的折"：持续到下一次检查才报
+        # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的任务"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
     update(P, s["now"], dry=a.dry_run)
     if a.dry_run:

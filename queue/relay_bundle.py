@@ -31,7 +31,7 @@ OUT = "~/.cache/phd/relay/bundles"
 KEEP = [f"scripts/queue/{f}" for f in ("worker_start.sh", "gpu_pad_start.sh", "gpu_pad.py", "dicc_worker.sh", "taskq.py",
                                        "run_task.sh", "spec.py", "recipes.py", "experiments.py", "common.py", "inputs.py")]
 KEEP += ["research/common/nnunet/train.sh"]
-# 推理（nnunet_infer，lab1 训的折在那边推理，10/31）
+# 推理（nnunet_infer，lab1 训的任务在那边推理，10/31）
 KEEP += ["research/RQ1/analysis/infer_task.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/analysis/write_manifest.py",
          "research/RQ1/nnunet/predict.sh", "research/common/sparsify_bg.sh", "research/common/sparsify_probs.py", "envs/nnunet_paths.sh"]
 KEEP_DIRS = ["scripts/queue/readers", "research/common/nnunet/trainers", "research/common/nnunet/nets"]

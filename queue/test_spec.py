@@ -3,6 +3,7 @@
 
     python3 scripts/queue/test_spec.py
 """
+import itertools
 import os
 import subprocess
 import sys
@@ -78,22 +79,22 @@ gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
 gd = os.path.join(gr, "guest/x")
 os.makedirs(gd)
 open(os.path.join(gd, "train.log"), "w").write("starting\n")
-f0 = S.collect([gs], gr)["folds"]["guest/x"]
+f0 = S.collect([gs], gr)["tasks"]["guest/x"]
 ok("collect：还没写 PROGRESS.json、没有存档 → 没进度", not f0["resumable"] and all(r["epochs_done"] == 0 for r in f0["runs"]))
 open(os.path.join(gd, "PROGRESS.json"), "w").write('{"done": 3, "total": 10}')
-f1 = S.collect([gs], gr)["folds"]["guest/x"]
+f1 = S.collect([gs], gr)["tasks"]["guest/x"]
 ok("collect：PROGRESS.json → 做完 3 轮、共 10 轮", max(r["epochs_done"] for r in f1["runs"]) == 3
    and any(r.get("total") == 10 for r in f1["runs"]))
 open(os.path.join(gd, "PROGRESS.json"), "w").write("{broken")
-ok("collect：PROGRESS.json 坏了 → 不报错、当没进度", max(r["epochs_done"] for r in S.collect([gs], gr)["folds"]["guest/x"]["runs"]) == 0)
+ok("collect：PROGRESS.json 坏了 → 不报错、当没进度", max(r["epochs_done"] for r in S.collect([gs], gr)["tasks"]["guest/x"]["runs"]) == 0)
 open(os.path.join(gd, "ckpt_0003.pt"), "w").close()
-ok("collect：有 resume 里的存档 → resumable", S.collect([gs], gr)["folds"]["guest/x"]["resumable"])
+ok("collect：有 resume 里的存档 → resumable", S.collect([gs], gr)["tasks"]["guest/x"]["resumable"])
 import relay as RL  # noqa: E402
 import refill as RF  # noqa: E402
 ok("relay.progress：只有存档（没有轮数）也算有进度", RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))
    and not RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=False)))
-src = {"src": {"lab": {"folds": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
-               "dicc": {"folds": {}}}}
+src = {"src": {"lab": {"tasks": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
+               "dicc": {"tasks": {}}}}
 ok("refill.progress：只有存档也算有进度，按机器分", RF.progress(src, "guest/x", "lab") and not RF.progress(src, "guest/x", "dicc"))
 
 # ---------------- 训完的判断 ----------------
@@ -134,8 +135,27 @@ ok("kv_args → parse_kv 来回一致（列表用 JSON）", S.parse_kv(args[1:])
 # ---------------- 实验表 ----------------
 ts = E.tasks()
 exps = E.load()[0]
-ok(f"实验表展开 {len(ts)} 个任务（= 各实验的折数之和）、key 不重复",
-   len(ts) == sum(len(e.get("folds") or [None]) for e in exps) and len(set(ts)) == len(ts))
+ok(f"实验表展开 {len(ts)} 个任务（= 各实验 each 的组合数之和）、key 不重复",
+   len(ts) == sum(len(list(itertools.product(*(e.get("each") or {}).values()))) for e in exps) and len(set(ts)) == len(ts))
+_rt = E.resolve_task
+E.resolve_task = lambda recipe, params, exp=None: dict(key="/".join(f"{k}={v}" for k, v in sorted(params.items())),  # noqa: E731
+                                                     names={k: str(v) for k, v in params.items()})
+_ex = dict(id="gx", exp="GX", recipe="command", params=dict(p="1"), each=dict(seed=["1", "2"], fold=["0", "1", "2"]))
+_t = E.expand(_ex)
+ok("each：按参数的每种组合展开（2 × 3），参数进 params、each 记下取值",
+   len(_t) == 6 and _t[0]["params"] == dict(p="1", seed="1", fold="0") and _t[-1]["each"] == dict(seed="2", fold="2"))
+ok("each：only 只展开给的取值；only 里的参数不在 each 里 → 报错",
+   [t["each"] for t in E.expand(_ex, dict(fold=["2"]))] == [dict(seed="1", fold="2"), dict(seed="2", fold="2")]
+   and raises(lambda: E.expand(_ex, dict(lr=["1"]))))
+ok("each：标签 = id + 每个参数的 _<首字母><取值>；没有 each → 只有 id",
+   E.label(_ex, _t[1]) == "gx_s1_f1" and E.label(dict(id="gy"), E.expand(dict(id="gy", exp="GY", recipe="command", params={}))[0]) == "gy")
+_g = E.group_names(_ex, "/d", "py")
+ok("each：实验一级的名字有 <参数>_list、<参数>_list_q",
+   _g["fold_list"] == "0 1 2" and _g["fold_list_q"] == "'0 1 2'" and _g["seed_list"] == "1 2" and "fold" not in _g and _g["p"] == "1")
+E.resolve_task = _rt
+_lab = {E.label(E.experiment(t["exp"]), t) for t in ts.values()}
+ok("实验表的标签和以前的写法一样（<id>_f<fold>）",
+   _lab == {f"{t['exp']}_f{t['params']['fold']}" if "fold" in t["params"] else t["exp"] for t in ts.values()})
 ok("每个任务都解析得了、有环境和输出", all(t["spec"].get("env") and t["spec"].get("out") for t in ts.values()))
 um = ts["Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1"]["spec"]
 sw = ts["Dataset101_GLIrq1/nnUNetTrainer_SwinUNETR/0"]["spec"]
@@ -208,7 +228,7 @@ try:
 finally:
     S.subprocess.run = _run
 ok("remote_collect：经 stdin 跑时 readers 一起送过去（nnunet_log 读出训完 1 轮，oldlogs 目录里的分段日志算训完一轮）",
-   rc and rc["folds"][ns["key"]]["runs"][0]["epochs_done"] == 1
+   rc and rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1
    and [x["trained"] for x in rc["seglogs"] if x["name"].startswith(ns["oldlogs"]["prefix"])] == [True])
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")

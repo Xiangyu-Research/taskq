@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """进度汇报（2026-10-16；10/21 起每 2 小时、改成白话）：box 上 cron 每 2 小时（08:30–20:30）在更新登记表和看板之后跑一次
-（scripts/monitor/auto_refresh.sh registry），推送到手机（和健康检查同一个 ntfy 频道）：训完的折数和上次以来多了几折、剩余天数、在训的折和预计训完时间、
-上次以来训完的折和出了结果的实验、要处理的问题（说法见 scripts/monitor/plain.py）。
+（scripts/monitor/auto_refresh.sh registry），推送到手机（和健康检查同一个 ntfy 频道）：训完的任务数和上次以来多了几个任务、剩余天数、在训的任务和预计训完时间、
+上次以来训完的任务和出了结果的实验、要处理的问题（说法见 scripts/monitor/plain.py）。
 
     python3 scripts/monitor/report.py            推送
     python3 scripts/monitor/report.py --dry-run  只打印
 读：research/RQ1/实验登记_状态.json、实验登记表.csv（make_registry.py 刚生成的）、scripts/queue/qs --json、
-  ~/.cache/phd-health/state.json（健康检查的当前问题）。上一次的训完折数和时间记在 ~/.cache/phd-health/report.json。
+  ~/.cache/phd-health/state.json（健康检查的当前问题）。上一次的训完任务数和时间记在 ~/.cache/phd-health/report.json。
 """
 import argparse
 import csv
@@ -46,10 +46,10 @@ def build(now):
     span = f"{(now - cut).total_seconds() / 3600:.0f} 小时"
     p = st["folds_done"]
     delta = f"（{span} +{p - last['folds_done']}）" if "folds_done" in last and p > last["folds_done"] else ""
-    lines = [f"已训完 {p} 折{delta}" + (f"，还剩约 {st['days_left']:.0f} 天" if st.get("days_left") else "")]
+    lines = [f"已训完 {p} 个任务{delta}" + (f"，还剩约 {st['days_left']:.0f} 天" if st.get("days_left") else "")]
 
     run = [r for r in rows if r["状态"] == "训练中" and r["实验"]]  # 临时任务（推理等）不算
-    lines.append(f"正在训 {len(run)} 折" + ("：" if run else ""))
+    lines.append(f"正在训 {len(run)} 个任务" + ("：" if run else ""))
     for r in run:
         pct = 100 * int(r["epoch"] or 0) / int(r["num_epochs"] or 1000)
         eta = f"，约 {hm(r['预计训完'])} 训完" if r["预计训完"] else ""
@@ -76,7 +76,7 @@ def build(now):
     if res or other:
         lines.append(f"{span}内出了结果：")
         for k, v in sorted(res.items(), key=lambda x: (x[0] in ("分析", "所有实验"), x[0])):
-            items = [("、".join(f"f{f}" for f in sorted(fs - {None})) + " " if fs - {None} else "") + st for st, fs in v.items()]
+            items = [("、".join(sorted(fs - {None})) + " " if fs - {None} else "") + st for st, fs in v.items()]
             lines.append(f"- {k}：{'；'.join(items) if k == '分析' else '、'.join(items)}")
         if other:
             lines.append(f"- 另有 {len(other)} 个一次性任务")

@@ -2,11 +2,13 @@
 taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读；
 分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
 
-实验的字段：id、exp、label、model、hours、recipe、params、fields、folds、after、group_after、names（见 RQ1 的表），
+实验的字段：id、exp、label、model、hours、recipe、params、fields、each、after、group_after、names（见 RQ1 的表），
 另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。
+each：{参数: [取值…]}，一个实验按这些参数的每种组合展开成一组任务（如 {"fold": ["0", "1"]}）；没有就是一个任务。
 表的模块里另外可以有 FINAL（所有实验做完后的步骤）、KEEP_DATA（keep_data()）。"""
 import glob
 import importlib.util
+import itertools
 import os
 import shlex
 import sys
@@ -57,14 +59,39 @@ def resolve_task(recipe, params, exp=None):
     return spec.resolve(recipe, {**((e or {}).get("fields") or {}), **params}, exp=exp)
 
 
-def expand(e, folds=None):
-    """一个实验 → [dict(key, exp, recipe, params, spec, fold)]（每折一个；folds 只展开这几折）。"""
+def expand(e, only=None):
+    """一个实验 → [dict(key, exp, recipe, params, spec, each)]（each 的每种组合一个；only={参数: [取值]} 只展开这些取值）。"""
+    each = {k: [v for v in vs if not only or k not in only or v in only[k]] for k, vs in (e.get("each") or {}).items()}
+    bad = sorted(set(only or {}) - set(each))
+    if bad:
+        raise spec.SpecError(f"{e['id']} 不按 {'、'.join(bad)} 展开（each 里有：{'、'.join(each) or '没有'}）")
     out = []
-    for f in (folds or e.get("folds") or [None]):
-        params = dict(e["params"], **({"fold": f} if f is not None else {}))
+    for vals in itertools.product(*each.values()):
+        pick = dict(zip(each, vals))
+        params = dict(e["params"], **pick)
         s = resolve_task(e["recipe"], params, e["id"])
-        out.append(dict(key=s["key"], exp=e["id"], recipe=e["recipe"], params=params, spec=s, fold=f))
+        out.append(dict(key=s["key"], exp=e["id"], recipe=e["recipe"], params=params, spec=s, each=pick))
     return out
+
+
+def short(t):
+    """任务在实验里的简称：each 的每个参数写成 <参数首字母><取值>，空格隔开（如 "f1"、"s2 f0"）；没有 each → ""。"""
+    return " ".join(f"{k[0]}{v}" for k, v in (t.get("each") or {}).items())
+
+
+def label(e, t):
+    """box pueue 任务标签里的任务名：实验 id + 简称的每一项前面加 "_"（如 t3met_f1）。"""
+    return e["id"] + "".join("_" + x for x in short(t).split())
+
+
+def parse_label(who):
+    """标签里的任务名 → (实验, 任务)；实验一级的（只有 id）→ (实验, None)；认不出 → (None, None)。"""
+    if "by_label" not in _cache:
+        _cache["by_label"] = {label(experiment(t["exp"]), t): t for t in tasks().values()}
+    t = _cache["by_label"].get(who)
+    if t:
+        return experiment(t["exp"]), t
+    return experiment(who), None
 
 
 def tasks():
@@ -82,17 +109,19 @@ def tasks():
 
 
 def group_names(e, data, python):
-    """实验一级步骤（group_after、FINAL）的模板名字：各折都一样的参数 + exp、id、folds（空格隔开）、folds_q（加了引号的）
-    + 实验的 names + data、python。"""
+    """实验一级步骤（group_after、FINAL）的模板名字：各任务都一样的参数 + exp、id + each 的每个参数 <参数>_list（取值空格隔开）、
+    <参数>_list_q（加了引号的） + 实验的 names + data、python。"""
     ts = expand(e)
     common = {k: v for k, v in ts[0]["spec"]["names"].items() if all(t["spec"]["names"].get(k) == v for t in ts)}
-    folds = " ".join(e.get("folds") or [])
-    return dict(common, exp=e["exp"], id=e["id"], folds=folds, folds_q=shlex.quote(folds), **(e.get("names") or {}),
-                data=data, python=python)
+    lists = {}
+    for k, vs in (e.get("each") or {}).items():
+        lists[f"{k}_list"] = " ".join(vs)
+        lists[f"{k}_list_q"] = shlex.quote(" ".join(vs))
+    return dict(common, exp=e["exp"], id=e["id"], **lists, **(e.get("names") or {}), data=data, python=python)
 
 
 def task_names(t, data, python):
-    """每折步骤（after）的模板名字：任务的参数 + exp、id + data、python。"""
+    """每个任务的步骤（after）的模板名字：任务的参数 + exp、id + data、python。"""
     e = experiment(t["exp"]) or {}
     return dict(t["spec"]["names"], exp=e.get("exp", ""), id=t["exp"], data=data, python=python)
 

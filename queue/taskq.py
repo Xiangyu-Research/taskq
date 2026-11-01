@@ -37,7 +37,8 @@ worker 调用（缓冲上）：
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
     taskq.py missing --worker <作业号> <key> [--why 说明]   缺输入（11/1）：交还，记 inputs/<key>，补齐前不再领
 box 上（总队列；在别的机器上跑这些命令时退出码 2，缓冲上只有带 TASKQ_FEED=1 的 feed.py 能改）：
-    taskq.py add [--nice <档位>] --exp <实验 id> [--folds 0 1 …]   从实验表加（已有的跳过；不给 --nice 用表里的档位）
+    taskq.py add [--nice <档位>] --exp <实验 id> [--only <参数>=<取值>[,<取值>…]]…   从实验表加（已有的跳过；不给 --nice 用表里的档位；
+                                       --only 只加 each 里这个参数取这些值的任务，如 --only fold=1,2）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py add [--nice <档位>] --file <任务单.json>               按任务单加（别人的训练、测试；不给 --nice 用单子里的）
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
@@ -560,12 +561,23 @@ def read_sheets(path):
     return new, (int(nice) if nice is not None else None)
 
 
+def only_of(items):
+    """["fold=1,2", …] → {"fold": ["1", "2"]}；没给 → None。"""
+    out = {}
+    for x in items:
+        k, sep, v = x.partition("=")
+        if not sep or not k or not v:
+            sys.exit(f"--only 要写成 参数=取值[,取值…]：{x}")
+        out.setdefault(k, []).extend(v.split(","))
+    return out or None
+
+
 def cmd_add(a):
     import experiments as E
     try:
         if a.exp:
             e = E.experiment(a.exp) or sys.exit(f"实验表里没有 {a.exp}（有：{', '.join(x['id'] for x in E.load()[0])}）")
-            new = [dict(exp=t["exp"], recipe=t["recipe"], params=t["params"]) for t in E.expand(e, a.folds)]
+            new = [dict(exp=t["exp"], recipe=t["recipe"], params=t["params"]) for t in E.expand(e, only_of(a.only))]
             if a.nice is None:
                 a.nice = e.get("nice")
                 if a.nice is None:
@@ -872,7 +884,7 @@ def main(argv):
     p = sub.add_parser("add")
     p.add_argument("--nice", type=int, help="档位；--exp 时不给就用实验表里的 nice")
     p.add_argument("--exp")
-    p.add_argument("--folds", nargs="*")
+    p.add_argument("--only", action="append", default=[], metavar="参数=取值[,取值…]")
     p.add_argument("--recipe")
     p.add_argument("--file", help="任务单（JSON），不写 recipe 时是 command 做法")
     p.add_argument("args", nargs="*", help="--recipe 的 k=v")

@@ -102,7 +102,7 @@ def rtask(key, state, worker=None):
 
 def S0(mt, box=(), recs=()):
     return dict(taskq={Q: dict(enabled=True, tasks=mt)}, pueue={M.hub(): dict(tasks=list(box))}, records=list(recs),
-                ok={M.hub(): True}, src={n: dict(folds={}) for n in M.names("train")})
+                ok={M.hub(): True}, src={n: dict(tasks={}) for n in M.names("train")})
 
 
 def keymap(*pairs):
@@ -154,7 +154,7 @@ def test_adopt_out():
 def test_plan():
     K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
     st = keymap((K, A))
-    RS = lambda *ts, **kw: dict(taskq=dict(tasks=list(ts), paused=kw.get("paused", False)), folds=kw.get("folds", {}), free=500e9)  # noqa: E731
+    RS = lambda *ts, **kw: dict(taskq=dict(tasks=list(ts), paused=kw.get("paused", False)), tasks=kw.get("tasks", {}), free=500e9)  # noqa: E731
 
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [("beat", K)] and not stuck, acts
@@ -227,7 +227,7 @@ def test_plan():
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
-    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed"), folds={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed"), tasks={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, acts
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "bad")), st)
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, stuck
@@ -458,7 +458,7 @@ def test_e2e():
 
     relay.write_status(NAME, relay.remote_status(NAME), relay.load_state())
     st = json.load(open(relay.STATUS))[NAME]
-    assert sp["key"] in st["folds"] and st["folds"][sp["key"]]["final"], st
+    assert sp["key"] in st["tasks"] and st["tasks"][sp["key"]]["final"], st
     ok("status.json 里有这一折（真 key）")
     return pre
 

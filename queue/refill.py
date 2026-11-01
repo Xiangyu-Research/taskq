@@ -4,14 +4,14 @@
 现在是 lab）上的数据，topup_all 给 Slurm 训练机（DICC）补交 worker 作业。
 
 lab 的训练（10/31 起）：box 上的 scripts/queue/feed.py 把总队列里的任务分给 lab（assigned = lab）、送进 lab 的缓冲，
-lab 上常驻的 worker（scripts/queue/dicc_worker.sh）领着训；0 号卡手动训的折在总队列里分给 lab:gpu0。
-传数据（transfer）、box 任务（add、then_check）、挑下一折（candidates、next_pick）这些共用的函数在这里，feed.py、relay.py、
+lab 上常驻的 worker（scripts/queue/dicc_worker.sh）领着训；0 号卡手动训的任务在总队列里分给 lab:gpu0。
+传数据（transfer）、box 任务（add、then_check）、挑下一个任务（candidates、next_pick）这些共用的函数在这里，feed.py、relay.py、
 advance.py 调用。
 
 lab 上的数据：
   自动传过去的数据（相对数据目录的路径）记在 ~/.cache/phd/refill.json 的 transferred，按"还要不要用"和空间预算管（cleanup()，2026-10-24）：
   - 不删：lab 缓冲里所有任务的、总队列里分给 lab 的（assigned 是 lab 或 lab:<组>）任务的、lab 上活着的训练任务的、box 上正在传、
-    正在从 lab 拉回 / 归档的、lab 上训完还没归档的折的，以及实验表的 KEEP_DATA；
+    正在从 lab 拉回 / 归档的、lab 上训完还没归档的任务的，以及实验表的 KEEP_DATA；
   - 其余的：总队列里没有 lab 能训的任务（free、有环境、要卡、没有进度、lab 没跳过）要用了就删；还有任务要用的留着，
     盘剩的低于软线（硬线 × SOFT，硬线 = 盘的提醒线 + TRAIN_OUT_GB）时从最晚用到的删起。
   lab、box 连不上，或者总队列、lab 的缓冲读不到时什么都不删。
@@ -79,11 +79,11 @@ def tag(path):
 
 
 def progress(s, key, host=None):
-    """这一折有没有训练进度（训完、有 epoch，或者有存档：任务说明的 resume）：host=None 时看所有机器。"""
-    from health import fold_info
-    if any(v[0] or v[1] > 0 for h, v in fold_info(s, key).items() if host in (None, h)):
+    """这个任务有没有训练进度（训完、有 epoch，或者有存档：任务说明的 resume）：host=None 时看所有机器。"""
+    from health import task_info
+    if any(v[0] or v[1] > 0 for h, v in task_info(s, key).items() if host in (None, h)):
         return True
-    return any(((d.get("folds") or {}).get(key) or {}).get("resumable") for h, d in (s.get("src") or {}).items()
+    return any(((d.get("tasks") or {}).get(key) or {}).get("resumable") for h, d in (s.get("src") or {}).items()
                if host in (None, h))
 
 
@@ -120,7 +120,7 @@ def candidates(s, name, tq, ready, oks=None):
 
 
 def next_pick(tq, cands, ready, free, hard, exclude=(), moving=()):
-    """下一折领哪个 → (任务, 要传的数据, 要传多少 GB, 有数据正在传)；没有 → (None, [], 0, False)。moving：正在传的数据集（tag）。
+    """下一个领哪个任务 → (任务, 要传的数据, 要传多少 GB, 有数据正在传)；没有 → (None, [], 0, False)。moving：正在传的数据集（tag）。
     要传数据的：传完后盘剩的不低于硬线才领。正在传的不再另传，领了等传完再开始（relay.py 用）。"""
     for t in cands:
         if t["key"] in exclude:
@@ -199,7 +199,7 @@ def transfer(name, paths, run=sh):
 
 
 def moves(s, t, name, p):
-    """box 任务 t 在给这台机器传 p、或在从这台机器拉回 / 归档 p 那个数据集的折。没有记录的（手动加的）按命令里有没有
+    """box 任务 t 在给这台机器传 p、或在从这台机器拉回 / 归档 p 那个数据集的任务。没有记录的（手动加的）按命令里有没有
     这台机器和 p 的名字算，宁可多留。"""
     r = C.identify(M.hub(), t, s.get("records") or [])
     if r and (r.get("to") == name or r.get("src") == name):
@@ -225,7 +225,7 @@ def kept(s, name):
 def cleanup(s, name, run=None, dry=False):
     """自动传过去的数据（~/.cache/phd/refill.json 的 transferred）按"还要不要用"和空间预算管（2026-10-24，10/31 改）→ [说明]。
     不删：实验表的 KEEP_DATA；只删做法的 INPUT_ROOTS 下面的；这台机器缓冲里的、总队列里分给它的任务要用的（kept）；这台机器上训练任务在用的；box 上正在传、
-    正在从这台机器拉回 / 归档的；训完还没归档的折的。其余的：
+    正在从这台机器拉回 / 归档的；训完还没归档的任务的。其余的：
       - 总队列里没有这台机器能训的任务（candidates）要用了 → 删；
       - 还有任务要用的留着，但盘剩的要不低于软线（硬线 × SOFT）：低了就从"下次用到"最晚的删起。
     这台机器、box 连不上，总队列、缓冲读不到时什么都不删。dry：只算、不删（说明照样给）。"""
@@ -266,7 +266,7 @@ def cleanup(s, name, run=None, dry=False):
             continue
         busy = any(t["status"] in LIVE and p in data_of(tq, kind_key(s, name, t)[1] or "") for t in s["pueue"][name]["tasks"])
         busy |= any(t["status"] in LIVE and moves(s, t, name, p) for t in box["tasks"])
-        busy |= any(p in data_of(tq, k) and not f.get("archived") for k, f in s["src"].get(name, {}).get("folds", {}).items() if f.get("final"))
+        busy |= any(p in data_of(tq, k) and not f.get("archived") for k, f in s["src"].get(name, {}).get("tasks", {}).items() if f.get("final"))
         if busy:
             continue
         if p not in when:

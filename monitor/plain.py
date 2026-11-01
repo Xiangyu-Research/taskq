@@ -33,7 +33,7 @@ def fold(key):
         if _tasks is None:
             _tasks = E.tasks()
         t = _tasks[key]
-        return f"{exp_name(E.experiment(t['exp']))} f{t['fold']}"
+        return " ".join(x for x in (exp_name(E.experiment(t["exp"])), E.short(t)) if x)
     except Exception:  # noqa: BLE001
         return key
 
@@ -50,7 +50,7 @@ def plan_items():
 
 
 def label(lab):
-    """pueue 标签 → (实验名, 做了什么, 第几折或 None)；中间步骤 → None。分析计划里的分析 → ("分析", "C3 问题", None)，
+    """pueue 标签 → (实验名, 做了什么, 任务的简称（E.short，如 "f1"）或 None)；中间步骤 → None。分析计划里的分析 → ("分析", "C3 问题", None)，
     别的一次性任务 → ("其他", 标签, None)。"""
     global _plan
     step, _, who = lab.partition(":")
@@ -63,12 +63,10 @@ def label(lab):
         if _plan is None:
             _plan = plan_items()
         return ("分析", f"{m.group(1)} {_plan[m.group(1)]}", None) if m and m.group(1) in _plan else ("其他", lab, None)
-    m = re.fullmatch(r"(.+)_f(\d+)", who)
-    eid, f = (m.group(1), m.group(2)) if m and E.experiment(m.group(1)) else (who, None)
-    e = E.experiment(eid)
+    e, t = E.parse_label(who)
     if not e:
         return ("其他", lab, None)
-    return exp_name(e), STEP[step], f
+    return exp_name(e), STEP[step], (E.short(t) or None) if t else None
 
 
 def task(lab):
@@ -77,11 +75,10 @@ def task(lab):
     if step == "train":
         return f"{fold(who)} 的训练"
     if step in STEP and step in QUIET:
-        m = re.fullmatch(r"(.+)_f(\d+)", who)
-        e = E.experiment(m.group(1)) if m else None
-        return (f"{exp_name(e)} f{m.group(2)}" if e else who) + " 的" + STEP[step]
+        e, t = E.parse_label(who)
+        return (" ".join(x for x in (exp_name(e), E.short(t) if t else "") if x) if e else who) + " 的" + STEP[step]
     r = label(lab)
-    return f"{r[0]}{' f' + r[2] if r[2] else ''} 的{r[1]}" if r else lab
+    return f"{r[0]}{' ' + r[2] if r[2] else ''} 的{r[1]}" if r else lab
 
 
 def _who(key):
@@ -116,7 +113,7 @@ def problem(pid, p):
         if kind == "tqidle":
             return f"{L(part[1])} 有作业占着 GPU 却没在训练。"
         if kind == "tqorphan":
-            return f"{L(part[1])} 还有 {num(r'还有 (\d+) 个')} 折没训，但已经没有作业在排队，训练会停下来。"
+            return f"{L(part[1])} 还有 {num(r'还有 (\d+) 个')} 个任务没训，但已经没有作业在排队，训练会停下来。"
         if kind == "taskq":
             return f"读不到 {L(part[1])} 的任务队列，看不到那边的训练情况。"
         if kind == "pueued":
@@ -146,7 +143,7 @@ def problem(pid, p):
         if kind == "board":
             return f"看板有新结果，要确认后才发布（{num(r'（(\d+) 个文件')} 个文件）。"
         if kind in ("refill", "advance") and part[1] == "error":
-            return "自动调度脚本出错了：" + ("DICC 不会补交作业，lab 上用完的数据不会清理。" if kind == "refill" else "训完的折不会自动推理、评测。")
+            return "自动调度脚本出错了：" + ("DICC 不会补交作业，lab 上用完的数据不会清理。" if kind == "refill" else "训完的任务不会自动推理、评测。")
         if kind == "site":  # 执行机（feed.py、relay.py，10/31）：site:<机器>:<类>[:<key 或数据集>]
             site, sub, key = L(part[1]), part[2], ":".join(part[3:])
             if sub == "down":
@@ -167,7 +164,7 @@ def problem(pid, p):
                 return f"{site} 上 {fold(key)} 的输入数据不全，没开训，过一小时自动重试。"
             if sub == "orphan":
                 if "认不出" in msg:
-                    return f"{site} 的队列里有一个认不出是哪一折的任务。"
+                    return f"{site} 的队列里有一个认不出来的任务。"
                 return f"{site} 在训 {fold(key)}，但总队列里没分给它，可能重复训练。"
         if kind == "topup":
             return f"给 {L(part[1])} 补交作业出错，那边排队的作业会越来越少。"

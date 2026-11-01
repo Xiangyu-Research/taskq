@@ -142,7 +142,7 @@ ok("执行机时段开始：卡上有别人不开；空了恢复 worker 组、al
 
 stops = []
 shift.stop_group = lambda host, g, pueue, wait=False: (stops.append((g, wait)), ([7], {}))[1]
-shift.site_folds = lambda name: {"D/t/1": dict(state="claimed", runs=[dict(epochs_done=40)]), "D/t/2": dict(state="free", runs=[])}
+shift.site_tasks = lambda name: {"D/t/1": dict(state="claimed", runs=[dict(epochs_done=40)]), "D/t/2": dict(state="free", runs=[])}
 shift.central_mine = lambda name: ["D/t/1", "D/t/2"]
 moves, gave = [], []
 shift.hand_over = lambda key, frm, to: (moves.append((key, frm, to)), True)[1]

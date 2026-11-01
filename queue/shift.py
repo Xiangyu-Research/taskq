@@ -3,7 +3,7 @@
 
 执行机（SITES 里的名字，10/31）：只在时段里领任务、开 worker（relay.py 看 allowed()）。
   - 时段开始后：卡上没有别的用户的进程 → 恢复它的 pueue 组、记下这个时段开了（有人在用就下次检查再看，直到时段结束）；
-  - 时段结束后：暂停组、停掉 worker（SIGTERM，worker 交还手上的任务）；总队列里分给它、没训完的折：有进度（在训、训过几轮）的
+  - 时段结束后：暂停组、停掉 worker（SIGTERM，worker 交还手上的任务）；总队列里分给它、没训完的任务：有进度（在训、训过几轮）的
     改分给同一台上不按时段的执行机（day_site，从存档接着训，relay.py 的收编把存档带过去），其余交还总队列。
 pueue 组（"<机器>": {"<组>": …}，只跑手动任务的组）：每个时段只动两次，中间手动的暂停、恢复都不管：
   - 时段开始后：组暂停着、卡上没有别的用户的进程 → 恢复；
@@ -157,12 +157,12 @@ def central_mine(name):
     return [t["key"] for t in st.get("tasks", []) if t.get("worker") == name and t["state"] not in ("done", "stopped")]
 
 
-def site_folds(name):
-    """relay.py 最近一次读到的这台的各折（~/.cache/phd/relay/status.json）→ {真 key: dict(state, runs, final)}。"""
+def site_tasks(name):
+    """relay.py 最近一次读到的这台的各任务（~/.cache/phd/relay/status.json）→ {真 key: dict(state, runs, final)}。"""
     import relay_names as RN
     try:
         with open(os.path.join(RN.RELAY_DIR, "status.json")) as f:
-            return (json.load(f).get(name) or {}).get("folds") or {}
+            return (json.load(f).get(name) or {}).get("tasks") or {}
     except (OSError, ValueError):
         return {}
 
@@ -210,14 +210,14 @@ def pause(host, g, name, last=False):
 
 
 def stop_site(name):
-    """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的折：有进度的交给白天的执行机，其余交还 → 说明。"""
+    """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的任务：有进度的交给白天的执行机，其余交还 → 说明。"""
     c = M.RELAY[name]
     host, g = c["ssh"], c["worker"]["group"]
     run, _ = stop_group(host, g, c.get("pueue") or PUEUE, wait=True)
-    folds, to = site_folds(name), day_site(host, but=name)
+    have, to = site_tasks(name), day_site(host, but=name)
     moved, gave = [], []
     for k in central_mine(name):
-        if to and has_progress(folds.get(k)) and hand_over(k, name, to):
+        if to and has_progress(have.get(k)) and hand_over(k, name, to):
             moved.append(k)
         elif give_back(k, name):
             gave.append(k)
@@ -253,7 +253,7 @@ def run_site(name, r, now, st, dry):
             msgs.append(f"{name}：{r[0]} 时段开始，卡空着，开始领任务、开 worker")
     elif ended and rec.get("started") == ended and rec.get("paused") != ended:
         if dry:
-            return [f"{name}：会停 worker、交出没训完的折（{r[1]} 时段结束）"]
+            return [f"{name}：会停 worker、交出没训完的任务（{r[1]} 时段结束）"]
         rec["paused"] = ended
         msgs.append(f"{name}：{r[1]} 时段结束，" + stop_site(name))
     return msgs

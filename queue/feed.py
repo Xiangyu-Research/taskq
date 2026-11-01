@@ -56,8 +56,8 @@ STATE = os.path.expanduser(os.environ.get("FEED_STATE", "~/.cache/phd/feed.json"
 LOG = os.path.expanduser(os.environ.get("FEED_LOG", "~/feed.log"))
 LOW_MIN = 60   # 补不满持续这么多分钟才报
 DOWN_S = 2 * 3600  # 连不上这么久才报
-INPUT_RETRY_S = 3600  # 缺输入的折过这么久撤掉标记重试
-COPYING = ("fetch", "archive", "relay_fetch")  # box 上这些步骤在跑时，这一折的结果还在拷
+INPUT_RETRY_S = 3600  # 缺输入的任务过这么久撤掉标记重试
+COPYING = ("fetch", "archive", "relay_fetch")  # box 上这些步骤在跑时，这个任务的结果还在拷
 # 比较两边的数据时不算的文件：临时文件，加上各做法拉回时不拉的（fetch.exclude，box 上本来就没有）
 EXCLUDE = ("*.tmp", ".DS_Store", ".incomplete") + tuple(sorted({x for r in recipes.RECIPES.values()
                                                              for x in ((r.get("fetch") or {}).get("exclude") or []) if "{" not in x}))
@@ -163,7 +163,7 @@ def differs(c, b):
 
 
 def trained_there(s, name, key):
-    return bool(((s.get("src", {}).get(name) or {}).get("folds", {}).get(key) or {}).get("final"))
+    return bool(((s.get("src", {}).get(name) or {}).get("tasks", {}).get(key) or {}).get("final"))
 
 
 def progress_elsewhere(s, key, name):
@@ -253,7 +253,7 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="bremove", key=k))
                 gone.add(k)
             if refill.progress(s, k, name):
-                acts.append(dict(op="handover", key=k, to=heir, why=f"换成了 {heir}，这一折在 {L} 上有进度，从存档接着训"))
+                acts.append(dict(op="handover", key=k, to=heir, why=f"换成了 {heir}，这个任务在 {L} 上有进度，从存档接着训"))
             else:
                 acts.append(dict(op="release", key=k, why=f"换成了 {heir}"))
             continue
@@ -364,7 +364,7 @@ def plan(s, name, st, data=None, now=None):
                 moving = True
                 continue
             gb, free, hard = refill.data_gb(miss), disk_free(s, name), disk_hard(name)
-            if gb is None or free is None or free - gb < hard:  # 传完盘剩的不够（用不着的数据由 refill.cleanup 删）：这一折先不传
+            if gb is None or free is None or free - gb < hard:  # 传完盘剩的不够（用不着的数据由 refill.cleanup 删）：这个任务先不传
                 why_room = (f"{L} 盘剩 {free:.0f} GB，传 {' '.join(miss)}（{gb:.0f} GB）后低于 {hard:.0f} GB" if gb is not None and free is not None
                             else f"不知道 {L} 盘还剩多少或数据多大")
                 room = room or why_room

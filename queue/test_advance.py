@@ -137,7 +137,7 @@ def pruned(ds, tr):
 
 def snap(tasks=(), remote=None):
     rows = [dict(id=i, status=st, command=c, label="", group="x", end=end) for i, (st, c, end) in enumerate(tasks)]
-    return dict(pueue={"box": dict(tasks=rows)}, src={h: dict(folds=f) for h, f in (remote or {}).items()},
+    return dict(pueue={"box": dict(tasks=rows)}, src={h: dict(tasks=f) for h, f in (remote or {}).items()},
                 taskq={"box": dict(tasks=[dict(key=f"Dataset121_GLIMETrq1/nnUNetTrainer_save10/{k}", nice=0) for k in range(5)])})
 
 
@@ -573,8 +573,8 @@ def lsnap(assigned=None, state="claimed", fold=None, qrows=(), lab=(), heads=Non
     if assigned or state != "claimed":
         s_["taskq"]["box"]["tasks"].append(dict(key=K3, nice=60, state=state, worker=assigned, assigned=assigned))
     s_["taskq"]["box"]["tasks"] += [dict(r) for r in qrows]
-    s_["src"]["lab"] = dict(folds=dict({K3: fold} if fold else {}, **(src3 or {})))
-    s_["src"]["dicc"] = dict(folds=dict(dicc3 or {}))
+    s_["src"]["lab"] = dict(tasks=dict({K3: fold} if fold else {}, **(src3 or {})))
+    s_["src"]["dicc"] = dict(tasks=dict(dicc3 or {}))
     s_["code"] = dict(main=H3, heads=heads or {"dicc": H3, "lab": H3})
     return s_
 
@@ -983,6 +983,12 @@ check("run 加任务前写了记录（box、步骤、key、组）；包过的命
 s_["pueue"]["box"]["tasks"][0]["label"] = "other"
 check("任务号对上、标签不同（任务号被重用）→ 不认，照常排", ens18(A.plan(s_)[0]))
 REMOTE["have"] = set()
+
+_qd = dict(inputs=["p/{m}/s{seed}/f{fold}/x", "p/{m}/all"])
+check("实验一级步骤的 inputs：each 的参数按 <参数>_list 的组合展开，不认具体参数名；每个任务的步骤照填",
+      A.inputs_of(_qd, dict(m="M", fold_list="0 1", seed_list="7"), {"fold": ["0", "1"], "seed": ["7"]})
+      == ["p/M/s7/f0/x", "p/M/s7/f1/x", "p/M/all"]
+      and A.inputs_of(_qd, dict(m="M", fold="1", seed="7"), {"fold": "1", "seed": "7"}) == ["p/M/s7/f1/x", "p/M/all"])
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
