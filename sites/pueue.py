@@ -8,16 +8,14 @@ import sys
 
 import remote as R
 
-sys.path.insert(0, os.path.join(R.REPO, "scripts", "queue"))
-
-
-def _rename(s):
-    import relay_bundle as RB
-    return RB.rename(s)
+sys.path.insert(0, os.path.join(R.REPO, "envs"))
+import machines as M  # noqa: E402
 
 
 def parse(raw, group):
-    """`pueue status --json` 的输出（文本或已解析的 dict）→ [[任务号, 标签, 状态, 结果或 None], …]（只要这个组的）；读不出 → None。"""
+    """`pueue status --json` 的输出（文本或已解析的 dict）→ [[任务号, 标签, 状态, 结果或 None], …]（只要这个组的，group 可以是几个组的列表）；
+    读不出 → None。"""
+    groups = [group] if isinstance(group, str) or group is None else list(group)
     try:
         tasks = (json.loads(raw) if isinstance(raw, str) else raw)["tasks"]
     except (TypeError, ValueError, KeyError):
@@ -28,27 +26,28 @@ def parse(raw, group):
         st = s if isinstance(s, str) else list(s)[0]
         done = s.get("Done") if isinstance(s, dict) else None
         res = done.get("result") if isinstance(done, dict) else None
-        if t.get("group") == group:
+        if t.get("group") in groups:
             jobs.append([int(i), t.get("label") or "", st, str(res) if res is not None else None])
     return jobs
 
 
-def workers(name, jobs):
-    """组里的 worker 任务（标签 worker:<id>），按任务号排。"""
-    w = R.conf(name)["worker"]
+def workers(name, jobs, kind="gpu"):
+    """跑 kind 任务的 worker（标签 worker:<id>，envs/machines.py 的 worker_of），按任务号排。"""
+    w = M.worker_of(name, kind)
     return [j for j in jobs or [] if j[1] == f"worker:{w['id']}"]
 
 
-def worker_cmd(name):
+def worker_cmd(name, kind="gpu"):
     """开 worker 的 pueue add 命令。整条 bash -c 作为一个参数：pueue 把 -- 后面的参数用空格拼起来交给 sh（ccb0ba6）。"""
-    c = R.conf(name)
-    w, gpu = c["worker"], c["groups"][c["worker"]["group"]][1]
-    run = (f"R={R.q(c['root'].rstrip('/'))}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue WORKER_ID={w['id']} "
-           f"CUDA_VISIBLE_DEVICES={gpu}; exec bash $REPO/scripts/queue/{_rename('worker_start.sh')}")
+    c, w = R.conf(name), M.worker_of(name, kind)
+    gpu = c["groups"][w["group"]][1]
+    env = f"WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
+    run = (f"R={R.q(c['root'].rstrip('/'))}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue {env}; "
+           "exec bash $REPO/scripts/queue/worker_start.sh")
     return f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- {shlex.quote('bash -c ' + shlex.quote(run))}"
 
 
-def start_worker(name, run):
-    """开一个 worker → (成功与否, 输出)。run：fn(命令) → (退出码, 输出)。"""
-    rc, out = run(worker_cmd(name))
+def start_worker(name, run, kind="gpu"):
+    """开一个跑 kind 任务的 worker → (成功与否, 输出)。run：fn(命令) → (退出码, 输出)。"""
+    rc, out = run(worker_cmd(name, kind))
     return rc == 0, out.strip()[-200:]

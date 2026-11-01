@@ -330,6 +330,16 @@ kill -TERM $wpid; wait $wpid 2> /dev/null
 cp "$T/fake_train.sh.orig" "$T/fake_train.sh"
 unset TASKQ_HEAD_CMD
 
+# 不在 Slurm 里的 CPU worker（pueue 的 cpu_worker）：最多用 TASKQ_CPUS 个核
+reset
+table << EOF
+t/c1 nnunet cpu
+EOF
+(WORKER_ID=lab-cpu WORKER_DEVICE=cpu TASKQ_CPUS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=3 exec bash "$HERE/dicc_worker.sh") > "$T/w6f.out" 2>&1 &
+wpid=$!
+waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid
+check "不在 Slurm 里的 CPU worker：最多用 TASKQ_CPUS 个核" 'grep -q "worker（cpu）.*CPU 1，" $T/w6f.out && grep -q "^start .* t/c1 .*cpus=1$" $T/train.log'
+
 # 代码包（<根>/code/<包>、current 指向在用的）：current 换了，空闲时直接 exec 新包的 worker_start.sh，同一进程接着跑（11/1）
 reset
 mkdir -p "$T/code/a" "$T/code/b/scripts/queue"

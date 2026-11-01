@@ -386,12 +386,12 @@ def undeployed(name):
 
 
 def parse_sched(name, rs):
-    """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
+    """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：各种 worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
     一次 ssh 读完、在 box 上用适配器解析（scripts/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
     raw, c = rs.pop("sched_raw", None), conf(name)
     rs["jobs"] = rs["squeue"] = None
     if raw is not None and c["scheduler"] == "pueue":
-        rs["jobs"] = PQ.parse(raw, (c.get("worker") or {}).get("group"))
+        rs["jobs"] = PQ.parse(raw, [M.worker_of(name, k)["group"] for k in M.kinds(name)])
     elif raw is not None:
         rs["squeue"] = SL.squeue(raw)
     return rs
@@ -743,7 +743,8 @@ def plan(s, name, rs, st, now=None):
 
 
 def fill(s, name, rs, st, acts):
-    """那边备好、没人领的任务不够 READY 个时领下一个任务 → take 动作；不领 → ([], 原因)。"""
+    """那边备好、没人领的任务不够 READY 个时领下一个任务（每种 worker 各备 READY 个，envs/machines.py 的 kinds）→ take 动作；
+    不领 → ([], 原因)。"""
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
@@ -751,26 +752,32 @@ def fill(s, name, rs, st, acts):
         return [], "不在时段里（envs/policy.py 的 SHIFT）"
     if any(n not in s["src"] and n not in P.OFFLINE for n in M.names("train")):  # 暂停检查的机器不算
         return [], "有训练机的进度读不到"
-    want = P.READY.get(name, 1)
+    want, kinds = P.READY.get(name, 1), M.kinds(name)
     keys = keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
 
     def waiting(t):  # 领着、还没开训：在传数据，或在那边排着
         a = rt.get(keys[t["key"]]["alias"]) if t["key"] in keys else None
         return a is None or a["state"] in ("free", "stale", "waiting")
-    have = sum(1 for t in mtq.get("tasks", []) if t.get("worker") == name
-               and t["state"] not in ("done", "stopped") and waiting(t))
+
+    def kind(t):
+        return refill.info(mtq, t["key"])["spec"].get("device", "gpu")
+    have = {k: 0 for k in kinds}
+    for t in mtq.get("tasks", []):
+        if t.get("worker") == name and t["state"] not in ("done", "stopped") and waiting(t):
+            have[kind(t)] = have.get(kind(t), 0) + 1
     ready = {p for k in keys.values() for p in k.get("data") or []}
-    cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"))
+    cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"), kinds=kinds)
              if relayable(refill.info(mtq, t["key"]))]
     urgent = [t for t in cands if t["nice"] < 0]  # 第 ⓪ 档（训完后的推理等）不受 READY 限制（11/1）
-    if have >= want and not urgent:
-        return [], f"那边排着 {have} 个"
+    room = {k: want - have[k] for k in kinds}
+    if all(n <= 0 for n in room.values()) and not urgent:
+        return [], f"那边排着 {sum(have.values())} 个"
     disk = (conf(name)["ssh"], rs.get("dev"))
     free = rs.get("free", 0) / 1e9 - PLANNED.get(disk, 0)
     hard = (conf(name).get("budget") or (None, HARD_GB))[1]
     out, took = [], set()
-    for pool, n in ((urgent, len(urgent)), (cands, want - have)):
+    for pool, n in [(urgent, len(urgent))] + [([t for t in cands if kind(t) == k], room[k]) for k in kinds]:
         for _ in range(n):
             t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
             if t is None:
@@ -781,35 +788,59 @@ def fill(s, name, rs, st, acts):
             out.append(dict(op="take", key=t["key"], nice=t["nice"]))
     if out:
         return out, ""
-    return out, ("队列里没有能领的任务" if not cands else f"那边排着 {have} 个" if have >= want
-                 else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
+    open_ = urgent or any(room[k] > 0 and kind(t) == k for t in cands for k in kinds)
+    return out, ("队列里没有能领的任务" if not cands else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）" if open_
+                 else f"那边排着 {sum(have.values())} 个")
+
+
+def kname(kind):
+    return "" if kind == "gpu" else f"{kind.upper()} "
+
+
+def wname(kind):
+    return f"{kname(kind)}worker"
+
+
+def kkey(base, kind):
+    """问题编号：GPU 的照旧，别的种类后面加 :<种类>。"""
+    return base if kind == "gpu" else f"{base}:{kind}"
+
+
+def sub_kind(x):
+    """topup 返回的一项 → 种类。"""
+    return x[1] if x[0] == "pueue" else "cpu" if x[3] == refill.CPU_FILE else "gpu"
 
 
 def topup(name, rs, run=None):
-    """→ [(QOS, 时限, 补几个)], 不补的原因。"要几个"只在这里算（先备好再开卡，10/31 定），适配器只读状态、照着开。
-    pueue 类：组里没有活着的 worker、上一个没失败、那边有备好没人领的任务时开一个 → [("pueue", None, 1)]；
-    Slurm 类：排着没开始的作业不超过备好的任务数（refill.topup_plan）。run：fn(名字, 命令) → (退出码, 输出, 错误)，测试替换。"""
+    """→ 要开的 worker, 不补的原因。"要几个"只在这里算（先备好再开卡，10/31 定），适配器只读状态、照着开。按这台能跑的种类
+    （envs/machines.py 的 kinds）各算各的：
+    pueue 类：这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个 → ("pueue", 种类, 1)；
+    Slurm 类：envs/policy.py 的 SLURM 里这台能跑的种类，按 refill.slurm_plan 交 → (QOS, 时限, 交几个, sbatch 文件)。
+    run：fn(名字, 命令) → (退出码, 输出, 错误)，测试替换。"""
     if not shift.allowed(name):
         return [], "不在时段里（envs/policy.py 的 SHIFT）"
     if conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
             return [], "读不到 pueue"
-        mine = PQ.workers(name, rs["jobs"])
-        if any(j[2] != "Done" for j in mine):
-            return [], "worker 在"
-        if mine and mine[-1][3] not in ("Success", "Killed"):
-            return [], f"上一个 worker（pueue 任务 {mine[-1][0]}）失败了（{mine[-1][3]}）"
-        if not refill.unclaimed(rs["taskq"], "gpu"):
-            return [], "那边没有备好、没人领的任务"  # worker 空闲 30 分钟自己退出，有了再开
-        return [("pueue", None, 1)], ""
-    conf_ = P.SLURM.get(name) or {}
-    if not conf_.get("gpu"):
+        subs, why = [], []
+        for k in M.kinds(name):
+            mine = PQ.workers(name, rs["jobs"], k)
+            if any(j[2] != "Done" for j in mine):
+                why.append(f"{wname(k)} 在")
+            elif mine and mine[-1][3] not in ("Success", "Killed"):
+                why.append(f"上一个 {wname(k)}（pueue 任务 {mine[-1][0]}）失败了（{mine[-1][3]}）")
+            elif not refill.unclaimed(rs["taskq"], k):
+                why.append(f"那边没有备好、没人领的{' ' + kname(k) if kname(k) else ''}任务")  # worker 空闲 30 分钟自己退出，有了再开
+            else:
+                subs.append(("pueue", k, 1))
+        return subs, "；".join(why)
+    conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
+    if not conf_:
         return [], "envs/policy.py 的 SLURM 里没有它"
     st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or rsh)(name, c)))
     if st is None:
         return [], "读不到作业数"
-    subs, why = refill.topup_plan(rs["taskq"], st["counts"], conf_["gpu"])
-    return [(q, t, n) for q, t, n, _ in subs], why
+    return refill.slurm_plan(rs["taskq"], st, conf_)
 
 
 def label(op, key):
@@ -909,19 +940,21 @@ def submit(name, subs):
     L, msgs, stuck = conf(name)["label"], [], {}
     run = lambda c: (lambda r: (r[0], r[1] + r[2]))(rsh(name, c))  # noqa: E731
     if conf(name)["scheduler"] == "pueue":
-        for _ in subs:
-            ok, out = PQ.start_worker(name, run)
-            if ok:
-                msgs.append(f"{L} 开了 worker（{out[-80:]}）")
-            else:
-                stuck[f"site:{name}:worker"] = f"{L} 开 worker 出错：{out}"
+        for _, k, n in subs:
+            for _ in range(n):
+                ok, out = PQ.start_worker(name, run, k)
+                if ok:
+                    msgs.append(f"{L} 开了 {wname(k)}（{out[-80:]}）")
+                else:
+                    stuck[kkey(f"site:{name}:worker", k)] = f"{L} 开 {wname(k)} 出错：{out}"
         return msgs, stuck
     cwd = R.q(root(name)) + "/code/current/scripts/queue"
-    for r in SL.start_workers(cwd, [(q, t, n, "worker.sbatch") for q, t, n in subs], run):
+    for r in SL.start_workers(cwd, subs, run):
+        k = sub_kind((r["qos"], r["time"], r["n"], r["file"]))
         if r["err"] is not None:
-            stuck[f"topup:{name}:{r['qos']}"] = f"{L} {r['qos']} 补交 worker 作业出错：{r['err']}"
+            stuck[kkey(f"topup:{name}:{r['qos']}", k)] = f"{L} {r['qos']} 补交 {wname(k)} 作业出错：{r['err']}"
         if r["ids"]:
-            msgs.append(f"{L} {r['qos']} 交了 {len(r['ids'])} 个 worker 作业 {'、'.join(r['ids'])}（每个 {r['time']}）")
+            msgs.append(f"{L} {r['qos']} 交了 {len(r['ids'])} 个 {wname(k)} 作业 {'、'.join(r['ids'])}（每个 {r['time']}）")
     return msgs, stuck
 
 
@@ -1018,11 +1051,13 @@ def run_one(s, name, dry):
     acts, stuck = plan(s, name, rs, st)
     more, why = (fill(s, name, rs, st, acts) if rs is not None else ([], "连不上"))
     subs, swhy = (topup(name, rs) if rs is not None else ([], "连不上"))
-    if swhy.startswith("上一个 worker"):
-        stuck[f"site:{name}:worker"] = f"{L} {swhy}；看那边的 pueue log，处理后 pueue remove 那个任务（下次检查重开）"
+    for part in swhy.split("；"):
+        k = next((k for k in M.kinds(name) if part.startswith(f"上一个 {wname(k)}（")), None)
+        if k:
+            stuck[kkey(f"site:{name}:worker", k)] = f"{L} {part}；看那边的 pueue log，处理后 pueue remove 那个任务（下次检查重开）"
     todo = [a for a in acts if a["op"] != "beat"]
     desc = "；".join(f"{a['op']} {a['key']}" for a in todo + more)
-    sdesc = "；".join(f"交 {q} {n} 个" for q, _, n in subs)
+    sdesc = "；".join(f"交 {x[0]} {x[2]} 个 {wname(sub_kind(x))}" for x in subs)
     if dry:
         return [f"{L}：会 {desc}" if desc else f"{L}：不动（{why}）",
                 f"{L}：会 {sdesc}" if sdesc else f"{L}：不交作业（{swhy}）"] + notes, stuck

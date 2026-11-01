@@ -183,12 +183,20 @@ def stop_group(host, g, pueue, wait=False):
     return run, tasks
 
 
+def worker_groups(name):
+    """这台各种 worker 所在的 pueue 组（envs/machines.py 的 kinds、worker_of），去重、按种类的顺序。"""
+    return list(dict.fromkeys(M.worker_of(name, k)["group"] for k in M.kinds(name)))
+
+
 def stop_site(name):
     """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的任务：有进度的交给白天的执行机，其余交还
     → (说明, 做完没有)。worker 确认停下了才交出任务；没停下、没交出去的下次检查再做（每一步都可以重做，11/1）。"""
     c = M.RELAY[name]
-    host, g = c["ssh"], c["worker"]["group"]
-    run, tasks = stop_group(host, g, c.get("pueue") or PUEUE, wait=True)
+    host, run, tasks = c["ssh"], [], {}
+    for g in worker_groups(name):
+        r, t = stop_group(host, g, c.get("pueue") or PUEUE, wait=True)
+        run += r
+        tasks = None if tasks is None or t is None else {**tasks, **t}
     if tasks is None or any((tasks.get(i) or {}).get("state", "Done") != "Done" for i in run):
         return f"worker 还没确认停下（pueue 任务 {run or '读不到'}），任务先不交出，下次检查再停", False
     have, to = site_tasks(name), day_site(host, but=name)
@@ -209,17 +217,18 @@ def run_site(name, r, now, st, dry):
     c, msgs = M.RELAY.get(name), []
     if not c or not P.AUTO.get(name) or name in getattr(P, "OFFLINE", {}):
         return msgs
-    host, g = c["ssh"], c["worker"]["group"]
+    host, groups = c["ssh"], worker_groups(name)
     rec = st.setdefault(name, {})
     cur, _ = dated(now, *r)
     # 按"现在该不该开"核对（11/1）：开过、还没确认停下的，只要现在不该开（不在时段里，或新时段卡被别人占着）就停，
     # 不管中间漏了几次检查
     unstopped = rec.get("started") and rec.get("paused") != rec["started"]
     if cur and rec.get("started") != cur:
-        gs, _ = group_tasks(host, g, c.get("pueue") or PUEUE)
-        if gs is None:
+        gs = {g: group_tasks(host, g, c.get("pueue") or PUEUE)[0] for g in groups}
+        if None in gs.values():
             return [f"{name}：读不到 pueue 组的状态，下次再看"]
-        who = others_on(host, c["groups"][g][1])
+        gpu = M.worker_of(name, "gpu")
+        who = others_on(host, c["groups"][gpu["group"]][1]) if gpu else []
         if who is None:
             msgs.append(f"{name}：读不到卡上的进程，下次再看")
         elif who:
@@ -231,8 +240,9 @@ def run_site(name, r, now, st, dry):
         elif dry:
             msgs.append(f"{name}：会开始领任务（{r[0]}–{r[1]}）")
         else:
-            if gs != "Running":
-                C.run(f"{c.get('pueue') or PUEUE} start -g {g}", host, timeout=60)
+            for g in groups:
+                if gs[g] != "Running":
+                    C.run(f"{c.get('pueue') or PUEUE} start -g {g}", host, timeout=60)
             rec["started"] = cur
             msgs.append(f"{name}：{r[0]} 时段开始，卡空着，开始领任务、开 worker")
     elif not cur and unstopped:

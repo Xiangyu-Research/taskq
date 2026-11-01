@@ -44,6 +44,7 @@ import policy as P  # noqa: E402
 import common as C  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
+import spec as S  # noqa: E402
 import recipes  # noqa: E402
 from common import write_json  # noqa: E402
 
@@ -165,7 +166,7 @@ def runnable(name, t, oks=None):
     """这台机器能跑这个任务：环境就绪（envs/machines.py 的 ready_envs）、machines 允许、说明没坏。"""
     sp = spec(t)
     envs = M.ready_envs(name, oks)
-    return bool(sp) and not t.get("bad") and t["state"] != "bad" and sp.get("env") in envs and name in (sp.get("machines") or [name])
+    return bool(sp) and not t.get("bad") and t["state"] != "bad" and bool(S.envs_of(sp)) and set(S.envs_of(sp)) <= envs and name in (sp.get("machines") or [name])
 
 
 def candidates(s, name, ctq):

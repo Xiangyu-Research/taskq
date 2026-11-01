@@ -60,16 +60,29 @@ def test_pueue_worker():
     ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
     none = dict(tasks=[dict(key="a/x/1", state="claimed")])
     assert relay.topup("lab1", dict(jobs=None, taskq=ready)) == ([], "读不到 pueue")
-    assert relay.topup("lab1", dict(jobs=[], taskq=ready)) == ([("pueue", None, 1)], "")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=ready)) == ([], "worker 在")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]], taskq=ready)) == ([("pueue", None, 1)], "")
+    assert relay.topup("lab1", dict(jobs=[], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=ready)) == ([], "worker 在；那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
     subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]], taskq=ready))
     assert not subs and why.startswith("上一个 worker")
     ok("pueue 类（lab1）：组里没有活着的 worker 才开，上一个失败了不重开")
-    assert relay.topup("lab1", dict(jobs=[], taskq=none)) == ([], "那边没有备好、没人领的任务")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=none)) == ([], "那边没有备好、没人领的任务")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=ready)) == ([("pueue", None, 1)], "")
+    assert relay.topup("lab1", dict(jobs=[], taskq=none)) == ([], "那边没有备好、没人领的任务；那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=none)) == ([], "那边没有备好、没人领的任务；那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
     ok("pueue 类：没有备好的任务不开 worker（空闲退出的那个不算失败），有了再开")
+
+    cw = relay.conf("lab1")["cpu_worker"]
+    clab = f"worker:{cw['id']}"
+    cpu = dict(tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu")), dict(key="a/x/1", state="claimed")])
+    both = dict(tasks=cpu["tasks"] + ready["tasks"][:1])
+    assert relay.topup("lab1", dict(jobs=[], taskq=cpu)) == ([("pueue", "cpu", 1)], "那边没有备好、没人领的任务")
+    assert relay.topup("lab1", dict(jobs=[], taskq=both)) == ([("pueue", "gpu", 1), ("pueue", "cpu", 1)], "")
+    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=both)) == ([("pueue", "cpu", 1)], "worker 在")
+    assert relay.topup("lab1", dict(jobs=[[5, clab, "Running", None]], taskq=both)) == ([("pueue", "gpu", 1)], "CPU worker 在")
+    subs, why = relay.topup("lab1", dict(jobs=[[5, clab, "Done", "{'Failed': 1}"]], taskq=both))
+    assert subs == [("pueue", "gpu", 1)] and why == "上一个 CPU worker（pueue 任务 5）失败了（{'Failed': 1}）", (subs, why)
+    assert relay.topup("lab0", dict(jobs=[], taskq=cpu)) == ([], "那边没有备好、没人领的任务")
+    ok("pueue 类：GPU、CPU 两种 worker 各自判断（在不在、上一个失败没有、有没有这种任务）；没有 cpu_worker 的（lab0）不开 CPU worker")
 
 
 def test_slurm_topup_ready():
@@ -77,12 +90,29 @@ def test_slurm_topup_ready():
     probe = lambda out: (lambda name, cmd: (0, out, ""))  # noqa: E731
     q = next(iter(relay.P.SLURM[NAME]["gpu"]))
     subs, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|0|0\n"))
-    assert [n for _, _, n in subs] == [2], subs
+    assert [n for _, _, n, _ in subs] == [2] and subs[0][3] == "worker.sbatch", subs
     subs, why = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|3|2\n"))
     assert subs == [] and "排着的作业已有 2 个" in why
     subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "备好" in why
     ok("Slurm 类（DICC2）：备好 2 个最多交 2 个，排着的够了不交，没备好不交")
+    cpu = dict(enabled=True, tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu"))])
+    subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\n"))
+    assert subs == [] and "CPU" not in why, (subs, why)
+    slurm0 = dict(relay.P.SLURM)
+    try:
+        relay.P.SLURM["dicc1"] = dict(gpu={"long": ("3-00:00:00", 0)}, cpu=("normal", "08:00:00", 2))
+        subs, why = relay.topup("dicc1", dict(taskq=cpu), run=probe("QOS|long|10|0|0\nCPU|0\nALL|10|3\n"))
+        assert subs == [("normal", "08:00:00", 1, "cpu_worker.sbatch")], (subs, why)
+        subs, why = relay.topup("dicc1", dict(taskq=dict(two, tasks=two["tasks"] + cpu["tasks"])), run=probe("QOS|long|10|0|0\nCPU|1\nALL|10|3\n"))
+        assert subs == [("long", "3-00:00:00", 2, "worker.sbatch")] and "CPU：已有 1 个" in why, (subs, why)
+        relay.P.SLURM["dicc2"] = dict(slurm0["dicc2"], cpu=("normal", "08:00:00", 2))
+        subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\nCPU|0\nALL|10|3\n"))
+        assert subs == [] and "CPU" not in why, (subs, why)
+    finally:
+        relay.P.SLURM.clear()
+        relay.P.SLURM.update(slurm0)
+    ok("Slurm 类：jobs 里有 cpu 的（dicc1）有纯 CPU 任务时交 cpu_worker.sbatch；没有的（DICC2）SLURM 里写了 cpu 也不交")
 
 
 def ok(msg):
@@ -309,6 +339,29 @@ def test_plan():
     more, why = relay.fill(S0([mtask(K), mtask(K0, "free", None, nice=-100)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K0, K2], (more, why)
     ok("第 ⓪ 档（nice < 0，训完后的推理）不受 READY 限制：排满了也领，先领它")
+
+    def ctask(key, state="free", worker=None, nice=3):
+        t = mtask(key, state, worker, nice=nice)
+        return dict(t, spec=dict(t["spec"], device="cpu"))
+    E1, E2 = "Dataset7_f/ev/0", "Dataset8_g/ev/0"
+    jobs0 = M.RELAY[NAME]["jobs"]
+    relay.P.READY[NAME] = 1
+    relay.PLANNED.clear()
+    try:
+        more, why = relay.fill(S0([mtask(K)] + cands + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
+        assert more == [] and "排着 1" in why, (more, why)
+        M.RELAY[NAME]["jobs"] = dict(jobs0, cpu="x_cpu")
+        more, why = relay.fill(S0([mtask(K)] + cands + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
+        assert [a["key"] for a in more] == [E1], (more, why)
+        more, why = relay.fill(S0([mtask(K), ctask(E1, "claimed", NAME)] + cands + [ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
+        assert more == [] and "排着 2" in why, (more, why)
+        more, why = relay.fill(S0([ctask(E1, "claimed", NAME)] + cands + [ctask(E2, nice=4)]), NAME, RS(), st, [])
+        assert [a["key"] for a in more] == [K2], (more, why)
+    finally:
+        M.RELAY[NAME]["jobs"] = jobs0
+        relay.P.READY[NAME] = 2
+        relay.PLANNED.clear()
+    ok("能跑 CPU 任务的执行机（jobs 里有 cpu / 有 cpu_worker）：GPU、CPU 各备 READY 个，互不占名额；不能跑的不领 CPU 任务")
 
     relay.PLANNED.clear()
     a1, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
@@ -559,21 +612,36 @@ def test_adapters_in_relay():
     seen = []
     relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append((name, cmd)), (0, "4870\n", ""))[1]), relay.rsh
     try:
-        msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2)])
+        msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2, "worker.sbatch")])
         assert not stuck and len(seen) == 2 and all("sbatch --parsable --qos=long --time=1:00:00 worker.sbatch" in c for _, c in seen)
         assert seen[0][1].startswith(f"cd {relay.R.q(relay.root(NAME))}/code/current/scripts/queue && ")
         seen.clear()
-        msgs, stuck = relay.submit("lab1", [("pueue", None, 1)])
+        msgs, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
+        assert not stuck and len(seen) == 1 and seen[0][1].endswith("--qos=normal --time=08:00:00 cpu_worker.sbatch") and "CPU worker" in msgs[0], (seen, msgs)
+        seen.clear()
+        msgs, stuck = relay.submit("lab1", [("pueue", "gpu", 1)])
         assert not stuck and len(seen) == 1 and " add -g " in seen[0][1] and "worker:" in seen[0][1], seen
+        seen.clear()
+        msgs, stuck = relay.submit("lab1", [("pueue", "cpu", 1)])
+        cw = relay.conf("lab1")["cpu_worker"]
+        assert not stuck and len(seen) == 1 and f"add -g {cw['group']} -l worker:{cw['id']}" in seen[0][1] and "WORKER_DEVICE=cpu" in seen[0][1], seen
         relay.rsh = lambda name, cmd, input=None, timeout=300: (1, "boom", "")
-        _, stuck = relay.submit("lab1", [("pueue", None, 1)])
-        assert list(stuck) == ["site:lab1:worker"], stuck
-        _, stuck = relay.submit(NAME, [("long", "1:00:00", 1)])
+        _, stuck = relay.submit("lab1", [("pueue", "gpu", 1), ("pueue", "cpu", 1)])
+        assert list(stuck) == ["site:lab1:worker", "site:lab1:worker:cpu"], stuck
+        _, stuck = relay.submit(NAME, [("long", "1:00:00", 1, "worker.sbatch")])
         assert list(stuck) == [f"topup:{NAME}:long"], stuck
+        _, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
+        assert list(stuck) == ["topup:dicc1:normal:cpu"], stuck
     finally:
         relay.rsh = rsh0
     assert not hasattr(relay, "worker_jobs")
-    ok("relay：一次 ssh 读回原始输出、在 box 上用适配器解析；开 worker / 交作业用适配器，报警的编号照旧")
+    raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status="Running"),
+                                 "5": dict(group="cpu", label="worker:w2", status="Queued"),
+                                 "6": dict(group="gpu0", label="x", status="Running")}))
+    assert [j[0] for j in relay.parse_sched("lab1", dict(sched_raw=raw))["jobs"]] == [3, 5]
+    assert [j[0] for j in relay.parse_sched("lab0", dict(sched_raw=raw))["jobs"]] == [6]
+    ok("relay：一次 ssh 读回原始输出、在 box 上用适配器解析（这台各种 worker 的组）；开 worker / 交作业用适配器，"
+       "报警的编号 GPU 照旧、CPU 加 :cpu")
 
 
 def test_fresh_site():

@@ -266,6 +266,26 @@ ok("最多 3 个、只剩 1 个提交名额：交 1 个", R.cpu_plan(cq, 0, ("no
 ok("提交名额用完：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 0) == ([], "提交名额用完了"))
 ok("读不到剩几个名额：不交", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), None)[0] == [])
 
+CONF = dict(gpu={"long": ("3-00:00:00", 2)}, cpu=("normal", "08:00:00", 1))
+ST0 = dict(counts={"long": (10, 0, 0)}, cpu=0, free=5)
+for q_ in (cq, snap()["taskq"]["box"]):
+    p, why = R.slurm_plan(q_, ST0, CONF)
+    g, gwhy = R.topup_plan(q_, ST0["counts"], CONF["gpu"])
+    c, cwhy = R.cpu_plan(q_, 0, CONF["cpu"], 5)
+    ok(f"slurm_plan = topup_plan + cpu_plan（{p}）", p == g + c and why == (gwhy if c else f"{gwhy}；CPU：{cwhy}".lstrip("；")))
+p, why = R.slurm_plan(cq, ST0, dict(cpu=CONF["cpu"]))
+ok("slurm_plan：只有 cpu 名额的机器只交 CPU worker", p == [("normal", "08:00:00", 1, "cpu_worker.sbatch")] and why == "")
+p, why = R.slurm_plan(snap()["taskq"]["box"], ST0, dict(cpu=CONF["cpu"]))
+ok("slurm_plan：没有纯 CPU 任务时说原因", p == [] and why == "CPU：没有没人领的纯 CPU 任务")
+
+ok("candidates：默认只要要卡的", R.candidates(snap(), "dicc", cq, set()) == [])
+ok("candidates：kinds 里有 cpu 才要纯 CPU 任务",
+   [t["key"] for t in R.candidates(snap(), "dicc", cq, set(), kinds=("gpu", "cpu"))] == [K_EV, K_EV + "b"])
+lq = [dict(tq(K_EV, -100, 2), spec=dict(ev_spec, env=["nnunet", "rstats"])),
+      dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b", env=["nnunet", "没有的环境"]))]
+ok("candidates：env 是列表时每个环境都要备好",
+   [t["key"] for t in R.candidates(snap(), "dicc", snap(queue=lq)["taskq"]["box"], set(), kinds=("cpu",))] == [K_EV])
+
 R.P.SLURM = {"dicc": dict(gpu={"long": ("3-00:00:00", 2)}, cpu=("normal", "08:00:00", 1))}
 sub = []
 
