@@ -256,6 +256,13 @@ def test_plan():
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=105e9), st, [])
     assert more == [] and "放不下" in why, why
     ok("补任务：那边排着的（含在传数据的）不够 READY 个才领，按档位，只领能翻译的做法，放不下不领")
+    K0 = "Dataset6_e/tr/0"
+    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0"), mtask(K0, "free", None, nice=-100)] + cands), NAME,
+                           RS(rtask(A, "free")), st, [])
+    assert [a["key"] for a in more] == [K0], (more, why)
+    more, why = relay.fill(S0([mtask(K), mtask(K0, "free", None, nice=-100)] + cands), NAME, RS(rtask(A, "free")), st, [])
+    assert [a["key"] for a in more] == [K0, K2], (more, why)
+    ok("第 ⓪ 档（nice < 0，训完后的推理）不受 READY 限制：排满了也领，先领它")
 
     relay.PLANNED.clear()
     a1, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])

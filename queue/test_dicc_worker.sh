@@ -273,14 +273,15 @@ check "不在 Slurm 里：空闲超过 IDLE_EXIT 就退出（退出码 0）" '[[
 reset
 table << EOF
 t/c nnunet
+t/d nnunet
 EOF
 echo a > "$T/head"
-(WORKER_ID=lab-test TASKQ_IDLE_POLL=1 FAKE_SECS=5 exec bash "$HERE/dicc_worker.sh") > "$T/w6b.out" 2>&1 &
+(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=5 exec bash "$HERE/dicc_worker.sh") > "$T/w6b.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/c" $T/train.log'
 echo b > "$T/head"
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "不在 Slurm 里：在训时提交号变了，等训完再退出" '[[ $rc == 0 ]] && grep -q "^end .* t/c" $T/train.log && grep -q "代码更新了" $T/w6b.out && [[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
+check "不在 Slurm 里：在训时代码变了，训完不再领下一个、退出" '[[ $rc == 0 ]] && grep -q "^end .* t/c" $T/train.log && ! grep -q "t/d" $T/train.log && grep -q "代码更新了" $T/w6b.out && [[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 
 reset
 table << EOF

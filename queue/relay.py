@@ -704,24 +704,29 @@ def fill(s, name, rs, st, acts):
         return a is None or a["state"] in ("free", "stale", "waiting")
     have = sum(1 for t in mtq.get("tasks", []) if t.get("worker") == name
                and t["state"] not in ("done", "stopped") and waiting(t))
-    if have >= want:
-        return [], f"那边排着 {have} 个"
     ready = {p for k in keys.values() for p in k.get("data") or []}
     cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"))
              if relayable(refill.info(mtq, t["key"]))]
+    urgent = [t for t in cands if t["nice"] < 0]  # 第 ⓪ 档（训完后的推理等）不受 READY 限制（11/1）
+    if have >= want and not urgent:
+        return [], f"那边排着 {have} 个"
     disk = (conf(name)["ssh"], rs.get("dev"))
     free = rs.get("free", 0) / 1e9 - PLANNED.get(disk, 0)
     hard = (conf(name).get("budget") or (None, HARD_GB))[1]
     out, took = [], set()
-    for _ in range(want - have):
-        t, need, gb, _ = refill.next_pick(mtq, cands, ready, free, hard, took)
-        if t is None:
-            break
-        free -= gb
-        PLANNED[disk] = PLANNED.get(disk, 0) + gb
-        took.add(t["key"])
-        out.append(dict(op="take", key=t["key"], nice=t["nice"]))
-    return out, "" if out else ("队列里没有能领的折" if not cands else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
+    for pool, n in ((urgent, len(urgent)), (cands, want - have)):
+        for _ in range(n):
+            t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
+            if t is None:
+                break
+            free -= gb
+            PLANNED[disk] = PLANNED.get(disk, 0) + gb
+            took.add(t["key"])
+            out.append(dict(op="take", key=t["key"], nice=t["nice"]))
+    if out:
+        return out, ""
+    return out, ("队列里没有能领的折" if not cands else f"那边排着 {have} 个" if have >= want
+                 else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）")
 
 
 def topup(name, rs, run=None):

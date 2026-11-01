@@ -24,7 +24,7 @@
 # 会被自动取消（10/17 的新规定）。
 # 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当 worker 名（envs/machines.py 的 worker），同时训几个看本机的 slots；
 # 没有时限、不查 squeue、没有显存填充；没有在训的、领不到的、队列出错、本 worker 失败太多次都不退出，每 60 秒再看；
-# 手上没有在训的时候仓库的提交号变了就退出（退出码 0），由 box 的 scripts/queue/feed.py 用新代码重开。
+# 代码变了（仓库的提交号，或代码包的 current 换了）就不再领新的，手上的做完后退出（退出码 0），由 box 用新代码重开（11/1）。
 # GPU 记录只看 CUDA_VISIBLE_DEVICES 那张卡（lab 另一张卡别人在用）。
 # TASKQ_* 环境变量只给测试用（scripts/queue/test_dicc_worker.sh）。
 set -uo pipefail
@@ -69,7 +69,12 @@ LOGDIR=$DATA/logs/workers
 mkdir -p "$LOGDIR"
 COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
 (cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
-head_now() { if [[ -n ${TASKQ_HEAD_CMD:-} ]]; then eval "$TASKQ_HEAD_CMD"; else git -C "$REPO" rev-parse HEAD 2> /dev/null; fi; }
+head_now() {
+    if [[ -n ${TASKQ_HEAD_CMD:-} ]]; then eval "$TASKQ_HEAD_CMD"
+    elif [[ -L $(dirname "$REPO")/current ]]; then readlink -f "$(dirname "$REPO")/current"
+    else git -C "$REPO" rev-parse HEAD 2> /dev/null; fi
+}
+code_changed() { (( ! INSLURM )) && [[ -n $HEAD0 && $(head_now) != "$HEAD0" ]]; }
 HEAD0=$(head_now)
 NVSEL=()  # 不在 Slurm 里：只看分给本 worker 的卡（Slurm 作业里只看得到自己的卡）
 (( ! INSLURM )) && [[ ${CUDA_VISIBLE_DEVICES:-} =~ ^[0-9]+$ ]] && NVSEL=(-i "$CUDA_VISIBLE_DEVICES")
@@ -306,7 +311,7 @@ while true; do
     # 领新的
     why= tried=0
     own_fails
-    while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && can_add; do
+    while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && ! code_changed && can_add; do
         tried=1
         # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的任务留位置
         t=$($TQPY next --worker "$W" --envs "$ENVS" --device "$DEVICE" --free-slots 1 \
@@ -329,7 +334,7 @@ while true; do
     else
         (( idle_since )) || idle_since=$now
         if (( ! INSLURM )); then
-            if [[ -n $HEAD0 && $(head_now) != "$HEAD0" ]]; then
+            if code_changed; then
                 echo "$(ts) 代码更新了，退出让 feed.py 用新代码重开"; break
             fi
             msg=$why
