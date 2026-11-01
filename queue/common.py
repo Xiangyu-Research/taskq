@@ -50,21 +50,6 @@ def have_script(paths, data):
             f'echo "{HAVE_END}"\n')
 
 
-CACHE_END = "@@"
-
-
-def cache_script(data):
-    """bash 片段：数据目录 data 下，做法（recipes.py）的 cache 里有哪些缓存、各被哪些数据集用过，
-    一行"CACHE|路径:数据集,数据集, 路径:, …@@"（路径相对 data）。结尾的 @@ 用来认出输出完整（refill.py 的 cache_cleanup 没看到就什么都不删）。"""
-    import recipes
-    cs = sorted({(c["root"], c["depth"], c["users"]) for c in (r.get("cache") for r in recipes.RECIPES.values()) if c})
-    if not cs:
-        return ""
-    loops = "; ".join(f"for d in $(find {r} -mindepth {n} -maxdepth {n} -type d 2>/dev/null); do "
-                      f"printf '%s:%s ' \"$d\" \"$(ls \"$d/{u}\" 2>/dev/null | tr '\\n' ',')\"; done" for r, n, u in cs)
-    return 'echo "CACHE|$(cd ' + data + ' 2>/dev/null && { ' + loops + '; })' + CACHE_END + '"\n'
-
-
 def parse_have(out):
     """have_script 的输出 → 有的路径的 set；没有结束标记（输出被截断、脚本没跑完）→ None，不当成"文件不在"。"""
     lines = out.splitlines()

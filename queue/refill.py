@@ -15,8 +15,6 @@ lab 上的数据：
   - 其余的：总队列里没有 lab 能训的任务（free、有环境、要卡、没有进度、lab 没跳过）要用了就删；还有任务要用的留着，
     盘剩的低于软线（硬线 × SOFT，硬线 = 盘的提醒线 + TRAIN_OUT_GB）时从最晚用到的删起。
   lab、box 连不上，或者总队列、lab 的缓冲读不到时什么都不删。
-  训练机自己生成的缓存（做法的 cache：nnU-Net 的解压缓存，train.sh 训练前导出）只留上面那些任务（缓冲里的、分给 lab 的、
-  在训的）用的（cache_cleanup()，10/26）。
 开关：envs/policy.py 的 AUTO["lab"] 是 False 时只算、不删（"会删什么"有变化时记进 ~/refill.log）。
 
 DICC 补作业：每个 QOS（envs/policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
@@ -296,43 +294,6 @@ def cleanup(s, name, run=None, dry=False):
     return msgs
 
 
-def cache_cleanup(s, name, run=None, dry=False):
-    """训练机自己从数据生成的缓存（做法的 cache，如 nnU-Net 的解压缓存，10/26）→ [说明]。要用时训练开始前重新生成
-    （几分钟），所以只留这台机器缓冲里的、总队列里分给它的（kept）、pueue 里活着的训练任务的数据集用过的（缓存自己的数据集，
-    加上缓存里记的用过它的数据集；软链接到别的数据集时几个数据集共用一份），其余删掉。
-    缓存列表没读全（探查没有结束标记）、总队列、缓冲或 pueue 读不到时什么都不删。"""
-    import recipes
-    run, m = run or sh, M.MACHINES[name]
-    raw = (s["probe"].get(name) or {}).get("CACHE")
-    if raw is None or not raw.endswith(C.CACHE_END) or not s["ok"].get(name) or "error" in (s["pueue"].get(name) or {"error": 1}):
-        return []
-    k = kept(s, name)
-    have = [x.split(":", 1) for x in raw[:-len(C.CACHE_END)].split()]
-    if not have or k is None or any(len(x) != 2 for x in have):
-        return []
-    tq = s["taskq"][taskq.queue_host()]
-    live = {kind_key(s, name, t)[1] for t in s["pueue"][name]["tasks"] if t["status"] in LIVE and kind_key(s, name, t)[0] == "train"}
-    used = {tag(p) for p in k[1]} | {tag(p) for key in live - {None} for p in data_of(tq, key)}
-    roots = {c["root"]: c for c in (r.get("cache") for r in recipes.RECIPES.values()) if c}
-    msgs = []
-    for p, users in have:
-        root = next((r for r in roots if p.startswith(r + "/")), None)
-        rest = p[len(root) + 1:].split("/") if root else []
-        if (not rest or len(rest) != roots[root]["depth"] or not re.fullmatch(roots[root].get("pattern") or r"[A-Za-z0-9_.-]+", rest[0])
-                or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", x) and x not in (".", "..") for x in rest)):
-            msgs.append(f"{m['label']} 上的缓存 {p!r} 路径不对，不删")
-            continue
-        if ({rest[0]} | set(filter(None, users.split(",")))) & used:
-            continue
-        if dry:
-            msgs.append(f"{m['label']} 上的缓存 {p} 会删（没有在训、排着的折用它）")
-            continue
-        rc, out = run(f"rm -rf {m['data']}/{shlex.quote(p)}", m["ssh"])
-        msgs.append(f"{m['label']} 上的缓存 {p} 删掉了（没有在训、排着的折用它；要用时训练开始前重新生成）" if rc == 0
-                    else f"{m['label']} 上删缓存 {p} 出错：{out[-150:]}")
-    return msgs
-
-
 def log(lines):
     if lines:
         with open(LOG, "a") as fo:
@@ -353,7 +314,7 @@ def run_all(s, dry=False):
         if "train" not in M.MACHINES[name]["roles"]:
             continue
         live = bool(P.AUTO.get(name)) and not dry
-        msgs = cleanup(s, name, dry=not live) + cache_cleanup(s, name, dry=not live)
+        msgs = cleanup(s, name, dry=not live)
         if live or dry:
             if live:
                 log(msgs)
