@@ -200,12 +200,12 @@ def test_plan():
     arec = dict(machine=M.hub(), id=9, label="relay_archive:" + K, step="relay_archive", key=K, added=2000.0)
     fcmd = dict(fdone[0], command="python3 scripts/queue/relay.py fetch x k && bash scripts/queue/archive_task.sh box k")
     try:
-        C.backup_down = lambda: "dicc 暂停检查（停机）"
+        C.backup_down = lambda ok=None: "dicc 暂停检查（停机）"
         acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
-        C.backup_down = lambda: None
+        C.backup_down = lambda ok=None: None
         acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("archive", K), ("beat", K)] and not stuck, (acts, stuck)
         acts, _ = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)

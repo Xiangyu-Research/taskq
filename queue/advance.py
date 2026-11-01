@@ -456,7 +456,7 @@ def plan(s, root=None):
                 if h in pend:
                     NOTES.append(f"archive:{t['lab']}：{h} 上还有这个任务的步骤没做完，做完再归档")
                     continue
-                down = C.backup_down()
+                down = C.backup_down(s.get("ok"))
                 if down:
                     NOTES.append(f"archive:{t['lab']}：备份机{down}，回来后再归档")
                     continue

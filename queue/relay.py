@@ -650,7 +650,7 @@ def plan(s, name, rs, st, now=None):
                     want = False
                 if want:
                     acts.append(dict(op="beat", key=key))
-                    if not C.backup_down():
+                    if not C.backup_down(s.get("ok")):
                         acts.append(dict(op="archive", key=key))
                     continue
                 if ft["status"] != "Success":
@@ -854,7 +854,7 @@ def execute(name, acts, s, run_add=None):
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
                 cmd = f"python3 scripts/queue/relay.py fetch {name} {shlex.quote(k)}"
-                if lookup(k).get("archive") and not C.backup_down():
+                if lookup(k).get("archive") and not C.backup_down(s.get("ok")):
                     cmd += f" && bash scripts/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")

@@ -211,8 +211,16 @@ def from_command(cmd):
     return None
 
 
-def backup_down():
-    """备份机（machines.py 里角色 backup 的）暂停检查（policy.py 的 OFFLINE）→ 说明；能用 → None。"""
+def backup_down(ok=None):
+    """备份机（machines.py 里角色 backup 的）暂停检查（policy.py 的 OFFLINE），或这次检查连不上（ok：快照的 s["ok"]）
+    → 说明；能用 → None。连不上时先不排归档，免得排上去的归档都失败、停住（11/1）。"""
     import machines as M
     import policy as P
-    return next((f"{b} 暂停检查（{P.OFFLINE[b]}）" for b in M.names("backup") if b != M.hub() and b in P.OFFLINE), None)
+    for b in M.names("backup"):
+        if b == M.hub():
+            continue
+        if b in P.OFFLINE:
+            return f"{b} 暂停检查（{P.OFFLINE[b]}）"
+        if ok is not None and ok.get(b) is False:
+            return f"{b} 这次连不上"
+    return None
