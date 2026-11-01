@@ -258,7 +258,7 @@ ERRF=$(mktemp)
 err_since=0   # 队列从什么时候开始连续出错
 idle_since=$T0  # 从什么时候开始手上没有在训的（0 = 有在训的）
 while true; do
-    # 收训完的（run_task.sh 的退出码：0 训完，3 命令正常结束但没训完，其他 = 出错）
+    # 收训完的（run_task.sh 的退出码：0 训完，3 命令正常结束但没训完，4 缺输入，其他 = 出错）
     for p in "${!KEY[@]}"; do
         if ! kill -0 "$p" 2> /dev/null; then
             wait "$p"; rc=$?
@@ -273,6 +273,10 @@ while true; do
             elif (( rc == 0 )); then
                 echo "$(ts) 训完 $key"
                 $TQPY release --worker "$W" "$key"
+            elif (( rc == 4 )); then
+                echo "$(ts) $key 缺输入，没开训，交还，记为缺输入（不算失败，补齐前不再领）"
+                $TQPY missing --worker "$W" "$key" --why "作业 $W 开训前查到" || $TQPY release --worker "$W" "$key"
+                EXCL+=("$key")
             elif (( rc == 3 )); then
                 echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
                 fail "$key" "退出码 0 但没训完" "$ran"
@@ -374,5 +378,5 @@ while true; do
 done
 kill_tree "$GPUMON"
 rm -f "$ERRF"
-rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # train.sh 拷的本地副本（stage_tmp.sh）
+rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
 exit 0

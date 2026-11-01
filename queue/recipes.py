@@ -19,12 +19,15 @@
     resume     out 下的存档（glob 列表）：有一个就算有进度，失败时留在那台机器上接着做，不交还跳过（2026-10-31）；None = 没有
     res        资源：gpus（卡数）、cpus、mem（如 "32G"）、gpu_mem（GB）；None 的项不限（2026-10-31）
                wait_gpu（分钟）= 不在 Slurm 里时卡上有别人的进程，最多等这么久，等不到算失败（0 = 不等）；不写 = 一直等（run_task.sh，10/31）
+               local_inputs（1/0）= 输入会反复读：执行机允许时（envs/policy.py 的 STAGE_TMP）开训后在后台拷到节点本地盘，
+               拷好一个换一个（scripts/queue/inputs.py，11/1）；命令从 $TASK_INPUTS_ROOT 下读输入（和数据目录一样的相对路径）
     owner      谁的任务（None = 自己的；别人请帮忙训练、测试的写名字）
     info       训练设置的解析方法（spec.py 的 INFO，readers/ 里的；登记表的参数列；None = 不读）
     oldlogs    以前放在别处的分段日志：dir（相对数据目录）、prefix（文件名前缀）。归档时一起备份，登记表一起数段数；None = 没有
     metrics    登记表的验证指标：{列名: (out 下的 JSON 文件, 键的路径列表)}（实验表里按数据给）
     checkpoint 登记表算校验和的文件（out 下；None = 不算）
-    data       训练机上要有的输入（相对数据目录的文件或文件夹；送到执行机前先传好）。任务里写 inputs=… 和 data=… 一样（2026-10-31）
+    data       训练机上要有的输入（相对数据目录的文件或文件夹；送到执行机前先传好）。任务里写 inputs=… 和 data=… 一样（2026-10-31）。
+               开训前 run_task.sh 查一遍（scripts/queue/inputs.py），不全就不开训（退出码 4，worker 记"缺输入"，11/1）
     fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）、
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
@@ -65,7 +68,7 @@ RECIPES = {
         log="training_log_*.txt",
         progress="nnunet_log",
         resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
-        res=dict(gpus=1),
+        res=dict(gpus=1, local_inputs=1),
         owner=None,
         info="nnunet_debug",
         oldlogs=dict(dir="nnUNet/results/logs", prefix="{dataset}_{trainer}_fold{fold}_"),  # 10/18 前的分段日志

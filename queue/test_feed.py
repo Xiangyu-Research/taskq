@@ -163,6 +163,11 @@ acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], src={
 ok("失败、有进度：留着、报出来", not [a for a in acts if a["op"] == "release"] and f"site:dicc:fail:{K[0]}" in stuck)
 acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], paused=True))
 ok("缓冲整个暂停：不交还，只报", not [a for a in acts if a["op"] == "release"] and "site:dicc:fail" in stuck)
+acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "input", note="缺输入（x）", input_since=time.time() - 600)]))
+ok("缓冲里缺输入：报 site:<机器>:input，不交还、不跳过、一小时内不重试", f"site:dicc:input:{K[0]}" in stuck
+   and not [a for a in acts if a["op"] in ("release", "bremove", "binputok")])
+acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "input", note="缺输入（x）", input_since=time.time() - 4000)]))
+ok("缺输入过了一小时：撤掉标记重试", ("binputok", K[0]) in ops(acts))
 
 # ---------------- 缓冲里有、总队列没分给它的 ----------------
 acts, stuck, _ = plan(snap([ct(K[0])], [bt(K[0], "claimed", "123")]))

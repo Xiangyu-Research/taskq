@@ -29,8 +29,8 @@ import remote as RM  # noqa: E402
 
 OUT = "~/.cache/phd/relay/bundles"
 KEEP = [f"scripts/queue/{f}" for f in ("worker_start.sh", "gpu_pad_start.sh", "gpu_pad.py", "dicc_worker.sh", "taskq.py",
-                                       "run_task.sh", "spec.py", "recipes.py", "experiments.py", "common.py")]
-KEEP += ["research/common/nnunet/train.sh", "research/common/nnunet/stage_tmp.sh"]
+                                       "run_task.sh", "spec.py", "recipes.py", "experiments.py", "common.py", "inputs.py")]
+KEEP += ["research/common/nnunet/train.sh"]
 # 推理（nnunet_infer，lab1 训的折在那边推理，10/31）
 KEEP += ["research/RQ1/analysis/infer_task.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/analysis/write_manifest.py",
          "research/RQ1/nnunet/predict.sh", "research/common/sparsify_bg.sh", "research/common/sparsify_probs.py", "envs/nnunet_paths.sh"]
@@ -44,7 +44,7 @@ FORBIDDEN = ["user-x", "name-y", "st/BRAIN_TUMOR", "github", "transfer-x", "lab-
 RENAME = [("BRAIN_TUMOR", "TASKQ_DATA"), ("RQ1_GPU_PAD", "TASKQ_GPU_PAD"), ("RQ1_WAIT_GPU", "TASK_WAIT_GPU"), ("RQ1", "P1"), ("phd_stage", "taskq_stage"), ("PHD_", "TASKQ_")]
 # 包里改名的脚本（常驻进程的名字和 DICC 的分开，10/30 DICC 管理员要求）：文件名和所有引用一起换
 FILES = [("dicc_worker.sh", "loop.sh"), ("run_task.sh", "job_run.sh"), ("gpu_pad_start.sh", "mem_keep_start.sh"),
-         ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh"), ("stage_tmp.sh", "copy_local.sh")]
+         ("gpu_pad.py", "mem_keep.py"), ("worker_start.sh", "start.sh"), ("train.sh", "fit.sh")]
 # 只在包里改的几处（原样字符串 → 新字符串，每处必须正好出现一次）；{data} 是那边的数据目录
 PE_SH = "research/RQ1/analysis/run_predict_eval.sh"
 PE_EXT = "EXT=(UCSF UPENN SSA PEDs MEN MET-Yale MET-UCSF MET-Multi MET-UCSD PEDs-noskullstrip)"

@@ -17,6 +17,8 @@
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
   skips/<key>   某台机器训不了的任务（release --skip）：这台机器不再领它，别的机器照常领；不算失败
+  inputs/<key>  缺输入（11/1）：worker 开训前查到输入不全（run_task.sh 退出码 4），交还并记在这里；不再领它，等补齐输入的一方
+                （relay.py 补传，feed.py 过一阵重试）taskq.py input-ok 撤掉。不算失败
   released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
   stopped/<key> 停止的任务（taskq.py stop，10/30）：不再领；在训的 worker 每 5 秒看一次，30 秒内停下、交还。
                 缓冲里"依赖记录"（put 的 hold）也是停止的：只给别的任务的 after 看，不训
@@ -33,6 +35,7 @@ worker 调用（缓冲上）：
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
     taskq.py beat --worker <作业号> <key>...            心跳
     taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
+    taskq.py missing --worker <作业号> <key> [--why 说明]   缺输入（11/1）：交还，记 inputs/<key>，补齐前不再领
 box 上（总队列；在别的机器上跑这些命令时退出码 2，缓冲上只有带 TASKQ_FEED=1 的 feed.py 能改）：
     taskq.py add [--nice <档位>] --exp <实验 id> [--folds 0 1 …]   从实验表加（已有的跳过；不给 --nice 用表里的档位）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
@@ -44,6 +47,7 @@ box 上（总队列；在别的机器上跑这些命令时退出码 2，缓冲�
     taskq.py stop [--why 原因] <key>...   停止任务（10/30）：在训的 30 秒内停下、交还（存档是原子写的，从存档接着训），
                                       之后不再领它；分给执行机的由 box 下次检查时在那边停（feed.py / refill.py / relay.py）
     taskq.py resume <key>...         撤销停止，照常排
+    taskq.py input-ok <key>...       撤掉"缺输入"（输入补齐了，11/1）
     taskq.py take --worker <机器> --assign <key>   分给一台执行机（free / stale / waiting 的）：分到退出码 0，分不到 10
     taskq.py put                      标准输入里的任务记录（JSON，一个或一列）原样写进本机队列（缓冲；feed.py 用）；
                                       hold: true = 依赖记录（停止着，只给 after 看），false = 撤掉依赖记录的停止
@@ -75,7 +79,7 @@ HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过�
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
-FEED_ONLY = ("add", "set", "set-nice", "remove", "stop", "resume", "put")  # 缓冲上只有 feed.py（TASKQ_FEED=1）能做
+FEED_ONLY = ("add", "set", "set-nice", "remove", "stop", "resume", "put", "input-ok")  # 缓冲上只有 feed.py（TASKQ_FEED=1）能做
 safe = S.safe
 
 
@@ -228,6 +232,15 @@ def stopped_info(key):
         return None
 
 
+def input_info(key):
+    """缺输入的记录 → (时间戳, 说明)；没有 → None。"""
+    try:
+        f = open(os.path.join(TQ, "inputs", safe(key)), encoding="utf-8").read().rstrip("\n").split("\t")
+        return float(f[0]), " ".join(f[1:])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def released_at(key):
     try:
         return float(open(os.path.join(TQ, "released", safe(key))).read().split()[0])
@@ -273,7 +286,7 @@ def after_state(s, root):
 
 
 def state(t, root):
-    """→ (状态, 说明)：done / stopped（taskq.py stop）/ claimed / busy / failed / free / stale（领取过期，可以重新领）/ bad（说明解析不了）/
+    """→ (状态, 说明)：done / stopped（taskq.py stop）/ input（缺输入，taskq.py missing）/ claimed / busy / failed / free / stale（领取过期，可以重新领）/ bad（说明解析不了）/
     waiting（after 里的任务还没做完）/ blocked（after 里的任务失败了或不在队列里）。"""
     s = spec_of(t)
     if s is None:
@@ -284,6 +297,9 @@ def state(t, root):
     if stop is not None:
         ci = claim_info(t["key"])
         return "stopped", f"停止（{stop}）" + (f"，作业 {ci.get('worker')} 还领着、正在停" if ci else "")
+    inp = input_info(t["key"])
+    if inp is not None and claim_info(t["key"]) is None:
+        return "input", f"缺输入（{time.strftime('%m-%d %H:%M', time.localtime(inp[0]))} {inp[1]}）"
     w = after_state(s, root)
     if w:
         return w
@@ -399,6 +415,31 @@ def cmd_release(a):
             with open(os.path.join(TQ, "released", safe(key)), "w") as f:
                 f.write(f"{time.time()} {a.worker}\n")
             shutil.rmtree(d, ignore_errors=True)
+    return 0
+
+
+def cmd_missing(a):
+    """缺输入（11/1）：记 inputs/<key>，像 release 一样交还（不算失败）。"""
+    ci = claim_info(a.key)
+    if not (ci and str(ci.get("worker")) == str(a.worker)):
+        print(f"{a.key} 不是 {a.worker} 领着的", file=sys.stderr)
+        return 1
+    os.makedirs(os.path.join(TQ, "inputs"), exist_ok=True)
+    with open(os.path.join(TQ, "inputs", safe(a.key)), "w", encoding="utf-8") as f:
+        f.write(f"{time.time()}\t{a.worker}\t{(a.why or '').replace(chr(9), ' ').replace(chr(10), ' ')}\n")
+    os.makedirs(os.path.join(TQ, "released"), exist_ok=True)
+    with open(os.path.join(TQ, "released", safe(a.key)), "w") as f:
+        f.write(f"{time.time()} {a.worker}\n")
+    shutil.rmtree(os.path.join(TQ, "claims", safe(a.key)), ignore_errors=True)
+    return 0
+
+
+def cmd_input_ok(a):
+    for k in a.keys:
+        p = os.path.join(TQ, "inputs", safe(k))
+        if os.path.exists(p):
+            os.remove(p)
+            print(f"输入补齐了：{k}")
     return 0
 
 
@@ -712,7 +753,7 @@ def local_status():
         s = spec_of(t)
         ci = claim_info(t["key"]) or {}
         out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
-                        assigned=ci.get("assigned"), held=(stopped_info(t["key"]) or "").endswith(HOLD_WHY),
+                        assigned=ci.get("assigned"), input_since=(input_info(t["key"]) or (None,))[0], held=(stopped_info(t["key"]) or "").endswith(HOLD_WHY),
                         beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None,
                         task_log_age=task_log_age(root, t["key"], ci.get("worker")),
                         out_age=out_age(s, root) if s and st == "claimed" else None, failures=failures(t["key"]),
@@ -816,6 +857,12 @@ def main(argv):
     p.add_argument("keys", nargs="+")
     p.add_argument("--failed")
     p.add_argument("--skip", help="这台机器训不了、以后不再领它（记在 skips/，不算失败）")
+    p = sub.add_parser("missing")
+    p.add_argument("--worker", required=True)
+    p.add_argument("--why", default="")
+    p.add_argument("key")
+    p = sub.add_parser("input-ok")
+    p.add_argument("keys", nargs="+")
     p = sub.add_parser("take")
     p.add_argument("--worker", required=True)
     p.add_argument("--ttl", type=int, default=STALE_BEAT)
@@ -849,7 +896,8 @@ def main(argv):
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,
-                stop=cmd_stop, resume=cmd_resume, put=cmd_put)[a.cmd.replace("-", "_")](a)
+                stop=cmd_stop, resume=cmd_resume, put=cmd_put,
+                missing=cmd_missing, input_ok=cmd_input_ok)[a.cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

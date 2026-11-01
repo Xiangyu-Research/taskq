@@ -625,6 +625,20 @@ rc, out = tqb("put", feed=True, stdin=json.dumps(dict(r7[0], nice=-5, hold=False
 check("缓冲：put hold=false 不撤掉真正的停止（stop 的）", st7(BUF)[kt7]["state"] == "stopped")
 rc, out = tqb("status")
 check("缓冲：status 照常（只读）", rc == 0)
+# 缺输入（11/1）：worker 记 missing → input，不领、不算失败；input-ok 只有 feed 能做
+tqb("resume", kt7, feed=True)
+rc, out = tqb("next", "--worker", "963", "--envs", ALL)
+rc1, _ = tqb("missing", "--worker", "999", "--why", "x", kt7)
+rc2, _ = tqb("missing", "--worker", "963", "--why", "作业 963 开训前查到", kt7)
+sb = st7(BUF)
+check("缺输入：不是自己领的不能记；自己领的记上 → input、交还、不算失败", rc == 0 and rc1 == 1 and rc2 == 0 and sb[kt7]["state"] == "input"
+      and "缺输入" in sb[kt7]["note"] and not sb[kt7]["worker"] and sb[kt7]["failures"] == 0 and sb[kt7]["input_since"])
+rc, out = tqb("next", "--worker", "964", "--envs", ALL)
+check("缺输入：不再领它", rc == 10 or not out.startswith(kt7 + "\n"))
+rc, _ = tqb("input-ok", kt7)
+check("缺输入：不带 TASKQ_FEED 的 input-ok 不做", rc == 2 and st7(BUF)[kt7]["state"] == "input")
+rc, out = tqb("input-ok", kt7, feed=True)
+check("缺输入：input-ok 撤掉标记 → 照常领", rc == 0 and st7(BUF)[kt7]["state"] == "free")
 
 # ---------------- 10/31：add --file（任务单） ----------------
 TQF = os.path.join(T, "taskqf")

@@ -163,6 +163,8 @@ def problem(pid, p):
                 if "有进度" in msg:
                     return f"{site} 上 {fold(key)} 训练失败了，有进度，要决定接着训还是放弃。"
                 return f"{site} 上 {fold(key)} 的任务出了问题，不会开始训练。"
+            if sub == "input":
+                return f"{site} 上 {fold(key)} 的输入数据不全，没开训，过一小时自动重试。"
             if sub == "orphan":
                 if "认不出" in msg:
                     return f"{site} 的队列里有一个认不出是哪一折的任务。"

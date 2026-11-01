@@ -56,6 +56,7 @@ STATE = os.path.expanduser(os.environ.get("FEED_STATE", "~/.cache/phd/feed.json"
 LOG = os.path.expanduser(os.environ.get("FEED_LOG", "~/feed.log"))
 LOW_MIN = 60   # 补不满持续这么多分钟才报
 DOWN_S = 2 * 3600  # 连不上这么久才报
+INPUT_RETRY_S = 3600  # 缺输入的折过这么久撤掉标记重试
 COPYING = ("fetch", "archive", "relay_fetch")  # box 上这些步骤在跑时，这一折的结果还在拷
 # 比较两边的数据时不算的文件：临时文件，加上各做法拉回时不拉的（fetch.exclude，box 上本来就没有）
 EXCLUDE = ("*.tmp", ".DS_Store", ".incomplete") + tuple(sorted({x for r in recipes.RECIPES.values()
@@ -284,6 +285,10 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="release", key=k, skip=f"{L} 上失败 {b.get('failures')} 次", why=f"{L} 上失败、没有进度，{L} 不再分它"))
         elif b["state"] in ("bad", "blocked"):
             stuck[f"site:{name}:fail:{k}"] = f"{L} 缓冲里的 {k} {b['state']}：{b.get('note')}"
+        elif b["state"] == "input":  # 那边开训前查到输入不全（taskq.py missing，11/1）：报，过一阵撤掉标记重试（盘一时读不了也会这样）
+            stuck[f"site:{name}:input:{k}"] = f"{L} 上 {k} {b.get('note')}；看那边数据目录里的输入"
+            if time.time() - (b.get("input_since") or 0) >= INPUT_RETRY_S:
+                acts.append(dict(op="binputok", key=k))
     acts += manual_done(ctq, name, copying)
     assigned = {t["key"] for t in mine}
     for k, b in bt.items():
@@ -454,6 +459,9 @@ def execute(name, acts, central=None, remote=None, add=None, transfer=None):
                 central(["release", "--worker", name, k])
                 rc, out, err = central(["take", "--worker", a["to"], "--assign", k])
                 msgs.append(f"总队列里 {k} 改分给 {a['to']}（{a['why']}）" if rc == 0 else f"{k} 改分给 {a['to']} 出错：{(out + err)[-150:]}")
+            elif a["op"] == "binputok":
+                r = buf("input-ok " + shlex.quote(k))
+                msgs.append(f"{L} 缓冲里 {k} 撤掉缺输入的标记，重试" if r and r[0] == 0 else f"{L} 缓冲里 {k} 撤掉缺输入的标记出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] in ("bstop", "bresume"):
                 r = buf(("stop --why 总队列里停了 " if a["op"] == "bstop" else "resume ") + shlex.quote(k))
                 what = "停" if a["op"] == "bstop" else "撤销停止"

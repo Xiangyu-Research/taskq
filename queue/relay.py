@@ -30,7 +30,7 @@
 连不上它时只续总队列的领取；领着折、连不上 2 小时以上报出来。
 
     python3 scripts/queue/relay.py                         看现在会做什么（不改任何东西）
-    python3 scripts/queue/relay.py stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据）
+    python3 scripts/queue/relay.py stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
     python3 scripts/queue/relay.py fetch <名字> <key>      拉回训完的一折、换回真名，放进 box 的数据目录
     python3 scripts/queue/relay.py bundle <名字> [--commit C]   打包、推过去、切换 current
     python3 scripts/queue/relay.py status <名字>           那边的队列
@@ -481,7 +481,7 @@ def stage(name, key, nice=None, add=True, say=print):
     texts = {k: (v if isinstance(v, bytes) else v.encode()) for k, v in ex["texts"].items()}
     n = rpy(name, VIEW_PY, dict(views=views, links=links, texts={k: base64.b64encode(v).decode() for k, v in texts.items()}))
     say(f"那边的 {'、'.join(views)} 建好了（{n} 个文件）")
-    if srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
+    if add and srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
         dirs = [f"{x['path']}/data/{alias['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
         try:
             r = rpy(name, ADOPT_OUT_PY, dict(srcs=dirs, alias=alias["out"], resume=real["resume"], done=real.get("done") or []), job=job)
@@ -500,6 +500,11 @@ def stage(name, key, nice=None, add=True, say=print):
         if r is None or r[0]:
             raise RuntimeError(f"加进 {conf(name)['label']} 的队列出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
         say(r[1])
+    else:  # 补传（那边查到缺输入）：撤掉标记，那边接着领
+        r = rtq(name, f"input-ok {shlex.quote(alias['key'])}")
+        if r is None or r[0]:
+            raise RuntimeError(f"{conf(name)['label']} 上撤掉缺输入的标记出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
+        say(r[1] or "那边没有缺输入的标记")
     return alias["key"]
 
 
@@ -663,6 +668,13 @@ def plan(s, name, rs, st, now=None):
                                               f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
         elif ast == "stopped":
             acts.append(dict(op="rresume", key=key, alias=a["key"]))
+        elif ast == "input":  # 那边开训前查到输入不全（taskq.py missing）：只补传缺的、重建视图，再撤掉标记（11/1）
+            sg = box_task(s, "relay_stage", key, a.get("input_since") or since)
+            if sg is None or sg["status"] == "Success":
+                acts.append(dict(op="restage", key=key))
+            elif sg["status"] not in LIVE:
+                stuck[f"relaystage:{key}"] = (f"给 {L} 补传 {key} 缺的输入的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
+                                              f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）")
         elif ast == "failed":
             if progress(folds.get(a["key"])):
                 stuck[f"site:{name}:fail:{key}"] = (f"{L} 上 {key}（{a['key']}）训练失败 {a.get('failures')} 次，有进度，领取保留；"
@@ -807,12 +819,13 @@ def execute(name, acts, s, run_add=None):
                     if t["key"] == k:
                         t.update(worker=name, assigned=name, state="claimed")
                 a = dict(a, op="stage")
-            if a["op"] == "stage":
+            if a["op"] in ("stage", "restage"):
                 lab = label("relay_stage", k)
-                cmd = f"python3 scripts/queue/relay.py stage {name} {shlex.quote(k)} --nice {int(a['nice'])}"
+                cmd = f"python3 scripts/queue/relay.py stage {name} {shlex.quote(k)} " + (
+                    "--no-add" if a["op"] == "restage" else f"--nice {int(a['nice'])}")
                 tid = add(M.hub(), lab, "relay_stage", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
-                msgs.append(f"{L} 的 {k} 排了传数据（box 任务 {tid}）")
+                msgs.append(f"{L} 的 {k} 排了{'补传缺的输入' if a['op'] == 'restage' else '传数据'}（box 任务 {tid}）")
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
                 cmd = f"python3 scripts/queue/relay.py fetch {name} {shlex.quote(k)}"

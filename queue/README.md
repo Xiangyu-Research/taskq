@@ -94,6 +94,8 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - 只领本机缓冲里的（`feed.py` 送来的）。不领：已做完的、别处在做的（领取在有效期内续过：20 分钟；或训练日志 15 分钟内更新过）、失败过 2 次的、依赖记录（只给 `after` 看的）。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
 - 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败）；整个队列 3 小时内失败 3 次就暂停领任务；停止的任务（`taskq.py stop`）每 5 秒看一次，先发 SIGTERM，20 秒没停就 SIGKILL，交还（不算失败），30 秒内做完（存档是原子写的）；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
 - 每个训练 14 个数据增强进程（作业 32 个 CPU）。
+- 开训前 `run_task.sh` 查任务的输入（`inputs.py prepare`：文件都在、链接指得到文件、没有建到一半的 `.incomplete`）；缺了退出码 4，worker 用 `taskq.py missing` 交还、记进 `inputs/<key>`（状态 `input`，不算失败，补齐前没人领），执行机由 `relay.py` 补传缺的数据块后 `input-ok` 放回；DICC 本身缓冲里的一小时后自动再试（`feed.py`）（11/1）。
+- 输入拷到节点本地盘（`envs/policy.py` 的 `STAGE_TMP` 开着、任务 `res.local_inputs` 时，11/1 起代替 `stage_tmp.sh` 开训前的整份拷贝）：在 `$TMPDIR/phd_stage_<作业号>/views/<任务>/` 建这个任务私有的链接树，先都指向共享盘，马上开训；后台 `inputs.py copy` 一个个拷到 `blobs/`、核对（sha256 名的按内容）后原子换掉链接，同一作业、本节点别的作业已有的直接用或硬链接；拷完要剩 `STAGE_KEEP_GB`（默认 300）GB，不够就不拷。命令从 `$TASK_INPUTS_ROOT` 读；作业结束时删自己的目录，下一个作业开始时清掉本节点上已结束作业留下的。
 - CPU worker（`cpu_worker.sbatch`，`WORKER_DEVICE=cpu`）只领 `device=cpu` 的任务，一次 1 个，领不到就结束。
 
 ### 往执行机送任务（`feed.py`，健康检查每 30 分钟调用，10/31）
@@ -167,8 +169,9 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 文件 | 内容 |
 |---|---|
 | `q`、`qs` | 加任务：`q <组> [pueue add 选项] -- '<命令>'`（按 `envs/machines.py` 设好卡和组的环境变量，工作目录是仓库根目录）；`qs [机器]` 看各 pueue 机器的队列 |
-| `taskq.py` | 总队列（box）和执行机的缓冲：worker 领（`next`）、心跳（`beat`）、交还（`release`）；分给一台执行机（`take --assign`）；往缓冲写原样的记录（`put`，只给 `feed.py` 用）；加（`add --exp`、`add --recipe`）、改参数（`set`）、改先后（`set-nice`）、删掉没人在做的（`remove`，依赖它的要一起删）、看说明（`show`）、看队列（`status`）。命令说明在文件开头 |
+| `taskq.py` | 总队列（box）和执行机的缓冲：worker 领（`next`）、心跳（`beat`）、交还（`release`）、缺输入交还（`missing`，补齐后 `input-ok`）；分给一台执行机（`take --assign`）；往缓冲写原样的记录（`put`，只给 `feed.py` 用）；加（`add --exp`、`add --recipe`）、改参数（`set`）、改先后（`set-nice`）、删掉没人在做的（`remove`，依赖它的要一起删）、看说明（`show`）、看队列（`status`）。命令说明在文件开头 |
 | `recipes.py`、`spec.py`、`experiments.py`、`steps.py` | 做法、解析器、读实验表、步骤的"做完没"判断 |
+| `inputs.py` | 开训前查输入（缺了退出码 4）、节点本地盘上的私有视图和后台拷贝（见上面） |
 | `run_task.sh <做法> k=v…` | 所有机器共用的运行器：激活环境、设变量、跑命令、写分段日志；已经训完就直接退出；Slurm 外设了 `CUDA_VISIBLE_DEVICES` 时卡被别人占着就等（每分钟看一次，最多 `res.wait_gpu` 分钟），出错隔 5 分钟重来、最多 3 次；SIGTERM 先停训练再退出 |
 | `worker.sbatch`、`worker_start.sh`、`cpu_worker.sbatch`、`dicc_worker.sh` | DICC 作业：`worker.sbatch`（作业名见 `envs/machines.py` 的 `jobs`，long、3 天）只有资源申请和转交到 `worker_start.sh` 的一行；`worker_start.sh` 查 `ENABLED`、激活 conda、启动显存填充，交给 `dicc_worker.sh`。`cpu_worker.sbatch`：`cpu-epyc-genoa`、normal、32 核、64G、8 小时（`cpu-epyc` 的节点系统太旧） |
 | `feed.py` | 送任务的唯一入口：relay 的执行机转给 `relay.py`，往 DICC、lab 的缓冲送任务（见上面）；`python3 scripts/queue/feed.py --dry` 只看会做什么 |
@@ -187,7 +190,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 ## 约定
 
 - **DICC 作业提交时定下的**只有 `worker.sbatch`；其余脚本在作业开始时或每次调用时从仓库读。排着的作业依赖的只有 `ENABLED` 和 `worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它调用的 `taskq.py next / beat / release` 和 `run_task.sh` 的参数、退出码不改，只加新命令。
-- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，2 任务说明或环境有问题，1 训练命令出错（命令自己的退出码 1–127 记在分段日志），128 以上是被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀如 137 原样传出；worker 据此区分"训不了"和"被杀"）（10/25 定）。`qs --json` 每个任务的 `status` 给人看（如 `Failed (1)`），程序读 `result`（`Success` / `Failed` / `Killed` / …，没结束是空）和 `code`（退出码）。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。不在 box、本机又没有队列时，改队列的命令退出码 2（"总队列在 box"）；缓冲（有 `BUFFER`）上 `add`、`set`、`set-nice`、`remove`、`stop`、`resume`、`put` 要带 `TASKQ_FEED=1`（`feed.py` 经 ssh 调用时带），否则退出码 2（10/31）。
+- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，4 缺输入（开训前查到，没跑命令；11/1），2 任务说明或环境有问题，1 训练命令出错（命令自己的退出码 1–127 记在分段日志），128 以上是被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀如 137 原样传出；worker 据此区分"训不了"和"被杀"）（10/25 定）。`qs --json` 每个任务的 `status` 给人看（如 `Failed (1)`），程序读 `result`（`Success` / `Failed` / `Killed` / …，没结束是空）和 `code`（退出码）。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。不在 box、本机又没有队列时，改队列的命令退出码 2（"总队列在 box"）；缓冲（有 `BUFFER`）上 `add`、`set`、`set-nice`、`remove`、`stop`、`resume`、`put` 要带 `TASKQ_FEED=1`（`feed.py` 经 ssh 调用时带），否则退出码 2（10/31）。
 - **经 ssh 读回的 JSON**：`taskq.py --json-status`、`taskq.py show --json`、`spec.py` 的 `remote_collect` 把 JSON 写在单独一行、以 `@@JSON ` 开头，读的一方只认这一行（`spec.py` 的 `json_out` / `json_in`），前后别的输出不影响。`taskq.remote` 分开返回标准输出和标准错误，ssh 不通（退出码 255）返回空（10/25 定）。
 - **各机器的状态只取一次**：`scripts/monitor/health.py` 的 `gather()`：pueue（`qs --json`）、每台 pueue 机器一次 ssh 的探查（开机、盘、GPU 使用记录、各卡和卡上的进程、训练要用的数据在不在）、Slurm 的 `squeue`（作业名、号、状态、已跑、原因、Nice、分区）和 `sacct`、任务队列、各任务的训练状态（`spec.collect`）。健康检查、`refill.py`、`advance.py` 和登记表 `make_registry.py` 都用它的结果，不另外去取（10/25 定）。
 - **队列所在的机器**：`envs/machines.py` 里用 Slurm、能训练的那台（`taskq.queue_host()`）；在别的机器上跑 `taskq.py add / set / set-nice / take / show / remove / status` 时经 ssh 到那边跑。worker 用的 `next / beat / release` 不转发，没有 `tasks.jsonl` 就退出 2（10/25 定）。
@@ -267,7 +270,7 @@ pueue 本身：`pueue log <号>`、`pueue follow <号>`、`pueue kill -s SIGTERM
 | `owner` | 谁的任务 |
 | `env` | 环境名（`envs/machines.py` 的 `envs`；没有这个环境的机器不领） |
 | `cmd` | 在仓库根目录用 bash 跑的命令；`{data}` 是那台机器的数据目录。重跑要能从存档接着做 |
-| `inputs` | 要用的文件或文件夹（相对数据目录，box 上先放好）；送到执行机之前传完、核对过 |
+| `inputs` | 要用的文件或文件夹（相对数据目录，box 上先放好）；送到执行机之前传完、核对过；开训前再查一次，缺了不跑、标"缺输入" |
 | `out` | 结果文件夹（相对数据目录），做完拉回 box 的同一位置 |
 | `done` | 做完的标志：`out` 下的文件，每一项都要有（一项里 `a|b` 有一个就行） |
 | `progress` | `progress_json`：命令每做完一轮写 `out/PROGRESS.json`，内容 `{"done": 已做完的轮数, "total": 总轮数}`；不写 = 只看日志多久没更新；某种模型专用的读法（如 nnU-Net 的 `nnunet_log`）在 `readers/<名>.py` 的 `PROGRESS` 表里（`info` 同理，`INFO` 表），只用标准库，收集进度时随 `spec.py` 一起送到别的机器 |

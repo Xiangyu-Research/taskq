@@ -9,6 +9,7 @@
 # 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；
 # 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
 # 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
+# 4 缺输入（data 里的文件不全，没开训，11/1）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练再退出，下次从存档接着训。
 set -u
@@ -72,6 +73,32 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$TASK_KEY，第 $PART 段，环境 $TASK_ENV，代码 $COMMIT，$(ts)" >> "$LOG"
 echo "$(ts) 开始：$TASK_KEY（环境 $TASK_ENV，日志 $LOG）"
+# 输入（任务说明的 data）：开训前查全没有，不全退出码 4；STAGE_TMP 开着、任务的 res.local_inputs 时在节点本地盘建私有视图，
+# 后台拷过去（scripts/queue/inputs.py，11/1）。命令从 TASK_INPUTS_ROOT 读输入（和数据目录一样的相对路径）
+TASK_INPUTS_ROOT=$DATA CPID=
+if (( ${#TASK_INPUTS[@]} )); then
+    LROOT=
+    if [[ ${TASK_LOCAL:-0} == 1 && -n ${SLURM_JOB_ID:-} ]]; then
+        ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$REPO/envs'); import machines, policy; print(int(bool(policy.STAGE_TMP.get(machines.whoami()))))" 2> /dev/null || echo 0)}
+        [[ $ST == 1 ]] && LROOT=${TMPDIR:-/tmp}/phd_stage_$SLURM_JOB_ID
+    fi
+    V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?
+    if (( rc == 4 )); then
+        echo "$(ts) 不开训：$(tail -n 1 "$LOG")"
+        exit 4
+    elif (( rc == 0 )) && [[ -n $V ]]; then
+        TASK_INPUTS_ROOT=$V
+        if [[ $V != "$DATA" ]]; then
+            python3 "$HERE/inputs.py" copy "$LROOT" "$TASK_SAFE" >> "$LOG" 2>&1 &
+            CPID=$!
+            echo "$(ts) 输入读 $V（后台拷到本地盘）" | tee -a "$LOG"
+        fi
+    else
+        echo "$(ts) 输入没查成（退出码 $rc），照旧读 $DATA" | tee -a "$LOG"
+    fi
+fi
+export TASK_INPUTS_ROOT
+trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
     wait_gpu || exit 1
     ( eval "$ACT" && cd "$REPO" && exec bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &

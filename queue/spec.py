@@ -117,7 +117,7 @@ def resolve(recipe, params, exp=None):
     return s
 
 
-RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu")
+RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
 
 
 def _check(s):
@@ -384,7 +384,9 @@ def shell_lines(s, data, repo=REPO):
     e = expand(s, data, repo)
     lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote(e['env'])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
              f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
-             f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}"]
+             f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
+             "TASK_INPUTS=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["data"]) + ")",
+             f"TASK_LOCAL={int(bool(e['res'].get('local_inputs')))}"]
     lines += [f"export {k}={shlex.quote(str(v))}" for k, v in e["vars"].items()]
     return "\n".join(lines)
 

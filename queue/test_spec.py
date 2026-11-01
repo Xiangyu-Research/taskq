@@ -68,8 +68,11 @@ ok("任务单：res.wait_gpu 转成分钟数、和默认的卡数合在一起，
    and raises(lambda: S.resolve("command", dict(G, res={"wait_gpu": -1}))))
 ok("任务单：data 里有 .. → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["../etc"]))))
 ok("任务单：不认识的 progress → 报错", raises(lambda: S.resolve("command", dict(G, progress="tqdm"))))
-ok("nnunet：也有 inputs、resume、一张卡，进度读 nnU-Net 日志", s["inputs"] == s["data"] and s["resume"]
-   and s["res"] == {"gpus": 1} and s["progress"] == "nnunet_log" and s["relay"] == "nnunet")
+ok("nnunet：也有 inputs、resume、一张卡、输入拷到本地，进度读 nnU-Net 日志", s["inputs"] == s["data"] and s["resume"]
+   and s["res"] == {"gpus": 1, "local_inputs": 1} and s["progress"] == "nnunet_log" and s["relay"] == "nnunet")
+sl = S.shell_lines(s, "/d").splitlines()
+ok("shell：TASK_INPUTS 是输入的绝对路径（数组），TASK_LOCAL 跟 res.local_inputs", f"TASK_INPUTS=(/d/nnUNet/preprocessed/{s['params']['dataset'] if 'params' in s else s['data'][0].split('/')[-1]})" in sl
+   and "TASK_LOCAL=1" in sl and "TASK_LOCAL=0" in S.shell_lines(S.resolve("command", G), "/d").splitlines())
 gr = tempfile.mkdtemp()
 gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
 gd = os.path.join(gr, "guest/x")

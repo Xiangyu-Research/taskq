@@ -235,6 +235,21 @@ def test_plan():
     assert f"site:{NAME}:fail" in stuck, stuck
     ok("那边失败：没有进度 → 交还（--skip）并删掉；有进度、bad → 保留、报 site:<名字>:fail:<key>；那边暂停 → site:<名字>:fail")
 
+    ri = dict(rtask(A, "input"), input_since=5000.0)
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(ri), st)
+    assert ops(acts) == [("beat", K), ("restage", K)] and not stuck, acts
+    srec = dict(machine=M.hub(), id=9, label="relay_stage:" + K, step="relay_stage", key=K, added=6000.0)
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=9, label=srec["label"], status="Running")], [srec]), NAME, RS(ri), st)
+    assert ops(acts) == [("beat", K)] and not stuck, acts
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=9, label=srec["label"], status="Failed")], [srec]), NAME, RS(ri), st)
+    assert ops(acts) == [("beat", K)] and f"relaystage:{K}" in stuck, (acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=9, label=srec["label"], status="Failed")], [dict(srec, added=1500.0)]), NAME, RS(ri), st)
+    assert ops(acts) == [("beat", K), ("restage", K)] and not stuck, (acts, stuck)
+    added = []
+    msgs = relay.execute(NAME, [dict(op="restage", key=K)], S0([mtask(K)]), run_add=lambda *a, **k: added.append(a) or 77)
+    assert added and "--no-add" in added[0][4] and "--nice" not in added[0][4] and "补传" in msgs[0], (added, msgs)
+    ok("那边缺输入 → 排补传（stage --no-add：只补缺的、撤掉标记）；在补 → 等；补传出错 → 报；标记之前的旧任务不算")
+
     acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [("beat", K), ("rstop", K)], acts
     acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(rtask(A, "stopped", "123")), st)

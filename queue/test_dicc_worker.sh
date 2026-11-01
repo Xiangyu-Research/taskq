@@ -132,6 +132,25 @@ EOF
 SLURM_JOB_ID=900008 FAKE_FAIL=t/a TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2d.out" 2>&1
 check "训练失败：记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
 
+# 2d2. 缺输入（run_task.sh 退出码 4）：交还、记为缺输入，不算失败，接着领下一个
+reset
+rm -rf "$TASKQ_DIR/inputs"
+table << EOF
+t/a nnunet
+t/b nnunet
+EOF
+python3 - "$TASKQ_DIR/tasks.jsonl" << 'PY'
+import json, sys
+p = sys.argv[1]
+ts = [json.loads(l) for l in open(p)]
+ts[0]["params"]["inputs"] = ["in/nothere"]
+open(p, "w").write("".join(json.dumps(t) + "\n" for t in ts))
+PY
+SLURM_JOB_ID=900009 TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2m.out" 2>&1
+check "缺输入：没开训、不记失败、记为缺输入，接着训下一个" '! grep -q "start .* t/a" $T/train.log && [[ ! -e $TASKQ_DIR/failures/t__a ]] && [[ -e $TASKQ_DIR/inputs/t__a ]] && grep -q "end .* t/b" $T/train.log'
+check "缺输入：领取交还了" '[[ ! -e $TASKQ_DIR/claims/t__a ]]'
+rm -rf "$TASKQ_DIR/inputs"
+
 # 2e. 开始不久就失败的 2 个任务：作业不再领；跑了一段时间才失败的、两次隔得比时间窗久的不算作业的问题，照常领下一个
 reset
 table << EOF
