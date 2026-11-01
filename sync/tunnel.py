@@ -51,8 +51,10 @@ def machines():
     return M
 
 
-def ssh(host, cmd, check=True, input=None):
-    r = subprocess.run(SSH + [host, cmd], input=input, capture_output=True, text=True)
+def ssh(host, cmd, check=True, input=None, timeout=300):
+    """那边跑一条短命令；那边也限时，卡在存储里时不留进程（11/1）。"""
+    r = subprocess.run(SSH + [host, f"timeout -k 10 {timeout - 15} bash -c {shlex.quote(cmd)}"], input=input, capture_output=True, text=True,
+                       timeout=timeout)
     if check and r.returncode:
         raise RuntimeError(f"ssh {host} 出错（{r.returncode}）：{r.stderr.strip()[-300:]}")
     return r.stdout

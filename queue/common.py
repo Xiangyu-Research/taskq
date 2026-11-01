@@ -24,12 +24,18 @@ def write_json(path, obj, indent=1):
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 
 
+def remote_timeout(cmd, timeout):
+    """ssh 到那边跑的命令外面套一层那边的 timeout：本机这边超时断开后，那边卡在存储里的进程也结束，不留在登录节点上（11/1）。"""
+    return f"timeout -k 10 {max(int(timeout) - 15, 10)} {cmd}"
+
+
 def run(cmd, host=None, timeout=120, input=None, ssh=None):
     """跑命令 → (退出码, 标准输出, 标准错误)。cmd 是列表时在本机直接跑；是字符串时本机用 bash -c、给了 host（ssh 名）就到那台跑。
-    超时、起不来 → (124, "", 原因)。ssh 不通时退出码是 255。"""
+    超时、起不来 → (124, "", 原因)。ssh 不通时退出码是 255。到那边跑的命令那边也限时（remote_timeout），不留卡住的进程。"""
+    import shlex
     import subprocess
     if isinstance(cmd, str):
-        cmd = ["bash", "-c", cmd] if host is None else (ssh or SSH) + [host, cmd]
+        cmd = ["bash", "-c", cmd] if host is None else (ssh or SSH) + [host, remote_timeout(f"bash -c {shlex.quote(cmd)}", timeout)]
     elif host is not None:
         raise ValueError("列表形式的命令只在本机跑")
     try:

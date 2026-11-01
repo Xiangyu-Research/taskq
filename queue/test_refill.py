@@ -345,5 +345,10 @@ for name in R.M.names("slurm"):
     ok(f"{name}：两个 sbatch 文件的 --job-name 和 envs/machines.py 的 jobs 一致",
        {"gpu": job_name(R.GPU_FILE), "cpu": job_name(R.CPU_FILE)} == R.M.MACHINES[name]["jobs"])
 
+# 那边的文件读不动（spec.collect 的 stuck，11/1）：当成有进度，不当新任务分出去
+st = {"src": {"dicc": {"tasks": {}, "stuck": ["k/1"]}, "box": {"tasks": {}}}}
+ok("progress：读不动的任务当成有进度（看所有机器、看那台）；别的机器、别的任务照常",
+   R.progress(st, "k/1") and R.progress(st, "k/1", "dicc") and not R.progress(st, "k/1", "box") and not R.progress(st, "k/2"))
+
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

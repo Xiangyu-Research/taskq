@@ -79,8 +79,11 @@ def tag(path):
 
 
 def progress(s, key, host=None):
-    """这个任务有没有训练进度（训完、有 epoch，或者有存档：任务说明的 resume）：host=None 时看所有机器。"""
+    """这个任务有没有训练进度（训完、有 epoch，或者有存档：任务说明的 resume）：host=None 时看所有机器。
+    那边这个任务的文件读不动（收集时记进 stuck，存储挂住）的当成有进度：不当新任务分出去、不当没进度交还（11/1）。"""
     from health import task_info
+    if any(key in (d.get("stuck") or []) for h, d in (s.get("src") or {}).items() if host in (None, h)):
+        return True
     if any(v[0] or v[1] > 0 for h, v in task_info(s, key).items() if host in (None, h)):
         return True
     return any(((d.get("tasks") or {}).get(key) or {}).get("resumable") for h, d in (s.get("src") or {}).items()

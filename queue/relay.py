@@ -409,7 +409,8 @@ def deploy(name, bid, path):
            f"ln -sfn {b} current.tmp; mv -T current.tmp current; "
            "ls -1t | grep -vx current | grep -v '\\.tmp$' | tail -n +4 | "
            "while read -r d; do find \"$d\" -maxdepth 0 -mtime +4 -exec rm -rf {} +; done")
-    r2 = subprocess.run(ssh_argv() + [conf(name)["ssh"], cmd], input=tar, capture_output=True, timeout=600)
+    r2 = subprocess.run(ssh_argv() + [conf(name)["ssh"], C.remote_timeout(f"bash -c {shlex.quote(cmd)}", 600)], input=tar,
+                        capture_output=True, timeout=600)
     if r2.returncode:
         raise RuntimeError(f"推代码包 {bid} 到 {conf(name)['label']} 出错：{r2.stderr.decode(errors='replace')[-300:]}")
 

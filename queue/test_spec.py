@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import experiments as E  # noqa: E402
@@ -89,6 +90,20 @@ open(os.path.join(gd, "PROGRESS.json"), "w").write("{broken")
 ok("collect：PROGRESS.json 坏了 → 不报错、当没进度", max(r["epochs_done"] for r in S.collect([gs], gr)["tasks"]["guest/x"]["runs"]) == 0)
 open(os.path.join(gd, "ckpt_0003.pt"), "w").close()
 ok("collect：有 resume 里的存档 → resumable", S.collect([gs], gr)["tasks"]["guest/x"]["resumable"])
+# 存储挂住（11/1）：一个任务的文件读不动 → 这个任务记进 stuck、跳过，别的照常读；一共等的时间有上限
+import threading  # noqa: E402
+hang = threading.Event()
+S.PROGRESS["hang"] = lambda p: hang.wait(30) or {}
+hs = dict(gs, key="guest/hang", out="guest/hang", progress="hang")
+os.makedirs(os.path.join(gr, "guest/hang"), exist_ok=True)
+open(os.path.join(gr, "guest/hang", "train.log"), "w").write("x\n")
+t0 = time.time()
+rh = S.collect([hs, gs], gr, wait=0.5)
+ok("collect：一个任务读不动 → 记进 stuck、不等它，别的任务照常", rh.get("stuck") == ["guest/hang"] and "guest/x" in rh["tasks"]
+   and "guest/hang" not in rh["tasks"] and time.time() - t0 < 5)
+ok("collect：都读得动 → 没有 stuck", "stuck" not in S.collect([gs], gr, wait=5))
+hang.set()
+del S.PROGRESS["hang"]
 import relay as RL  # noqa: E402
 import refill as RF  # noqa: E402
 ok("relay.progress：只有存档（没有轮数）也算有进度", RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))

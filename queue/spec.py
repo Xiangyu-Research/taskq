@@ -34,6 +34,9 @@ def safe(key):
 JSON_MARK = "@@JSON "  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/queue/README.md 的"约定"）
 
 
+COLLECT_WAIT = 90  # remote_collect 一共等几秒（各任务同时读）
+
+
 def json_out(obj):
     print(JSON_MARK + json.dumps(obj), flush=True)
 
@@ -306,30 +309,57 @@ def task_specs(queue=()):
     return [{k: t["spec"].get(k) for k in COLLECT_FIELDS} for t in all_tasks(queue)]
 
 
-def collect(specs, root):
-    """这台机器上每个任务的情况（健康检查、登记表用）：{"tasks": {key: …}, "seglogs": […]}。
+def collect(specs, root, wait=None):
+    """这台机器上每个任务的情况（健康检查、登记表用）：{"tasks": {key: …}, "seglogs": […]}，有读不动的再加 "stuck": [key…]。
     specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。
-    分段日志在 logs/tasks/，加上说明里 oldlogs 的 dir（以前放在别处的）。"""
-    out = {"tasks": {}, "seglogs": []}
-    for s in specs:
-        fd = out_dir(s, root)
-        if not os.path.isdir(fd):
-            continue
-        logs = sorted(glob.glob(os.path.join(fd, s["log"]))) if s.get("log") else []
-        parse = PROGRESS.get(s.get("progress"), plain_log)
-        runs = []
-        for p in logs:
-            try:
-                runs.append(parse(p))
-            except OSError:
-                pass
-        if s.get("progress") == "progress_json":
-            pj = progress_json(fd)
-            if pj:
-                runs.append(pj)
-        out["tasks"][s["key"]] = dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
-                                      dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd),
-                                      resumable=resumable(s, fd))
+    分段日志在 logs/tasks/，加上说明里 oldlogs 的 dir（以前放在别处的）。
+    wait：给了就每个任务一个线程同时读，wait 秒后还没读完的（文件卡在存储里）记进 stuck、不再等（11/1），
+    卡住的线程留着，进程结束时一起结束（remote_collect 读完后 os._exit）。"""
+    jobs = [(s["key"], lambda s=s: one_task(s, root)) for s in specs] + [("@seglogs", lambda: seg_logs(specs, root))]
+    if wait is None:
+        res = {k: fn() for k, fn in jobs}
+    else:
+        import threading
+        res, ths = {}, []
+        for k, fn in jobs:
+            th = threading.Thread(target=lambda k=k, fn=fn: res.__setitem__(k, fn()), daemon=True)
+            th.start()
+            ths.append(th)
+        end = time.time() + wait
+        for th in ths:
+            th.join(max(0, end - time.time()))
+        res = dict(res)
+    out = {"tasks": {s["key"]: res[s["key"]] for s in specs if res.get(s["key"]) is not None}, "seglogs": res.get("@seglogs") or []}
+    stuck = [k for k, _ in jobs if k not in res]
+    if stuck:
+        out["stuck"] = stuck
+    return out
+
+
+def one_task(s, root):
+    """collect 里一个任务的情况；还没有输出目录 → None。"""
+    fd = out_dir(s, root)
+    if not os.path.isdir(fd):
+        return None
+    logs = sorted(glob.glob(os.path.join(fd, s["log"]))) if s.get("log") else []
+    parse = PROGRESS.get(s.get("progress"), plain_log)
+    runs = []
+    for p in logs:
+        try:
+            runs.append(parse(p))
+        except OSError:
+            pass
+    if s.get("progress") == "progress_json":
+        pj = progress_json(fd)
+        if pj:
+            runs.append(pj)
+    return dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
+                dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd), resumable=resumable(s, fd))
+
+
+def seg_logs(specs, root):
+    """collect 里的分段日志：[{name, first, trained}]。"""
+    out = {"seglogs": []}
     dirs = sorted({s["oldlogs"]["dir"] for s in specs if (s.get("oldlogs") or {}).get("dir")})
     pats = [os.path.join(root, d, "*_seg*.log") for d in dirs] + [os.path.join(root, "logs", "tasks", f"*_{w}*.log") for w in ("seg", "part")]
     for p in (q for pat in pats for q in glob.glob(pat)):
@@ -341,16 +371,18 @@ def collect(specs, root):
         except Exception:  # noqa: BLE001
             pass
         out["seglogs"].append(dict(name=os.path.basename(p), first=first, trained=trained))
-    return out
+    return out["seglogs"]
 
 
 def remote_collect(ssh, specs, root, timeout=600):
     """ssh 到别的机器上跑 collect()：把本文件、readers/ 和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
+    import common as C
     prog = open(os.path.abspath(__file__), encoding="utf-8").read().replace('\nif __name__ == "__main__":', "\nif False:")
     prog += f"\nload_readers(json.loads({json.dumps(json.dumps(reader_sources()))}))"
-    prog += f"\njson_out(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r})))\n"
+    prog += (f"\njson_out(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r}), "
+             f"wait={COLLECT_WAIT}))\nos._exit(0)\n")  # 卡住的线程不等
     try:
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ssh, "python3 -"], input=prog,
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ssh, C.remote_timeout("python3 -", timeout)], input=prog,
                            capture_output=True, text=True, timeout=timeout)
         out = json_in(r.stdout)
         if out is None:

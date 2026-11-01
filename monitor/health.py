@@ -235,6 +235,10 @@ def check(s):
         if not s["ok"].get(name) and name not in policy.OFFLINE:
             add(f"down:{name}", f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(m['ssh'])}）",
                 after=60 if m["scheduler"] == "slurm" else 30)
+    for name, d in (s.get("src") or {}).items():  # 存储挂住、读不动的任务（spec.collect 的 stuck，11/1）
+        if d.get("stuck"):
+            add(f"unread:{name}", f"{L(name)} 上 {len(d['stuck'])} 个任务的文件读不动（多半是存储挂住），先不分、不交还："
+                                 f"{'、'.join(d['stuck'][:5])}{' …' if len(d['stuck']) > 5 else ''}", after=60)
     code = s.get("code") or {}
     for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了
         if head and code.get("main") and head != code["main"] and name in M.MACHINES and name not in policy.OFFLINE:

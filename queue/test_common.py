@@ -91,5 +91,19 @@ ths = [threading.Thread(target=many, args=(20,)) for _ in range(4)]
 [t.join() for t in ths]
 ok("几个进程同时加：加锁读改写，一条不丢", len(C.load_records()) == 80 and isinstance(json.load(open(C.tasks_path())), list))
 
+# 到别的机器跑的命令那边也限时（11/1）：本机超时断开后那边不留卡住的进程
+_sp = __import__("subprocess")
+_run = _sp.run
+seen = []
+_sp.run = lambda cmd, **kw: (seen.append((cmd, kw.get("timeout"))), _run(["true"]))[1]
+try:
+    C.run("cat ~/x | wc -l", "dicc", timeout=120)
+finally:
+    _sp.run = _run
+cmd, to = seen[0]
+ok("run：给了 host → 那边用 timeout -k 包住、比本机早 15 秒，命令原样交给 bash -c", cmd[-1] == "timeout -k 10 105 bash -c 'cat ~/x | wc -l'"
+   and cmd[-2] == "dicc" and to == 120)
+ok("run：本机的不套", C.run("echo hi")[1] == "hi\n")
+
 print("\n全部通过" if not fails else f"\n{fails} 项失败")
 sys.exit(1 if fails else 0)
