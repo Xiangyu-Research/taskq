@@ -144,9 +144,9 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 ### 执行机（DICC2、lab1、lab0，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
 
-`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：中转执行机 DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）训练同一个总队列里的任务。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径（11/1 起不换名）。流程细节写在 `relay.py` 开头。
+`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：中转执行机 DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径（11/1 起不换名）。流程细节写在 `relay.py` 开头。
 
-- **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/sites/slurm.py`、`scripts/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算（Slurm 用 `refill.topup_plan`；pueue 组里没有活着的 worker、上一个没失败、那边有备好没人领的任务时开一个），适配器照着开。
+- **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/sites/slurm.py`、`scripts/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`，和 DICC 的 `refill.py` 同一份；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
 - **根目录**写成 `~/…`（如 dicc1 的 `~/st/…`）时，命令里开头的 `~` 留给那边展开（`scripts/sites/remote.py` 的 `q()`）；代码包里 `worker.sbatch` 的日志用相对路径（Slurm 不展开 `~`）。
 
 ```
@@ -157,10 +157,12 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
    总队列显示训完（box 上有了）、拉回归档的任务成功了 → 交还，删掉那边的任务和结果
 ```
 
+- **路径的引用计数**（11/1）：`state.json` 每个任务记下它放的视图、输入和产出（`outs`）。删一个任务时只删别的记录不用的路径（`relay.droppable`），如 lab1 训完的模型正被推理引用就留着；一个任务的输入和同一台上没做完的任务的产出重叠时不传（`check_overlap`）。记录带 `redo` 的，下次检查先删掉那边的任务和路径（那边在跑就先停），再按现在的做法重新传。
+
 - **代码包**（`relay_bundle.py`，11/1 起不改名、不去注释）：origin/main 里 `scripts/`、`envs/`、`research/` 下的代码（`.py .sh .R .sbatch`，1 MB 以内的 `.json .csv .txt .yaml .yml`），生成只有这一台机器的 `envs/machines.py`、`envs/policy.py`，Slurm 类按 `jobs` 生成 `worker.sbatch`（gpu）、`cpu_worker.sbatch`（cpu）；所有 `.py` 用两个 Python 编译、`.sh` 过 `bash -n`，有像钥匙的内容（私钥、常见 token）就不发。作业名（`tq_fit`，传输作业 `tq_xfer`）、资源（30 核、60G，`envs/machines.py` 的 `sbatch`）和 DICC 的分开（10/30 DICC 管理员要求）。包名 = 提交号-内容哈希，内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据目录里是指向 blob 的软链接，路径和 box 一样，文件内容不改；要哪些文件由做法的 `relay` 插件列（`scripts/sites/names.py`、`relay_plugins.py`）。拉回时插件核对（训练：`validation/` 的病例和这个任务的划分一致；推理：各测试集病例齐、checkpoint 的 sha256 和 box 上的一样），对不上不收、报出来。
 - **传输**：都经隧道（`scripts/sync/tunnel.py`），在哪里收发和 DICC 一样（10/30 定）：往那边传 1 GB 以上的先交 CPU 作业（`tq_xfer`），10 分钟排不上就在登录节点下载；拉回在登录节点上传。地址用每次新开的临时 trycloudflare 地址（box 上的 cloudflared 容器，`envs/machines.py` hub 的 `quick`、`RELAY` 的 `quick_tunnel`），不用 box 的固定地址（10/30 定）。
-- **个数**：`envs/policy.py` 的 `READY[名字]`（那边备好、等 worker 领的任务数）、`SLURM["dicc2"]`（`gpu`：QOS 和时限）。
+- **个数**：`envs/policy.py` 的 `READY[名字]`（那边每种 worker 备好、等领的任务数）、`SLURM["dicc2"]`（`gpu`：QOS 和时限）。
 - **盘**：有 `budget` 的（lab1、lab0，同一个盘）剩不到软线时由 `relay_gc.py` 清理：先删总队列不再要的视图，再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。
 - **状态**：box `~/.cache/phd/relay/state.json`（领着的任务）、`status.json`（那边各任务进度，登记表显示成 DICC2）、日志 `~/relay.log`。
 - **手动**：`python3 scripts/queue/relay.py stage dicc2 <key> --nice N --no-add`（只传数据，不领）；`relay.py status dicc2`；`relay.py bundle dicc2`。

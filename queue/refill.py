@@ -46,6 +46,7 @@ import slurm as SL  # noqa: E402
 import policy as P  # noqa: E402
 import experiments as E  # noqa: E402
 import taskq  # noqa: E402
+import spec as S  # noqa: E402
 import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
@@ -111,13 +112,16 @@ def rank(tq, t, ready):
     return (t["nice"], any(p not in ready for p in data_of(tq, t["key"])), t["order"])
 
 
-def candidates(s, name, tq, ready, oks=None):
-    """这台机器能领的任务，按领的先后排：free、没标成有问题、环境就绪、没限定在别的机器、要卡、任何机器上都没有进度、这台机器没跳过。
-    oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
+def candidates(s, name, tq, ready, oks=None, kinds=("gpu",)):
+    """这台机器能领的任务，按领的先后排：free、没标成有问题、环境都就绪、没限定在别的机器、种类（device）在 kinds 里、
+    任何机器上都没有进度、这台机器没跳过。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
     envs = M.ready_envs(name, oks)
-    cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and info(tq, t["key"])["spec"].get("env") in envs
+
+    def env_ok(sp):
+        return bool(S.envs_of(sp)) and set(S.envs_of(sp)) <= envs
+    cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and env_ok(info(tq, t["key"])["spec"])
              and M.serves(name, info(tq, t["key"])["spec"].get("machines"))
-             and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu"
+             and info(tq, t["key"])["spec"].get("device", "gpu") in kinds
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
     return sorted(cands, key=lambda t: rank(tq, t, ready))
 
@@ -383,6 +387,17 @@ def cpu_plan(tq, have, conf, free=None):
     return ([(q, t, n, CPU_FILE)], "") if n > 0 else ([], f"已有 {have} 个" if free > 0 else "提交名额用完了")
 
 
+def slurm_plan(tq, st, conf):
+    """Slurm 类机器要补交的 worker 作业 → ([(QOS, 时限, 交几个, sbatch 文件)], 不交的原因)。st：scripts/sites/slurm.py 的 status；
+    conf：envs/policy.py 的 SLURM[机器]（有 gpu 补 GPU worker，有 cpu 补 CPU worker）。"""
+    subs, why = topup_plan(tq, st["counts"], conf["gpu"]) if conf.get("gpu") else ([], "")
+    if conf.get("cpu"):
+        csub, cwhy = cpu_plan(tq, st["cpu"], conf["cpu"], st["free"])
+        subs += csub
+        why = why if csub else "；".join(x for x in (why, f"CPU：{cwhy}") if x)
+    return subs, why
+
+
 def topup(s, name, dry=False, run=None):
     """→ (dry 时的说明, 出错的 {问题编号: 说明})。交上去的作业只记日志、不推送。"""
     run = run or sh
@@ -392,12 +407,7 @@ def topup(s, name, dry=False, run=None):
     st = SL.status(name, lambda c: run(c, m["ssh"]))
     if st is None:
         return [], {}  # 一时连不上：下次再看（ssh 不通健康检查另外报）
-    counts, ncpu, free = st["counts"], st["cpu"], st["free"]
-    subs, why = topup_plan(tq, counts, conf["gpu"])
-    if conf.get("cpu"):
-        csub, cwhy = cpu_plan(tq, ncpu, conf["cpu"], free)
-        subs += csub
-        why = why if csub else f"{why}；CPU：{cwhy}"
+    subs, why = slurm_plan(tq, st, conf)
     desc = "；".join(f"交 {'CPU worker ' if f == CPU_FILE else ''}{q} {n} 段" for q, _, n, f in subs) or f"不交（{why}）"
     if dry:
         return [f"{name}：会 {desc}" if subs else f"{name}：{desc}"], {}

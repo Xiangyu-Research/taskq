@@ -2,11 +2,13 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
-if [[ ${WORKER_DEVICE:-gpu} == gpu && -z ${TASKQ_DIR:-} ]]; then
+if [[ -z ${TASKQ_DIR:-} ]]; then
+    KIND=${WORKER_DEVICE:-gpu}
+    [[ $KIND == gpu ]] && SB=worker.sbatch || SB=${KIND}_worker.sbatch
     SITE=$(python3 "$REPO/envs/machines.py" site-root . 2> /dev/null) || SITE=
-    if [[ -n $SITE && -f $SITE/code/current/scripts/queue/worker.sbatch ]]; then
-        echo "$(date '+%F %T') 这台已经换成 $SITE 的代码包，转过去"
-        exec bash "$SITE/code/current/scripts/queue/worker.sbatch"
+    if [[ -n $SITE && -f $SITE/code/current/scripts/queue/$SB ]]; then
+        echo "$(date '+%F %T') 这台已经换成 $SITE 的代码包，转过去（$SB）"
+        exec bash "$SITE/code/current/scripts/queue/$SB"
     fi
 fi
 [[ -f ${TASKQ_DIR:-$HOME/.cache/phd/taskq}/ENABLED ]] || { echo "$(date '+%F %T') 任务队列的总开关不在，结束"; exit 0; }

@@ -36,13 +36,14 @@ ok("全天（开始 = 结束）：时段首尾相接，最后一个结束后算�
 
 calls, world = [], dict(group="Paused", who=[], tasks={})
 shift.group_tasks = lambda host, g, *a: (world["group"], world["tasks"])
-shift.others_on = lambda host, gpu: world["who"]
+shift.others_on = lambda host, gpu: (world.setdefault("cards", set()).add(gpu), world["who"])[1]
 shift.C.run = lambda cmd, host=None, timeout=0: (calls.append(cmd), (0, "", ""))[1]
 
 
 # 执行机按时段（SHIFT 写 "<执行机>": (开始, 结束, 第一个, 最后一个)，lab0）：时段外不领任务；开始时卡空着才开；结束时交出没训完的折
-shift.M.RELAY = {"z0": dict(ssh="lab", worker=dict(group="g0"), groups={"g0": (1, "0", {})}),
-                 "z1": dict(ssh="lab", worker=dict(group="g1"), groups={"g1": (1, "1", {})})}
+shift.M.RELAY = {"z0": dict(ssh="lab", scheduler="pueue", worker=dict(group="g0"), cpu_worker=dict(group="c0"),
+                        groups={"g0": (1, "0", {}), "c0": (1, None, {})}),
+                 "z1": dict(ssh="lab", scheduler="pueue", worker=dict(group="g1"), groups={"g1": (1, "1", {})})}
 shift.P.SHIFT = {"z0": ("18:00", "09:00", "2026-10-31", None)}
 shift.P.AUTO = dict(shift.P.AUTO, z0=True, z1=True)
 shift.P.OFFLINE = {}
@@ -60,11 +61,12 @@ shift.run(now=T(31, "18:05"))
 assert not calls and not shift.allowed("z0", T(31, "18:05"))
 world["who"] = []
 shift.run(now=T(31, "18:35"))
-assert any("start -g g0" in c for c in calls) and shift.allowed("z0", T(31, "18:40")), calls
+assert any("start -g g0" in c for c in calls) and any("start -g c0" in c for c in calls) and shift.allowed("z0", T(31, "18:40")), calls
+assert world["cards"] == {"0"}, world["cards"]
 calls.clear()
 shift.run(now=T(31, "23:00"))
 assert not calls
-ok("执行机时段开始：卡上有别人不开；空了恢复 worker 组、allowed() 放行；只开一次")
+ok("执行机时段开始：卡上有别人不开；空了恢复各种 worker 的组（GPU、CPU；只看 GPU 组的卡）、allowed() 放行；只开一次")
 
 stops = []
 shift.stop_group = lambda host, g, pueue, wait=False: (stops.append((g, wait)), ([7], {}))[1]
@@ -74,12 +76,12 @@ moves, gave = [], []
 shift.hand_over = lambda key, frm, to: (moves.append((key, frm, to)), True)[1]
 shift.give_back = lambda key, frm: (gave.append((key, frm)), True)[1]
 msgs = shift.run(now=dt.datetime(2026, 11, 1, 9, 0, tzinfo=TZ))
-assert stops == [("g0", True)] and moves == [("D/t/1", "z0", "z1")] and gave == [("D/t/2", "z0")], (stops, moves, gave, msgs)
+assert stops == [("g0", True), ("c0", True)] and moves == [("D/t/1", "z0", "z1")] and gave == [("D/t/2", "z0")], (stops, moves, gave, msgs)
 assert not shift.allowed("z0", dt.datetime(2026, 11, 1, 9, 5, tzinfo=TZ))
 stops.clear()
 shift.run(now=dt.datetime(2026, 11, 1, 9, 30, tzinfo=TZ))
 assert not stops
-ok("执行机时段结束：停 worker（等它交还），有进度的折改分给同一台上不按时段的执行机（从存档接着训），其余交还；只做一次")
+ok("执行机时段结束：停各种 worker（等它交还），有进度的折改分给同一台上不按时段的执行机（从存档接着训），其余交还；只做一次")
 
 shift.P.OFFLINE = {"z0": "停机"}
 calls.clear()

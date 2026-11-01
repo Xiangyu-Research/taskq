@@ -39,6 +39,8 @@ DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)
 export TASKQ_DATA=$DATA BRAIN_TUMOR=$DATA
 ENVS=${TASKQ_ENVS:-$(python3 "$REPO/envs/machines.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
+# Slurm 外（pueue 的常驻 worker）：最多用 TASKQ_CPUS 个核（envs/machines.py 的 cpu_worker 的 cpus），和别人共用这台机器
+if (( ! INSLURM )) && [[ ${TASKQ_CPUS:-} =~ ^[0-9]+$ ]] && (( TASKQ_CPUS > 0 && TASKQ_CPUS < NCPU )); then NCPU=$TASKQ_CPUS; fi
 MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
 if [[ $DEVICE == cpu ]]; then
     SLOTS=1

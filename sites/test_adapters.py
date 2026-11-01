@@ -68,6 +68,24 @@ def main():
     c0 = PQ.worker_cmd("lab0")
     assert "CUDA_VISIBLE_DEVICES=0" in c0 and M.SITES["lab0"]["worker"]["id"] in c0
     ok("pueue：lab0 条目拼得出命令")
+    cw = lab1["cpu_worker"]
+    fake = Fake([("add -g", (0, "New task added (id 10).\n"))])
+    assert PQ.start_worker("lab1", fake, "cpu") == (True, "New task added (id 10).")
+    argv = shlex.split(fake.calls[0])
+    run = shlex.split(argv[argv.index("--") + 1])[2]
+    assert argv[argv.index("-g") + 1] == cw["group"] and argv[argv.index("-l") + 1] == f"worker:{cw['id']}"
+    assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES= TASKQ_CPUS={cw['cpus']};" in run, run
+    assert run.endswith("exec bash $REPO/scripts/queue/worker_start.sh") and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
+    assert "TASKQ_CPUS" not in PQ.worker_cmd("lab1")
+    ok("pueue：CPU worker 在 cpu_worker 的组、WORKER_DEVICE=cpu、看不到卡、最多用 cpus 个核，入口是 worker_start.sh")
+    raw2 = pueue_json((3, w["group"], wl, "Running"), (4, cw["group"], f"worker:{cw['id']}", "Queued"), (5, "gpu0", "x", "Running"))
+    jobs2 = PQ.parse(raw2, [w["group"], cw["group"]])
+    assert [j[0] for j in jobs2] == [3, 4] and [j[0] for j in PQ.workers("lab1", jobs2, "cpu")] == [4]
+    assert [j[0] for j in PQ.workers("lab1", jobs2)] == [3]
+    ok("pueue.parse 读几个组；workers 按种类认标签")
+    assert M.kinds("lab1") == ("gpu", "cpu") and M.kinds("lab0") == ("gpu",) and M.kinds("dicc1") == ("gpu", "cpu") \
+        and M.kinds("dicc2") == ("gpu",) and M.worker_of("dicc1", "cpu") == dict(job="tq_cpu") and M.worker_of("lab0", "cpu") is None
+    ok("machines.kinds / worker_of：pueue 看 worker、cpu_worker，Slurm 看 jobs")
 
     # ---- slurm ----
     old = dict(P.SLURM)
@@ -116,8 +134,8 @@ def main():
     assert set(M.RELAY) == {k for k, v in M.SITES.items() if v.get("relay")} and {"lab0", "dicc1", "lab1", "dicc2"} <= set(M.RELAY)
     for n, c in M.SITES.items():
         assert c["scheduler"] in ("slurm", "pueue") and c.get("root")
-        assert c["scheduler"] != "pueue" or (c.get("worker") and c["worker"]["group"] in c["groups"])
-    ok("SITES：RELAY = relay=True 的条目；每条都有调度器、根目录，pueue 的 worker 组在 groups 里")
+        assert c["scheduler"] != "pueue" or (c.get("worker") and all(M.worker_of(n, k)["group"] in c["groups"] for k in M.kinds(n)))
+    ok("SITES：RELAY = relay=True 的条目；每条都有调度器、根目录，pueue 的各种 worker 的组在 groups 里")
     print("全部通过")
 
 

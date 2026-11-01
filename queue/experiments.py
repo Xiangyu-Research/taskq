@@ -137,7 +137,7 @@ def env_of(model_dir):
     t = _task_of(model_dir)
     if t is None:
         raise spec.SpecError(f"实验表里没有训这个模型的实验：{model_dir}（实验表以外的模型设 MODEL_ENV）")
-    return t["spec"]["env"]
+    return spec.envs_of(t["spec"])[0]
 
 
 def experiment_of(model_dir):

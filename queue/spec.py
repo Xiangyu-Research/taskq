@@ -159,6 +159,12 @@ def _check(s):
         raise SpecError(f"不认识的进度解析方法 {s.get('progress')}（有：{', '.join(k for k in PROGRESS if k)}）")
 
 
+def envs_of(s):
+    """说明的 env → 环境名的列表（env 可以是一个名字或几个名字的列表；没写 → []）。"""
+    v = (s or {}).get("env")
+    return [v] if isinstance(v, str) and v else [x for x in v if x] if isinstance(v, list) else []
+
+
 def mem_mb(v):
     """"32G" 这样的 → MB；None → None。"""
     if v is None:
@@ -433,7 +439,7 @@ def lookup(key):
 def shell_lines(s, data, repo=REPO):
     """run_task.sh 用：把说明变成 shell 变量（按本机的数据目录、仓库展开）。"""
     e = expand(s, data, repo)
-    lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote(e['env'])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
+    lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote((envs_of(e) or [''])[0])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
              f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
              f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
              "TASK_INPUTS=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["data"]) + ")",

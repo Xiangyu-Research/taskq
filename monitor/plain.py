@@ -154,6 +154,8 @@ def problem(pid, p):
                 return f"{site} 排着的训练不够（数据还没传到），卡可能会空着。"
             if sub == "sync":
                 return f"给 {site} 传训练数据出错了，要这份数据的训练开不了。"
+            if sub == "worker" and key:
+                return f"{site} 上的 {key.upper()} worker 出错停了，那边的 {key.upper()} 任务没人做，要看日志后重开。"
             if sub == "worker":
                 return f"{site} 上的 worker 出错停了，那边的卡会空着，要看日志后重开。"
             if sub == "fail" and not key:

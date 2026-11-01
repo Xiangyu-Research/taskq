@@ -403,6 +403,15 @@ rc, out, _ = tq3("next", "--worker", "713", "--envs", "nnunet", "--device", "cpu
 check("next --device cpu：只领 device=cpu 的", rc == 0 and out.startswith("toy/c\n") and "device=cpu" in out)
 rc, out, _ = tq3("next", "--worker", "714", "--envs", "nnunet", "--device", "cpu")
 check("next --device cpu：没有别的纯 CPU 任务 → 10", rc == 10)
+rc, out, _ = tq3("add", "--nice", "-200", "--recipe", "command", "key=toy/e", "cmd=true", 'env=["nnunet","rstats"]', "out=toy/e",
+                 'done=["DONE"]', "device=cpu")
+check("add：env 可以是几个环境的列表", rc == 0 and "环境 nnunet,rstats" in out)
+rc, out, _ = tq3("next", "--worker", "715", "--envs", "nnunet", "--device", "cpu")
+check("next：env 列表里有没备好的环境 → 不领", rc == 10)
+rc, out, _ = tq3("next", "--worker", "715", "--envs", "nnunet,rstats", "--device", "cpu")
+check("next：env 列表里的环境都备好 → 领", rc == 0 and out.startswith("toy/e\n"))
+rc, out, _ = tq3("status")
+check("status：env 列表显示成 a,b", rc == 0 and "nnunet,rstats" in out)
 
 # 10/23：主数据目录读不了时不领
 # add 不给 --nice（10/24）：--exp 用实验表里的档位，别的报错（单独一份队列，不影响上面的）

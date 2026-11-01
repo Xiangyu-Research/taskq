@@ -382,7 +382,7 @@ def cmd_next(a):
 
     def pick(t):
         s = spec_of(t)
-        if s["env"] not in envs or (s.get("machines") and me not in s["machines"]) or s.get("device", "gpu") != a.device:
+        if not S.envs_of(s) or not set(S.envs_of(s)) <= envs or (s.get("machines") and me not in s["machines"]) or s.get("device", "gpu") != a.device:
             return None
         if not S.fits(s.get("res"), a.cpus, a.mem_mb, a.gpu_mem)[0]:
             return None
@@ -575,7 +575,7 @@ def _insert(new, nice):
             order += 1
             tasks.append(dict(t, key=s["key"], order=order, nice=nice))
             have.add(s["key"])
-            print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {s['env']}）")
+            print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {','.join(S.envs_of(s))}）")
         write_tasks(tasks)
     return 0
 
@@ -875,7 +875,7 @@ def cmd_status(a):
     for t in s["tasks"]:
         n[t["state"]] = n.get(t["state"], 0) + 1
         if t["state"] not in ("done",):
-            env = (t.get("spec") or {}).get("env", "?")
+            env = ",".join(S.envs_of(t.get("spec"))) or "?"
             print(f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}")
     print("；".join(f"{k} {v}" for k, v in sorted(n.items())))
     return 0
