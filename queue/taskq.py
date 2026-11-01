@@ -369,7 +369,9 @@ def _claim(a, pick):
             except FileExistsError:
                 continue
             now = time.time()
-            write_json(os.path.join(d, "info"), dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now), indent=None)
+            a.token = os.urandom(6).hex()
+            write_json(os.path.join(d, "info"), dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now,
+                                                     token=a.token), indent=None)
             return 0, out
     return NOTHING, None
 
@@ -385,44 +387,62 @@ def cmd_next(a):
         return t["key"] + "\n" + " ".join(shlex.quote(x) for x in S.kv_args(t["recipe"], t["params"]))
     rc, out = _claim(a, pick)
     if rc == 0:
-        print(out)
+        print(out + "\n" + a.token)  # 第三行：这次领取的 token（11/1 加，只读两行的老 worker 不受影响）
     return rc
 
 
+def owns(ci, a):
+    """领取记录是不是这个 worker 这一轮的：worker 相同；给了 --token 时 token 也要相同（同名 worker 重开后是新的一轮，11/1）。"""
+    if not ci or str(ci.get("worker")) != str(a.worker):
+        return False
+    return not getattr(a, "token", None) or not ci.get("token") or ci["token"] == a.token
+
+
 def cmd_beat(a):
-    for key in a.keys:
-        p = os.path.join(TQ, "claims", safe(key), "info")
-        ci = claim_info(key)
-        if ci and str(ci.get("worker")) == str(a.worker):
-            ci["beat"] = time.time()
-            write_json(p, ci, indent=None)
+    with Lock():  # 和领取用同一把锁：读到自己的记录、写回之间不会被别人接管
+        for key in a.keys:
+            p = os.path.join(TQ, "claims", safe(key), "info")
+            ci = claim_info(key)
+            if owns(ci, a):
+                ci["beat"] = time.time()
+                write_json(p, ci, indent=None)
     return 0
 
 
 def cmd_release(a):
-    for key in a.keys:
-        d = os.path.join(TQ, "claims", safe(key))
-        ci = claim_info(key)
-        if a.skip:
-            os.makedirs(os.path.join(TQ, "skips"), exist_ok=True)
-            with open(os.path.join(TQ, "skips", safe(key)), "a") as f:
-                f.write(f"{time.strftime('%F %T')}\t{a.worker}\t{a.skip}\n")
-        if a.failed:
-            os.makedirs(os.path.join(TQ, "failures"), exist_ok=True)
-            with open(os.path.join(TQ, "failures", safe(key)), "a") as f:
-                f.write(f"{time.strftime('%F %T')}\t作业 {a.worker}\t{a.failed}\n")
-        if ci and str(ci.get("worker")) == str(a.worker):
-            os.makedirs(os.path.join(TQ, "released"), exist_ok=True)
-            with open(os.path.join(TQ, "released", safe(key)), "w") as f:
-                f.write(f"{time.time()} {a.worker}\n")
-            shutil.rmtree(d, ignore_errors=True)
+    with Lock():
+        for key in a.keys:
+            _release(a, key)
     return 0
 
 
+def _release(a, key):
+    d = os.path.join(TQ, "claims", safe(key))
+    ci = claim_info(key)
+    if a.skip:
+        os.makedirs(os.path.join(TQ, "skips"), exist_ok=True)
+        with open(os.path.join(TQ, "skips", safe(key)), "a") as f:
+            f.write(f"{time.strftime('%F %T')}\t{a.worker}\t{a.skip}\n")
+    if a.failed:
+        os.makedirs(os.path.join(TQ, "failures"), exist_ok=True)
+        with open(os.path.join(TQ, "failures", safe(key)), "a") as f:
+            f.write(f"{time.strftime('%F %T')}\t作业 {a.worker}\t{a.failed}\n")
+    if owns(ci, a):
+        os.makedirs(os.path.join(TQ, "released"), exist_ok=True)
+        with open(os.path.join(TQ, "released", safe(key)), "w") as f:
+            f.write(f"{time.time()} {a.worker}\n")
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def cmd_missing(a):
+    with Lock():
+        return _missing(a)
+
+
+def _missing(a):
     """缺输入（11/1）：记 inputs/<key>，像 release 一样交还（不算失败）。"""
     ci = claim_info(a.key)
-    if not (ci and str(ci.get("worker")) == str(a.worker)):
+    if not owns(ci, a):
         print(f"{a.key} 不是 {a.worker} 领着的", file=sys.stderr)
         return 1
     os.makedirs(os.path.join(TQ, "inputs"), exist_ok=True)
@@ -861,16 +881,20 @@ def main(argv):
     p.add_argument("--exclude", nargs="*", default=[])
     p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
     p.add_argument("--device", default="gpu", choices=["gpu", "cpu"], help="只领任务说明里 device 是这个的（2026-10-24）")
+    tok = "next 打印的第三行；给了就只动这一轮的领取（11/1）"
     p = sub.add_parser("beat")
     p.add_argument("--worker", required=True)
+    p.add_argument("--token", help=tok)
     p.add_argument("keys", nargs="+")
     p = sub.add_parser("release")
     p.add_argument("--worker", required=True)
+    p.add_argument("--token", help=tok)
     p.add_argument("keys", nargs="+")
     p.add_argument("--failed")
     p.add_argument("--skip", help="这台机器训不了、以后不再领它（记在 skips/，不算失败）")
     p = sub.add_parser("missing")
     p.add_argument("--worker", required=True)
+    p.add_argument("--token", help=tok)
     p.add_argument("--why", default="")
     p.add_argument("key")
     p = sub.add_parser("input-ok")

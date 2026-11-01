@@ -11,7 +11,7 @@
 # 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # 4 缺输入（data 里的文件不全，没开训，11/1）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
-# 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练再退出，下次从存档接着训。
+# 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练（8 秒没停下就强制停）再退出，下次从存档接着训。
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
@@ -38,6 +38,7 @@ TRIES=3
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
 POLL=${RUN_TASK_POLL:-300}        # 只给测试用
 GPU_POLL=${RUN_TASK_GPU_POLL:-60} # 只给测试用
+STOP_WAIT=${RUN_TASK_STOP_WAIT:-8} # 只给测试用
 
 gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算，10/19 起）
     [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
@@ -62,10 +63,21 @@ wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1�
         waited=$(( waited + GPU_POLL ))
     done
 }
-kill_tree() { local c; for c in $(pgrep -P "$1"); do kill_tree "$c"; done; kill -TERM "$1" 2> /dev/null; }
+kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
+gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # 训练的进程组和它本身都不在了
 pid=
-on_term() {
-    [[ -n $pid ]] && { echo "$(ts) 收到停止信号，停训练"; kill_tree "$pid"; for _ in $(seq 30); do kill -0 "$pid" 2> /dev/null || break; sleep 1; done; }
+on_term() {  # 先 SIGTERM 整个进程组，8 秒没停下就 SIGKILL（存档是原子写的），确认停下了才退出（11/1）
+    if [[ -n $pid ]]; then
+        echo "$(ts) 收到停止信号，停训练"
+        kill -TERM -- -"$pid" 2> /dev/null; kill_tree "$pid"
+        for _ in $(seq "$STOP_WAIT"); do gone "$pid" && break; sleep 1; done
+        if ! gone "$pid"; then
+            echo "$(ts) 训练 $STOP_WAIT 秒没停下，强制停" | tee -a "$LOG"
+            kill -KILL -- -"$pid" 2> /dev/null; kill_tree "$pid" KILL
+            for _ in 1 2 3; do gone "$pid" && break; sleep 1; done
+        fi
+        gone "$pid" || echo "$(ts) 训练进程强制停之后还在（多半卡在读写上）" | tee -a "$LOG"
+    fi
     exit 143
 }
 trap on_term TERM INT
@@ -101,7 +113,7 @@ export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
     wait_gpu || exit 1
-    ( eval "$ACT" && cd "$REPO" && exec bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
+    ( eval "$ACT" && cd "$REPO" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &  # 自己一个进程组，停的时候整组停
     pid=$!
     wait "$pid"; rc=$?; pid=
     if done_ "$@"; then

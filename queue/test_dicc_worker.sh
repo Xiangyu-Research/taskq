@@ -225,6 +225,17 @@ python3 "$HERE/taskq.py" resume t/a > /dev/null
 check "撤销停止后照常排" '[[ ! -e $TASKQ_DIR/stopped/t__a ]] && python3 "$HERE/taskq.py" status | grep -q "t/a .* free"'
 kill -TERM $wpid; wait $wpid 2> /dev/null
 
+# 3c. 作业收到停止信号时训练不理 SIGTERM（11/1）：强制停，确认停下才交还；作业退出时训练进程都不在了
+reset
+table << EOF
+t/d nnunet
+EOF
+FAKE_SECS=60 FAKE_IGNORE=t/d SLURM_JOB_ID=900032 TASKQ_IDLE_MAX=60 bash "$HERE/dicc_worker.sh" > "$T/w3c.out" 2>&1 &
+wpid=$!
+for _ in $(seq 30); do grep -q "^start .* t/d" "$T/train.log" 2> /dev/null && break; sleep 1; done
+kill -TERM $wpid; wait $wpid; rc=$?
+check "停止信号、训练不理：强制停、交还，作业退出时假训练已经不在" '[[ $rc == 143 ]] && [[ -z $(ls $TASKQ_DIR/claims) ]] && ! pgrep -f "$T/fake_train.sh t/d" > /dev/null'
+
 # 4. box 替 lab 领的（ttl 24 小时、beat 30 分钟前）不被 DICC 作业领走
 reset
 table << EOF

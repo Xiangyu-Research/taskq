@@ -86,6 +86,22 @@ rc, out = tq("next", "--worker", "104", "--envs", ALL)
 check("心跳过期、日志也没更新的重新领", rc == 0 and out.startswith("Dataset103_Y/"))
 check("重新领后记的是新的 worker", json.load(open(p))["worker"] == "104")
 
+# 11/1：next 的第三行是这次领取的 token；同名 worker 重开（lab 的 pueue worker 名不变）后，旧一轮带旧 token 的交还、心跳不动新一轮的领取
+lines = out.splitlines()
+check("next 第三行是 token，和领取记录里的一样", len(lines) == 3 and lines[2] == json.load(open(p))["token"])
+K103 = "Dataset103_Y/nnUNetTrainer_save10/0"
+ci = json.load(open(p))
+ci["beat"] = time.time() - 600
+json.dump(ci, open(p, "w"))
+tq("beat", "--worker", "104", "--token", "0ld0ld", K103)
+check("旧一轮的 token：心跳不改记录", time.time() - json.load(open(p))["beat"] > 500)
+tq("release", "--worker", "104", "--token", "0ld0ld", K103)
+check("旧一轮的 token：交还不了", os.path.exists(p))
+rc, _ = tq("missing", "--worker", "104", "--token", "0ld0ld", K103)
+check("旧一轮的 token：记不了缺输入", rc == 1 and os.path.exists(p) and taskq.input_info(K103) is None)
+tq("beat", "--worker", "104", "--token", lines[2], K103)
+check("这一轮的 token：心跳更新", time.time() - json.load(open(p))["beat"] < 10)
+
 # 心跳过期但训练日志刚更新 → 仍算在训
 key2 = "Dataset121_X/nnUNetTrainer_save10/2"
 p2 = os.path.join(TQ, "claims", taskq.safe(key2), "info")

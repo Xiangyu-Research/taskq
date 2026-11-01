@@ -643,7 +643,32 @@ def test_forget():
     ok("推理任务那边删掉后删 box 上的别名 checkpoint；那边没删掉时留着；训练任务的结果路径不碰")
 
 
+def test_drop_refused():
+    """那边拒绝删任务（有人在训）时不删结果、总队列里也不交还；上次删了任务没删完结果的照常删（审查 11/1）。"""
+    K, A = "Dataset1_x/tr/0", "Dataset901_ab/tr/0"
+    seen, central = [], []
+    rsh0, rtq0, cen0 = relay.rsh, relay.rtq, relay.taskq.central
+    relay.rsh = lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "", ""))[1]
+    relay.taskq.central = lambda args, timeout=300: (central.append(args), (0, "", ""))[1]
+    acts = [dict(op="drop", key=K, alias=A, out="predictions/Dataset901_ab/tr/fold_0"), dict(op="release", key=K, why="测试")]
+    try:
+        for r in [(1, f"不删：{A}：claimed，有人在做"), None]:
+            seen.clear(); central.clear()
+            relay.rtq = lambda name, cmd, r=r: r
+            msgs = relay.execute(NAME, acts, S0([]))
+            assert not any("rm -rf" in c for c in seen), (r, seen)
+            assert not central, (r, central, msgs)
+        seen.clear()
+        relay.rtq = lambda name, cmd: (1, f"队列里没有：{A}")
+        msgs = relay.execute(NAME, acts, S0([]))
+        assert any("rm -rf" in c for c in seen) and central, (seen, central, msgs)
+    finally:
+        relay.rsh, relay.rtq, relay.taskq.central = rsh0, rtq0, cen0
+    ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果")
+
+
 if __name__ == "__main__":
+    test_drop_refused()
     test_forget()
     test_fresh_site()
     test_plan()

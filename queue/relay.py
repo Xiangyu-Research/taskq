@@ -829,10 +829,13 @@ def execute(name, acts, s, run_add=None):
         r = master(f"beat --worker {name} " + " ".join(shlex.quote(k) for k in beats))
         if r is None or r[0]:
             msgs.append(f"{L} 的领取续不上（{(r or [0, 'ssh 不通'])[1][-150:]}）")
+    kept = set()  # 那边没删掉的：总队列里不交还（交还了别处会再领，两处一起训）
     for a in acts:
         k = a["key"]
         try:
-            if a["op"] == "release":
+            if a["op"] == "release" and k in kept:
+                msgs.append(f"{L} 上 {k} 没删掉，先不交还")
+            elif a["op"] == "release":
                 r = master(f"release --worker {name} {shlex.quote(k)}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
                 msgs.append(f"{L} 交还 {k}：{a['why']}" if r and r[0] == 0 else f"{L} 交还 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "take":
@@ -875,16 +878,23 @@ def execute(name, acts, s, run_add=None):
                     msgs.append(f"{L} 的队列里删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "drop":
                 r = (0, "") if a.get("gone") else rtq(name, f"remove {shlex.quote(a['alias'])}")
+                if r and r[0] and "不删" not in r[1] and "队列里没有" in r[1]:
+                    r = (0, r[1])  # 上次删了任务、没删完结果
+                # taskq.py remove 在锁里查过没人领着、没人在训，删掉后也没人能再领，这时才删结果
+                if not r or r[0]:
+                    msgs.append(f"{L} 上删 {k} 出错（任务没删掉，结果留着）：{(r or [0, 'ssh 不通'])[1][-150:]}")
+                    kept.add(k)
+                    continue
                 rr = R.q(root(name))
                 extra = [safe_rel(c) for c in (keys_of(load_state(), name).get(k) or {}).get("cleanup") or []]
                 rc, out, err = rsh(name, f"rm -rf {rr}/data/{shlex.quote(a['out'])} {rr}/data/logs/tasks/{shlex.quote(S.safe(a['alias']))}__*"
                                    + "".join(f" {rr}/data/{shlex.quote(c)}" for c in extra))
-                if r and r[0] == 0 and rc == 0:
+                if rc == 0:
                     update_state(lambda st: (st.get("keys") or {}).get(name, {}).pop(k, None))
                     RN.forget(a["out"])
                     msgs.append(f"{L} 上删了 {k} 的任务和结果")
                 else:
-                    msgs.append(f"{L} 上删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]} {err[-150:]}")
+                    msgs.append(f"{L} 上删 {k} 的结果出错：{(out + err)[-150:]}")
             elif a["op"] in ("rstop", "rresume"):
                 r = rtq(name, ("stop --why 总队列里停了 " if a["op"] == "rstop" else "resume ") + shlex.quote(a["alias"]))
                 what = "停" if a["op"] == "rstop" else "撤销停止"

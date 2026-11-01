@@ -169,7 +169,7 @@ def has_progress(f):
 
 
 def stop_group(host, g, pueue, wait=False):
-    """暂停组、SIGTERM 在跑的任务、等它们结束 → (在跑的任务号, 结束后的任务表)。"""
+    """暂停组、SIGTERM 在跑的任务、等它们结束 → (在跑的任务号, 结束后的任务表；读不到 → None)。"""
     C.run(f"{pueue} pause -g {g}" + (" --wait" if wait else ""), host, timeout=60)
     _, tasks = group_tasks(host, g, pueue)
     run = [i for i, t in (tasks or {}).items() if t["state"] == "Running"]
@@ -180,23 +180,28 @@ def stop_group(host, g, pueue, wait=False):
             if tasks and all(tasks[i]["state"] == "Done" for i in run if i in tasks):
                 break
             time.sleep(5)
-    return run, tasks or {}
+    return run, tasks
 
 
 def stop_site(name):
-    """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的任务：有进度的交给白天的执行机，其余交还 → 说明。"""
+    """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的任务：有进度的交给白天的执行机，其余交还
+    → (说明, 做完没有)。worker 确认停下了才交出任务；没停下、没交出去的下次检查再做（每一步都可以重做，11/1）。"""
     c = M.RELAY[name]
     host, g = c["ssh"], c["worker"]["group"]
-    run, _ = stop_group(host, g, c.get("pueue") or PUEUE, wait=True)
+    run, tasks = stop_group(host, g, c.get("pueue") or PUEUE, wait=True)
+    if tasks is None or any((tasks.get(i) or {}).get("state", "Done") != "Done" for i in run):
+        return f"worker 还没确认停下（pueue 任务 {run or '读不到'}），任务先不交出，下次检查再停", False
     have, to = site_tasks(name), day_site(host, but=name)
-    moved, gave = [], []
+    moved, gave, left = [], [], []
     for k in central_mine(name):
         if to and has_progress(have.get(k)) and hand_over(k, name, to):
             moved.append(k)
         elif give_back(k, name):
             gave.append(k)
+        else:
+            left.append(k)
     return (f"停了 worker（pueue 任务 {run or '无'}）；交给 {to or '（没有白天的执行机）'}：{', '.join(moved) or '无'}；"
-            f"交还总队列：{', '.join(gave) or '无'}")
+            f"交还总队列：{', '.join(gave) or '无'}" + (f"；没交出去：{', '.join(left)}，下次检查再交" if left else "")), not left
 
 
 def run_site(name, r, now, st, dry):
@@ -206,7 +211,10 @@ def run_site(name, r, now, st, dry):
         return msgs
     host, g = c["ssh"], c["worker"]["group"]
     rec = st.setdefault(name, {})
-    cur, ended = dated(now, *r)
+    cur, _ = dated(now, *r)
+    # 按"现在该不该开"核对（11/1）：开过、还没确认停下的，只要现在不该开（不在时段里，或新时段卡被别人占着）就停，
+    # 不管中间漏了几次检查
+    unstopped = rec.get("started") and rec.get("paused") != rec["started"]
     if cur and rec.get("started") != cur:
         gs, _ = group_tasks(host, g, c.get("pueue") or PUEUE)
         if gs is None:
@@ -218,6 +226,8 @@ def run_site(name, r, now, st, dry):
             if rec.get("busy") != cur:
                 msgs.append(f"{name}：时段开始，卡上有别人的进程（{', '.join(sorted(set(who)))}），等下次检查")
                 rec["busy"] = cur
+            if unstopped:
+                msgs += stop_rec(name, r, rec, dry)
         elif dry:
             msgs.append(f"{name}：会开始领任务（{r[0]}–{r[1]}）")
         else:
@@ -225,12 +235,19 @@ def run_site(name, r, now, st, dry):
                 C.run(f"{c.get('pueue') or PUEUE} start -g {g}", host, timeout=60)
             rec["started"] = cur
             msgs.append(f"{name}：{r[0]} 时段开始，卡空着，开始领任务、开 worker")
-    elif ended and rec.get("started") == ended and rec.get("paused") != ended:
-        if dry:
-            return [f"{name}：会停 worker、交出没训完的任务（{r[1]} 时段结束）"]
-        rec["paused"] = ended
-        msgs.append(f"{name}：{r[1]} 时段结束，" + stop_site(name))
+    elif not cur and unstopped:
+        msgs += stop_rec(name, r, rec, dry)
     return msgs
+
+
+def stop_rec(name, r, rec, dry):
+    """停 rec 里开过的那个时段；确认停下、任务都交出去了才记 paused → 说明列表。"""
+    if dry:
+        return [f"{name}：会停 worker、交出没训完的任务（{rec['started']} 开始的时段，{r[1]} 结束）"]
+    msg, done = stop_site(name)
+    if done:
+        rec["paused"] = rec["started"]
+    return [f"{name}：{rec['started']} 开始的时段结束，" + msg]
 
 
 def run(s=None, dry=False, now=None):

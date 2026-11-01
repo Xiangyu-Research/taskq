@@ -112,6 +112,12 @@ declare -A STARTED=()     # pid → 开始的时刻
 declare -A OUTDIR=()      # pid → 结果文件夹
 declare -A SAFE=()        # pid → key 转成的文件名（spec.py 的 TASK_SAFE）
 declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
+declare -A TOK=()         # key → 这次领取的 token（taskq.py next 的第三行；交还、心跳时带上，11/1）
+tq() {  # tq <release|beat|missing> <key> [参数…]：带上这个 key 的 token
+    local c=$1 k=$2; shift 2
+    $TQPY "$c" --worker "$W" ${TOK[$k]:+--token "${TOK[$k]}"} "$k" "$@"
+}
+dead() { ! kill -0 "$1" 2> /dev/null; }
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
@@ -155,7 +161,7 @@ can_add() {  # 手上有训练时，还能不能再加一个；不能时 why_not
     return 0
 }
 fail() {  # key 原因 跑了多少秒：交还并记一次失败；本作业不再领这个 key；开始不久就失败的才算本作业的
-    $TQPY release --worker "$W" "$1" --failed "$2"
+    tq release "$1" --failed "$2"
     EXCL+=("$1")
     (( $3 < EARLY_FAIL )) || return 0
     FAIL_AT+=("$(date +%s)")
@@ -182,8 +188,9 @@ quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变�
     [[ -n $hit ]] && echo 0 || echo $(( now - m ))
 }
 start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的参数（shell 引号）
-    local key args
-    { read -r key; read -r args; } <<< "$1"
+    local key args tok
+    { read -r key; read -r args; read -r tok; } <<< "$1"
+    TOK[$key]=$tok
     eval "local targs=($args)"
     pad_make_room
     TASK_JOBTAG=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)") TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
@@ -198,17 +205,21 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     echo "$(ts) 开训 $key（pid $pid：run_task.sh $args）"
 }
 kill_tree() { [[ -n $1 ]] || return 0; local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
-on_term() {
+any_alive() { local p; for p in "${!KEY[@]}"; do dead "$p" || return 0; done; return 1; }
+on_term() {  # run_task.sh 自己 8 秒后强制停训练；15 秒还没退出的整棵树 SIGKILL。确认停下的才交还（11/1），30 秒内做完
     echo "$(ts) 收到停止信号（$( (( INSLURM )) && echo 多半是到时限 || echo pueue kill)），停训练、交还任务"
     local p
     for p in "${!KEY[@]}"; do kill_tree "$p"; done
-    for _ in $(seq 15); do
-        local alive=0
-        for p in "${!KEY[@]}"; do kill -0 "$p" 2> /dev/null && alive=1; done
-        (( alive )) || break
-        sleep 1
+    for _ in $(seq "$TERM_WAIT"); do any_alive || break; sleep 1; done
+    if any_alive; then
+        echo "$(ts) $TERM_WAIT 秒没停下，强制停"
+        for p in "${!KEY[@]}"; do dead "$p" || kill_tree "$p" KILL; done
+        for _ in 1 2 3; do any_alive || break; sleep 1; done
+    fi
+    for p in "${!KEY[@]}"; do
+        if dead "$p"; then tq release "${KEY[$p]}"
+        else echo "$(ts) ${KEY[$p]} 强制停之后还在，不交还（领取过期后才能被别人领）"; fi
     done
-    (( ${#KEY[@]} )) && $TQPY release --worker "$W" "${KEY[@]}"
     kill_tree "$GPUMON"
     rm -f "$ERRF"
     rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"
@@ -221,10 +232,12 @@ QDIR=${TASKQ_DIR:-$HOME/.cache/phd/taskq}
 SAFECH=$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import spec; print(spec.SAFE)" 2> /dev/null || echo __)
 STOP_POLL=${TASKQ_STOP_POLL:-5}
 STOP_WAIT=${TASKQ_STOP_WAIT:-20}
+TERM_WAIT=${TASKQ_TERM_WAIT:-15}
 check_stops() {
     local p k i n=0
     for p in "${!KEY[@]}"; do
         k=${KEY[$p]}
+        [[ -n ${STALLED[$p]:-} ]] && continue  # 已经在按卡住停
         [[ -e $QDIR/stopped/${k//\//$SAFECH} ]] || continue
         echo "$(ts) $k 被停止（taskq.py stop），停训练、交还"
         kill_tree "$p"
@@ -234,10 +247,15 @@ check_stops() {
             kill_tree "$p" KILL
             sleep 1
         fi
-        kill -0 "$p" 2> /dev/null || wait "$p" 2> /dev/null
-        $TQPY release --worker "$W" "$k"
-        unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
-        n=1
+        if dead "$p"; then
+            wait "$p" 2> /dev/null
+            tq release "$k"
+            unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
+            n=1
+        else  # 交给卡住的那一路：停不下就不交还
+            echo "$(ts) $k 强制停之后还在，按卡住处理"
+            STALLED[$p]=${STALLED[$p]:-$(date +%s)}
+        fi
     done
     (( n ))
 }
@@ -268,14 +286,14 @@ while true; do
             unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
             if [[ -n $stalled ]]; then
                 echo "$(ts) 卡住的 $key 已停下，交还（不算失败），本作业不再领它"
-                $TQPY release --worker "$W" "$key"
+                tq release "$key"
                 EXCL+=("$key")
             elif (( rc == 0 )); then
                 echo "$(ts) 训完 $key"
-                $TQPY release --worker "$W" "$key"
+                tq release "$key"
             elif (( rc == 4 )); then
                 echo "$(ts) $key 缺输入，没开训，交还，记为缺输入（不算失败，补齐前不再领）"
-                $TQPY missing --worker "$W" "$key" --why "作业 $W 开训前查到" || $TQPY release --worker "$W" "$key"
+                tq missing "$key" --why "作业 $W 开训前查到" || tq release "$key"
                 EXCL+=("$key")
             elif (( rc == 3 )); then
                 echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
@@ -291,10 +309,10 @@ while true; do
     for p in "${!KEY[@]}"; do
         if [[ -n ${STALLED[$p]:-} ]]; then
             if (( now - STALLED[$p] >= 180 )); then
-                echo "$(ts) ${KEY[$p]} 停了 3 分钟还没停下（多半卡在读写上），不再等它，交还"
-                $TQPY release --worker "$W" "${KEY[$p]}"
+                # 还活着就不交还（11/1）：不再心跳，领取过期后别人才能领；空出位置领下一个
+                echo "$(ts) ${KEY[$p]} 停了 3 分钟还没停下（多半卡在读写上），不再等它，不交还（领取过期后别人才能领）"
                 EXCL+=("${KEY[$p]}")
-                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
+                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "TOK[${KEY[$p]}]"
             elif (( now - STALLED[$p] >= 60 )); then
                 kill_tree "$p" KILL
             fi
@@ -309,7 +327,7 @@ while true; do
     done
     (( END )) || get_end
     if (( now - last_beat >= 300 && ${#KEY[@]} > 0 )); then
-        $TQPY beat --worker "$W" "${KEY[@]}"
+        for p in "${!KEY[@]}"; do tq beat "${KEY[$p]}"; done
         last_beat=$now
     fi
     # 领新的
