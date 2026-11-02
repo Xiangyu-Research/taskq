@@ -307,8 +307,11 @@ for h,(rel,size) in A['files'].items():
 spec.json_out(got)
 """
 
-VIEW_PY = HEAD + """import base64
+VIEW_PY = HEAD + """import base64,fcntl
 D=os.path.join(R,'data')
+os.makedirs(os.path.join(R,'state'),exist_ok=True)
+L=open(os.path.join(R,'state','view.lock'),'w')
+fcntl.flock(L,fcntl.LOCK_EX)
 def rel_ok(r):
     r=os.path.normpath(r)
     if r.startswith('/') or '..' in r.split('/'):

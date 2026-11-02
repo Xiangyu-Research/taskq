@@ -13,6 +13,8 @@ import os
 import re
 import shutil
 import socket
+import subprocess
+import tempfile
 import sys
 import time
 
@@ -876,6 +878,29 @@ def test_drop_refused():
     ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果")
 
 
+def test_view_lock():
+    """建视图在那边一次只跑一个（11/2：同一个数据集的两折同时建视图，互相删了 .incomplete）。"""
+    import fcntl
+    root = tempfile.mkdtemp()
+    os.makedirs(os.path.join(root, "state"))
+    lk = open(os.path.join(root, "state", "view.lock"), "w")
+    fcntl.flock(lk, fcntl.LOCK_EX)
+    data = json.dumps(dict(views=["nnUNet/preprocessed/D1"], links={}, texts={"nnUNet/preprocessed/D1/a.json": "e30="}))
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    p = subprocess.Popen([sys.executable, "-c", relay.VIEW_PY, root], cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    p.stdin.write(data)
+    p.stdin.close()
+    time.sleep(1.5)
+    waited = p.poll() is None
+    fcntl.flock(lk, fcntl.LOCK_UN)
+    lk.close()
+    p.wait(timeout=30)
+    d = os.path.join(root, "data", "nnUNet/preprocessed/D1")
+    assert waited and p.returncode == 0 and os.path.isfile(os.path.join(d, "a.json")) and not os.path.exists(os.path.join(d, ".incomplete"))
+    shutil.rmtree(root)
+    ok("建视图：别的在建时等锁，建完删掉 .incomplete")
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
@@ -889,5 +914,6 @@ if __name__ == "__main__":
     test_adopt_out()
     test_place()
     test_e2e_path(test_e2e())
+    test_view_lock()
     shutil.rmtree(T)
     print("全部通过")
