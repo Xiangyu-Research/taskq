@@ -7,7 +7,8 @@
 # fetch 失败（GitHub 连不上）时照样用克隆里已有的 origin/main，退出码 1。
 set -u
 SRC=${1:?用法：snapshot.sh <克隆>}
-C=~/.cache/phd/code
+C=${TASKQ_STATE:+$TASKQ_STATE/code}
+C=${C:-~/.cache/phd/code}
 mkdir -p "$C"
 exec 8> "$C/.lock"
 flock -w 300 8 || { echo "snapshot.sh：等锁超时"; exit 1; }

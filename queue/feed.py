@@ -39,6 +39,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
+TQS = cfg.state("taskq", expand=False)
 sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
 sys.path.insert(0, HERE)
 import machines as M  # noqa: E402
@@ -50,7 +51,7 @@ import spec as S  # noqa: E402
 import recipes  # noqa: E402
 from common import write_json  # noqa: E402
 
-STATE = os.path.expanduser(os.environ.get("FEED_STATE", "~/.cache/phd/feed.json"))  # 环境变量只给测试用
+STATE = os.path.expanduser(os.environ.get("FEED_STATE", cfg.state("feed.json", expand=False)))  # 环境变量只给测试用
 LOG = os.path.expanduser(os.environ.get("FEED_LOG", "~/feed.log"))
 LOW_MIN = 60   # 补不满持续这么多分钟才报
 DOWN_S = 2 * 3600  # 连不上这么久才报
@@ -208,7 +209,7 @@ def plan(s, name, st, data=None, now=None):
                                           "留着不动（那边的 worker 照常训）")
         return [], stuck, "连不上"
     if not btq.get("buffer"):
-        return [], {}, f"{L} 还没有缓冲（{L} 的 ~/.cache/phd/taskq 里没有 BUFFER）"
+        return [], {}, f"{L} 还没有缓冲（{L} 的 {TQS} 里没有 BUFFER）"
     ct = {t["key"]: t for t in ctq["tasks"]}
     bt = {t["key"]: t for t in btq["tasks"]}
     live = box_live(s)
@@ -266,7 +267,7 @@ def plan(s, name, st, data=None, now=None):
                 pass  # 下面整体报
             elif refill.progress(s, k, name):
                 stuck[f"site:{name}:fail:{k}"] = (f"{L} 上 {k} 失败 {b.get('failures')} 次，有进度，留在那边；看那边的 "
-                                                  f"~/.cache/phd/taskq/failures/ 和 logs/tasks/")
+                                                  f"{TQS}/failures/ 和 logs/tasks/")
             else:
                 acts.append(dict(op="bremove", key=k))
                 gone.add(k)
@@ -288,7 +289,7 @@ def plan(s, name, st, data=None, now=None):
             gone.add(k)
     if btq.get("paused"):
         stuck[f"site:{name}:fail"] = (f"{L} 的缓冲 3 小时内失败 {btq.get('recent_failures')} 次，暂停领任务（多半是节点或环境坏了；"
-                                      "看那边的 ~/.cache/phd/taskq/failures/ 和作业的 .out）")
+                                      f"看那边的 {TQS}/failures/ 和作业的 .out）")
 
     # ---- 送新任务 ----
     code = s.get("code") or {}

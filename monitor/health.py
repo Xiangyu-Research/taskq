@@ -42,6 +42,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
+TQS = cfg.state("taskq", expand=False)
 sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
 import machines as M  # noqa: E402
 import policy  # noqa: E402
@@ -254,9 +255,9 @@ def check(s):
     hub = M.hub()
     ctq = s.get("taskq", {}).get(hub)
     if hub in s.get("taskq", {}) and ctq is None:
-        add(f"taskq:{hub}", f"{L(hub)} 读不到总队列（~/.cache/phd/taskq/）")
+        add(f"taskq:{hub}", f"{L(hub)} 读不到总队列（{TQS}/）")
     elif ctq and not ctq.get("enabled"):
-        add(f"tqoff:{hub}", f"{L(hub)} 的总队列关着（~/.cache/phd/taskq/ENABLED 不在），不会往执行机送任务", after=60)
+        add(f"tqoff:{hub}", f"{L(hub)} 的总队列关着（{TQS}/ENABLED 不在），不会往执行机送任务", after=60)
     elif ctq:
         for t in ctq["tasks"]:
             if t["state"] == "blocked" and not t.get("assigned"):
@@ -265,7 +266,7 @@ def check(s):
     for name in [n for n in s.get("taskq", {}) if n != hub]:
         tq = s["taskq"][name]
         if name in s["slurm"] and tq is None:
-            add(f"taskq:{name}", f"{L(name)} 读不到任务队列（~/.cache/phd/taskq/）")
+            add(f"taskq:{name}", f"{L(name)} 读不到任务队列（{TQS}/）")
         if tq and tq["enabled"]:
             for t in tq["tasks"]:
                 key, st = t["key"], t["state"]
@@ -281,7 +282,7 @@ def check(s):
                     add(f"tqblocked:{key}", f"{L(name)} 队列任务 {key} {t['note']}，不会开始")
                 if t["failures"] and st != "done":  # 后来训完了就不再报
                     add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 失败 {t['failures']} 次"
-                        + ("，不再领（看 ~/.cache/phd/taskq/failures/）" if st == "failed" else ""))
+                        + (f"，不再领（看 {TQS}/failures/）" if st == "failed" else ""))
     # --- Slurm ---
     for name, d in s["slurm"].items():
         tq = s.get("taskq", {}).get(name)

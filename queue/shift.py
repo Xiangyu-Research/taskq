@@ -21,7 +21,7 @@ import common as C  # noqa: E402
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 
-STATE = os.path.expanduser("~/.cache/phd/shift.json")
+STATE = cfg.state("shift.json")
 LOG = os.path.expanduser("~/refill.log")
 PUEUE = "~/.local/bin/pueue"
 TZ = dt.timezone(dt.timedelta(hours=8))

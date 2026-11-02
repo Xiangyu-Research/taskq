@@ -37,7 +37,7 @@ STALL = int(os.environ.get("TUNNEL_STALL", 3600))
 ROUNDS = 3  # 没传到、对不上的文件同一次里再补传几轮（11/2：一万多个文件偶尔断几个）
 POLL = int(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
-LOCK = os.path.expanduser(os.environ.get("TUNNEL_LOCK", "~/.cache/phd/tunnel_push.lock"))
+LOCK = os.environ.get("TUNNEL_LOCK")
 UA = {"User-Agent": "xfer/1"}
 STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
 
@@ -52,6 +52,12 @@ def machines():
     cfg.use_config()
     import machines as M
     return M
+
+
+def state(*parts, **kw):
+    machines()
+    import cfg
+    return cfg.state(*parts, **kw)
 
 
 def ssh(host, cmd, check=True, input=None, timeout=300):
@@ -242,8 +248,9 @@ def start_server(serve, quick=False):
 
 
 def take_lock():
-    os.makedirs(os.path.dirname(LOCK), exist_ok=True)
-    f = open(LOCK, "w")
+    lock = os.path.expanduser(LOCK) if LOCK is not None else state("tunnel_push.lock")
+    os.makedirs(os.path.dirname(lock), exist_ok=True)
+    f = open(lock, "w")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -271,7 +278,7 @@ def run_remote(host, mode, plan, serve, total):
     else:
         job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
         script = "tunnel.py"
-        base = "~/.cache/phd/tunnel"
+        base = state("tunnel", expand=False)
     wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p {base} && mkdir -m 700 $d && cd $d && pwd").strip()
     ssh(host, f"cat > {wd}/{script}", input=src)
     ssh(host, f"cat > {wd}/plan.json", input=json.dumps(plan))

@@ -81,7 +81,7 @@ def sh_path(p):
 
 
 def state_dir(m):
-    return m["root"].rstrip("/") + "/state/envs" if m.get("root") else "~/.cache/phd/envs"
+    return m["root"].rstrip("/") + "/state/envs" if m.get("root") else cfg.state("envs", expand=False)
 
 
 def code_dir(m):

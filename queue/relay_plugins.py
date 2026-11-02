@@ -11,7 +11,6 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 
-RELAY_DIR = os.path.expanduser(os.environ.get("RELAY_DIR", "~/.cache/phd/relay"))
 
 
 class RelayError(Exception):
@@ -53,5 +52,7 @@ ACCEPTS = {}  # 插件能不能送这个任务（按参数；不在这里的都�
 VIEW_ROOTS = []  # 训练插件建视图的文件夹：relay_gc.py 除了登记过的视图，还清理这下面没人用的
 
 import cfg  # noqa: E402
+
+RELAY_DIR = os.path.expanduser(os.environ.get("RELAY_DIR", cfg.state("relay", expand=False)))
 
 cfg.extend(globals(), "relay_plugins", ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"))

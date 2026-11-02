@@ -73,7 +73,7 @@ import spec as S  # noqa: E402
 import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
-TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", "~/.cache/phd/taskq"))  # TASKQ_DIR：测试和中转执行机（relay.py）用
+TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", cfg.state("taskq", expand=False)))  # TASKQ_DIR：测试和中转执行机（relay.py）用
 TASKS = "tasks.jsonl"
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
@@ -180,9 +180,9 @@ def spec_of(t):
 
 
 def data_root():
-    """本机的数据目录：TASKQ_DATA（旧名 BRAIN_TUMOR，envs/nnunet_paths.sh 两个都设）> envs/machines.py。"""
-    if os.environ.get("TASKQ_DATA") or os.environ.get("BRAIN_TUMOR"):
-        return os.environ.get("TASKQ_DATA") or os.environ["BRAIN_TUMOR"]
+    """本机的数据目录：TASKQ_DATA（旧名见 cfg.py 的 LEGACY）> envs/machines.py。"""
+    if cfg.env("TASKQ_DATA"):
+        return cfg.env("TASKQ_DATA")
     import machines as M
     me = M.whoami()
     if not me:
@@ -833,7 +833,8 @@ def remote(host, args, timeout=120, env="", input=None):
     import machines as M
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
-    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}TASKQ_DATA={m['data']} BRAIN_TUMOR={m['data']} python3 scripts/queue/taskq.py {args}"
+    data = " ".join(f"{k}={m['data']}" for k in ("TASKQ_DATA", cfg.LEGACY["TASKQ_DATA"]))
+    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}{data} python3 scripts/queue/taskq.py {args}"
     rc, out, err = C.run(cmd, m["ssh"], timeout, ssh=ssh, input=input)
     return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 

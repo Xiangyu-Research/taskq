@@ -3,6 +3,13 @@ import json
 import os
 
 
+def _cfg():
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import cfg
+    return cfg
+
+
 def write_json(path, obj, indent=1):
     """整份写到临时文件、落盘以后再换过去：断电、被杀时文件要么是旧的、要么是新的，不会只写一半。"""
     d = os.path.dirname(path)
@@ -86,7 +93,7 @@ def local_time(x):
 def changed(name, value):
     """value 和上次记下的不一样 → 记下、返回 True；一样 → False。记在 ~/.cache/phd/last/<name>.json。"""
     import re
-    d = os.path.expanduser(os.environ.get("PHD_LAST") or "~/.cache/phd/last")  # 环境变量只给测试用
+    d = os.path.expanduser(os.environ.get("PHD_LAST") or _cfg().state("last", expand=False))  # 环境变量只给测试用
     p = os.path.join(d, re.sub(r"[^\w.-]", "_", name) + ".json")
     try:
         if json.load(open(p)) == value:
@@ -99,7 +106,7 @@ def changed(name, value):
 
 # ---------------- 任务记录（2026-10-25）：box、lab 的 pueue 任务"是谁"只看这里 ----------------
 def tasks_path():
-    return os.path.expanduser(os.environ.get("PHD_TASKS") or "~/.cache/phd/tasks.json")  # 环境变量只给测试用
+    return os.path.expanduser(os.environ.get("PHD_TASKS") or _cfg().state("tasks.json", expand=False))  # 环境变量只给测试用
 
 
 def load_records():
