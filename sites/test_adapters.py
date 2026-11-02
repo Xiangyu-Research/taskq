@@ -68,6 +68,7 @@ def main():
     ok("pueue.start_worker：出错 → (False, 输出)")
     c0 = PQ.worker_cmd("lab0")
     assert "CUDA_VISIBLE_DEVICES=0" in c0 and M.SITES["lab0"]["worker"]["id"] in c0
+    assert all(f" {k}={v}" in c0 for k, v in M.SITES["lab0"]["groups"]["gpu0"][2].items())  # 组的环境变量带给 worker
     ok("pueue：lab0 条目拼得出命令")
     cw = lab1["cpu_worker"]
     fake = Fake([("add -g", (0, "New task added (id 10).\n"))])
