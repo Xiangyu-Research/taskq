@@ -1,0 +1,13 @@
+# 测试用的环境描述：基础 conda 环境，两个 torch 变体（形状同真的描述）
+python: "3.11"
+channels: [conda-forge]
+conda: []
+torch:
+  default:
+    index_url: https://download.pytorch.org/whl/cu121
+    packages: [torch==2.5.1]
+  cu128:
+    index_url: https://download.pytorch.org/whl/cu128
+    packages: [torch==2.7.1]
+pip:
+  - six==1.16.0

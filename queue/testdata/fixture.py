@@ -1,0 +1,21 @@
+"""调度核心的测试用的固定配置（2026-11-02）：机器表、policy（config/）、做法和插件（plugins/）、实验表（exps/demo/）、
+假的 conda 和 venv、步骤脚本（bin/）。
+
+    sys.path.insert(0, os.path.join(HERE, "testdata")); import fixture; fixture.use()
+
+use() 在 import 读配置的模块（machines、policy、recipes、relay_plugins、spec、experiments…）之前调用：设 TASKQ_CONFIG、
+TASKQ_PLUGINS 指到这里（覆盖已经设了的），子进程跟着继承。bash 的测试 source fixture.sh。
+"""
+import os
+
+FIX = os.path.dirname(os.path.abspath(__file__))
+CONFIG = os.path.join(FIX, "config")
+PLUGINS = os.path.join(FIX, "plugins")
+BIN = os.path.join(FIX, "bin")
+EXPS = os.path.join(FIX, "exps")
+
+
+def use():
+    os.environ["TASKQ_CONFIG"] = CONFIG
+    os.environ["TASKQ_PLUGINS"] = PLUGINS
+    return CONFIG, PLUGINS

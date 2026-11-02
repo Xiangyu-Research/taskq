@@ -1,0 +1,5 @@
+# 测试用：只有 conda 包
+channels: [conda-forge]
+override_channels: true
+conda:
+  - r-base=4.4.3

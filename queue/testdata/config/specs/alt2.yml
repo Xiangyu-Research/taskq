@@ -1,0 +1,4 @@
+# 测试用：建在 base 上的 venv
+base: base
+pip:
+  - six==1.16.0
