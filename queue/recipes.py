@@ -14,7 +14,7 @@
     out        结果文件夹（相对数据目录）。拉回、归档、登记表都看这里
     done       训完的标志：out 下的文件，每一项都要有；一项里用 | 分开的有一个就行
     log        out 下的训练日志（glob）：多久没更新用来判断有没有人在训
-    progress   进度的解析方法（spec.py 的 PROGRESS，模型专用的在 scripts/queue/readers/：nnunet_log = nnU-Net 的训练日志；progress_json = 任务自己写的
+    progress   进度的解析方法（spec.py 的 PROGRESS，模型专用的在 research/common/taskq_plugins/readers/：nnunet_log = nnU-Net 的训练日志；progress_json = 任务自己写的
                out/PROGRESS.json，{"done": 已做完的轮数, "total": 总轮数}；None = 只看训完没、日志多久没更新）
     resume     out 下的存档（glob 列表）：有一个就算有进度，失败时留在那台机器上接着做，不交还跳过（2026-10-31）；None = 没有
     res        资源：gpus（卡数）、cpus、mem（如 "32G"）、gpu_mem（GB）；None 的项不限（2026-10-31）
@@ -33,7 +33,7 @@
     archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
     relay      交给执行机（envs/machines.py 的 RELAY）时按哪个插件列输入、核对结果：path = 输入就是 inputs / data 里的文件、文件夹、
                glob（任何任务都能用，scripts/sites/names.py）；nnunet（训练）、nnunet_infer（推理）= 按 nnU-Net 的参数列要的文件，
-               拉回后核对（scripts/queue/relay_plugins.py）；None = 不交
+               拉回后核对（research/common/taskq_plugins/relay_plugins.py）；None = 不交
     machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc"]）；None = 有环境的都行
     device     gpu = 要卡（DICC 的 GPU worker、lab 领）；cpu = 纯 CPU（只由 DICC 的 CPU worker 领，scripts/queue/cpu_worker.sbatch，
                2026-10-24）
@@ -42,42 +42,14 @@
 
 INPUT_ROOTS：训练机上输入数据所在的文件夹（相对数据目录，下一级是一份数据）。自动传过去的数据只有在这些下面的才按空间预算删
 （refill.py 的 cleanup()）。
+领域专用的做法（如 nnunet）和 INPUT_ROOTS 在 TASKQ_PLUGINS 各文件夹的 recipes.py 里（scripts/queue/cfg.py），加载时合进来。
 """
 
-INPUT_ROOTS = ["nnUNet/preprocessed", "nnUNet/raw"]
+INPUT_ROOTS = []
 
 REQUIRED = object()
 
 RECIPES = {
-    # nnU-Net v2 的训练（任何训练器、数据集、plans、配置）
-    "nnunet": dict(
-        params=dict(dataset=REQUIRED, fold=REQUIRED, trainer="nnUNetTrainer_save10", plans="nnUNetResEncUNetMPlans",
-                    config="3d_fullres", env="nnunet", code="research/common/nnunet/trainers",
-                    model="{dataset}/{trainer}__{plans}__{config}"),
-        key="{dataset}/{trainer}/{fold}",
-        env="{env}",
-        cmd="bash research/common/nnunet/train.sh {dataset} {config} {fold} {plans} {trainer}",
-        vars=dict(nnUNet_raw="{data}/nnUNet/raw", nnUNet_preprocessed="{data}/nnUNet/preprocessed",
-                  nnUNet_results="{data}/nnUNet/results", nnUNet_extTrainer="{repo}/{code}"),
-        out="nnUNet/results/{model}/fold_{fold}",
-        done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"],
-        log="training_log_*.txt",
-        progress="nnunet_log",
-        resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
-        res=dict(gpus=1, local_inputs=1),
-        owner=None,
-        info="nnunet_debug",
-        oldlogs=dict(dir="nnUNet/results/logs", prefix="{dataset}_{trainer}_fold{fold}_"),  # 10/18 前的分段日志
-        metrics={},
-        checkpoint="checkpoint_final.pth",
-        data=["nnUNet/preprocessed/{dataset}"],
-        fetch=dict(exclude=["checkpoint_latest.pth"], extra=["*.json"]),
-        archive=dict(drop=["checkpoint_*.pth", "validation/**"], keep=["validation/summary.json"]),
-        machines=None,
-        device="gpu",
-        after=[],
-        relay="nnunet",
-    ),
     # 什么都由任务自己给（非 nnU-Net 的训练可以直接用，或者照着写一种新的做法）
     "command": dict(
         params=dict(key=REQUIRED, cmd=REQUIRED, env=REQUIRED, out=REQUIRED, done=REQUIRED),
@@ -87,3 +59,7 @@ RECIPES = {
         fetch=dict(exclude=[], extra=[]), archive=None, machines=None, device="gpu", after=[], relay=None,
     ),
 }
+
+import cfg  # noqa: E402
+
+cfg.extend(globals(), "recipes", ("RECIPES", "INPUT_ROOTS"))

@@ -150,7 +150,7 @@ def infer_setup():
                 os.makedirs(os.path.join(ROOT, d), exist_ok=True)
                 os.symlink(os.path.join(store, d, f), os.path.join(ROOT, d, f))
     needs = [f"{model}/dataset.json", f"{model}/plans.json", f"{model}/fold_0/checkpoint_final.pth", *sorted(INS)]
-    RN.infer_inputs = lambda spec, root: needs
+    sys.modules[REAL_INFER_INPUTS.__module__].infer_inputs = lambda spec, root: needs
     return S.resolve("command", dict(key=f"infer/{DS}/{TD}/fold_0", env="nnunet",
                                      cmd=f"bash research/RQ1/analysis/infer_task.sh {{data}}/{model} 0",
                                      out=f"predictions/{DS}/{TD}/fold_0", done=[".infer_done"], relay="nnunet_infer",

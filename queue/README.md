@@ -8,7 +8,7 @@
 |---|---|
 | [`envs/machines.py`](../../envs/machines.py) | 每台机器：数据目录、conda、环境名 → 怎么激活（`envs`）、pueue 的组、角色、要查的盘。没有某个环境的机器不领用它的任务 |
 | [`envs/policy.py`](../../envs/policy.py) | 怎么跑：每个步骤在哪里做（`PLACE`）、自动的部分开不开（`AUTO`）、暂缓哪些步骤（`HOLD`）、按时段开的执行机（`SHIFT`）、执行机备几个任务（`READY`）、Slurm 补交几个作业（`SLURM`） |
-| [`recipes.py`](recipes.py) | 做法：一种训练怎么跑（参数和默认值、`key`、`env`、`cmd`、`out`、`done`、`data`、`fetch`、`archive` 等，字段说明在文件开头）。现在有 `nnunet`（`research/common/nnunet/train.sh`）和 `command`（全部由任务自己给） |
+| [`recipes.py`](recipes.py) | 做法：一种训练怎么跑（参数和默认值、`key`、`env`、`cmd`、`out`、`done`、`data`、`fetch`、`archive` 等，字段说明在文件开头）。核心只有 `command`（全部由任务自己给）；`nnunet`（`research/common/nnunet/train.sh`）在 `research/common/taskq_plugins/recipes.py`，按 `TASKQ_PLUGINS` 加载时合进来 |
 | `research/<RQ>/experiments.py` | 实验表：做法和参数、按哪些参数展开成一组任务（`each`，如 `{"fold": ["0", "1"]}`；box pueue 标签 `<id>_f0`）、每个任务训完后的步骤（`after`）、一个实验的任务都训完后的（`group_after`）、最后一起做的（`FINAL`）、默认档位（`nice`）、分析脚本要的声明（`names`）、看板名称（`board`）。`scripts/queue/experiments.py` 读所有 RQ 的表；分析脚本按模型文件夹查（`experiments.py name-of <模型文件夹> <名字>…`），查不到就报错 |
 
 `spec.py` 是唯一的解析器：做法 + 参数 → 任务说明（`spec.py lookup <key>` 打印某个任务的说明）。
@@ -58,6 +58,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它（旧名 `RQ1_WAIT_GPU`） |
 | `TASKQ_*` | 环境变量 | `dicc_worker.sh` 的阈值，默认值写在脚本开头：`SLOTS`（一个作业最多同时几个，GPU 2、CPU 1）、`ADD_AFTER`（900 秒）、`UTIL_MAX`（90%）、`MIN_LEFT`（3600 秒）、`PATIENCE`（1200 秒）、`ERR_MAX`（600 秒）、`IDLE_MAX`（2400 秒）、`EARLY_FAIL`（600 秒）、`FAIL_WINDOW`（3600 秒）、`STALL_MAX`（1800 秒）；`TASKQ_DIR`、`TASKQ_SSH`、`TASKQ_MACHINE` 只给测试用 |
 | `TASKQ_CONFIG` | 环境变量 | `machines.py`、`policy.py` 所在的文件夹，默认 `<仓库>/envs`（11/2）。Python 脚本经 `scripts/queue/cfg.py` 的 `use_config()` 找，bash 脚本用 `${TASKQ_CONFIG:-$REPO/envs}`；`relay_bundle.py` 在它在仓库里时取提交里的 `machines.py`，在仓库外时读文件；执行机的代码包里生成的两个文件照旧在 `envs/` |
+| `TASKQ_PLUGINS` | 环境变量 | 领域专用的插件文件夹（`:` 隔开几个，空串 = 没有），默认 `<仓库>/research/common/taskq_plugins`（11/2）。每个文件夹里可以有 `recipes.py`（`RECIPES`、`INPUT_ROOTS`）、`relay_plugins.py`（`PLUGINS`、`ACCEPTS`、`VIEW_ROOTS`）、`readers/<名>.py`（`PROGRESS`、`INFO`、`TRAINED`，只用标准库）；核心的同名模块加载时合进来（字典里重名报错），插件里别的名字也挂在核心模块上 |
 
 `envs/policy.py` 由 box 的健康检查每次读，在 `~/auto/PhD`（只给 cron 用的克隆，跟着 origin/main）里生效，所以改了要提交推送。写错了（不认识的地方、条件、步骤）时 `advance.py` 这次什么都不排，报到健康检查里。
 
@@ -166,7 +167,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **路径的引用计数**（11/1）：`state.json` 每个任务记下它放的视图、输入和产出（`outs`）。删一个任务时只删别的记录不用的路径（`relay.droppable`），如 lab1 训完的模型正被推理引用就留着；一个任务的输入和同一台上没做完的任务的产出重叠时不传（`check_overlap`）。记录带 `redo` 的，下次检查先删掉那边的任务和路径（那边在跑就先停），再按现在的做法重新传。
 
 - **代码包**（`relay_bundle.py`，11/1 起不改名、不去注释）：origin/main 里 `scripts/`、`envs/`、`research/` 下的代码（`.py .sh .R .sbatch`，1 MB 以内的 `.json .csv .txt .yaml .yml`），生成只有这一台机器的 `envs/machines.py`、`envs/policy.py`，Slurm 类按 `jobs` 生成 `worker.sbatch`（gpu）、`cpu_worker.sbatch`（cpu）；所有 `.py` 用两个 Python 编译、`.sh` 过 `bash -n`，有像钥匙的内容（私钥、常见 token）就不发。资源（30 核、60G，`envs/machines.py` 的 `sbatch`）和 DICC 的分开（10/30 DICC 管理员要求）；sbatch 里不写作业名。包名 = 提交号-内容哈希，内容变了才重打。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
-- **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据目录里是指向 blob 的软链接，路径和 box 一样，文件内容不改；要哪些文件由做法的 `relay` 插件列（`scripts/sites/names.py`、`relay_plugins.py`）。拉回时插件核对（训练：`validation/` 的病例和这个任务的划分一致；推理：各测试集病例齐、checkpoint 的 sha256 和 box 上的一样），对不上不收、报出来。
+- **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据目录里是指向 blob 的软链接，路径和 box 一样，文件内容不改；要哪些文件由做法的 `relay` 插件列（`scripts/sites/names.py`、`relay_plugins.py`；nnU-Net 的在 `research/common/taskq_plugins/relay_plugins.py`）。拉回时插件核对（训练：`validation/` 的病例和这个任务的划分一致；推理：各测试集病例齐、checkpoint 的 sha256 和 box 上的一样），对不上不收、报出来。
 - **传输**：都经隧道（`scripts/sync/tunnel.py`），在哪里收发和 DICC 一样（10/30 定）：往那边传 1 GB 以上的先交 CPU 作业，10 分钟排不上就在登录节点下载；拉回在登录节点上传。地址用每次新开的临时 trycloudflare 地址（box 上的 cloudflared 容器，`envs/machines.py` hub 的 `quick`、`RELAY` 的 `quick_tunnel`），不用 box 的固定地址（10/30 定）。
 - **个数**：`envs/policy.py` 的 `READY[名字]`（那边每种 worker 备好、等领的任务数）、`SLURM["dicc2"]`（`gpu`：QOS 和时限）。
 - **盘**：有 `budget` 的（lab1、lab0，同一个盘）剩不到软线时由 `relay_gc.py` 清理：先删总队列不再要的视图，再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。
@@ -192,7 +193,8 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（nnU-Net 从存档接着训，推理跳过已做好的病例），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 和 DICC 的克隆） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
-| `relay.py`、`relay_bundle.py`、`relay_plugins.py`、`relay_gc.py`、`shift.py` | 执行机（见上面）：接力、代码包、nnU-Net 的输入和核对插件、清理根目录、按时段开停 |
+| `relay.py`、`relay_bundle.py`、`relay_plugins.py`、`relay_gc.py`、`shift.py` | 执行机（见上面）：接力、代码包、中继插件的加载、清理根目录、按时段开停 |
+| `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）和插件文件夹（`TASKQ_PLUGINS`），把插件合进核心的表 |
 | `scripts/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`refill.py`、`relay.py` 共用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口 |
 
@@ -279,7 +281,7 @@ pueue 本身：`pueue log <号>`、`pueue follow <号>`、`pueue kill -s SIGTERM
 | `inputs` | 要用的文件或文件夹（相对数据目录，box 上先放好）；送到执行机之前传完、核对过；开训前再查一次，缺了不跑、标"缺输入" |
 | `out` | 结果文件夹（相对数据目录），做完拉回 box 的同一位置 |
 | `done` | 做完的标志：`out` 下的文件，每一项都要有（一项里 `a|b` 有一个就行） |
-| `progress` | `progress_json`：命令每做完一轮写 `out/PROGRESS.json`，内容 `{"done": 已做完的轮数, "total": 总轮数}`；不写 = 只看日志多久没更新；某种模型专用的读法（如 nnU-Net 的 `nnunet_log`）在 `readers/<名>.py` 的 `PROGRESS` 表里（`info` 同理，`INFO` 表），只用标准库，收集进度时随 `spec.py` 一起送到别的机器 |
+| `progress` | `progress_json`：命令每做完一轮写 `out/PROGRESS.json`，内容 `{"done": 已做完的轮数, "total": 总轮数}`；不写 = 只看日志多久没更新；某种模型专用的读法（如 nnU-Net 的 `nnunet_log`）在 `research/common/taskq_plugins/readers/<名>.py` 的 `PROGRESS` 表里（`info` 同理，`INFO` 表），只用标准库，收集进度时随 `spec.py` 一起送到别的机器 |
 | `resume` | `out` 下的存档（glob）：有一个就算有进度，失败时留在那台机器上从存档接着做，不换机器重来 |
 | `log` | `out` 下的日志（glob），15 分钟没更新算没人在做 |
 | `res` | 资源：卡数、CPU 数、内存、显存（GB）；`wait_gpu`（分钟）：不在 Slurm 里时卡上有别人的进程（自己账号的 worker、显存填充不算）就每分钟看一次，最多等这么久，等不到算失败（0 = 不等，不写 = 一直等） |

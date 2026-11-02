@@ -268,7 +268,7 @@ def plain_log(path):
     return dict(start=None, end=t, epochs_done=0, tl=[])
 
 
-# 进度、训练设置的读法：通用的在这里，某种模型专用的放在 readers/<名>.py（PROGRESS、INFO、TRAINED 三张表，只用标准库），
+# 进度、训练设置的读法：通用的在这里，某种模型专用的放在 TASKQ_PLUGINS 各文件夹的 readers/<名>.py（PROGRESS、INFO、TRAINED 三张表，只用标准库），
 # 加载时合进来（2026-10-31）。collect() 送到别的机器上跑时 remote_collect 把 readers/ 的内容一起送过去。
 PROGRESS = {"progress_json": plain_log, None: plain_log}  # progress_json：日志只看时间，进度另读
 INFO = {None: lambda fd: {}}
@@ -276,10 +276,15 @@ TRAINED = []  # 分段日志里出现这些字样之一 = 至少做完了一轮�
 
 
 def reader_sources():
-    """readers/*.py → {名: 源码}（没有这个文件夹时为空）。"""
-    d = os.path.join(HERE, "readers")
-    return {f[:-3]: open(os.path.join(d, f), encoding="utf-8").read()
-            for f in sorted(os.listdir(d) if os.path.isdir(d) else []) if f.endswith(".py") and not f.startswith("test_")}
+    """readers/*.py（这里的和 TASKQ_PLUGINS 各文件夹里的）→ {名: 源码}（没有这些文件夹时为空）。"""
+    if HERE not in sys.path:
+        sys.path.append(HERE)
+    import cfg
+    out = {}
+    for d in [os.path.join(x, "readers") for x in [HERE] + cfg.plugin_dirs()]:
+        out.update({f[:-3]: open(os.path.join(d, f), encoding="utf-8").read()
+                    for f in sorted(os.listdir(d) if os.path.isdir(d) else []) if f.endswith(".py") and not f.startswith("test_")})
+    return out
 
 
 def load_readers(sources):
