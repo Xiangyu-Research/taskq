@@ -76,8 +76,10 @@ def plugins(name):
 
 
 def extend(ns, name, tables):
-    """插件的 tables 合进 ns（字典：插件的在前，键重复报错；列表：接在后面），其余核心没有的名字原样放进 ns。"""
+    """插件的 tables 合进 ns（字典：插件的在前，键重复报错；列表：接在后面），其余核心没有的名字原样放进 ns；
+    不以 _ 开头的函数、类和核心或先加载的插件里的同名（不是同一个）时报错（不然后加载的不生效）。"""
     add = {t: ({} if isinstance(ns[t], dict) else []) for t in tables}
+    owner = {}
     for m in plugins(name):
         for k, v in vars(m).items():
             if k.startswith("__"):
@@ -92,6 +94,10 @@ def extend(ns, name, tables):
                     add[k] += [x for x in v if x not in add[k] and x not in ns[k]]
             elif k not in ns:
                 ns[k] = v
+                owner[k] = m
+            elif ns[k] is not v and callable(v) and not k.startswith("_") and not isinstance(v, type(sys)):
+                who = f"插件 {owner[k].__file__}" if k in owner else "核心"
+                raise ValueError(f"插件 {m.__file__} 的 {k} 和{who}的同名，后加载的不会生效")
     for t, v in add.items():
         ns[t] = {**v, **ns[t]} if isinstance(v, dict) else ns[t] + v
 

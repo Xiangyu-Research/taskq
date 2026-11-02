@@ -297,7 +297,7 @@ def check(s):
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
             if left and not any(is_worker_job(r) for r in d["squeue"]):
                 add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
-                    "（envs/policy.py 的 AUTO[\"dicc\"] 关着？看 ~/refill.log）", after=60)
+                    f"（envs/policy.py 的 AUTO[\"{name}\"] 关着？看 ~/refill.log）", after=60)
             for jid, jname, st, end, code in d["sacct"]:
                 add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
             continue

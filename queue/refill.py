@@ -23,7 +23,7 @@ DICC 补作业：每个 QOS（envs/policy.py 的 SLURM[机器]["gpu"]：QOS → 
 空出一个补一个，作业的排队时间分从交上去开始累积。只看要卡的任务（任务说明的 device=gpu）。
 纯 CPU 的任务（device=cpu，如评测，2026-10-24）：SLURM[机器] 里有 cpu 的机器，缓冲里有没人领的这类任务、我们的 CPU worker 作业
 （排着和在跑的）不到 min(这类任务数, 最多几个) 时交 scripts/queue/cpu_worker.sbatch；作业领不到任务就结束，不在节点上空等。
-开关：envs/policy.py 的 AUTO["dicc"]，False 时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
+开关：envs/policy.py 的 AUTO[机器]，False 时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
     python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
 """
@@ -422,7 +422,7 @@ def topup(s, name, dry=False, run=None):
     desc = "；".join(f"交 {'CPU worker ' if f == CPU_FILE else ''}{q} {n} 段" for q, _, n, f in subs) or f"不交（{why}）"
     if dry:
         return [f"{name}：会 {desc}" if subs else f"{name}：{desc}"], {}
-    if not P.AUTO.get("dicc"):
+    if not P.AUTO.get(name):
         if subs:
             shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
         return [], {}
