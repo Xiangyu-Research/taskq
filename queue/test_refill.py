@@ -230,32 +230,30 @@ QOS = {"long": "1-12:00:00", "normal": "08:00:00"}
 p, why = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 216, 0), "normal": (10, 138, 0)}, QOS)
 ok("现在：旧作业远超上限，不补", p == [] and "排满" in why)
 p, _ = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 9, 0), "normal": (10, 3, 0)}, QOS)
-ok("long 空 1 个、normal 空 7 个、备好 5 个：long 1、normal 4（不超过备好的）", p == [("long", "1-12:00:00", 1, "worker.sbatch"), ("normal", "08:00:00", 4, "worker.sbatch")])
+ok("long 空 1 个、normal 空 7 个：按名额排满 long 1、normal 7（11/2 起不按备好的个数截）", p == [("long", "1-12:00:00", 1, "worker.sbatch"), ("normal", "08:00:00", 7, "worker.sbatch")])
 p, _ = R.topup_plan(snap()["taskq"]["box"], {"long": (None, 4, 0), "normal": (10, 10, 0)}, QOS)
-ok("QOS 没设排队上限：按 SUBMIT_CAP，再按备好的 5 个截", p == [("long", "1-12:00:00", min(R.SUBMIT_CAP - 4, 5), "worker.sbatch")])
+ok("QOS 没设排队上限：按 SUBMIT_CAP", p == [("long", "1-12:00:00", R.SUBMIT_CAP - 4, "worker.sbatch")])
 p, _ = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 6, 0)}, {"long": ("3-00:00:00", 2)})
 ok("留 2 个名额：上限 10、现有 6，补 2", p == [("long", "3-00:00:00", 2, "worker.sbatch")])
 p, why = R.topup_plan(snap()["taskq"]["box"], {"long": (10, 8, 0)}, {"long": ("3-00:00:00", 2)})
 ok("留 2 个名额：现有 8 就不补", p == [] and "排满" in why)
 done_q = [tq(K_T14, 0, 1, "done"), tq(K_UM, 50, 2, "claimed", "486191")]
-ok("队列里没有没人领的任务：不补", R.topup_plan(snap(queue=done_q)["taskq"]["box"], {"long": (10, 0, 0), "normal": (10, 0, 0)}, QOS)[0] == [])
+ok("没人领的没有、有在训的：照样排满（攒排队时间）", R.topup_plan(snap(queue=done_q)["taskq"]["box"], {"long": (10, 2, 0), "normal": (10, 0, 0)}, QOS)[0]
+   == [("long", "1-12:00:00", 8, "worker.sbatch"), ("normal", "08:00:00", 10, "worker.sbatch")])
+ok("没人领的、在训的都没有：不补", R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "done")])["taskq"]["box"], {"long": (10, 0, 0), "normal": (10, 0, 0)}, QOS)[0] == [])
 ok("领取过期的（stale）也算没人领", R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "stale")])["taskq"]["box"], {"long": (10, 0, 0), "normal": (10, 10, 0)}, QOS)[0] != [])
 ok("总开关不在：不补", R.topup_plan(snap(enabled=False)["taskq"]["box"], {"long": (10, 0, 0), "normal": (10, 0, 0)}, QOS)[0] == [])
 paused = snap()["taskq"]["box"] | {"paused": True}
 ok("队列暂停：不补", R.topup_plan(paused, {"long": (10, 0, 0), "normal": (10, 0, 0)}, QOS)[0] == [])
 ok("读不到某个 QOS 的作业数：都不补", R.topup_plan(snap()["taskq"]["box"], {"long": (10, 0, 0)}, QOS)[0] == [])
-# 先备好再开卡（10/31 定）：排着没开始的作业数不超过备好、没人领的 GPU 任务数
+# 按名额排满（11/2 定，之前排着的不超过备好的任务数）
 two = [tq(K_T14, 0, 1), tq(K_UM, 50, 2), tq(K_T1C[0], 50, 3, "claimed", "486191")]
 p, _ = R.topup_plan(snap(queue=two)["taskq"]["box"], {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 0)})
-ok("备好 2 个、空 10 个位置：最多交 2 个", p == [("long", "3-00:00:00", 2, "worker.sbatch")])
-p, why = R.topup_plan(snap(queue=two)["taskq"]["box"], {"long": (10, 3, 2)}, {"long": ("3-00:00:00", 0)})
-ok("备好 2 个、已有 2 个作业在排：不交", p == [] and "排着的作业已有 2 个" in why)
-p, _ = R.topup_plan(snap(queue=two)["taskq"]["box"], {"long": (10, 3, 1)}, {"long": ("3-00:00:00", 0)})
-ok("备好 2 个、1 个在排（在跑的不算）：再交 1 个", p == [("long", "3-00:00:00", 1, "worker.sbatch")])
-p, _ = R.topup_plan(snap(queue=two)["taskq"]["box"], {"long": (10, 9, 0), "normal": (10, 0, 0)}, QOS)
-ok("备好 2 个：long 剩 1 个位置交 1 个，normal 交剩下的 1 个", p == [("long", "1-12:00:00", 1, "worker.sbatch"), ("normal", "08:00:00", 1, "worker.sbatch")])
-p, why = R.topup_plan(snap(queue=done_q)["taskq"]["box"], {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 0)})
-ok("一个都没备好：不交", p == [] and "备好" in why)
+ok("备好 2 个、空 10 个位置：交 10 个", p == [("long", "3-00:00:00", 10, "worker.sbatch")])
+p, why = R.topup_plan(snap(queue=two)["taskq"]["box"], {"long": (10, 4, 2)}, {"long": ("3-00:00:00", 1)})
+ok("留 1 个、已有 4 个（2 个在排）：再交 5 个", p == [("long", "3-00:00:00", 5, "worker.sbatch")])
+p, why = R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "done")])["taskq"]["box"], {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 0)})
+ok("没有要卡的任务：不交", p == [] and "没有要卡的任务" in why)
 ok("slurm.parse：5 段才算，少一段当读不到", R.SL.parse("QOS|long|10|3|1\nQOS|normal|10|2\n")["counts"] == {"long": (10, 3, 1)})
 ok("refill 里和 scripts/sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
 
@@ -264,7 +262,7 @@ K_EV = "eval/Dataset101_GLIrq1/x/fold_0"
 ev_spec = dict(key=K_EV, env="nnunet", machines=["dicc"], device="cpu")
 cpu_q = [tq(K_T14, 0, 1, "done"), dict(tq(K_EV, -100, 2), spec=ev_spec), dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b"))]
 cq = snap(queue=cpu_q)["taskq"]["box"]
-p, why = R.topup_plan(cq, {"long": (10, 0)}, {"long": ("3-00:00:00", 2)})
+p, why = R.topup_plan(cq, {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 2)})
 ok("只有纯 CPU 任务没人领：不补 GPU worker", p == [] and "要卡" in why)
 ok("纯 CPU 任务 2 个、最多 1 个、现有 0：交 1 个 CPU worker", R.cpu_plan(cq, 0, ("normal", "08:00:00", 1), 5) == ([("normal", "08:00:00", 1, "cpu_worker.sbatch")], ""))
 ok("最多 3 个：按任务数交 2 个", R.cpu_plan(cq, 0, ("normal", "08:00:00", 3), 5)[0] == [("normal", "08:00:00", 2, "cpu_worker.sbatch")])

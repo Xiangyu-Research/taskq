@@ -96,13 +96,14 @@ def test_slurm_topup_ready():
     two = dict(enabled=True, tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="free"), dict(key="a/x/2", state="claimed")])
     probe = lambda out: (lambda name, cmd: (0, out, ""))  # noqa: E731
     q = next(iter(relay.P.SLURM[NAME]["gpu"]))
+    keep = relay.P.SLURM[NAME]["gpu"][q][1]
     subs, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|0|0\n"))
-    assert [n for _, _, n, _ in subs] == [2] and subs[0][3] == "worker.sbatch", subs
-    subs, why = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|3|2\n"))
-    assert subs == [] and "排着的作业已有 2 个" in why
+    assert [n for _, _, n, _ in subs] == [10 - keep] and subs[0][3] == "worker.sbatch", subs
+    subs, why = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|{10 - keep}|2\n"))
+    assert subs == [] and "排满" in why
     subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
-    assert subs == [] and "备好" in why
-    ok("Slurm 类（DICC2）：备好 2 个最多交 2 个，排着的够了不交，没备好不交")
+    assert subs == [] and "没有要卡的任务" in why
+    ok("Slurm 类（DICC2）：有任务就按名额排满（攒排队时间，11/2），满了不交，没有任务不交")
     cpu = dict(enabled=True, tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu"))])
     subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "CPU" not in why, (subs, why)
@@ -112,7 +113,7 @@ def test_slurm_topup_ready():
         subs, why = relay.topup("dicc1", dict(taskq=cpu), run=probe("QOS|long|10|0|0\nCPU|0\nALL|10|3\n"))
         assert subs == [("normal", "08:00:00", 1, "cpu_worker.sbatch")], (subs, why)
         subs, why = relay.topup("dicc1", dict(taskq=dict(two, tasks=two["tasks"] + cpu["tasks"])), run=probe("QOS|long|10|0|0\nCPU|1\nALL|10|3\n"))
-        assert subs == [("long", "3-00:00:00", 2, "worker.sbatch")] and "CPU：已有 1 个" in why, (subs, why)
+        assert subs == [("long", "3-00:00:00", 10, "worker.sbatch")] and "CPU：已有 1 个" in why, (subs, why)
         relay.P.SLURM["dicc2"] = dict(slurm0["dicc2"], cpu=("normal", "08:00:00", 2))
         subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\nCPU|0\nALL|10|3\n"))
         assert subs == [] and "CPU" not in why, (subs, why)

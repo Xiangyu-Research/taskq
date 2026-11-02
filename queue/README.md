@@ -113,7 +113,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 ### 补交 DICC 作业（`refill.py`，健康检查每 30 分钟调用）
 
-- **DICC**：每个 QOS 排着和在跑的不到 `SLURM` 写的上限、缓冲里还有没人领的任务时，补交 `worker.sbatch`，空一个补一个，每个空位一个普通作业（不用数组）；排着没开始的不超过缓冲里备好、没人领的任务数（先备好再开卡，10/31 定）。缓冲里有没人领的纯 CPU 任务时才交 `cpu_worker.sbatch`，按剩下的提交名额交。在 `feed.py` 送完之后补。读作业数、交作业用 `scripts/sites/slurm.py`，交几个在 `refill.topup_plan` 算。
+- **DICC**：每个 QOS 排着和在跑的不到 `SLURM` 写的上限、这台有要卡的任务（备好没人领的或在训的）时，补交 `worker.sbatch` 排满名额，每个空位一个普通作业（不用数组），让排着的作业一直攒排队时间（11/2 定；10/31–11/2 排着的不超过备好的任务数）；开始时没有任务的 worker 空等 `IDLE_MAX` 再结束。缓冲里有没人领的纯 CPU 任务时才交 `cpu_worker.sbatch`，按剩下的提交名额交。在 `feed.py` 送完之后补。读作业数、交作业用 `scripts/sites/slurm.py`，交几个在 `refill.topup_plan` 算。
 
 ### 训完以后（`advance.py`，健康检查每 30 分钟调用）
 

@@ -358,25 +358,27 @@ def unclaimed(tq, device):
     return sum(1 for t in tq["tasks"] if t["state"] in ("free", "stale") and info(tq, t["key"])["spec"].get("device", "gpu") == device)
 
 
+def training(tq):
+    """队列里有人领着（在训）、要卡的任务数。"""
+    return sum(1 for t in tq["tasks"] if t["state"] == "claimed" and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu")
+
+
 def topup_plan(tq, counts, qos):
     """→ ([(QOS, 每段时限, 补几段)], 不补的原因)。counts：{QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}。
-    先备好再开卡（10/31 定）：排着没开始的作业数不超过缓冲里备好、没人领的 GPU 任务数（缓冲里的训练是数据到位后才送的，
-    推理只在训练所在的执行机跑、输入是那边自己训出来的），一个都没备好就不交。"""
+    这台有要卡的任务（备好没人领的，或在训的）时按各 QOS 的名额排满，让排着的作业一直攒排队时间（11/2 定；10/31–11/2 排着的
+    不超过备好的任务数）。每人同时最多 2 张卡，多排的作业等在跑的结束才开始，那时缓冲已补到 READY；开始时没有任务的 worker
+    空等 IDLE_MAX 再结束（dicc_worker.sh）。两样都没有就不交。"""
     if not tq:
         return [], "读不到任务队列"
     if not tq.get("enabled"):
         return [], "任务队列的总开关不在"
     if tq.get("paused"):
         return [], "任务队列失败太多、暂停中"
-    ready = unclaimed(tq, "gpu")
-    if not ready:
-        return [], "队列里没有备好、没人领的要卡的任务"
+    if not unclaimed(tq, "gpu") and not training(tq):
+        return [], "队列里没有要卡的任务（备好没人领的、在训的都没有）"
     if any(q not in counts for q in qos):
         return [], f"读不到 {next(q for q in qos if q not in counts)} 的作业数"
-    room = ready - sum(counts[q][2] for q in qos)
-    if room <= 0:
-        return [], f"备好的任务 {ready} 个，排着的作业已有 {ready - room} 个"
-    out = SL.distribute(qos, counts, room, GPU_FILE)
+    out = SL.distribute(qos, counts, sum((counts[q][0] or SL.SUBMIT_CAP) for q in qos), GPU_FILE)
     return out, "" if out else "各 QOS 都排满了"
 
 

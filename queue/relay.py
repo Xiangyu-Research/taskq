@@ -26,7 +26,7 @@
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
   3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一个任务（只领插件接受的做法，
      数据传过去后那边至少还剩 HARD_GB）；
-  4. 那边排着和在跑的 worker 作业不够、又有备好没人领的任务时补交（refill.py 的 topup_plan：排着没开始的作业不超过备好的任务数，QOS 和个数见 SLURM[名字]["gpu"]）。
+  4. 那边排着和在跑的 worker 作业不够、又有要卡的任务（备好的或在训的）时排满（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
 按时段的执行机（envs/policy.py 的 SHIFT，scripts/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
 每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的任务，那边的队列里删掉任务
@@ -962,7 +962,7 @@ def sub_kind(x):
 
 
 def topup(name, rs, run=None):
-    """→ 要开的 worker, 不补的原因。"要几个"只在这里算（先备好再开卡，10/31 定），适配器只读状态、照着开。按这台能跑的种类
+    """→ 要开的 worker, 不补的原因。"要几个"只在这里算，适配器只读状态、照着开。按这台能跑的种类
     （envs/machines.py 的 kinds）各算各的：
     pueue 类：这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个 → ("pueue", 种类, 1)；
     Slurm 类：envs/policy.py 的 SLURM 里这台能跑的种类，按 refill.slurm_plan 交 → (QOS, 时限, 交几个, sbatch 文件)。

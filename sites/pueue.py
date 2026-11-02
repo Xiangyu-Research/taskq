@@ -1,5 +1,5 @@
 """pueue 类执行机（SITES 里 scheduler="pueue"，如 lab1、lab0）的适配器（2026-10-31）：读 worker 所在组的任务、开常驻 worker。
-和 slurm.py 对应：读状态 → 调用方按"先备好再开卡"定开不开（scripts/queue/relay.py 的 topup）→ start_worker 开。
+和 slurm.py 对应：读状态 → 调用方定开不开（scripts/queue/relay.py 的 topup）→ start_worker 开。
 pueue 的原始输出由那边的状态脚本一次读回（relay.py 的 STATUS_PY），这里只解析。"""
 import json
 import os
