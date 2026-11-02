@@ -7,6 +7,7 @@
 # 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
 # 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；
+# 设了 TASK_GPU_IDLE（分钟，envs/machines.py 里组的环境变量）时，还要 GPU 使用记录（scripts/monitor/gpu_log.sh）里最近这么久这张卡上没有别人（11/2）；
 # 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
 # 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # 4 缺输入（data 里的文件不全，没开训，11/1）；
@@ -55,14 +56,29 @@ gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（�
     done < <(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2> /dev/null)
     (( ${used:-0} - mine <= 500 ))
 }
+gpu_quiet() {  # GPU 使用记录里最近 TASK_GPU_IDLE 分钟这张卡上没有别人；有 → 最后一次见到的时间记在 GPU_SEEN。没有记录文件 → 只看现在
+    GPU_SEEN=
+    [[ -z ${TASK_GPU_IDLE:-} || ${TASK_GPU_IDLE} == 0 || -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
+    local dir=${GPU_LOG_DIR:-$HOME/gpu_usage} since files f
+    since=$(date -d "-$TASK_GPU_IDLE min" '+%F %T')
+    files=("$dir/gpu_$(date -d "-$TASK_GPU_IDLE min" +%Y-%m).csv")
+    f="$dir/gpu_$(date +%Y-%m).csv"; [[ $f == "${files[0]}" ]] || files+=("$f")
+    GPU_SEEN=$(for f in "${files[@]}"; do [[ -f $f ]] && tail -n 20000 "$f"; done |
+        awk -F, -v s="$since" -v g="$CUDA_VISIBLE_DEVICES" -v me="$(id -un)" '$1 >= s && $2 == g && $6 != "" && $6 != me {t = $1} END {print t}')
+    [[ -z $GPU_SEEN ]]
+}
 wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1。每次看都往任务日志写一行（dicc_worker.sh 按日志判断卡没卡住）
     local waited=0
-    while ! gpu_free; do
+    while GPU_SEEN=; ! { gpu_free && gpu_quiet; }; do
         if [[ -n ${TASK_WAIT_GPU:-} ]] && (( waited >= TASK_WAIT_GPU * 60 )); then
-            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着，等了 $TASK_WAIT_GPU 分钟还没空出来，不跑" | tee -a "$LOG"
+            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着${GPU_SEEN:+（空着，别人 $GPU_SEEN 还在用，要空满 $TASK_GPU_IDLE 分钟）}，等了 $TASK_WAIT_GPU 分钟还没空出来，不跑" | tee -a "$LOG"
             return 1
         fi
-        echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着，等它空出来（已等 $(( waited / 60 )) 分钟${TASK_WAIT_GPU:+，最多 $TASK_WAIT_GPU 分钟}）" | tee -a "$LOG"
+        if [[ -n ${GPU_SEEN:-} ]]; then
+            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 空着，别人 $GPU_SEEN 还在用，空满 $TASK_GPU_IDLE 分钟再跑（已等 $(( waited / 60 )) 分钟）" | tee -a "$LOG"
+        else
+            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着，等它空出来（已等 $(( waited / 60 )) 分钟${TASK_WAIT_GPU:+，最多 $TASK_WAIT_GPU 分钟}）" | tee -a "$LOG"
+        fi
         sleep "$GPU_POLL" & wait $!
         waited=$(( waited + GPU_POLL ))
     done

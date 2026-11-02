@@ -77,6 +77,25 @@ check "卡上只有自己的进程（worker、显存填充）：不等" "(( rc =
 gpu 99 "1, 1000" 1000
 $G SLURM_JOB_ID=1 $R command key=toy/w5 'cmd=touch $TASKQ_DATA/toy/w5/DONE' env=nnunet out=toy/w5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "Slurm 里不查卡" "(( rc == 0 )) && [[ ! -e $T/gpu/n ]]"
+# 空满 TASK_GPU_IDLE 分钟才跑（11/2）：GPU 使用记录（gpu_log.sh 的格式）里最近有别人 → 不跑
+mkdir -p "$T/gl"; GL="$T/gl/gpu_$(date +%Y-%m).csv"
+glrow() { echo "time,gpu,util_pct,mem_used_mib,mem_total_mib,user,pid,proc_mem_mib,program" > "$GL"; echo "$(date -d "-$1 min" '+%F %T'),$2,90,16000,32000,$3,123,16000,train.py" >> "$GL"; echo "$(date '+%F %T'),0,0,100,32000,,,," >> "$GL"; }
+I="$G GPU_LOG_DIR=$T/gl TASK_GPU_IDLE=60"
+gpu 0 "" 0; glrow 10 0 someoneelse
+$I $R command key=toy/q1 'cmd=touch $TASKQ_DATA/toy/q1/DONE' env=nnunet out=toy/q1 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "别人 10 分钟前还用这张卡：不跑，日志写还要空多久" "(( rc == 1 )) && [[ ! -e $T/toy/q1/DONE ]] && grep -q '要空满 60 分钟' $T/logs/tasks/toy__q1__test-1_part1.log"
+gpu 0 "" 0; glrow 90 0 someoneelse
+$I $R command key=toy/q2 'cmd=touch $TASKQ_DATA/toy/q2/DONE' env=nnunet out=toy/q2 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "别人 90 分钟前用过：照常跑" "(( rc == 0 ))"
+gpu 0 "" 0; glrow 10 1 someoneelse
+$I $R command key=toy/q3 'cmd=touch $TASKQ_DATA/toy/q3/DONE' env=nnunet out=toy/q3 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "别人用的是另一张卡：照常跑" "(( rc == 0 ))"
+gpu 0 "" 0; glrow 10 0 "$(id -un)"
+$I $R command key=toy/q4 'cmd=touch $TASKQ_DATA/toy/q4/DONE' env=nnunet out=toy/q4 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "记录里只有自己：照常跑" "(( rc == 0 ))"
+gpu 0 "" 0; glrow 10 0 someoneelse
+$G GPU_LOG_DIR=$T/gl $R command key=toy/q5 'cmd=touch $TASKQ_DATA/toy/q5/DONE' env=nnunet out=toy/q5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
+check "没设 TASK_GPU_IDLE：不看记录" "(( rc == 0 ))"
 
 # 旧名（10/31 前）：只设 BRAIN_TUMOR 的调用方、传 TASK_SEG 的旧 worker（它按 _seg<段>.log 找日志）
 env -u TASKQ_DATA BRAIN_TUMOR=$T TASK_SEG=1 $R command key=toy/o1 'cmd=touch $TASKQ_DATA/toy/o1/DONE; touch $BRAIN_TUMOR/toy/o1/B' env=nnunet out=toy/o1 'done=["DONE"]' > /dev/null; rc=$?
