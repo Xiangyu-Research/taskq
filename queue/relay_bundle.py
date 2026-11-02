@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/1 起就是这个提交的代码，不改名、不去注释）：
-提交里跟踪的 scripts/、envs/、research/（envs/policy.py 的 OUTPUTS["bundle"]）下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），
-另外生成只有这一台的 envs/machines.py、envs/policy.py，Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，
-cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的 ~/.cache/phd/… 换成那边根目录下的 queue/、state/。
-核对：两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。包名 = <提交号前 10 位>-<内容哈希前 8 位>，
+提交里跟踪的 envs/policy.py 的 OUTPUTS["bundle"] 这几个顶层文件夹下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），
+另外生成只有这一台的 envs/machines.py、envs/policy.py（OUTPUTS 只留 experiments），Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，
+cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的状态文件夹（cfg.py 的 STATE_HOME）换成那边根目录下的 queue/、state/。
+核对：本机和 OUTPUTS["bundle_check"] 那个环境的两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。包名 = <提交号前 10 位>-<内容哈希前 8 位>，
 同样的内容只建一次。
 
     relay_bundle.py build <名字> [--commit 提交] [--out 目录]   → 打印"包名 路径"
@@ -30,7 +30,7 @@ import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 import remote as RM  # noqa: E402
 
-OUT = "~/.cache/phd/relay/bundles"
+OUT = cfg.state("relay", "bundles", expand=False)
 TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("scripts", "envs")))  # envs/policy.py 的 OUTPUTS
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
@@ -124,7 +124,7 @@ def machine_entry(name, e, root, entry=None):
     m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/code/current", code=None,
              data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
-    m.update({k: e[k] for k in ("slots", "worker", "cpu_worker") if k in e})
+    m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars") if k in e})
     m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/sites/envs.py）在根目录下
     m.update(entry or {})
     return m
@@ -148,10 +148,11 @@ def gen_machines(src, name, m):
     return "\n".join(lines)
 
 
-def gen_policy(name, stage_tmp=True, gpu_aug=False, gpu_aug_loader=False):
-    return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\nGPU_AUG = {{{name!r}: {gpu_aug!r}}}\nGPU_AUG_LOADER = {{{name!r}: {gpu_aug_loader!r}}}\n"
+def gen_policy(name, stage_tmp=True):
+    out = {k: P.OUTPUTS[k] for k in ("experiments",) if k in getattr(P, "OUTPUTS", {})}
+    return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\n"
             f"STAGE_TMP = {{{name!r}: {stage_tmp!r}}}\n"
-            "SLURM = {}\n")
+            "SLURM = {}\n" + (f"OUTPUTS = {out!r}\n" if out else ""))
 
 
 def sbatch_over(m, kind):
@@ -183,22 +184,27 @@ def gen_sbatch(real, m, root, kind="gpu"):
                       'exec bash "$REPO/scripts/queue/worker_start.sh"', ""])
 
 
+HOME_MAP = {"taskq": "queue", "gpu_pad/DISABLED": "queue/gpu_pad_DISABLED"}  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/
+
+
 def home_paths(text, root):
-    """家目录下的 ~/.cache/phd/… 换成根目录下的：任务队列 → queue/，显存填充的开关 → queue/gpu_pad_DISABLED，其余 → state/。"""
+    """家目录下的状态文件夹（cfg.py 的 STATE_HOME 的默认写法）换成根目录下的：任务队列 → queue/，显存填充的开关 →
+    queue/gpu_pad_DISABLED，其余 → state/。"""
+    h = cfg.STATE_HOME[2:]
     for pre in ("$HOME/", "~/"):
         r = pre + root[2:] if root.startswith("~/") else root  # 根目录在家目录下时沿用原来的写法（双引号里的 ~ 不展开）
-        text = text.replace(pre + ".cache/phd/taskq", f"{r}/queue")
-        text = text.replace(pre + ".cache/phd/gpu_pad/DISABLED", f"{r}/queue/gpu_pad_DISABLED")
-        text = text.replace(pre + ".cache/phd/", f"{r}/state/")
+        for k, v in HOME_MAP.items():
+            text = text.replace(pre + h + k, f"{r}/{v}")
+        text = text.replace(pre + h, f"{r}/state/")
     return text
 
 
 # ---------------- 核对 ----------------
-def nnunet_python():
-    """本机 nnunet 环境的 python（和那边的 conda 环境同一个 Python 版本），用来核对能编译。"""
+def check_python():
+    """本机 OUTPUTS["bundle_check"] 那个环境的 python（和那边的 conda 环境同一个 Python 版本），用来核对能编译；没写时 None。"""
     me = M.whoami()
     m = M.MACHINES.get(me) or {}
-    e = (m.get("envs") or {}).get("nnunet")
+    e = (m.get("envs") or {}).get(getattr(P, "OUTPUTS", {}).get("bundle_check"))
     if not e or e[0] != "conda":
         return None
     p = os.path.join(M.expand(m["conda"][0]), "envs", e[1], "bin", "python")
@@ -217,7 +223,7 @@ def secret_hits(files):
 def check(d, files):
     pys = [os.path.join(d, f) for f in files if f.endswith(".py")]
     prog = "import sys\nfor f in sys.argv[1:]:\n    compile(open(f, 'rb').read(), f, 'exec')\n"
-    for py in filter(None, [sys.executable, nnunet_python()]):
+    for py in filter(None, [sys.executable, check_python()]):
         r = subprocess.run([py, "-c", prog, *pys], capture_output=True, text=True)
         if r.returncode:
             raise BundleError(f"{py} 编译不过：{r.stderr.strip()[-500:]}")
@@ -242,7 +248,7 @@ def contents(name, commit="origin/main", root=None, entry=None):
             raise BundleError(f"{path} 不是 UTF-8：{err}") from None
         out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
     out["envs/machines.py"] = (home_paths(gen_machines(read_machines(commit), name, m), root), True)
-    out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True), e.get("gpu_aug", False), e.get("gpu_aug_loader", False)), False)
+    out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True)), False)
     for tpl in SBATCH.values():
         out.pop(tpl, None)
     if m["scheduler"] == "slurm":

@@ -3,9 +3,10 @@
 调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（scripts/monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
 
 命令行：
-  spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开）
+  spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
+                                     再加本机 envs/machines.py 的 task_vars 里还没设的）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
-  spec.py lookup <key>               按 key 找任务（先查实验表 research/*/experiments.py，再查训练队列），打印说明（JSON）
+  spec.py lookup <key>               按 key 找任务（先查实验表（experiments.py），再查训练队列），打印说明（JSON）
 k=v 的值以 [ 或 { 开头时按 JSON 读（如 done='["a","b|c"]'），其他都是字符串。
 """
 import fnmatch
@@ -453,6 +454,14 @@ def shell_lines(s, data, repo=REPO):
     return "\n".join(lines)
 
 
+def machine_vars():
+    """本机 envs/machines.py 的 task_vars → shell 语句：已经设了（非空）的不改。"""
+    import machines as M
+    me = M.whoami()
+    tv = ((M.MACHINES.get(me) or {}).get("task_vars") or {}) if me else {}
+    return [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items()]
+
+
 def main(argv):
     sys.path.insert(0, HERE)
     import cfg
@@ -475,7 +484,7 @@ def main(argv):
     except SpecError as e:
         print(f"spec.py：{e}", file=sys.stderr)
         return 2
-    data = os.environ.get("TASKQ_DATA") or os.environ.get("BRAIN_TUMOR")
+    data = cfg.env("TASKQ_DATA")
     if not data:
         import machines as M
         me = M.whoami()
@@ -483,7 +492,7 @@ def main(argv):
     if cmd == "lookup":
         print(json.dumps(s, ensure_ascii=False, indent=1))
     elif cmd == "shell":
-        print(shell_lines(s, data))
+        print("\n".join([shell_lines(s, data)] + machine_vars()))
     elif cmd == "done":
         return 0 if is_done(s, data) else 1
     return 0

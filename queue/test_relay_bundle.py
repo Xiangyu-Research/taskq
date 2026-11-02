@@ -97,10 +97,10 @@ def test_bundle(T):
     act = run(["python3", mp, "activate", "nnunet"]).stdout
     assert f"conda activate {e['envs']['nnunet'][1]}" in act and e["conda"][0] in act
     pol = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import machines, policy; "
-               "print(int(bool(policy.STAGE_TMP.get(machines.whoami()))), int(bool(policy.GPU_AUG.get(machines.whoami()))))",
+               "print(int(bool(policy.STAGE_TMP.get(machines.whoami()))), int(bool(machines.MACHINES[machines.whoami()].get('task_vars'))))",
                os.path.join(cur, "envs")]).stdout.split()
     assert pol == ["1", "0"], pol
-    ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、GPU_AUG 关")
+    ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、没有 task_vars")
 
     sb = open(os.path.join(cur, "scripts/queue/worker.sbatch")).read().split("\n")
     real = open(os.path.join(REPO, "scripts/queue/worker.sbatch")).read()

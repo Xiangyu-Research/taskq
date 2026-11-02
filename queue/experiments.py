@@ -1,10 +1,10 @@
-"""读所有研究问题的实验表（research/*/experiments.py，2026-10-18），展开成一个个任务。
+"""读所有实验表（envs/policy.py 的 OUTPUTS["experiments"]，相对仓库根目录的 glob；2026-10-18），展开成一个个任务。
 taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读；
 分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
 
-实验的字段：id、exp、label、model、hours、recipe、params、fields、each、after、group_after、names（见 RQ1 的表），
+实验的字段：id、exp、label、model、hours、recipe、params、fields、each、after、group_after、names（见各实验表），
 另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。
-each：{参数: [取值…]}，一个实验按这些参数的每种组合展开成一组任务（如 {"fold": ["0", "1"]}）；没有就是一个任务。
+each：{参数: [取值…]}，一个实验按这些参数的每种组合展开成一组任务（如 {"seed": ["0", "1"]}）；没有就是一个任务。
 表的模块里另外可以有 FINAL（所有实验做完后的步骤）、KEEP_DATA（keep_data()）。"""
 import glob
 import importlib.util
@@ -16,17 +16,19 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+import cfg  # noqa: E402
 import spec  # noqa: E402
 
 _cache = {}
 
 
 def load():
-    """→ (实验列表, 结束步骤列表)。每个实验加上 rq（所在的研究问题文件夹）。id、任务名重复时报错。"""
+    """→ (实验列表, 结束步骤列表)。每个实验加上 rq（实验表所在的文件夹名）。id、任务名重复时报错。"""
     if "exps" in _cache:
         return _cache["exps"], _cache["final"]
     exps, final, keep = [], [], []
-    for path in sorted(glob.glob(os.path.join(REPO, "research", "*", "experiments.py"))):
+    pat = cfg.outputs("experiments")
+    for path in sorted(glob.glob(os.path.join(REPO, pat))) if pat else []:
         rq = os.path.basename(os.path.dirname(path))
         sp = importlib.util.spec_from_file_location(f"experiments_{rq}", path)
         mod = importlib.util.module_from_spec(sp)
@@ -147,7 +149,7 @@ def experiment_of(model_dir):
 
 
 def names_of(model_dir, *names):
-    """模型文件夹 → 它所属实验的 names 里这几项（没有的给空串），分析脚本按这个取实验的声明（如 RQ1 的 skip_ext、splits）。
+    """模型文件夹 → 它所属实验的 names 里这几项（没有的给空串），分析脚本按这个取实验的声明（如 skip_ext、splits）。
     表里没有这个模型时报 SpecError：不按名字猜。"""
     e = experiment_of(model_dir)
     if e is None:

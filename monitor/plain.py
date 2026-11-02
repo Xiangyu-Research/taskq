@@ -42,7 +42,8 @@ def fold(key):
 def plan_items():
     """各 RQ 分析计划表里的编号 → 问题（"C3" → "混合训练是否改变对水肿 / 合成病灶的依赖？"）。"""
     out = {}
-    for f in sorted(glob.glob(os.path.join(REPO, "research", "*", "分析计划.md"))):
+    pat = cfg.outputs("plans")
+    for f in sorted(glob.glob(os.path.join(REPO, pat))) if pat else []:
         for ln in open(f, encoding="utf-8"):
             m = re.match(r"\| ([A-Z]\d+) \| ([^|]+?) \|", ln)
             if m:

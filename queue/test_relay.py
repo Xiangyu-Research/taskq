@@ -55,7 +55,7 @@ NAME = next(iter(M.RELAY))
 RROOT = os.path.join(T, "remote")
 CONDA = os.path.join(T, "conda")
 os.makedirs(os.path.join(CONDA, "bin"))
-os.symlink(relay_bundle.nnunet_python(), os.path.join(CONDA, "bin", "python3"))
+os.symlink(relay_bundle.check_python(), os.path.join(CONDA, "bin", "python3"))
 M.RELAY[NAME] = dict(M.RELAY[NAME], root=RROOT, conda=(CONDA, "pt"), transfer_job="-p test")
 Q = "box"  # 总队列所在的机器（taskq.queue_host()，10/31）
 assert relay.taskq.queue_host() == Q

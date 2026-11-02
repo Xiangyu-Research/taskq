@@ -163,9 +163,9 @@ def setup():
     wb(os.path.join(SPECS, "toy.check.py"), "import numpy\nprint('numpy', numpy.__version__)\n")
     M.SPECS = SPECS
     # 假的 conda、指到自己 pueued 的 pueue
-    py = RB.nnunet_python()
+    py = RB.check_python()
     if not py:
-        raise SystemExit("本机没有 nnunet 环境（RB.nnunet_python），跑不了")
+        raise SystemExit("本机没有 nnunet 环境（RB.check_python），跑不了")
     os.makedirs(os.path.join(CONDA, "bin"))
     for n in ("python3", "python"):
         os.symlink(py, os.path.join(CONDA, "bin", n))
