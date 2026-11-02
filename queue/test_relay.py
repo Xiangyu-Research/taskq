@@ -323,6 +323,8 @@ def test_plan():
 
     acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "free")), st)
     assert ops(acts) == [("unq", K)] and acts[0]["to"] == "other" and not stuck, acts
+    acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "stopped")), st)
+    assert ops(acts) == [("unq", K)] and not stuck, acts
     ust = dict(keys={NAME: {K: dict(st["keys"][NAME][K], recipe="nnunet", params=dict(dataset="Dataset901_ab", fold="0"), unq=1.0)}})
     acts, _ = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(), ust)
     assert ops(acts) == [], acts
@@ -330,7 +332,7 @@ def test_plan():
     assert ops(acts) == [("drop", K)] and acts[0].get("gone") and acts[0]["rkey"] == A, acts
     acts, _ = relay.plan(S0([]), NAME, RS(), ust)
     assert ops(acts) == [("drop", K)] and acts[0].get("gone"), acts
-    ok("总队列里改分给了别的执行机（换卡）→ 那边队列里删掉（unq）、结果留着给它收编；总队列训完了再删结果（不再删队列）")
+    ok("总队列里改分给了别的执行机（换卡；那边停着的也算）→ 那边队列里删掉（unq）、结果留着给它收编；总队列训完了再删结果（不再删队列）")
 
     old = keymap((K, "Dataset901_ab/tr/0"))
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "123")), old)

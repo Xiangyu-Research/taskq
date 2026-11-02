@@ -863,7 +863,7 @@ def plan(s, name, rs, st, now=None):
             stuck[f"site:{name}:orphan:{real}"] = f"{L} 在训 {real}，但总队列里不是它领着；看总队列和 {L} 的队列"
         elif m is None or m["state"] == "done":
             acts.append(dict(op="drop", key=real, rkey=a["key"]))
-        elif a["state"] != "stopped" and m.get("worker") and m["worker"] != name:  # 改分给了别的执行机：结果留给它收编
+        elif m.get("worker") and m["worker"] != name:  # 改分给了别的执行机（那边停着的也算，11/2）：结果留给它收编
             acts.append(dict(op="unq", key=real, rkey=a["key"], to=m["worker"]))
         elif a["state"] != "stopped":
             acts.append(dict(op="rstop", key=real, rkey=a["key"]))
