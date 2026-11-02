@@ -18,7 +18,7 @@ set -euo pipefail
 HOST=${1:?用法：archive_task.sh <机器> <key> [--dry-run]} KEY=${2:?用法：archive_task.sh <机器> <key> [--dry-run]}
 DRY=${3:-}
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
-M="python3 $REPO/envs/machines.py"
+M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
 SRCH= SRCD=
 if [[ $HOST != "$($M names hub | head -1)" ]]; then
     SRCH=$($M get "$HOST" ssh) SRCD=$($M get "$HOST" data)

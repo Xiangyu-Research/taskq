@@ -6,7 +6,9 @@ import os
 import secrets
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "envs"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts", "queue"))
+import cfg  # noqa: E402
+cfg.use_config()
 import policy as P  # noqa: E402
 
 SUBMIT_CAP = 10  # 读不到 QOS 的排队上限时按这个算

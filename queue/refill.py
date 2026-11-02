@@ -38,7 +38,9 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "envs"))
+sys.path.insert(0, HERE)
+import cfg  # noqa: E402
+cfg.use_config()
 sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))

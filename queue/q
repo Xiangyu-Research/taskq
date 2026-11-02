@@ -9,7 +9,7 @@
 set -euo pipefail
 G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
 HERE=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
-SRC=$(python3 "$HERE/envs/machines.py" get . repo) CODE=$(python3 "$HERE/envs/machines.py" get . code)
+SRC=$(python3 "${TASKQ_CONFIG:-$HERE/envs}/machines.py" get . repo) CODE=$(python3 "${TASKQ_CONFIG:-$HERE/envs}/machines.py" get . code)
 if [[ -n $CODE ]]; then
     bash "$HERE/scripts/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
     REPO=$(readlink -f "$CODE")
@@ -18,7 +18,7 @@ else
 fi
 [[ -d $REPO ]] || { echo "q：没有工作目录 $REPO" >&2; exit 2; }
 echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）"
-ENV=$(python3 "$REPO/envs/machines.py" q-env "$G") || exit 2
+ENV=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 source "$REPO/envs/nnunet_paths.sh"  # 数据目录、nnUNet_raw / preprocessed / results：直接调 python 的分析任务也要用

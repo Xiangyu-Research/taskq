@@ -10,7 +10,7 @@
 set -euo pipefail
 HOST=${1:?用法：fetch_task.sh <机器> <key>} KEY=${2:?用法：fetch_task.sh <机器> <key>}
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
-M="python3 $REPO/envs/machines.py"
+M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
 SSH=$($M get "$HOST" ssh)
 [[ -n $SSH ]] || { echo "envs/machines.py 里没有可以拉回的机器 $HOST" >&2; exit 2; }
 RDATA=$($M get "$HOST" data) LDATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}

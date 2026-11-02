@@ -47,7 +47,9 @@ def log(msg):
 
 
 def machines():
-    sys.path.insert(0, os.path.join(REPO, "envs"))
+    sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+    import cfg
+    cfg.use_config()
     import machines as M
     return M
 

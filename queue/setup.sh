@@ -8,7 +8,7 @@
 set -euo pipefail
 P=~/.local/bin/pueue
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
-M="python3 $REPO/envs/machines.py"
+M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
 me=$($M whoami) || { echo "envs/machines.py 里没有这台机器（$(hostname -s)）" >&2; exit 1; }
 [[ $($M get . scheduler) == pueue ]] || { echo "$me 不用 pueue" >&2; exit 1; }
 [[ -x $P ]] || bash "$REPO/scripts/queue/install_pueue.sh"

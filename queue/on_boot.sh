@@ -9,7 +9,7 @@ P=~/.local/bin/pueue
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
 log() { echo "$(date '+%F %T') $*"; }
 sleep 30  # 等网络和数据盘
-if [[ -n $(python3 "$REPO/envs/machines.py" get . gpu_log) ]] && ! pgrep -f "scripts/monitor/gpu_log.sh" > /dev/null; then
+if [[ -n $(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . gpu_log) ]] && ! pgrep -f "scripts/monitor/gpu_log.sh" > /dev/null; then
     setsid -f bash "$REPO/scripts/monitor/gpu_log.sh" > /dev/null 2>&1 < /dev/null && log "已启动 GPU 使用记录"
 fi
 if ! $P status > /dev/null 2>&1; then

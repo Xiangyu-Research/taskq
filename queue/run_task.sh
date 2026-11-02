@@ -16,7 +16,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v…" >&2; exit 2; }
-DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
+DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
 [[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit 2; }
 export TASKQ_DATA=$DATA BRAIN_TUMOR=$DATA
 SH=$(python3 "$HERE/spec.py" shell "$@") || exit 2
@@ -24,7 +24,7 @@ eval "$SH"
 ts() { date '+%F %T'; }
 done_() { python3 "$HERE/spec.py" done "$@"; }
 if done_ "$@"; then echo "$(ts) 已经训完：$TASK_KEY"; exit 0; fi
-ACT=$(python3 "$REPO/envs/machines.py" activate "$TASK_ENV") || { echo "这台机器没有环境 $TASK_ENV（envs/machines.py）" >&2; exit 2; }
+ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { echo "这台机器没有环境 $TASK_ENV（envs/machines.py）" >&2; exit 2; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
 if [[ -n ${TASK_PART:-} ]]; then PART=$TASK_PART PSUF=part
 elif [[ -n ${TASK_SEG:-} ]]; then PART=$TASK_SEG PSUF=seg

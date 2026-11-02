@@ -20,8 +20,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+import cfg  # noqa: E402
+cfg.use_config()
 sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
 import machines as M  # noqa: E402
 

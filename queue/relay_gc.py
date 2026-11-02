@@ -144,7 +144,9 @@ spec.json_out(out)
 
 
 def budget(name):
-    sys.path.insert(0, os.path.join(REPO, "envs"))
+    sys.path.insert(0, HERE)
+    import cfg
+    cfg.use_config()
     import machines as M
     return M.machine(name).get("budget")
 

@@ -19,7 +19,7 @@ SRC=${2:?用法：tunnel_push.sh <机器> <源目录> <目标目录> <子目录>
 DEST=${3:?用法：tunnel_push.sh <机器> <源目录> <目标目录> <子目录>...}
 shift 3
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
-H=$(python3 "$REPO/envs/machines.py" get "$HOST" ssh)
+H=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以传过去的机器 $HOST" >&2; exit 2; }
 (( $# > 0 )) || { echo "至少给一个子目录" >&2; exit 2; }
 SUBS=("$@")

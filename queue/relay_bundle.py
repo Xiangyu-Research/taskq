@@ -22,7 +22,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "envs"))
+sys.path.insert(0, HERE)
+import cfg  # noqa: E402
+cfg.use_config()
 sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
 import machines as M  # noqa: E402
 import remote as RM  # noqa: E402
@@ -99,9 +101,17 @@ def read(commit, path):
     return open(os.path.join(REPO, path), "rb").read().decode() if commit is None else git("show", f"{commit}:{path}")
 
 
+def read_machines(commit):
+    """配置文件夹在仓库里时取提交里的 machines.py，在仓库外（TASKQ_CONFIG）时读文件。"""
+    rel = os.path.relpath(os.path.realpath(cfg.config_dir()), os.path.realpath(REPO))
+    if rel == ".." or rel.startswith("../"):
+        return open(os.path.join(cfg.config_dir(), "machines.py"), encoding="utf-8").read()
+    return read(commit, f"{rel}/machines.py")
+
+
 def relay_entry(commit, name):
     ns = {"__name__": "relay_machines"}
-    exec(compile(read(commit, "envs/machines.py"), "machines.py", "exec"), ns)
+    exec(compile(read_machines(commit), "machines.py", "exec"), ns)
     relay = ns.get("RELAY") or {}
     if name not in relay:
         raise BundleError(f"{commit or '工作区'} 的 envs/machines.py 的 RELAY 里没有 {name}")
@@ -230,7 +240,7 @@ def contents(name, commit="origin/main", root=None, entry=None):
         except UnicodeDecodeError as err:
             raise BundleError(f"{path} 不是 UTF-8：{err}") from None
         out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
-    out["envs/machines.py"] = (home_paths(gen_machines(read(commit, "envs/machines.py"), name, m), root), True)
+    out["envs/machines.py"] = (home_paths(gen_machines(read_machines(commit), name, m), root), True)
     out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True), e.get("gpu_aug", False), e.get("gpu_aug_loader", False)), False)
     for tpl in SBATCH.values():
         out.pop(tpl, None)

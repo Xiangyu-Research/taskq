@@ -8,7 +8,7 @@ OP=${1:?用法：offload_io.sh push|pull <机器> <路径>...} HOST=${2:?缺机�
 shift 2
 (( $# > 0 )) || { echo "至少给一个路径" >&2; exit 2; }
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
-M="python3 $REPO/envs/machines.py"
+M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
 H=$($M get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以连过去的机器 $HOST" >&2; exit 2; }
 RD=$($M get "$HOST" data) LD=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}

@@ -15,7 +15,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, "..", "..", "envs"))
+import cfg  # noqa: E402
+cfg.use_config()
 import common as C  # noqa: E402
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402

@@ -450,7 +450,8 @@ def shell_lines(s, data, repo=REPO):
 
 def main(argv):
     sys.path.insert(0, HERE)
-    sys.path.insert(0, os.path.join(REPO, "envs"))
+    import cfg
+    cfg.use_config()
     if not argv:
         print(__doc__.split("命令行：")[1], file=sys.stderr)
         return 2

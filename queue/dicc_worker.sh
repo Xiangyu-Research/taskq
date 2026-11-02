@@ -36,9 +36,9 @@ TQPY="python3 $HERE/taskq.py"
 if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
 W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
 DEVICE=${WORKER_DEVICE:-gpu}
-DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "$REPO/envs/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
+DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
 export TASKQ_DATA=$DATA BRAIN_TUMOR=$DATA
-ENVS=${TASKQ_ENVS:-$(python3 "$REPO/envs/machines.py" get . envs | tr ' ' ,)}
+ENVS=${TASKQ_ENVS:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 # Slurm 外（pueue 的常驻 worker）：最多用 TASKQ_CPUS 个核（envs/machines.py 的 cpu_worker 的 cpus），和别人共用这台机器
 if (( ! INSLURM )) && [[ ${TASKQ_CPUS:-} =~ ^[0-9]+$ ]] && (( TASKQ_CPUS > 0 && TASKQ_CPUS < NCPU )); then NCPU=$TASKQ_CPUS; fi
@@ -46,7 +46,7 @@ MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
 if [[ $DEVICE == cpu ]]; then
     SLOTS=1
 elif (( ! INSLURM )); then
-    SLOTS=${TASKQ_SLOTS:-$(python3 "$REPO/envs/machines.py" get . slots 2> /dev/null || true)}
+    SLOTS=${TASKQ_SLOTS:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . slots 2> /dev/null || true)}
     [[ $SLOTS =~ ^[0-9]+$ ]] || SLOTS=1
 elif (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
     SLOTS=${TASKQ_SLOTS:-2}   # 最多同时训几个

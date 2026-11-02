@@ -55,7 +55,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "envs"))
+import cfg  # noqa: E402
+cfg.use_config()
 sys.path.insert(0, os.path.join(REPO, "scripts", "sync"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
