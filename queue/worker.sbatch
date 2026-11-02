@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --job-name=train_worker
 #SBATCH --partition=gpu-a100
 #SBATCH --qos=long
 #SBATCH --time=3-00:00:00

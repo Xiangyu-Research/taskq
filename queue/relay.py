@@ -216,8 +216,7 @@ def rpy(name, code, data=None, timeout=600, job=None):
     job：Slurm 的 srun 参数（machines.py 的 adopt_job），在 CPU 节点上跑；排不上 → NoSlot。"""
     cmd = f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {R.q(root(name))}"
     if job:
-        jname = (conf(name).get("jobs") or {}).get("transfer") or "tq_xfer"
-        cmd = f"srun -I{JOB_WAIT} {job} -J {jname} bash -c {shlex.quote(cmd)}"
+        cmd = f"srun -I{JOB_WAIT} {job} -J {SL.jobname()} bash -c {shlex.quote(cmd)}"
         timeout += JOB_WAIT
     rc, out, err = rsh(name, cmd, input=json.dumps(data), timeout=timeout)
     if job and rc and S.json_in(out) is None and any(x in err for x in ("Unable to allocate", "Immediate", "revoked")):

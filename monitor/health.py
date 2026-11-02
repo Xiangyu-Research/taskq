@@ -41,6 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(REPO, "envs"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
 import machines as M  # noqa: E402
 import policy  # noqa: E402
 import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
@@ -48,6 +49,7 @@ import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上�
 import taskq  # noqa: E402  scripts/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
 import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
 import common as C  # noqa: E402  scripts/queue/common.py
+import slurm as SL  # noqa: E402  scripts/sites/slurm.py
 from common import write_json  # noqa: E402
 
 STATE = os.path.expanduser("~/.cache/phd-health/state.json")
@@ -65,12 +67,12 @@ def stopped(t):
 
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
-SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y|%P'; echo '=====';"
+SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y|%P|%o'; echo '=====';"
                " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
 
 
-def is_worker_job(machine, job):
-    return job in M.worker_jobs(machine)  # scripts/queue/worker.sbatch，和以前用过的名字（CPU worker 不算）
+def is_worker_job(row):
+    return SL.kind_of(row[7]) == "gpu"  # squeue 的一行：交的脚本是 worker.sbatch（CPU worker 不算；作业名每次随机，不按名字认）
 
 
 def data_candidates(queue=()):
@@ -170,7 +172,7 @@ def gather(remote=True):
             ok = rc == 0 and "=====" in out
             if ok:
                 q, a = out.split("=====", 1)
-                s["slurm"][name] = dict(squeue=[ln.split("|") for ln in q.splitlines() if ln.count("|") == 6],  # 作业名、号、状态、已跑、原因、Nice、分区
+                s["slurm"][name] = dict(squeue=[ln.split("|", 7) for ln in q.splitlines() if ln.count("|") >= 7],  # 作业名、号、状态、已跑、原因、Nice、分区、脚本
                                         sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
                 if "train" in m["roles"]:
                     s["taskq"][name] = taskq.remote_status(name)
@@ -281,14 +283,14 @@ def check(s):
         tq = s.get("taskq", {}).get(name)
         if tq and tq["enabled"]:
             # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
-            run = [r for r in d["squeue"] if is_worker_job(name, r[0]) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
+            run = [r for r in d["squeue"] if is_worker_job(r) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
             workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
             if len(run) > len(workers):
                 add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
                     "（看作业的 .out：可能在等刚停下的任务、队列暂停或出错）")
             # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了：refill.py 应该已经补交了 worker.sbatch
             left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
-            if left and not any(is_worker_job(name, r[0]) for r in d["squeue"]):
+            if left and not any(is_worker_job(r) for r in d["squeue"]):
                 add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
                     "（envs/policy.py 的 AUTO[\"dicc\"] 关着？看 ~/refill.log）", after=60)
             for jid, jname, st, end, code in d["sacct"]:

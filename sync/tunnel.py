@@ -264,11 +264,11 @@ def run_remote(host, mode, plan, serve, total):
         base = relay["root"].rstrip("/")
         job = relay.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
         pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(src, base)
-        jname, script = (relay.get("jobs") or {}).get("transfer") or f"tunnel{mode}", "xfer.py"
+        script = "xfer.py"
         base += "/tmp"
     else:
         job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
-        jname, script = f"tunnel{mode}", "tunnel.py"
+        script = "tunnel.py"
         base = "~/.cache/phd/tunnel"
     wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p {base} && mkdir -m 700 $d && cd $d && pwd").strip()
     ssh(host, f"cat > {wd}/{script}", input=src)
@@ -276,7 +276,9 @@ def run_remote(host, mode, plan, serve, total):
     run = [f"cd {wd}"]
     if job:
         t = max(30, int(total / 5e6 / 60) + 10)
-        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {jname} {pyx} {script} {mode} plan.json >> log 2>&1")
+        sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+        import slurm  # 作业名每次随机
+        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname()} {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")

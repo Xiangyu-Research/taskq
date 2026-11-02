@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -414,7 +415,7 @@ def test_plan():
     try:
         more, why = relay.fill(S0([mtask(K)] + hi + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
         assert more == [] and "排着 1" in why, (more, why)
-        M.RELAY[NAME]["jobs"] = dict(jobs0, cpu="x_cpu")
+        M.RELAY[NAME]["jobs"] = tuple(jobs0) + ("cpu",)
         more, why = relay.fill(S0([mtask(K)] + hi + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
         assert [a["key"] for a in more] == [E1], (more, why)
         more, why = relay.fill(S0([mtask(K), ctask(E1, "claimed", NAME)] + hi + [ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
@@ -714,7 +715,7 @@ def test_adapters_in_relay():
     relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append((name, cmd)), (0, "4870\n", ""))[1]), relay.rsh
     try:
         msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2, "worker.sbatch")])
-        assert not stuck and len(seen) == 2 and all("sbatch --parsable --qos=long --time=1:00:00 worker.sbatch" in c for _, c in seen)
+        assert not stuck and len(seen) == 2 and all(re.search(r"sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=1:00:00 worker.sbatch", c) for _, c in seen)
         assert seen[0][1].startswith(f"cd {relay.R.q(relay.root(NAME))}/code/current/scripts/queue && ")
         seen.clear()
         msgs, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])

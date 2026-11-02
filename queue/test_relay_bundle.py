@@ -108,7 +108,7 @@ def test_bundle(T):
         if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
             assert ln in sb, ln
     assert "#SBATCH --cpus-per-task=30" in sb and "#SBATCH --mem=60G" in sb, sb
-    assert f"#SBATCH --job-name={e['jobs']['gpu']}" in sb
+    assert not any(x.startswith("#SBATCH --job-name") for x in sb), sb
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
     assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
@@ -156,23 +156,23 @@ def test_bundle(T):
 def test_cpu_sbatch(T):
     """jobs 里有 cpu 的 Slurm 执行机：另外生成 cpu_worker.sbatch（作业名、资源按 sbatch.cpu，WORKER_DEVICE=cpu）。"""
     R = "~/st/abc"
-    entry = dict(jobs=dict(gpu="tq_fit", cpu="tq_cpu"), sbatch=dict(gpu=dict(cpus=30, mem="60G"), cpu=dict(cpus=8, mem="16G")))
+    entry = dict(jobs=("gpu", "cpu"), sbatch=dict(gpu=dict(cpus=30, mem="60G"), cpu=dict(cpus=8, mem="16G")))
     files = B.contents(NAME, None, root=R, entry=entry)
     sb = files["scripts/queue/cpu_worker.sbatch"][0].split("\n")
     real = open(os.path.join(REPO, "scripts/queue/cpu_worker.sbatch")).read()
     for ln in real.split("\n"):
         if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
             assert ln in sb, ln
-    assert "#SBATCH --job-name=tq_cpu" in sb and "#SBATCH --cpus-per-task=8" in sb and "#SBATCH --mem=16G" in sb, sb
+    assert not any(x.startswith("#SBATCH --job-name") for x in sb) and "#SBATCH --cpus-per-task=8" in sb and "#SBATCH --mem=16G" in sb, sb
     assert "#SBATCH --output=../../../../data/logs/workers/%x_%j.out" in sb and "R=~/st/abc" in sb, sb
     assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED WORKER_DEVICE=cpu" in sb
     assert sb[-2] == 'exec bash "$REPO/scripts/queue/worker_start.sh"' and "git" not in "\n".join(sb)
     gsb = files["scripts/queue/worker.sbatch"][0]
     assert "#SBATCH --cpus-per-task=30" in gsb and "WORKER_DEVICE" not in gsb
-    old = B.contents(NAME, None, root=R, entry=dict(jobs=dict(gpu="tq_fit", cpu="tq_cpu"), sbatch=dict(cpus=30, mem="60G")))
+    old = B.contents(NAME, None, root=R, entry=dict(jobs=("gpu", "cpu"), sbatch=dict(cpus=30, mem="60G")))
     assert "#SBATCH --cpus-per-task=30" in old["scripts/queue/worker.sbatch"][0]
     assert "#SBATCH --cpus-per-task=30" not in old["scripts/queue/cpu_worker.sbatch"][0]
-    ok("cpu_worker.sbatch：jobs.cpu 有时生成，作业名、资源按 sbatch.cpu（老写法的 sbatch 只算 gpu），WORKER_DEVICE=cpu，入口 worker_start.sh")
+    ok("cpu_worker.sbatch：jobs.cpu 有时生成，不带作业名，资源按 sbatch.cpu（老写法的 sbatch 只算 gpu），WORKER_DEVICE=cpu，入口 worker_start.sh")
 
 
 def test_pueue_site(T):

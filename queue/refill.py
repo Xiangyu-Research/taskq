@@ -350,7 +350,7 @@ def topup_all(s, dry=False):
     return events, stuck
 
 
-GPU_FILE, CPU_FILE = "worker.sbatch", "cpu_worker.sbatch"
+GPU_FILE, CPU_FILE = SL.FILES["gpu"], SL.FILES["cpu"]
 
 
 def unclaimed(tq, device):

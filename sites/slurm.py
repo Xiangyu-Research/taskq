@@ -3,26 +3,49 @@
 交的是那台的 worker.sbatch，它转交 worker_start.sh（开显存填充 gpu_pad，gpu-a100 要求 >= 40GB）。
 run：fn(命令) → (退出码, 输出)，由调用方绑好机器（测试替换）。"""
 import os
+import secrets
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "envs"))
 import policy as P  # noqa: E402
-import machines as M  # noqa: E402
 
 SUBMIT_CAP = 10  # 读不到 QOS 的排队上限时按这个算
+FILES = {"gpu": "worker.sbatch", "cpu": "cpu_worker.sbatch"}  # worker 的种类 → sbatch 文件；认 worker 按 squeue 的 %o（交的脚本）
+
+# 作业名每次随机取 <词>-<词>（11/2 定：各账号、各作业的名字都不一样），不靠名字认作业
+_W1 = ("amber azure bold brisk calm clear coral crisp dawn deep dry eager early fair fast fern firm fresh gentle glad gold "
+       "grand green grey hazy keen kind late light lime lively lone loyal lucky mellow merry mild misty modest neat noble "
+       "pale plain polar proud quick quiet rapid rare ready red rosy round royal ruby rustic sandy sharp shy silent silver "
+       "simple sleek slow smooth snowy soft solar solid steady still stout sunny swift tall tidy topaz true vast warm wild wise").split()
+_W2 = ("acorn alder anchor apple arch aspen badger basin beacon birch bison bloom brook cabin canyon cedar cliff clover comet "
+       "coral crane creek delta dune eagle ember falcon fern finch fjord forest fox garnet glade grove harbor hawk heron hill "
+       "island ivy jade lagoon lake lark laurel lynx maple marsh meadow mesa moose moss oak orchid otter owl pebble pine plover "
+       "pond prairie quail raven reef ridge river robin sage shore sparrow spruce stone summit swan thicket tide trail tulip "
+       "valley willow wren yew").split()
+
+
+def jobname():
+    """一个随机的作业名 <词>-<词>。"""
+    return f"{secrets.choice(_W1)}-{secrets.choice(_W2)}"
+
+
+def kind_of(command):
+    """squeue 的 %o（交的脚本的路径）→ worker 的种类（FILES）；不是 worker（传输作业、手动的作业）→ None。"""
+    base = (command or "").strip().rsplit("/", 1)[-1]
+    return next((k for k, f in FILES.items() if base == f), None)
 
 
 def probe(name):
     """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数|其中还在排（没开始）的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
     "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
-    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM，作业名来自 envs/machines.py 的 jobs（加上 jobs_legacy 里以前用过的）。"""
+    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM；CPU worker 按交的脚本（FILES["cpu"]）认。"""
     conf = P.SLURM[name]
     out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
         "ids=$(squeue -u $USER -h -r -q $q -o %i); pd=$(squeue -u $USER -h -r -q $q -t PD -o %i); " \
         "echo \"QOS|$q|$lim|$(printf '%s' \"$ids\" | grep -c . || true)|$(printf '%s' \"$pd\" | grep -c . || true)\"; done"
     if conf.get("cpu"):
-        out += f"; ids=$(squeue -u $USER -h -r -n {','.join(M.worker_jobs(name, 'cpu'))} -o %i); " \
-            "echo \"CPU|$(printf '%s' \"$ids\" | grep -c . || true)\"; " \
+        out += "; cmds=$(squeue -u $USER -h -r -o %o); " \
+            f"echo \"CPU|$(printf '%s\\n' \"$cmds\" | grep -cE '(^|/){FILES['cpu'].replace('.', '[.]')}$' || true)\"; " \
             f"lim=$(sacctmgr -nP show qos {conf['cpu'][0]} format=maxsubmitpu); " \
             "ids=$(squeue -u $USER -h -r -o %i); echo \"ALL|$lim|$(printf '%s' \"$ids\" | grep -c . || true)\""
     return out
@@ -68,12 +91,12 @@ def distribute(qos, counts, room, file):
 
 
 def start_workers(cwd, subs, run):
-    """在 cwd（那边放 sbatch 文件的目录，shell 写法）交 subs → [dict(qos, time, n=要交几个, file, ids, err)]；一个 QOS 出错就停这个 QOS。"""
+    """在 cwd（那边放 sbatch 文件的目录，shell 写法）交 subs（每个作业一个随机名字）→ [dict(qos, time, n=要交几个, file, ids, err)]；一个 QOS 出错就停这个 QOS。"""
     res = []
     for q, t, n, f in subs:
         ids, err = [], None
         for _ in range(n):
-            rc, out = run(f"cd {cwd} && sbatch --parsable --qos={q} --time={t} {f}")
+            rc, out = run(f"cd {cwd} && sbatch --parsable -J {jobname()} --qos={q} --time={t} {f}")
             if rc:
                 err = out[-200:]
                 break

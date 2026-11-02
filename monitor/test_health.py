@@ -131,7 +131,7 @@ H.time.time = lambda: NOW.timestamp()
 P = H.check(s)
 ok("总队列分给 lab、lab 在训：不算同一折两处，也不算卡住", f"dup:{MEN0}" not in P and not [k for k in P if k.startswith("stuck:") and MEN0 in k])
 s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
-s["slurm"] = sq(["train_worker", "486191_2", "RUNNING", "3:00:00", "None", "0"])
+s["slurm"] = sq(["brave-otter", "486191_2", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
 ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
 INF = "infer/Dataset103_GLIrq1_t1c/x/fold_2"
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=120)]
@@ -144,22 +144,22 @@ s["taskq"]["dicc"]["tasks"] = []
 s["pueue"]["lab"]["tasks"] = []
 ok("在跑的 DICC 作业、缓冲里没人领：报有卡空着", "tqidle:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "waiting", None), tqrow(MET2, "claimed", "491480", since=old, task_log_age=60)]
-s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
+s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
 ok("提前排的推理在等训练（waiting）：不报、不算没人训、不算有卡空着", not {f"tqblocked:{INF}", "tqorphan:dicc", "tqidle:dicc"} & ids(s))
 s["taskq"]["dicc"]["tasks"][0] = dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次")
 ok("等的任务失败了（blocked）：报出来", "失败 2 次" in H.check(s).get(f"tqblocked:{INF}", {}).get("msg", ""))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None, since=old)]
 s["slurm"] = sq()
 ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "AUTO" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
-s["slurm"] = sq(["train_worker", "486300_1", "PENDING", "0:00", "Priority", "2000"])
+s["slurm"] = sq(["brave-otter", "486300_1", "PENDING", "0:00", "Priority", "2000", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
 ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
-s["slurm"] = sq(["train_worker", "487000_1", "PENDING", "0:00", "Priority", "0"])
-ok("排着不带折的 train_worker 作业也算：不提醒", "tqorphan:dicc" not in H.check(s))
-s["slurm"] = sq(["cpu_worker", "487001", "RUNNING", "1:00:00", "None", "0"])
-ok("只有 CPU worker 在跑：还是提醒没人训（作业名按 envs/machines.py 的 jobs）", "tqorphan:dicc" in H.check(s))
+s["slurm"] = sq(["brave-otter", "487000_1", "PENDING", "0:00", "Priority", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+ok("排着的 worker 作业（按交的脚本认，名字随机）也算：不提醒", "tqorphan:dicc" not in H.check(s))
+s["slurm"] = sq(["calm-heron", "487001", "RUNNING", "1:00:00", "None", "0", "normal", "/home/u/q/code/current/scripts/queue/cpu_worker.sbatch"])
+ok("只有 CPU worker 在跑：还是提醒没人训（按交的脚本认）", "tqorphan:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None)]
-s["slurm"] = sq(["train_worker", "487000_1", "RUNNING", "3:00:00", "None", "0"])
-ok("在跑的 train_worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
+s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+ok("在跑的 worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
 
 H.time.time = time_orig
 
@@ -235,7 +235,7 @@ def fake_sh(cmd, inp=None, timeout=120):
 def fake_run_on(m, script, timeout=120):
     calls.append(("run_on", m["label"]))
     if m["scheduler"] == "slurm":
-        return 0, "train_worker|123|RUNNING|1:00|None|0|gpu-a100\nbad|line\n=====\n"
+        return 0, "brave-otter|123|RUNNING|1:00|None|0|gpu-a100|/q/a|b/worker.sbatch\nbad|line\n=====\n"
     have = "HAVE|nnUNet/x\nHAVE|a b\n@@END\n" if H.C.HAVE_END in script and not cut else ""
     return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n" + have
 
@@ -251,8 +251,8 @@ g = H.gather()
 ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留着",
    g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123", "HAVE": "a b nnUNet/x"}
    and g["gpus"]["lab"] == [dict(gpu="0", uuid="GPU-a", util="37", mem="1200", apps=[dict(pid="42", mem="1100", args="python x|y")])])
-ok("gather：squeue 每行 7 项（最后是分区），格式不对的行不要",
-   g["slurm"]["dicc"]["squeue"] == [["train_worker", "123", "RUNNING", "1:00", "None", "0", "gpu-a100"]])
+ok("gather：squeue 每行 8 项（最后是交的脚本，里面的 | 原样留着），格式不对的行不要",
+   g["slurm"]["dicc"]["squeue"] == [["brave-otter", "123", "RUNNING", "1:00", "None", "0", "gpu-a100", "/q/a|b/worker.sbatch"]])
 calls.clear()
 H.policy.OFFLINE = {"dicc": "停机维护"}
 g = H.gather()

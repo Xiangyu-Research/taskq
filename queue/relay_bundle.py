@@ -112,7 +112,7 @@ def relay_entry(commit, name):
 def machine_entry(name, e, root, entry=None):
     m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/code/current", code=None,
              data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
-             roles=("train",), disk=None, gpu_log=False, jobs=dict(e.get("jobs") or {}), sbatch=dict(e.get("sbatch") or {}))
+             roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
     m.update({k: e[k] for k in ("slots", "worker", "cpu_worker") if k in e})
     m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/sites/envs.py）在根目录下
     m.update(entry or {})
@@ -159,12 +159,11 @@ def gen_sbatch(real, m, root, kind="gpu"):
         if not o or o.group(1) in ("job-name", "output"):
             continue
         keep.append(f"#SBATCH --{o.group(1)}={over[o.group(1)]}" if over.get(o.group(1)) else ln)
-    job = (m.get("jobs") or {}).get(kind)
-    if not job:
-        raise BundleError(f"RELAY 里没有 jobs.{kind}（worker 的作业名）")
+    if kind not in (m.get("jobs") or ()):
+        raise BundleError(f"RELAY 的 jobs 里没有 {kind}")
     # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/scripts/queue 交，往上 4 级是根目录）
     logs = ("../../../.." if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
-    return "\n".join(["#!/bin/bash", f"#SBATCH --job-name={job}", *keep,
+    return "\n".join(["#!/bin/bash", *keep,
                       f"#SBATCH --output={logs}",
                       f"R={RM.q(root)}",
                       'REPO=$(readlink -f "$R/code/current")',
@@ -237,7 +236,7 @@ def contents(name, commit="origin/main", root=None, entry=None):
         out.pop(tpl, None)
     if m["scheduler"] == "slurm":
         for kind, tpl in SBATCH.items():
-            if (m.get("jobs") or {}).get(kind):
+            if kind in (m.get("jobs") or ()):
                 out[tpl] = (gen_sbatch(read(commit, tpl), m, root, kind), False)
     hits = secret_hits(out)
     if hits:

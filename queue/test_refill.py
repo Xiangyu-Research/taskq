@@ -70,7 +70,7 @@ K_T14 = f"Dataset121_GLIMETrq1/{NN}/0"   # ① 但数据集 62 GB 放不下
 K_T1C = [f"Dataset103_GLIrq1_t1c/{NN}/{f}" for f in range(3)]
 K_UM = f"Dataset101_GLIrq1/{UM}/1"
 QUEUE = [tq(K_T14, 0, 1), tq(K_UM, 50, 2), tq(K_T1C[0], 50, 3), tq(K_T1C[1], 50, 4), tq(K_T1C[2], 100, 5)]
-SQ = [["rq1_t1c_f0", "485145_1", "PENDING", "0:00", "Priority", "50"]]  # DICC 上只有 nnunet 的作业
+SQ = [["rq1_t1c_f0", "485145_1", "PENDING", "0:00", "Priority", "50", "long", "/x/run.sbatch"]]  # DICC 上只有 nnunet 的作业
 
 
 def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_tasks_st=None, enabled=True, skips=None,
@@ -325,7 +325,7 @@ ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交
 R.P.AUTO["dicc"] = True
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关开着：交 worker.sbatch（long，1 个普通作业，不用数组），记日志、不推送",
-   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=long --time=3-00:00:00 worker.sbatch")]
+   len(sub) == 1 and re.fullmatch(r"cd ~/Projects/PhD/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=3-00:00:00 worker.sbatch", sub[0][1])
    and ev == [] and not st and "交了 1 个 worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 
@@ -360,7 +360,7 @@ ok("作业数读不出来：不补（不按 0 算）", ev == [] and not st and n
 sub.clear()
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5|0\nCPU|0\nALL|10|6\n"))
 ok("开关开着、有纯 CPU 任务：只交 cpu_worker.sbatch（normal、8 小时），记日志",
-   sub == [("dicc", "cd ~/Projects/PhD/scripts/queue && sbatch --parsable --qos=normal --time=08:00:00 cpu_worker.sbatch")]
+   len(sub) == 1 and re.fullmatch(r"cd ~/Projects/PhD/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=normal --time=08:00:00 cpu_worker.sbatch", sub[0][1])
    and not st and "交了 1 个 CPU worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5|0\nCPU|1\nALL|10|7\n"))
@@ -370,17 +370,13 @@ ok("所有作业已占满 10 个提交名额：不交 CPU worker、不报错", n
 R.P.AUTO["dicc"] = False
 probe = R.SL.probe("dicc")
 ok("查作业数用 envs/policy.py 的 QOS、envs/machines.py 的作业名",
-   "show qos normal " in probe and "-n cpu_worker " in probe and "for q in long;" in probe)
+   "show qos normal " in probe and "cpu_worker[.]sbatch" in probe and "for q in long;" in probe)
 
 
-def job_name(f):
-    return next(ln.split("=", 1)[1].strip() for ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f))
-                if ln.startswith("#SBATCH --job-name="))
-
-
-for name in R.M.names("slurm"):
-    ok(f"{name}：两个 sbatch 文件的 --job-name 和 envs/machines.py 的 jobs 一致",
-       {"gpu": job_name(R.GPU_FILE), "cpu": job_name(R.CPU_FILE)} == R.M.MACHINES[name]["jobs"])
+for f in (R.GPU_FILE, R.CPU_FILE):
+    ok(f"{f} 不写 --job-name（作业名交的时候随机取，11/2）",
+       not any(ln.startswith("#SBATCH --job-name") for ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), f))))
+ok("refill 的 sbatch 文件名和 slurm.FILES 一致", {"gpu": R.GPU_FILE, "cpu": R.CPU_FILE} == R.SL.FILES)
 
 # 那边的文件读不动（spec.collect 的 stuck，11/1）：当成有进度，不当新任务分出去
 st = {"src": {"dicc": {"tasks": {}, "stuck": ["k/1"]}, "box": {"tasks": {}}}}
