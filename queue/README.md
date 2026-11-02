@@ -44,18 +44,19 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `AUTO["dicc2"]`、`AUTO["lab1"]`、`AUTO["lab0"]`、`AUTO["dicc1"]` | True / False | relay 执行机（DICC2、lab 的两张卡、换过来以后的 DICC）：领新的任务、补交作业 / 开 worker；False 时只记进 box `~/relay.log`，已领的任务照常推进（见下面"执行机"） |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
 | `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件只有 `have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
-| `envs/policy.py` `GPU_AUG` | 机器 → True | 这台机器上训练集的数据增强在 GPU 上做（`train.sh` 设 `RQ1_GPU_AUG=1`）；新开始或续训的段生效。单个任务可以预先设 `RQ1_GPU_AUG=0 / 1` |
-| `envs/policy.py` `GPU_AUG_LOADER` | 机器 → True | GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集（`gpu_aug_loader.py`，`train.sh` 设 `RQ1_GPU_AUG_LOADER=1`；11/1 起不再导出解压缓存）；单个任务可以预先设 |
+| `envs/machines.py` `task_vars` | 机器 → {变量: 值} | 这台机器上 `run_task.sh` 跑的每个任务都带的环境变量（`spec.py shell` 设，任务自己已经设了的不改；执行机的代码包里生成的 `machines.py` 照样带）；新开始或续训的段生效。现在 lab、lab1、lab0 是 `RQ1_GPU_AUG=1`（训练集的数据增强在 GPU 上做）、`RQ1_GPU_AUG_LOADER=1`（GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集，`gpu_aug_loader.py`），没设时 `train.sh` 当 0；11/2 前是 `envs/policy.py` 的 `GPU_AUG`、`GPU_AUG_LOADER` |
 | `envs/policy.py` `SLURM` | 每台 Slurm 机器的 QOS、时限、个数 | `refill.py` 补交多少 GPU / CPU worker 作业 |
 | `envs/policy.py` `SHIFT` | 执行机 → (开始, 结束, 第一个, 最后一个) | `shift.py` 跟着健康检查在时段开始时恢复执行机的 worker 组（卡上有别人的进程就等），`allowed()` 放行后 `relay.py` 才替它领任务、开 worker；结束时停 worker（等它交还），有进度的任务在总队列里改分给同一台上不按时段的执行机（`adopt` 收编存档、接着训），没开始的交还总队列，这台的队列里删掉（`unq`），那台训完后删这边的结果。每个时段只动这两次，记录在 box `~/.cache/phd/shift.json`，日志 `~/refill.log` |
 | `envs/policy.py` `OFFLINE_UNTIL` | 机器 → (到期时间, 原因) | 到期前健康检查、送任务、补交作业、拉回前的查看、代码同步都不连它，`advance.py` 不往它排（`OFFLINE` 由它算出）；到期后自动恢复 |
-| `envs/policy.py` `OUTPUTS` | 键 → 路径 | 调度在仓库里、本机上读写的地方（11/2）：代码包带的顶层文件夹（`relay_bundle.py`）、健康检查的状态文件夹和 ntfy 频道文件、推送标题的前缀（`health.py`、`report.py`）、各机器代码提交号的记录（`auto_refresh.sh` 写、`health.py` 读）、登记表的生成脚本、文件夹和生成文件（`auto_refresh.sh`、`report.py`） |
+| `envs/policy.py` `OUTPUTS` | 键 → 路径 | 调度在仓库里、本机上读写的地方（11/2）：代码包带的顶层文件夹（`relay_bundle.py`）、健康检查的状态文件夹和 ntfy 频道文件、推送标题的前缀（`health.py`、`report.py`）、各机器代码提交号的记录（`auto_refresh.sh` 写、`health.py` 读）、登记表的生成脚本、文件夹和生成文件（`auto_refresh.sh`、`report.py`）、实验表 `experiments`（`experiments.py`，glob；代码包里生成的 `policy.py` 也带）、分析计划表 `plans`（`plain.py`）、`code_dirs`（`run_task.sh`、`dicc_worker.sh` 的代码版本后面标"+改动"时看的目录）、`bundle_check`（`relay_bundle.py` 另用本机哪个环境的 python 核对能编译）、`env_script`（`q` 加的任务先 source 的环境脚本）。没写的键：没有实验表 / 分析计划、只看 `scripts/queue`、只用当前的 python 核对、不 source。bash 读：`python3 scripts/queue/cfg.py get <键>` |
 | `envs/machines.py` `replaces` | 执行机 → 被它接替的机器 | 被接替的 AUTO 关、它的 AUTO 开、它不在 `OFFLINE` 时：`advance.py` 把 `queue:<旧>` 换成它（`have` 用不了）；`feed.py` 把旧缓冲里分给旧机器、没在训的交还（有进度的改分给它）；排着的旧 worker 作业开始时 `worker_start.sh` 转到它根目录的代码包 |
 | box `~/.cache/phd/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `feed.py`、`refill.py`、`relay.py` 什么都不分 |
 | DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 缓冲的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`），`feed.py` 也不往里送 |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
 | `TASKQ_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"）；`gpu_pad*` 的参数 `TASKQ_GPU_PAD_*`（10/31 改名，旧名 `RQ1_GPU_PAD*` 照样认） |
 | `TASKQ_DATA` | 环境变量 | 本机的数据目录（`run_task.sh`、`dicc_worker.sh`、`taskq.py` 先读它，没有再读旧名 `BRAIN_TUMOR`，再查 `envs/machines.py`；`envs/nnunet_paths.sh` 两个都设，10/31） |
+| 旧名 | `cfg.py` 的 `LEGACY`、`legacy_names.sh` | 10/31 改名前的环境变量名只列在这两处（11/2）：Python 用 `cfg.env(<新名>)`（新名没设时读旧名，`TASKQ_GPU_PAD_*` 对 `RQ1_GPU_PAD_*`）；bash 先 `source legacy_names.sh map`（新名没设时取旧名的值，不 export），设好 `TASKQ_DATA` 后 `source legacy_names.sh export` 同时 export 成 `BRAIN_TUMOR` |
+| `TASKQ_STATE` | 环境变量 | 本机的状态文件夹（11/2）：设了时任务队列、`relay/`、`last/`、`tasks.json`、`envs/`、隧道、显存填充的开关、`code/`（`snapshot.sh`）都在它下面（`<它>/taskq`、`<它>/gpu_pad/DISABLED`…）；没设时照旧在 `~/.cache/phd/`（`cfg.py` 的 `STATE_HOME`、`STATE_PLACES`，Python 经 `cfg.state()`）。`TASKQ_DIR`、`TASKQ_GPU_PAD_SWITCH` 等单项的变量优先。执行机的代码包把这些默认写法换成根目录下的 `queue/`、`state/` |
 | `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它（旧名 `RQ1_WAIT_GPU`） |
 | `TASKQ_*` | 环境变量 | `dicc_worker.sh` 的阈值，默认值写在脚本开头：`SLOTS`（一个作业最多同时几个，GPU 2、CPU 1）、`ADD_AFTER`（900 秒）、`UTIL_MAX`（90%）、`MIN_LEFT`（3600 秒）、`PATIENCE`（1200 秒）、`ERR_MAX`（600 秒）、`IDLE_MAX`（2400 秒）、`EARLY_FAIL`（600 秒）、`FAIL_WINDOW`（3600 秒）、`STALL_MAX`（1800 秒）；`TASKQ_DIR`、`TASKQ_SSH`、`TASKQ_MACHINE` 只给测试用 |
 | `TASKQ_CONFIG` | 环境变量 | `machines.py`、`policy.py` 所在的文件夹，默认 `<仓库>/envs`（11/2）。Python 脚本经 `scripts/queue/cfg.py` 的 `use_config()` 找，bash 脚本用 `${TASKQ_CONFIG:-$REPO/envs}`；`relay_bundle.py` 在它在仓库里时取提交里的 `machines.py`，在仓库外时读文件；执行机的代码包里生成的两个文件照旧在 `envs/` |
@@ -195,7 +196,8 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 和 DICC 的克隆） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
 | `relay.py`、`relay_bundle.py`、`relay_plugins.py`、`relay_gc.py`、`shift.py` | 执行机（见上面）：接力、代码包、中继插件的加载、清理根目录、按时段开停 |
-| `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）和插件文件夹（`TASKQ_PLUGINS`），把插件合进核心的表 |
+| `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）、插件文件夹（`TASKQ_PLUGINS`）、状态文件夹（`TASKQ_STATE`），把插件合进核心的表；`OUTPUTS` 的读法（`get <键>` 给 bash）、旧名（`LEGACY`） |
+| `legacy_names.sh` | bash 脚本的旧名兼容（见"开关和配置"的"旧名"） |
 | `scripts/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`refill.py`、`relay.py` 共用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口 |
 
