@@ -36,8 +36,10 @@ TQPY="python3 $HERE/taskq.py"
 if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
 W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
 DEVICE=${WORKER_DEVICE:-gpu}
-DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
-export TASKQ_DATA=$DATA BRAIN_TUMOR=$DATA
+source "$HERE/legacy_names.sh" map
+DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
+export TASKQ_DATA=$DATA
+source "$HERE/legacy_names.sh" export
 ENVS=${TASKQ_ENVS:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 # Slurm 外（pueue 的常驻 worker）：最多用 TASKQ_CPUS 个核（envs/machines.py 的 cpu_worker 的 cpus），和别人共用这台机器
@@ -55,7 +57,7 @@ else
 fi
 ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过这么久才判断要不要再加一个
 UTIL_MAX=${TASKQ_UTIL_MAX:-90}          # 近 10 分钟 GPU 平均使用率低于这个才加
-PADBASE=${TASKQ_GPU_PAD_BASE:-${RQ1_GPU_PAD_BASE:-$( (( INSLURM )) && echo "/tmp/gpu_pad_$W" || echo /nonexistent/gpu_pad)}}
+PADBASE=${TASKQ_GPU_PAD_BASE:-$( (( INSLURM )) && echo "/tmp/gpu_pad_$W" || echo /nonexistent/gpu_pad)}
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-$([[ $DEVICE == cpu ]] && echo 0 || echo 1200)}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
@@ -72,7 +74,8 @@ LOGDIR=$DATA/logs/workers
 mkdir -p "$LOGDIR"
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
-    git -C "$REPO" diff --quiet HEAD -- scripts/queue research/common 2> /dev/null || COMMIT="$COMMIT+改动"
+    CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
+    git -C "$REPO" diff --quiet HEAD -- ${CODE_DIRS:-scripts/queue} 2> /dev/null || COMMIT="$COMMIT+改动"
 else
     COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名 <提交号>-<内容哈希>
 fi
@@ -244,7 +247,8 @@ on_term() {  # run_task.sh 自己 8 秒后强制停训练；15 秒还没退出�
 }
 trap on_term TERM INT
 
-QDIR=${TASKQ_DIR:-$HOME/.cache/phd/taskq}
+QDIR=${TASKQ_DIR:-${TASKQ_STATE:+$TASKQ_STATE/taskq}}
+QDIR=${QDIR:-$HOME/.cache/phd/taskq}
 SAFECH=$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import spec; print(spec.SAFE)" 2> /dev/null || echo __)
 STOP_POLL=${TASKQ_STOP_POLL:-5}
 STOP_WAIT=${TASKQ_STOP_WAIT:-20}

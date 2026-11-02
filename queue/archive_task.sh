@@ -19,6 +19,7 @@ HOST=${1:?用法：archive_task.sh <机器> <key> [--dry-run]} KEY=${2:?用法�
 DRY=${3:-}
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
+source "$REPO/scripts/queue/legacy_names.sh" map
 SRCH= SRCD=
 if [[ $HOST != "$($M names hub | head -1)" ]]; then
     SRCH=$($M get "$HOST" ssh) SRCD=$($M get "$HOST" data)
@@ -26,7 +27,7 @@ if [[ $HOST != "$($M names hub | head -1)" ]]; then
 fi
 BK=$($M names backup | grep -vx "$HOST" | head -1)
 [[ -n $BK ]] || { echo "envs/machines.py 里没有 $HOST 以外的备份机器（角色 backup）" >&2; exit 2; }
-BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" data) LD=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}
+BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" data) LD=${TASKQ_DATA:-$($M get . data)}
 SPEC=$(python3 "$REPO/scripts/queue/spec.py" lookup "$KEY") || { echo "找不到任务 $KEY（实验表、训练队列里都没有）" >&2; exit 2; }
 sp() { python3 -c '
 import json, re, shlex, sys

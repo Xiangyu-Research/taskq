@@ -16,9 +16,11 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(dirname "$(dirname "$HERE")")
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v…" >&2; exit 2; }
-DATA=${TASKQ_DATA:-${BRAIN_TUMOR:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}}  # BRAIN_TUMOR：10/31 前的旧名
+source "$HERE/legacy_names.sh" map
+DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
 [[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit 2; }
-export TASKQ_DATA=$DATA BRAIN_TUMOR=$DATA
+export TASKQ_DATA=$DATA
+source "$HERE/legacy_names.sh" export
 SH=$(python3 "$HERE/spec.py" shell "$@") || exit 2
 eval "$SH"
 ts() { date '+%F %T'; }
@@ -33,7 +35,8 @@ mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
 LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_${PSUF}${PART}.log
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
-    git -C "$REPO" diff --quiet HEAD -- scripts/queue research/common 2> /dev/null || COMMIT="$COMMIT+改动"
+    CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
+    git -C "$REPO" diff --quiet HEAD -- ${CODE_DIRS:-scripts/queue} 2> /dev/null || COMMIT="$COMMIT+改动"
 else
     COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名 <提交号>-<内容哈希>
 fi

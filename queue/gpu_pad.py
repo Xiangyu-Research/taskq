@@ -8,6 +8,12 @@ import sys
 import time
 from dataclasses import dataclass
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import cfg as tcfg
+except ImportError:
+    tcfg = None
+
 MIB = 1024 * 1024
 STABLE_TOL_MIB = 1024
 FALLBACK_TARGET_MARGIN_MIB = 1500
@@ -15,10 +21,13 @@ HEARTBEAT = 600
 
 
 def pad_env(name, default=None):
-    v = os.environ.get("TASKQ_GPU_PAD_" + name)
-    if v is None or v == "":
-        v = os.environ.get("RQ1_GPU_PAD_" + name)
-    return default if v is None or v == "" else v
+    if tcfg:
+        return tcfg.env("TASKQ_GPU_PAD_" + name, default)
+    return os.environ.get("TASKQ_GPU_PAD_" + name) or default
+
+
+def default_switch():
+    return tcfg.state("gpu_pad", "DISABLED") if tcfg else os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")
 
 
 def env_int(name, default):
@@ -59,7 +68,7 @@ class Config:
     release_hysteresis_mib: int = 2048
     min_train_mib: int = 2000
     base: str = ""
-    switch: str = os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")
+    switch: str = default_switch()
     parent_pid: int | None = None
     supervisor_pid: int | None = None
     dry_run: bool = False
@@ -347,8 +356,7 @@ def parse_args(argv=None):
     p.add_argument("--release-hysteresis-mib", type=int, default=env_int("HYSTERESIS_MIB", 2048))
     p.add_argument("--min-train-mib", type=int, default=env_int("MIN_TRAIN_MIB", 2000))
     p.add_argument("--base", default=default_base())
-    p.add_argument("--switch", default=pad_env("SWITCH",
-                                         os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")))
+    p.add_argument("--switch", default=pad_env("SWITCH", default_switch()))
     p.add_argument("--parent-pid", type=int, default=None)
     p.add_argument("--supervisor-pid", type=int, default=None)
     p.add_argument("--dry-run", action="store_true")

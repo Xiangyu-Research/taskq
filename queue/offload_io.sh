@@ -9,9 +9,10 @@ shift 2
 (( $# > 0 )) || { echo "至少给一个路径" >&2; exit 2; }
 REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
+source "$REPO/scripts/queue/legacy_names.sh" map
 H=$($M get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以连过去的机器 $HOST" >&2; exit 2; }
-RD=$($M get "$HOST" data) LD=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}
+RD=$($M get "$HOST" data) LD=${TASKQ_DATA:-$($M get . data)}
 RD=${RD/#\~\//}
 for p in "$@"; do [[ $p != /* && $p != *..* && $p == */* ]] || { echo "路径要相对数据目录、至少两层：$p" >&2; exit 2; }; done
 
