@@ -36,6 +36,7 @@ chmod +x "$T/fake_train.sh"
 export FAKE_LOG=$T/train.log
 fails=0
 check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi; }
+waitfor() { local i; for i in $(seq "$1"); do eval "$2" && return 0; sleep 1; done; return 1; }
 table() {  # 每行：任务名 环境 [device]
     : > "$TASKQ_DIR/tasks.jsonl"
     local i=0 name env dev
@@ -78,6 +79,28 @@ t/y nnunet
 EOF
 SLURM_JOB_ID=900007 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1b.out" 2>&1
 check "本机没有的环境不领，别的照常领" '[[ $(grep -c ^end $T/train.log) == 1 ]] && grep -q "end .* t/y" $T/train.log && grep -q "没有能领的任务" $T/w1b.out'
+
+# 1c. Slurm 里开始时没有能领的（缓冲刚好空着，11/2）：空着等，来了任务就领；一直没有，空等 IDLE_MAX 后结束
+reset
+: > "$TASKQ_DIR/tasks.jsonl"
+SLURM_JOB_ID=900040 TASKQ_IDLE_MAX=10 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1c.out" 2>&1 &
+wpid=$!
+waitfor 20 'grep -q "没有能领的任务，空着等" $T/w1c.out'
+sleep 2
+check "开始时没有能领的：不马上结束" 'kill -0 $wpid 2> /dev/null && ! grep -q "作业结束" $T/w1c.out'
+table << EOF
+t/a nnunet
+EOF
+waitfor 30 'grep -q "^end .* t/a" $T/train.log'
+check "空等时来了任务：领了、训完" 'grep -q "^end .* t/a" $T/train.log && grep -q "开训 t/a" $T/w1c.out'
+waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "训完后又没有能领的：空等 IDLE_MAX 后结束（退出码 0）" '[[ $rc == 0 ]] && grep -q "空等 0 分钟没有能领的任务，作业结束" $T/w1c.out && [[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
+reset
+: > "$TASKQ_DIR/tasks.jsonl"
+t0=$(date +%s)
+SLURM_JOB_ID=900041 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1d.out" 2>&1; rc=$?
+dt=$(( $(date +%s) - t0 ))
+check "一直没有能领的：空等 IDLE_MAX（4 秒）后结束，用了 $dt 秒" '[[ $rc == 0 ]] && (( dt >= 4 )) && grep -q "空等 0 分钟没有能领的任务，作业结束" $T/w1d.out && ! grep -q "没有在训的，也没有能领的任务" $T/w1d.out'
 
 # 2. 不带参数（worker.sbatch）；GPU 跑满（使用率 95%）时一次只训 1 个
 reset
@@ -260,6 +283,7 @@ EOF
 SLURM_JOB_ID=900020 WORKER_DEVICE=cpu TASKQ_SLOTS= timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4b.out" 2>&1
 check "CPU worker：两个纯 CPU 任务先后训完，不碰要卡的" '[[ $(grep -c "^end .* t/c" $T/train.log) == 2 ]] && ! grep -q "t/g" $T/train.log'
 check "CPU worker：一次 1 个、不记 GPU" '[[ $(head -2 $T/train.log | grep -c ^start) == 1 && ! -e $BRAIN_TUMOR/logs/workers/worker_900020_gpu.csv ]] && grep -q "worker（cpu）.*最多同时 1 个" $T/w4b.out'
+check "CPU worker：没有能领的就结束，不空等" 'grep -q "没有在训的，也没有能领的任务，作业结束" $T/w4b.out && ! grep -q "空着等" $T/w4b.out'
 SLURM_JOB_ID=900021 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4c.out" 2>&1
 check "GPU worker：只训要卡的" 'grep -q "^end .* t/g" $T/train.log && [[ $(grep -c "^start .* t/c" $T/train.log) == 2 ]]'
 
@@ -270,7 +294,6 @@ check "队列出错：报出来、过一会儿结束作业" '[[ $rc == 0 ]] && g
 
 # 6. 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当名字，按本机 slots（box 没写 → 1），只看 CUDA_VISIBLE_DEVICES 那张卡；
 #    空闲不到 IDLE_EXIT（默认 30 分钟）、队列出错、失败太多都不退出（RUN_TASK_TRIES=1：不在 Slurm 里 run_task.sh 自己会重试 3 次）；手上没有在训的时候提交号变了才退出（退出码 0），在训时变了等训完
-waitfor() { local i; for i in $(seq "$1"); do eval "$2" && return 0; sleep 1; done; return 1; }
 mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
 echo a > "$T/head"
 export TASKQ_HEAD_CMD="cat $T/head"
@@ -342,6 +365,9 @@ check "不在 Slurm 里的 CPU worker：最多用 TASKQ_CPUS 个核" 'grep -q "w
 
 # 代码包（<根>/code/<包>、current 指向在用的）：current 换了，空闲时直接 exec 新包的 worker_start.sh，同一进程接着跑（11/1）
 reset
+table << EOF
+t/k nnunet
+EOF
 mkdir -p "$T/code/a" "$T/code/b/scripts/queue"
 cp -r "$HERE/../../scripts" "$HERE/../../envs" "$T/code/a/"
 mkdir -p "$T/code/a/research"; cp -r "$HERE/../../research/common" "$T/code/a/research/"
@@ -356,6 +382,7 @@ waitfor 20 'grep -q "没有能领的任务" $T/w6e.out'
 ln -sfn b "$T/code/current"
 waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "代码包换了：空闲时 exec 新包的 worker_start.sh 接着跑，不退出等重开" '[[ $rc == 0 ]] && grep -q "换成新代码 b 接着跑" $T/w6e.out && grep -q "新包的 start lab-test" $T/w6e.out'
+check "代码包：worker、任务日志记的代码版本是包名（不是"未知+改动"）" 'grep -q "，代码 a$" $T/w6e.out && grep -q "^end .* t/k" $T/train.log && head -1 $BRAIN_TUMOR/logs/tasks/t__k__*_part1.log | grep -q "，代码 a，"'
 check "代码包：worker 在用的包更新了时间戳（清理只删 4 天没动过的）" '[[ -n $(find "$T/code/a" -maxdepth 0 -mtime -1) ]]'
 
 # gpu_stats / pad_now 读真的文件（假 nvidia-smi）：只取 dicc_worker.sh 里这两个函数

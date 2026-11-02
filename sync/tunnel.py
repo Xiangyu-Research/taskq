@@ -34,6 +34,7 @@ NPAR = int(os.environ.get("TUNNEL_NPAR", 8))
 MIN_JOB = float(os.environ.get("TUNNEL_MIN_JOB", 1e9))
 JOB_WAIT = 600
 STALL = int(os.environ.get("TUNNEL_STALL", 3600))
+ROUNDS = 3  # 没传到、对不上的文件同一次里再补传几轮（11/2：一万多个文件偶尔断几个）
 POLL = int(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
 LOCK = os.path.expanduser(os.environ.get("TUNNEL_LOCK", "~/.cache/phd/tunnel_push.lock"))
@@ -316,7 +317,8 @@ def run_remote(host, mode, plan, serve, total):
 
 
 def push(host, src, dst, rels):
-    """box 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。返回内容对不上、已删掉的文件。"""
+    """box 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
+    返回最后还对不上、已删掉的文件。"""
     files = {}
     for r in rels:
         st = os.stat(os.path.join(src, r))
@@ -327,27 +329,36 @@ def push(host, src, dst, rels):
     lk = take_lock()
     srv, url = start_server(serve, quick=bool((relay_of(host) or {}).get("quick_tunnel")))
     log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
-    t0 = time.time()
+    t0, bad = time.time(), list(files)
     try:
-        plan = dict(base=f"{url}/{token}", root=dst, npar=NPAR, files=[[r, *v] for r, v in files.items()])
-        res = run_remote(host, "_fetch", plan, serve, total)
+        for k in range(ROUNDS + 1):
+            if k:
+                log(f"补传 {len(bad)} 个缺的文件（第 {k} 轮）")
+            for r in bad:
+                serve.sent.pop(r, None)
+            plan = dict(base=f"{url}/{token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad])
+            try:
+                res, stop = run_remote(host, "_fetch", plan, serve, sum(files[r][0] for r in bad)), False
+            except RuntimeError as e:
+                if not k:
+                    raise
+                log(f"补传出错（{e}），不再补")
+                res, stop = {}, True
+            bad = [r for r in bad if res.get(r) != (serve.sent.get(r) or md5_of(os.path.join(src, r)))]
+            if bad:
+                ssh(host, "cd " + rq(dst) + " && rm -f -- " + " ".join(shlex.quote(r) for r in bad), check=False)
+            if not bad or stop:
+                break
     finally:
         stop_server(srv)
         lk.close()
-    bad = []
-    for r in files:
-        want = serve.sent.get(r) or md5_of(os.path.join(src, r))
-        if res.get(r) != want:
-            bad.append(r)
-    if bad:
-        ssh(host, "cd " + rq(dst) + " && rm -f -- " + " ".join(shlex.quote(r) for r in bad), check=False)
     dt = time.time() - t0
     log(f"传完：{len(files) - len(bad)} 个一致，{len(bad)} 个没传到或对不上（已删）；用时 {dt / 60:.0f} 分钟，平均 {total / 1e6 / dt:.1f} MB/s")
     return bad
 
 
 def pull(host, src, dst, items):
-    """那边的 src/<rel> → box 的 dst/<rel>。items：[(rel, 字节数)]。返回没拉到的文件。"""
+    """那边的 src/<rel> → box 的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
     token = secrets.token_urlsafe(24)
@@ -356,10 +367,25 @@ def pull(host, src, dst, items):
     lk = take_lock()
     srv, url = start_server(serve, quick=bool((relay_of(host) or {}).get("quick_tunnel")))
     log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
-    t0 = time.time()
+    t0, bad = time.time(), list(files)
     try:
-        plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, npar=NPAR, files=[[r, n[0]] for r, n in files.items()])
-        run_remote(host, "_send", plan, serve, total)
+        for k in range(ROUNDS + 1):
+            if k:
+                log(f"补传 {len(bad)} 个缺的文件（第 {k} 轮）")
+            for r in bad:
+                serve.done.pop(r, None)
+            plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, npar=NPAR, round=k, files=[[r, files[r][0]] for r in bad])
+            try:
+                run_remote(host, "_send", plan, serve, sum(files[r][0] for r in bad))
+                stop = False
+            except RuntimeError as e:
+                if not k:
+                    raise
+                log(f"补传出错（{e}），不再补")
+                stop = True
+            bad = [r for r in bad if not serve.done.get(r)]
+            if not bad or stop:
+                break
     finally:
         stop_server(srv)
         lk.close()
@@ -367,7 +393,6 @@ def pull(host, src, dst, items):
             p = os.path.join(dst, r) + ".tunnelpart"
             if os.path.exists(p):
                 os.unlink(p)
-    bad = [r for r in files if not serve.done.get(r)]
     dt = time.time() - t0
     log(f"传完：{len(files) - len(bad)} 个一致，{len(bad)} 个没传到或对不上；用时 {dt / 60:.0f} 分钟，平均 {total / 1e6 / dt:.1f} MB/s")
     return bad
@@ -391,10 +416,14 @@ def remote_fetch(plan):
     out = open("results.tsv", "a")
     lock = threading.Lock()
     bad = os.environ.get("TUNNEL_TEST_BADMD5")
+    drop = (os.environ.get("TUNNEL_TEST_DROP") or "").split(",") if not plan.get("round") else []
 
     def one(item):
         rel, size, mtime, mode = item
         p = os.path.join(root, rel)
+        if rel in drop:
+            print(f"失败 {rel}：测试", flush=True)
+            return
         if os.path.isfile(p) and os.stat(p).st_size == size and os.stat(p).st_mtime_ns == mtime:
             digest = md5_of(p)
         else:
@@ -431,6 +460,7 @@ def remote_send(plan):
     base = urllib.parse.urlsplit(plan["base"])
     chunk = plan["chunk"]
     bad = os.environ.get("TUNNEL_TEST_BADMD5")
+    drop = (os.environ.get("TUNNEL_TEST_DROP") or "").split(",") if not plan.get("round") else []
     local = threading.local()
 
     def req(method, path, f=None, off=0, n=0, h=None):
@@ -467,6 +497,9 @@ def remote_send(plan):
     def one(item):
         rel, size = item
         p = os.path.join(root, rel)
+        if rel in drop:
+            print(f"失败 {rel}：测试", flush=True)
+            return
         try:
             st = os.stat(p)
             if st.st_size != size:

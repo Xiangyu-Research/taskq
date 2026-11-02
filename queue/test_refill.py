@@ -24,6 +24,16 @@ R.P.AUTO = dict(advance=False, lab=False, dicc=False)
 R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")  # run_all 里补作业那一步
 R.C.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("测试里不应该在真机器上跑命令"))
 GB = {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0, "stuff": 1.0}
+_hub = R.M.MACHINES[R.M.hub()]
+_d0 = _hub["data"]
+_hub["data"] = D
+os.makedirs(f"{D}/raw/A/x")
+for n_, b_ in (("a-seg.nii.gz", 1000), ("b-seg.nii.gz", 2000), ("c.nii.gz", 4000)):
+    open(f"{D}/raw/A/x/{n_}", "wb").write(b"0" * b_)
+_gb = (R.data_gb(["raw/A/*/*-seg.nii.gz"]), R.data_gb(["raw/A/x/c.nii.gz"]), R.data_gb(["raw/B/*.nii.gz"]))
+_hub["data"] = _d0
+assert _gb == (3e-6, 4e-6, None), _gb
+print("ok data_gb：带通配符的输入展开后算大小，对不上 → None（11/2：评测的输入带通配符，之前一直当成不在）")
 R.data_gb = lambda paths: sum(GB.get(R.tag(p), 10.0) for p in paths)
 NN, UM = "nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc"
 DS = {101: "Dataset101_GLIrq1", 103: "Dataset103_GLIrq1_t1c", 111: "Dataset111_MENrq1"}
@@ -285,6 +295,13 @@ lq = [dict(tq(K_EV, -100, 2), spec=dict(ev_spec, env=["nnunet", "rstats"])),
       dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b", env=["nnunet", "没有的环境"]))]
 ok("candidates：env 是列表时每个环境都要备好",
    [t["key"] for t in R.candidates(snap(), "dicc", snap(queue=lq)["taskq"]["box"], set(), kinds=("cpu",))] == [K_EV])
+mn0 = getattr(R.P, "MAX_NICE", None)
+R.P.MAX_NICE = {"dicc": -101}
+ok("candidates：档位超过 MAX_NICE 的不领（11/2）", R.candidates(snap(), "dicc", cq, set(), kinds=("gpu", "cpu")) == [])
+R.P.MAX_NICE = {"dicc": -100}
+ok("candidates：档位等于 MAX_NICE 的照领",
+   [t["key"] for t in R.candidates(snap(), "dicc", cq, set(), kinds=("gpu", "cpu"))] == [K_EV, K_EV + "b"])
+R.P.MAX_NICE = mn0 if mn0 is not None else {}
 
 R.P.SLURM = {"dicc": dict(gpu={"long": ("3-00:00:00", 2)}, cpu=("normal", "08:00:00", 1))}
 sub = []

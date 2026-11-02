@@ -152,7 +152,7 @@ def budget(name):
 def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=(), siblings=()):
     """name 这台的清理 → dict(freed, removed_views, removed_blobs, free)；没有 budget → None。
     keep_dirs：分给这台的任务要用的、刚建的视图（相对 R/data）。views：登记过的视图（relay.py 的 state）。siblings：同一个盘上别的执行机的根目录。rpy：relay.rpy。
-    free 只给测试用。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
+    free：剩余的字节数（有 cap 的执行机由 relay.py 按 cap 算好传进来；不给时看盘本身）。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
     if soft_gb is None:
         b = budget(name)
         if not b:

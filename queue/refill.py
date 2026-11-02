@@ -27,6 +27,7 @@ DICC 补作业：每个 QOS（envs/policy.py 的 SLURM[机器]["gpu"]：QOS → 
 
     python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
 """
+import glob
 import json
 import os
 import re
@@ -114,7 +115,7 @@ def rank(tq, t, ready):
 
 def candidates(s, name, tq, ready, oks=None, kinds=("gpu",)):
     """这台机器能领的任务，按领的先后排：free、没标成有问题、环境都就绪、没限定在别的机器、种类（device）在 kinds 里、
-    任何机器上都没有进度、这台机器没跳过。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
+    任何机器上都没有进度、这台机器没跳过、档位不超过 envs/policy.py 的 MAX_NICE。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
     envs = M.ready_envs(name, oks)
 
     def env_ok(sp):
@@ -122,7 +123,8 @@ def candidates(s, name, tq, ready, oks=None, kinds=("gpu",)):
     cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and env_ok(info(tq, t["key"])["spec"])
              and M.serves(name, info(tq, t["key"])["spec"].get("machines"))
              and info(tq, t["key"])["spec"].get("device", "gpu") in kinds
-             and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
+             and not progress(s, t["key"]) and name not in t.get("skipped_by", [])
+             and t["nice"] <= getattr(P, "MAX_NICE", {}).get(name, float("inf"))]
     return sorted(cands, key=lambda t: rank(tq, t, ready))
 
 
@@ -143,10 +145,15 @@ def next_pick(tq, cands, ready, free, hard, exclude=(), moving=()):
 
 
 def data_gb(paths):
-    """box 上这些数据（相对数据目录）一共多大（几个路径指到同一个文件时按几份算，和传过去后一样）；有一个不在 → None。"""
-    ps = [os.path.join(M.expand(M.MACHINES[M.hub()]["data"]), p) for p in paths]
-    if not all(os.path.exists(p) for p in ps):
-        return None
+    """box 上这些数据（相对数据目录，可以带通配符）一共多大（几个路径指到同一个文件时按几份算，和传过去后一样）；有一个不在
+    （带通配符的一个也对不上）→ None。"""
+    ps = []
+    for p in paths:
+        p = os.path.join(M.expand(M.MACHINES[M.hub()]["data"]), p)
+        got = sorted(glob.glob(p)) if glob.has_magic(p) else [p] if os.path.exists(p) else []
+        if not got:
+            return None
+        ps += got
     r = subprocess.run(["du", "-sbLlc"] + ps, capture_output=True, text=True)
     return int(r.stdout.strip().splitlines()[-1].split()[0]) / 1e9 if r.returncode == 0 else None
 

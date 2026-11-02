@@ -31,8 +31,12 @@ elif [[ -n ${TASK_SEG:-} ]]; then PART=$TASK_SEG PSUF=seg
 else PART=1 PSUF=part; fi
 mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
 LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_${PSUF}${PART}.log
-COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
-(cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
+if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
+    COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
+    git -C "$REPO" diff --quiet HEAD -- scripts/queue research/common 2> /dev/null || COMMIT="$COMMIT+改动"
+else
+    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名 <提交号>-<内容哈希>
+fi
 TRIES=3
 [[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用

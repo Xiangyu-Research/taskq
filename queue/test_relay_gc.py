@@ -175,7 +175,11 @@ def main():
         assert exists(R, "hh1") and exists(R, "ii1") and r.get("unlinked") == 1, r
         ok("还不够时：自己不用、另一个链接在同一个盘上别的执行机 blobs 里的，只删自己这个链接；老目录的硬链接、自己在用的不碰")
 
-        assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
+        b0, G.budget = G.budget, lambda n: None
+        try:
+            assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
+        finally:
+            G.budget = b0
         ok("没有 budget 的机器不清理")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

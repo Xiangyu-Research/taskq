@@ -490,6 +490,7 @@ pq = [("Failed (1)", x[0]["cmd"], None)]
 # 10b. DICC 换成接替它的 dicc1（machines.py 的 replaces）、暂停检查（OFFLINE）
 REMOTE["have"] = set(TNEEDS)
 A.P.AUTO = dict(A.P.AUTO, dicc=False, dicc1=True)
+CAP1 = A.M.RELAY["dicc1"].pop("cap", None)  # 先测换名，cap 在后面单独测
 trained("Dataset103_GLIrq1_t1c", "nnUNetTrainer_save10", "2")
 x = tc(A.plan(snap())[0])
 check("queue:dicc，DICC 换成了 dicc1 → 进总队列只给 dicc1（relay.py 连同输入送过去，不先传）",
@@ -500,6 +501,19 @@ A.P.PLACE = dict(BASE, infer=["queue:dicc have", "box:gpu"])
 x = tc(A.plan(snap())[0])
 check("queue:dicc have，换成了 dicc1 → 照样给 dicc1（执行机用真名，输入由 relay.py 传过去，11/1）",
       len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["dicc1"]' in x[0]["args"])
+A.M.RELAY["dicc1"]["cap"] = 60
+A.P.PLACE = dict(BASE, infer=["queue:dicc", "queue:lab1", "box:gpu"])
+x = tc(A.plan(snap())[0])
+check("queue:dicc 换成 dicc1，dicc1 的根目录放不下推理（cap，11/2）→ 用下一个地方（lab1）",
+      len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["lab1"]' in x[0]["args"])
+A.P.AUTO = dict(A.P.AUTO, lab1=False)
+x = tc(A.plan(snap())[0])
+check("下一个执行机 lab1 的 AUTO 关着 → 也跳过，用 box", len(x) == 1 and x[0].get("group") == "gpu")
+A.P.AUTO = dict(A.P.AUTO, lab1=True)
+A.M.RELAY["dicc1"].pop("cap")
+if CAP1 is not None:
+    A.M.RELAY["dicc1"]["cap"] = CAP1
+A.P.PLACE = dict(BASE, infer=["queue:dicc have", "box:gpu"])
 A.P.PLACE = dict(BASE, infer=["queue:dicc", "box:gpu"])
 A.P.OFFLINE = {"dicc1": "停机"}
 x = tc(A.plan(snap())[0])
@@ -618,11 +632,14 @@ check("trainer：按时段的 relay 机器（lab0，晚班）训的折 → 推�
       len(x) == 1 and 'machines=["lab1"]' in x[0]["args"] and "after=" + json.dumps([K3]) in x[0]["args"])
 A.P.AUTO = dict(A.P.AUTO, lab1=True, lab0=False)
 A.feed.sites = lambda: ["dicc", "lab"]
+CAPLF0 = A.M.RELAY["dicc2"].pop("cap", None)  # cap 在第 12 节单独测
 for r_ in ("dicc2", "lab1"):
     x = t3(A.plan(lsnap(r_, heads={"dicc": H3, "lab": H3}))[0])
     check(f"trainer：relay 机器（{r_}）训的折 → 推理现在就进总队列，只给它、等训练、带 relay=nnunet_infer（不看代码是不是最新）",
           [(t["step"], t.get("op")) for t in x] == [("infer", "taskq")] and f'machines=["{r_}"]' in x[0]["args"]
           and "after=" + json.dumps([K3]) in x[0]["args"] and "relay=nnunet_infer" in x[0]["args"] and x[0]["qnice"] == -100)
+if CAPLF0 is not None:
+    A.M.RELAY["dicc2"]["cap"] = CAPLF0
 todo, _ = A.plan(lsnap("lab", heads={"dicc": H3, "lab": "b" * 40}))
 check("trainer：lab 的代码不是最新 → 不提前排，记下原因", not t3(todo) and any("lab 的代码不是最新" in n_ for n_ in A.NOTES))
 check("trainer：推理已经在总队列里 → 不再加", not t3(A.plan(lsnap("lab", qrows=[qrow(INF3, "waiting")]))[0]))
@@ -920,9 +937,25 @@ check("DICC 在训：推理、评测一起进队列，推理等训练、评测�
 x = sb(A.plan(psnap(assigned="lab"))[0])
 check("分给 lab 的折：推理进 lab 的缓冲，评测写的是 DICC，不跟着提前排（10/31）",
       [t["step"] for t in x] == ["infer"] and 'machines=["lab"]' in x[0]["args"])
+CAPLF = A.M.RELAY["dicc2"].pop("cap", None)
 x = sb(A.plan(psnap(assigned="dicc2", heads={}))[0])
 check("分给中转执行机的折：推理进总队列只给它（不看代码），评测写的是 DICC，不跟着提前排",
       [t["step"] for t in x] == ["infer"] and 'machines=["dicc2"]' in x[0]["args"])
+A.M.RELAY["dicc2"]["cap"] = 60
+x = sb(A.plan(psnap(assigned="dicc2", heads={}))[0])
+check("分给中转执行机的折、它的根目录放不下推理（cap，11/2）→ 不提前排给它", not any('machines=["dicc2"]' in t.get("args", []) for t in x))
+x = sb(A.plan(psnap(assigned="dicc2", heads={}, extra=[dict(key=SBI, nice=-100, state="waiting", spec=dict(machines=["dicc2"]))]))[0])
+check("已经提前排给它的推理，现在放不下 → 撤掉（unqueue）", any(t.get("op") == "unqueue" for t in x))
+IR = dict(key=SBI, nice=-100, state="free", spec=dict(machines=["dicc"]))
+check("训练做完了（done）、推理等着那边领 → 不撤", not any(t.get("op") == "unqueue" for t in A.plan(psnap(state="done", extra=[IR]))[0]))
+x = [t for t in A.plan(psnap(state="free", assigned=None, extra=[IR]))[0] if t.get("op") == "unqueue"]
+check("训练交还了（free）→ 先前提前排的推理撤掉", len(x) == 1 and x[0]["qks"] == [SBI])
+rm_ = []
+A.run(psnap(state="free", assigned=None, extra=[IR]), q=lambda *a: 0, tq=lambda n, a: (0, ""), rm=lambda ks: rm_.append(ks) or (0, ""))
+check("撤掉的调用 taskq.py remove", rm_ == [[SBI]])
+A.M.RELAY["dicc2"].pop("cap")
+if CAPLF is not None:
+    A.M.RELAY["dicc2"]["cap"] = CAPLF
 check("还没分出去的折：不提前排", not sb(A.plan(psnap(state="free", assigned=None))[0]))
 x = sb(A.plan(psnap(buffer=[dict(key=SBK, nice=0, state="claimed", worker="492500")]))[0])
 check("缓冲里的同一个 key（档位不同）：以总队列为准", x and x[0]["nice"] == 60)

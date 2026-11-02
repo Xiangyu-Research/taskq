@@ -94,7 +94,7 @@ def targets(step, group):
         a, _, b = w[0].partition(":")
         if w[0] == "trainer":
             d["kind"] = "trainer"
-        elif a == "queue" and b in M.MACHINES:
+        elif a == "queue" and (b in M.MACHINES or b in M.RELAY):
             d.update(kind="queue", machine=b)
         elif a == M.hub() and b in M.MACHINES[a]["groups"]:
             d.update(kind="box", machine=a, group=b)
@@ -226,7 +226,7 @@ def plan(s, root=None):
         qd = st["queue"]
         q = {}
         for k, v in qd.items():
-            if k not in ("nice", "inputs"):
+            if k not in ("nice", "inputs", "disk"):
                 q[k] = S.fill(v, dict(t["names"], data="{data}"), keep=())
             if k == "env":
                 q["machines"] = [mach]
@@ -317,10 +317,16 @@ def plan(s, root=None):
         have = [h for h in sorted(src) if key in src[h] and not src[h][key].get("archived")]
         return next((h for h in have if src[h][key].get("final")), have[0] if have else None)
 
-    def where(t, tg, per_task):
+    def too_big(m, st):
+        """这一步在执行机 m 上放不下（m 有 cap，实验表 queue 的 disk 加上 budget 的第二项超过 cap）→ 原因；放得下 → None。"""
+        c, gb = (M.RELAY.get(m) or {}).get("cap"), ((st or {}).get("queue") or {}).get("disk")
+        hard = ((M.RELAY.get(m) or {}).get("budget") or (0, 0))[1]
+        return f"要 {gb} GB，{m} 最多放 {c} GB" if c and gb and gb + hard > c else None
+
+    def where(t, tg, per_task, st=None):
         """PLACE 里的一项 → 地方（trainer 换成训这个任务的执行机的 queue，带 trainer=True），或者用不了的原因。
         queue:<机器>：那台暂停检查（OFFLINE）时用不了；那台已经换成接替它的 relay 机器（machines.py 的 replaces，它的 AUTO 开着、
-        那台的关着）时用接替的那台（输入由 relay.py 传过去）。"""
+        那台的关着）时用接替的那台（输入由 relay.py 传过去）；执行机的 AUTO 关着时用不了。执行机放不下这一步（too_big）时用不了。"""
         if tg["kind"] == "queue":
             m = tg["machine"]
             r = M.successor(m)
@@ -328,7 +334,9 @@ def plan(s, root=None):
                 m, tg = r, dict(tg, machine=r)
             if m in P.OFFLINE:
                 return f"{m} 暂停检查（{P.OFFLINE[m]}）"
-            return tg
+            if m in M.RELAY and m not in M.MACHINES and not P.AUTO.get(m):
+                return f"{m} 的 AUTO 关着"
+            return too_big(m, st) or tg
         if tg["kind"] != "trainer":
             return tg
         if not per_task:
@@ -337,7 +345,7 @@ def plan(s, root=None):
         site = site_of(h)
         if not site:
             return f"训这个任务的 {h} 不是执行机" if h else "找不到训这个任务的机器"
-        return dict(tg, kind="queue", machine=site, trainer=True)
+        return too_big(site, st) or dict(tg, kind="queue", machine=site, trainer=True)
 
     def qmach(qk):
         """总队列里这个任务（加上这次要加的）给了哪几台机器。"""
@@ -362,13 +370,31 @@ def plan(s, root=None):
         """这个任务在总队列里分给了一台执行机（feed.py 的 sites）：每个任务的步骤里，PLACE 第一个用得上的地方是这台的，现在就加进
         总队列，after 接上前一步；feed.py 跟着训练送进那边的缓冲，训完的那个 worker 接着就能领到推理（10/25、10/31）。"""
         h = site_of(assigned_to(t["key"]))
+        # 训练不再分给提前排时的那台（交还、停下、改分给别处），或那台现在放不下这一步：那时排的、还没人领的后续步骤连同后面的
+        # 一起撤掉，分出去时按新的那台重排（11/2）。训练做完了（done）不撤：后续步骤正等着那边的 worker 领
+        tx = tq_tasks.get(hub, {}).get(t["key"]) or {}
+        gone, cut = [], False
+        for st in after if tx.get("state") != "done" else ():
+            qk = S.fill(st["queue"]["key"], t["names"], keep=()) if st.get("queue") else None
+            x = tq_tasks.get(hub, {}).get(qk) if qk else None
+            if not cut and h:
+                tg = next((w for w in (where(t, y, True, st) for y in targets(st["name"], st["group"])) if not isinstance(w, str)), None)
+                cut = not tg or tg["kind"] != "queue" or tg["machine"] != h
+            ms = ((x or {}).get("spec") or {}).get("machines") or []
+            if x and x.get("state") in ("waiting", "free") and not x.get("worker") and ms and (cut or not h or ms != [h]):
+                gone.append(qk)
+        if gone:
+            ms_ = " ".join(sorted({m for k in gone for m in ((tq_tasks[hub][k].get("spec") or {}).get("machines") or [])}))
+            todo.append(dict(op="unqueue", step="unqueue", key=t["key"], label=f"unqueue:{t['lab']}", nice=NO_NICE, qks=gone,
+                             why=f"训练{f'分给了 {h}' if h else '没分给执行机'}，撤掉先前排给 {ms_} 的"))
+            qkeys.difference_update(gone)
         if not h:
             return
         prev, items = t["key"], []
         for st in after:
             label = f"{st['name']}:{t['lab']}"
             qd = st.get("queue")
-            tg = next((w for w in (where(t, y, True) for y in targets(st["name"], st["group"])) if not isinstance(w, str)), None)
+            tg = next((w for w in (where(t, y, True, st) for y in targets(st["name"], st["group"])) if not isinstance(w, str)), None)
             if not qd or not tg or tg["kind"] != "queue" or tg["machine"] != h or any(fnmatch(label, pat) for pat in P.HOLD):
                 break
             sk = (st["name"], t["key"])
@@ -411,7 +437,7 @@ def plan(s, root=None):
             return
         why = []
         for tg in targets(st["name"], st["group"]):
-            w = where(t, tg, per_task)
+            w = where(t, tg, per_task, st)
             if isinstance(w, str):
                 r = w
             elif w["kind"] == "box":
@@ -639,7 +665,14 @@ def taskq_add(nice, args):
     return r.returncode, (r.stdout + r.stderr).strip()
 
 
-def run(s, dry=False, q=None, tq=None):
+def taskq_remove(keys):
+    """从总队列删掉这些（没人领着的）任务 → (退出码, 输出)。"""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "remove", *keys], cwd=REPO, capture_output=True, text=True,
+                       timeout=300)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def run(s, dry=False, q=None, tq=None, rm=None):
     """health.py 调用：→ (这次排了的说明列表（只算不排时是"会排 …"）, 卡住的 {问题编号: 说明})。"""
     q = q or refill.q
     tq = tq or taskq_add
@@ -661,6 +694,17 @@ def run(s, dry=False, q=None, tq=None):
                     stuck[f"advance:remote:{t['label']}"] = f"{t['label']}：删 {host} 上的结果出错（{out[-150:]}）"
             else:
                 lines.append(f"会清理 {what}")
+            continue
+        if t.get("op") == "unqueue":
+            what = f"{t['label']}：{t['why']}：{' '.join(t['qks'])}"
+            if live_mode:
+                rc, out = (rm or taskq_remove)(t["qks"])
+                if rc == 0:
+                    lines.append(f"撤了 {what}")
+                else:
+                    stuck[f"advance:unqueue:{t['key']}"] = f"{t['label']}：从任务队列撤掉出错（{out[-200:]}）"
+            else:
+                lines.append(f"会撤 {what}")
             continue
         h = any(fnmatch(t["label"], pat) for pat in P.HOLD)
         if t.get("op") == "taskq":
@@ -724,6 +768,8 @@ if __name__ == "__main__":
             print(f"会清理 {t['label']:26} {t['host']} {' '.join(t['paths'])}")
         elif t.get("op") == "taskq":
             print(f"会排 {t['label']:28} 任务队列（档位 {t['qnice']}） {' '.join(shlex.quote(a) for a in t['args'])}")
+        elif t.get("op") == "unqueue":
+            print(f"会撤 {t['label']:28} {t['why']}：{' '.join(t['qks'])}")
         else:
             print(f"会排 {t['label']:28} {(t.get('host', '') + ' ' + t['group']).strip():9} {t['cmd']}")
     for x in NOTES:

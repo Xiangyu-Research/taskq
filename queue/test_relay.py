@@ -6,6 +6,8 @@
      那边的队列、拉回（fetch），和 box 一样的真名路径；
   4. 删任务时按引用计数只删别的任务不用的路径；redo（重新传）。
 跑法：python3 scripts/queue/test_relay.py（在 box 上；checkpoint 用本机的 nnunet 环境）"""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -210,6 +212,12 @@ def test_plan():
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Failed")], [old]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
     ok("还没放过去 → 排传数据；在传 → 等；出错 → 报、领取保留；领取之前的旧任务不算")
+    ns = [dict(id=7, label=rec["label"], status=f"Failed ({relay.NOSLOT_RC})", code=relay.NOSLOT_RC)]
+    acts, stuck = relay.plan(S0([mtask(K, since=time.time() - 600)], ns, [rec]), NAME, RS(), {})
+    assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K, since=time.time() - 4 * 3600)], ns, [dict(rec, added=time.time() - 3600)]), NAME, RS(), {})
+    assert ops(acts) == [("beat", K), ("stage", K)] and f"site:{NAME}:stage" in stuck, (acts, stuck)
+    ok("传数据排不上 CPU 作业（退出码 75）→ 下次检查再传、不报；领了 3 小时以上还排不上才报")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K), ("fetch", K)], acts
@@ -352,13 +360,14 @@ def test_plan():
     cands = [mtask(K2, "free", None, nice=3), mtask(K3, "free", None, nice=4), mtask("Dataset4_c/tr/0", "free", None, relay_=None)]
     relay.refill.data_gb = lambda paths: 10.0
     relay.P.READY[NAME] = 2
+    HARD0 = (relay.conf(NAME).get("budget") or (None, relay.HARD_GB))[1]
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "claimed", "1")), st, [])
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K2], more
     more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0")] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert more == [] and "排着 2" in why, (more, why)
-    more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=105e9), st, [])
+    more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=(HARD0 + 5) * 1e9), st, [])
     assert more == [] and "放不下" in why, why
     ok("补任务：那边排着的（含在传数据的）不够 READY 个才领，按档位，只领能翻译的做法，放不下不领")
     K0 = "Dataset6_e/tr/0"
@@ -395,7 +404,7 @@ def test_plan():
     relay.PLANNED.clear()
     a1, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     disk = next(iter(relay.PLANNED))
-    relay.PLANNED[disk] = 395.0
+    relay.PLANNED[disk] = 500.0 - HARD0 - 5
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert a1 and more == [] and "放不下" in why, (a1, more, why)
     relay.PLANNED.clear()
@@ -533,8 +542,29 @@ def test_e2e():
     TN.wb(os.path.join(rout, "debug.json"), b"{}")
     TN.wj(os.path.join(os.path.dirname(rout), "plans.json"), {})
     TN.wb(os.path.join(RROOT, "data", "logs", "tasks", S.safe(sp["key"]) + "__12345_seg1.log"), b"log")
-    relay.fetch(NAME, sp["key"], say=lambda m: None)
     out = os.path.join(TN.ROOT, sp["out"])
+    inbox = os.path.join(TN.ROOT, ".relay_in", S.safe(sp["key"]))
+    os.environ["TUNNEL_TEST_BADMD5"] = sp["out"] + "/checkpoint_final.pth"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            relay.fetch(NAME, sp["key"], say=lambda m: None)
+        raise AssertionError("有文件没拉到应报错")
+    except relay.RN.RelayError as e:
+        assert "1 个文件没拉到" in str(e), e
+    finally:
+        del os.environ["TUNNEL_TEST_BADMD5"]
+    assert not os.path.exists(out) and os.path.isfile(os.path.join(inbox, sp["out"], "validation", "summary.json"))
+    sj = os.path.join(inbox, sp["out"], "validation", "summary.json")
+    TN.wb(sj, b"x" * os.path.getsize(sj))  # 大小一样、修改时间不同
+    TN.wb(os.path.join(inbox, sp["out"], "validation", "old.nii.gz"), b"old")
+    TN.wb(os.path.join(inbox, sp["out"], "debug.json.tunnelpart"), b"{")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        relay.fetch(NAME, sp["key"], say=lambda m: None)
+    assert "拉 2 个文件" in buf.getvalue(), buf.getvalue()
+    assert not os.path.exists(os.path.join(out, "validation", "old.nii.gz")) and not os.path.exists(os.path.join(out, "debug.json.tunnelpart"))
+    assert json.load(open(os.path.join(out, "validation", "summary.json"))) == dict(metric_per_case=[{}, {}])
+    ok("拉回到一半（上次缺文件报错，box 上什么都没放）：再拉只拉缺的和大小、修改时间对不上的，旧的、半份的不混进结果")
     assert os.path.exists(os.path.join(out, "validation", "summary.json"))
     assert sorted(f for f in os.listdir(os.path.join(out, "validation")) if f.endswith(".nii.gz")) == sorted(c + ".nii.gz" for c in TN.CASES[:2])
     assert not os.path.exists(os.path.join(out, "checkpoint_latest.pth"))
@@ -729,6 +759,35 @@ def test_fresh_site():
     print("通过：新机器还没有代码包时先部署再读状态；部署失败这次当连不上")
 
 
+def test_auto_off():
+    """AUTO 关着（11/2）：不传、不重传、不让那边接着训、不领新的、不交作业；训完的照常拉回。"""
+    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "write_status", "update_state", "load_state", "plan", "fill",
+                                           "topup", "log", "execute", "submit")}
+    auto = dict(relay.P.AUTO)
+    try:
+        ran = []
+        relay.remote_status = lambda n: {"bundle": None, "free": 1e12}
+        relay.undeployed = lambda n: False
+        relay.write_status = lambda n, rs, st: None
+        relay.update_state = lambda fn: None
+        relay.load_state = lambda: {}
+        relay.plan = lambda s, n, rs, st: ([dict(op=o, key=o) for o in ("beat", "stage", "restage", "redo", "rresume", "fetch")], {})
+        relay.fill = lambda *a: ([dict(op="take", key="t")], "")
+        relay.topup = lambda *a: ([("long", "x", 1, "worker.sbatch")], "")
+        relay.log = lambda lines: None
+        relay.execute = lambda n, acts, s: ran.extend(a["op"] for a in acts) or []
+        relay.submit = lambda n, subs: ran.append("submit") or ([], {})
+        relay.P.AUTO[NAME] = False
+        s = {"ok": {relay.M.hub(): True}, "taskq": {relay.taskq.queue_host(): {"tasks": [dict(key="x", worker=NAME, state="claimed")]}}}
+        relay.run_one(s, NAME, False)
+        assert ran == ["beat", "fetch"], ran
+    finally:
+        for k, v in keep.items():
+            setattr(relay, k, v)
+        relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
+    print("通过：AUTO 关着 → 只续领取、拉回训完的；不传、不接着训、不领新的、不交作业")
+
+
 def test_refcount():
     """删一个任务时只删别的任务不用的路径：同一个数据集的几折共用视图，推理的输入在训练的产出下面（11/1）。"""
     keys = {"t0": dict(views=["pre/X"], outs=["res/X/tr/fold_0"]),
@@ -794,6 +853,7 @@ if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
     test_fresh_site()
+    test_auto_off()
     test_plan()
     test_pueue_worker()
     test_slurm_topup_ready()

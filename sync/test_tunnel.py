@@ -81,8 +81,13 @@ ok("push 再跑一次：已有的跳过、仍然一致", r.returncode == 0 and s
 
 shutil.rmtree(dst)
 r = run("push", "dicc", src, "st/pushed", lst, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
-ok("push 校验和对不上：退出码 1，那边删掉那个文件，别的在", r.returncode == 1 and not os.path.exists(os.path.join(dst, "a/x.bin"))
-   and same(src, dst, [f for f in FILES if f != "a/x.bin"]))
+ok("push 校验和对不上：补传 3 轮还不对 → 退出码 1，那边删掉那个文件，别的在", r.returncode == 1 and not os.path.exists(os.path.join(dst, "a/x.bin"))
+   and same(src, dst, [f for f in FILES if f != "a/x.bin"]) and "补传 1 个缺的文件（第 3 轮）" in r.stdout and "第 4 轮" not in r.stdout)
+
+shutil.rmtree(dst)
+r = run("push", "dicc", src, "st/pushed", lst, env=dict(ENV, TUNNEL_TEST_DROP="a/x.bin,z.bin"))
+ok("push 第一轮断了两个：同一次里只补传那两个，退出码 0、一致", r.returncode == 0 and same(src, dst, FILES)
+   and "补传 2 个缺的文件（第 1 轮）" in r.stdout and "第 2 轮" not in r.stdout and "4 个一致" in r.stdout)
 
 shutil.rmtree(dst)
 r = run("push", "dicc", src, "st/pushed", lst, env=dict(ENV, TUNNEL_MIN_JOB="1"))
@@ -101,7 +106,13 @@ ok("pull 没有留下 .tunnelpart", not any(p.endswith(".tunnelpart") for p in t
 
 shutil.rmtree(pdst)
 r = run("pull", "dicc", "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
-ok("pull 校验和对不上：退出码 1，box 上没有那个文件、也没有半份", r.returncode == 1 and tree(pdst) == sorted(f for f in FILES if f != "a/x.bin"))
+ok("pull 校验和对不上：补传 3 轮还不对 → 退出码 1，box 上没有那个文件、也没有半份", r.returncode == 1
+   and tree(pdst) == sorted(f for f in FILES if f != "a/x.bin") and "补传 1 个缺的文件（第 3 轮）" in r.stdout)
+
+shutil.rmtree(pdst)
+r = run("pull", "dicc", "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_DROP="a/x.bin,top.pth"))
+ok("pull 第一轮断了两个：同一次里只补拉那两个，退出码 0、一致", r.returncode == 0 and same(rsrc, pdst, FILES)
+   and "补传 2 个缺的文件（第 1 轮）" in r.stdout and "第 2 轮" not in r.stdout and not any(p.endswith(".tunnelpart") for p in tree(pdst)))
 
 # 服务只认清单里的路径
 sys.path.insert(0, HERE)

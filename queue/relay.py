@@ -87,6 +87,8 @@ LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传完、还没加进队列或刚交还）
 STATUS_S = 90  # 读状态的超时：那边的存储挂住时跳过这台，不等
 JOB_WAIT = 600  # 在 CPU 作业里跑（machines.py 的 adopt_job）时最多等这么久排上
+NOSLOT_RC = 75  # relay.py stage 这次排不上 CPU 作业的退出码：下次检查再传，不报
+NOSLOT_ALERT_S = 3 * 3600  # 领了这么久还一直排不上就报
 PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记：同一个盘上的几台合起来算
 
 
@@ -243,7 +245,20 @@ except Exception:
     raw=None
 ed=os.path.join(R,'state','envs')
 oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
-spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=raw,free=shutil.disk_usage(R).free,dev=os.stat(R).st_dev,envs_ok=oks,
+free=shutil.disk_usage(R).free
+if A.get('cap'):
+    used,seen=0,set()
+    for dp,dns,fns in os.walk(R):
+        for f in fns:
+            x=os.lstat(os.path.join(dp,f))
+            if x.st_nlink>1:
+                if (x.st_dev,x.st_ino) in seen:
+                    continue
+                seen.add((x.st_dev,x.st_ino))
+            if not os.path.islink(os.path.join(dp,f)):
+                used+=x.st_blocks*512
+    free=min(free,max(0,int(A['cap']*1e9)-used))
+spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
@@ -353,7 +368,8 @@ ex=(T.get('fetch') or {}).get('exclude') or []
 items=[]
 def add(p):
     if os.path.isfile(p) and not os.path.realpath(p).startswith(B):
-        items.append([os.path.relpath(p,D),os.path.getsize(p)])
+        st=os.stat(p)
+        items.append([os.path.relpath(p,D),st.st_size,st.st_mtime_ns])
 for o in A['outs']:
     for dp,_,fs in os.walk(os.path.join(D,o)):
         for f in fs:
@@ -436,7 +452,7 @@ def remote_status(name):
     if c.get("ssh_master") and subprocess.run(ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
         return None  # 长连接断着：不另起连接（中转执行机认证失败多了会被锁）
     try:
-        rs = rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue")), timeout=STATUS_S)
+        rs = rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap")), timeout=STATUS_S)
     except RuntimeError:
         return None
     return parse_sched(name, rs)
@@ -658,6 +674,7 @@ def place(src, D, written, real):
 
 
 def fetch(name, key, say=print):
+    import stat
     import tunnel
     real, D = lookup(key), box_data()
     k = keys_of(load_state(), name).get(key)
@@ -668,9 +685,20 @@ def fetch(name, key, say=print):
         raise RN.RelayError(f"{conf(name)['label']} 上 {key} 还没做完")
     inbox = os.path.join(D, ".relay_in", S.safe(key))
     out = inbox + ".real"
-    for d in (inbox, out):
-        shutil.rmtree(d, ignore_errors=True)
-    bad = tunnel.pull(conf(name)["ssh"], root(name) + "/data", inbox, res["items"])
+    shutil.rmtree(out, ignore_errors=True)
+    # 上次拉到一半的（11/2）：清单里有、大小和修改时间都对上的留着（隧道核对过 MD5 才放进来），只拉其余的；别的删掉
+    want = {i[0]: list(i[1:]) for i in res["items"]}
+    for dp, _, fs in os.walk(inbox):
+        for f in fs:
+            p = os.path.join(dp, f)
+            st = os.lstat(p)
+            rel = os.path.relpath(p, inbox)
+            if rel in want and stat.S_ISREG(st.st_mode) and [st.st_size, st.st_mtime_ns][:len(want[rel])] == want[rel]:
+                want.pop(rel)
+            else:
+                os.remove(p)
+    todo = [(r, v[0]) for r, v in want.items()]
+    bad = tunnel.pull(conf(name)["ssh"], root(name) + "/data", inbox, todo) if todo else []
     if bad:
         raise RN.RelayError(f"{len(bad)} 个文件没拉到（{bad[:3]}）")
     written = N.import_(real, inbox, out, D)
@@ -770,8 +798,12 @@ def plan(s, name, rs, st, now=None):
         since = t.get("since") or 0
         if a is None:
             sg = box_task(s, "relay_stage", key, since)
-            if sg is None or sg["status"] == "Success":
+            noslot = sg is not None and sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC
+            if sg is None or sg["status"] == "Success" or noslot:
                 acts.append(dict(op="stage", key=key, nice=t["nice"]))
+                if noslot and now - since > NOSLOT_ALERT_S:
+                    stuck[f"site:{name}:stage"] = (f"{L} 的 CPU 作业 {(now - since) / 3600:.0f} 小时都排不上，{key} 的数据传不过去"
+                                                   f"（box 任务 {sg['id']}，每次检查再试）")
             elif sg["status"] not in LIVE:
                 stuck[f"relaystage:{key}"] = (f"给 {L} 传 {key} 的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
                                               f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）")
@@ -793,7 +825,7 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="rresume", key=key, rkey=a["key"]))
         elif ast == "input":  # 那边开训前查到输入不全（taskq.py missing）：只补传缺的、重建视图，再撤掉标记（11/1）
             sg = box_task(s, "relay_stage", key, a.get("input_since") or since)
-            if sg is None or sg["status"] == "Success":
+            if sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC):
                 acts.append(dict(op="restage", key=key))
             elif sg["status"] not in LIVE:
                 stuck[f"relaystage:{key}"] = (f"给 {L} 补传 {key} 缺的输入的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
@@ -1145,7 +1177,8 @@ def run_one(s, name, dry):
             reg = (st.get("views") or {}).get(name) or {}
             keep = {v for k in keys_of(st, name).values() for v in (k.get("outs") or [] if k.get("unq") else paths_of(k))}
             keep |= {v for v, t in reg.items() if time.time() - t < VIEW_KEEP_S}
-            g = relay_gc.gc(name, keep, rpy, views=reg, siblings=[x["path"] for x in M.adopt_sources(name) if x["site"]])
+            g = relay_gc.gc(name, keep, rpy, views=reg, siblings=[x["path"] for x in M.adopt_sources(name) if x["site"]],
+                            free=rs.get("free") if conf(name).get("cap") else None)
             if g and g["removed_views"]:
                 update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
             if g and (g["removed_views"] or g["removed_blobs"]):
@@ -1155,6 +1188,8 @@ def run_one(s, name, dry):
         except Exception as e:  # noqa: BLE001
             notes.append(f"{L} 清理出错：{e}")
     acts, stuck = plan(s, name, rs, st)
+    if not live:  # 开关关着：不传、不重传、不让那边接着训；训完的照常拉回、交还
+        acts = [a for a in acts if a["op"] not in ("stage", "restage", "redo", "rresume")]
     more, why = (fill(s, name, rs, st, acts) if rs is not None else ([], "连不上"))
     subs, swhy = (topup(name, rs) if rs is not None else ([], "连不上"))
     for part in swhy.split("；"):
@@ -1199,7 +1234,8 @@ def main(argv):
     if a.cmd == "stage":
         if a.nice is None and not a.no_add:
             ap.error("要给 --nice（或 --no-add）")
-        stage(a.name, a.key, a.nice, add=not a.no_add)
+        if stage(a.name, a.key, a.nice, add=not a.no_add) is None:
+            return NOSLOT_RC
     elif a.cmd == "fetch":
         fetch(a.name, a.key)
     elif a.cmd == "bundle":

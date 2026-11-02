@@ -5,7 +5,8 @@
 # 一张卡训几个看实际情况：先训 1 个；最近一个训练开始 15 分钟以后，如果近 10 分钟 GPU 平均使用率低于 90%（10/18 前 80%）、
 # 还空着一半显存，再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。
 # CPU 跟不上的训练（nnU-Net）会变成 2 个，GPU 跑满的（SwinUNETR、U-Mamba）自然只训 1 个。训完一个再领下一个；
-# 离时限不到 1 小时不再领新的；没有在训的、也领不到新的就退出。作业到时限被停掉时，没训完的任务交还队列，
+# 离时限不到 1 小时不再领新的；没有在训的、也领不到新的，空着等（有了就领），等满 40 分钟还没有就退出
+# （11/2 起：排了几天的作业开始时缓冲刚好空着、数据还在传，不再几秒就结束）。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
 #   bash dicc_worker.sh                     （scripts/queue/worker.sbatch → worker_start.sh）
 # WORKER_DEVICE=cpu（scripts/queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
@@ -69,8 +70,12 @@ TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.s
 unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
 LOGDIR=$DATA/logs/workers
 mkdir -p "$LOGDIR"
-COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2> /dev/null || echo 未知)
-(cd "$REPO" && git diff --quiet HEAD -- scripts/queue research/common) 2> /dev/null || COMMIT="$COMMIT+改动"
+if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
+    COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
+    git -C "$REPO" diff --quiet HEAD -- scripts/queue research/common 2> /dev/null || COMMIT="$COMMIT+改动"
+else
+    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名 <提交号>-<内容哈希>
+fi
 head_now() {
     if [[ -n ${TASKQ_HEAD_CMD:-} ]]; then eval "$TASKQ_HEAD_CMD"
     elif [[ -L $(dirname "$REPO")/current ]]; then readlink -f "$(dirname "$REPO")/current"
@@ -365,7 +370,7 @@ while true; do
     if [[ -n $why_not && $why_not != "${last_why:-}" ]]; then echo "$(ts) 先不再加训练：$why_not"; fi
     last_why=$why_not
     if (( ${#KEY[@]} > 0 )); then
-        idle_since=0 said_idle=
+        idle_since=0 said_idle= said_nothing=
     else
         (( idle_since )) || idle_since=$now
         if (( ! INSLURM )); then
@@ -393,15 +398,18 @@ while true; do
             echo "$(ts) 本作业失败太多次，作业结束"; break
         elif (( $(left) <= MIN_LEFT )); then
             echo "$(ts) 离时限不到 $(( MIN_LEFT / 60 )) 分钟，作业结束"; break
-        elif [[ $why == nothing ]]; then
+        elif [[ $why == nothing && $DEVICE == cpu ]]; then
             echo "$(ts) 没有在训的，也没有能领的任务，作业结束"; break
+        elif [[ $why == nothing ]] && (( now - idle_since >= IDLE_MAX )); then
+            echo "$(ts) 空等 $(( (now - idle_since) / 60 )) 分钟没有能领的任务，作业结束、把卡还回去"; break
         elif [[ $why == error ]] && (( now - err_since >= ERR_MAX )); then
             echo "$(ts) 队列连续出错 $(( (now - err_since) / 60 )) 分钟（$(tail -n 1 "$ERRF")），结束作业、把卡还回去"; break
         elif (( now - idle_since >= IDLE_MAX )); then
             echo "$(ts) 手上没有在训的已经 $(( (now - idle_since) / 60 )) 分钟（$why），结束作业、把卡还回去（DICC：GPU 使用率连续 1 小时低于 40% 会被取消）"
             break
         fi
-        # wait（等前面刚停下的任务）、paused（队列暂停）、error（还没到结束的时候）：先空着等，最多 IDLE_MAX
+        # nothing（没有能领的）、wait（等前面刚停下的任务）、paused（队列暂停）、error（还没到结束的时候）：先空着等，最多 IDLE_MAX
+        [[ $why == nothing && ${said_nothing:-} != 1 ]] && { echo "$(ts) 没有能领的任务，空着等，每 ${TASKQ_POLL:-30} 秒再看，最多 $(( IDLE_MAX / 60 )) 分钟"; said_nothing=1; }
         [[ $why == paused && ${said_paused:-} != 1 ]] && { echo "$(ts) 队列暂停领任务（3 小时内失败太多次），空着等，最多 $(( IDLE_MAX / 60 )) 分钟"; said_paused=1; }
         [[ $why == wait && ${said_wait:-} != 1 ]] && { echo "$(ts) 排在前面的任务刚停下，等它（最多到开始后 $(( PATIENCE / 60 )) 分钟）"; said_wait=1; }
     fi

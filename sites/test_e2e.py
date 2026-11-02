@@ -201,6 +201,13 @@ def setup():
     rs = relay.remote_status(NAME)
     step(f"准备：代码包 {bid} 推过去，那边的队列开着、是空的，自己的 pueued 起来了",
          rs is not None and rs["bundle"] == bid and rs["taskq"]["enabled"] and rs["taskq"]["tasks"] == [] and rs["jobs"] == [], rs)
+    used = int(subprocess.run(["du", "-sb", os.path.join(T, "r")], capture_output=True, text=True).stdout.split()[0])
+    M.RELAY[NAME]["cap"] = 1
+    try:
+        rs2 = relay.remote_status(NAME)
+    finally:
+        M.RELAY[NAME].pop("cap")
+    step("cap（11/2）：剩余按 cap 减去根目录已占的算，不看整个盘", rs2 is not None and 0 < rs2["free"] <= 1e9 - used * 0.5, (rs2 or {}).get("free"))
 
 
 # ---------------- box 的 wait 组：在进程里直接做 ----------------
