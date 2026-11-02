@@ -5,8 +5,8 @@
 
     python3 scripts/monitor/report.py            推送
     python3 scripts/monitor/report.py --dry-run  只打印
-读：research/RQ1/实验登记_状态.json、实验登记表.csv（make_registry.py 刚生成的）、scripts/queue/qs --json、
-  ~/.cache/phd-health/state.json（健康检查的当前问题）。上一次的训完任务数和时间记在 ~/.cache/phd-health/report.json。
+读：登记表（envs/policy.py 的 OUTPUTS["registry"]）的实验登记_状态.json、实验登记表.csv（make_registry.py 刚生成的）、scripts/queue/qs --json、
+  健康检查的 state.json（当前问题）。上一次的训完任务数和时间记在同一文件夹的 report.json。
 """
 import argparse
 import csv
@@ -23,8 +23,8 @@ import health as H  # noqa: E402  push、机器表
 import common as C  # noqa: E402  scripts/queue/common.py（health 已经把路径加上）
 import plain as PL  # noqa: E402  白话说法
 
-RQ1 = os.path.join(REPO, "research", "RQ1")
-LAST = os.path.expanduser("~/.cache/phd-health/report.json")
+REG = os.path.join(REPO, H.OUT.get("registry", {}).get("dir", ""))
+LAST = os.path.join(H.HDIR, "report.json")
 HOURS = 2  # 没有上一次的记录时，"上次以来"按这么多小时算
 
 
@@ -39,8 +39,8 @@ def hm(ts):
 
 
 def build(now):
-    st = json.load(open(os.path.join(RQ1, "实验登记_状态.json"), encoding="utf-8"))
-    rows = list(csv.DictReader(open(os.path.join(RQ1, "实验登记表.csv"), encoding="utf-8")))
+    st = json.load(open(os.path.join(REG, "实验登记_状态.json"), encoding="utf-8"))
+    rows = list(csv.DictReader(open(os.path.join(REG, "实验登记表.csv"), encoding="utf-8")))
     last = json.load(open(LAST)) if os.path.exists(LAST) else {}
     cut = datetime.strptime(last["time"], "%Y-%m-%d %H:%M") if "time" in last else now - timedelta(hours=HOURS)
     span = f"{(now - cut).total_seconds() / 3600:.0f} 小时"
@@ -100,7 +100,7 @@ def main():
     if a.dry_run:
         print(msg)
         return
-    H.push(msg, title=f"PhD 进度 {now:%H:%M}", priority="low", tags="bar_chart")
+    H.push(msg, title=f"{H.NAME} 进度 {now:%H:%M}", priority="low", tags="bar_chart")
     os.makedirs(os.path.dirname(LAST), exist_ok=True)
     json.dump({"folds_done": p, "time": now.strftime("%Y-%m-%d %H:%M")}, open(LAST, "w"))
 

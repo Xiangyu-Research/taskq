@@ -20,8 +20,8 @@
   - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
 提醒（10/21 起）：每个问题推送一次，用 scripts/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
-文件：~/.config/phd-health/ntfy_topic（ntfy 频道名，不进仓库）、~/.cache/phd-health/state.json（问题和推送记录，
-  make_registry.py 读）、~/.cache/phd-health/health.log（每次有变化记一行）。
+文件（envs/policy.py 的 OUTPUTS）：topic（ntfy 频道名，不进仓库）、health 下的 state.json（问题和推送记录，
+  make_registry.py 读）、health.log（每次有变化记一行）。
 每次检查后还做两件事（10/18 起）：
   - scripts/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
   - scripts/queue/feed.py：送任务的唯一入口（10/31）。SITES 里 relay=True 的执行机交给 scripts/queue/relay.py（领任务、传数据、
@@ -53,11 +53,14 @@ import common as C  # noqa: E402  scripts/queue/common.py
 import slurm as SL  # noqa: E402  scripts/sites/slurm.py
 from common import write_json  # noqa: E402
 
-STATE = os.path.expanduser("~/.cache/phd-health/state.json")
-CODE_HEADS = os.path.expanduser("~/.cache/phd/code/heads.tsv")  # scripts/monitor/auto_refresh.sh 写
-LOG = os.path.expanduser("~/.cache/phd-health/health.log")
-TOPIC = os.path.expanduser("~/.config/phd-health/ntfy_topic")
-H_PENDING = os.path.expanduser("~/.cache/phd-health/board_pending.txt")  # scripts/dashboard/publish.py --auto 写
+OUT = getattr(policy, "OUTPUTS", {})
+HDIR = os.path.expanduser(OUT.get("health", "~/.cache/taskq-health"))
+NAME = OUT.get("name", "taskq")
+STATE = os.path.join(HDIR, "state.json")
+CODE_HEADS = os.path.expanduser(OUT.get("heads", "~/.cache/taskq/code/heads.tsv"))  # scripts/monitor/auto_refresh.sh 写
+LOG = os.path.join(HDIR, "health.log")
+TOPIC = os.path.expanduser(OUT.get("topic", "~/.config/taskq-health/ntfy_topic"))
+H_PENDING = os.path.join(HDIR, "board_pending.txt")  # scripts/dashboard/publish.py --auto 写
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
 
 
@@ -382,7 +385,7 @@ def check(s):
 
 
 # ---------------- 推送和状态 ----------------
-def push(msg, title="PhD 作业", priority="default", tags=""):
+def push(msg, title=f"{NAME} 作业", priority="default", tags=""):
     topic = open(TOPIC).read().strip()
     q = urllib.parse.urlencode({"title": title, "priority": priority, "tags": tags})
     req = urllib.request.Request(f"https://ntfy.sh/{topic}?{q}", data=msg.encode(), method="POST")
@@ -420,7 +423,7 @@ def update(P, now, dry=False):
                 urgent = any(p["level"] == "urgent" for _, p in msgs)
                 texts = [PL.problem(pid, p) for pid, p in msgs]
                 push(texts[0] if len(texts) == 1 else "\n".join("- " + t for t in texts),
-                     title=("PhD：紧急" if urgent else "PhD：需要处理") + (f"（{len(texts)} 件）" if len(texts) > 1 else ""),
+                     title=(f"{NAME}：紧急" if urgent else f"{NAME}：需要处理") + (f"（{len(texts)} 件）" if len(texts) > 1 else ""),
                      priority="high" if urgent else "default", tags="rotating_light" if urgent else "warning")
                 for _, p in msgs:
                     p["notified"] = True

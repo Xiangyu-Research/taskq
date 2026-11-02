@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/1 起就是这个提交的代码，不改名、不去注释）：
-提交里跟踪的 scripts/、envs/、research/ 下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），
+提交里跟踪的 scripts/、envs/、research/（envs/policy.py 的 OUTPUTS["bundle"]）下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），
 另外生成只有这一台的 envs/machines.py、envs/policy.py，Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，
 cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的 ~/.cache/phd/… 换成那边根目录下的 queue/、state/。
 核对：两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。包名 = <提交号前 10 位>-<内容哈希前 8 位>，
@@ -27,10 +27,11 @@ import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
 import machines as M  # noqa: E402
+import policy as P  # noqa: E402
 import remote as RM  # noqa: E402
 
 OUT = "~/.cache/phd/relay/bundles"
-TOPS = ("scripts", "envs", "research")
+TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("scripts", "envs")))  # envs/policy.py 的 OUTPUTS
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
