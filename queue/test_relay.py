@@ -365,35 +365,61 @@ def test_plan():
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K2], more
-    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0")] + cands), NAME, RS(rtask(A, "free")), st, [])
+    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0")] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME, RS(rtask(A, "free")), st, [])
     assert more == [] and "排着 2" in why, (more, why)
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=(HARD0 + 5) * 1e9), st, [])
     assert more == [] and "放不下" in why, why
     ok("补任务：那边排着的（含在传数据的）不够 READY 个才领，按档位，只领能翻译的做法，放不下不领")
     K0 = "Dataset6_e/tr/0"
-    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0"), mtask(K0, "free", None, nice=-100)] + cands), NAME,
+    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0"), mtask(K0, "free", None, nice=-100)] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME,
                            RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K0], (more, why)
     more, why = relay.fill(S0([mtask(K), mtask(K0, "free", None, nice=-100)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K0, K2], (more, why)
     ok("第 ⓪ 档（nice < 0，训完后的推理）不受 READY 限制：排满了也领，先领它")
 
+    K5 = "Dataset5_d/tr/0"
+    st2 = keymap((K, A), (K5, K5))
+    late = [mtask(K2, "free", None, nice=6), mtask(K3, "free", None, nice=7)]
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + late), NAME, RS(rtask(A, "stopped"), rtask(K5, "free")), st2, [])
+    assert more == [] and "排着 2" in why, (more, why)
+    ok("那边停着、这次要撤销停止的也算排着（11/2：lab1 多领了 2 个）")
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "free"), rtask(K5, "free")), st2, [])
+    assert [(a["op"], a["key"]) for a in more] == [("drop", K5), ("release", K5), ("take", K2)] and more[0]["rkey"] == K5, more
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "claimed", "1"), rtask(K5, "free")), st2, [])
+    assert [(a["op"], a["key"]) for a in more] == [("take", K2)], more
+    relay.P.READY[NAME] = 1
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "claimed", "1"), rtask(K5, "free")), st2, [])
+    assert [(a["op"], a["key"]) for a in more] == [("drop", K5), ("release", K5), ("take", K2)], more
+    relay.P.READY[NAME] = 2
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + late), NAME, RS(rtask(A, "free"), rtask(K5, "free")), st2, [])
+    assert more == [] and "排着 2" in why, (more, why)
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + [mtask(K2, "free", None, nice=6)]), NAME, RS(rtask(A, "free"), rtask(K5, "free")), st2, [])
+    assert more == [], more
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, dict(RS(rtask(A, "free"), rtask(K5, "free")), free=(HARD0 + 5) * 1e9), st2, [])
+    assert more == [], more
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "waiting"), rtask(K5, "free", "9")), st2, [])
+    assert more == [], more
+    relay.PLANNED.clear()
+    ok("备满了、总队列里有更优先的：交还一个备好没人领的（先删那边、再交还）换它进来；在训的、有人领的、同档的不换，放不下不换")
+
     def ctask(key, state="free", worker=None, nice=3):
         t = mtask(key, state, worker, nice=nice)
         return dict(t, spec=dict(t["spec"], device="cpu"))
+    hi = [dict(t, nice=t["nice"] + 3) for t in cands]
     E1, E2 = "Dataset7_f/ev/0", "Dataset8_g/ev/0"
     jobs0 = M.RELAY[NAME]["jobs"]
     relay.P.READY[NAME] = 1
     relay.PLANNED.clear()
     try:
-        more, why = relay.fill(S0([mtask(K)] + cands + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
+        more, why = relay.fill(S0([mtask(K)] + hi + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
         assert more == [] and "排着 1" in why, (more, why)
         M.RELAY[NAME]["jobs"] = dict(jobs0, cpu="x_cpu")
-        more, why = relay.fill(S0([mtask(K)] + cands + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
+        more, why = relay.fill(S0([mtask(K)] + hi + [ctask(E1), ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
         assert [a["key"] for a in more] == [E1], (more, why)
-        more, why = relay.fill(S0([mtask(K), ctask(E1, "claimed", NAME)] + cands + [ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
+        more, why = relay.fill(S0([mtask(K), ctask(E1, "claimed", NAME)] + hi + [ctask(E2, nice=4)]), NAME, RS(rtask(A, "free")), st, [])
         assert more == [] and "排着 2" in why, (more, why)
-        more, why = relay.fill(S0([ctask(E1, "claimed", NAME)] + cands + [ctask(E2, nice=4)]), NAME, RS(), st, [])
+        more, why = relay.fill(S0([ctask(E1, "claimed", NAME)] + hi + [ctask(E2, nice=4)]), NAME, RS(), st, [])
         assert [a["key"] for a in more] == [K2], (more, why)
     finally:
         M.RELAY[NAME]["jobs"] = jobs0

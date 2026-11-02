@@ -40,7 +40,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `AUTO["advance"]` | True / False | 训完以后的步骤真的排；False 时只把"会排什么"写进 box `~/advance.log` |
 | `envs/policy.py` `AUTO["lab"]` | True / False | 老的 lab 缓冲（10/31 17:50 关，换成 relay 执行机 lab1、lab0） |
 | `envs/policy.py` `AUTO["dicc"]` | True / False | 往 DICC 的缓冲送新任务（`feed.py`）、补交 DICC 的 worker 作业；False 时只记"会送 / 会交什么"（`~/feed.log`、`~/refill.log`），已分过去的照常交还、同步 |
-| `envs/policy.py` `READY` | 执行机 → 个数 | 缓冲里备几个没人领的训练（`feed.py`、`relay.py`） |
+| `envs/policy.py` `READY` | 执行机 → 个数 | 缓冲里备几个没人领的训练（`feed.py`、`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领的一个交还换它（每次检查一个，11/2） |
 | `envs/policy.py` `AUTO["dicc2"]`、`AUTO["lab1"]`、`AUTO["lab0"]`、`AUTO["dicc1"]` | True / False | relay 执行机（DICC2、lab 的两张卡、换过来以后的 DICC）：领新的任务、补交作业 / 开 worker；False 时只记进 box `~/relay.log`，已领的任务照常推进（见下面"执行机"） |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
 | `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件只有 `have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |

@@ -888,27 +888,43 @@ def fill(s, name, rs, st, acts):
     keys = keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
 
-    def waiting(t):  # 领着、还没开训：在传数据，或在那边排着
-        a = rt.get(rkey(t["key"], keys[t["key"]])) if t["key"] in keys else None
-        return a is None or a["state"] in ("free", "stale", "waiting")
+    def remote(t):
+        return rt.get(rkey(t["key"], keys[t["key"]])) if t["key"] in keys else None
+
+    def waiting(t):  # 领着、还没开训：在传数据，在那边排着，或那边停着、这次检查要撤销停止的（11/2）
+        a = remote(t)
+        return a is None or a["state"] in ("free", "stale", "waiting", "stopped", "input")
+
+    def idle(t):  # 那边备好了、没人领：可以让给更优先的任务（11/2）
+        a = remote(t)
+        return a is not None and a["state"] == "free" and not a.get("worker")
 
     def kind(t):
         return refill.info(mtq, t["key"])["spec"].get("device", "gpu")
-    have = {k: 0 for k in kinds}
+    have, held = {k: 0 for k in kinds}, []
     for t in mtq.get("tasks", []):
         if t.get("worker") == name and t["state"] not in ("done", "stopped") and waiting(t):
             have[kind(t)] = have.get(kind(t), 0) + 1
+            held.append(t)
     ready = {p for k in keys.values() for p in k.get("data") or []}
     cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"), kinds=kinds)
              if relayable(refill.info(mtq, t["key"]))]
     urgent = [t for t in cands if t["nice"] < 0]  # 第 ⓪ 档（训完后的推理等）不受 READY 限制（11/1）
     room = {k: want - have[k] for k in kinds}
-    if all(n <= 0 for n in room.values()) and not urgent:
-        return [], f"那边排着 {sum(have.values())} 个"
     disk = (conf(name)["ssh"], rs.get("dev"))
     free = rs.get("free", 0) / 1e9 - PLANNED.get(disk, 0)
     hard = (conf(name).get("budget") or (None, HARD_GB))[1]
     out, took = [], set()
+    for k in kinds:  # 备满了、总队列里有更优先的：每次检查把一个最靠后、备好没人领的交还，换它进来（11/2）
+        idle_k = sorted((t for t in held if kind(t) == k and idle(t)), key=lambda t: (-t["nice"], -t["order"]))
+        better = [t for t in cands if kind(t) == k and t["nice"] >= 0 and idle_k and t["nice"] < idle_k[0]["nice"]]
+        if room[k] <= 0 and better and refill.next_pick(mtq, better, ready, free, hard, took)[0] is not None:
+            w = idle_k[0]
+            out += [dict(op="drop", key=w["key"], rkey=rkey(w["key"], keys[w["key"]])),
+                    dict(op="release", key=w["key"], why=f"让给更优先的 {better[0]['key']}（档位 {better[0]['nice']} < {w['nice']}）")]
+            room[k] = 1
+    if all(n <= 0 for n in room.values()) and not urgent:
+        return [], f"那边排着 {sum(have.values())} 个"
     for pool, n in [(urgent, len(urgent))] + [([t for t in cands if kind(t) == k], room[k]) for k in kinds]:
         for _ in range(n):
             t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
