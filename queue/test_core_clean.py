@@ -4,6 +4,7 @@ import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = REPO  # 清单里的路径相对它
 
 CLEAN = [
     "scripts/queue/common.py", "scripts/queue/inputs.py", "scripts/queue/feed.py", "scripts/queue/refill.py",
@@ -23,13 +24,16 @@ WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|tra
 
 # 测试用的固定配置（testdata/）整个查；PLACE 的地方 "trainer"（训练所在的执行机）是核心的写法
 FIXTURE = "scripts/queue/testdata"
-CLEAN += sorted(os.path.relpath(os.path.join(d, f), REPO) for d, ds, fs in os.walk(os.path.join(REPO, FIXTURE))
-                if "__pycache__" not in d for f in fs if not f.endswith(".pyc"))
+FIXED = sorted(os.path.relpath(os.path.join(d, f), ROOT) for d, ds, fs in os.walk(os.path.join(ROOT, FIXTURE))
+               if "__pycache__" not in d for f in fs if not f.endswith(".pyc"))
+if not FIXED:
+    sys.exit(f"{FIXTURE} 下没有文件")
+CLEAN += FIXED
 ALLOW = {f"{FIXTURE}/config/policy.py": '"trainer"'}
 
 bad = []
 for f in CLEAN:
-    for i, line in enumerate(open(os.path.join(REPO, f), encoding="utf-8", errors="replace"), 1):
+    for i, line in enumerate(open(os.path.join(ROOT, f), encoding="utf-8", errors="replace"), 1):
         line = line.replace(ALLOW[f], "") if f in ALLOW else line
         m = WORDS.search(line)
         if m:
