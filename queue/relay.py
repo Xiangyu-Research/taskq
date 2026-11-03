@@ -218,7 +218,7 @@ def rpy(name, code, data=None, timeout=600, job=None):
     job：Slurm 的 srun 参数（machines.py 的 adopt_job），在 CPU 节点上跑；排不上 → NoSlot。"""
     cmd = f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {R.q(root(name))}"
     if job:
-        cmd = f"srun -I{JOB_WAIT} {job} -J {SL.jobname()} bash -c {shlex.quote(cmd)}"
+        cmd = f"srun -I{JOB_WAIT} {job} -J {SL.jobname(conf(name).get('job_names'))} bash -c {shlex.quote(cmd)}"
         timeout += JOB_WAIT
     rc, out, err = rsh(name, cmd, input=json.dumps(data), timeout=timeout)
     if job and rc and S.json_in(out) is None and any(x in err for x in ("Unable to allocate", "Immediate", "revoked")):
@@ -1135,7 +1135,7 @@ def submit(name, subs):
                     stuck[kkey(f"site:{name}:worker", k)] = f"{L} 开 {wname(k)} 出错：{out}"
         return msgs, stuck
     cwd = R.q(root(name)) + "/code/current/scripts/queue"
-    for r in SL.start_workers(cwd, subs, run):
+    for r in SL.start_workers(cwd, subs, run, conf(name).get("job_names")):
         k = sub_kind((r["qos"], r["time"], r["n"], r["file"]))
         if r["err"] is not None:
             stuck[kkey(f"topup:{name}:{r['qos']}", k)] = f"{L} {r['qos']} 补交 {wname(k)} 作业出错：{r['err']}"

@@ -287,7 +287,7 @@ def run_remote(host, mode, plan, serve, total):
         t = max(30, int(total / 5e6 / 60) + 10)
         sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
         import slurm  # 作业名每次随机
-        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname()} {pyx} {script} {mode} plan.json >> log 2>&1")
+        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname((relay or M.MACHINES.get(name, {})).get('job_names'))} {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
