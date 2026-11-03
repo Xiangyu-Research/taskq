@@ -21,6 +21,7 @@
      - 那边做完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、核对、备份到 DICC；备份机暂停检查时只拉回）；
      - 总队列显示训完（box 上有了），而且拉回、归档的 box 任务成功了 → 交还，删掉那边的任务和结果；
        拉回时没归档或归档失败的，备份机能用时单独排 archive_task.sh box（relay_archive），之前领取保留、那边的结果不删；
+       备份机停用（envs/policy.py 的 OFFLINE）时不等归档：拉回核对成功就交还、删那边的（11/3 定，box 的 backup 池是第二份）；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
@@ -776,7 +777,7 @@ def plan(s, name, rs, st, now=None):
                     want = bool(lookup(key).get("archive"))
                 except (RN.RelayError, S.SpecError):
                     want = False
-                if want:
+                if want and not (ft["status"] == "Success" and C.backup_down()):
                     acts.append(dict(op="beat", key=key))
                     if not C.backup_down(s.get("ok")):
                         acts.append(dict(op="archive", key=key))
@@ -786,7 +787,8 @@ def plan(s, name, rs, st, now=None):
                     stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），box 上有了、领取保留；"
                                                   f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
                     continue
-            acts.append(dict(op="release", key=key, why="训完了，box 上有了、归档到 DICC 了"))
+            archived = (at is not None) or (ft is not None and "archive_task.sh" in (ft.get("command") or ""))
+            acts.append(dict(op="release", key=key, why="训完了，box 上有了" + ("、归档了" if archived else "（没有归档）")))
             if k:
                 acts.append(dict(op="drop", key=key, rkey=rkey(key, k)))
             continue

@@ -266,6 +266,10 @@ def test_plan():
         acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
+        assert ops(acts) == [("drop", K), ("release", K)] and not stuck, (acts, stuck)
+        assert "没有归档" in [a for a in acts if a["op"] == "release"][0]["why"], acts
+        C.backup_down = lambda ok=None: "dicc 这次连不上" if ok is not None else None
+        acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
         C.backup_down = lambda ok=None: None
         acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
@@ -285,7 +289,7 @@ def test_plan():
         assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
     finally:
         relay.lookup, C.backup_down = old_lookup, old_down
-    ok("要归档的折：备份机暂停检查时拉回后先不归档、领取保留、不报；备份机回来后单独排归档（relay_archive），归档成功才交还、删那边的；归档出错 → 报")
+    ok("要归档的折：备份机停用时拉回成功就交还、删那边的（拉回出错不删、不报）；只是这次连不上 → 等；备份机能用时单独排归档（relay_archive），归档成功才交还、删那边的；归档出错 → 报")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
