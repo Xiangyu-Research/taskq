@@ -105,5 +105,17 @@ ok("run：给了 host → 那边用 timeout -k 包住、比本机早 15 秒，�
    and cmd[-2] == "dicc" and to == 120)
 ok("run：本机的不套", C.run("echo hi")[1] == "hi\n")
 
+# have_script：数据目录进不去 → 没有结束标记，parse_have 是 None（未知），不当成"什么都没有"（11/3）
+hd = os.path.join(T, "have")
+os.makedirs(os.path.join(hd, "a"))
+os.makedirs(os.path.join(hd, "b"))
+open(os.path.join(hd, "b", ".incomplete"), "w").close()
+r = _sp.run(["bash", "-s"], input=C.have_script(["a", "b", "c"], hd), capture_output=True, text=True)
+ok("have_script：目录在 → 列出有的（建到一半的不算），有结束标记", C.parse_have(r.stdout) == {"a"})
+r = _sp.run(["bash", "-s"], input=C.have_script(["a"], os.path.join(T, "nothere")), capture_output=True, text=True)
+ok("have_script：数据目录进不去 → 没有 @@END，parse_have 返回 None", C.HAVE_END not in r.stdout and C.parse_have(r.stdout) is None)
+r = _sp.run(["bash", "-c", C.have_script(["a"], "~/have")], capture_output=True, text=True, env=dict(os.environ, HOME=T))
+ok("have_script：~/ 开头的数据目录留给那边展开", C.parse_have(r.stdout) == {"a"})
+
 print("\n全部通过" if not fails else f"\n{fails} 项失败")
 sys.exit(1 if fails else 0)

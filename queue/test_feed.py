@@ -322,5 +322,56 @@ rc, _ = tqb("release", "--worker", "900", "toy/0")
 rc2, out2 = tqb("next", "--worker", "903", "--envs", "base")
 ok("交还后别的 worker 接着领", rc == 0 and rc2 == 0 and out2.startswith("toy/0"))
 
+# ---------------- send 时 put 结果未知：不交还，下次检查核对 ----------------
+CEN = os.path.join(T, "central")
+os.makedirs(CEN)
+open(os.path.join(CEN, "ENABLED"), "w").close()
+
+
+def tqc(*args, stdin=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(os.environ, TASKQ_DIR=CEN, TASKQ_DATA=DATA, TASKQ_FEED="1"),
+                       capture_output=True, text=True, input=stdin)
+    return r.returncode, r.stdout, r.stderr
+
+
+def assigned(key):
+    rc, out, _ = tqc("--json-status")
+    return {t["key"]: t.get("assigned") for t in F.S.json_in(out)["tasks"]}.get(key) if rc == 0 else "?"
+
+
+def lossy(ret):
+    """缓冲替身：put 真的写进缓冲，返回包丢了（ret）。"""
+    def f(args, inp):
+        calls.append(("buf", args, inp))
+        if args == "put":
+            tqb("put", feed=True, stdin=inp)
+        return ret
+    return f
+
+
+rec = dict(order=9, nice=0, key="toy/u", exp=None, recipe="command",
+           params={"key": "toy/u", "cmd": "true", "env": "base", "out": "toy/u", "done": '["DONE"]'})
+tqc("put", stdin=json.dumps([rec]))
+for ret in (None, (124, "", "超时"), (255, "", "ssh 不通")):
+    calls.clear()
+    msgs = F.execute(NAME, [dict(op="send", key="toy/u", rec=rec, deps=[], nice=0)], central=lambda a: tqc(*a), remote=lossy(ret))
+    ok(f"send：put 结果未知（{ret and ret[0]}）→ 总队列里仍分给 {NAME}、不交还，说明写结果未知",
+       assigned("toy/u") == NAME and "结果未知" in " ".join(msgs) or print(msgs, assigned("toy/u")))
+    tqc("release", "--worker", NAME, "toy/u")
+calls.clear()
+msgs = F.execute(NAME, [dict(op="send", key="toy/u", rec=rec, deps=[], nice=0)], central=lambda a: tqc(*a), remote=lambda a, i: (1, "", "bad json"))
+ok("send：那边明确执行了 put 并失败 → 交还", assigned("toy/u") is None and "交还" in " ".join(msgs))
+c7 = [mine("toy/u"), ct(K[0])]
+acts, _, _ = plan(snap(c7, []))
+ok("下一次检查：分给它、缓冲里没有 → 补送（put，hold=false）", ops(acts)[0] == ("put", "toy/u") and acts[0]["rec"]["hold"] is False)
+c8 = [ct(K[0], "done"), mine(INF, "waiting", machines=[NAME], after=[K[0]], nice=-100)]
+acts, _, _ = plan(snap(c8, []))
+p8 = [a for a in acts if a["op"] == "put"]
+ok("补送只有这台能跑的：依赖记录（hold）一起送", p8 and p8[0]["key"] == INF and [d["key"] for d in p8[0].get("deps", [])] == [K[0]]
+   and p8[0]["deps"][0]["hold"] is True)
+calls.clear()
+F.execute(NAME, p8, central=central(), remote=buf())
+ok("补送：依赖记录和任务一次 put，依赖在前", [r["key"] for r in json.loads([c for c in calls if c[0] == "buf"][0][2])] == [K[0], INF])
+
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

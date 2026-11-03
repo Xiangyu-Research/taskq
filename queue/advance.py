@@ -458,11 +458,12 @@ def plan(s, root=None):
     for t in tasks:
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
         after = (t["e"] or {}).get("after", [])
-        trained[key] = S.is_done(sp, root)
+        here = S.is_done(sp, root)
+        trained[key] = here and key not in live_fetch  # 拉回还在跑：done 标志可能先到，拉完再算
         archiving = ("archive", key) in live or ("relay_fetch", key) in live
         if not trained[key]:
             frm = next((h for h in sorted(src) if (src[h].get(key) or {}).get("final")), None)
-            if frm:
+            if frm and not here:
                 want("fetch", key, f"fetch:{t['lab']}", f"bash scripts/queue/fetch_task.sh {frm} {key}", "wait", n, src=frm)
             prequeue(t, after)
             continue

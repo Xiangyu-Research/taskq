@@ -4,7 +4,9 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -81,7 +83,7 @@ def main():
     run = shlex.split(argv[argv.index("--") + 1])[2]
     assert argv[argv.index("-g") + 1] == cw["group"] and argv[argv.index("-l") + 1] == f"worker:{cw['id']}"
     assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES= TASKQ_CPUS={cw['cpus']};" in run, run
-    assert run.endswith("exec bash $REPO/scripts/queue/worker_start.sh") and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
+    assert run.endswith('exec bash "$REPO/scripts/queue/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
     assert "TASKQ_CPUS" not in PQ.worker_cmd("lab1")
     ok("pueue：CPU worker 在 cpu_worker 的组、WORKER_DEVICE=cpu、看不到卡、最多用 cpus 个核，入口是 worker_start.sh")
     raw2 = pueue_json((3, w["group"], wl, "Running"), (4, cw["group"], f"worker:{cw['id']}", "Queued"), (5, "gpu0", "x", "Running"))
@@ -92,6 +94,26 @@ def main():
     assert M.kinds("lab1") == ("gpu", "cpu") and M.kinds("lab0") == ("gpu",) and M.kinds("dicc1") == ("gpu", "cpu") \
         and M.kinds("dicc2") == ("gpu",) and M.worker_of("dicc1", "cpu") == dict(kind="cpu") and M.worker_of("lab0", "cpu") is None
     ok("machines.kinds / worker_of：pueue 看 worker、cpu_worker，Slurm 看 jobs")
+
+    home = tempfile.mkdtemp()
+    for root, shown in ((os.path.join(home, "r o'ot"), None), (os.path.join(home, "a b"), "~/a b")):
+        code = os.path.join(root, "code", "v1", "scripts", "queue")
+        os.makedirs(code)
+        os.symlink(os.path.join(root, "code", "v1"), os.path.join(root, "code", "current"))
+        with open(os.path.join(code, "worker_start.sh"), "w") as f:
+            f.write('printf "%s\\n" "$0" "$TASKQ_DIR" "$WORKER_ID" "$@" > "$HOME/argv"\n')
+        old_conf = PQ.R.conf
+        PQ.R.conf = lambda name: dict(old_conf(name), root=(shown or root) + "/")
+        try:
+            argv = shlex.split(PQ.worker_cmd("lab1"))
+        finally:
+            PQ.R.conf = old_conf
+        inner = shlex.split(argv[argv.index("--") + 1])
+        assert inner[:2] == ["bash", "-c"]
+        subprocess.run(inner, env=dict(PATH=os.environ["PATH"], HOME=home), check=True, timeout=30)
+        got = open(os.path.join(home, "argv")).read().splitlines()
+        assert got == [os.path.join(code, "worker_start.sh"), os.path.join(root, "queue"), w["id"]], got
+    ok("pueue.worker_cmd：根目录带空格、单引号、~/ 开头时 worker 照样起来（路径都加了引号）")
 
     # ---- slurm ----
     old = dict(P.SLURM)

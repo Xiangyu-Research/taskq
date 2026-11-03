@@ -2,7 +2,7 @@
 """任务的输入（2026-11-01）：开训前查全没有；执行机允许时在节点本地盘建一份这个任务私有的视图，开训后在后台拷过去。
 
   inputs.py prepare <数据目录> <任务文件名> <本地根目录或空> <输入>...
-      查每个输入（文件或文件夹；链接要指得到文件；文件夹里有 .incomplete = 建到一半）。不全 → 退出码 4，标准错误里写缺几个、举几个例子。
+      查每个输入（文件或文件夹；链接要指得到文件；文件夹里任一层有 .incomplete = 建到一半，读不了也算缺）。不全 → 退出码 4，标准错误里写缺几个、举几个例子。
       给了本地根目录时：在 <根>/views/<任务文件名>/ 下照数据目录的相对路径建一份只有链接的树，指向原处的文件（已经拷到本地的指本地），
       要拷的写进 <根>/views/<任务文件名>.todo.json，打印这份视图的根；没给时打印数据目录。命令从打印的目录读（$TASK_INPUTS_ROOT）。
       先删本节点上自己的、作业已经结束的 phd_stage_<作业号>。
@@ -48,14 +48,14 @@ def entries(data, inp):
             miss += m
         return out, miss
     if os.path.isdir(inp):
-        if os.path.exists(os.path.join(inp, ".incomplete")):
-            return [], [f"{rel}（建到一半）"]
-        out = []
-        for d, _, fs in os.walk(inp, followlinks=True):
+        out, bad = [], []
+        for d, ds, fs in os.walk(inp, onerror=lambda e: bad.append(f"{os.path.relpath(e.filename, data)}（读不了）"), followlinks=True):
+            if ".incomplete" in fs or ".incomplete" in ds:  # 任一层建到一半
+                return [], [f"{os.path.relpath(d, data)}（建到一半）"]
             for f in fs:
                 p = os.path.join(d, f)
                 out.append((os.path.relpath(p, data), p))
-        return out, []
+        return ([], bad) if bad else (out, [])
     if os.path.lexists(inp):
         return [(rel, inp)], []
     return [], [f"{rel}（没有）"]

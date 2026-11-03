@@ -45,8 +45,8 @@ def worker_cmd(name, kind="gpu"):
     gpu = c["groups"][w["group"]][1]
     env = f"WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
     env += "".join(f" {k}={shlex.quote(str(v))}" for k, v in (c["groups"][w["group"]][2] or {}).items())  # 组的环境变量（如 TASK_GPU_IDLE）
-    run = (f"R={R.q(c['root'].rstrip('/'))}; REPO=$(readlink -f $R/code/current); export TASKQ_DIR=$R/queue {env}; "
-           "exec bash $REPO/scripts/queue/worker_start.sh")
+    run = (f'R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/code/current"); export TASKQ_DIR="$R/queue" {env}; '
+           'exec bash "$REPO/scripts/queue/worker_start.sh"')
     return f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- {shlex.quote('bash -c ' + shlex.quote(run))}"
 
 

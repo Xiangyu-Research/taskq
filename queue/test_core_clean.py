@@ -16,7 +16,7 @@ CLEAN = [
     "scripts/queue/gpu_pad_start.sh", "scripts/queue/relay_plugins.py", "scripts/queue/relay_bundle.py",
     "scripts/queue/experiments.py", "scripts/queue/spec.py", "scripts/queue/q", "scripts/sync/snapshot.sh",
     "scripts/queue/test_feed.py", "scripts/queue/test_common.py", "scripts/queue/test_shift.py", "scripts/sites/test_adapters.py",
-    "scripts/sites/test_e2e.py", "scripts/sites/test_envs.py", "scripts/sync/test_tunnel.py",
+    "scripts/sites/test_e2e.py", "scripts/sites/test_envs.py", "scripts/sync/test_tunnel.py", "scripts/queue/test_archive_task.sh",
 ]
 WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b",
                    re.I)

@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -721,6 +722,127 @@ check("add --file：单子和命令行都没有档位 → 报错、不加", rc !
 open(fn, "w").write("{oops")
 rc, out, _ = tqf("add", "--nice", "1", "--file", fn)
 check("add --file：不是 JSON → 报错", rc == 2 and "任务单" in out)
+
+# ---------------- 11/3：锁、take --assign、旧 token 交还、after 的顺序 ----------------
+TQR = os.path.join(T, "taskqr")
+os.makedirs(TQR)
+
+
+def tqr(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQR, TASKQ_DATA=DATA),
+                       capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def strl():
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "--json-status"], env=dict(ENV, TASKQ_DIR=TQR, TASKQ_DATA=DATA),
+                       capture_output=True, text=True)
+    return {t["key"]: (t["state"], t["note"]) for t in taskq.S.json_in(r.stdout)["tasks"]}
+
+
+def try_lock(tries=4):
+    try:
+        lk = taskq.Lock(tries=tries).__enter__()
+    except SystemExit:
+        return None
+    return lk
+
+
+tq_orig, taskq.TQ = taskq.TQ, TQR
+LK = os.path.join(TQR, "lock")
+holder = subprocess.Popen([sys.executable, "-c", "import sys, taskq\nwith taskq.Lock():\n    print('held', flush=True)\n    sys.stdin.read()"],
+                          env=dict(ENV, TASKQ_DIR=TQR, PYTHONPATH=HERE), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+check("锁：另一个进程拿到锁", holder.stdout.readline().strip() == "held")
+os.utime(LK, (time.time() - 121,) * 2)
+lk = try_lock()
+check("锁：持有者在本机、进程还活着，锁目录 2 分钟没动也不抢", lk is None and os.path.isdir(LK))
+if lk:
+    lk.__exit__()
+holder.stdin.close()
+holder.wait(timeout=30)
+check("锁：持有者退出时删掉自己的锁", not os.path.exists(LK))
+dead = subprocess.Popen([sys.executable, "-c", "pass"])
+dead.wait()
+os.mkdir(LK)
+open(os.path.join(LK, "owner"), "w").write(f"{socket.gethostname()}\t{dead.pid}\tx\n")
+os.utime(LK, (time.time() - 121,) * 2)
+lk = try_lock()
+check("锁：持有者的进程已经不在，过 2 分钟照常抢", lk is not None)
+if lk:
+    lk.__exit__()
+os.mkdir(LK)
+open(os.path.join(LK, "owner"), "w").write(f"elsewhere\t{os.getpid()}\tx\n")
+lk = try_lock()
+check("锁：别的主机拿着、锁目录是新的 → 等", lk is None)
+os.utime(LK, (time.time() - 121,) * 2)
+lk = try_lock()
+check("锁：别的主机拿着、2 分钟没动 → 抢", lk is not None)
+if lk:
+    lk.__exit__()
+os.mkdir(LK)
+os.utime(LK, (time.time() - 121,) * 2)
+lk = try_lock()
+check("锁：旧版本留下的空锁目录，过 2 分钟照常抢", lk is not None)
+if lk:
+    lk.__exit__()
+lk = taskq.Lock().__enter__()
+shutil.rmtree(LK, ignore_errors=True)
+os.mkdir(LK)
+lk.__exit__()
+check("锁：锁已经被旧版本的进程接管（空目录），原持有者退出时不删", os.path.isdir(LK))
+shutil.rmtree(LK, ignore_errors=True)
+lk = taskq.Lock().__enter__()
+shutil.rmtree(LK, ignore_errors=True)
+os.mkdir(LK)
+open(os.path.join(LK, "owner"), "w").write("other\t1\tzz\n")
+lk.__exit__()
+check("锁：锁已经被别人接管，原持有者退出时不删", os.path.exists(os.path.join(LK, "owner")))
+shutil.rmtree(LK, ignore_errors=True)
+taskq.TQ = tq_orig
+
+kp, kc, kr = "r/prereq", "r/child", "r/rel"
+rows_r = [cmdtask(1, kp, []), cmdtask(2, kc, [kp]), cmdtask(3, kr, [])]
+with open(os.path.join(TQR, "tasks.jsonl"), "w") as f:
+    f.writelines(json.dumps(r) + "\n" for r in rows_r)
+rc, _ = tqr("take", "--worker", "A", "--assign", kc)
+rc2, out2 = tqr("take", "--worker", "B", "--assign", kc)
+ci = json.load(open(os.path.join(TQR, "claims", taskq.safe(kc), "info")))
+check("take --assign：waiting 的已分给 A，B 分不到（退出码 10），仍是 A", rc == 0 and rc2 == 10 and ci["assigned"] == "A")
+rc, _ = tqr("take", "--worker", "A", "--assign", kc)
+check("take --assign：A 再分自己的照样成功", rc == 0 and json.load(open(os.path.join(TQR, "claims", taskq.safe(kc), "info")))["assigned"] == "A")
+
+rc, out = tqr("next", "--worker", "W", "--envs", ALL, "--exclude", kp)
+tok1 = out.splitlines()[-1] if rc == 0 else None
+pr = os.path.join(TQR, "claims", taskq.safe(kr), "info")
+ci = json.load(open(pr))
+ci["beat"] = time.time() - 1800
+json.dump(ci, open(pr, "w"))
+rc2, out2 = tqr("next", "--worker", "W", "--envs", ALL, "--exclude", kp)
+tok2 = out2.splitlines()[-1] if rc2 == 0 else None
+check("旧 token：同名 worker 重新领到过期的任务，token 换了", rc == 0 and rc2 == 0 and out.startswith(kr) and tok1 != tok2)
+for _ in range(3):
+    tqr("release", "--worker", "W", "--token", tok1, kr, "--failed", "旧一轮失败")
+    tqr("release", "--worker", "W", "--token", tok1, kr, "--skip", "旧一轮放不下")
+check("旧 token：release --failed / --skip 不记失败、跳过，领取还在", os.path.exists(pr) and json.load(open(pr))["token"] == tok2
+      and not os.path.exists(os.path.join(TQR, "failures", taskq.safe(kr))) and not os.path.exists(os.path.join(TQR, "skips", taskq.safe(kr)))
+      and not os.path.exists(os.path.join(TQR, "released", taskq.safe(kr))) and strl()[kr][0] == "claimed")
+rc, _ = tqr("release", "--worker", "W", "--token", tok2, kr, "--failed", "这一轮失败")
+check("这一轮的 token：release --failed 记一次、交还", rc == 0 and not os.path.exists(pr)
+      and len(open(os.path.join(TQR, "failures", taskq.safe(kr))).readlines()) == 1)
+
+rows_a = [cmdtask(1, kp, []), cmdtask(4, "r/failed2", []),
+          cmdtask(5, "r/a1", [kp, "nosuch/x"]), cmdtask(6, "r/a2", ["nosuch/x", kp]),
+          cmdtask(7, "r/a3", [kp, "r/failed2"]), cmdtask(8, "r/a4", [kp])]
+with open(os.path.join(TQR, "tasks.jsonl"), "w") as f:
+    f.writelines(json.dumps(r) + "\n" for r in rows_a)
+os.makedirs(os.path.join(TQR, "failures"), exist_ok=True)
+old = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 4 * 3600))
+open(os.path.join(TQR, "failures", taskq.safe("r/failed2")), "w").write(f"{old}\tx\t1\n" * taskq.MAX_FAIL)
+sr = strl()
+check("after：没做完的 + 不在队列里的，两种顺序都是 blocked", sr["r/a1"][0] == "blocked" and sr["r/a2"][0] == "blocked"
+      and "nosuch/x" in sr["r/a1"][1])
+check("after：没做完的 + 失败满次的 → blocked", sr["r/a3"][0] == "blocked" and "r/failed2" in sr["r/a3"][1])
+check("after：只有没做完的 → waiting", sr["r/a4"] == ("waiting", f"等 {kp}"))
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

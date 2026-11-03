@@ -131,28 +131,57 @@ def write_tasks(tasks, path=None):
 
 
 class Lock:
-    def __init__(self):
+    def __init__(self, tries=600):
         self.d = os.path.join(TQ, "lock")
+        self.tries = tries
+        self.me = None
 
     def __enter__(self):
         os.makedirs(TQ, exist_ok=True)
-        for _ in range(600):
+        for _ in range(self.tries):
             try:
                 os.mkdir(self.d)
-                return self
             except FileExistsError:
                 try:
-                    if time.time() - os.path.getmtime(self.d) > 120:  # 拿锁的进程死了
+                    age = time.time() - os.path.getmtime(self.d)
+                    if age > 900 or (age > 120 and not self._holder_alive()):  # 拿锁的进程死了（pid 可能被复用：15 分钟后不管）
                         os.rename(self.d, f"{self.d}.stale{os.getpid()}")
                         shutil.rmtree(f"{self.d}.stale{os.getpid()}", ignore_errors=True)
                         continue
                 except OSError:
                     pass
                 time.sleep(0.5)
+                continue
+            me = f"{socket.gethostname()}\t{os.getpid()}\t{os.urandom(6).hex()}\n"
+            try:
+                with open(os.path.join(self.d, "owner"), "w") as f:
+                    f.write(me)
+                self.me = me
+            except OSError:
+                pass
+            return self
         raise SystemExit("拿不到队列的锁")
 
-    def __exit__(self, *a):
+    def _holder_alive(self):
+        """持有者记的是本机、进程还在 → True（共享盘卡顿时不按年龄抢）。"""
         try:
+            host, pid, _ = open(os.path.join(self.d, "owner")).read().split("\t")
+            if host != socket.gethostname():
+                return False
+            os.kill(int(pid), 0)
+        except PermissionError:
+            return True
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def __exit__(self, *a):
+        p = os.path.join(self.d, "owner")
+        try:
+            if self.me is not None:
+                if open(p).read() != self.me:  # 锁已被别人接管
+                    return
+                os.remove(p)
             os.rmdir(self.d)
         except OSError:
             pass
@@ -274,6 +303,7 @@ def after_state(s, root):
     if ver not in _BY_KEY:
         _BY_KEY.clear()
         _BY_KEY[ver] = {x["key"]: x for x in read_tasks()}
+    wait = None  # 先看完全部：有 blocked 的报 blocked
     for k in s["after"]:
         x = _BY_KEY[ver].get(k)
         xs = spec_of(x) if x else None
@@ -283,8 +313,8 @@ def after_state(s, root):
             continue
         if failures(k) >= MAX_FAIL:
             return "blocked", f"等的 {k} 失败 {failures(k)} 次"
-        return "waiting", f"等 {k}"
-    return None
+        wait = wait or ("waiting", f"等 {k}")
+    return wait
 
 
 def state(t, root):
@@ -422,6 +452,8 @@ def cmd_release(a):
 def _release(a, key):
     d = os.path.join(TQ, "claims", safe(key))
     ci = claim_info(key)
+    if getattr(a, "token", None) and ci and not owns(ci, a):  # 已被新一轮接管的迟到交还：什么都不记
+        return
     if a.skip:
         os.makedirs(os.path.join(TQ, "skips"), exist_ok=True)
         with open(os.path.join(TQ, "skips", safe(key)), "a") as f:
@@ -482,6 +514,9 @@ def cmd_take(a):
             return NOTHING
         ci = claim_info(a.key)
         mine = bool(ci) and str(ci.get("worker")) == str(a.worker)
+        if ci and ci.get("assigned") and not mine:
+            print(f"{a.key}：已分给 {ci['assigned']}")
+            return NOTHING
         st, note = state(t, root)
         ok = ("free", "stale", "waiting") if a.assign else ("free", "stale")
         if st in ("done", "stopped") or (not mine and st not in ok):

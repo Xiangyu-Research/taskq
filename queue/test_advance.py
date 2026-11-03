@@ -181,6 +181,14 @@ inf = next(t for t in todo if t["step"] == "infer")
 check("推理：gpu 组、--stage infer", inf["group"] == "gpu" and "--stage infer" in inf["cmd"] and inf["cmd"].endswith(f"__{P} 1"))
 todo, _ = A.plan(snap(remote={"lab": {f"{T3}/1": dict(final=True, archived=True)}}))
 check("lab 上已经归档的：不再归档", steps(todo) == [("infer", f"{T3}/1")])
+fe = f"bash scripts/queue/fetch_task.sh lab {T3}/1"
+todo, _ = A.plan(snap([("Running", fe, None)], remote={"lab": {f"{T3}/1": FIN}}))
+check("拷到一半 6：box 上已有训完的标志、拉回还在跑 → 不算训完，不排推理、不归档、不重复拉回",
+      not [t for t in todo if t["key"] == f"{T3}/1"])
+todo, _ = A.plan(snap([("Success", fe, "2026-11-03 10:00:00")], remote={"lab": {f"{T3}/1": FIN}}))
+check("拉回做完了：照常排推理和归档", steps(todo) == [("archive", f"{T3}/1"), ("infer", f"{T3}/1")])
+todo, _ = A.plan(snap([("Running", f"bash scripts/queue/fetch_task.sh dicc {T3}/1", None)], remote={"lab": {f"{T3}/1": FIN}}))
+check("box 上已有标志、从另一台的拉回在跑：不算训完，也不再排第二个拉回", not [t for t in todo if t["key"] == f"{T3}/1"])
 
 # 4. 推理做完 → 评测（cpu）；评测做完 → 这一折没事了
 inferred("D116_gamma", "V_save", "1")

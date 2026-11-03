@@ -170,18 +170,21 @@ def has_progress(f):
 
 
 def stop_group(host, g, pueue, wait=False):
-    """暂停组、SIGTERM 在跑的任务、等它们结束 → (在跑的任务号, 结束后的任务表；读不到 → None)。"""
-    C.run(f"{pueue} pause -g {g}" + (" --wait" if wait else ""), host, timeout=60)
-    _, tasks = group_tasks(host, g, pueue)
+    """暂停组、SIGTERM 在跑的任务、等它们结束 → (在跑的任务号, 结束后的任务表)。暂停没成功、组不是 Paused、读不到 → 任务表是 None
+    （没确认停下：排着的 worker 还会开始）。"""
+    rc, _, _ = C.run(f"{pueue} pause -g {g}" + (" --wait" if wait else ""), host, timeout=60)
+    gs, tasks = group_tasks(host, g, pueue)
     run = [i for i, t in (tasks or {}).items() if t["state"] == "Running"]
+    if rc or gs != "Paused":
+        return run, None
     if run:
         C.run(f"{pueue} kill -s SIGTERM {' '.join(map(str, run))}", host, timeout=60)
         for _ in range(60):
-            _, tasks = group_tasks(host, g, pueue)
+            gs, tasks = group_tasks(host, g, pueue)
             if tasks and all(tasks[i]["state"] == "Done" for i in run if i in tasks):
                 break
             time.sleep(5)
-    return run, tasks
+    return run, (tasks if gs == "Paused" else None)
 
 
 def worker_groups(name):
@@ -199,7 +202,7 @@ def stop_site(name):
         run += r
         tasks = None if tasks is None or t is None else {**tasks, **t}
     if tasks is None or any((tasks.get(i) or {}).get("state", "Done") != "Done" for i in run):
-        return f"worker 还没确认停下（pueue 任务 {run or '读不到'}），任务先不交出，下次检查再停", False
+        return f"组没确认暂停或 worker 还没确认停下（pueue 任务 {run or '无或读不到'}），任务先不交出，下次检查再停", False
     have, to = site_tasks(name), day_site(host, but=name)
     moved, gave, left = [], [], []
     for k in central_mine(name):

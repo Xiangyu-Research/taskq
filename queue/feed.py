@@ -9,7 +9,7 @@ RELAY 的执行机（envs/machines.py 的 RELAY，lab1、lab0 等）由 relay.py
      - box 上训完了（总队列的 done），而且没有在往 box 拷（拉回、归档）→ 删掉缓冲里的记录（别的记录的 after 还引用它时留着），
        再在总队列交还；
      - 总队列里停了 → 缓冲里也停；那边没人领着以后删掉记录、交还；撤销停止后缓冲里也撤销；
-     - 缓冲里没有（送的时候出错）→ 再送一次；档位、参数和总队列不一样（set、set-nice）→ 照总队列改；
+     - 缓冲里没有（送的时候出错）→ 再送一次（after 里不在缓冲的带上依赖记录）；档位、参数和总队列不一样（set、set-nice）→ 照总队列改；
      - 缓冲里失败了：这台机器上没有进度 → 删掉记录、交还（--skip，这台以后不再分它）；有进度 → 留着、报出来；
        缓冲整个暂停时（3 小时失败 3 次，多半是节点或环境坏了）不交还，只报出来。
   2. 缓冲里有、总队列里没分给它的记录：别的记录的 after 引用的留着（依赖记录）；没人领着的删掉；有人在训的报出来。
@@ -22,7 +22,7 @@ RELAY 的执行机（envs/machines.py 的 RELAY，lab1、lab0 等）由 relay.py
   这台已经换成接替它的执行机（envs/machines.py 的 replaces，接替的那台 AUTO 开着、这台关着）：分给这台、没人在做的从缓冲里删掉，
   有进度的在总队列里改分给接替的那台（它从老数据目录收编存档，接着训），其余交还。
   执行机连不上：什么都不动，分给它的也不交还；连不上 2 小时以上报出来。那边的代码不是最新的（health 的 code 检查）时不送新任务。
-  先在缓冲里删成功，再在总队列交还；分过去后送不进缓冲时马上交还。
+  先在缓冲里删成功，再在总队列交还；分过去后那边明确送不进缓冲时马上交还，结果未知（超时、断线）时留着，下次按"缓冲里没有"补送。
 总队列里分给了一个不是执行机的名字（执行机换了名字、撤掉了以后留下的）：没有谁会做它，报出来（feed:nobody），交还后照常重新分。
 开关 envs/policy.py 的 AUTO[机器]：False 时第 3、4 步只把"会送什么"记进 ~/feed.log。
 
@@ -61,6 +61,7 @@ COPYING = ("fetch", "archive", "relay_fetch")  # box 上这些步骤在跑时，
 EXCLUDE = ("*.tmp", ".DS_Store", ".incomplete") + tuple(sorted({x for r in recipes.RECIPES.values()
                                                              for x in ((r.get("fetch") or {}).get("exclude") or []) if "{" not in x}))
 LIVE = refill.LIVE
+UNKNOWN = (124, 255)  # 缓冲上的命令超时、ssh 断了：做没做成不知道
 
 
 def sites():
@@ -256,7 +257,8 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="bstop", key=k))
             continue
         if b is None:
-            acts.append(dict(op="put", key=k, rec=record(t, hold=False), why="缓冲里没有"))
+            deps = [record(ct[d], hold=True) for d in spec(t).get("after") or [] if d not in bt and d in ct]
+            acts.append(dict(op="put", key=k, rec=record(t, hold=False), deps=deps, why="缓冲里没有"))
             continue
         if b.get("held") or differs(t, b):
             acts.append(dict(op="put", key=k, rec=record(t, hold=False), why="照总队列改"))
@@ -407,7 +409,7 @@ def execute(name, acts, central=None, remote=None, add=None):
                 what = "停" if a["op"] == "bstop" else "撤销停止"
                 msgs.append(f"{L} 缓冲里{what} {k}" if r and r[0] == 0 else f"{L} 缓冲里{what} {k} 出错：{(r or [0, '连不上'])[1][-150:]}")
             elif a["op"] == "put":
-                r = buf("put", json.dumps([a["rec"]]))
+                r = buf("put", json.dumps(a.get("deps", []) + [a["rec"]]))
                 msgs.append(f"{L} 缓冲里更新 {k}（{a['why']}）" if r and r[0] == 0 else f"{L} 缓冲里更新 {k} 出错：{(r or [0, '连不上'])[1][-150:]}")
             elif a["op"] == "send":
                 rc, out, err = central(["take", "--worker", name, "--assign", k])
@@ -415,9 +417,12 @@ def execute(name, acts, central=None, remote=None, add=None):
                     msgs.append(f"没分到 {k}：{(out + err).strip()[-150:]}")
                     continue
                 r = buf("put", json.dumps(a["deps"] + [a["rec"]]))
-                if r is None or r[0]:
+                if r is None or r[0] in UNKNOWN:  # 那边可能已经写进去了：不交还，下次检查核对（缓冲里没有就补送）
+                    msgs.append(f"{k} 送进 {L} 的缓冲结果未知（{(r or [0, '连不上'])[1][-150:] or r[0]}），留着分给 {L}，下次检查核对")
+                    continue
+                if r[0]:
                     rc2, out2, err2 = central(["release", "--worker", name, k])
-                    msgs.append(f"{k} 送不进 {L} 的缓冲（{(r or [0, '连不上'])[1][-150:]}），交还" + ("" if rc2 == 0 else f"出错：{(out2 + err2)[-100:]}"))
+                    msgs.append(f"{k} 送不进 {L} 的缓冲（{r[1][-150:]}），交还" + ("" if rc2 == 0 else f"出错：{(out2 + err2)[-100:]}"))
                     continue
                 dep = f"，带上依赖记录 {' '.join(d['key'] for d in a['deps'])}" if a["deps"] else ""
                 msgs.append(f"送到 {L}：{k}（档位 {a['nice']}{dep}）")

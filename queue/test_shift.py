@@ -14,6 +14,7 @@ fixture.use()
 import shift  # noqa: E402
 
 TZ = shift.TZ
+real_stop_group = shift.stop_group
 _d = tempfile.mkdtemp()
 shift.STATE, shift.LOG = os.path.join(_d, "shift.json"), os.path.join(_d, "refill.log")
 
@@ -134,5 +135,24 @@ stops.clear()
 shift.run(now=D(4, 11, 30))
 assert not stops
 ok("worker 没确认停下、读不到 pueue、任务没交出去：不记 paused，下次检查再停；都做完后只停一次")
+
+# 11/3（审查）：暂停失败、组没暂停时不算停下，不交出任务；真跑 stop_group，只替换 C.run 和 group_tasks
+shift.stop_group = real_stop_group
+moves.clear(), gave.clear()
+shift.hand_over = lambda key, frm, to: (moves.append((key, frm, to)), True)[1]
+shift.give_back = lambda key, frm: (gave.append((key, frm)), True)[1]
+shift.C.run = lambda cmd, host=None, timeout=0: (calls.append(cmd), (255, "", "连接断了") if " pause " in cmd else (0, "", ""))[1]
+shift.group_tasks = lambda host, g, *a: ("Running", {7: dict(state="Queued")})
+calls.clear()
+msg, done = shift.stop_site("z0")
+assert not done and not moves and not gave and not any(" kill " in c for c in calls), (msg, done, moves, gave, calls)
+shift.C.run = lambda cmd, host=None, timeout=0: (calls.append(cmd), (0, "", ""))[1]
+msg, done = shift.stop_site("z0")
+assert not done and not moves and not gave, (msg, done, moves, gave)
+ok("暂停失败、或暂停说成功但组仍 Running（有排着的 worker）：不算停下，不交出任务")
+shift.group_tasks = lambda host, g, *a: ("Paused", {7: dict(state="Done")})
+msg, done = shift.stop_site("z0")
+assert done and moves == [("D/t/1", "z0", "z1")] and gave == [("D/t/2", "z0")], (msg, done, moves, gave)
+ok("暂停成功、组 Paused、没有在跑的：照常交接")
 
 print("全部通过")

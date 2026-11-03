@@ -56,11 +56,12 @@ HAVE_END = "@@END"
 
 
 def have_script(paths, data):
-    """bash 片段：在数据目录 data 下，打印 paths 里已经有的（文件夹里有 .incomplete 的是没传完的，不算），每行一个，最后一行 @@END。"""
+    """bash 片段：在数据目录 data 下，打印 paths 里已经有的（文件夹里有 .incomplete 的是没传完的，不算），每行一个，最后一行 @@END。
+    数据目录进不去时不打 @@END（parse_have → None）、退出码 3。"""
     import shlex
     ps = " ".join(shlex.quote(p) for p in paths)
-    return (f'(cd {data} 2>/dev/null && for p in {ps}; do [[ -e $p && ! -e $p/.incomplete ]] && echo "HAVE|$p"; done); '
-            f'echo "{HAVE_END}"\n')
+    return (f'(cd {data} 2>/dev/null || exit 3; for p in {ps}; do [[ -e $p && ! -e $p/.incomplete ]] && echo "HAVE|$p"; done; '
+            f'echo "{HAVE_END}")\n')
 
 
 def parse_have(out):
