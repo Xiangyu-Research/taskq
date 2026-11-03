@@ -46,13 +46,6 @@ TQS = cfg.state("taskq", expand=False)
 sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
 import machines as M  # noqa: E402
 import policy  # noqa: E402
-import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
-import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
-import taskq  # noqa: E402  scripts/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
-import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
-import common as C  # noqa: E402  scripts/queue/common.py
-import slurm as SL  # noqa: E402  scripts/sites/slurm.py
-from common import write_json  # noqa: E402
 
 OUT = getattr(policy, "OUTPUTS", {})
 HDIR = os.path.expanduser(OUT.get("health", "~/.cache/taskq-health"))
@@ -62,7 +55,45 @@ CODE_HEADS = os.path.expanduser(OUT.get("heads", "~/.cache/taskq/code/heads.tsv"
 LOG = os.path.join(HDIR, "health.log")
 TOPIC = os.path.expanduser(OUT.get("topic", "~/.config/taskq-health/ntfy_topic"))
 H_PENDING = os.path.join(HDIR, "board_pending.txt")  # scripts/dashboard/publish.py --auto 写
+H_LOADERR = os.path.join(HDIR, "load_error.txt")
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
+
+
+def push(msg, title=f"{NAME} 作业", priority="default", tags=""):
+    topic = open(TOPIC).read().strip()
+    q = urllib.parse.urlencode({"title": title, "priority": priority, "tags": tags})
+    req = urllib.request.Request(f"https://ntfy.sh/{topic}?{q}", data=msg.encode(), method="POST")
+    urllib.request.urlopen(req, timeout=30).read()
+
+
+def load_failed(e):
+    """实验表、插件加载出错：整个检查（送任务、拉回、排下一步）都停了，推送一次（同样的错不重复推；夜里等到早上）。"""
+    msg = f"健康检查没法运行：实验表或插件加载出错，送任务、拉回、排下一步都停了。\n{type(e).__name__}: {e}"
+    print(msg, file=sys.stderr)
+    if any(a in sys.argv for a in ("--dry-run", "-h", "--help")) or not NIGHT[1] <= datetime.now().hour < NIGHT[0]:
+        return
+    old = open(H_LOADERR).read() if os.path.exists(H_LOADERR) else None
+    if old != msg:
+        push(msg, priority="high", tags="warning")
+        os.makedirs(HDIR, exist_ok=True)
+        open(H_LOADERR, "w").write(msg)
+
+
+try:
+    import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
+    import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
+    import taskq  # noqa: E402  scripts/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
+    import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
+    import common as C  # noqa: E402  scripts/queue/common.py
+    import slurm as SL  # noqa: E402  scripts/sites/slurm.py
+    from common import write_json  # noqa: E402
+except Exception as _e:
+    if __name__ == "__main__":
+        load_failed(_e)
+        sys.exit(1)
+    raise
+if __name__ == "__main__" and "--dry-run" not in sys.argv and os.path.exists(H_LOADERR):
+    os.remove(H_LOADERR)
 
 
 def stopped(t):
@@ -394,13 +425,6 @@ def check(s):
 
 
 # ---------------- 推送和状态 ----------------
-def push(msg, title=f"{NAME} 作业", priority="default", tags=""):
-    topic = open(TOPIC).read().strip()
-    q = urllib.parse.urlencode({"title": title, "priority": priority, "tags": tags})
-    req = urllib.request.Request(f"https://ntfy.sh/{topic}?{q}", data=msg.encode(), method="POST")
-    urllib.request.urlopen(req, timeout=30).read()
-
-
 def night(now):
     return now.hour >= NIGHT[0] or now.hour < NIGHT[1]
 

@@ -390,5 +390,57 @@ ok("白话：每个任务的步骤的标签 → (实验名, 步骤, 简称)；�
 ok("白话：认不出的标签 → 其他", PL.label("eval:nope_f1") == ("其他", "eval:nope_f1", None))
 ok("白话：推送里的一句话带简称", PL.task(f"infer:{EX.label(_e, _t)}") == f"{_n} {EX.short(_t)} 的{PL.STEP['infer']}")
 
+# 插件、实验表加载出错：health 在 import 时就停，要推送一次（同样的错不重复推，夜里不推），修好后清掉记录
+import shutil  # noqa: E402
+_lt = tempfile.mkdtemp()
+_bad = os.path.join(_lt, "bad")
+shutil.copytree(os.environ["TASKQ_PLUGINS"].split(os.pathsep)[0], _bad, ignore=shutil.ignore_patterns("__pycache__"))
+open(os.path.join(_bad, "readers", "zz_broken.py"), "w").write("PROGRESS = {\n")
+_wrap = os.path.join(_lt, "wrap.py")
+open(_wrap, "w").write("""import datetime, runpy, sys, urllib.request
+H, LOG, HOUR = sys.argv[1], sys.argv[2], int(sys.argv[3])
+class _D(datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.datetime(2026, 11, 3, HOUR, 0)
+datetime.datetime = _D
+class _R:
+    def read(self):
+        return b""
+def _open(req, timeout=0):
+    open(LOG, "a").write(req.full_url + " " + req.data.decode().replace(chr(10), " ") + chr(10))
+    return _R()
+urllib.request.urlopen = _open
+sys.argv = [H] + sys.argv[4:]
+sys.path.insert(0, H.rsplit("/", 1)[0])
+runpy.run_path(H, run_name="__main__")
+""")
+
+
+def _health(plugins, hour, *args):
+    home = os.path.join(_lt, "home")
+    os.makedirs(os.path.join(home, ".config", "phd-health"), exist_ok=True)
+    open(os.path.join(home, ".config", "phd-health", "ntfy_topic"), "w").write("t0\n")
+    env = dict(os.environ, HOME=home, TASKQ_PLUGINS=plugins, TASKQ_STATE=os.path.join(_lt, "st"),
+               TASKQ_DIR=os.path.join(_lt, "q"))
+    log = os.path.join(_lt, "pushed.log")
+    r = subprocess.run([sys.executable, _wrap, os.path.join(HERE, "health.py"), log, str(hour), *args],
+                       env=env, capture_output=True, text=True, timeout=60)
+    return r.returncode, (open(log).read().splitlines() if os.path.exists(log) else [])
+
+
+rc1, p1 = _health(_bad, 12)
+rc2, p2 = _health(_bad, 12)
+ok("插件写错：health 退出码非零，推送一次（带出错的文件），同样的错下次不再推",
+   rc1 != 0 and len(p1) == 1 and "zz_broken" in p1[0] and rc2 != 0 and len(p2) == 1)
+_mark = os.path.join(_lt, "home", ".cache", "phd-health", "load_error.txt")
+rc3, _ = _health(os.environ["TASKQ_PLUGINS"], 12, "--help")
+ok("插件修好后：正常 import，清掉出错记录", rc3 == 0 and not os.path.exists(_mark))
+shutil.rmtree(os.path.join(_lt, "home"))
+if os.path.exists(os.path.join(_lt, "pushed.log")):
+    os.remove(os.path.join(_lt, "pushed.log"))
+rc4, p4 = _health(_bad, 23)
+ok("插件写错、夜里：不推送（早上第一次检查时推）", rc4 != 0 and p4 == [])
+
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)
