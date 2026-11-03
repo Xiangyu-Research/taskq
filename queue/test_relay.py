@@ -96,8 +96,7 @@ def test_pueue_worker():
     assert relay.topup("lab1", dict(jobs=[[5, clab, "Running", None]], taskq=both)) == ([("pueue", "gpu", 1)], "CPU worker 在")
     subs, why = relay.topup("lab1", dict(jobs=[[5, clab, "Done", "{'Failed': 1}"]], taskq=both))
     assert subs == [("pueue", "gpu", 1)] and why == "上一个 CPU worker（pueue 任务 5）失败了（{'Failed': 1}）", (subs, why)
-    allowed0 = relay.shift.allowed
-    relay.shift.allowed = lambda n, now=None: True  # 时段里
+    allowed0, relay.shift.allowed = relay.shift.allowed, lambda n, now=None: True  # 不看 box 上真实的时段记录（~/.cache/phd/shift.json）
     try:
         assert relay.topup("lab0", dict(jobs=[], taskq=cpu)) == ([], "那边没有备好、没人领的任务")
     finally:
