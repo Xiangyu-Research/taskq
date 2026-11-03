@@ -7,7 +7,8 @@
 # 结果文件夹、要删的文件按任务说明（scripts/queue/spec.py lookup <key>）：out、fetch（extra：上一级里一起备份的文件；
 # exclude：没拉回 box 的文件，核对时跳过）、archive（drop 匹配、keep 不匹配的才删）。
 # 步骤：
-#   1. 训练机上这个任务的分段日志拉回 box；box → 备份机器：out、上一级里的 extra、分段日志。只新增，不覆盖备份机器上已有的文件。
+#   1. 训练机上这个任务的分段日志拉回 box；box → 备份机器：out、上一级里的 extra、分段日志。备份机器上和 box 不同的文件按 box 的覆盖（11/3：如 11/2 稀疏化过的概率图），
+#      不删备份机器上多出的文件；从训练机拉回的只新增。
 #      分段日志：<数据目录>/logs/tasks/<key 的文件名>_*；以前放在别处的按说明的 oldlogs（dir 下以 prefix 开头的）。
 #   2. 核对：训练机上 out 里的每个文件（exclude 的除外）box 上都有、内容一致（按校验和）；box 上的每个文件备份机器上都有、大小和
 #      修改时间一致（刚用 rsync 传过，传输时已按校验和核对；DICC 登录节点上不做大量读盘）。
@@ -51,8 +52,9 @@ mapfile -t EXTRA < <(sp extra | grep . || true)
 PARENT=$(dirname "$OUT") BOX=$LD/$OUT
 log() { echo "$(date '+%F %T') $*"; }
 [[ -d $BOX ]] && (cd "$BOX" && eval "$TEST") || { log "box 上这个任务还没拉回完整：$BOX"; exit 1; }
-R=(python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --ignore-existing)
-[[ $DRY == --dry-run ]] && R+=(-n --itemize-changes)
+RB=(python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial)
+[[ $DRY == --dry-run ]] && RB+=(-n --itemize-changes)
+R=("${RB[@]}" --ignore-existing)
 EX=()
 for x in ${EXCL[@]+"${EXCL[@]}"}; do EX+=(--exclude="$x"); done
 
@@ -67,19 +69,19 @@ if [[ -n $SRCH && -n $OLDSEG ]] && ssh "$SRCH" "test -d $SRCD/$OLDDIR"; then
 fi
 [[ $DRY == --dry-run ]] || ssh "$BKH" "mkdir -p $BKD/$OUT $BKD/logs/tasks${OLDSEG:+ $BKD/$OLDDIR}"
 for x in ${EXTRA[@]+"${EXTRA[@]}"}; do
-    compgen -G "$LD/$PARENT/$x" > /dev/null && "${R[@]}" "$LD/$PARENT/"$x "$BKH:$BKD/$PARENT/"
+    compgen -G "$LD/$PARENT/$x" > /dev/null && "${RB[@]}" "$LD/$PARENT/"$x "$BKH:$BKD/$PARENT/"
 done
-"${R[@]}" "$BOX/" "$BKH:$BKD/$OUT/"
-compgen -G "$LD/logs/tasks/${SAFE}_*" > /dev/null && "${R[@]}" "$LD/logs/tasks/${SAFE}_"* "$BKH:$BKD/logs/tasks/"
+"${RB[@]}" "$BOX/" "$BKH:$BKD/$OUT/"
+compgen -G "$LD/logs/tasks/${SAFE}_*" > /dev/null && "${RB[@]}" "$LD/logs/tasks/${SAFE}_"* "$BKH:$BKD/logs/tasks/"
 if [[ -n $OLDSEG && -d $LD/$OLDDIR ]]; then
-    "${R[@]}" --include="${OLDSEG}*" --exclude='*' "$LD/$OLDDIR/" "$BKH:$BKD/$OLDDIR/"
+    "${RB[@]}" --include="${OLDSEG}*" --exclude='*' "$LD/$OLDDIR/" "$BKH:$BKD/$OLDDIR/"
 fi
 
 log "2. 核对"
-diffs() {  # 列出不一致的（要传的文件 >、要建的目录或链接 c）；rsync 本身出错（如连不上）时整个脚本退出，不删任何东西
+diffs() {  # 列出不一致的（要传的文件：拉 >、推 <；要建的目录或链接 c）；rsync 本身出错（如连不上）时整个脚本退出，不删任何东西
     local out
     out=$(rsync "$@") || { log "核对时 rsync 出错（退出码 $?），不删 $HOST 上的文件" >&2; return 1; }
-    grep -E '^(>|c)' <<< "$out" || true
+    grep -E '^(<|>|c)' <<< "$out" || true
 }
 bad_bk=$(diffs -rltn --itemize-changes "$BOX/" "$BKH:$BKD/$OUT/")
 if [[ $DRY == --dry-run ]]; then
