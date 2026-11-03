@@ -880,7 +880,7 @@ def remote(host, args, timeout=120, env="", input=None):
     return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 
 
-def central(args, timeout=300):
+def central(args, timeout=420):  # 比锁的最长等待（300 秒）长：等不到锁时拿到退出码，不是超时
     """box 上改总队列：本机跑 taskq.py <args>（参数列表或 shell 写法的字符串）→ (退出码, 标准输出, 标准错误)。"""
     import subprocess
     argv = shlex.split(args) if isinstance(args, str) else list(args)

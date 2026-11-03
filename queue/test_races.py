@@ -125,7 +125,15 @@ def test_gc_pin():
     assert os.path.exists(blob), (f"stage 在 GC 运行中写了 pin，GC 仍删了这个 blob：{r.stdout.strip()}")
 
 
-TESTS = dict(lock=test_lock, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin)
+def test_central_timeout():
+    import inspect
+    wait = inspect.signature(taskq.Lock).parameters["tries"].default * 0.5
+    t = inspect.signature(taskq.central).parameters["timeout"].default
+    assert t > wait + 30, f"central() 的超时 {t} 秒不比锁的最长等待 {wait} 秒长：锁被占着时调用方拿到 TimeoutExpired，而不是退出码"
+
+
+TESTS = dict(lock=test_lock, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,
+             central_timeout=test_central_timeout)
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(TESTS)
