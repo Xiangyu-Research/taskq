@@ -55,7 +55,7 @@ from common import write_json  # noqa: E402
 
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（存档、验证结果）留的空间
 SOFT = 2  # 自动传过去、留着以后用的数据：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
-KICK = "~/auto/PhD/scripts/monitor/auto_refresh.sh"  # 健康检查（在 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
+KICK = M.MACHINES[M.hub()]["repo"] + "/scripts/monitor/auto_refresh.sh"  # 健康检查（在 hub 上 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
 STATE = cfg.state("refill.json")
 SUBMIT_CAP = SL.SUBMIT_CAP  # QOS 没设排队上限时，每个 QOS 最多排这么多段（scripts/sites/slurm.py）
 LOG = os.path.expanduser("~/refill.log")

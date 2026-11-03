@@ -2,8 +2,9 @@
 """执行机全流程测试（2026-10-31）：本机模拟一台 pueue 类执行机（lab1 的条目，根目录、conda、pueue 都换成临时的），走一遍
 建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理。
 完全隔离：执行机根目录、box 的数据目录、总队列都在临时目录里；pueue 是自己起的 pueued（自己的配置和 socket），结束时只停它；
-ssh 换成本机的 bash -c，不连任何机器；不改 envs/machines.py（条目在进程里替换）。
+ssh 换成本机的 bash -c，不连任何机器；不改机器表（条目在进程里替换）。
 跑法：python3 scripts/sites/test_e2e.py（box 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
+import glob
 import json
 import os
 import re
@@ -18,6 +19,16 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(REPO, "scripts", "queue", "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
+sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+import cfg  # noqa: E402
+
+LEGACY_UNSET = "".join(f" -u {v}" for v in cfg.LEGACY.values())
+for _v in cfg.LEGACY.values():
+    os.environ.pop(_v, None)
 PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
 PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
 
@@ -35,7 +46,7 @@ for d in (BD, PQ, BIN):
     os.makedirs(d)
 with open(FAKE, "w") as f:  # 假的 ssh：跳过 -o 和机器名，在本机跑；box 这边的变量不带过去
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nshift\n'
-            'cd / && exec env -u BRAIN_TUMOR -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
+            f'cd / && exec env{LEGACY_UNSET} -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
 with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # 不碰真的卡
     f.write("#!/bin/bash\nexit 0\n")
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):
@@ -45,7 +56,7 @@ s_.bind(("127.0.0.1", 0))
 PORT = s_.getsockname()[1]
 s_.close()
 os.environ.update(
-    RELAY_DIR=os.path.join(T, "relay"), TASKQ_DIR=os.path.join(T, "boxq"), BRAIN_TUMOR=BD, TASKQ_DATA=BD,
+    RELAY_DIR=os.path.join(T, "relay"), TASKQ_DIR=os.path.join(T, "boxq"), TASKQ_DATA=BD,
     RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1",
     TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"),
     RELAY_LOG=os.path.join(T, "relay.log"), PATH=BIN + ":" + os.environ["PATH"],
@@ -55,7 +66,8 @@ os.environ.update(
 os.makedirs(os.environ["TASKQ_DIR"])
 open(os.path.join(os.environ["TASKQ_DIR"], "ENABLED"), "w").close()
 
-for d in ("envs", "scripts/queue", "scripts/sync", "scripts/monitor", "scripts/sites"):
+cfg.use_config()
+for d in ("scripts/queue", "scripts/sync", "scripts/monitor", "scripts/sites"):
     sys.path.insert(0, os.path.join(REPO, d))
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
@@ -69,7 +81,7 @@ import envs as E  # noqa: E402
 
 NAME = "lab1"
 Q = taskq.queue_host()
-CONDA = os.path.join(RROOT, "conda")       # 假的 conda：activate 只把 bin 放进 PATH（bin/python3 是本机 nnunet 环境的）
+CONDA = os.path.join(RROOT, "conda")       # 假的 conda：activate 只把 bin 放进 PATH（bin/python3 是本机一个有 numpy 的 Python）
 PWRAP = os.path.join(RROOT, "bin", "pueue")  # 指到自己的 pueued
 PCFG = os.path.join(PQ, "c.yml")
 WID = "wtest"
@@ -139,6 +151,13 @@ open(f"{a.out}/DONE", "w").close()
 '''
 
 
+def numpy_python():
+    cands = [RB.check_python(), sys.executable] + sorted(glob.glob(os.path.expanduser("~/miniforge3/envs/*/bin/python"))) \
+        + [os.path.expanduser("~/miniforge3/bin/python3")]
+    return next((p for p in cands if p and os.path.exists(p)
+                 and subprocess.run([p, "-c", "import numpy, venv"], capture_output=True).returncode == 0), None)
+
+
 def text_of(i):
     return f"数据 {i}\n" * i
 
@@ -163,9 +182,9 @@ def setup():
     wb(os.path.join(SPECS, "toy.check.py"), "import numpy\nprint('numpy', numpy.__version__)\n")
     M.SPECS = SPECS
     # 假的 conda、指到自己 pueued 的 pueue
-    py = RB.check_python()
+    py = numpy_python()
     if not py:
-        raise SystemExit("本机没有 nnunet 环境（RB.check_python），跑不了")
+        raise SystemExit("本机没有带 numpy 的 Python（RB.check_python、miniforge 的环境），跑不了")
     os.makedirs(os.path.join(CONDA, "bin"))
     for n in ("python3", "python"):
         os.symlink(py, os.path.join(CONDA, "bin", n))
@@ -184,7 +203,7 @@ def setup():
         time.sleep(0.2)
     rc, out = pq("group", "add", "gpu1")
     assert rc == 0, out
-    # 进程里换掉 lab1 的条目（不改 envs/machines.py）
+    # 进程里换掉 lab1 的条目（不改机器表）
     conf = dict(M.SITES[NAME], root=RROOT, ssh="lab", adopt=None, budget=(0, 0), transfer_job=None, **ENTRY)
     M.SITES[NAME] = conf
     M.RELAY[NAME] = conf
@@ -511,9 +530,9 @@ def step_shift():
     wait(lambda: all(t["status"] != "Running" for t in pueue_tasks().values() if t["group"] == "gpu0"), 60, "lab0 的 worker 停下")
     check(NAME0)
     a0 = keys0().get(K6) or {}
-    rq0 = relay.remote_status(NAME0)["taskq"]["tasks"]
+    remote_q0 = relay.remote_status(NAME0)["taskq"]["tasks"]
     step("lab0：队列里删掉 t6（unq），结果目录留着给 lab1 收编",
-         a0.get("unq") and not rq0 and os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), (a0, rq0))
+         a0.get("unq") and not remote_q0 and os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), (a0, remote_q0))
 
     def done6():
         return box_tasks()[K6]["state"] == "done"
@@ -566,7 +585,7 @@ def main():
         step_finish()
         step_gc()
         step_shift()
-        print("nnU-Net 小折：跳过（box 上没有 1–2 个 epoch 能训完的预处理数据集；nnU-Net 的换名、拉回见 scripts/queue/test_relay.py）")
+        print("真的训练做法的小任务：跳过（换名、拉回见 scripts/queue/test_relay.py）")
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:
             print(f"失败：{type(e).__name__}: {e}")

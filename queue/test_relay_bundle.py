@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑原来的测试。
-包从工作区建（commit=None），根目录换成临时目录。
+包从工作区建（commit=None），根目录换成临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 只有 scripts）。
     python3 scripts/queue/test_relay_bundle.py
 """
 import json
@@ -12,12 +12,20 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "envs"))
+import cfg  # noqa: E402
+
+cfg.use_config()
 import machines as M  # noqa: E402
 import relay_bundle as B  # noqa: E402
 
 NAME = "dicc2"
+STEP = "scripts/queue/testdata/bin/step.sh"
+FIX_PLUGINS = "scripts/queue/testdata/plugins"  # 包里的测试用插件（相对包）
 
 
 def ok(msg):
@@ -25,21 +33,25 @@ def ok(msg):
 
 
 def run(cmd, env=None, **kw):
-    e = {k: v for k, v in os.environ.items() if k not in ("BRAIN_TUMOR", "TASKQ_DIR", "TASKQ_MACHINE")}
+    """包里的命令：不带本机的配置（TASKQ_CONFIG），用包里生成的 envs/。"""
+    e = {k: v for k, v in os.environ.items()
+         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS", *cfg.LEGACY.values())}
     e.update(env or {})
     return subprocess.run(cmd, capture_output=True, text=True, env=e, **kw)
 
 
 def test_source_files_from_commit():
     files = B.source_files("HEAD")
-    for f in ("scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh", "research/common/nnunet/trainers/nnUNetTrainer_save10.py",
-              "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/experiments.py", "envs/machines.py"):
+    for f in ("scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh", STEP, "scripts/queue/testdata/exps/demo/experiments.py",
+              "scripts/queue/testdata/config/machines.py"):
         assert f in files, f
-    assert any(f.endswith(".R") for f in files) and not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
+    assert B._wanted("x/a.R", 10) and not B._wanted("x/big.json", B.SMALL_MAX + 1) and not B._wanted("x/__pycache__/a.py", 1)
+    assert not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
     assert not any("__pycache__" in f for f in files) and all(len(files[f][0]) <= B.SMALL_MAX for f in files if f.endswith(B.SMALL))
-    head = subprocess.run(["git", "-C", REPO, "show", "HEAD:research/RQ1/analysis/run_predict_eval.sh"], capture_output=True).stdout
-    assert files["research/RQ1/analysis/run_predict_eval.sh"] == (head, False)
-    ok("从提交取文件：scripts/、envs/、research/ 下的代码和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
+    head = subprocess.run(["git", "-C", REPO, "show", f"HEAD:{STEP}"], capture_output=True).stdout
+    mode = subprocess.run(["git", "-C", REPO, "ls-tree", "HEAD", STEP], capture_output=True, text=True).stdout.split()[0]
+    assert files[STEP] == (head, mode == "100755")
+    ok("从提交取文件：OUTPUTS[\"bundle\"] 下的代码（含 .R）和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
 
 
 def test_secrets():
@@ -71,18 +83,19 @@ def test_bundle(T):
     files = sorted(os.path.relpath(os.path.join(d, f), path) for d, _, fs in os.walk(path) for f in fs)
     src = B.source_files(None)
     for f in ("envs/machines.py", "envs/policy.py", "scripts/queue/worker.sbatch", "scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh",
-              "research/common/nnunet/train.sh", "research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/experiments.py"):
+              "scripts/queue/testdata/bin/toy_train.sh", STEP, "scripts/queue/testdata/exps/demo/experiments.py"):
         assert f in files, f
     assert "scripts/queue/cpu_worker.sbatch" not in files, "这台没有 jobs.cpu"
-    for f in ("research/RQ1/analysis/run_predict_eval.sh", "research/RQ1/nnunet/predict.sh", "scripts/queue/taskq.py"):
+    for f in (STEP, "scripts/queue/testdata/bin/infer_task.sh", "scripts/queue/taskq.py"):
         assert open(os.path.join(path, f), encoding="utf-8").read() == B.home_paths(src[f][0].decode(), R), f"{f} 和提交的不一样"
         assert os.access(os.path.join(path, f), os.X_OK) == (src[f][1] or f.endswith(".sh")), f
-    assert open(os.path.join(path, "research/RQ1/analysis/run_predict_eval.sh"), "rb").read() == src["research/RQ1/analysis/run_predict_eval.sh"][0]
+    assert open(os.path.join(path, STEP), "rb").read() == src[STEP][0]
     for ln, tgt in B.LINKS.items():
         assert os.readlink(os.path.join(path, ln)) == tgt and os.path.isfile(os.path.join(path, ln)), ln
-    np_ = open(os.path.join(path, "envs/nnunet_paths.sh"), encoding="utf-8").read()
-    assert ".cache/phd" not in np_, np_[:300]
-    ok("包里的文件：提交里的代码原样（run_predict_eval.sh、predict.sh 等不改），~/.cache/phd 换成根目录下的，start.sh、loop.sh 指向新名字")
+    assert ".cache/phd" in src["scripts/queue/gpu_pad_start.sh"][0].decode()
+    gp = open(os.path.join(path, "scripts/queue/gpu_pad_start.sh"), encoding="utf-8").read()
+    assert ".cache/phd" not in gp, gp[:300]
+    ok("包里的文件：提交里的代码原样（step.sh、infer_task.sh 等不改），~/.cache/phd 换成根目录下的，start.sh、loop.sh 指向新名字")
 
     os.symlink(bid, os.path.join(R, "code", "current"))
     for d in ("data", "queue"):
@@ -92,10 +105,10 @@ def test_bundle(T):
     assert run(["python3", mp, "whoami"]).stdout.strip() == NAME
     assert run(["python3", mp, "names", "slurm"]).stdout.split() == [NAME]
     assert run(["python3", mp, "get", ".", "data"]).stdout.strip() == f"{R}/data"
-    e = M.RELAY[NAME]
+    e = B.relay_entry(None, NAME)  # 包按机器表的源码读（测试用的机器表在源码里读时 conda 是 /nonexistent/…）
     assert run(["python3", mp, "get", ".", "conda"]).stdout.split() == list(e["conda"])
-    act = run(["python3", mp, "activate", "nnunet"]).stdout
-    assert f"conda activate {e['envs']['nnunet'][1]}" in act and e["conda"][0] in act
+    act = run(["python3", mp, "activate", "base"]).stdout
+    assert f"conda activate {e['envs']['base'][1]}" in act and e["conda"][0] in act
     pol = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import machines, policy; "
                "print(int(bool(policy.STAGE_TMP.get(machines.whoami()))), int(bool(machines.MACHINES[machines.whoami()].get('task_vars'))))",
                os.path.join(cur, "envs")]).stdout.split()
@@ -124,19 +137,19 @@ def test_bundle(T):
     assert out == f"{fake}/queue|{fake}/queue/gpu_pad_DISABLED|{fake}/code/b1", out
     ok("worker.sbatch：CPU、内存、作业名、输出位置按账号，其余资源和原来一样；开始时按 current 的实际包跑，队列和显存开关在根目录下")
 
-    env = {"BRAIN_TUMOR": f"{R}/data", "TASKQ_DIR": f"{R}/queue"}
+    env = {"TASKQ_DATA": f"{R}/data", "TASKQ_DIR": f"{R}/queue", "TASKQ_PLUGINS": os.path.join(cur, FIX_PLUGINS)}
     tq = ["python3", os.path.join(cur, "scripts/queue/taskq.py")]
-    key = "Dataset999_abcdef/nnUNetTrainer_save10/0"
-    r = run(tq + ["add", "--nice", "0", "--recipe", "nnunet", "dataset=Dataset999_abcdef", "fold=0"], env)
+    key = "D999_abcdef/V_save/0"
+    r = run(tq + ["add", "--nice", "0", "--recipe", "toy", "ds=D999_abcdef", "frag=0"], env)
     assert r.returncode == 0 and key in r.stdout, r
     st = json.loads(next(ln for ln in run(tq + ["--json-status"], env).stdout.splitlines() if ln.startswith("@@JSON"))[6:])
     assert [t["key"] for t in st["tasks"]] == [key] and st["tasks"][0]["state"] == "free", st
-    assert st["tasks"][0]["spec"]["relay"] == "nnunet" and st["tasks"][0]["exp"] is None
-    r = run(tq + ["next", "--worker", "123", "--envs", "nnunet", "--device", "gpu"], env)
+    assert st["tasks"][0]["spec"]["relay"] == "toy" and st["tasks"][0]["exp"] is None
+    r = run(tq + ["next", "--worker", "123", "--envs", "base", "--device", "gpu"], env)
     assert r.returncode == 0, r
     lines = r.stdout.strip().split("\n")
-    assert lines[0] == key and lines[1].startswith("nnunet ") and "dataset=Dataset999_abcdef" in lines[1], lines
-    assert run(tq + ["next", "--worker", "124", "--envs", "nnunet", "--device", "gpu"], env).returncode == 10
+    assert lines[0] == key and lines[1].startswith("toy ") and "ds=D999_abcdef" in lines[1], lines
+    assert run(tq + ["next", "--worker", "124", "--envs", "base", "--device", "gpu"], env).returncode == 10
     assert run(tq + ["beat", "--worker", "123", key], env).returncode == 0
     assert run(tq + ["stop", key], env).returncode == 0
     assert os.path.exists(f"{R}/queue/stopped/{key.replace('/', '__')}")
@@ -146,7 +159,7 @@ def test_bundle(T):
     assert run(tq + ["resume", key], env).returncode == 0
     assert run(tq + ["remove", key], env).returncode == 0
     assert not open(f"{R}/queue/tasks.jsonl").read().strip()
-    r = run(tq + ["--json-status"], {"BRAIN_TUMOR": f"{R}/data"})
+    r = run(tq + ["--json-status"], {"TASKQ_DATA": f"{R}/data"})
     assert r.returncode == 0 and '"enabled": false' in r.stdout
     ok("包里的 taskq.py：add → --json-status → next（0；再领 10）→ beat → stop → release → resume → remove；"
        "不设 TASKQ_DIR 也用根目录下的 queue/")
@@ -189,6 +202,14 @@ def test_pueue_site(T):
     assert run(["python3", mp, "names", "pueue"]).stdout.split() == [NAME]
     ok("pueue 的执行机：没有 worker.sbatch、cpu_worker.sbatch，slots、组照抄")
 
+    R1 = os.path.join(T, "lab1_site")
+    _, path = B.build("lab1", commit=None, out=os.path.join(R1, "code"), root=R1)
+    got = run(["python3", "-c", "import sys, json; sys.path.insert(0, sys.argv[1]); import machines, policy; "
+               "print(json.dumps([machines.MACHINES['lab1'].get('task_vars'), policy.STAGE_TMP]))", os.path.join(path, "envs")])
+    assert json.loads(got.stdout) == [M.RELAY["lab1"]["task_vars"], {"lab1": False}], got
+    assert M.RELAY["lab1"]["task_vars"] == {"DEMO_FAST": "1", "DEMO_FAST_LOADER": "1"}
+    ok("生成的 machines.py 带上 RELAY 里写的 task_vars（lab1），STAGE_TMP 按 stage_tmp")
+
 
 def test_dicc_worker_in_bundle(T):
     """包里的 dicc_worker.sh、run_task.sh、taskq.py 跑原来的 test_dicc_worker.sh（环境换成本机的，好真激活）。"""
@@ -199,6 +220,9 @@ def test_dicc_worker_in_bundle(T):
     test = open(os.path.join(HERE, "test_dicc_worker.sh")).read()
     assert "TASKQ_MACHINE=dicc " in test
     dst = os.path.join(path, "scripts", "queue", "test_in_bundle.sh")
+    fx = 'source "$HERE/testdata/fixture.sh"'
+    assert fx in test
+    test = test.replace(fx, 'export TASKQ_CONFIG=$(cd "$HERE/../../envs" && pwd) TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 envs/
     with open(dst, "w") as f:
         f.write(test.replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
     r = run(["bash", dst], timeout=1800)

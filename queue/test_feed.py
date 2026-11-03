@@ -14,6 +14,10 @@ T = tempfile.mkdtemp()
 os.environ.update(FEED_STATE=os.path.join(T, "feed.json"), FEED_LOG=os.path.join(T, "feed.log"),
                   PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 import feed as F  # noqa: E402
 import machines as M  # noqa: E402
 
@@ -31,13 +35,13 @@ def ok(msg, cond):
     fails += not cond
 
 
-D1, D2, D3 = (f"nnUNet/preprocessed/Dataset10{i}_X" for i in (1, 2, 3))
+D1, D2, D3 = (f"prepared/D10{i}_X" for i in (1, 2, 3))
 
 
 def ct(key, state="free", nice=50, order=1, assigned=None, data=(D1,), machines=None, after=None, device="gpu", skipped=(), **kw):
     """总队列 / 缓冲里的一行（taskq.py local_status 的样子）。"""
-    sp = dict(key=key, env="nnunet", data=list(data), machines=machines, device=device, after=list(after or []), out=f"out/{key}")
-    return dict(dict(key=key, nice=nice, order=order, exp=None, recipe="nnunet", params={}, state=state, spec=sp, assigned=assigned,
+    sp = dict(key=key, env="base", data=list(data), machines=machines, device=device, after=list(after or []), out=f"out/{key}")
+    return dict(dict(key=key, nice=nice, order=order, exp=None, recipe="toy", params={}, state=state, spec=sp, assigned=assigned,
                      worker=assigned, skipped_by=list(skipped), held=False, failures=0, note=""), **kw)
 
 
@@ -53,7 +57,7 @@ def snap(c, b=(), box=(), recs=(), src=None, head="a", paused=False, benabled=Tr
                 code=dict(main="a", heads={NAME: head}), ok={HUB: True, NAME: True})
 
 
-def fold(final=False, epochs=0):
+def prog(final=False, epochs=0):
     return dict(final=final, runs=[dict(start="", end="2026-10-31 10:00:00", epochs_done=epochs, tl=[])])
 
 
@@ -68,7 +72,7 @@ def plan(s, data=READY, st=None, now=None):
     return F.plan(s, NAME, {} if st is None else st, data, now)
 
 
-K = [f"Dataset10{i}_X/tr/{f}" for i in (1, 2, 3) for f in (0, 1)]
+K = [f"D10{i}_X/tr/{f}" for i in (1, 2, 3) for f in (0, 1)]
 
 # ---------------- 补训练 ----------------
 c = [ct(K[3], nice=50, order=4, data=(D2,)), ct(K[0], nice=50, order=1), ct(K[1], nice=50, order=2), ct(K[2], nice=0, order=3, data=(D2,))]
@@ -82,7 +86,7 @@ acts, _, _ = plan(snap(c, [bt(K[4], "claimed", "123"), bt(K[5], "claimed", "124"
 ok("缓冲里的都在训：照样补满（在训的不算备着的）", [a["key"] for a in acts if a["op"] == "send"] == [K[2], K[0]])
 c2 = [ct(K[0], skipped=[NAME]), ct(K[1]), ct(K[2], data=(D2,))]
 ok("这台跳过的不送", [a["key"] for a in plan(snap(c2))[0] if a["op"] == "send"] == [K[1], K[2]])
-acts, _, _ = plan(snap(c, src={"lab": {"tasks": {K[2]: fold(epochs=30)}}}))
+acts, _, _ = plan(snap(c, src={"lab": {"tasks": {K[2]: prog(epochs=30)}}}))
 ok("别的机器上有进度的不送", [a["key"] for a in acts if a["op"] == "send"] == [K[0], K[1]])
 ok("代码不是最新的：不送新任务", not [a for a in plan(snap(c, head="b"))[0] if a["op"] == "send"])
 ok("缓冲总开关没开：不送", not [a for a in plan(snap(c, benabled=False))[0] if a["op"] == "send"])
@@ -105,7 +109,7 @@ acts, _, _ = plan(snap(c3), (dict(box_d, **{D1: "inc"}), {D1: (10, 1000), D2: (5
 ok("box 上的数据自己还在生成（.incomplete）：不送、不传", ("send", K[0]) not in ops(acts) and ("sync", K[0]) not in ops(acts))
 acts, _, _ = plan(snap(c3), (dict(box_d, **{D1: (0, 0)}), {D2: (5, 500)}))
 ok("box 上也没有这份数据（还没生成）：不送、不传", ("send", K[0]) not in ops(acts) and ("sync", K[0]) not in ops(acts))
-SY = dict(id=40, label="sync_dicc_Dataset101_X", status="Running", group="wait", command="x")
+SY = dict(id=40, label="sync_dicc_D101_X", status="Running", group="wait", command="x")
 SR = dict(machine=HUB, id=40, label=SY["label"], step="sync", key=D1, to=NAME, group="wait", created_at=0)
 acts, _, _ = plan(snap(c3, box=[SY], recs=[SR]), (box_d, {D1: (10, 1000), D2: (5, 500)}))
 ok("那边看着齐了、但传输还在跑：不送这个，别的照送", ("send", K[0]) not in ops(acts) and ("send", K[2]) in ops(acts))
@@ -134,7 +138,7 @@ acts, _, _ = plan(snap([mine(K[0], "done")], [bt(K[0], "done")], box=[FE], recs=
 ok("拷到一半 3：box 上看着训完了，但拉回还在跑 → 不交还、不删", not [a for a in acts if a["key"] == K[0] and a["op"] in ("bremove", "release")])
 acts, _, _ = plan(snap([mine(K[0], "claimed")], [bt(K[0], "done")]))
 ok("拷到一半 4：那边训完、box 上还不算训完（缺 summary.json）→ 不交还", not [a for a in acts if a["op"] in ("bremove", "release")])
-INF = "infer/x/fold_0"
+INF = "infer/x/frag_0"
 acts, _, _ = plan(snap([mine(K[0], "done"), mine(INF, "waiting", machines=[NAME], after=[K[0]])],
                        [bt(K[0], "done"), bt(INF, "free", machines=[NAME], after=[K[0]])]))
 ok("训完的折还被缓冲里的推理引用：只交还，不删记录", ("release", K[0]) in ops(acts) and ("bremove", K[0]) not in ops(acts))
@@ -157,7 +161,7 @@ ok("依赖记录后来真分给它了：put hold=false 撤掉停止", ops(acts)[
 acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)]))
 rel = [a for a in acts if a["op"] == "release"]
 ok("缓冲里失败、这台没有进度：删记录、交还（--skip）", ("bremove", K[0]) in ops(acts) and rel and rel[0].get("skip"))
-acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], src={NAME: {"tasks": {K[0]: fold(epochs=50)}}}))
+acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], src={NAME: {"tasks": {K[0]: prog(epochs=50)}}}))
 ok("失败、有进度：留着、报出来", not [a for a in acts if a["op"] == "release"] and f"site:dicc:fail:{K[0]}" in stuck)
 acts, stuck, _ = plan(snap([mine(K[0])], [bt(K[0], "failed", failures=2)], paused=True))
 ok("缓冲整个暂停：不交还，只报", not [a for a in acts if a["op"] == "release"] and "site:dicc:fail" in stuck)
@@ -178,7 +182,7 @@ c4 = [mine(K[0]), ct(INF, "waiting", machines=[NAME], after=[K[0]], nice=-100)]
 acts, _, _ = plan(snap(c4 + [ct(k, "claimed", assigned=NAME) for k in K[4:]] + [ct(K[2])], [bt(K[0], "claimed", "123"), bt(K[4]), bt(K[5])]))
 ok("推理（machines=[dicc]）、训练在缓冲里：马上送，不受 READY 限制", ("send", INF) in ops(acts) and not [a for a in acts if a["op"] == "send" and a["key"] != INF])
 c5 = [ct(K[0], "done"), ct(INF, "free", machines=[NAME], after=[K[0]], nice=-100)]
-acts, _, _ = plan(snap(c5, [], src={NAME: {"tasks": {K[0]: fold(final=True)}}}))
+acts, _, _ = plan(snap(c5, [], src={NAME: {"tasks": {K[0]: prog(final=True)}}}))
 s5 = [a for a in acts if a["op"] == "send"]
 ok("训练在这台训完、已交还：推理带上依赖记录（hold）一起送", s5 and s5[0]["key"] == INF and [d["key"] for d in s5[0]["deps"]] == [K[0]]
    and s5[0]["deps"][0]["hold"] is True)
@@ -186,7 +190,7 @@ acts, _, _ = plan(snap(c5, []))
 ok("训练不是在这台训的：推理不送", ("send", INF) not in ops(acts))
 AR = dict(id=51, label=f"archive:{K[0]}", status="Running", group="wait", command="x")
 ARR = dict(machine=HUB, id=51, label=AR["label"], step="archive", key=K[0], created_at=0)
-acts, _, _ = plan(snap(c5, [], box=[AR], recs=[ARR], src={NAME: {"tasks": {K[0]: fold(final=True)}}}))
+acts, _, _ = plan(snap(c5, [], box=[AR], recs=[ARR], src={NAME: {"tasks": {K[0]: prog(final=True)}}}))
 ok("拷到一半 5：依赖还在归档（拷）：下游不送", ("send", INF) not in ops(acts))
 ok("推理要的环境这台没有：不送", ("send", "infer/y") not in ops(plan(snap([dict(ct("infer/y", machines=[NAME]), spec=dict(ct("infer/y")["spec"], env="nope", machines=[NAME]))], []))[0]))
 
@@ -194,7 +198,7 @@ ok("推理要的环境这台没有：不送", ("send", "infer/y") not in ops(pla
 P.AUTO.update({NAME: False, "dicc1": True})
 c6 = [mine(K[0]), mine(K[1]), mine(K[2]), mine(K[3], "done"), mine(K[4], "stopped")]
 b6 = [bt(K[0]), bt(K[1], "claimed", "123"), bt(K[3], "done"), bt(K[4], "stopped")]
-acts, _, _ = plan(snap(c6, b6, src={NAME: {"tasks": {K[2]: fold(epochs=40)}}}))
+acts, _, _ = plan(snap(c6, b6, src={NAME: {"tasks": {K[2]: prog(epochs=40)}}}))
 ok("换成了 dicc1：没人领的从缓冲删掉、交还；有进度的改分给 dicc1；在训的等它交还；训完、停了的照旧",
    ops(acts) == [("bremove", K[0]), ("release", K[0]), ("handover", K[2]), ("bremove", K[3]), ("release", K[3]),
                  ("bremove", K[4]), ("release", K[4])] and acts[2]["to"] == "dicc1" or print(ops(acts)))
@@ -297,8 +301,7 @@ BUF, DATA = os.path.join(T, "buffer"), os.path.join(T, "data")
 os.makedirs(BUF), os.makedirs(DATA)
 for f in ("BUFFER", "ENABLED"):
     open(os.path.join(BUF, f), "w").close()
-ENV = dict(os.environ, TASKQ_DIR=BUF, BRAIN_TUMOR=DATA, TASKQ_DATA=DATA, TASKQ_MACHINE=NAME)
-ENV.pop("nnUNet_results", None)
+ENV = dict(os.environ, TASKQ_DIR=BUF, TASKQ_DATA=DATA, TASKQ_MACHINE=NAME)
 
 
 def tqb(*args, feed=False, stdin=None):
@@ -308,15 +311,15 @@ def tqb(*args, feed=False, stdin=None):
 
 
 recs = [dict(order=i, nice=0, key=f"toy/{i}", exp=None, recipe="command",
-             params={"key": f"toy/{i}", "cmd": "true", "env": "nnunet", "out": f"toy/{i}", "done": '["DONE"]'}) for i in range(2)]
+             params={"key": f"toy/{i}", "cmd": "true", "env": "base", "out": f"toy/{i}", "done": '["DONE"]'}) for i in range(2)]
 rc, out = tqb("put", feed=True, stdin=json.dumps(recs))
 got = []
 for w in ("900", "901", "902"):
-    rc, out = tqb("next", "--worker", w, "--envs", "nnunet")
+    rc, out = tqb("next", "--worker", w, "--envs", "base")
     got.append((rc, out.splitlines()[0] if rc == 0 else ""))
 ok("box 不在线（缓冲目录里没有总队列）：worker 按顺序领完，再领返回 10", [g[0] for g in got] == [0, 0, 10] and got[0][1] == "toy/0")
 rc, _ = tqb("release", "--worker", "900", "toy/0")
-rc2, out2 = tqb("next", "--worker", "903", "--envs", "nnunet")
+rc2, out2 = tqb("next", "--worker", "903", "--envs", "base")
 ok("交还后别的 worker 接着领", rc == 0 and rc2 == 0 and out2.startswith("toy/0"))
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")

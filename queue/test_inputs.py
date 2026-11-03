@@ -10,6 +10,10 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 PY = [sys.executable, os.path.join(HERE, "inputs.py")]
 T = tempfile.mkdtemp()
 ok_all = True
@@ -144,7 +148,7 @@ OUT = os.path.join(DATA, "jobs", "t")
 
 
 def rtask(inputs, local, **e):
-    args = ["command", "key=t/one", "env=rstats", "out=jobs/t", "done=DONE", f"inputs={json.dumps(inputs)}",
+    args = ["command", "key=t/one", "env=stats", "out=jobs/t", "done=DONE", f"inputs={json.dumps(inputs)}",
             f"res={json.dumps(dict(local_inputs=local))}",
             'cmd=cat "$TASK_INPUTS_ROOT/in/ds1/dataset.json" > "$TASKQ_DATA/jobs/t/seen"; echo "$TASK_INPUTS_ROOT" > "$TASKQ_DATA/jobs/t/root"; touch "$TASKQ_DATA/jobs/t/DONE"']
     envx = dict(os.environ, TASKQ_DATA=DATA, RUN_TASK_TRIES="1", TMPDIR=TMP, PATH=BIN + ":" + os.environ["PATH"], STAGE_KEEP_GB="0", **e)
@@ -154,7 +158,7 @@ def rtask(inputs, local, **e):
     return subprocess.run(["bash", RT] + args, capture_output=True, text=True, env=envx)
 
 
-envs_ok = subprocess.run([sys.executable, os.path.join(HERE, "..", "..", "envs", "machines.py"), "activate", "rstats"], capture_output=True).returncode == 0
+envs_ok = subprocess.run([sys.executable, os.path.join(fixture.CONFIG, "machines.py"), "activate", "stats"], capture_output=True).returncode == 0
 if envs_ok:
     with open(os.path.join(BIN, "squeue"), "w") as f:
         f.write("#!/bin/sh\necho 7\n")
@@ -170,7 +174,7 @@ if envs_ok:
     r = rtask(["in/ds1"], 1, SLURM_JOB_ID="7", TASKQ_STAGE_TMP="0")
     ok("run_task.sh：STAGE_TMP 关 → 读数据目录", r.returncode == 0 and open(os.path.join(OUT, "root")).read().strip() == DATA)
 else:
-    print("跳过 run_task.sh 的几条：本机 envs/machines.py 里没有 rstats 环境")
+    print("跳过 run_task.sh 的几条：测试用的机器表认不出本机（没有 stats 环境）")
 
 shutil.rmtree(T, ignore_errors=True)
 print("\n全部通过" if ok_all else "\n有失败")

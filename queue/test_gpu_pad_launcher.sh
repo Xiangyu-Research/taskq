@@ -1,7 +1,11 @@
 #!/bin/bash
+# 显存填充的启动器（gpu_pad_start.sh）：经环境脚本（policy.py 的 OUTPUTS["env_script"]，这里是测试用的 testdata/env.sh）source 时
+# 什么情况下启动、只启动一次、失败重启。  bash scripts/queue/test_gpu_pad_launcher.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
+source "$HERE/testdata/fixture.sh"
+ENV_SCRIPT=$REPO/$(python3 "$HERE/cfg.py" get env_script)
 T=$(mktemp -d)
 trap 'stop_pads; rm -rf "$T"' EXIT
 fails=0
@@ -34,20 +38,20 @@ source_it() {
     (
         export PATH=$path TASKQ_DATA=$T/bt TASKQ_GPU_PAD_SCRIPT=$T/fake_pad.py \
                TASKQ_GPU_PAD_SWITCH=$T/switch TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
-               FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed nnUNet_n_proc_DA=1
+               FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed
         local kv
         for kv in "$@"; do export "$kv"; done
-        source "$REPO/envs/nnunet_paths.sh"
+        source "$ENV_SCRIPT"
     )
 }
 source_it_twice() {  # 旧名字（RQ1_GPU_PAD_*、BRAIN_TUMOR）照样认
     (
         export PATH=$T/bin BRAIN_TUMOR=$T/bt RQ1_GPU_PAD_SCRIPT=$T/fake_pad.py \
                RQ1_GPU_PAD_SWITCH=$T/switch RQ1_GPU_PAD_RETRY_DELAY=0.1 \
-               FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed nnUNet_n_proc_DA=1 \
-               SLURM_JOB_ID=2001 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
-        source "$REPO/envs/nnunet_paths.sh"
-        source "$REPO/envs/nnunet_paths.sh"
+               FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed \
+               SLURM_JOB_ID=2001 CUDA_VISIBLE_DEVICES=0
+        source "$ENV_SCRIPT"
+        source "$ENV_SCRIPT"
     )
 }
 stop_pads() {
@@ -60,16 +64,10 @@ lines() { if [[ -f $T/args ]]; then wc -l < "$T/args"; else echo 0; fi; }
 reset() { stop_pads; rm -f "$T/args" "$T/failed" "$T/switch"; }
 
 reset
-source_it "$T/bin" SLURM_JOB_ID=1001 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
+source_it "$T/bin" SLURM_JOB_ID=1001 CUDA_VISIBLE_DEVICES=0
 sleep 0.5
 check "正常启动一个 pad" test "$(lines)" -eq 1
-check "不传训练器（pad 不分模型）" bash -c "! grep -q -- '--trainer' '$T/args'"
-check "传了 parent-pid 和 supervisor-pid" bash -c "grep -q 'parent-pid [0-9]*' '$T/args' && grep -q 'supervisor-pid [0-9]*' '$T/args'"
-
-reset
-source_it "$T/bin" SLURM_JOB_ID=1002 CUDA_VISIBLE_DEVICES=0
-sleep 0.5
-check "没有 TRAINER 也能启动" bash -c "test \$(wc -l < '$T/args') -eq 1"
+check "只传 parent-pid 和 supervisor-pid（pad 不分模型）" grep -Eq '^--parent-pid [0-9]+ --supervisor-pid [0-9]+ pid=' "$T/args"
 
 reset
 mkdir -p "$T/badbin"
@@ -81,26 +79,28 @@ sleep 0.5
 check "子 bash 换了 PATH 也用启动时的 python3" bash -c "test \$(wc -l < '$T/args') -eq 1 && test ! -e '$T/badpy'"
 unset BASH_ENV
 
-reset; source_it "$T/bin" CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
+reset; source_it "$T/bin" CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "没有 SLURM_JOB_ID：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1003 TRAINER=nnunet
+reset; source_it "$T/bin" SLURM_JOB_ID=1003
 sleep 0.3; check "没有 CUDA_VISIBLE_DEVICES：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1004 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet SLURM_STEP_ID=1
+reset; source_it "$T/bin" SLURM_JOB_ID=1004 CUDA_VISIBLE_DEVICES=0 SLURM_STEP_ID=1
 sleep 0.3; check "srun step：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet RQ1_TEST_FAKEBIN=1
-sleep 0.3; check "测试环境 RQ1_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1006 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet QUEUE_TEST_DIR=$T
+reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 TASKQ_TEST_FAKEBIN=1
+sleep 0.3; check "测试环境 TASKQ_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
+reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 RQ1_TEST_FAKEBIN=1
+sleep 0.3; check "测试环境旧名 RQ1_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
+reset; source_it "$T/bin" SLURM_JOB_ID=1006 CUDA_VISIBLE_DEVICES=0 QUEUE_TEST_DIR=$T
 sleep 0.3; check "测试环境 QUEUE_TEST_DIR：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1007 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet TASKQ_GPU_PAD=0
+reset; source_it "$T/bin" SLURM_JOB_ID=1007 CUDA_VISIBLE_DEVICES=0 TASKQ_GPU_PAD=0
 sleep 0.3; check "TASKQ_GPU_PAD=0：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1011 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet RQ1_GPU_PAD=0
+reset; source_it "$T/bin" SLURM_JOB_ID=1011 CUDA_VISIBLE_DEVICES=0 RQ1_GPU_PAD=0
 sleep 0.3; check "旧名 RQ1_GPU_PAD=0：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1012 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet RQ1_GPU_PAD_STARTED=1
+reset; source_it "$T/bin" SLURM_JOB_ID=1012 CUDA_VISIBLE_DEVICES=0 RQ1_GPU_PAD_STARTED=1
 sleep 0.3; check "旧版启动器已经开过（RQ1_GPU_PAD_STARTED）：不再开" test "$(lines)" -eq 0
 reset; touch "$T/switch"
-source_it "$T/bin" SLURM_JOB_ID=1008 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
+source_it "$T/bin" SLURM_JOB_ID=1008 CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "DISABLED 开关：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/nobin" SLURM_JOB_ID=1009 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet
+reset; source_it "$T/nobin" SLURM_JOB_ID=1009 CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "没有 nvidia-smi：不启动" test "$(lines)" -eq 0
 
 reset
@@ -109,19 +109,9 @@ sleep 0.5
 check "重复 source 只启动一次" test "$(lines)" -eq 1
 
 reset
-source_it "$T/bin" SLURM_JOB_ID=1010 CUDA_VISIBLE_DEVICES=0 TRAINER=nnunet FAKE_PAD_FAIL_ONCE=1
+source_it "$T/bin" SLURM_JOB_ID=1010 CUDA_VISIBLE_DEVICES=0 FAKE_PAD_FAIL_ONCE=1
 sleep 1
 check "pad 失败一次后 supervisor 重启" test "$(lines)" -eq 2
-
-for f in research/common/nnunet/smoke/run_gpu_smoke.sh research/RQ1/nnunet/predict.sh research/RQ1/analysis/run_predict_eval.sh \
-         research/RQ1/probe/p1_predict.sh research/RQ1/probe/run_p2.sh research/RQ2/quickcheck/run_p4.sh \
-         research/RQ1/analysis/run_sensitivity.sh research/RQ1/external/run_t19.sh research/RQ1/external/t19_eval.sh \
-         research/RQ1/probe/p1_predict_model.sh research/RQ1/probe/p2_predict_model.sh \
-         research/RQ1/analysis/validation_predict_eval.sh research/RQ1/analysis/validation_prep.sh \
-         research/RQ1/analysis/edema_intervention.sh research/RQ1/analysis/edema_ring_probe.sh \
-         research/common/nnunet/smoke/epoch_bench.sh; do
-    check "$f 有 TASKQ_GPU_PAD=0" grep -q 'TASKQ_GPU_PAD=0' "$REPO/$f"
-done
 
 reset
 if (( fails == 0 )); then echo "全部通过"; else echo "$fails 项失败"; exit 1; fi

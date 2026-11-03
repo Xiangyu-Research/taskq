@@ -15,13 +15,22 @@ CLEAN = [
     "scripts/queue/archive_task.sh", "scripts/queue/offload_io.sh", "scripts/queue/gpu_pad.py",
     "scripts/queue/gpu_pad_start.sh", "scripts/queue/relay_plugins.py", "scripts/queue/relay_bundle.py",
     "scripts/queue/experiments.py", "scripts/queue/spec.py", "scripts/queue/q", "scripts/sync/snapshot.sh",
+    "scripts/queue/test_feed.py", "scripts/queue/test_common.py", "scripts/queue/test_shift.py", "scripts/sites/test_adapters.py",
+    "scripts/sites/test_e2e.py", "scripts/sites/test_envs.py", "scripts/sync/test_tunnel.py",
 ]
 WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b",
                    re.I)
 
+# 测试用的固定配置（testdata/）整个查；PLACE 的地方 "trainer"（训练所在的执行机）是核心的写法
+FIXTURE = "scripts/queue/testdata"
+CLEAN += sorted(os.path.relpath(os.path.join(d, f), REPO) for d, ds, fs in os.walk(os.path.join(REPO, FIXTURE))
+                if "__pycache__" not in d for f in fs if not f.endswith(".pyc"))
+ALLOW = {f"{FIXTURE}/config/policy.py": '"trainer"'}
+
 bad = []
 for f in CLEAN:
-    for i, line in enumerate(open(os.path.join(REPO, f), encoding="utf-8"), 1):
+    for i, line in enumerate(open(os.path.join(REPO, f), encoding="utf-8", errors="replace"), 1):
+        line = line.replace(ALLOW[f], "") if f in ALLOW else line
         m = WORDS.search(line)
         if m:
             bad.append(f"{f}:{i}: {m.group(0)}")

@@ -1,21 +1,21 @@
 #!/bin/bash
 # dicc_worker.sh 的模拟测试（2026-10-18）：临时的假队列（TASKQ_DIR）、临时数据目录、假作业号，任务用 command 做法跑假训练
-# （睡几秒后写训完的文件）；环境真的按 envs/machines.py 激活（本机 box 的 nnunet、swinunetr）。不用 Slurm、不用 GPU。
+# （睡几秒后写训完的文件）；环境按测试用的机器表（testdata/config）激活：假的 conda、venv（本机 box 的 base、alt）。不用 Slurm、不用 GPU。
 #   bash scripts/queue/test_dicc_worker.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
-export TASKQ_DIR=$T/tq BRAIN_TUMOR=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
-unset nnUNet_results nnUNet_preprocessed
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 export TASKQ_POLL=1 TASKQ_IDLE_MAX=4 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_SLOTS=2 TASKQ_ADD_AFTER=0 TASKQ_ERR_MAX=3
-mkdir -p "$TASKQ_DIR" "$BRAIN_TUMOR"
+mkdir -p "$TASKQ_DIR" "$TASKQ_DATA"
 touch "$TASKQ_DIR/ENABLED"
 cat > "$T/fake_train.sh" << 'EOF'
 #!/bin/bash
 # 假训练：参数 任务名；记下开始、结束时刻、环境，睡 ${FAKE_SECS:-3} 秒后写训完的文件
-out=$BRAIN_TUMOR/runs/$1
+out=$TASKQ_DATA/runs/$1
 mkdir -p "$out"
-echo "start $(date +%s.%N) $1 ${VIRTUAL_ENV:-无} $(command -v python) cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
+echo "start $(date +%s.%N) $1 ${DEMO_ACTIVE_VENV:-无} ${CONDA_DEFAULT_ENV:-无} cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
 trap 'echo "term $1" >> "$FAKE_LOG"; exit 143' TERM
 if [[ ${FAKE_IGNORE:-} == "$1" ]]; then  # 不理停止信号
     trap 'echo "term $1" >> "$FAKE_LOG"' TERM
@@ -51,31 +51,31 @@ open(p, "a").write(json.dumps(t) + "\n")
 EOF
     done
 }
-reset() { : > "$T/train.log"; rm -rf "$BRAIN_TUMOR/runs" "$TASKQ_DIR/claims" "$TASKQ_DIR/failures" "$TASKQ_DIR/released" "$TASKQ_DIR/stopped"; }
+reset() { : > "$T/train.log"; rm -rf "$TASKQ_DATA/runs" "$TASKQ_DIR/claims" "$TASKQ_DIR/failures" "$TASKQ_DIR/released" "$TASKQ_DIR/stopped"; }
 
-# 1. 旧作业的调用方式（训练器 fold 数据集，参数只记日志）：按顺序领；GPU 不忙、显存够时一张卡 2 个；按任务换环境
+# 1. 旧作业的调用方式（带三个参数，只记日志）：按顺序领；GPU 不忙、显存够时一张卡 2 个；按任务换环境
 export WORKER_TEST_GPU="50 10 20000 81920"   # 近 10 分钟使用率 50%、训练占 20GB
 reset
 table << EOF
-t/a nnunet
-t/b swinunetr
-t/c nnunet
-t/d nnunet
+t/a base
+t/b alt
+t/c base
+t/d base
 EOF
-SLURM_JOB_ID=900001 timeout 90 bash "$HERE/dicc_worker.sh" nnUNetTrainer_save10 0 101 > "$T/w1.out" 2>&1
+SLURM_JOB_ID=900001 timeout 90 bash "$HERE/dicc_worker.sh" V_save 0 101 > "$T/w1.out" 2>&1
 check "旧作业：四个都训完" '[[ $(grep -c ^end $T/train.log) == 4 ]]'
 check "旧作业：GPU 不忙时前两个同时开始" '[[ $(head -2 $T/train.log | grep -c ^start) == 2 ]]'
-check "按任务说明换环境：swinunetr 用 ~/envs/swinunetr，nnunet 用 conda 环境（不带进 venv）" \
-      'grep -q "^start .* t/b .*envs/swinunetr " $T/train.log && grep "^start .* t/c " $T/train.log | grep -q " 无 .*envs/nnunetv2/bin/python"'
+check "按任务说明换环境：alt 用 venv（基于 conda 的 base0），base 用 conda 环境（不带进 venv）" \
+      'grep -q "^start .* t/b alt base0 " $T/train.log && grep -q "^start .* t/c 无 base0 " $T/train.log'
 check "每个训练分到的 CPU 传给任务（TASK_CPUS）" 'grep -q "cpus=[0-9]" $T/train.log'
 check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
-check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $BRAIN_TUMOR/logs/tasks/t__a__900001_part1.log ]] && head -1 $BRAIN_TUMOR/logs/tasks/t__a__900001_part1.log | grep -q "^作业 900001_1 @ .*任务=t/a"'
+check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $TASKQ_DATA/logs/tasks/t__a__900001_part1.log ]] && head -1 $TASKQ_DATA/logs/tasks/t__a__900001_part1.log | grep -q "^作业 900001_1 @ .*任务=t/a"'
 
-# 1b. 本机没有的环境（hdbet 只在 DICC 上）不领
+# 1b. 本机没有的环境（x3 只在 DICC 上）不领
 reset
 table << EOF
-t/x hdbet
-t/y nnunet
+t/x x3
+t/y base
 EOF
 SLURM_JOB_ID=900007 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1b.out" 2>&1
 check "本机没有的环境不领，别的照常领" '[[ $(grep -c ^end $T/train.log) == 1 ]] && grep -q "end .* t/y" $T/train.log && grep -q "没有能领的任务" $T/w1b.out'
@@ -89,7 +89,7 @@ waitfor 20 'grep -q "没有能领的任务，空着等" $T/w1c.out'
 sleep 2
 check "开始时没有能领的：不马上结束" 'kill -0 $wpid 2> /dev/null && ! grep -q "作业结束" $T/w1c.out'
 table << EOF
-t/a nnunet
+t/a base
 EOF
 waitfor 30 'grep -q "^end .* t/a" $T/train.log'
 check "空等时来了任务：领了、训完" 'grep -q "^end .* t/a" $T/train.log && grep -q "开训 t/a" $T/w1c.out'
@@ -105,8 +105,8 @@ check "一直没有能领的：空等 IDLE_MAX（4 秒）后结束，用了 $dt 
 # 2. 不带参数（worker.sbatch）；GPU 跑满（使用率 95%）时一次只训 1 个
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
+t/a base
+t/b base
 EOF
 SLURM_JOB_ID=900002 WORKER_TEST_GPU="95 10 30000 81920" timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2.out" 2>&1
 check "GPU 跑满：一个训完才开始下一个" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]]'
@@ -114,17 +114,17 @@ check "GPU 跑满：一个训完才开始下一个" '[[ $(sed -n 2p $T/train.log
 # 2b. 显存不够一半（训练占 50GB）时也只训 1 个
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
+t/a base
+t/b base
 EOF
 SLURM_JOB_ID=900005 WORKER_TEST_GPU="50 10 50000 81920" timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2b.out" 2>&1
 check "显存不够：一次 1 个" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]]'
 
 reset
 table << EOF
-t/a nnunet
+t/a base
 EOF
-export RQ1_GPU_PAD_BASE=$T/pad
+export TASKQ_GPU_PAD_BASE=$T/pad
 echo 33000 > "$T/pad.mib"
 ( while [[ ! -e $T/pad.start ]]; do sleep 0.2; done; sleep 2; echo 0 > "$T/pad.mib"; date +%s.%N > "$T/pad.released" ) &
 padpid=$!
@@ -134,7 +134,7 @@ check "显存填充放掉之后才开始训练" '[[ -f $T/pad.released ]] && awk
 
 reset
 table << EOF
-t/a nnunet
+t/a base
 EOF
 rm -f "$T/pad.start" "$T/pad.released" "$T/pad.ready"
 echo 33000 > "$T/pad.mib"
@@ -144,13 +144,13 @@ padpid=$!
 SLURM_JOB_ID=900009 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2c2.out" 2>&1
 kill $padpid 2> /dev/null
 check "显存填充只放到 floor（不到 0）：等它写 ready 后才开始训练，旧的 ready 不算" '[[ -f $T/pad.released ]] && awk -v r=$(cat $T/pad.released) "/^start/ {exit !(\$2 >= r)}" $T/train.log && ! grep -q "没回应" $T/w2c2.out'
-unset RQ1_GPU_PAD_BASE
+unset TASKQ_GPU_PAD_BASE
 
 # 2d. 训练失败：交还、记一次失败，本作业不再领它
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
+t/a base
+t/b base
 EOF
 SLURM_JOB_ID=900008 FAKE_FAIL=t/a TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2d.out" 2>&1
 check "训练失败：记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
@@ -159,8 +159,8 @@ check "训练失败：记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ
 reset
 rm -rf "$TASKQ_DIR/inputs"
 table << EOF
-t/a nnunet
-t/b nnunet
+t/a base
+t/b base
 EOF
 python3 - "$TASKQ_DIR/tasks.jsonl" << 'PY'
 import json, sys
@@ -177,9 +177,9 @@ rm -rf "$TASKQ_DIR/inputs"
 # 2e. 开始不久就失败的 2 个任务：作业不再领；跑了一段时间才失败的、两次隔得比时间窗久的不算作业的问题，照常领下一个
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
-t/c nnunet
+t/a base
+t/b base
+t/c base
 EOF
 cat > "$T/fail2.sh" << EOF
 [[ \$1 == t/a || \$1 == t/b ]] && FAKE_FAIL=\$1; export FAKE_FAIL
@@ -199,9 +199,9 @@ cp "$T/fake_train.sh.orig" "$T/fake_train.sh"
 # 2f. 卡住的任务（日志、结果文件夹都不动）：停掉、交还、不记失败，本作业领下一个；一直在写结果文件夹的不算卡住
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
-t/c nnunet
+t/a base
+t/b base
+t/c base
 EOF
 SLURM_JOB_ID=900013 TASKQ_SLOTS=1 TASKQ_STALL_MAX=4 FAKE_HANG=t/a FAKE_BUSY=t/b timeout 90 bash "$HERE/dicc_worker.sh" > "$T/w2f.out" 2>&1
 check "卡住：停掉、交还、不记失败" 'grep -q "^term t/a" $T/train.log && grep -q "t/a 的日志和结果文件夹 .*当作卡住" $T/w2f.out && grep -q "卡住的 t/a 已停下" $T/w2f.out && [[ ! -e $TASKQ_DIR/failures/t__a ]]'
@@ -212,9 +212,9 @@ check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 # 3. 收到停止信号：停训练、交还领取（下一个作业能接着领）
 reset
 table << EOF
-t/a nnunet
+t/a base
 EOF
-FAKE_SECS=60 SLURM_JOB_ID=900003 bash "$HERE/dicc_worker.sh" nnUNetTrainer_save10 3 101 > "$T/w3.out" 2>&1 &
+FAKE_SECS=60 SLURM_JOB_ID=900003 bash "$HERE/dicc_worker.sh" V_save 3 101 > "$T/w3.out" 2>&1 &
 wpid=$!
 for _ in $(seq 30); do grep -q ^start "$T/train.log" 2> /dev/null && break; sleep 1; done
 kill -TERM $wpid; wait $wpid; rc=$?
@@ -223,9 +223,9 @@ check "停止信号：退出 143、训练收到停止、领取交还" '[[ $rc ==
 # 3b. 停止某个任务（taskq.py stop）：30 秒内停下、交还、不记失败，不再领它；另一个照常训；不理停止信号的强制停
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
-t/c nnunet
+t/a base
+t/b base
+t/c base
 EOF
 FAKE_SECS=40 FAKE_IGNORE=t/b SLURM_JOB_ID=900031 TASKQ_IDLE_MAX=60 TASKQ_STOP_WAIT=3 TASKQ_POLL=30 bash "$HERE/dicc_worker.sh" > "$T/w3b.out" 2>&1 &
 wpid=$!
@@ -251,7 +251,7 @@ kill -TERM $wpid; wait $wpid 2> /dev/null
 # 3c. 作业收到停止信号时训练不理 SIGTERM（11/1）：强制停，确认停下才交还；作业退出时训练进程都不在了
 reset
 table << EOF
-t/d nnunet
+t/d base
 EOF
 FAKE_SECS=60 FAKE_IGNORE=t/d SLURM_JOB_ID=900032 TASKQ_IDLE_MAX=60 bash "$HERE/dicc_worker.sh" > "$T/w3c.out" 2>&1 &
 wpid=$!
@@ -262,7 +262,7 @@ check "停止信号、训练不理：强制停、交还，作业退出时假训�
 # 4. box 替 lab 领的（ttl 24 小时、beat 30 分钟前）不被 DICC 作业领走
 reset
 table << EOF
-t/a nnunet
+t/a base
 EOF
 python3 "$HERE/taskq.py" take --worker lab --ttl 86400 t/a > /dev/null
 python3 - "$TASKQ_DIR" << 'EOF'
@@ -276,20 +276,20 @@ check "lab 领着的（30 分钟没续，但在 24 小时内）：DICC 作业不
 # 4b. CPU worker（WORKER_DEVICE=cpu，10/24）：只领 device=cpu 的，一次 1 个，不记 GPU；GPU worker 不领 device=cpu 的
 reset
 table << EOF
-t/g nnunet
-t/c1 nnunet cpu
-t/c2 nnunet cpu
+t/g base
+t/c1 base cpu
+t/c2 base cpu
 EOF
 SLURM_JOB_ID=900020 WORKER_DEVICE=cpu TASKQ_SLOTS= timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4b.out" 2>&1
 check "CPU worker：两个纯 CPU 任务先后训完，不碰要卡的" '[[ $(grep -c "^end .* t/c" $T/train.log) == 2 ]] && ! grep -q "t/g" $T/train.log'
-check "CPU worker：一次 1 个、不记 GPU" '[[ $(head -2 $T/train.log | grep -c ^start) == 1 && ! -e $BRAIN_TUMOR/logs/workers/worker_900020_gpu.csv ]] && grep -q "worker（cpu）.*最多同时 1 个" $T/w4b.out'
+check "CPU worker：一次 1 个、不记 GPU" '[[ $(head -2 $T/train.log | grep -c ^start) == 1 && ! -e $TASKQ_DATA/logs/workers/worker_900020_gpu.csv ]] && grep -q "worker（cpu）.*最多同时 1 个" $T/w4b.out'
 check "CPU worker：没有能领的就结束，不空等" 'grep -q "没有在训的，也没有能领的任务，作业结束" $T/w4b.out && ! grep -q "空着等" $T/w4b.out'
 SLURM_JOB_ID=900021 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4c.out" 2>&1
 check "GPU worker：只训要卡的" 'grep -q "^end .* t/g" $T/train.log && [[ $(grep -c "^start .* t/c" $T/train.log) == 2 ]]'
 
-# 5. 队列出错（任务表读不了）连续一段时间、手上没有在训的：结束作业（不再训作业名那一折）
+# 5. 队列出错（任务表读不了）连续一段时间、手上没有在训的：结束作业（不再按作业名的参数训）
 rm -f "$TASKQ_DIR/tasks.jsonl"
-SLURM_JOB_ID=900009 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/dicc_worker.sh" nnUNetTrainer_save10 0 101 > "$T/w5.out" 2>&1; rc=$?
+SLURM_JOB_ID=900009 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/dicc_worker.sh" V_save 0 101 > "$T/w5.out" 2>&1; rc=$?
 check "队列出错：报出来、过一会儿结束作业" '[[ $rc == 0 ]] && grep -q "队列出错" $T/w5.out && grep -q "队列连续出错" $T/w5.out'
 
 # 6. 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当名字，按本机 slots（box 没写 → 1），只看 CUDA_VISIBLE_DEVICES 那张卡；
@@ -299,8 +299,8 @@ echo a > "$T/head"
 export TASKQ_HEAD_CMD="cat $T/head"
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
+t/a base
+t/b base
 EOF
 (unset TASKQ_SLOTS; WORKER_ID=lab-test CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 PATH=$T/bin6:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/w6.out" 2>&1 &
 wpid=$!
@@ -325,8 +325,8 @@ check "不在 Slurm 里：空闲超过 IDLE_EXIT 就退出（退出码 0）" '[[
 
 reset
 table << EOF
-t/c nnunet
-t/d nnunet
+t/c base
+t/d base
 EOF
 echo a > "$T/head"
 (WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=5 exec bash "$HERE/dicc_worker.sh") > "$T/w6b.out" 2>&1 &
@@ -338,9 +338,9 @@ check "不在 Slurm 里：在训时代码变了，训完不再领下一个、退
 
 reset
 table << EOF
-t/a nnunet
-t/b nnunet
-t/c nnunet
+t/a base
+t/b base
+t/c base
 EOF
 echo a > "$T/head"
 cp "$T/fake_train.sh" "$T/fake_train.sh.orig"; cp "$T/fail2.sh" "$T/fake_train.sh"
@@ -356,7 +356,7 @@ unset TASKQ_HEAD_CMD
 # 不在 Slurm 里的 CPU worker（pueue 的 cpu_worker）：最多用 TASKQ_CPUS 个核
 reset
 table << EOF
-t/c1 nnunet cpu
+t/c1 base cpu
 EOF
 (WORKER_ID=lab-cpu WORKER_DEVICE=cpu TASKQ_CPUS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=3 exec bash "$HERE/dicc_worker.sh") > "$T/w6f.out" 2>&1 &
 wpid=$!
@@ -366,11 +366,10 @@ check "不在 Slurm 里的 CPU worker：最多用 TASKQ_CPUS 个核" 'grep -q "w
 # 代码包（<根>/code/<包>、current 指向在用的）：current 换了，空闲时直接 exec 新包的 worker_start.sh，同一进程接着跑（11/1）
 reset
 table << EOF
-t/k nnunet
+t/k base
 EOF
 mkdir -p "$T/code/a" "$T/code/b/scripts/queue"
-cp -r "$HERE/../../scripts" "$HERE/../../envs" "$T/code/a/"
-mkdir -p "$T/code/a/research"; cp -r "$HERE/../../research/common" "$T/code/a/research/"
+cp -r "$HERE/../../scripts" "$T/code/a/"   # 配置、插件经 TASKQ_CONFIG、TASKQ_PLUGINS 找（testdata）
 printf '#!/bin/bash
 echo "新包的 start $WORKER_ID"
 ' > "$T/code/b/scripts/queue/worker_start.sh"
@@ -382,7 +381,7 @@ waitfor 20 'grep -q "没有能领的任务" $T/w6e.out'
 ln -sfn b "$T/code/current"
 waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "代码包换了：空闲时 exec 新包的 worker_start.sh 接着跑，不退出等重开" '[[ $rc == 0 ]] && grep -q "换成新代码 b 接着跑" $T/w6e.out && grep -q "新包的 start lab-test" $T/w6e.out'
-check "代码包：worker、任务日志记的代码版本是包名（不是"未知+改动"）" 'grep -q "，代码 a$" $T/w6e.out && grep -q "^end .* t/k" $T/train.log && head -1 $BRAIN_TUMOR/logs/tasks/t__k__*_part1.log | grep -q "，代码 a，"'
+check "代码包：worker、任务日志记的代码版本是包名（不是"未知+改动"）" 'grep -q "，代码 a$" $T/w6e.out && grep -q "^end .* t/k" $T/train.log && head -1 $TASKQ_DATA/logs/tasks/t__k__*_part1.log | grep -q "，代码 a，"'
 check "代码包：worker 在用的包更新了时间戳（清理只删 4 天没动过的）" '[[ -n $(find "$T/code/a" -maxdepth 0 -mtime -1) ]]'
 
 # gpu_stats / pad_now 读真的文件（假 nvidia-smi）：只取 dicc_worker.sh 里这两个函数

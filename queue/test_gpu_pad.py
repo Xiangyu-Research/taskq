@@ -6,8 +6,14 @@ import contextlib
 import io
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import gpu_pad as G
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
+os.environ["TASKQ_STATE"] = tempfile.mkdtemp()  # 总开关（DISABLED）的默认位置不指到本机真的状态文件夹
+sys.path.insert(0, HERE)
+import gpu_pad as G  # noqa: E402
 
 fails = 0
 
@@ -268,6 +274,7 @@ os.environ["SLURM_JOB_ID"] = "4242"
 os.environ.pop("RQ1_GPU_PAD_BASE", None)
 os.environ.pop("TASKQ_GPU_PAD_BASE", None)
 ok("默认 base 是 /tmp/gpu_pad_<作业号>", G.parse_args([]).base == "/tmp/gpu_pad_4242")
+ok("总开关默认在 TASKQ_STATE/gpu_pad/DISABLED", G.default_switch() == os.path.join(os.environ["TASKQ_STATE"], "gpu_pad", "DISABLED"))
 os.environ["RQ1_GPU_PAD_FLOOR_MIB"] = "41000"
 f_old = G.parse_args([]).floor_mib
 os.environ["TASKQ_GPU_PAD_FLOOR_MIB"] = "43000"

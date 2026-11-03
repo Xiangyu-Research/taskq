@@ -142,9 +142,9 @@ def check_toy_infer(spec, src, root):
             raise RelayError(f"{key} 的 {c} 里有认不出的文件：{sorted(other or [f for f in fs if f.endswith('.tmp.prob')])[:5]}")
         v = man["cohorts"][c]
         hit = next((i for i, cs in enumerate(free) if cs == outs), None)
-        if hit is None or probs != outs or metas != outs or v.get("n_segmentations") != len(outs) or v.get("n_probabilities") != len(probs):
+        if hit is None or probs != outs or metas != outs or v.get("n_outputs") != len(outs) or v.get("n_probs") != len(probs):
             raise RelayError(f"{key} 的 {c} 对不上：输出 {len(outs)}、概率 {len(probs)}、meta {len(metas)}，"
-                             f"MANIFEST 记 {v.get('n_segmentations')} / {v.get('n_probabilities')}，"
+                             f"MANIFEST 记 {v.get('n_outputs')} / {v.get('n_probs')}，"
                              f"{'和 box 上的输入一致' if hit is not None else 'box 上没有样本完全一样的输入文件夹'}")
         free.pop(hit)
     if free:

@@ -5,7 +5,12 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 import shift  # noqa: E402
 
 TZ = shift.TZ

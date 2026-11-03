@@ -11,6 +11,10 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 T = tempfile.mkdtemp(prefix="test_tunnel_")
 HOME = os.path.join(T, "home")
 os.makedirs(HOME)
@@ -145,33 +149,33 @@ srv.shutdown()
 srv.server_close()
 
 # rsync 的替身
-big = {"fold/validation/c1.npz": 1_500_000, "fold/validation/c2.npz": 700_000, "fold/checkpoint_final.pth": 400_000, "fold/plans.json": 50}
+big = {"frag/check/c1.prob": 1_500_000, "frag/check/c2.prob": 700_000, "frag/final.ckpt": 400_000, "frag/plans.json": 50}
 rs = os.path.join(HOME, "st/res")
 make(rs, big)
-loc = os.path.join(T, "box/res/fold")
-r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "dicc:st/res/fold/", loc + "/")
+loc = os.path.join(T, "box/res/frag")
+r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "dicc:st/res/frag/", loc + "/")
 inner = [f for f in big if f.count("/") > 1]
-ok("替身拉回第一遍（不带最上层的文件）：子文件夹齐了、标志文件 checkpoint_final.pth 没到", r.returncode == 0
-   and same(os.path.join(rs, "fold"), loc, [f[5:] for f in inner]) and not os.path.exists(os.path.join(loc, "checkpoint_final.pth")))
+ok("替身拉回第一遍（不带最上层的文件）：子文件夹齐了、标志文件 final.ckpt 没到", r.returncode == 0
+   and same(os.path.join(rs, "frag"), loc, [f[5:] for f in inner]) and not os.path.exists(os.path.join(loc, "final.ckpt")))
 ok("替身拉回：数据经隧道（rsync 经 ssh 传 0 字节）", "经隧道从" in r.stdout and "Literal data: 0 bytes" in r.stdout)
 ok("替身拉回：暂存目录删了", not [d for d in os.listdir(os.path.dirname(loc)) if d.startswith(".tunnel_stage_")])
-r = run("rsync", "-rlt", "--partial", "dicc:st/res/fold/", loc + "/")
-ok("替身拉回第二遍：全齐", r.returncode == 0 and same(os.path.join(rs, "fold"), loc, [f[5:] for f in big]))
+r = run("rsync", "-rlt", "--partial", "dicc:st/res/frag/", loc + "/")
+ok("替身拉回第二遍：全齐", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
 
 shutil.rmtree(loc)
-r = run("rsync", "-rlt", "--partial", "dicc:st/res/fold/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="validation/c1.npz"))
-ok("替身拉回：隧道传坏的文件由 rsync 经 ssh 补上", r.returncode == 0 and same(os.path.join(rs, "fold"), loc, [f[5:] for f in big]))
+r = run("rsync", "-rlt", "--partial", "dicc:st/res/frag/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="check/c1.prob"))
+ok("替身拉回：隧道传坏的文件由 rsync 经 ssh 补上", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
 
-bsrc = os.path.join(T, "box/arch/fold")
+bsrc = os.path.join(T, "box/arch/frag")
 make(bsrc, {k[5:]: v for k, v in big.items()})
-r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "dicc:~/st/arch/fold/")
-rdst = os.path.join(HOME, "st/arch/fold")
+r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "dicc:~/st/arch/frag/")
+rdst = os.path.join(HOME, "st/arch/frag")
 ok("替身推送（~/ 开头的目标）：一致、数据经隧道", r.returncode == 0 and same(bsrc, rdst, [f[5:] for f in big])
    and "Literal data: 0 bytes" in r.stdout and not os.path.exists(os.path.join(HOME, "~")))
 ok("替身推送：那边的暂存目录删了", not [d for d in os.listdir(os.path.dirname(rdst)) if d.startswith(".tunnel_stage_")])
 
-r = run("rsync", "-rltR", bsrc + "/./checkpoint_final.pth", "dicc:st/arch3/")
-ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/checkpoint_final.pth")))
+r = run("rsync", "-rltR", bsrc + "/./final.ckpt", "dicc:st/arch3/")
+ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/final.ckpt")))
 r = run("rsync", "-rlt", "lab:x/", os.path.join(T, "lab/"))
 ok("不走隧道的机器（lab）：直接 rsync", "经隧道" not in r.stdout)
 

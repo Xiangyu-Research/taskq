@@ -59,14 +59,14 @@ ok("任务删掉了：记录删掉", C.sync_records({"box": dict(tasks=[])}, [r1
 ok("任务号被别的任务重用（标签不同）：记录删掉", C.sync_records({"box": dict(tasks=[task(8, "other")])}, [r1]) == [])
 ok("lab 读不到（error）：lab 的记录不删",
    C.sync_records({"lab": {"error": "ssh"}}, [dict(r1, machine="lab")]) == [dict(r1, machine="lab")])
-r2 = dict(r1, machine="lab", label="infer:t1c_f3", out="predictions/x/fold_3")
+r2 = dict(r1, machine="lab", label="infer:t16_f3", out="preds/x/frag_3")
 ok("训练机上做的步骤（有 out）：那边的任务删了也留着，等清理完", C.sync_records({"lab": dict(tasks=[])}, [r2]) == [r2])
 
 # 写文件
 C.write_json(C.tasks_path(), [])
-a = C.new_record("lab", "infer:t1c_f3", "infer", "k3", out="predictions/x/fold_3", group="gpu1")
+a = C.new_record("lab", "infer:t16_f3", "infer", "k3", out="preds/x/frag_3", group="gpu1")
 C.set_record_id(a, 30)
-b = C.new_record("lab", "infer:t1c_f3", "infer", "k3", out="predictions/x/fold_3", group="gpu1")
+b = C.new_record("lab", "infer:t16_f3", "infer", "k3", out="preds/x/frag_3", group="gpu1")
 recs = C.load_records()
 ok("新记录先没有任务号，set_record_id 补上；同一台机器同标签的旧的训练机步骤作废",
    len(recs) == 1 and recs[0]["id"] is None and recs[0]["added"] == b["added"])

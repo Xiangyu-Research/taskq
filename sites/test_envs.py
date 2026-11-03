@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测 scripts/sites/envs.py 和 envs/machines.py 里按描述建的环境（2026-10-31）：描述能读、激活语句、.ok 对不上时不送任务、
+"""测 scripts/sites/envs.py 和机器表里按描述建的环境（2026-10-31）：描述能读、激活语句、.ok 对不上时不送任务、
 建环境的命令只在 CPU 上跑；最后在临时目录里真建一个只有 numpy 的 venv（不联网时跳过装包那一步之外的部分不跑）。
 
     python3 scripts/sites/test_envs.py [--real]
@@ -17,6 +17,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "queue", "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 import envs as E  # noqa: E402
 M = E.M
 import refill  # noqa: E402
@@ -32,7 +36,7 @@ def ok(what, cond):
 
 # ---------- 描述 ----------
 names = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(M.SPECS, "*.yml")))
-ok("有 nnunet、umamba、swinunetr、rstats 的描述", {"nnunet", "umamba", "swinunetr", "rstats"} <= set(names))
+ok("有 base、alt、alt2、stats 的描述", {"base", "alt", "alt2", "stats"} <= set(names))
 for n in names:
     try:
         sp = E.load(n)
@@ -43,30 +47,30 @@ for n in names:
         good = False
     ok(f"{n}.yml 能读、有检查", good)
     ok(f"{n}.check.py 能编译", bool(compile(open(E.check_file(n), encoding="utf-8").read(), n, "exec")))
-ok("umamba 建在 nnunet 上", E.load("umamba")["base"] == "nnunet")
-ok("nnunet 有 5090 的变体", "cu128" in E.load("nnunet")["torch"])
+ok("alt 建在 base 上", E.load("alt")["base"] == "base")
+ok("base 有 cu128 的变体", "cu128" in E.load("base")["torch"])
 ok("哈希 = 描述内容的 sha256",
-   M.spec_hash("nnunet") == hashlib.sha256(open(os.path.join(M.SPECS, "nnunet.yml"), "rb").read()).hexdigest())
+   M.spec_hash("base") == hashlib.sha256(open(os.path.join(M.SPECS, "base.yml"), "rb").read()).hexdigest())
 ok("没有的描述 → 哈希 None", M.spec_hash("没有这个") is None)
 
 # ---------- 假机器 ----------
 SAVE_M, SAVE_R = copy.deepcopy(M.MACHINES), copy.deepcopy(M.RELAY)
 M.RELAY["tsite"] = M.SITES["tsite"] = dict(label="测试", hostname=r"(?!)", ssh="tsite", scheduler="pueue", root="/r/x1",
-                       conda=("/opt/c", "base"), envs={"nnunet": ("spec", "cu128"), "umamba": "spec", "old": ("conda", "o")},
+                       conda=("/opt/c", "base"), envs={"base": ("spec", "cu128"), "alt": "spec", "old": ("conda", "o")},
                        roles=("train",))
 M.RELAY["tslurm"] = M.SITES["tslurm"] = dict(label="测试 Slurm", hostname=r"(?!)", ssh="tslurm", scheduler="slurm", root="/s/y",
-                        conda=("/app/c", "pt"), envs={"nnunet": "spec"}, roles=("train",),
+                        conda=("/app/c", "pt"), envs={"base": "spec"}, roles=("train",),
                         transfer_job="-p cpu-x --qos=normal -c 4 --mem=4G")
 SAVE_S = copy.deepcopy(M.SITES)
 M.SITES.update(tsite=M.RELAY["tsite"], tslurm=M.RELAY["tslurm"])  # machine() 读 SITES（10/31 起 RELAY 是它的一部分）
 
-a = M.activate("tsite", "umamba")
-ok("spec 环境的激活语句 = 根目录下的 .activate", "source /r/x1/envs/umamba/.activate" in a)
+a = M.activate("tsite", "alt")
+ok("spec 环境的激活语句 = 根目录下的 .activate", "source /r/x1/envs/alt/.activate" in a)
 ok("conda 条目照旧", "conda activate o" in M.activate("tsite", "old"))
 ok("没有 .ok 时 spec 环境不就绪，conda 的就绪", M.ready_envs("tsite") == {"old"})
-h = M.spec_hash("nnunet")
-ok(".ok 对得上才就绪", M.ready_envs("tsite", {"nnunet": h}) == {"old", "nnunet"})
-ok(".ok 是旧描述的哈希 → 不就绪", M.ready_envs("tsite", {"nnunet": "0" * 64}) == {"old"})
+h = M.spec_hash("base")
+ok(".ok 对得上才就绪", M.ready_envs("tsite", {"base": h}) == {"old", "base"})
+ok(".ok 是旧描述的哈希 → 不就绪", M.ready_envs("tsite", {"base": "0" * 64}) == {"old"})
 ok("现有机器条目的环境都还就绪（没改成 spec）",
    all(M.ready_envs(n) == set(M.machine(n).get("envs") or {}) for n in list(SAVE_M) + list(SAVE_R)))
 
@@ -75,30 +79,33 @@ def task(key, env):
     return dict(key=key, state="free", nice=0, order=0, spec=dict(env=env, device="gpu"))
 
 
-tq = dict(tasks=[task("a", "nnunet"), task("b", "old"), task("c", "umamba")])
+tq = dict(tasks=[task("a", "base"), task("b", "old"), task("c", "alt")])
 refill.info = lambda tq_, k: dict(spec=next(t["spec"] for t in tq_["tasks"] if t["key"] == k), recipe=None, params={})
 refill.progress = lambda s, k, h=None: None
 got = lambda oks: sorted(t["key"] for t in refill.candidates({}, "tsite", tq, set(), oks))
 ok("没有 .ok：只送 conda 环境的任务", got(None) == ["b"])
-ok("nnunet 的 .ok 对上：也送 nnunet 的", got({"nnunet": h}) == ["a", "b"])
-ok("umamba 的 .ok 是旧的：不送", got({"nnunet": h, "umamba": "x"}) == ["a", "b"])
+ok("base 的 .ok 对上：也送 base 的", got({"base": h}) == ["a", "b"])
+ok("alt 的 .ok 是旧的：不送", got({"base": h, "alt": "x"}) == ["a", "b"])
 
 # feed.py 的同一道门槛
 import feed as F  # noqa: E402
-t = dict(key="a", state="free", spec=dict(env="nnunet"))
+t = dict(key="a", state="free", spec=dict(env="base"))
 F.spec = lambda t_: t_["spec"]
 ok("feed：没有 .ok 不送", not F.runnable("tsite", t))
-ok("feed：.ok 对上送", F.runnable("tsite", t, {"nnunet": h}))
-ok("feed：从收集的状态里读 envs_ok", F.envs_ok({"src": {"tsite": {"envs_ok": {"nnunet": h}}}}, "tsite") == {"nnunet": h})
+ok("feed：.ok 对上送", F.runnable("tsite", t, {"base": h}))
+ok("feed：从收集的状态里读 envs_ok", F.envs_ok({"src": {"tsite": {"envs_ok": {"base": h}}}}, "tsite") == {"base": h})
 
 # ---------- 建环境的脚本和命令 ----------
-s_ = E.build_script("tsite", "umamba")
-ok("venv：先激活基础环境（它的 .activate）", "source /r/x1/envs/nnunet/.activate" in s_)
+s_ = E.build_script("tsite", "alt")
+ok("venv：先激活基础环境（它的 .activate）", "source /r/x1/envs/base/.activate" in s_)
 ok("venv：--system-site-packages", "--system-site-packages" in s_)
+M.RELAY["tsite"]["envs"]["alt3"] = "spec"
+s_ = E.build_script("tsite", "alt3")
+del M.RELAY["tsite"]["envs"]["alt3"]
 ok("占位换成按环境算的变量", "${SPEC_TORCH_MM}" in s_ and "{torch_mm}" not in s_)
 ok("看不到卡", "export CUDA_VISIBLE_DEVICES=" in s_)
 ok("检查过才写 .ok、换软链接", s_.index("CHECK_EOF") < s_.index('mv -T') < s_.index('.ok"'))
-s_ = E.build_script("tsite", "nnunet")
+s_ = E.build_script("tsite", "base")
 ok("conda：按变体装 torch（cu128）", "whl/cu128" in s_ and "torch==2.7.1" in s_)
 ok("conda：建在根目录下的 <名>-<哈希>", 'P="$ROOT/$N-${H:0:12}"' in s_ and "ROOT=/r/x1/envs" in s_)
 ok("检查拿到代码目录", "python3 - /r/x1/code/current" in s_)
@@ -117,11 +124,11 @@ try:
     ok("不是按描述建的环境 → 报错", False)
 except E.EnvError:
     ok("不是按描述建的环境 → 报错", True)
-M.RELAY["tsite"]["envs"]["umamba"] = "spec"
-ok("dry-run 不跑命令", E.build("tsite", "umamba", dry=True,
+M.RELAY["tsite"]["envs"]["alt"] = "spec"
+ok("dry-run 不跑命令", E.build("tsite", "alt", dry=True,
                               run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("跑了")))[0] == 0)
 ok("生成的脚本 bash -n 过", all(subprocess.run(["bash", "-n"], input=E.build_script("tsite", n), text=True).returncode == 0
-                                for n in ("nnunet", "umamba")))
+                                for n in ("base", "alt")))
 
 # ---------- 状态 ----------
 def fake(txt):
@@ -129,24 +136,24 @@ def fake(txt):
 
 
 now = 2_000_000_000
-st = E.states("tsite", run=fake(f"ENV|nnunet|{h}|||1\nENV|umamba||||0\nNOW|{now}\n"))
-ok("状态：ok、没建、conda 的不是按描述建的", st == {"old": "不是按描述建的", "nnunet": "ok", "umamba": "没建"})
-uh = M.spec_hash("umamba")
-st = E.states("tsite", run=fake(f"ENV|nnunet|{'0'*64}|||1\nENV|umamba||{uh}||0\nNOW|{now}\n"))
-ok("状态：描述变了、检查失败", st["nnunet"] == "描述变了" and st["umamba"] == "检查失败")
-st = E.states("tsite", run=fake(f"ENV|nnunet|||{h} {now - 60}|0\nENV|umamba|||{uh} {now - 7 * 3600}|0\nNOW|{now}\n"))
-ok("状态：在建、在建很久", st["nnunet"] == "在建" and st["umamba"] == "在建（可能已停）")
+st = E.states("tsite", run=fake(f"ENV|base|{h}|||1\nENV|alt||||0\nNOW|{now}\n"))
+ok("状态：ok、没建、conda 的不是按描述建的", st == {"old": "不是按描述建的", "base": "ok", "alt": "没建"})
+uh = M.spec_hash("alt")
+st = E.states("tsite", run=fake(f"ENV|base|{'0'*64}|||1\nENV|alt||{uh}||0\nNOW|{now}\n"))
+ok("状态：描述变了、检查失败", st["base"] == "描述变了" and st["alt"] == "检查失败")
+st = E.states("tsite", run=fake(f"ENV|base|||{h} {now - 60}|0\nENV|alt|||{uh} {now - 7 * 3600}|0\nNOW|{now}\n"))
+ok("状态：在建、在建很久", st["base"] == "在建" and st["alt"] == "在建（可能已停）")
 ok("连不上 → None", E.states("tsite", run=lambda *a, **k: (255, "", "")) is None)
-ok("oks_of 只放 ok 的", E.oks_of({"nnunet": "ok", "umamba": "没建"}) == {"nnunet": h})
+ok("oks_of 只放 ok 的", E.oks_of({"base": "ok", "alt": "没建"}) == {"base": h})
 
 # ---------- 代码包里的机器条目 ----------
 import relay_bundle as RB  # noqa: E402
 e = RB.machine_entry("tsite", M.RELAY["tsite"], "/r/x1")
 ok("代码包的条目带 env_root，那边的激活语句指到根目录下", e["env_root"] == "/r/x1/envs")
-src = RB.gen_machines(open(os.path.join(REPO, "envs", "machines.py"), encoding="utf-8").read(), "tsite", e)
-ns = {"__name__": "x", "__file__": os.path.join(REPO, "envs", "machines.py")}
+src = RB.gen_machines(open(os.path.join(fixture.CONFIG, "machines.py"), encoding="utf-8").read(), "tsite", e)
+ns = {"__name__": "x", "__file__": os.path.join(fixture.CONFIG, "machines.py")}
 exec(compile(src, "machines.py", "exec"), ns)
-ok("生成的 machines.py 能用，spec 环境的激活语句对", "source /r/x1/envs/umamba/.activate" in ns["activate"]("tsite", "umamba"))
+ok("生成的 machines.py 能用，spec 环境的激活语句对", "source /r/x1/envs/alt/.activate" in ns["activate"]("tsite", "alt"))
 M.MACHINES.clear(); M.MACHINES.update(SAVE_M)
 M.RELAY.clear(); M.RELAY.update(SAVE_R)
 M.SITES.clear(); M.SITES.update(SAVE_S)

@@ -199,7 +199,8 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）、插件文件夹（`TASKQ_PLUGINS`）、状态文件夹（`TASKQ_STATE`），把插件合进核心的表；`OUTPUTS` 的读法（`get <键>` 给 bash）、旧名（`LEGACY`） |
 | `legacy_names.sh` | bash 脚本的旧名兼容（见"开关和配置"的"旧名"） |
 | `scripts/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`refill.py`、`relay.py` 共用） |
-| `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口 |
+| `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口。核心的测试不读 `envs/`、`research/`，用 `testdata/` 的固定配置（11/2）；关于真的实验表、nnU-Net 插件、机器表和环境描述的检查在 `research/common/taskq_plugins/tests/` |
+| `testdata/` | 测试用的固定配置：`config/`（机器表、`policy.py`、环境描述，机器名同真的）、`plugins/`（`toy` 做法、中继插件、进度读法）、`exps/demo/experiments.py`（小实验表，步骤的写法同真的）、`bin/`（假的训练和步骤脚本）、假的 conda 和 venv；`fixture.py` / `fixture.sh` 设 `TASKQ_CONFIG`、`TASKQ_PLUGINS` |
 
 ## 约定
 

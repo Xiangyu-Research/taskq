@@ -11,7 +11,12 @@ import re
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
+sys.path.insert(0, HERE)
 os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
 os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
 import refill as R  # noqa: E402
@@ -19,25 +24,25 @@ import refill as R  # noqa: E402
 fails = 0
 D = tempfile.mkdtemp()
 R.LOG, R.STATE = f"{D}/refill.log", f"{D}/refill.json"
-# 测试用固定的配置，不跟着 envs/policy.py 变
+# 测试用固定的配置（testdata/config）
 R.P.AUTO = dict(advance=False, lab=False, dicc=False)
 R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")  # run_all 里补作业那一步
 R.C.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("测试里不应该在真机器上跑命令"))
-GB = {"Dataset103_GLIrq1_t1c": 4.0, "Dataset121_GLIMETrq1": 62.0, "stuff": 1.0}
+GB = {"D103_alpha_one": 4.0, "D121_alphagamma": 62.0, "stuff": 1.0}
 _hub = R.M.MACHINES[R.M.hub()]
 _d0 = _hub["data"]
 _hub["data"] = D
 os.makedirs(f"{D}/raw/A/x")
-for n_, b_ in (("a-seg.nii.gz", 1000), ("b-seg.nii.gz", 2000), ("c.nii.gz", 4000)):
+for n_, b_ in (("a-lbl.dat", 1000), ("b-lbl.dat", 2000), ("c.dat", 4000)):
     open(f"{D}/raw/A/x/{n_}", "wb").write(b"0" * b_)
-_gb = (R.data_gb(["raw/A/*/*-seg.nii.gz"]), R.data_gb(["raw/A/x/c.nii.gz"]), R.data_gb(["raw/B/*.nii.gz"]))
+_gb = (R.data_gb(["raw/A/*/*-lbl.dat"]), R.data_gb(["raw/A/x/c.dat"]), R.data_gb(["raw/B/*.dat"]))
 _hub["data"] = _d0
 assert _gb == (3e-6, 4e-6, None), _gb
 print("ok data_gb：带通配符的输入展开后算大小，对不上 → None（11/2：评测的输入带通配符，之前一直当成不在）")
 R.data_gb = lambda paths: sum(GB.get(R.tag(p), 10.0) for p in paths)
-NN, UM = "nnUNetTrainer_save10", "nnUNetTrainer_UMambaEnc"
-DS = {101: "Dataset101_GLIrq1", 103: "Dataset103_GLIrq1_t1c", 111: "Dataset111_MENrq1"}
-PP = "nnUNet/preprocessed/"
+NN, UM = "V_save", "V_m"
+DS = {101: "D101_alpha", 103: "D103_alpha_one", 111: "D111_beta"}
+PP = "prepared/"
 
 
 def ok(what, cond):
@@ -58,22 +63,22 @@ def task(i, group, status, cmd, label=""):
 
 
 def train(i, ds, f, status="Running", tr=""):
-    extra = f" trainer={tr}" + (" env=umamba" if tr == UM else "") if tr else ""
-    return task(i, "gpu1", status, f"bash scripts/queue/run_task.sh nnunet dataset={DS[ds]} fold={f}{extra}", f"x{i}")
+    extra = f" variant={tr}" + (" env=alt2" if tr == UM else "") if tr else ""
+    return task(i, "gpu1", status, f"bash scripts/queue/run_task.sh toy ds={DS[ds]} frag={f}{extra}", f"x{i}")
 
 
 def tq(key, nice, order, state="free", worker=None, skipped_by=()):
     return dict(key=key, nice=nice, order=order, state=state, worker=worker, kind="-", host=worker, skipped_by=list(skipped_by))
 
 
-K_T14 = f"Dataset121_GLIMETrq1/{NN}/0"   # ① 但数据集 62 GB 放不下
-K_T1C = [f"Dataset103_GLIrq1_t1c/{NN}/{f}" for f in range(3)]
-K_UM = f"Dataset101_GLIrq1/{UM}/1"
+K_T14 = f"D121_alphagamma/{NN}/0"   # ① 但数据集 62 GB 放不下
+K_T1C = [f"D103_alpha_one/{NN}/{f}" for f in range(3)]
+K_UM = f"D101_alpha/{UM}/1"
 QUEUE = [tq(K_T14, 0, 1), tq(K_UM, 50, 2), tq(K_T1C[0], 50, 3), tq(K_T1C[1], 50, 4), tq(K_T1C[2], 100, 5)]
-SQ = [["rq1_t1c_f0", "485145_1", "PENDING", "0:00", "Priority", "50", "long", "/x/run.sbatch"]]  # DICC 上只有 nnunet 的作业
+SQ = [["demo_one_f0", "485145_1", "PENDING", "0:00", "Priority", "50", "long", "/x/run.sbatch"]]  # DICC 上只有一个排着的作业
 
 
-def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}Dataset101_GLIrq1 {PP}Dataset111_MENrq1", disk=56e9, box_tasks=(), lab_tasks_st=None, enabled=True, skips=None,
+def snap(lab_tasks=(), queue=QUEUE, prep=f"{PP}D101_alpha {PP}D111_beta", disk=56e9, box_tasks=(), lab_tasks_st=None, enabled=True, skips=None,
          groups=None, buf=()):
     """buf：lab 缓冲里的任务（None = 读不到）。"""
     tqs = {h: dict(enabled=enabled, tasks=copy.deepcopy(list(queue)), recent_skips=skips or {}) for h in ("box", "dicc")}  # 总队列、DICC 的缓冲
@@ -100,7 +105,9 @@ def fake_run(cmd, host=None, timeout=0):
 
 
 R.taskq.central = lambda a: (_ for _ in ()).throw(AssertionError("refill.py 不应该改总队列"))
-P103 = PP + "Dataset103_GLIrq1_t1c"
+P103 = PP + "D103_alpha_one"
+LABD = R.M.MACHINES["lab"]["data"]
+DREPO = "cd " + re.escape(R.M.MACHINES["dicc"]["repo"])
 
 
 def transferred(*paths):
@@ -112,33 +119,33 @@ json.dump({}, open(R.STATE, "w"))
 R.C.drop_records(lambda r: True)
 tids = R.transfer("lab", [P103], run=fake_run)
 ok("传数据：box 的 wait 组加 tunnel_push.sh 任务，记进 transferred",
-   len(cmds) == 1 and cmds[0][0] == "box" and "sync_lab_Dataset103_GLIrq1_t1c" in cmds[0][1] and "tunnel_push.sh lab" in cmds[0][1]
+   len(cmds) == 1 and cmds[0][0] == "box" and "sync_lab_D103_alpha_one" in cmds[0][1] and "tunnel_push.sh lab" in cmds[0][1]
    and " wait -p " in cmds[0][1] and json.load(open(R.STATE))["transferred"]["lab"] == [P103] and tids == [101])
 sr = [r for r in R.C.load_records() if r["step"] == "sync"]
 ok("传数据的任务记进任务记录（step=sync、to、key=路径、任务号）",
    len(sr) == 1 and sr[0]["to"] == "lab" and sr[0]["key"] == P103 and sr[0]["machine"] == "box"
-   and sr[0]["label"] == "sync_lab_Dataset103_GLIrq1_t1c" and sr[0]["id"] == 101)
+   and sr[0]["label"] == "sync_lab_D103_alpha_one" and sr[0]["id"] == 101)
 ok("传数据的任务传完后马上跑一次健康检查（带 PHD_TASK_DONE）",
-   "PHD_TASK_DONE=sync_lab_Dataset103_GLIrq1_t1c bash ~/auto/PhD/scripts/monitor/auto_refresh.sh kick" in cmds[0][1])
+   f"PHD_TASK_DONE=sync_lab_D103_alpha_one bash {R.KICK} kick" in cmds[0][1])
 R.transfer("lab", [P103], run=fake_run)
 ok("同一个数据集再传一次：transferred 里不重复", json.load(open(R.STATE))["transferred"]["lab"] == [P103])
-SY = task(50, "wait", "Running", "bash scripts/sync/tunnel_push.sh lab …", "sync_lab_Dataset103_GLIrq1_t1c")
+SY = task(50, "wait", "Running", "bash scripts/sync/tunnel_push.sh lab …", "sync_lab_D103_alpha_one")
 sync, bad = R.syncing(snap(box_tasks=[SY]), "lab")
-ok("syncing：还在传的按数据集认出来", list(sync) == ["Dataset103_GLIrq1_t1c"] and bad == {})
+ok("syncing：还在传的按数据集认出来", list(sync) == ["D103_alpha_one"] and bad == {})
 sync, bad = R.syncing(snap(box_tasks=[dict(SY, status="Failed (1)")]), "lab")
-ok("syncing：出错停了的单独列出", sync == {} and list(bad) == ["Dataset103_GLIrq1_t1c"])
+ok("syncing：出错停了的单独列出", sync == {} and list(bad) == ["D103_alpha_one"])
 R.C.drop_records(lambda r: True)
 
 # ---------------- 清理自动传过去的数据 ----------------
-NO103 = [t for t in QUEUE if not t["key"].startswith("Dataset103")]
+NO103 = [t for t in QUEUE if not t["key"].startswith("D103")]
 cmds.clear()
 transferred(P103)
 busy = snap([train(1, 103, 3, "Running")], queue=NO103)
 ok("lab 上还有训练在用：不删", R.cleanup(busy, "lab", run=fake_run) == [] and not cmds)
-arch = task(40, "wait", "Queued", "bash scripts/queue/archive_task.sh lab Dataset103_GLIrq1_t1c/x/0", "a")
+arch = task(40, "wait", "Queued", "bash scripts/queue/archive_task.sh lab D103_alpha_one/x/0", "a")
 ok("box 上还有这台机器的归档任务：不删", R.cleanup(snap(queue=NO103, box_tasks=[arch]), "lab", run=fake_run) == [] and not cmds)
 ok("box 上还在往 lab 传这个数据集：不删", R.cleanup(snap(queue=NO103, box_tasks=[SY]), "lab", run=fake_run) == [] and not cmds)
-ok("lab 上还有训完没归档的折：不删",
+ok("lab 上还有训完没归档的任务：不删",
    R.cleanup(snap(queue=NO103, lab_tasks_st={K_T1C[0]: dict(final=True, archived=False, runs=[])}), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲里任务的数据不删", R.cleanup(snap(queue=NO103, buf=[tq(K_T1C[1], 50, 4, "claimed", "lab-gpu1")]), "lab", run=fake_run) == [] and not cmds)
 ok("缓冲里训完、还没删掉的记录的数据也不删", R.cleanup(snap(queue=NO103, buf=[tq(K_T1C[1], 50, 4, "done")]), "lab", run=fake_run) == [] and not cmds)
@@ -155,13 +162,13 @@ ok("box 的 pueue 读不到：不删", R.cleanup(s, "lab", run=fake_run) == [] a
 asg = NO103 + [dict(tq(K_T1C[2], 100, 5, "claimed", "dicc"), assigned="dicc")]
 out = R.cleanup(snap(queue=asg), "lab", run=fake_run)
 ok("队列里没有 lab 的任务要用了（分给 DICC 的不算）：删掉自动传过去的数据集",
-   len(out) == 1 and cmds == [("lab", f"rm -rf ~/BRAIN_TUMOR/{P103}")] and "没有任务要用" in out[0]
+   len(out) == 1 and cmds == [("lab", f"rm -rf {LABD}/{P103}")] and "没有任务要用" in out[0]
    and json.load(open(R.STATE))["transferred"]["lab"] == [])
-transferred(f"{PP}Dataset101_GLIrq1")
+transferred(f"{PP}D101_alpha")
 cmds.clear()
-ok("Dataset101 不删", R.cleanup(snap(queue=[]), "lab", run=fake_run) == [] and not cmds)
-for bad in ["/", "/etc/x", "nnUNet/preprocessed/", "nnUNet/preprocessed", "nnUNet//x", "raw/BraTS2023-GLI", "nnUNet/results/Dataset103_x",
-            "nnUNet/preprocessed/../../x"]:
+ok("D101（实验表的 KEEP_DATA）不删", R.cleanup(snap(queue=[]), "lab", run=fake_run) == [] and not cmds)
+for bad in ["/", "/etc/x", "prepared/", "prepared", "prepared//x", "other/SET-A", "results/D103_x",
+            "prepared/../../x"]:
     cmds.clear()
     transferred(bad)
     out = R.cleanup(snap(queue=NO103), "lab", run=fake_run)
@@ -169,12 +176,12 @@ for bad in ["/", "/etc/x", "nnUNet/preprocessed/", "nnUNet/preprocessed", "nnUNe
 
 # 空间预算：还有任务要用的留着，盘剩的低于软线（硬线 = 提醒线 40 + 10 GB，× 2 = 100 GB）时从最晚用到的删起
 K_LATE = "misc/late"
-LATE = dict(tq(K_LATE, 200, 9), recipe="command", params={"key": K_LATE, "cmd": "python x.py", "env": "nnunet"},
-            spec=dict(key=K_LATE, env="nnunet", data=[PP + "Dataset131_GLIrq1_synth"]))
+LATE = dict(tq(K_LATE, 200, 9), recipe="command", params={"key": K_LATE, "cmd": "python x.py", "env": "base"},
+            spec=dict(key=K_LATE, env="base", data=[PP + "D131_alpha_synth"]))
 QA = [dict(tq(K_UM, 50, 2, "claimed", "lab"), assigned="lab"), tq(K_T1C[0], 50, 3), tq(K_T1C[1], 50, 4), tq(K_T1C[2], 100, 5), LATE]
 RUN = train(5, 101, 1, "Running", UM)
-P131 = PP + "Dataset131_GLIrq1_synth"
-P3 = f"{PP}Dataset101_GLIrq1 {P131} {P103}"
+P131 = PP + "D131_alpha_synth"
+P3 = f"{PP}D101_alpha {P131} {P103}"
 
 
 def snap_a(disk, prep=P3, **kw):
@@ -187,17 +194,17 @@ note = R.cleanup(snap_a(150e9), "lab", run=fake_run)
 ok("还有任务要用、盘也够：留着", note == [] and not cmds)
 transferred(P131, P103)
 note = R.cleanup(snap_a(60e9, buf=[tq(K_T1C[0], 50, 3)]), "lab", run=fake_run)
-ok("盘低于软线：从最晚用到的删起，缓冲里的任务要用的不删", cmds == [("lab", f"rm -rf ~/BRAIN_TUMOR/{P131}")]
+ok("盘低于软线：从最晚用到的删起，缓冲里的任务要用的不删", cmds == [("lab", f"rm -rf {LABD}/{P131}")]
    and json.load(open(R.STATE))["transferred"]["lab"] == [P103] and "低于 100 GB" in note[0])
 transferred(P131, P103)
 cmds.clear()
 note = R.cleanup(snap_a(60e9), "lab", run=fake_run)
 ok("盘低于软线、缓冲里没有：最晚用到的（misc/late）先删，还不够再删下一个",
-   cmds == [("lab", f"rm -rf ~/BRAIN_TUMOR/{P131}"), ("lab", f"rm -rf ~/BRAIN_TUMOR/{P103}")])
+   cmds == [("lab", f"rm -rf {LABD}/{P131}"), ("lab", f"rm -rf {LABD}/{P103}")])
 transferred(P131, P103)
 cmds.clear()
 note = R.cleanup(snap_a(95e9), "lab", run=fake_run)
-ok("删一个就回到软线以上：只删最晚用到的", cmds == [("lab", f"rm -rf ~/BRAIN_TUMOR/{P131}")])
+ok("删一个就回到软线以上：只删最晚用到的", cmds == [("lab", f"rm -rf {LABD}/{P131}")])
 transferred(P131)
 cmds.clear()
 note = R.cleanup(snap_a(60e9), "lab", run=fake_run, dry=True)
@@ -219,7 +226,7 @@ ev, st, filled = R.run_all(snap(queue=NO103), dry=True)
 ok("--dry-run：打印会删什么，不删", not cmds and any("会删" in x for x in ev) and st == {} and filled == set())
 R.P.AUTO["lab"] = True
 ev, st, filled = R.run_all(snap(queue=NO103))
-ok("开关开着：删、记日志；不领任务（卡住的、补上的都是空的）", cmds == [("lab", f"rm -rf ~/BRAIN_TUMOR/{P103}")] and "删掉了" in ev[0]
+ok("开关开着：删、记日志；不领任务（卡住的、补上的都是空的）", cmds == [("lab", f"rm -rf {LABD}/{P103}")] and "删掉了" in ev[0]
    and st == {} and filled == set() and "删掉了" in open(R.LOG).read())
 R.P.AUTO["lab"] = False
 R.sh = lambda cmd, host=None, timeout=0: (1, "测试里不连 DICC")
@@ -258,8 +265,8 @@ ok("slurm.parse：5 段才算，少一段当读不到", R.SL.parse("QOS|long|10|
 ok("refill 里和 scripts/sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
 
 # 纯 CPU 任务（device=cpu，10/24）：GPU worker 不为它们补，有这类任务时才交 CPU worker
-K_EV = "eval/Dataset101_GLIrq1/x/fold_0"
-ev_spec = dict(key=K_EV, env="nnunet", machines=["dicc"], device="cpu")
+K_EV = "eval/D101_alpha/x/frag_0"
+ev_spec = dict(key=K_EV, env="base", machines=["dicc"], device="cpu")
 cpu_q = [tq(K_T14, 0, 1, "done"), dict(tq(K_EV, -100, 2), spec=ev_spec), dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b"))]
 cq = snap(queue=cpu_q)["taskq"]["box"]
 p, why = R.topup_plan(cq, {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 2)})
@@ -289,8 +296,8 @@ ok("slurm_plan：没有纯 CPU 任务时说原因", p == [] and why == "CPU：�
 ok("candidates：默认只要要卡的", R.candidates(snap(), "dicc", cq, set()) == [])
 ok("candidates：kinds 里有 cpu 才要纯 CPU 任务",
    [t["key"] for t in R.candidates(snap(), "dicc", cq, set(), kinds=("gpu", "cpu"))] == [K_EV, K_EV + "b"])
-lq = [dict(tq(K_EV, -100, 2), spec=dict(ev_spec, env=["nnunet", "rstats"])),
-      dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b", env=["nnunet", "没有的环境"]))]
+lq = [dict(tq(K_EV, -100, 2), spec=dict(ev_spec, env=["base", "stats"])),
+      dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b", env=["base", "没有的环境"]))]
 ok("candidates：env 是列表时每个环境都要备好",
    [t["key"] for t in R.candidates(snap(), "dicc", snap(queue=lq)["taskq"]["box"], set(), kinds=("cpu",))] == [K_EV])
 mn0 = getattr(R.P, "MAX_NICE", None)
@@ -323,7 +330,7 @@ ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交
 R.P.AUTO["dicc"] = True
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关开着：交 worker.sbatch（long，1 个普通作业，不用数组），记日志、不推送",
-   len(sub) == 1 and re.fullmatch(r"cd ~/Projects/PhD/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=3-00:00:00 worker.sbatch", sub[0][1])
+   len(sub) == 1 and re.fullmatch(DREPO + r"/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=3-00:00:00 worker.sbatch", sub[0][1])
    and ev == [] and not st and "交了 1 个 worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 
@@ -358,7 +365,7 @@ ok("作业数读不出来：不补（不按 0 算）", ev == [] and not st and n
 sub.clear()
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5|0\nCPU|0\nALL|10|6\n"))
 ok("开关开着、有纯 CPU 任务：只交 cpu_worker.sbatch（normal、8 小时），记日志",
-   len(sub) == 1 and re.fullmatch(r"cd ~/Projects/PhD/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=normal --time=08:00:00 cpu_worker.sbatch", sub[0][1])
+   len(sub) == 1 and re.fullmatch(DREPO + r"/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=normal --time=08:00:00 cpu_worker.sbatch", sub[0][1])
    and not st and "交了 1 个 CPU worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5|0\nCPU|1\nALL|10|7\n"))
@@ -367,7 +374,7 @@ ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|8|0\nCPU|
 ok("所有作业已占满 10 个提交名额：不交 CPU worker、不报错", not sub and not st)
 R.P.AUTO["dicc"] = False
 probe = R.SL.probe("dicc")
-ok("查作业数用 envs/policy.py 的 QOS、envs/machines.py 的作业名",
+ok("查作业数用 policy.py 的 QOS、机器表的作业名",
    "show qos normal " in probe and "cpu_worker[.]sbatch" in probe and "for q in long;" in probe)
 
 

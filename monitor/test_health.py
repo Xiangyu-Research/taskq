@@ -11,16 +11,20 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
+import fixture  # noqa: E402
+fixture.use()
 os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
 os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
 import health as H  # noqa: E402
 
-H.policy.OFFLINE = {}  # 不受线上 envs/policy.py 的暂停检查影响
+H.policy.OFFLINE = {}  # 不受配置里的暂停检查影响
 
 NOW = datetime(2026, 10, 16, 12, 0)
-MET2 = "Dataset116_METrq1/nnUNetTrainer_save10/2"
-MEN0 = "Dataset111_MENrq1/nnUNetTrainer_save10_n470/0"
+MET2 = "D116_gamma/V_save/2"
+MEN0 = "D111_beta/V_save_n470/0"
 fails = 0
 time_orig = time.time
 
@@ -39,7 +43,7 @@ def pt(dt):  # pueue 的时间格式
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000000000+08:00")
 
 
-def fold(final=False, epochs=100, end=NOW):
+def prog(final=False, epochs=100, end=NOW):
     return dict(final=final, runs=[dict(start=ts(end - timedelta(hours=5)), end=ts(end), epochs_done=epochs, tl=[])], dice={}, debug={})
 
 
@@ -56,9 +60,9 @@ def task(i, group, status, cmd, label="", start=NOW - timedelta(hours=3), end=No
 
 
 LAB_BUSY = {"groups": {}, "tasks": [dict(id=90, group="gpu1", status="Running", label="busy_a", deps=[], start=None, end=None,
-                                         command="bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_save10 fold=2"),
+                                         command="bash scripts/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=2"),
                                     dict(id=91, group="gpu1", status="Queued", label="busy_b", deps=[], start=None, end=None,
-                                         command="bash scripts/queue/run_task.sh nnunet dataset=Dataset101_GLIrq1 trainer=nnUNetTrainer_save10 fold=3")]}
+                                         command="bash scripts/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=3")]}
 
 
 def snap(**kw):
@@ -98,33 +102,33 @@ ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["
 s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "train_worker", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
 ok("DICC 作业失败", "dicc:486300_1" in ids(s))
 
-lab_train = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")
+lab_train = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
-s["src"]["lab"]["tasks"][MEN0] = fold(end=NOW - timedelta(minutes=5))
+s["src"]["lab"]["tasks"][MEN0] = prog(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 
-fetch = task(9, "wait", "Running", f"bash scripts/queue/fetch_task.sh dicc {MET2}", "fetch_t3met_f2")
+fetch = task(9, "wait", "Running", f"bash scripts/queue/fetch_task.sh dicc {MET2}", "fetch_t3g_f2")
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}})
 ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
 s["slurm"], s["ok"]["dicc"] = {}, False
 ok("DICC 连不上时不判断是否在排队", f"orphan:{MET2}" not in ids(s) and "down:dicc" in ids(s))
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}},
-         src={"box": {"tasks": {}}, "lab": {"tasks": {}}, "dicc": {"tasks": {MET2: fold(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
+         src={"box": {"tasks": {}}, "lab": {"tasks": {}}, "dicc": {"tasks": {MET2: prog(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
 ok("训完 90 分钟还没拉回 → 报", f"fetch:{MET2}" in ids(s))
 
 
 # ---------------- DICC 任务队列（10/17）+ lab 领的折（10/18）----------------
-def tqrow(key, state, worker=None, since=None, log_age=None, kind="nnunet", task_log_age=None, out_age=None):
+def tqrow(key, state, worker=None, since=None, log_age=None, kind="toy", task_log_age=None, out_age=None):
     return dict(key=key, state=state, worker=worker, host=worker, since=since, beat=None, note="", log_age=log_age, failures=0,
                 kind=kind, nice=0, order=1, task_log_age=task_log_age, out_age=out_age)
 
 
 old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
-lab_men = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0")
+lab_men = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_men]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(minutes=5))}}},
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}},
          taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")]),
                 "dicc": dict(enabled=True, buffer=True, paused=False, tasks=[])})
 H.time.time = lambda: NOW.timestamp()
@@ -133,7 +137,7 @@ ok("总队列分给 lab、lab 在训：不算同一折两处，也不算卡住",
 s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
 s["slurm"] = sq(["brave-otter", "486191_2", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
 ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
-INF = "infer/Dataset103_GLIrq1_t1c/x/fold_2"
+INF = "infer/D103_alpha_one/x/frag_2"
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=120)]
 ok("推理任务（没有训练日志）：任务日志刚更新过，不算卡住", f"stuck:dicc:{INF}" not in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=6000)]
@@ -176,33 +180,33 @@ def tk(cmd):
     return (r["step"], r["key"]) if r else (None, None)
 
 
-ok("run_task.sh 的训练命令 → key", tk("bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 "
-                                              "trainer=nnUNetTrainer_save10_n470 fold=0") == ("train", MEN0))
-ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c 'bash scripts/queue/run_task.sh nnunet "
-                                                           "dataset=Dataset116_METrq1 fold=2'") == ("train", MET2))
-ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/queue/run_task.sh command key=x/y cmd=true env=nnunet "
+ok("run_task.sh 的训练命令 → key", tk("bash scripts/queue/run_task.sh toy ds=D111_beta "
+                                              "variant=V_save_n470 frag=0") == ("train", MEN0))
+ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c 'bash scripts/queue/run_task.sh toy "
+                                                           "ds=D116_gamma frag=2'") == ("train", MET2))
+ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/queue/run_task.sh command key=x/y cmd=true env=base "
                                                      "out=runs/x done=ok") == ("train", "x/y"))
-ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/queue/run_task.sh nnunet datset=x fold=0") == (None, None))
+ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/queue/run_task.sh toy dss=x frag=0") == (None, None))
 ok("fetch_task.sh <机器> <key> → 拉回", H.C.from_command(f"bash scripts/queue/fetch_task.sh dicc {MET2}") == dict(step="fetch", src="dicc", key=MET2))
-lab_rt = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0",
+lab_rt = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0",
               "train:" + MEN0)
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
 ok("lab 上 run_task.sh 的训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
 cand = H.data_candidates([dict(key="x/y", spec=dict(data=["other/stuff"]))])
-ok("要查的数据：实验表里的 + 队列里临时任务的", "nnUNet/preprocessed/Dataset111_MENrq1" in cand and "other/stuff" in cand)
-ps = H.probe_script(H.M.MACHINES["lab"], ["nnUNet/preprocessed/Dataset111_MENrq1", "a b"])
+ok("要查的数据：实验表里的 + 队列里临时任务的", "prepared/D111_beta" in cand and "other/stuff" in cand)
+ps = H.probe_script(H.M.MACHINES["lab"], ["prepared/D111_beta", "a b"])
 ok("训练机的探查脚本按清单查数据（HAVE），带空格的路径加引号", "HAVE|" in ps and "'a b'" in ps and "PREP" not in ps)
 ok("非训练机不查数据", "HAVE" not in H.probe_script(H.M.MACHINES["box"], ["x"]))
 import subprocess  # noqa: E402
 d = tempfile.mkdtemp()
-for p_ in ("nnUNet/preprocessed/A", "nnUNet/preprocessed/B", "C"):
+for p_ in ("prepared/A", "prepared/B", "C"):
     os.makedirs(os.path.join(d, p_))
-open(os.path.join(d, "nnUNet/preprocessed/B/.incomplete"), "w").close()
+open(os.path.join(d, "prepared/B/.incomplete"), "w").close()
 fake = dict(H.M.MACHINES["lab"], data=d, disk=None, gpu_log=False, roles=("train",))
-out = subprocess.run(["bash", "-s"], input=H.probe_script(fake, ["nnUNet/preprocessed/A", "nnUNet/preprocessed/B", "C", "D"]),
+out = subprocess.run(["bash", "-s"], input=H.probe_script(fake, ["prepared/A", "prepared/B", "C", "D"]),
                      capture_output=True, text=True).stdout
-ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", H.C.parse_have(out) == {"nnUNet/preprocessed/A", "C"})
+ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", H.C.parse_have(out) == {"prepared/A", "C"})
 ok("HAVE 输出被截断（没有结束标记）→ 没读到", H.C.parse_have(out.split(H.C.HAVE_END)[0]) is None)
 
 # ---------------- gather：各卡和卡上的进程、Slurm 分区、只看本机 ----------------
@@ -236,7 +240,7 @@ def fake_run_on(m, script, timeout=120):
     calls.append(("run_on", m["label"]))
     if m["scheduler"] == "slurm":
         return 0, "brave-otter|123|RUNNING|1:00|None|0|gpu-a100|/q/a|b/worker.sbatch\nbad|line\n=====\n"
-    have = "HAVE|nnUNet/x\nHAVE|a b\n@@END\n" if H.C.HAVE_END in script and not cut else ""
+    have = "HAVE|prepared/x\nHAVE|a b\n@@END\n" if H.C.HAVE_END in script and not cut else ""
     return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n" + have
 
 
@@ -249,7 +253,7 @@ H.spec.remote_collect = lambda ssh, specs, root: {"tasks": {}, "seglogs": []}
 H.spec.collect = lambda specs, root: {"tasks": {}, "seglogs": []}
 g = H.gather()
 ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留着",
-   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123", "HAVE": "a b nnUNet/x"}
+   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123", "HAVE": "a b prepared/x"}
    and g["gpus"]["lab"] == [dict(gpu="0", uuid="GPU-a", util="37", mem="1200", apps=[dict(pid="42", mem="1100", args="python x|y")])])
 ok("gather：squeue 每行 8 项（最后是交的脚本，里面的 | 原样留着），格式不对的行不要",
    g["slurm"]["dicc"]["squeue"] == [["brave-otter", "123", "RUNNING", "1:00", "None", "0", "gpu-a100", "/q/a|b/worker.sbatch"]])
@@ -286,7 +290,7 @@ ok("GPU 记录停了 → 报；代码停在别的提交 → 报（持续 2 小�
 s["code"]["heads"]["lab"] = ""
 ok("连不上（提交号空着）→ 不报代码", "code:lab" not in H.check(s))
 
-s = snap(board_pending=["data/rq1_v50.json"])
+s = snap(board_pending=["data/demo_v50.json"])
 s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00 开机：放回队列 3 4"
 P = H.check(s)
 ok("box 重启过 → 报（带上放回的任务），lab 很久前重启的不报", [p["msg"] for k, p in P.items() if k.startswith("boot:")] == ["box 10-16 10:00 重启过：开机：放回队列 3 4"])
@@ -296,10 +300,10 @@ ok("看板有结果等确认 → 报", "board" in P)
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
                             groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
-fk = task(3, "gpu0", "Running", "bash scripts/queue/run_task.sh nnunet dataset=Dataset111_MENrq1 trainer=nnUNetTrainer_save10_n470 fold=0", "t15men_f0_fake")
+fk = task(3, "gpu0", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
          src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "fake": {"tasks": {}},
-              "lab": {"tasks": {MEN0: fold(end=NOW - timedelta(minutes=5))}}})
+              "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}})
 s["ok"]["fake"] = True
 s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|"}
 s["code"] = dict(main="a" * 40, heads={"fake": "b" * 40})
@@ -327,12 +331,12 @@ A = {"disk:lab": dict(msg="lab 盘", level="normal", kind="state", after=0)}
 U = {"dup:x": dict(msg="两处", level="urgent", kind="state", after=0)}
 day1 = datetime(2026, 10, 16, 12, 0)
 out = run(A, day1)
-ok("白天新问题：推送一条白话", len(out) == 1 and out[0][0] == "PhD：需要处理" and "盘满了" in out[0][1])
+ok("白天新问题：推送一条白话", len(out) == 1 and out[0][0] == f"{H.NAME}：需要处理" and "盘满了" in out[0][1])
 ok("同一个问题不重复推送", run(A, day1 + timedelta(minutes=30)) == [])
 ok("恢复后不推送", run({}, day1 + timedelta(hours=1)) == [])
 ok("夜里普通问题不推送", run(A, datetime(2026, 10, 16, 23, 0)) == [])
 out = run({**A, **U}, datetime(2026, 10, 17, 1, 0))
-ok("夜里紧急问题即时推送", len(out) == 1 and out[0][0] == "PhD：紧急" and "两处训练" in out[0][1])
+ok("夜里紧急问题即时推送", len(out) == 1 and out[0][0] == f"{H.NAME}：紧急" and "两处训练" in out[0][1])
 out = run({**A, **U}, datetime(2026, 10, 17, 8, 5))
 ok("早上第一次检查推送夜里攒下的", len(out) == 1 and "盘满了" in out[0][1] and "两处" not in out[0][1])
 ok("推过之后不再推送", run(A, datetime(2026, 10, 17, 8, 35)) == [])

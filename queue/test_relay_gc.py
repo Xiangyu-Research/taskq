@@ -11,6 +11,10 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
 sys.path.insert(0, HERE)
 import relay_gc as G  # noqa: E402
 import spec as S  # noqa: E402
@@ -45,25 +49,25 @@ def build(tmp):
     """→ (R, 外面的文件)。视图 ds_keep（指 aa1）、ds_old（指 bb1、cc1(硬链接)、带一个 2000 字节的缓存文件和一个指向 R 外面的链接）；
     blob dd1、ee1 没人指（dd1 更旧）；ff1 有硬链接在老目录。"""
     R = os.path.join(tmp, "R")
-    outside = os.path.join(tmp, "old", "x.npz")
+    outside = os.path.join(tmp, "old", "x.prob")
     os.makedirs(os.path.dirname(outside))
     with open(outside, "wb") as f:
         f.write(b"x" * 500)
-    pre = os.path.join(R, "data", "nnUNet", "preprocessed")
+    pre = os.path.join(R, "data", "prepared")
     for ds in ("ds_keep", "ds_old"):
-        os.makedirs(os.path.join(pre, ds, "plans_3d"))
+        os.makedirs(os.path.join(pre, ds, "PlanM_full"))
     a = blob(R, "aa1", 1000)
-    os.symlink(a, os.path.join(pre, "ds_keep", "plans_3d", "c1.npz"))
+    os.symlink(a, os.path.join(pre, "ds_keep", "PlanM_full", "c1.prob"))
     b = blob(R, "bb1", 1000)
-    os.symlink(b, os.path.join(pre, "ds_old", "plans_3d", "c1.npz"))
+    os.symlink(b, os.path.join(pre, "ds_old", "PlanM_full", "c1.prob"))
     c = blob(R, "cc1", 1000)
     os.link(c, os.path.join(tmp, "old", "cc1_copy"))
-    os.symlink(c, os.path.join(pre, "ds_old", "plans_3d", "c2.npz"))
-    with open(os.path.join(pre, "ds_old", "plans_3d", "c1.npy"), "wb") as f:
+    os.symlink(c, os.path.join(pre, "ds_old", "PlanM_full", "c2.prob"))
+    with open(os.path.join(pre, "ds_old", "PlanM_full", "c1.npy"), "wb") as f:
         f.truncate(2000)
     with open(os.path.join(pre, "ds_old", "dataset.json"), "w") as f:
         f.write("{}")
-    os.symlink(outside, os.path.join(pre, "ds_old", "ext.npz"))
+    os.symlink(outside, os.path.join(pre, "ds_old", "ext.prob"))
     d = blob(R, "dd1", 3000)
     os.utime(d, (1000, 1000))
     e = blob(R, "ee1", 3000)
@@ -71,7 +75,7 @@ def build(tmp):
     f_ = blob(R, "ff1", 5000)
     os.link(f_, os.path.join(tmp, "old", "ff1_copy"))
     os.utime(f_, (10, 10))
-    res = os.path.join(R, "data", "nnUNet", "results", "ds_keep", "fold_0")
+    res = os.path.join(R, "data", "results", "ds_keep", "frag_0")
     os.makedirs(res)
     os.symlink(e, os.path.join(res, "uses_ee1"))
     return R, outside
@@ -86,17 +90,17 @@ def main():
     try:
         R, outside = build(tmp)
         rpy = local_rpy(R)
-        keep = ["nnUNet/preprocessed/ds_keep"]
+        keep = ["prepared/ds_keep"]
         r = G.gc("x", keep, rpy, soft_gb=100, free=200 * GB)
         assert r["freed"] == 0 and not r["removed_views"] and r["removed_blobs"] == 0, r
-        assert os.path.isdir(os.path.join(R, "data", "nnUNet", "preprocessed", "ds_old"))
+        assert os.path.isdir(os.path.join(R, "data", "prepared", "ds_old"))
         ok("剩余高于软线：什么都不动")
 
         soft = 1e-6  # 1000 字节
         r = G.gc("x", keep, rpy, soft_gb=soft, free=0)
-        assert r["removed_views"] == ["nnUNet/preprocessed/ds_old"], r
-        assert os.path.isdir(os.path.join(R, "data", "nnUNet", "preprocessed", "ds_keep"))
-        assert not os.path.exists(os.path.join(R, "data", "nnUNet", "preprocessed", "ds_old"))
+        assert r["removed_views"] == ["prepared/ds_old"], r
+        assert os.path.isdir(os.path.join(R, "data", "prepared", "ds_keep"))
+        assert not os.path.exists(os.path.join(R, "data", "prepared", "ds_old"))
         assert r["freed"] == 2002 + 0 and r["removed_blobs"] == 0, r  # 缓存 2000 + dataset.json 2；视图删完已到软线
         assert all(exists(R, h) for h in ("aa1", "bb1", "cc1", "dd1", "ee1", "ff1"))
         assert os.path.getsize(outside) == 500
@@ -105,7 +109,7 @@ def main():
         R, outside = build(tempfile.mkdtemp(dir=tmp))
         rpy = local_rpy(R)
         r = G.gc("x", keep, rpy, soft_gb=5000 / GB, free=0)
-        assert r["removed_views"] == ["nnUNet/preprocessed/ds_old"], r
+        assert r["removed_views"] == ["prepared/ds_old"], r
         assert not exists(R, "dd1") and exists(R, "bb1"), r
         assert exists(R, "aa1") and exists(R, "ee1"), "在用的 blob 不删"
         assert exists(R, "cc1") and exists(R, "ff1"), "nlink > 1 的不删"
@@ -134,15 +138,15 @@ def main():
 
         R, _ = build(tempfile.mkdtemp(dir=tmp))
         D = os.path.join(R, "data")
-        for v in ("in/aaa", "in/bbb", "in/ccc", "nnUNet/models/a/td/fold_0"):
+        for v in ("in/aaa", "in/bbb", "in/ccc", "models/a/td/frag_0"):
             os.makedirs(os.path.join(D, v))
-            os.symlink(blob(R, v.replace("/", "_"), 10), os.path.join(D, v, "f.nii.gz"))
+            os.symlink(blob(R, v.replace("/", "_"), 10), os.path.join(D, v, "f.dat"))
         open(os.path.join(D, "in/ccc/.incomplete"), "w").close()
-        reg = ["in/aaa", "in/bbb", "in/ccc", "in/gone", "nnUNet/models/a/td/fold_0", "../x", "in"]
+        reg = ["in/aaa", "in/bbb", "in/ccc", "in/gone", "models/a/td/frag_0", "../x", "in"]
         r = G.gc("x", keep + ["in/bbb"], local_rpy(R), soft_gb=1e-6, free=0, views=reg)
-        assert r["removed_views"] == ["in/aaa", "in/gone", "nnUNet/models/a/td/fold_0", "nnUNet/preprocessed/ds_old"], r
-        assert not os.path.exists(os.path.join(D, "in/aaa")) and os.path.exists(os.path.join(D, "in/bbb/f.nii.gz"))
-        assert os.path.exists(os.path.join(D, "in/ccc/f.nii.gz")) and os.path.isdir(os.path.join(D, "nnUNet/models/a/td"))
+        assert r["removed_views"] == ["in/aaa", "in/gone", "models/a/td/frag_0", "prepared/ds_old"], r
+        assert not os.path.exists(os.path.join(D, "in/aaa")) and os.path.exists(os.path.join(D, "in/bbb/f.dat"))
+        assert os.path.exists(os.path.join(D, "in/ccc/f.dat")) and os.path.isdir(os.path.join(D, "models/a/td"))
         assert os.path.isdir(os.path.dirname(R)) and os.path.isdir(os.path.join(D, "in"))
         ok("登记过的任务视图也清理：keep 里的、正在建的（.incomplete）不删，那边已经没有的报出来让登记表去掉，越界的、只有一层的不认")
 
@@ -151,7 +155,7 @@ def main():
         R, _ = build(real)
         link = os.path.join(tmp, "Rlink")
         os.symlink(R, link)
-        pre = os.path.join(R, "data", "nnUNet", "preprocessed", "ds_keep", "plans_3d", "c1.npz")
+        pre = os.path.join(R, "data", "prepared", "ds_keep", "PlanM_full", "c1.prob")
         os.remove(pre)
         os.symlink(os.path.join(link, "blobs", "aa", "aa1"), pre)
         r = G.gc("x", keep, local_rpy(link), soft_gb=1.0, free=0)
@@ -169,7 +173,7 @@ def main():
         os.link(h_, os.path.join(tmp, "old", "hh1_copy"))
         i_ = blob(R, "ii1", 100)
         os.link(i_, os.path.join(sib, "blobs", "ii", "ii1"))
-        os.symlink(i_, os.path.join(R, "data", "nnUNet", "preprocessed", "ds_keep", "plans_3d", "c9.npz"))
+        os.symlink(i_, os.path.join(R, "data", "prepared", "ds_keep", "PlanM_full", "c9.prob"))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0, siblings=[sib])
         assert not exists(R, "gg1") and os.path.exists(os.path.join(sib, "blobs", "gg", "gg1")), r
         assert exists(R, "hh1") and exists(R, "ii1") and r.get("unlinked") == 1, r

@@ -114,7 +114,7 @@ TASK_INPUTS_ROOT=$DATA CPID=
 if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
     if [[ ${TASK_LOCAL:-0} == 1 && -n ${SLURM_JOB_ID:-} ]]; then
-        ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$REPO/envs'); import machines, policy; print(int(bool(policy.STAGE_TMP.get(machines.whoami()))))" 2> /dev/null || echo 0)}
+        ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; cfg.use_config(); import machines, policy; print(int(bool(policy.STAGE_TMP.get(machines.whoami()))))" 2> /dev/null || echo 0)}
         [[ $ST == 1 ]] && LROOT=${TMPDIR:-/tmp}/phd_stage_$SLURM_JOB_ID
     fi
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?

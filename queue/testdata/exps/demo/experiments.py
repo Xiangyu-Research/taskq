@@ -31,14 +31,14 @@ def _manifest_ok(path):
     for c, v in (m.get("cohorts") or {}).items():
         src = (v.get("args") or {}).get("source")
         n_in = len(glob.glob(os.path.join(src, "*_0000.dat"))) if isinstance(src, str) and os.path.isdir(src) else None
-        if not v["n_segmentations"] or v["n_segmentations"] != v["n_probabilities"] or (n_in and v["n_segmentations"] != n_in):
+        if not v["n_outputs"] or v["n_outputs"] != v["n_probs"] or (n_in and v["n_outputs"] != n_in):
             return False
         d = os.path.join(os.path.dirname(path), c)
         here = (len(glob.glob(os.path.join(d, "*.out"))), len([f for f in glob.glob(os.path.join(d, "*.prob")) if not f.endswith(".tmp.prob")]))
         if c in removed:
-            if here[0] != v["n_segmentations"] or here[1] > v["n_probabilities"]:
+            if here[0] != v["n_outputs"] or here[1] > v["n_probs"]:
                 return False
-        elif here != (v["n_segmentations"], v["n_probabilities"]):
+        elif here != (v["n_outputs"], v["n_probs"]):
             return False
     return True
 

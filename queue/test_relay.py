@@ -5,7 +5,7 @@
   3. 真跑一遍：本机模拟"那边"（假的 ssh、srun 在本地跑，服务开在 127.0.0.1），推代码包、传数据（stage）、
      那边的队列、拉回（fetch），和 box 一样的真名路径；
   4. 删任务时按引用计数只删别的任务不用的路径；redo（重新传）。
-跑法：python3 scripts/queue/test_relay.py（在 box 上；checkpoint 用本机的 nnunet 环境）"""
+跑法：python3 scripts/queue/test_relay.py（配置用测试用的 testdata/；包里的 Python 文件用本机 bundle_check 那个环境核对，没有时用当前的 Python）"""
 import contextlib
 import io
 import json
@@ -19,6 +19,12 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
+STATE_DIR = tempfile.mkdtemp(prefix="test_relay_state_")
+os.environ["TASKQ_STATE"] = STATE_DIR  # 本机的状态（时段、队列…）放临时目录
 sys.path.insert(0, HERE)
 import test_relay_plugins as TN  # noqa: E402  （设了 RELAY_DIR、建了临时目录 TN.TMP）
 
@@ -26,7 +32,7 @@ T = TN.TMP
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
     f.write(f'#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\n[[ $1 == -O ]] && {{ [[ -e {T}/master_down ]] && exit 255; exit 0; }}\n'
-            'shift\ncd / && exec bash -c "$*"\n')
+            f'shift\ncd / && exec env -u TASKQ_CONFIG -u TASKQ_STATE TASKQ_PLUGINS={T}/remote/code/current/scripts/queue/testdata/plugins bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
 BIN = os.path.join(T, "bin")
 os.makedirs(BIN)
@@ -45,7 +51,9 @@ os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1
                   PHD_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
                   PATH=BIN + ":" + os.environ["PATH"])
 
-sys.path.insert(0, os.path.join(HERE, "..", "..", "envs"))
+import cfg  # noqa: E402
+
+cfg.use_config()
 import machines as M  # noqa: E402
 import spec as S  # noqa: E402
 import relay  # noqa: E402
@@ -55,7 +63,7 @@ NAME = next(iter(M.RELAY))
 RROOT = os.path.join(T, "remote")
 CONDA = os.path.join(T, "conda")
 os.makedirs(os.path.join(CONDA, "bin"))
-os.symlink(relay_bundle.check_python(), os.path.join(CONDA, "bin", "python3"))
+os.symlink(relay_bundle.check_python() or sys.executable, os.path.join(CONDA, "bin", "python3"))
 M.RELAY[NAME] = dict(M.RELAY[NAME], root=RROOT, conda=(CONDA, "pt"), transfer_job="-p test")
 Q = "box"  # 总队列所在的机器（taskq.queue_host()，10/31）
 assert relay.taskq.queue_host() == Q
@@ -88,7 +96,12 @@ def test_pueue_worker():
     assert relay.topup("lab1", dict(jobs=[[5, clab, "Running", None]], taskq=both)) == ([("pueue", "gpu", 1)], "CPU worker 在")
     subs, why = relay.topup("lab1", dict(jobs=[[5, clab, "Done", "{'Failed': 1}"]], taskq=both))
     assert subs == [("pueue", "gpu", 1)] and why == "上一个 CPU worker（pueue 任务 5）失败了（{'Failed': 1}）", (subs, why)
-    assert relay.topup("lab0", dict(jobs=[], taskq=cpu)) == ([], "那边没有备好、没人领的任务")
+    allowed0 = relay.shift.allowed
+    relay.shift.allowed = lambda n, now=None: True  # 时段里
+    try:
+        assert relay.topup("lab0", dict(jobs=[], taskq=cpu)) == ([], "那边没有备好、没人领的任务")
+    finally:
+        relay.shift.allowed = allowed0
     ok("pueue 类：GPU、CPU 两种 worker 各自判断（在不在、上一个失败没有、有没有这种任务）；没有 cpu_worker 的（lab0）不开 CPU worker")
 
 
@@ -128,9 +141,9 @@ def ok(msg):
 
 
 # ---------------- 1. 决策 ----------------
-def mtask(key, state="claimed", worker=NAME, nice=5, since=1000.0, relay_="nnunet"):
+def mtask(key, state="claimed", worker=NAME, nice=5, since=1000.0, relay_="toy"):
     return dict(key=key, state=state, worker=worker, nice=nice, order=1, since=since, note="",
-                spec=dict(env="nnunet", data=[f"nnUNet/preprocessed/{key.split('/')[0]}"], relay=relay_, device="gpu", machines=None),
+                spec=dict(env="base", data=[f"prepared/{key.split('/')[0]}"], relay=relay_, device="gpu", machines=None),
                 skipped_by=[])
 
 
@@ -139,7 +152,7 @@ def rtask(key, state, worker=None):
 
 
 def record(k, **kw):
-    return dict(dict(recipe="nnunet", params={}, data=[f"nnUNet/preprocessed/{k.split('/')[0]}"], views=[f"nnUNet/preprocessed/{k.split('/')[0]}"],
+    return dict(dict(recipe="toy", params={}, data=[f"prepared/{k.split('/')[0]}"], views=[f"prepared/{k.split('/')[0]}"],
                      outs=[f"out/{k}"]), **kw)
 
 
@@ -161,41 +174,41 @@ def test_adopt_out():
     """老数据目录、别的执行机里训到一半的存档（最新的那份）拷进结果目录；这边已有更新的存档或训完了时不动。"""
     import subprocess
     old, sib, R = os.path.join(T, "ao_old"), os.path.join(T, "ao_sib"), os.path.join(T, "ao_R")
-    src, ssrc = os.path.join(old, "res", "fold_3"), os.path.join(sib, "data", "a", "fold_3")
+    src, ssrc = os.path.join(old, "res", "frag_3"), os.path.join(sib, "data", "a", "frag_3")
     os.makedirs(src)
-    for f, b in (("checkpoint_latest.pth", b"L"), ("checkpoint_best.pth", b"B"), ("training_log.txt", b"t")):
+    for f, b in (("latest.ckpt", b"L"), ("best.ckpt", b"B"), ("train_log.txt", b"t")):
         open(os.path.join(src, f), "wb").write(b)
     dirs = [ssrc, src]
     run = lambda: S.json_in(subprocess.run(
-        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/fold_3", resume=["checkpoint_latest.pth", "checkpoint_final.pth"],
-                                                                         done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"])),
+        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/frag_3", resume=["latest.ckpt", "final.ckpt"],
+                                                                         done=["check/summary.json", "final.ckpt|ARCHIVED"])),
         capture_output=True, text=True, cwd=os.path.dirname(os.path.dirname(HERE)), check=True).stdout)
     r = run()
     assert r["n"] == 3 and r["src"] == src, r
-    new = os.path.join(R, "data", "a", "fold_3")
-    assert open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"L"
+    new = os.path.join(R, "data", "a", "frag_3")
+    assert open(os.path.join(new, "latest.ckpt"), "rb").read() == b"L"
     assert not [f for f in os.listdir(new) if f.endswith(".relaytmp")]
-    open(os.path.join(new, "checkpoint_latest.pth"), "wb").write(b"N")
-    assert run()["n"] == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"N"
+    open(os.path.join(new, "latest.ckpt"), "wb").write(b"N")
+    assert run()["n"] == 0 and open(os.path.join(new, "latest.ckpt"), "rb").read() == b"N"
     ok("老目录的存档拷进结果目录；已有更新的存档时不覆盖")
     os.makedirs(ssrc)
-    open(os.path.join(ssrc, "checkpoint_latest.pth"), "wb").write(b"S")
+    open(os.path.join(ssrc, "latest.ckpt"), "wb").write(b"S")
     t = time.time() + 60
-    os.utime(os.path.join(ssrc, "checkpoint_latest.pth"), (t, t))
+    os.utime(os.path.join(ssrc, "latest.ckpt"), (t, t))
     r = run()
-    assert r["src"] == ssrc and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"S", r
+    assert r["src"] == ssrc and open(os.path.join(new, "latest.ckpt"), "rb").read() == b"S", r
     ok("另一台执行机（同一个盘、换卡）的存档更新 → 拷它的，接着训")
-    open(os.path.join(new, "checkpoint_final.pth"), "wb").write(b"F")
-    wb_ = os.path.join(new, "validation", "summary.json")
+    open(os.path.join(new, "final.ckpt"), "wb").write(b"F")
+    wb_ = os.path.join(new, "check", "summary.json")
     os.makedirs(os.path.dirname(wb_))
     open(wb_, "w").write("{}")
-    os.utime(os.path.join(ssrc, "checkpoint_latest.pth"), (t + 60, t + 60))
-    assert run()["n"] == 0 and open(os.path.join(new, "checkpoint_latest.pth"), "rb").read() == b"S"
+    os.utime(os.path.join(ssrc, "latest.ckpt"), (t + 60, t + 60))
+    assert run()["n"] == 0 and open(os.path.join(new, "latest.ckpt"), "rb").read() == b"S"
     ok("这边已经训完（任务说明的 done 都在）→ 不动")
 
 
 def test_plan():
-    K = A = "Dataset1_x/tr/0"
+    K = A = "D1_x/tr/0"
     st = keymap((K, A))
     RS = lambda *ts, **kw: dict(taskq=dict(tasks=list(ts), paused=kw.get("paused", False)), tasks=kw.get("tasks", {}), free=500e9)  # noqa: E731
 
@@ -315,8 +328,8 @@ def test_plan():
     assert ops(acts) == [("rstop", K)], acts
     acts, _ = relay.plan(S0([mtask(K, "done", worker=None)]), NAME, RS(rtask(A, "stopped")), st)
     assert ops(acts) == [("drop", K)], acts
-    acts, stuck = relay.plan(S0([]), NAME, RS(rtask("Dataset999_zz/tr/0", "free")), st)
-    assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:Dataset999_zz/tr/0"], stuck
+    acts, stuck = relay.plan(S0([]), NAME, RS(rtask("D999_zz/tr/0", "free")), st)
+    assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:D999_zz/tr/0"], stuck
     acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:{K}"], stuck
     ok("那边有、总队列里不归它的：不让它训；总队列训完了就删；认不出的、在训的报 site:<名字>:orphan")
@@ -325,7 +338,7 @@ def test_plan():
     assert ops(acts) == [("unq", K)] and acts[0]["to"] == "other" and not stuck, acts
     acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "stopped")), st)
     assert ops(acts) == [("unq", K)] and not stuck, acts
-    ust = dict(keys={NAME: {K: dict(st["keys"][NAME][K], recipe="nnunet", params=dict(dataset="Dataset901_ab", fold="0"), unq=1.0)}})
+    ust = dict(keys={NAME: {K: dict(st["keys"][NAME][K], recipe="toy", params=dict(ds="D901_ab", frag="0"), unq=1.0)}})
     acts, _ = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(), ust)
     assert ops(acts) == [], acts
     acts, _ = relay.plan(S0([mtask(K, "done", "other")]), NAME, RS(), ust)
@@ -334,25 +347,25 @@ def test_plan():
     assert ops(acts) == [("drop", K)] and acts[0].get("gone"), acts
     ok("总队列里改分给了别的执行机（换卡；那边停着的也算）→ 那边队列里删掉（unq）、结果留着给它收编；总队列训完了再删结果（不再删队列）")
 
-    old = keymap((K, "Dataset901_ab/tr/0"))
-    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "123")), old)
+    old = keymap((K, "D901_ab/tr/0"))
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask("D901_ab/tr/0", "claimed", "123")), old)
     assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
-    acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask("Dataset901_ab/tr/0", "done")), old)
-    assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "drop"][0]["rkey"] == "Dataset901_ab/tr/0", acts
+    acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask("D901_ab/tr/0", "done")), old)
+    assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "drop"][0]["rkey"] == "D901_ab/tr/0", acts
     ok("11/1 前换名的老记录：那边的 key 是别名，照样续、删")
 
-    red = dict(keys={NAME: {K: record(K, alias="Dataset901_ab/tr/0", redo=1.0)}})
-    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "free")), red)
-    assert ops(acts) == [("beat", K), ("redo", K)] and not acts[1]["busy"] and acts[1]["rkey"] == "Dataset901_ab/tr/0", acts
-    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "123")), red)
+    red = dict(keys={NAME: {K: record(K, alias="D901_ab/tr/0", redo=1.0)}})
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("D901_ab/tr/0", "free")), red)
+    assert ops(acts) == [("beat", K), ("redo", K)] and not acts[1]["busy"] and acts[1]["rkey"] == "D901_ab/tr/0", acts
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("D901_ab/tr/0", "claimed", "123")), red)
     assert ops(acts) == [("beat", K), ("redo", K), ("rstop", K)] and acts[1]["busy"], acts
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), red)
     assert ops(acts) == [("beat", K), ("redo", K)], acts
-    acts, _ = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("Dataset901_ab/tr/0", "free")), red)
+    acts, _ = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("D901_ab/tr/0", "free")), red)
     assert ops(acts) == [("drop", K)] and not acts[0]["gone"], acts
     acts, _ = relay.plan(S0([]), NAME, RS(), red)
     assert ops(acts) == [("drop", K)] and acts[0]["gone"], acts
-    acts, stuck = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("Dataset901_ab/tr/0", "claimed", "1")), red)
+    acts, stuck = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("D901_ab/tr/0", "claimed", "1")), red)
     assert ops(acts) == [("rstop", K)], acts
     ok("redo：领着的 → 那边没人领着时删掉、下次重新传，在训的先停；不归它的 → 删掉（那边在训的先停）")
 
@@ -362,8 +375,8 @@ def test_plan():
     assert ops(acts) == [("beat", K)] and not stuck
     ok("连不上：只续总队列的领取，2 小时以上报")
 
-    K2, K3 = "Dataset2_y/tr/0", "Dataset3_z/tr/0"
-    cands = [mtask(K2, "free", None, nice=3), mtask(K3, "free", None, nice=4), mtask("Dataset4_c/tr/0", "free", None, relay_=None)]
+    K2, K3 = "D2_y/tr/0", "D3_z/tr/0"
+    cands = [mtask(K2, "free", None, nice=3), mtask(K3, "free", None, nice=4), mtask("D4_c/tr/0", "free", None, relay_=None)]
     relay.refill.data_gb = lambda paths: 10.0
     relay.P.READY[NAME] = 2
     HARD0 = (relay.conf(NAME).get("budget") or (None, relay.HARD_GB))[1]
@@ -371,20 +384,20 @@ def test_plan():
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K2], more
-    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0")] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME, RS(rtask(A, "free")), st, [])
+    more, why = relay.fill(S0([mtask(K), mtask("D5_d/tr/0")] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME, RS(rtask(A, "free")), st, [])
     assert more == [] and "排着 2" in why, (more, why)
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(RS(rtask(A, "free")), free=(HARD0 + 5) * 1e9), st, [])
     assert more == [] and "放不下" in why, why
     ok("补任务：那边排着的（含在传数据的）不够 READY 个才领，按档位，只领能翻译的做法，放不下不领")
-    K0 = "Dataset6_e/tr/0"
-    more, why = relay.fill(S0([mtask(K), mtask("Dataset5_d/tr/0"), mtask(K0, "free", None, nice=-100)] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME,
+    K0 = "D6_e/tr/0"
+    more, why = relay.fill(S0([mtask(K), mtask("D5_d/tr/0"), mtask(K0, "free", None, nice=-100)] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME,
                            RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K0], (more, why)
     more, why = relay.fill(S0([mtask(K), mtask(K0, "free", None, nice=-100)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K0, K2], (more, why)
     ok("第 ⓪ 档（nice < 0，训完后的推理）不受 READY 限制：排满了也领，先领它")
 
-    K5 = "Dataset5_d/tr/0"
+    K5 = "D5_d/tr/0"
     st2 = keymap((K, A), (K5, K5))
     late = [mtask(K2, "free", None, nice=6), mtask(K3, "free", None, nice=7)]
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + late), NAME, RS(rtask(A, "stopped"), rtask(K5, "free")), st2, [])
@@ -413,7 +426,7 @@ def test_plan():
         t = mtask(key, state, worker, nice=nice)
         return dict(t, spec=dict(t["spec"], device="cpu"))
     hi = [dict(t, nice=t["nice"] + 3) for t in cands]
-    E1, E2 = "Dataset7_f/ev/0", "Dataset8_g/ev/0"
+    E1, E2 = "D7_f/ev/0", "D8_g/ev/0"
     jobs0 = M.RELAY[NAME]["jobs"]
     relay.P.READY[NAME] = 1
     relay.PLANNED.clear()
@@ -457,14 +470,14 @@ def test_plan():
 # ---------------- 2. 挪进数据目录的顺序 ----------------
 def test_place():
     src, D = os.path.join(T, "place_src"), os.path.join(T, "place_dst")
-    real = dict(out="nnUNet/results/X/tr/fold_0", done=["validation/summary.json", "checkpoint_final.pth|ARCHIVED"],
+    real = dict(out="results/X/tr/frag_0", done=["check/summary.json", "final.ckpt|ARCHIVED"],
                 fetch=dict(extra=["*.json"]))
-    written = ["nnUNet/results/X/tr/fold_0/validation/a.nii.gz", "nnUNet/results/X/tr/plans.json",
-               "logs/tasks/k__1_seg1.log", "nnUNet/results/X/tr/fold_0/checkpoint_final.pth",
-               "nnUNet/results/X/tr/fold_0/validation/summary.json"]
+    written = ["results/X/tr/frag_0/check/a.dat", "results/X/tr/plans.json",
+               "logs/tasks/k__1_seg1.log", "results/X/tr/frag_0/final.ckpt",
+               "results/X/tr/frag_0/check/summary.json"]
     for w in written:
         TN.wb(os.path.join(src, w), b"new")
-    TN.wb(os.path.join(D, "nnUNet/results/X/tr/plans.json"), b"old")
+    TN.wb(os.path.join(D, "results/X/tr/plans.json"), b"old")
     seen, real_replace = [], os.replace
 
     def spy(a, b):
@@ -480,18 +493,18 @@ def test_place():
         pass
     finally:
         relay.os.replace = real_replace
-    assert not os.path.exists(os.path.join(D, real["out"], "validation/summary.json"))
-    assert not os.path.exists(os.path.join(D, real["out"], "checkpoint_final.pth"))
+    assert not os.path.exists(os.path.join(D, real["out"], "check/summary.json"))
+    assert not os.path.exists(os.path.join(D, real["out"], "final.ckpt"))
     relay.place(src, D, [w for w in written if os.path.exists(os.path.join(src, w))], real)
-    assert open(os.path.join(D, "nnUNet/results/X/tr/plans.json"), "rb").read() == b"old"
-    assert seen[:2] == ["nnUNet/results/X/tr/fold_0/validation/a.nii.gz", "logs/tasks/k__1_seg1.log"], seen
-    assert os.path.exists(os.path.join(D, real["out"], "validation/summary.json"))
+    assert open(os.path.join(D, "results/X/tr/plans.json"), "rb").read() == b"old"
+    assert seen[:2] == ["results/X/tr/frag_0/check/a.dat", "logs/tasks/k__1_seg1.log"], seen
+    assert os.path.exists(os.path.join(D, real["out"], "check/summary.json"))
     ok("拉回：训完的标志最后挪（中途出错时不算训完），上一级已有的 JSON 不覆盖")
 
     src, D = os.path.join(T, "place2_src"), os.path.join(T, "place2_dst")
-    real = dict(out="predictions/m/fold_0", done=[".infer_done"], fetch=dict(extra=[]))
-    written = ["predictions/m/fold_0/.infer_done", "predictions/m/fold_0/MANIFEST.json", "predictions/m/fold_0/c1.nii.gz",
-               "predictions/m/note.txt"]
+    real = dict(out="preds/m/frag_0", done=[".infer_done"], fetch=dict(extra=[]))
+    written = ["preds/m/frag_0/.infer_done", "preds/m/frag_0/MANIFEST.json", "preds/m/frag_0/c1.dat",
+               "preds/m/note.txt"]
     for w in written:
         TN.wb(os.path.join(src, w), b"n")
     seen = []
@@ -504,15 +517,15 @@ def test_place():
         relay.place(src, D, written, real)
     finally:
         relay.os.replace = real_replace
-    assert seen == ["predictions/m/fold_0/c1.nii.gz", "predictions/m/note.txt", "predictions/m/fold_0/MANIFEST.json",
-                    "predictions/m/fold_0/.infer_done"], seen
+    assert seen == ["preds/m/frag_0/c1.dat", "preds/m/note.txt", "preds/m/frag_0/MANIFEST.json",
+                    "preds/m/frag_0/.infer_done"], seen
     ok("拉回：MANIFEST.json 在训完的标志前、普通文件后挪")
 
 
 # ---------------- 3. 真跑 ----------------
 def test_e2e():
     TN.setup()
-    sp = S.resolve("nnunet", dict(dataset=TN.DS, fold="0"))
+    sp = S.resolve("toy", dict(ds=TN.DS, frag="0"))
     relay.lookup = lambda k: sp
     relay.box_data = lambda: TN.ROOT
     bid, path = relay_bundle.build(NAME, None, os.path.join(T, "bundles"), root=RROOT)
@@ -547,18 +560,18 @@ def test_e2e():
 
     rkey_ = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
     assert rkey_ == sp["key"]
-    pre = os.path.join(RROOT, "data", "nnUNet", "preprocessed", TN.DS)
+    pre = os.path.join(RROOT, "data", "prepared", TN.DS)
     links = [os.path.join(dp, f) for dp, _, fs in os.walk(pre) for f in fs]
     assert links and all(os.path.isfile(p) for p in links), links
     assert not os.path.exists(os.path.join(pre, ".incomplete"))
-    gt = sorted(os.listdir(os.path.join(pre, "gt_segmentations")))
-    assert gt == sorted(c + ".nii.gz" for c in TN.CASES), gt
-    assert open(os.path.join(pre, "gt_segmentations", TN.CASES[0] + ".nii.gz"), "rb").read() == b"gt" + TN.CASES[0].encode()
+    gt = sorted(os.listdir(os.path.join(pre, "gt")))
+    assert gt == sorted(c + ".dat" for c in TN.CASES), gt
+    assert open(os.path.join(pre, "gt", TN.CASES[0] + ".dat"), "rb").read() == b"gt" + TN.CASES[0].encode()
     blobs = sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs")))
     rs = relay.remote_status(NAME)
     assert [(t["key"], t["state"]) for t in rs["taskq"]["tasks"]] == [(sp["key"], "free")], rs["taskq"]["tasks"]
     k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
-    assert k["views"] == [f"nnUNet/preprocessed/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
+    assert k["views"] == [f"prepared/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
     ok(f"传数据：{blobs} 个文件按内容存、软链接放在和 box 一样的路径，key 和参数原样，加进那边的队列")
 
     rkey2 = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
@@ -567,16 +580,16 @@ def test_e2e():
 
     rout = os.path.join(RROOT, "data", sp["out"])
     for c in TN.CASES[:2]:
-        TN.wb(os.path.join(rout, "validation", c + ".nii.gz"), b"p")
-    TN.wj(os.path.join(rout, "validation", "summary.json"), dict(metric_per_case=[{}, {}]))
-    TN.wb(os.path.join(rout, "checkpoint_final.pth"), b"ck")
-    TN.wb(os.path.join(rout, "checkpoint_latest.pth"), b"latest")
+        TN.wb(os.path.join(rout, "check", c + ".dat"), b"p")
+    TN.wj(os.path.join(rout, "check", "summary.json"), dict(metric_per_case=[{}, {}]))
+    TN.wb(os.path.join(rout, "final.ckpt"), b"ck")
+    TN.wb(os.path.join(rout, "latest.ckpt"), b"latest")
     TN.wb(os.path.join(rout, "debug.json"), b"{}")
     TN.wj(os.path.join(os.path.dirname(rout), "plans.json"), {})
     TN.wb(os.path.join(RROOT, "data", "logs", "tasks", S.safe(sp["key"]) + "__12345_seg1.log"), b"log")
     out = os.path.join(TN.ROOT, sp["out"])
     inbox = os.path.join(TN.ROOT, ".relay_in", S.safe(sp["key"]))
-    os.environ["TUNNEL_TEST_BADMD5"] = sp["out"] + "/checkpoint_final.pth"
+    os.environ["TUNNEL_TEST_BADMD5"] = sp["out"] + "/final.ckpt"
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             relay.fetch(NAME, sp["key"], say=lambda m: None)
@@ -585,27 +598,27 @@ def test_e2e():
         assert "1 个文件没拉到" in str(e), e
     finally:
         del os.environ["TUNNEL_TEST_BADMD5"]
-    assert not os.path.exists(out) and os.path.isfile(os.path.join(inbox, sp["out"], "validation", "summary.json"))
-    sj = os.path.join(inbox, sp["out"], "validation", "summary.json")
+    assert not os.path.exists(out) and os.path.isfile(os.path.join(inbox, sp["out"], "check", "summary.json"))
+    sj = os.path.join(inbox, sp["out"], "check", "summary.json")
     TN.wb(sj, b"x" * os.path.getsize(sj))  # 大小一样、修改时间不同
-    TN.wb(os.path.join(inbox, sp["out"], "validation", "old.nii.gz"), b"old")
+    TN.wb(os.path.join(inbox, sp["out"], "check", "old.dat"), b"old")
     TN.wb(os.path.join(inbox, sp["out"], "debug.json.tunnelpart"), b"{")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         relay.fetch(NAME, sp["key"], say=lambda m: None)
     assert "拉 2 个文件" in buf.getvalue(), buf.getvalue()
-    assert not os.path.exists(os.path.join(out, "validation", "old.nii.gz")) and not os.path.exists(os.path.join(out, "debug.json.tunnelpart"))
-    assert json.load(open(os.path.join(out, "validation", "summary.json"))) == dict(metric_per_case=[{}, {}])
+    assert not os.path.exists(os.path.join(out, "check", "old.dat")) and not os.path.exists(os.path.join(out, "debug.json.tunnelpart"))
+    assert json.load(open(os.path.join(out, "check", "summary.json"))) == dict(metric_per_case=[{}, {}])
     ok("拉回到一半（上次缺文件报错，box 上什么都没放）：再拉只拉缺的和大小、修改时间对不上的，旧的、半份的不混进结果")
-    assert os.path.exists(os.path.join(out, "validation", "summary.json"))
-    assert sorted(f for f in os.listdir(os.path.join(out, "validation")) if f.endswith(".nii.gz")) == sorted(c + ".nii.gz" for c in TN.CASES[:2])
-    assert not os.path.exists(os.path.join(out, "checkpoint_latest.pth"))
-    assert os.path.exists(os.path.join(out, "checkpoint_final.pth"))
+    assert os.path.exists(os.path.join(out, "check", "summary.json"))
+    assert sorted(f for f in os.listdir(os.path.join(out, "check")) if f.endswith(".dat")) == sorted(c + ".dat" for c in TN.CASES[:2])
+    assert not os.path.exists(os.path.join(out, "latest.ckpt"))
+    assert os.path.exists(os.path.join(out, "final.ckpt"))
     assert os.path.exists(os.path.join(os.path.dirname(out), "plans.json"))
     assert not os.listdir(os.path.join(TN.ROOT, ".relay_in"))
     logs = os.listdir(os.path.join(TN.ROOT, "logs", "tasks"))
     assert logs == [S.safe(sp["key"]) + "__12345_seg1.log"], logs
-    ok("拉回：同样的相对路径、不拉 checkpoint_latest、上一级的 json 和分段日志、临时目录删掉")
+    ok("拉回：同样的相对路径、不拉 latest.ckpt、上一级的 json 和分段日志、临时目录删掉")
 
     relay.write_status(NAME, relay.remote_status(NAME), relay.load_state())
     st = json.load(open(relay.STATUS))[NAME]
@@ -625,10 +638,10 @@ def test_e2e_path(pre):
     D = os.path.join(RROOT, "data")
     assert rk == sp["key"] and k["views"] == ["proj/inputs/cohortA"], k
     assert set(k["outs"]) == {sp["out"], "proj/analysis/thing/shared"}, k
-    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.nii.gz" in k["inputs"] and not any("t1" in x for x in k["inputs"]), k
-    assert open(os.path.join(D, "proj/inputs/cohortA", "y_0000.nii.gz"), "rb").read() == b"yy"
-    assert open(os.path.join(D, "proj/inputs/cohortA", "a", "x_0000.nii.gz"), "rb").read() == b"xa"
-    assert open(os.path.join(D, "raw/Set/c2/c2-seg.nii.gz"), "rb").read() == b"sc2"
+    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.dat" in k["inputs"] and not any("t1" in x for x in k["inputs"]), k
+    assert open(os.path.join(D, "proj/inputs/cohortA", "y_0000.dat"), "rb").read() == b"yy"
+    assert open(os.path.join(D, "proj/inputs/cohortA", "a", "x_0000.dat"), "rb").read() == b"xa"
+    assert open(os.path.join(D, "raw/Set/c2/c2-seg.dat"), "rb").read() == b"sc2"
     assert not os.path.exists(os.path.join(D, "proj/inputs/cohortA", ".incomplete"))
     after = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
                    for dp, _, fs in os.walk(pre) for f in fs)
@@ -663,7 +676,7 @@ def test_e2e_path(pre):
     tk = next(r for r in keys if r != sp["key"])
     assert relay.droppable(keys, sp["key"], relay.paths_of(keys[sp["key"]])) == sorted(relay.paths_of(keys[sp["key"]]))
     relay.drop_remote(NAME, sp["key"], sp["key"], gone=True)
-    assert not os.path.lexists(os.path.join(D, "raw/Set/c1/c1-seg.nii.gz")) and not os.path.exists(os.path.join(D, "proj/inputs"))
+    assert not os.path.lexists(os.path.join(D, "raw/Set/c1/c1-seg.dat")) and not os.path.exists(os.path.join(D, "proj/inputs"))
     assert not os.path.exists(os.path.join(D, sp["out"])) and os.listdir(pre) and sp["key"] not in relay.keys_of(relay.load_state(), NAME)
     assert not [f for f in os.listdir(os.path.join(D, "logs", "tasks")) if f.startswith(S.safe(sp["key"]))]
     ok(f"删任务：它独占的输入、产出、日志删掉，空了的上级目录删掉；别的任务（{tk}）的视图不动")
@@ -674,7 +687,7 @@ def test_e2e_path(pre):
             raise AssertionError(bad)
         except relay.RN.RelayError:
             pass
-    assert relay.views_of(dict(view="nnUNet/preprocessed/D1")) == ["nnUNet/preprocessed/D1"]
+    assert relay.views_of(dict(view="prepared/D1")) == ["prepared/D1"]
     ok("要删的、要建的路径在数据目录里、至少两层；旧记录的 view 也认")
 
 
@@ -822,18 +835,18 @@ def test_auto_off():
 
 def test_refcount():
     """删一个任务时只删别的任务不用的路径：同一个数据集的几折共用视图，推理的输入在训练的产出下面（11/1）。"""
-    keys = {"t0": dict(views=["pre/X"], outs=["res/X/tr/fold_0"]),
-            "t1": dict(views=["pre/X"], outs=["res/X/tr/fold_1"]),
-            "inf": dict(inputs=["res/X/tr/fold_0/checkpoint_final.pth", "res/X/tr/dataset.json", "raw/A/img/a.nii.gz"],
-                        outs=["pred/X/tr/fold_0"]),
-            "ev": dict(inputs=["pred/X/tr/fold_0/a.nii.gz", "raw/A/lab/a.nii.gz"], outs=["an/X/fold_0/eval"])}
+    keys = {"t0": dict(views=["pre/X"], outs=["res/X/tr/frag_0"]),
+            "t1": dict(views=["pre/X"], outs=["res/X/tr/frag_1"]),
+            "inf": dict(inputs=["res/X/tr/frag_0/final.ckpt", "res/X/tr/dataset.json", "raw/A/img/a.dat"],
+                        outs=["pred/X/tr/frag_0"]),
+            "ev": dict(inputs=["pred/X/tr/frag_0/a.dat", "raw/A/lab/a.dat"], outs=["an/X/frag_0/eval"])}
     P = lambda k: relay.paths_of(keys[k])  # noqa: E731
     assert relay.droppable(keys, "t0", P("t0")) == []
-    assert relay.droppable(keys, "t1", P("t1")) == ["res/X/tr/fold_1"]
-    assert relay.droppable(keys, "inf", P("inf")) == ["raw/A/img/a.nii.gz", "res/X/tr/dataset.json"]
-    assert relay.droppable(keys, "ev", P("ev")) == ["an/X/fold_0/eval", "raw/A/lab/a.nii.gz"]
+    assert relay.droppable(keys, "t1", P("t1")) == ["res/X/tr/frag_1"]
+    assert relay.droppable(keys, "inf", P("inf")) == ["raw/A/img/a.dat", "res/X/tr/dataset.json"]
+    assert relay.droppable(keys, "ev", P("ev")) == ["an/X/frag_0/eval", "raw/A/lab/a.dat"]
     k2 = {k: v for k, v in keys.items() if k not in ("t1", "inf")}
-    assert relay.droppable(k2, "t0", P("t0")) == ["pre/X", "res/X/tr/fold_0"]
+    assert relay.droppable(k2, "t0", P("t0")) == ["pre/X", "res/X/tr/frag_0"]
     assert relay.overlaps("a/b", {"a/b/c"}, relay.ancestors({"a/b/c"})) and relay.overlaps("a/b/c/d", {"a/b"}, set())
     assert not relay.overlaps("a/bc", {"a/b"}, relay.ancestors({"a/b"}))
     ok("引用计数：共用的视图、别的任务输入所在的产出不删；只是名字前缀相同的不算")
@@ -846,12 +859,12 @@ def test_refcount():
     relay.update_state = lambda fn: None
     try:
         msgs = relay.execute(NAME, [dict(op="drop", key="inf", rkey="inf")], S0([]))
-        assert seen and seen[-1][0] == relay.DROP_PY and seen[-1][1] == dict(paths=["raw/A/img/a.nii.gz", "res/X/tr/dataset.json"], logs="inf"), (seen, msgs)
+        assert seen and seen[-1][0] == relay.DROP_PY and seen[-1][1] == dict(paths=["raw/A/img/a.dat", "res/X/tr/dataset.json"], logs="inf"), (seen, msgs)
         seen.clear()
         msgs = relay.execute(NAME, [dict(op="redo", key="ev", rkey="ev", busy=True)], S0([]))
         assert not seen and "等它停下" in msgs[0], msgs
         msgs = relay.execute(NAME, [dict(op="redo", key="ev", rkey="ev", busy=False)], S0([]))
-        assert seen[-1][1]["paths"] == ["an/X/fold_0/eval", "raw/A/lab/a.nii.gz"] and "重新传" in msgs[0], msgs
+        assert seen[-1][1]["paths"] == ["an/X/frag_0/eval", "raw/A/lab/a.dat"] and "重新传" in msgs[0], msgs
     finally:
         relay.rpy, relay.rtq, relay.load_state, relay.update_state = rpy0, rtq0, st0, up0
     ok("drop / redo 只删算出来能删的路径和自己的日志；redo 时那边还领着就等")
@@ -859,7 +872,7 @@ def test_refcount():
 
 def test_drop_refused():
     """那边拒绝删任务（有人在训）时不删结果、总队列里也不交还；上次删了任务没删完结果的照常删（审查 11/1）。"""
-    K = "Dataset1_x/tr/0"
+    K = "D1_x/tr/0"
     seen, central = [], []
     rpy0, rtq0, cen0 = relay.rpy, relay.rtq, relay.taskq.central
     relay.rpy = lambda name, code, data=None, **kw: (seen.append(data), 1)[1]
@@ -888,7 +901,7 @@ def test_view_lock():
     os.makedirs(os.path.join(root, "state"))
     lk = open(os.path.join(root, "state", "view.lock"), "w")
     fcntl.flock(lk, fcntl.LOCK_EX)
-    data = json.dumps(dict(views=["nnUNet/preprocessed/D1"], links={}, texts={"nnUNet/preprocessed/D1/a.json": "e30="}))
+    data = json.dumps(dict(views=["prepared/D1"], links={}, texts={"prepared/D1/a.json": "e30="}))
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     p = subprocess.Popen([sys.executable, "-c", relay.VIEW_PY, root], cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     p.stdin.write(data)
@@ -898,7 +911,7 @@ def test_view_lock():
     fcntl.flock(lk, fcntl.LOCK_UN)
     lk.close()
     p.wait(timeout=30)
-    d = os.path.join(root, "data", "nnUNet/preprocessed/D1")
+    d = os.path.join(root, "data", "prepared/D1")
     assert waited and p.returncode == 0 and os.path.isfile(os.path.join(d, "a.json")) and not os.path.exists(os.path.join(d, ".incomplete"))
     shutil.rmtree(root)
     ok("建视图：别的在建时等锁，建完删掉 .incomplete")
@@ -919,4 +932,5 @@ if __name__ == "__main__":
     test_e2e_path(test_e2e())
     test_view_lock()
     shutil.rmtree(T)
+    shutil.rmtree(STATE_DIR)
     print("全部通过")

@@ -1,0 +1,5 @@
+# 测试用：建在 base 上的 venv，pip_no_deps 里有按基础环境填的占位（{torch_mm}、{abi}、{cp}）
+base: base
+pip_no_deps:
+  - https://example.org/whl/ext-1.0+torch{torch_mm}abi{abi}-{cp}-{cp}-linux_x86_64.whl
+pip: []
