@@ -130,6 +130,7 @@ declare -A KEY=()         # 训练的 pid → key
 declare -A STARTED=()     # pid → 开始的时刻
 declare -A OUTDIR=()      # pid → 结果文件夹
 declare -A SAFE=()        # pid → key 转成的文件名（spec.py 的 TASK_SAFE）
+declare -A JTAG=()        # pid → 分段日志名里的作业名（run_task.sh 的 TASK_JOBTAG）
 declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
 declare -A TOK=()         # key → 这次领取的 token（taskq.py next 的第三行；交还、心跳时带上，11/1）
 tq() {  # tq <release|beat|missing> <key> [参数…]：带上这个 key 的 token
@@ -198,7 +199,7 @@ own_fails() {  # OWN_FAILS = FAIL_WINDOW 以内的次数
 quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变化；读不了时输出空
     local p=$1 now log m
     now=$(date +%s)
-    log=$DATA/logs/tasks/${SAFE[$p]}__${W}_part1.log
+    log=$DATA/logs/tasks/${SAFE[$p]}__${JTAG[$p]:-$W}_part1.log
     m=$(timeout 20 stat -c %Y "$log" 2> /dev/null) || return 0
     (( now - m < STALL_MAX )) && { echo $(( now - m )); return 0; }
     [[ -n ${OUTDIR[$p]:-} && -d ${OUTDIR[$p]} ]] || { echo $(( now - m )); return 0; }
@@ -212,9 +213,12 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     TOK[$key]=$tok
     eval "local targs=($args)"
     pad_make_room
-    TASK_JOBTAG=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)") TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
+    local jt
+    jt=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)")
+    TASK_JOBTAG=$jt TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
     local pid=$! sh TASK_OUT= TASK_SAFE=
     KEY[$pid]=$key
+    JTAG[$pid]=$jt
     STARTED[$pid]=$(date +%s)
     sh=$(python3 "$HERE/spec.py" shell "${targs[@]}" 2> /dev/null | grep -E '^TASK_(OUT|SAFE)=')
     eval "$sh"
@@ -270,7 +274,7 @@ check_stops() {
         if dead "$p"; then
             wait "$p" 2> /dev/null
             tq release "$k"
-            unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
+            unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "JTAG[$p]"
             n=1
         else  # 交给卡住的那一路：停不下就不交还
             echo "$(ts) $k 强制停之后还在，按卡住处理"
@@ -303,7 +307,7 @@ while true; do
             key=${KEY[$p]}; unset "KEY[$p]"
             ran=$(( $(date +%s) - ${STARTED[$p]:-0} ))
             stalled=${STALLED[$p]:-}
-            unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]"
+            unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "JTAG[$p]"
             if [[ -n $stalled ]]; then
                 echo "$(ts) 卡住的 $key 已停下，交还（不算失败），本作业不再领它"
                 tq release "$key"
@@ -332,7 +336,7 @@ while true; do
                 # 还活着就不交还（11/1）：不再心跳，领取过期后别人才能领；空出位置领下一个
                 echo "$(ts) ${KEY[$p]} 停了 3 分钟还没停下（多半卡在读写上），不再等它，不交还（领取过期后别人才能领）"
                 EXCL+=("${KEY[$p]}")
-                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "TOK[${KEY[$p]}]"
+                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "JTAG[$p]" "TOK[${KEY[$p]}]"
             elif (( now - STALLED[$p] >= 60 )); then
                 kill_tree "$p" KILL
             fi

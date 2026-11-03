@@ -374,8 +374,12 @@ def add(p):
     if os.path.isfile(p) and not os.path.realpath(p).startswith(B):
         st=os.stat(p)
         items.append([os.path.relpath(p,D),st.st_size,st.st_mtime_ns])
+def bad(e,top=None):
+    if not (isinstance(e,FileNotFoundError) and e.filename==top):
+        raise e
 for o in A['outs']:
-    for dp,_,fs in os.walk(os.path.join(D,o)):
+    top=os.path.join(D,o)
+    for dp,_,fs in os.walk(top,onerror=lambda e:bad(e,top)):
         for f in fs:
             if not any(fnmatch.fnmatch(f,x) for x in ex):
                 add(os.path.join(dp,f))
@@ -819,7 +823,9 @@ def plan(s, name, rs, st, now=None):
                                               f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）")
             continue
         ast = a["state"]
-        if ast == "done":
+        if ast == "done" and a.get("worker"):
+            pass  # 做完的标志有了、worker 还领着：训练命令还在写结果，只续约，交还以后再拉回（11/3）
+        elif ast == "done":
             ft = box_task(s, "relay_fetch", key, since)
             if ft is None:
                 acts.append(dict(op="fetch", key=key))

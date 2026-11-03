@@ -142,6 +142,11 @@ def test_central_timeout():
     wait = inspect.signature(taskq.Lock).parameters["tries"].default * 0.5
     t = inspect.signature(taskq.central).parameters["timeout"].default
     assert t > wait + 30, f"central() 的超时 {t} 秒不比锁的最长等待 {wait} 秒长：锁被占着时调用方拿到 TimeoutExpired，而不是退出码"
+    import advance
+    for f in (advance.taskq_add, advance.taskq_remove):
+        src = inspect.getsource(f)
+        t = eval(src.split("timeout=")[1].split(")")[0], vars(advance))
+        assert t > wait + 30, f"advance.{f.__name__} 的超时 {t} 秒不比锁的最长等待 {wait} 秒长"
 
 
 TESTS = dict(lock=test_lock, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,

@@ -657,17 +657,20 @@ class Leftover:
 
 
 # ---------------- 执行 ----------------
+TQ_TIMEOUT = 420  # 比队列锁的最长等待（300 秒）长：等不到锁时拿到退出码，不是超时
+
+
 def taskq_add(nice, args):
     """加进总队列（box 上本地的 taskq.py，10/31）→ (退出码, 输出)；feed.py 再送到执行机的缓冲。"""
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", str(nice), "--recipe", "command", *args],
-                       cwd=REPO, capture_output=True, text=True, timeout=300)
+                       cwd=REPO, capture_output=True, text=True, timeout=TQ_TIMEOUT)
     return r.returncode, (r.stdout + r.stderr).strip()
 
 
 def taskq_remove(keys):
     """从总队列删掉这些（没人领着的）任务 → (退出码, 输出)。"""
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "remove", *keys], cwd=REPO, capture_output=True, text=True,
-                       timeout=300)
+                       timeout=TQ_TIMEOUT)
     return r.returncode, (r.stdout + r.stderr).strip()
 
 

@@ -251,6 +251,9 @@ def test_plan():
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K), ("fetch", K)], acts
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "done", "123")), st)
+    assert ops(acts) == [("beat", K)], acts
+    ok("那边有了做完的标志、worker 还领着（训练命令还在写结果）→ 只续约，不拉回")
     frec = dict(machine=M.hub(), id=8, label="relay_fetch:" + K, step="relay_fetch", key=K, added=2000.0)
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=8, label=frec["label"], status="Running")], [frec]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K)] and not stuck, acts
@@ -945,6 +948,31 @@ def test_view_lock():
     ok("建视图：别的在建时等锁，建完删掉 .incomplete")
 
 
+def test_list_unreadable():
+    """拉回前列结果：读不了的子目录不能静默跳过（11/3：只拉回一部分、box 上算训完，下一轮删掉那边的整份）。"""
+    root = tempfile.mkdtemp()
+    out = os.path.join(root, "data", "out", "k")
+    os.makedirs(os.path.join(out, "check"))
+    os.makedirs(os.path.join(out, "part"))
+    open(os.path.join(out, "check", "DONE"), "w").close()
+    open(os.path.join(out, "part", "a"), "w").close()
+    spec = dict(key="k", out="out/k", done=["check/DONE"])
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    run = lambda outs: subprocess.run([sys.executable, "-c", relay.LIST_PY, root], input=json.dumps(dict(spec=spec, outs=outs, key="k")),
+                                      cwd=repo, capture_output=True, text=True)
+    r = run(["out/k", "out/none"])
+    res = S.json_in(r.stdout)
+    assert r.returncode == 0 and res["done"] and sorted(i[0] for i in res["items"]) == ["out/k/check/DONE", "out/k/part/a"], (r, res)
+    os.chmod(os.path.join(out, "part"), 0)
+    try:
+        r = run(["out/k"])
+    finally:
+        os.chmod(os.path.join(out, "part"), 0o755)
+    shutil.rmtree(root)
+    assert r.returncode != 0 and S.json_in(r.stdout) is None, (r.returncode, r.stdout)
+    ok("拉回前列结果：读不了的子目录 → 出错（不拉回、不算做完）；不存在的结果文件夹照样跳过")
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
@@ -959,6 +987,7 @@ if __name__ == "__main__":
     test_place()
     test_e2e_path(test_e2e())
     test_view_lock()
+    test_list_unreadable()
     shutil.rmtree(T)
     shutil.rmtree(STATE_DIR)
     print("全部通过")
