@@ -21,6 +21,7 @@
      - 那边做完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、核对、备份到 DICC；备份机暂停检查时只拉回）；
      - 总队列显示训完（box 上有了），而且拉回、归档的 box 任务成功了 → 交还，删掉那边的任务和结果；
        拉回时没归档或归档失败的，备份机能用时单独排 archive_task.sh box（relay_archive），之前领取保留、那边的结果不删；
+       备份机停用（envs/policy.py 的 OFFLINE）时不等归档：拉回核对成功就交还、删那边的（11/3 定，box 的 backup 池是第二份）；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
@@ -730,7 +731,7 @@ def progress(f):
 
 def plan(s, name, rs, st, now=None):
     """→ (动作, 卡住的 {问题编号: 说明})。rs：那边的状态（None = 连不上）；st：load_state()。
-    动作 dict(op=beat|release|stage|restage|redo|fetch|drop|unq|rstop|rresume|archive, key, …)；rkey：那边队列里的 key。"""
+    动作 dict(op=beat|release|stage|restage|redo|fetch|drop|unq|rstop|rresume|rnice|archive, key, …)；rkey：那边队列里的 key。"""
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = conf(name)["label"], keys_of(st, name)
@@ -777,7 +778,7 @@ def plan(s, name, rs, st, now=None):
                     want = bool(lookup(key).get("archive"))
                 except (RN.RelayError, S.SpecError):
                     want = False
-                if want:
+                if want and not (ft["status"] == "Success" and C.backup_down()):
                     acts.append(dict(op="beat", key=key))
                     if not C.backup_down(s.get("ok")):
                         acts.append(dict(op="archive", key=key))
@@ -787,7 +788,8 @@ def plan(s, name, rs, st, now=None):
                     stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），box 上有了、领取保留；"
                                                   f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
                     continue
-            acts.append(dict(op="release", key=key, why="训完了，box 上有了、归档到 DICC 了"))
+            archived = (at is not None) or (ft is not None and "archive_task.sh" in (ft.get("command") or ""))
+            acts.append(dict(op="release", key=key, why="训完了，box 上有了" + ("、归档了" if archived else "（没有归档）")))
             if k:
                 acts.append(dict(op="drop", key=key, rkey=rkey(key, k)))
             continue
@@ -798,6 +800,8 @@ def plan(s, name, rs, st, now=None):
             elif not (a and a.get("worker")):  # 那边不再领着（或者还没放过去）
                 acts[-1] = dict(op="release", key=key, why="停止（taskq.py stop）" + ("，那边的结果留着" if a else ""))
             continue
+        if a and a["state"] not in ("done", "failed", "bad") and a.get("nice") is not None and a["nice"] != t["nice"]:
+            acts.append(dict(op="rnice", key=key, rkey=a["key"], nice=t["nice"]))  # 总队列里改了档位（set-nice）：那边跟着改（11/3）
         since = t.get("since") or 0
         if a is None:
             sg = box_task(s, "relay_stage", key, since)
@@ -1068,6 +1072,9 @@ def execute(name, acts, s, run_add=None):
                     kept.add(k)
                 else:
                     msgs.append(f"{L} 上删了 {k} 的任务和结果" if a["op"] == "drop" else f"{L} 上删了 {k} 的旧任务和路径，下次检查重新传")
+            elif a["op"] == "rnice":
+                r = rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
+                msgs.append(f"{L} 上 {k} 改到档位 {a['nice']}" if r and r[0] == 0 else f"{L} 上 {k} 改档位出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] in ("rstop", "rresume"):
                 r = rtq(name, ("stop --why 总队列里停了 " if a["op"] == "rstop" else "resume ") + shlex.quote(a["rkey"]))
                 what = "停" if a["op"] == "rstop" else "撤销停止"

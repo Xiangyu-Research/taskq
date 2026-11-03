@@ -217,6 +217,19 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "free")), st)
     assert ops(acts) == [("beat", K)], acts
     ok("那边排着、在训 → 只续")
+    acts, _ = relay.plan(S0([mtask(K, nice=-101)]), NAME, RS(rtask(A, "free")), st)
+    assert ops(acts) == [("beat", K), ("rnice", K)] and [a for a in acts if a["op"] == "rnice"][0]["nice"] == -101, acts
+    acts, _ = relay.plan(S0([mtask(K, nice=-101)]), NAME, RS(rtask(A, "done")), st)
+    assert "rnice" not in [a["op"] for a in acts], acts
+    calls = []
+    old_rtq = relay.rtq
+    relay.rtq = lambda name, args, timeout=180: calls.append(args) or (0, "")
+    try:
+        msgs = relay.execute(NAME, [dict(op="rnice", key=K, rkey=A, nice=-101)], S0([mtask(K)]))
+    finally:
+        relay.rtq = old_rtq
+    assert calls == [f"set-nice --nice -101 {A}"] and "档位 -101" in msgs[0], (calls, msgs)
+    ok("总队列里改了档位 → 那边跟着改（set-nice）；那边训完的不改")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)], acts
@@ -266,6 +279,10 @@ def test_plan():
         acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
+        assert ops(acts) == [("drop", K), ("release", K)] and not stuck, (acts, stuck)
+        assert "没有归档" in [a for a in acts if a["op"] == "release"][0]["why"], acts
+        C.backup_down = lambda ok=None: "dicc 这次连不上" if ok is not None else None
+        acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
         C.backup_down = lambda ok=None: None
         acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
@@ -285,7 +302,7 @@ def test_plan():
         assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
     finally:
         relay.lookup, C.backup_down = old_lookup, old_down
-    ok("要归档的折：备份机暂停检查时拉回后先不归档、领取保留、不报；备份机回来后单独排归档（relay_archive），归档成功才交还、删那边的；归档出错 → 报")
+    ok("要归档的折：备份机停用时拉回成功就交还、删那边的（拉回出错不删、不报）；只是这次连不上 → 等；备份机能用时单独排归档（relay_archive），归档成功才交还、删那边的；归档出错 → 报")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
