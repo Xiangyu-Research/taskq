@@ -65,8 +65,8 @@ def main():
     argv = shlex.split(fake.calls[0])
     i = argv.index("--")
     assert len(argv) == i + 2, "pueue add 的 -- 后面只能有一个参数"
-    inner = shlex.split(argv[i + 1])
-    assert inner[:2] == ["bash", "-c"] and len(inner) == 3
+    inner = shlex.split(argv[i + 1])[1:]
+    assert shlex.split(argv[i + 1])[0] == "exec" and inner[:2] == ["bash", "-c"] and len(inner) == 3
     assert f"WORKER_ID={w['id']}" in inner[2] and f"CUDA_VISIBLE_DEVICES={lab1['groups'][w['group']][1]}" in inner[2]
     assert argv[argv.index("-g") + 1] == w["group"] and argv[argv.index("-l") + 1] == wl
     ok("pueue.start_worker：整条 bash -c 作为一个参数（ccb0ba6），组、标签、卡号来自 SITES")
@@ -80,7 +80,7 @@ def main():
     fake = Fake([("add -g", (0, "New task added (id 10).\n"))])
     assert PQ.start_worker("lab1", fake, "cpu") == (True, "New task added (id 10).")
     argv = shlex.split(fake.calls[0])
-    run = shlex.split(argv[argv.index("--") + 1])[2]
+    run = shlex.split(argv[argv.index("--") + 1])[3]
     assert argv[argv.index("-g") + 1] == cw["group"] and argv[argv.index("-l") + 1] == f"worker:{cw['id']}"
     assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES= TASKQ_CPUS={cw['cpus']};" in run, run
     assert run.endswith('exec bash "$REPO/scripts/queue/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
@@ -101,19 +101,19 @@ def main():
         os.makedirs(code)
         os.symlink(os.path.join(root, "code", "v1"), os.path.join(root, "code", "current"))
         with open(os.path.join(code, "worker_start.sh"), "w") as f:
-            f.write('printf "%s\\n" "$0" "$TASKQ_DIR" "$WORKER_ID" "$@" > "$HOME/argv"\n')
+            f.write('printf "%s\\n" "$0" "$TASKQ_DIR" "$WORKER_ID" "$$" "$@" > "$HOME/argv"\n')
         old_conf = PQ.R.conf
         PQ.R.conf = lambda name: dict(old_conf(name), root=(shown or root) + "/")
         try:
             argv = shlex.split(PQ.worker_cmd("lab1"))
         finally:
             PQ.R.conf = old_conf
-        inner = shlex.split(argv[argv.index("--") + 1])
-        assert inner[:2] == ["bash", "-c"]
-        subprocess.run(inner, env=dict(PATH=os.environ["PATH"], HOME=home), check=True, timeout=30)
+        p = subprocess.Popen(["sh", "-c", argv[argv.index("--") + 1]], env=dict(PATH=os.environ["PATH"], HOME=home))  # pueue 的跑法
+        assert p.wait(timeout=30) == 0
         got = open(os.path.join(home, "argv")).read().splitlines()
-        assert got == [os.path.join(code, "worker_start.sh"), os.path.join(root, "queue"), w["id"]], got
-    ok("pueue.worker_cmd：根目录带空格、单引号、~/ 开头时 worker 照样起来（路径都加了引号）")
+        assert got == [os.path.join(code, "worker_start.sh"), os.path.join(root, "queue"), w["id"], str(p.pid)], got
+    ok("pueue.worker_cmd：根目录带空格、单引号、~/ 开头时 worker 照样起来（路径都加了引号）；"
+       "sh 一路 exec 到 worker_start.sh，pueue 停任务时等 worker 自己收尾")
 
     # ---- slurm ----
     old = dict(P.SLURM)
