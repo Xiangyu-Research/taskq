@@ -427,7 +427,7 @@ def topup(s, name, dry=False, run=None):
             shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
         return [], {}
     msgs, stuck = [], {}
-    for r in SL.start_workers(f"{m['repo']}/scripts/queue", subs, lambda c: run(c, m["ssh"])):
+    for r in SL.start_workers(f"{m['repo']}/scripts/queue", subs, lambda c: run(c, m["ssh"]), m.get("job_names")):
         q, t, n, ids, f = r["qos"], r["time"], r["n"], r["ids"], r["file"]
         if r["err"] is not None:
             stuck[f"topup:{name}:{q}{':cpu' if f == CPU_FILE else ''}"] = f"{m['label']} {q} 补交 {f} 出错：{r['err']}"

@@ -14,7 +14,7 @@ import policy as P  # noqa: E402
 SUBMIT_CAP = 10  # 读不到 QOS 的排队上限时按这个算
 FILES = {"gpu": "worker.sbatch", "cpu": "cpu_worker.sbatch"}  # worker 的种类 → sbatch 文件；认 worker 按 squeue 的 %o（交的脚本）
 
-# 作业名每次随机取 <词>-<词>（11/2 定：各账号、各作业的名字都不一样），不靠名字认作业
+# 作业名每次随机取（11/2 定：各账号、各作业的名字都不一样），不靠名字认作业；每台按机器表的 job_names 用自己的一套（11/3 定）
 _W1 = ("amber azure bold brisk calm clear coral crisp dawn deep dry eager early fair fast fern firm fresh gentle glad gold "
        "grand green grey hazy keen kind late light lime lively lone loyal lucky mellow merry mild misty modest neat noble "
        "pale plain polar proud quick quiet rapid rare ready red rosy round royal ruby rustic sandy sharp shy silent silver "
@@ -26,9 +26,18 @@ _W2 = ("acorn alder anchor apple arch aspen badger basin beacon birch bison bloo
        "valley willow wren yew").split()
 
 
-def jobname():
-    """一个随机的作业名 <词>-<词>。"""
-    return f"{secrets.choice(_W1)}-{secrets.choice(_W2)}"
+_STARS = ("acrux adhara algol alnair altair antares arcturus atlas bellatrix betelgeuse canopus capella castor deneb diphda "
+          "electra enif fomalhaut gacrux hadar hamal izar kochab lyra merak mimosa mira mizar nunki orion pollux procyon rigel "
+          "sabik sadr saiph schedar shaula sirius spica suhail thuban vega wezen zosma").split()
+STYLES = {
+    "pair": lambda: f"{secrets.choice(_W1)}-{secrets.choice(_W2)}",  # <形容词>-<名词>，如 late-plover
+    "star": lambda: f"{secrets.choice(_STARS)}{secrets.randbelow(90) + 10}",  # <星名><两位数>，如 vega27
+}
+
+
+def jobname(style=None):
+    """一个随机的作业名，按 style（STYLES 的键；没有 → pair）。"""
+    return STYLES[style or "pair"]()
 
 
 def kind_of(command):
@@ -98,13 +107,13 @@ def distribute(qos, counts, room, file):
     return out
 
 
-def start_workers(cwd, subs, run):
-    """在 cwd（那边放 sbatch 文件的目录，shell 写法）交 subs（每个作业一个随机名字）→ [dict(qos, time, n=要交几个, file, ids, err)]；一个 QOS 出错就停这个 QOS。"""
+def start_workers(cwd, subs, run, style=None):
+    """在 cwd（那边放 sbatch 文件的目录，shell 写法）交 subs（每个作业一个随机名字，按 style）→ [dict(qos, time, n=要交几个, file, ids, err)]；一个 QOS 出错就停这个 QOS。"""
     res = []
     for q, t, n, f in subs:
         ids, err = [], None
         for _ in range(n):
-            rc, out = run(f"cd {cwd} && sbatch --parsable -J {jobname()} --qos={q} --time={t} {f}")
+            rc, out = run(f"cd {cwd} && sbatch --parsable -J {jobname(style)} --qos={q} --time={t} {f}")
             if rc:
                 err = out[-200:]
                 break

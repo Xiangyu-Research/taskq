@@ -143,7 +143,13 @@ def main():
         assert c0 and c1, fake.calls
         names = {SL.jobname() for _ in range(50)}
         assert len(names) > 40 and all(re.fullmatch(r"[a-z]+-[a-z]+", x) for x in names)
-        ok("slurm.start_workers：交的是那边的 worker.sbatch（再转交 worker_start.sh、开显存填充），每个作业一个随机的 <词>-<词> 名字")
+        fake = Fake([("sbatch", (0, "4712\n"))])
+        SL.start_workers("d", [("long", "1", 1, "worker.sbatch")], fake, "star")
+        stars = {SL.jobname("star") for _ in range(50)}
+        assert re.fullmatch(r".* -J [a-z]+[1-9][0-9] .*", fake.calls[0]) and len(stars) > 40 \
+            and all(re.fullmatch(r"[a-z]+[1-9][0-9]", x) for x in stars) and not names & stars
+        ok("slurm.start_workers：交的是那边的 worker.sbatch（再转交 worker_start.sh、开显存填充），每个作业一个随机名字，"
+           "按机器表的 job_names 用各自的一套（pair：<词>-<词>，star：<星名><两位数>）")
         assert SL.kind_of("/home/user/a/q/code/current/scripts/queue/worker.sbatch") == "gpu" and SL.kind_of("cpu_worker.sbatch") == "cpu" \
             and SL.kind_of("/bin/sh") is None and SL.kind_of("/x/worker.sbatch.bak") is None and SL.kind_of(None) is None
         pr = SL.probe("dicc1")
