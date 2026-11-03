@@ -7,10 +7,11 @@ import re
 import shlex
 import subprocess
 
+import cfg
 from relay_plugins import RelayError, expand, sha256
 
 FIX = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(FIX)))
+REPO = cfg.REPO  # 任务命令里的路径相对它
 
 
 def _jload(p):

@@ -5,6 +5,7 @@
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -222,7 +223,7 @@ def test_dicc_worker_in_bundle(T):
     dst = os.path.join(path, "scripts", "queue", "test_in_bundle.sh")
     fx = 'source "$HERE/testdata/fixture.sh"'
     assert fx in test
-    test = test.replace(fx, 'export TASKQ_CONFIG=$(cd "$HERE/../../envs" && pwd) TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 envs/
+    test = test.replace(fx, f'export TASKQ_CONFIG={shlex.quote(os.path.join(path, "envs"))} TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 envs/
     with open(dst, "w") as f:
         f.write(test.replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
     r = run(["bash", dst], timeout=1800)
