@@ -729,7 +729,7 @@ def progress(f):
 
 def plan(s, name, rs, st, now=None):
     """→ (动作, 卡住的 {问题编号: 说明})。rs：那边的状态（None = 连不上）；st：load_state()。
-    动作 dict(op=beat|release|stage|restage|redo|fetch|drop|unq|rstop|rresume|archive, key, …)；rkey：那边队列里的 key。"""
+    动作 dict(op=beat|release|stage|restage|redo|fetch|drop|unq|rstop|rresume|rnice|archive, key, …)；rkey：那边队列里的 key。"""
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = conf(name)["label"], keys_of(st, name)
@@ -797,6 +797,8 @@ def plan(s, name, rs, st, now=None):
             elif not (a and a.get("worker")):  # 那边不再领着（或者还没放过去）
                 acts[-1] = dict(op="release", key=key, why="停止（taskq.py stop）" + ("，那边的结果留着" if a else ""))
             continue
+        if a and a["state"] not in ("done", "failed", "bad") and a.get("nice") is not None and a["nice"] != t["nice"]:
+            acts.append(dict(op="rnice", key=key, rkey=a["key"], nice=t["nice"]))  # 总队列里改了档位（set-nice）：那边跟着改（11/3）
         since = t.get("since") or 0
         if a is None:
             sg = box_task(s, "relay_stage", key, since)
@@ -1067,6 +1069,9 @@ def execute(name, acts, s, run_add=None):
                     kept.add(k)
                 else:
                     msgs.append(f"{L} 上删了 {k} 的任务和结果" if a["op"] == "drop" else f"{L} 上删了 {k} 的旧任务和路径，下次检查重新传")
+            elif a["op"] == "rnice":
+                r = rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
+                msgs.append(f"{L} 上 {k} 改到档位 {a['nice']}" if r and r[0] == 0 else f"{L} 上 {k} 改档位出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] in ("rstop", "rresume"):
                 r = rtq(name, ("stop --why 总队列里停了 " if a["op"] == "rstop" else "resume ") + shlex.quote(a["rkey"]))
                 what = "停" if a["op"] == "rstop" else "撤销停止"

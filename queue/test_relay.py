@@ -204,6 +204,19 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "free")), st)
     assert ops(acts) == [("beat", K)], acts
     ok("那边排着、在训 → 只续")
+    acts, _ = relay.plan(S0([mtask(K, nice=-101)]), NAME, RS(rtask(A, "free")), st)
+    assert ops(acts) == [("beat", K), ("rnice", K)] and [a for a in acts if a["op"] == "rnice"][0]["nice"] == -101, acts
+    acts, _ = relay.plan(S0([mtask(K, nice=-101)]), NAME, RS(rtask(A, "done")), st)
+    assert "rnice" not in [a["op"] for a in acts], acts
+    calls = []
+    old_rtq = relay.rtq
+    relay.rtq = lambda name, args, timeout=180: calls.append(args) or (0, "")
+    try:
+        msgs = relay.execute(NAME, [dict(op="rnice", key=K, rkey=A, nice=-101)], S0([mtask(K)]))
+    finally:
+        relay.rtq = old_rtq
+    assert calls == [f"set-nice --nice -101 {A}"] and "档位 -101" in msgs[0], (calls, msgs)
+    ok("总队列里改了档位 → 那边跟着改（set-nice）；那边训完的不改")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)], acts
