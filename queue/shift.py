@@ -57,12 +57,15 @@ def dated(now, start, end, first=None, last=None):
     return (cur if inside(cur) else None), (ended if inside(ended) else None)
 
 
-def rule(name):
-    """执行机 name 的时段 (开始, 结束, 第一个, 最后一个)；不按时段 → None。"""
+def rule(name, now=None):
+    """执行机 name 现在用的时段 (开始, 结束, 第一个, 最后一个)；不按时段 → None。SHIFT 可以写一段或几段（列表，11/3）：
+    取现在在时段里的那一段，都不在 → 最后一段。几段的日期不要重叠。"""
     v = getattr(P, "SHIFT", {}).get(name)
-    if not isinstance(v, (tuple, list)):
+    if not isinstance(v, (tuple, list)) or not v:
         return None
-    return tuple(v) + (None,) * (4 - len(v))
+    rs = [tuple(x) + (None,) * (4 - len(x)) for x in (v if isinstance(v[0], (tuple, list)) else [v])]
+    now = now or dt.datetime.now(TZ)
+    return next((r for r in rs if dated(now, *r)[0]), rs[-1])
 
 
 def limited(name):
@@ -71,10 +74,11 @@ def limited(name):
 
 def allowed(name, now=None):
     """执行机现在能不能领任务、开 worker：不按时段 → True；按时段的要在时段里、这个时段已经由 run() 开了（卡空着）。"""
-    r = rule(name)
+    now = now or dt.datetime.now(TZ)
+    r = rule(name, now)
     if r is None:
         return True
-    cur, _ = dated(now or dt.datetime.now(TZ), *r)
+    cur, _ = dated(now, *r)
     rec = load().get(name) or {}
     return bool(cur) and rec.get("started") == cur and rec.get("paused") != cur
 
@@ -265,8 +269,8 @@ def run(s=None, dry=False, now=None):
     now = now or dt.datetime.now(TZ)
     st, msgs = load(), []
     for name in getattr(P, "SHIFT", {}):
-        if rule(name):
-            msgs += run_site(name, rule(name), now, st, dry)
+        if rule(name, now):
+            msgs += run_site(name, rule(name, now), now, st, dry)
     if not dry:
         save(st)
         if msgs:

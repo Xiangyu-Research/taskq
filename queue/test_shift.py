@@ -130,4 +130,20 @@ shift.run(now=D(4, 11, 30))
 assert not stops
 ok("worker 没确认停下、读不到 pueue、任务没交出去：不记 paused，下次检查再停；都做完后只停一次")
 
+# 11/3：一台写几段（全天到 11/3 的时段，11/4 起晚班 21:00–09:00）
+shift.P.SHIFT = {"z0": [("09:00", "09:00", "2026-11-01", "2026-11-03"), ("21:00", "09:00", "2026-11-04", None)]}
+assert shift.rule("z0", D(3, 19)) == ("09:00", "09:00", "2026-11-01", "2026-11-03")
+assert shift.rule("z0", D(4, 12)) == ("21:00", "09:00", "2026-11-04", None) and shift.limited("z0")
+shift.save({"z0": dict(started="2026-11-03")})
+assert shift.allowed("z0", D(3, 19, 30)) and shift.allowed("z0", D(4, 8, 59))
+assert not shift.allowed("z0", D(4, 9)) and not shift.allowed("z0", D(4, 20, 59))
+stops.clear()
+shift.run(now=D(4, 9, 30))
+assert stops and shift.load()["z0"].get("paused") == "2026-11-03", shift.load()
+calls.clear()
+shift.run(now=D(4, 21, 5))
+assert shift.load()["z0"].get("started") == "2026-11-04" and shift.allowed("z0", D(4, 21, 10)) and shift.allowed("z0", D(5, 8, 50))
+assert not shift.allowed("z0", D(5, 9, 10)) and not shift.allowed("z0", D(5, 20, 50))
+ok("几段时段：前一段到期后停，下一段按它的开始时间开")
+
 print("全部通过")
