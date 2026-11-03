@@ -237,6 +237,17 @@ ok("_x：写错步骤名、oof 没给 splits、paired 不跟在 oof 后面、P1 
 ok("readers：toy_log、toy_debug 加载进 PROGRESS、INFO，有训完一轮的字样",
    "toy_log" in S.PROGRESS and "toy_debug" in S.INFO and S.TRAINED)
 ok("readers：重名的报错", raises(lambda: S.load_readers({"a.py": "PROGRESS={'toy_log': None}"})))
+_dup = tempfile.mkdtemp()
+os.makedirs(os.path.join(_dup, "readers"))
+open(os.path.join(_dup, "readers", "toy.py"), "w").write("PROGRESS = {}\n")
+_pl = os.environ.get("TASKQ_PLUGINS")
+os.environ["TASKQ_PLUGINS"] = os.pathsep.join(filter(None, [_pl, _dup]))
+try:
+    ok("readers：两个插件文件夹里有同名的 readers/toy.py 时报错，不让后一个顶掉前一个", raises(S.reader_sources))
+finally:
+    os.environ.pop("TASKQ_PLUGINS")
+    if _pl is not None:
+        os.environ["TASKQ_PLUGINS"] = _pl
 rr = tempfile.mkdtemp()
 ns = S.resolve("toy", {"ds": "D1_x", "variant": "tr", "frag": "0"})
 od = os.path.join(rr, ns["out"])

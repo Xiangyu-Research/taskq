@@ -281,10 +281,16 @@ def reader_sources():
     if HERE not in sys.path:
         sys.path.append(HERE)
     import cfg
-    out = {}
+    out, where = {}, {}
     for d in [os.path.join(x, "readers") for x in [HERE] + cfg.plugin_dirs()]:
-        out.update({f[:-3]: open(os.path.join(d, f), encoding="utf-8").read()
-                    for f in sorted(os.listdir(d) if os.path.isdir(d) else []) if f.endswith(".py") and not f.startswith("test_")})
+        for f in sorted(os.listdir(d) if os.path.isdir(d) else []):
+            if not f.endswith(".py") or f.startswith("test_"):
+                continue
+            p = os.path.join(d, f)
+            if f[:-3] in where and os.path.realpath(where[f[:-3]]) != os.path.realpath(p):
+                raise SpecError(f"{p} 和 {where[f[:-3]]} 同名，后加载的会顶掉前一个")
+            where[f[:-3]] = p
+            out[f[:-3]] = open(p, encoding="utf-8").read()
     return out
 
 
