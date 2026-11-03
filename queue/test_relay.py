@@ -408,6 +408,11 @@ def test_plan():
     HARD0 = (relay.conf(NAME).get("budget") or (None, relay.HARD_GB))[1]
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "claimed", "1")), st, [])
     assert [a["key"] for a in more] == [K2, K3], (more, why)
+    berr = S0([mtask(K)] + cands)
+    berr["pueue"] = {M.hub(): {"error": "pueue 没有响应"}}
+    more, why = relay.fill(berr, NAME, RS(rtask(A, "claimed", "1")), st, [])
+    assert more == [] and "pueue" in why, (more, why)
+    ok("box 的 pueue 读不到：不领新任务、不换位（传数据要在 box 的 pueue 排）")
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K2], more
     more, why = relay.fill(S0([mtask(K), mtask("D5_d/tr/0")] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME, RS(rtask(A, "free")), st, [])

@@ -898,6 +898,8 @@ def fill(s, name, rs, st, acts):
         return [], "总队列关着或暂停中"
     if not shift.allowed(name):
         return [], "不在时段里（envs/policy.py 的 SHIFT）"
+    if "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):  # 传数据要在 box 的 pueue 排，在跑的看不见（11/3）
+        return [], "box 的 pueue 读不到"
     if any(n not in s["src"] and n not in P.OFFLINE for n in M.names("train")):  # 暂停检查的机器不算
         return [], "有训练机的进度读不到"
     want, kinds = P.READY.get(name, 1), M.kinds(name)
