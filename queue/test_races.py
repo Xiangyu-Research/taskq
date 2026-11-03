@@ -99,7 +99,7 @@ def test_gc_pin():
     R = os.path.join(TMP, "gcroot")
     h = "ab" + "0" * 62
     os.makedirs(os.path.join(R, "blobs", h[:2]))
-    os.makedirs(os.path.join(R, "data", "nnUNet", "preprocessed"))
+    os.makedirs(os.path.join(R, "data", "views", "v"))
     os.makedirs(os.path.join(R, "state", "pins"))
     blob = os.path.join(R, "blobs", h[:2], h)
     with open(blob, "wb") as f:
@@ -120,7 +120,7 @@ def test_gc_pin():
         f.write(relay_gc.GC_PY)
     repo = os.path.dirname(os.path.dirname(HERE))
     r = subprocess.run([sys.executable, "-c", code, gc_file, R], cwd=repo, capture_output=True, text=True,
-                       input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["nnUNet/preprocessed"])))
+                       input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["views/v"])))
     assert r.returncode == 0, r.stderr
     assert os.path.exists(blob), (f"stage 在 GC 运行中写了 pin，GC 仍删了这个 blob：{r.stdout.strip()}")
 
