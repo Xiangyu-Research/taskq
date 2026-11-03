@@ -552,6 +552,21 @@ def test_place():
                     "preds/m/frag_0/.infer_done"], seen
     ok("拉回：MANIFEST.json 在训完的标志前、普通文件后挪")
 
+    # 变异审查（11/3）：done 有几项时倒着放，第一项（只看第一项的读者认的标志）最后放
+    src, D = os.path.join(T, "place3_src"), os.path.join(T, "place3_dst")
+    real = dict(out="o/f0", done=["first.flag", "second.flag|alt.flag", "third.flag"], fetch=dict(extra=[]))
+    written = ["o/f0/first.flag", "o/f0/second.flag", "o/f0/third.flag", "o/f0/x.dat"]
+    for w in written:
+        TN.wb(os.path.join(src, w), b"n")
+    seen = []
+    relay.os.replace = spy2
+    try:
+        relay.place(src, D, written, real)
+    finally:
+        relay.os.replace = real_replace
+    assert seen == ["o/f0/x.dat", "o/f0/third.flag", "o/f0/second.flag", "o/f0/first.flag"], seen
+    ok("拉回：done 的几项倒着放，第一项最后")
+
 
 # ---------------- 3. 真跑 ----------------
 def test_e2e():

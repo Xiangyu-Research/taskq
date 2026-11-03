@@ -699,6 +699,17 @@ s_["pueue"]["box"]["tasks"].append(dict(id=97, status="Running", command=f"bash 
                                         group="wait", end=None))
 x = t3(A.plan(s_)[0])
 check("trainer：lab 上正在归档这一折 → 不用 lab，DICC 的队列等归档做完再加", not x)
+# 变异审查（11/3）：relay 机器训完、box 上已有训完的标志、但 relay_fetch（拉回训练）还在跑 → 推理不分给那台（拉回后那边的结果会删）
+A.feed.sites = lambda: ["dicc"]
+A.P.AUTO = dict(A.P.AUTO, lab1=True)
+s_ = lsnap("lab1")
+s_["pueue"]["box"]["tasks"].append(dict(id=96, status="Running", command=f"python3 scripts/queue/relay.py fetch lab1 {K3}",
+                                        label=f"relay_fetch:{K3}", group="wait", end=None))
+s_["records"] = [dict(machine="box", id=96, label=f"relay_fetch:{K3}", step="relay_fetch", key=K3)]
+x = t3(A.plan(s_)[0])
+print("   ", [(t["step"], t.get("args")) for t in x])
+check("trainer：relay_fetch 还在拉回训练结果 → 推理不分给那台", not any('machines=["lab1"]' in (t.get("args") or []) for t in x))
+A.feed.sites = lambda: ["dicc", "lab"]
 REMOTE["have"] = set(TN3) - {"raw/holdout/A/inputs"}
 todo, stuck = A.plan(lsnap("lab", frag=FIN))
 check("trainer：lab 上缺测试集文件夹 → 报出来（和 DICC 缺的一样）；没排上，照常归档（归档以后改用 DICC）",

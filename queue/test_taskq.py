@@ -617,6 +617,8 @@ rc, out = tq7("remove", kt7, "infer/x/frag_3")
 check("remove：分出去的不删，提示先 stop", rc == 1 and "先 stop" in out)
 rc, out = tq7("stop", kt7)
 check("stop：分出去的提示由 box 下次检查时停", rc == 0 and "分给了 dicc" in out)
+rc, out = tq7("take", "--worker", "dicc", "--assign", kt7)  # 变异审查（11/3）：停了的，原来领着的也不能再领
+check("take：停了的（就算是自己领着的）不领", rc == 10 and "stopped" in out)
 tq7("resume", kt7)
 
 BUF = os.path.join(T, "buffer7")
@@ -843,6 +845,35 @@ check("after：没做完的 + 不在队列里的，两种顺序都是 blocked", 
       and "nosuch/x" in sr["r/a1"][1])
 check("after：没做完的 + 失败满次的 → blocked", sr["r/a3"][0] == "blocked" and "r/failed2" in sr["r/a3"][1])
 check("after：只有没做完的 → waiting", sr["r/a4"] == ("waiting", f"等 {kp}"))
+
+# 变异审查（11/3）：同一个进程里队列文件改了（health 里 advance 加任务后 feed 第二遍），after 要按新文件算，不用旧的缓存
+tq_orig, taskq.TQ = taskq.TQ, TQR
+try:
+    rows_c = [cmdtask(1, "r/c1", ["r/cnew"])]
+    taskq.write_tasks([dict(r) for r in rows_c])
+    t_c = taskq.read_tasks()[0]
+    st_a = taskq.state(t_c, DATA)
+    taskq.write_tasks(taskq.read_tasks() + [dict(cmdtask(2, "r/cnew", []))])
+    os.utime(taskq.tasks_path(), (time.time() + 5, time.time() + 5))
+    st_b = taskq.state(t_c, DATA)
+    check("after：同一进程里加了等的任务 → 从 blocked 变成 waiting", st_a[0] == "blocked" and st_b[0] == "waiting")
+    print("   ", st_a, st_b)
+finally:
+    taskq.TQ = tq_orig
+
+# 变异审查（11/3）：有缺输入的标记、但已经有人领着（标记之后重新领了）→ 算 claimed，不算 input（input 的可以被 remove、被 restage）
+tq_orig, taskq.TQ = taskq.TQ, TQR
+try:
+    taskq.write_tasks([dict(cmdtask(1, "r/inp", []))])
+    t_i = taskq.read_tasks()[0]
+    os.makedirs(os.path.join(TQR, "inputs"), exist_ok=True)
+    open(os.path.join(TQR, "inputs", taskq.safe("r/inp")), "w").write(f"{time.time()}\tW\tx\n")
+    os.makedirs(os.path.join(TQR, "claims", taskq.safe("r/inp")), exist_ok=True)
+    taskq.write_json(os.path.join(TQR, "claims", taskq.safe("r/inp"), "info"), dict(worker="W2", host="h", since=time.time(), beat=time.time()), indent=None)
+    st_i = taskq.state(t_i, DATA)
+    check("缺输入的标记 + 有人领着 → claimed", st_i[0] == "claimed")
+finally:
+    taskq.TQ = tq_orig
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

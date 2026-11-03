@@ -179,6 +179,19 @@ def main():
         assert exists(R, "hh1") and exists(R, "ii1") and r.get("unlinked") == 1, r
         ok("还不够时：自己不用、另一个链接在同一个盘上别的执行机 blobs 里的，只删自己这个链接；老目录的硬链接、自己在用的不碰")
 
+        # 变异审查（11/3）：keep 是视图里更深的一层（或更上的一层）时，包含它的视图 / 它下面的视图也不删
+        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        D = os.path.join(R, "data")
+        os.makedirs(os.path.join(D, "in/up/sub"))
+        os.symlink(blob(R, "up1", 10), os.path.join(D, "in/up/sub/f.dat"))
+        r = G.gc("x", ["prepared/ds_keep/PlanM_full", "in/up/sub"], local_rpy(R), soft_gb=1e-6, free=0, views=["in/up"])
+        assert os.path.exists(os.path.join(D, "prepared/ds_keep/PlanM_full/c1.prob")), r
+        assert os.path.exists(os.path.join(D, "in/up/sub/f.dat")), r
+        assert "prepared/ds_old" in r["removed_views"] and "prepared/ds_keep" not in r["removed_views"], r
+        r = G.gc("x", ["prepared"], local_rpy(R), soft_gb=1e-6, free=0)
+        assert os.path.isdir(os.path.join(D, "prepared/ds_keep")), r
+        ok("keep 是视图下面一层或上面一层：那个视图也不删")
+
         b0, G.budget = G.budget, lambda n: None
         try:
             assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None

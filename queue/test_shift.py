@@ -155,4 +155,12 @@ msg, done = shift.stop_site("z0")
 assert done and moves == [("D/t/1", "z0", "z1")] and gave == [("D/t/2", "z0")], (msg, done, moves, gave)
 ok("暂停成功、组 Paused、没有在跑的：照常交接")
 
+# 变异审查（11/3）：SIGTERM 之后 worker 停了，但组已不是 Paused（被恢复了，排着的 worker 会开始）：不算停下，不交出任务
+moves.clear(), gave.clear()
+seq = {"g0": [("Paused", {7: dict(state="Running")}), ("Running", {7: dict(state="Done")})]}
+shift.group_tasks = lambda host, g, *a: (seq[g].pop(0) if len(seq[g]) > 1 else seq[g][0]) if g in seq else ("Paused", {})
+msg, done = shift.stop_site("z0")
+assert not done and not moves and not gave, (msg, done, moves, gave)
+ok("worker 停下后组变回 Running：不算停下，不交出任务")
+
 print("全部通过")
