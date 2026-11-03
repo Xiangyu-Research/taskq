@@ -105,6 +105,15 @@ def gpus_of(lines):
     return list(gpus.values())
 
 
+def probe_ok(script, rc, out):
+    """probe_script 的结果 → (连得上没有, 已有的数据)。输出被截断：这次算没读到，不当成数据不在。
+    数据目录不在或进不去（@@NODATA）：机器算连得上，数据都不在（11/3）。"""
+    have = C.parse_have(out) if C.HAVE_END in script else set()
+    if have is None and rc == 3 and C.HAVE_NODATA in out.splitlines():
+        rc, have = 0, set()
+    return rc == 0 and "BOOT|" in out and have is not None, have
+
+
 def probe_script(m, paths=()):
     """pueue 机器上要查的东西（按表里的字段），每行"项|值"。paths：训练机上要看在不在的数据（相对数据目录）。"""
     lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"', GPU_PROBE]
@@ -186,8 +195,7 @@ def gather(remote=True):
         else:
             script = probe_script(m, data_candidates(queue))
             rc, out = run_on(m, script)
-            have = C.parse_have(out) if C.HAVE_END in script else set()  # 输出被截断：这次算没读到，不当成数据不在
-            ok = rc == 0 and "BOOT|" in out and have is not None
+            ok, have = probe_ok(script, rc, out)
             if ok:
                 lines = out.splitlines()
                 s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|", "HAVE|")))
