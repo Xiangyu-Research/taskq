@@ -420,7 +420,7 @@ def topup(s, name, dry=False, run=None):
     desc = "；".join(f"交 {'CPU worker ' if f == CPU_FILE else ''}{q} {n} 段" for q, _, n, f in subs) or f"不交（{why}）"
     if dry:
         return [f"{name}：会 {desc}" if subs else f"{name}：{desc}"], {}
-    if not P.AUTO.get("dicc"):
+    if not P.AUTO.get(name):
         if subs:
             shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
         return [], {}

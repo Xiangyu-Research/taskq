@@ -222,7 +222,7 @@ def backup_down(ok=None):
     → 说明；能用 → None。连不上时先不排归档，免得排上去的归档都失败、停住（11/1）。"""
     import machines as M
     import policy as P
-    for b in M.names("backup"):
+    for b in M.backups():
         if b == M.hub():
             continue
         if b in P.OFFLINE:

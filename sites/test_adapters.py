@@ -8,6 +8,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "queue"))
+import testfix  # noqa: E402
+testfix.slurm_site()
 import remote as R  # noqa: E402
 import pueue as PQ  # noqa: E402
 import slurm as SL  # noqa: E402

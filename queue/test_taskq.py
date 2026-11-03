@@ -17,6 +17,8 @@ ENV = dict(os.environ, TASKQ_DIR=TQ, BRAIN_TUMOR=DATA, TASKQ_MACHINE="dicc")  # 
 ENV.pop("nnUNet_results", None)
 sys.path.insert(0, HERE)
 os.environ.update(TASKQ_DIR=TQ)
+import testfix  # noqa: E402
+testfix.slurm_site()
 import taskq  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402

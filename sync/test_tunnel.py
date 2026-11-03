@@ -18,13 +18,17 @@ FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
     f.write('#!/bin/bash\nshift\ncd "$HOME" && exec bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
+HOST = "plainhost"  # 不是执行机的 Slurm 机器（子进程里由 sitecustomize 加进机器表）
+with open(os.path.join(T, "sitecustomize.py"), "w") as f:
+    f.write(f"import sys\nsys.path.insert(0, {os.path.join(HERE, '..', '..', 'envs')!r})\nimport machines\n"
+            f"machines.MACHINES[{HOST!r}] = dict(label='plain', ssh={HOST!r}, scheduler='slurm', transfer_job='-p x', tunnel=('push', 'pull'))\n")
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 ENV = dict(os.environ, HOME=HOME, TUNNEL_SSH=FAKE, RSYNC_RSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}",
            TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1", TUNNEL_CHUNK=str(1 << 20),
-           TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", PATH=os.environ["PATH"])
+           TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", PATH=os.environ["PATH"], PYTHONPATH=T)
 FAILS = []
 
 
@@ -69,28 +73,28 @@ make(src, FILES)
 os.chmod(os.path.join(src, "a/b/y.bin"), 0o600)
 lst = os.path.join(T, "list")
 open(lst, "w").write("\n".join(FILES) + "\n")
-r = run("push", "dicc", src, "st/pushed", lst)
+r = run("push", HOST, src, "st/pushed", lst)
 dst = os.path.join(HOME, "st/pushed")
 ok("push 退出码 0", r.returncode == 0)
 ok("push 内容和修改时间一致", same(src, dst, FILES))
 ok("push 保留权限", os.stat(os.path.join(dst, "a/b/y.bin")).st_mode & 0o777 == 0o600)
 ok("push 没有留下 .tunnelpart、那边的工作目录删了", not any(p.endswith(".tunnelpart") for p in tree(dst)) and not os.listdir(os.path.join(HOME, ".cache/phd/tunnel")))
 
-r = run("push", "dicc", src, "st/pushed", lst)
+r = run("push", HOST, src, "st/pushed", lst)
 ok("push 再跑一次：已有的跳过、仍然一致", r.returncode == 0 and same(src, dst, FILES) and "4 个一致" in r.stdout)
 
 shutil.rmtree(dst)
-r = run("push", "dicc", src, "st/pushed", lst, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
+r = run("push", HOST, src, "st/pushed", lst, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
 ok("push 校验和对不上：补传 3 轮还不对 → 退出码 1，那边删掉那个文件，别的在", r.returncode == 1 and not os.path.exists(os.path.join(dst, "a/x.bin"))
    and same(src, dst, [f for f in FILES if f != "a/x.bin"]) and "补传 1 个缺的文件（第 3 轮）" in r.stdout and "第 4 轮" not in r.stdout)
 
 shutil.rmtree(dst)
-r = run("push", "dicc", src, "st/pushed", lst, env=dict(ENV, TUNNEL_TEST_DROP="a/x.bin,z.bin"))
+r = run("push", HOST, src, "st/pushed", lst, env=dict(ENV, TUNNEL_TEST_DROP="a/x.bin,z.bin"))
 ok("push 第一轮断了两个：同一次里只补传那两个，退出码 0、一致", r.returncode == 0 and same(src, dst, FILES)
    and "补传 2 个缺的文件（第 1 轮）" in r.stdout and "第 2 轮" not in r.stdout and "4 个一致" in r.stdout)
 
 shutil.rmtree(dst)
-r = run("push", "dicc", src, "st/pushed", lst, env=dict(ENV, TUNNEL_MIN_JOB="1"))
+r = run("push", HOST, src, "st/pushed", lst, env=dict(ENV, TUNNEL_MIN_JOB="1"))
 ok("push 要在计算节点下载、srun 不能用：退回登录节点，一致", r.returncode == 0 and same(src, dst, FILES))
 
 # pull："那边" → box，分块（1 MB 一块，2.5 MB 的文件 3 块）
@@ -99,18 +103,18 @@ make(rsrc, FILES)
 items = os.path.join(T, "items")
 open(items, "w").write("".join(f"{r_}\t{n}\n" for r_, n in FILES.items()))
 pdst = os.path.join(T, "pulled")
-r = run("pull", "dicc", "st/remote", pdst, items)
+r = run("pull", HOST, "st/remote", pdst, items)
 ok("pull 退出码 0", r.returncode == 0)
 ok("pull 内容和修改时间一致（含分块的、空文件）", same(rsrc, pdst, FILES))
 ok("pull 没有留下 .tunnelpart", not any(p.endswith(".tunnelpart") for p in tree(pdst)))
 
 shutil.rmtree(pdst)
-r = run("pull", "dicc", "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
+r = run("pull", HOST, "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
 ok("pull 校验和对不上：补传 3 轮还不对 → 退出码 1，box 上没有那个文件、也没有半份", r.returncode == 1
    and tree(pdst) == sorted(f for f in FILES if f != "a/x.bin") and "补传 1 个缺的文件（第 3 轮）" in r.stdout)
 
 shutil.rmtree(pdst)
-r = run("pull", "dicc", "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_DROP="a/x.bin,top.pth"))
+r = run("pull", HOST, "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_DROP="a/x.bin,top.pth"))
 ok("pull 第一轮断了两个：同一次里只补拉那两个，退出码 0、一致", r.returncode == 0 and same(rsrc, pdst, FILES)
    and "补传 2 个缺的文件（第 1 轮）" in r.stdout and "第 2 轮" not in r.stdout and not any(p.endswith(".tunnelpart") for p in tree(pdst)))
 
@@ -149,28 +153,28 @@ big = {"fold/validation/c1.npz": 1_500_000, "fold/validation/c2.npz": 700_000, "
 rs = os.path.join(HOME, "st/res")
 make(rs, big)
 loc = os.path.join(T, "box/res/fold")
-r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "dicc:st/res/fold/", loc + "/")
+r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "plainhost:st/res/fold/", loc + "/")
 inner = [f for f in big if f.count("/") > 1]
 ok("替身拉回第一遍（不带最上层的文件）：子文件夹齐了、标志文件 checkpoint_final.pth 没到", r.returncode == 0
    and same(os.path.join(rs, "fold"), loc, [f[5:] for f in inner]) and not os.path.exists(os.path.join(loc, "checkpoint_final.pth")))
 ok("替身拉回：数据经隧道（rsync 经 ssh 传 0 字节）", "经隧道从" in r.stdout and "Literal data: 0 bytes" in r.stdout)
 ok("替身拉回：暂存目录删了", not [d for d in os.listdir(os.path.dirname(loc)) if d.startswith(".tunnel_stage_")])
-r = run("rsync", "-rlt", "--partial", "dicc:st/res/fold/", loc + "/")
+r = run("rsync", "-rlt", "--partial", "plainhost:st/res/fold/", loc + "/")
 ok("替身拉回第二遍：全齐", r.returncode == 0 and same(os.path.join(rs, "fold"), loc, [f[5:] for f in big]))
 
 shutil.rmtree(loc)
-r = run("rsync", "-rlt", "--partial", "dicc:st/res/fold/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="validation/c1.npz"))
+r = run("rsync", "-rlt", "--partial", "plainhost:st/res/fold/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="validation/c1.npz"))
 ok("替身拉回：隧道传坏的文件由 rsync 经 ssh 补上", r.returncode == 0 and same(os.path.join(rs, "fold"), loc, [f[5:] for f in big]))
 
 bsrc = os.path.join(T, "box/arch/fold")
 make(bsrc, {k[5:]: v for k, v in big.items()})
-r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "dicc:~/st/arch/fold/")
+r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "plainhost:~/st/arch/fold/")
 rdst = os.path.join(HOME, "st/arch/fold")
 ok("替身推送（~/ 开头的目标）：一致、数据经隧道", r.returncode == 0 and same(bsrc, rdst, [f[5:] for f in big])
    and "Literal data: 0 bytes" in r.stdout and not os.path.exists(os.path.join(HOME, "~")))
 ok("替身推送：那边的暂存目录删了", not [d for d in os.listdir(os.path.dirname(rdst)) if d.startswith(".tunnel_stage_")])
 
-r = run("rsync", "-rltR", bsrc + "/./checkpoint_final.pth", "dicc:st/arch3/")
+r = run("rsync", "-rltR", bsrc + "/./checkpoint_final.pth", "plainhost:st/arch3/")
 ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/checkpoint_final.pth")))
 r = run("rsync", "-rlt", "lab:x/", os.path.join(T, "lab/"))
 ok("不走隧道的机器（lab）：直接 rsync", "经隧道" not in r.stdout)

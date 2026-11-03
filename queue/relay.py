@@ -18,10 +18,10 @@
        任务的产出重叠时不传、报出来）；
      - 记录上有 redo（做法或输入变了、11/1 迁移）→ 那边没人领着时删掉那边的任务和它独占的路径，下次检查重新传；
      - 在那边排着、在训 → 续上（beat）；
-     - 那边做完 → box 的 wait 组排 relay.py fetch && archive_task.sh box（拉回、核对、备份到 DICC；备份机暂停检查时只拉回）；
-     - 总队列显示训完（box 上有了），而且拉回、归档的 box 任务成功了 → 交还，删掉那边的任务和结果；
-       拉回时没归档或归档失败的，备份机能用时单独排 archive_task.sh box（relay_archive），之前领取保留、那边的结果不删；
-       备份机停用（envs/policy.py 的 OFFLINE）时不等归档：拉回核对成功就交还、删那边的（11/3 定，box 的 backup 池是第二份）；
+     - 那边做完 → box 的 wait 组排 relay.py fetch（拉回、核对）；
+     - 总队列显示训完（box 上有了）→ 删掉那边的任务和结果（11/3 定：执行机的盘只用来中转）；要归档的，备份机能用时 box 的 wait 组
+       单独排 archive_task.sh box（relay_archive，备份到 envs/machines.py 角色 backup 的那台），归档成功才交还；备份机停用
+       （envs/policy.py 的 OFFLINE）时不等，直接交还；只是这次连不上时下次检查再排；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
@@ -766,31 +766,32 @@ def plan(s, name, rs, st, now=None):
             if any(x is not None and x["status"] in LIVE for x in (ft, at)):  # box 上有了，但拉回、归档还没做完：等
                 acts.append(dict(op="beat", key=key))
                 continue
-            if at is not None and at["status"] != "Success":
+            # 总队列显示训完：box 上有了（结果本身，不看拉回记录）。只有单独的拉回出错时才报（11/3 起拉回不带归档）
+            fcmd = (ft or {}).get("command") or ""
+            if ft is not None and ft["status"] != "Success" and "archive_task.sh" not in fcmd:
                 acts.append(dict(op="beat", key=key))
-                stuck[f"relayfetch:{key}"] = (f"{key} 归档到备份机的 box 任务 {at['id']} 出错了（{at['status']}），box 上有了、领取保留；"
-                                              f"看 pueue log {at['id']}，处理后 pueue remove {at['id']}（下次检查重排）")
+                stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），领取保留；"
+                                              f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
                 continue
-            # 拉回时没归档（备份机暂停检查），或拉回成功、归档那一半失败了：备份机能用时单独归档，之前领取保留、那边的结果不删
-            if at is None and ft is not None and (ft["status"] != "Success" or "archive_task.sh" not in (ft.get("command") or "")):
-                try:
-                    want = bool(lookup(key).get("archive"))
-                except (RN.RelayError, S.SpecError):
-                    want = False
-                if want and not (ft["status"] == "Success" and C.backup_down()):
+            if k:  # box 上有了就删那边的任务和结果，不等归档（11/3 定：执行机的盘只用来中转）
+                acts.append(dict(op="drop", key=key, rkey=rkey(key, k)))
+            try:
+                want = ft is not None and bool(lookup(key).get("archive"))
+            except (RN.RelayError, S.SpecError):
+                want = False
+            archived = (at is not None and at["status"] == "Success") or (ft is not None and ft["status"] == "Success" and "archive_task.sh" in fcmd)
+            if want and not archived:
+                if at is not None:
+                    acts.append(dict(op="beat", key=key))
+                    stuck[f"relayfetch:{key}"] = (f"{key} 归档到备份机的 box 任务 {at['id']} 出错了（{at['status']}），box 上有了、领取保留；"
+                                                  f"看 pueue log {at['id']}，处理后 pueue remove {at['id']}（下次检查重排）")
+                    continue
+                if not C.backup_down():  # 备份机能用：box 单独排归档，归档成功才交还；只是这次连不上时下次再排
                     acts.append(dict(op="beat", key=key))
                     if not C.backup_down(s.get("ok")):
                         acts.append(dict(op="archive", key=key))
                     continue
-                if ft["status"] != "Success":
-                    acts.append(dict(op="beat", key=key))
-                    stuck[f"relayfetch:{key}"] = (f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），box 上有了、领取保留；"
-                                                  f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
-                    continue
-            archived = (at is not None) or (ft is not None and "archive_task.sh" in (ft.get("command") or ""))
             acts.append(dict(op="release", key=key, why="训完了，box 上有了" + ("、归档了" if archived else "（没有归档）")))
-            if k:
-                acts.append(dict(op="drop", key=key, rkey=rkey(key, k)))
             continue
         acts.append(dict(op="beat", key=key))
         if t["state"] == "stopped" and not (a and a["state"] == "done"):
@@ -1043,11 +1044,9 @@ def execute(name, acts, s, run_add=None):
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
                 cmd = f"python3 scripts/queue/relay.py fetch {name} {shlex.quote(k)}"
-                if lookup(k).get("archive") and not C.backup_down(s.get("ok")):
-                    cmd += f" && bash scripts/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
-                msgs.append(f"{L} 训完了 {k}，排了拉回、归档（box 任务 {tid}）")
+                msgs.append(f"{L} 训完了 {k}，排了拉回（box 任务 {tid}）")
             elif a["op"] == "archive":
                 lab = label("relay_archive", k)
                 cmd = f"bash scripts/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"

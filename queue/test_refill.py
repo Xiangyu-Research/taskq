@@ -14,6 +14,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
 os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
+import testfix  # noqa: E402
+testfix.slurm_site()
 import refill as R  # noqa: E402
 
 fails = 0

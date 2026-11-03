@@ -4,6 +4,7 @@
 run：fn(命令) → (退出码, 输出)，由调用方绑好机器（测试替换）。"""
 import os
 import secrets
+import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "envs"))
@@ -103,3 +104,17 @@ def start_workers(cwd, subs, run):
             ids.append(out.strip().splitlines()[-1])
         res.append(dict(qos=q, time=t, n=n, file=f, ids=ids, err=err))
     return res
+
+
+def submit(opts, wrap, run):
+    """交一个一次性的作业（不是 worker）：sbatch <opts> --wrap <命令>，作业名随机 → (作业号, None) 或 (None, 出错说明)。"""
+    rc, out = run(f"sbatch --parsable -J {jobname()} {opts} --wrap {shlex.quote(wrap)}")
+    jid = (out or "").strip().split(";")[0].split("\n")[-1] if rc == 0 else ""
+    return (jid, None) if jid.isdigit() else (None, (out or "").strip()[-200:] or f"退出码 {rc}")
+
+
+def state(jid, run):
+    """作业的状态（sacct 的 State 第一个词，如 COMPLETED、RUNNING、FAILED）；读不到 → None。"""
+    rc, out = run(f"sacct -n -X -P -j {int(jid)} -o State")
+    w = (out or "").split()
+    return w[0] if rc == 0 and w else None

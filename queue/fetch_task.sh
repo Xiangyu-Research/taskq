@@ -1,5 +1,5 @@
 #!/bin/bash
-# 把某台机器（envs/machines.py 里的名字，如 dicc、lab）上训完的一个任务拉回 box（2026-10-18，取代 fetch_fold.sh）。
+# 把某台机器（envs/machines.py 里的名字，如 lab）上训完的一个任务拉回 box（2026-10-18，取代 fetch_fold.sh）。
 # 由 box 上的 scripts/queue/advance.py 在那边训完以后放进 wait 组：
 #   q wait --label fetch:<标签> -- 'bash scripts/queue/fetch_task.sh <机器> <key>'
 # 结果文件夹、训完的标志、不拉的文件、上一级里还要拉的文件都按任务说明（scripts/queue/spec.py lookup <key>：实验表或训练队列）：

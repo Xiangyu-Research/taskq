@@ -1,5 +1,5 @@
 #!/bin/bash
-# 某台训练机（envs/machines.py 里的名字，如 lab）上训完、已经拉回 box 的一个任务：先备份到备份机器（表里角色 backup 的，现在是 DICC），
+# 某台训练机（envs/machines.py 里的名字，如 lab）上训完、已经拉回 box 的一个任务：先备份到备份机器（表里角色 backup 的，11/3 起是 dicc1 的 backup 目录，在 DICC 的 /scr 上），
 # 三份核对一致后删掉训练机上的大文件（2026-10-18，取代 archive_fold.sh；规则同 10/16 定的，lab 的盘几乎满了）。
 #   archive_task.sh <机器> <key> [--dry-run]
 # 拉回以后由 box 上的 scripts/queue/advance.py 放进 wait 组（和推理并行）：
@@ -24,9 +24,9 @@ if [[ $HOST != "$($M names hub | head -1)" ]]; then
     SRCH=$($M get "$HOST" ssh) SRCD=$($M get "$HOST" data)
     [[ -n $SRCH ]] || { echo "envs/machines.py 里没有可以归档的机器 $HOST" >&2; exit 2; }
 fi
-BK=$($M names backup | grep -vx "$HOST" | head -1)
+BK=$($M backups | grep -vx "$HOST" | head -1)
 [[ -n $BK ]] || { echo "envs/machines.py 里没有 $HOST 以外的备份机器（角色 backup）" >&2; exit 2; }
-BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" data) LD=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}
+BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" backup 2> /dev/null || $M get "$BK" data) LD=${TASKQ_DATA:-${BRAIN_TUMOR:-$($M get . data)}}
 SPEC=$(python3 "$REPO/scripts/queue/spec.py" lookup "$KEY") || { echo "找不到任务 $KEY（实验表、训练队列里都没有）" >&2; exit 2; }
 sp() { python3 -c '
 import json, re, shlex, sys
