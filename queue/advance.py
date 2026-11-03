@@ -327,13 +327,9 @@ def plan(s, root=None):
 
     def where(t, tg, per_task, st=None):
         """PLACE 里的一项 → 地方（trainer 换成训这个任务的执行机的 queue，带 trainer=True），或者用不了的原因。
-        queue:<机器>：那台暂停检查（OFFLINE）时用不了；那台已经换成接替它的 relay 机器（machines.py 的 replaces，它的 AUTO 开着、
-        那台的关着）时用接替的那台（输入由 relay.py 传过去）；执行机的 AUTO 关着时用不了。执行机放不下这一步（too_big）时用不了。"""
+        queue:<机器>：那台暂停检查（OFFLINE）时用不了；执行机的 AUTO 关着时用不了（输入由 relay.py 传过去）。执行机放不下这一步（too_big）时用不了。"""
         if tg["kind"] == "queue":
             m = tg["machine"]
-            r = M.successor(m)
-            if r and P.AUTO.get(r) and not P.AUTO.get(m):
-                m, tg = r, dict(tg, machine=r)
             if m in P.OFFLINE:
                 return f"{m} 暂停检查（{P.OFFLINE[m]}）"
             if m in M.RELAY and m not in M.MACHINES and not P.AUTO.get(m):

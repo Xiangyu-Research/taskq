@@ -3,7 +3,7 @@
 机器名同真的，环境名、目录、作业参数是虚构的。conda 指向 testdata/conda（假的 conda.sh：activate 只记下环境名）。
 LOGIC 以下的函数和真的机器表逐字相同（PhD 一侧的 test_fixture_sync.py 核对）。
 
-命令行同真的机器表：whoami、get、site-root、names、q-env、groups、activate。
+命令行同真的机器表：whoami、get、backups、names、q-env、groups、activate。
 """
 import os
 import re
@@ -61,7 +61,7 @@ SITES = {
                         "alt2": ("venv", FAKE + "/venv/alt2", "base"), "x3": ("venv", FAKE + "/venv/x3", "base"),
                         "x1": ("venv", FAKE + "/venv/x1", "base"), "stats": ("conda", "stats0")}, roles=("train",),
                   jobs=("gpu", "cpu"),
-                  ssh_master=True, tunnel=("push", "pull"), replaces="dicc",
+                  ssh_master=True, tunnel=("push", "pull"),
                   transfer_job="-p cpu-part --qos=normal -c 2 --mem=2G", relay=True),
     "lab0": dict(label="lab 0 号卡", hostname=r"(?!)", ssh="lab", scheduler="pueue", root="/mnt/disk1/datasets/d0eab39f",
                  conda=(FAKE_CONDA, "w0"), envs={"base": ("conda", "w0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
@@ -84,14 +84,9 @@ def adopt_sources(name):
     return out
 
 
-def successor(name):
-    """接替 MACHINES 里 name 的执行机（SITES 的 replaces，relay=True）；没有 → None。"""
-    return next((n for n, e in globals().get("SITES", {}).items() if e.get("replaces") == name and e.get("relay")), None)
-
-
 def serves(name, machines):
-    """任务说明的 machines（None = 都行）里有这台，或者有它接替的那台。"""
-    return not machines or name in machines or machine(name).get("replaces") in machines
+    """任务说明的 machines（None = 都行）里有这台。"""
+    return not machines or name in machines
 
 
 KINDS = ("gpu", "cpu")
@@ -108,12 +103,6 @@ def worker_of(name, kind):
 def kinds(name):
     """这台能跑的任务种类（有序）。"""
     return tuple(k for k in KINDS if worker_of(name, k))
-
-
-def site_root(name):
-    """接替 MACHINES 里 name 的执行机（SITES 的 replaces）的根目录，~ 展开；没有 → None。"""
-    n = successor(name)
-    return expand(SITES[n]["root"]) if n else None
 
 
 def expand(path):
@@ -145,11 +134,17 @@ def names(kind=None):
     return [n for n, m in MACHINES.items() if kind is None or kind in m["roles"] or kind == m["scheduler"]]
 
 
+def backups():
+    """角色 backup 的机器：MACHINES 里的，加上 SITES 里的（11/3 起备份在执行机 dicc1 上）。"""
+    return [n for n, m in {**MACHINES, **globals().get("SITES", {})}.items() if "backup" in (m.get("roles") or ())]
+
+
 def machine_of_jobtag(tag):
     """训练分段日志里的作业名 → 机器的 label：纯数字是 Slurm 的作业号，其他是 run_task.sh（10/18 前 train_folds.sbatch）写的"主机名-时间"。"""
     if re.fullmatch(r"\d+", tag):
-        slurm = names("slurm")
-        return MACHINES[slurm[0]]["label"] if len(slurm) == 1 else "Slurm"
+        labels = sorted({m["label"] for m in {**MACHINES, **globals().get("SITES", {})}.values() if m["scheduler"] == "slurm"})
+        pre = os.path.commonprefix(labels).strip()
+        return labels[0] if len(labels) == 1 else (pre or "Slurm")
     for m in MACHINES.values():
         if m["scheduler"] != "slurm" and re.match(m["hostname"], tag):
             return m["label"]
@@ -206,7 +201,7 @@ def activate(name, env):
 
 
 def _value(name, field):
-    v = MACHINES[name][field]
+    v = machine(name)[field]
     if field in ("data", "conda", "repo", "code") and name == whoami() and v:
         v = expand(v) if isinstance(v, str) else (expand(v[0]),) + tuple(v[1:])
     if v is None or v is False:
@@ -232,17 +227,14 @@ def main(argv):
         print(me)
     elif cmd == "get":
         name = me if args[0] == "." else args[0]
-        if name not in MACHINES:
+        if name not in MACHINES and name not in globals().get("SITES", {}):
             print(f"machines.py：不认识的机器 {args[0]}（本机：{me or '认不出'}）", file=sys.stderr)
             return 1
         print(_value(name, args[1]))
-    elif cmd == "site-root":
-        r = site_root(me if args[0] == "." else args[0]) if args else None
-        if not r:
-            return 1
-        print(r)
     elif cmd == "names":
         print("\n".join(names(args[0] if args else None)))
+    elif cmd == "backups":
+        print("\n".join(backups()))
     elif cmd == "q-env":
         groups = MACHINES[me]["groups"] if me else {}
         if args[0] not in groups:

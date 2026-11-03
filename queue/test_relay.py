@@ -274,24 +274,26 @@ def test_plan():
     relay.lookup = lambda k: dict(archive=True)
     arec = dict(machine=M.hub(), id=9, label="relay_archive:" + K, step="relay_archive", key=K, added=2000.0)
     fcmd = dict(fdone[0], command="python3 scripts/queue/relay.py fetch x k && bash scripts/queue/archive_task.sh box k")
+    plain_fail = [dict(fdone[0], status="Failed")]
     try:
-        C.backup_down = lambda ok=None: "dicc 暂停检查（停机）"
-        acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
-        assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
+        C.backup_down = lambda ok=None: "dicc1 暂停检查（停机）"
+        acts, stuck = relay.plan(S0([mtask(K, "done")], plain_fail, [frec]), NAME, RS(rtask(A, "done")), st)
+        assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("drop", K), ("release", K)] and not stuck, (acts, stuck)
         assert "没有归档" in [a for a in acts if a["op"] == "release"][0]["why"], acts
-        C.backup_down = lambda ok=None: "dicc 这次连不上" if ok is not None else None
+        C.backup_down = lambda ok=None: "dicc1 这次连不上" if ok is not None else None
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
-        assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
+        assert ops(acts) == [("beat", K), ("drop", K)] and not stuck, (acts, stuck)
         C.backup_down = lambda ok=None: None
-        acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
-        assert ops(acts) == [("archive", K), ("beat", K)] and not stuck, (acts, stuck)
-        acts, _ = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
-        assert ops(acts) == [("archive", K), ("beat", K)], acts
+        acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
+        assert ops(acts) == [("archive", K), ("beat", K), ("drop", K)] and not stuck, (acts, stuck)
         acts, _ = relay.plan(S0([mtask(K, "done")], [fcmd], [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("drop", K), ("release", K)], acts
-        two = [dict(fdone[0], status="Failed"), dict(id=9, label=arec["label"], status="Running")]
+        assert "归档了" in [a for a in acts if a["op"] == "release"][0]["why"], acts
+        acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fcmd, status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
+        assert ops(acts) == [("archive", K), ("beat", K), ("drop", K)] and not stuck, (acts, stuck)
+        two = [dict(fcmd, status="Failed"), dict(id=9, label=arec["label"], status="Running")]
         acts, stuck = relay.plan(S0([mtask(K, "done")], two, [frec, arec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
         two[1]["status"] = "Success"
@@ -299,10 +301,14 @@ def test_plan():
         assert ops(acts) == [("drop", K), ("release", K)], acts
         two[1]["status"] = "Failed"
         acts, stuck = relay.plan(S0([mtask(K, "done")], two, [frec, arec]), NAME, RS(rtask(A, "done")), st)
-        assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
+        assert ops(acts) == [("beat", K), ("drop", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
+        acts, stuck = relay.plan(S0([mtask(K, "done")], [fdone[0], dict(id=9, label=arec["label"], status="Failed")], [frec, arec]), NAME,
+                                 RS(rtask(A, "done")), st)
+        assert ops(acts) == [("beat", K), ("drop", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
     finally:
         relay.lookup, C.backup_down = old_lookup, old_down
-    ok("要归档的折：备份机停用时拉回成功就交还、删那边的（拉回出错不删、不报）；只是这次连不上 → 等；备份机能用时单独排归档（relay_archive），归档成功才交还、删那边的；归档出错 → 报")
+    ok("要归档的折：box 上有了就删那边的；备份机能用时单独排归档（relay_archive），归档成功才交还，归档出错 → 报、领取保留；"
+       "备份机停用时直接交还（没有归档）；只是这次连不上 → 等；单独的拉回出错 → 报")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts

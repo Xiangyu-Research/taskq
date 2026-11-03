@@ -192,8 +192,8 @@ class Serve:
 
 
 def relay_of(host):
-    """中转执行机那一类的执行机（送去的脚本换名、不带注释）；接替 MACHINES 里一台的（replaces，同一个账号）照那台的走法。"""
-    return next((m for m in machines().RELAY.values() if m.get("ssh") == host and not m.get("replaces")), None)
+    """这个 ssh 名字是执行机（送去的脚本换名、不带注释，工作目录在根目录下）→ 它的条目；不是 → None。"""
+    return next((m for m in machines().RELAY.values() if m.get("ssh") == host), None)
 
 
 def quick_tunnel(bind):
@@ -573,7 +573,7 @@ def wrap(args):
     M = machines()
     if M.whoami() != M.hub():
         plain(args)
-    hosts = {m["ssh"]: m for m in M.MACHINES.values() if m.get("ssh")}
+    hosts = {m["ssh"]: m for m in [*M.SITES.values(), *M.MACHINES.values()] if m.get("ssh")}  # 同一个 ssh 名字以 MACHINES 的为准
     rs, rd = (re.match(r"^([^/:]+):(.*)$", x) for x in (src, dst))
     if bool(rs) == bool(rd):
         plain(args)
@@ -633,7 +633,7 @@ def main(argv):
         return 0
     if cmd in ("push", "pull") and len(a) == 4:
         M = machines()
-        host = M.MACHINES[a[0]]["ssh"]
+        host = M.machine(a[0])["ssh"]
         lines = [ln for ln in open(a[3]).read().splitlines() if ln]
         if cmd == "push":
             return 1 if push(host, a[1], a[2], lines) else 0

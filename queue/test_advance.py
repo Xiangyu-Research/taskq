@@ -89,9 +89,10 @@ A.plan = plan_with_records
 
 A.taskq_add = lambda nice, args: (0, "")  # 不真的加进总队列
 A.feed.sites = lambda: ["dicc", "lab"]  # 执行机（10/31 第二阶段起 lab 也有缓冲）
-REAL_PLACE = dict(A.P.PLACE, eval=["queue:dicc have", "box:cpu"], ens=["queue:dicc have", "box:cpu"])  # 按平时的写法测（DICC 停机时 policy 临时改过）
+REAL_PLACE = dict(A.P.PLACE, infer=["trainer", "queue:dicc", "queue:lab1"], eval=["queue:dicc have", "box:cpu"],
+                  ens=["queue:dicc have", "box:cpu"], p1=["queue:dicc"], p2=["queue:dicc"])  # 缓冲执行机 dicc（夹具）的写法
 A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组）；第 9 节起测别的地方
-A.P.AUTO = dict(A.P.AUTO, advance=False, dicc=True, dicc1=False)  # 按 DICC 换成 dicc1 之前测；换过去以后第 10b 节测
+A.P.AUTO = dict(A.P.AUTO, advance=False, dicc=True, dicc1=False)  # 缓冲执行机 dicc（夹具）；relay 执行机 dicc1 在第 10b 节测
 A.P.OFFLINE = {}
 A.P.HOLD = []
 # 实验一级带 queue 的几串（10/23，P1 / P2 重跑）也先拿掉，第 11 节再放回来测
@@ -356,12 +357,12 @@ check("t0 的 lab 副本已归档：不排归档", not [t for t in todo if t["st
 todo, _ = A.plan(snap(remote={"lab": {T0K: FIN}}))
 check("t0 的 lab 副本没归档：照常归档", ("archive", T0K) in steps(todo))
 _down = A.C.backup_down
-A.C.backup_down = lambda ok=None: "dicc 暂停检查（停机）"
+A.C.backup_down = lambda ok=None: "dicc1 暂停检查（停机）"
 todo, _ = A.plan(snap(remote={"lab": {T0K: FIN}}))
 A.C.backup_down = _down
 check("备份机暂停检查：先不排归档", ("archive", T0K) not in steps(todo))
 _s = snap(remote={"lab": {T0K: FIN}})
-_bk = next(b for b in A.M.names("backup") if b != A.M.hub())
+_bk = next(b for b in A.M.backups() if b != A.M.hub())
 _s.setdefault("ok", {})[_bk] = False
 todo, _ = A.plan(_s)
 check("备份机这次连不上（没暂停检查）：也先不排归档", ("archive", T0K) not in steps(todo) and A.C.backup_down(_s["ok"]) == f"{_bk} 这次连不上")
@@ -497,24 +498,25 @@ x = tc(todo)
 check("queue：DICC 上缺模型文件 → box wait 组先传过去，不加任务", len(x) == 1 and x[0]["step"] == "push" and x[0]["group"] == "wait"
       and x[0]["cmd"] == f"bash scripts/queue/offload_io.sh push dicc {TCM}/frag_2/final.ckpt")
 pq = [("Failed (1)", x[0]["cmd"], None)]
-# 10b. DICC 换成接替它的 dicc1（machines.py 的 replaces）、暂停检查（OFFLINE）
+# 10b. relay 执行机（dicc1）、放不下（cap）、暂停检查（OFFLINE）
 REMOTE["have"] = set(TNEEDS)
-A.P.AUTO = dict(A.P.AUTO, dicc=False, dicc1=True)
-CAP1 = A.M.RELAY["dicc1"].pop("cap", None)  # 先测换名，cap 在后面单独测
+A.P.AUTO = dict(A.P.AUTO, dicc1=True)
+CAP1 = A.M.RELAY["dicc1"].pop("cap", None)  # cap 在后面单独测
 trained("D103_alpha_one", "V_save", "2")
+A.P.PLACE = dict(BASE, infer=["queue:dicc1", "box:gpu"])
 x = tc(A.plan(snap())[0])
-check("queue:dicc，DICC 换成了 dicc1 → 进总队列只给 dicc1（relay.py 连同输入送过去，不先传）",
+check("queue:dicc1 → 进总队列只给 dicc1（relay.py 连同输入送过去，不先传）",
       len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["dicc1"]' in x[0]["args"])
 check("给执行机的任务单带上命令列出的输入（--stage needs:<阶段>，relay.py 按真名传过去）",
       any(y.startswith("inputs=") and f"{TCM}/frag_2/final.ckpt" in y for y in x[0]["args"]))
-A.P.PLACE = dict(BASE, infer=["queue:dicc have", "box:gpu"])
+A.P.PLACE = dict(BASE, infer=["queue:dicc1 have", "box:gpu"])
 x = tc(A.plan(snap())[0])
-check("queue:dicc have，换成了 dicc1 → 照样给 dicc1（执行机用真名，输入由 relay.py 传过去，11/1）",
+check("queue:dicc1 have → 照样给 dicc1（输入由 relay.py 传过去，11/1）",
       len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["dicc1"]' in x[0]["args"])
 A.M.RELAY["dicc1"]["cap"] = 60
-A.P.PLACE = dict(BASE, infer=["queue:dicc", "queue:lab1", "box:gpu"])
+A.P.PLACE = dict(BASE, infer=["queue:dicc1", "queue:lab1", "box:gpu"])
 x = tc(A.plan(snap())[0])
-check("queue:dicc 换成 dicc1，dicc1 的根目录放不下推理（cap，11/2）→ 用下一个地方（lab1）",
+check("dicc1 的根目录放不下推理（cap，11/2）→ 用下一个地方（lab1）",
       len(x) == 1 and x[0].get("op") == "taskq" and 'machines=["lab1"]' in x[0]["args"])
 A.P.AUTO = dict(A.P.AUTO, lab1=False)
 x = tc(A.plan(snap())[0])
@@ -523,15 +525,15 @@ A.P.AUTO = dict(A.P.AUTO, lab1=True)
 A.M.RELAY["dicc1"].pop("cap")
 if CAP1 is not None:
     A.M.RELAY["dicc1"]["cap"] = CAP1
-A.P.PLACE = dict(BASE, infer=["queue:dicc have", "box:gpu"])
-A.P.PLACE = dict(BASE, infer=["queue:dicc", "box:gpu"])
+A.P.PLACE = dict(BASE, infer=["queue:dicc1", "box:gpu"])
 A.P.OFFLINE = {"dicc1": "停机"}
 x = tc(A.plan(snap())[0])
-check("queue:dicc，dicc1 暂停检查（OFFLINE）→ 跳过，用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
-A.P.AUTO = dict(A.P.AUTO, dicc=True, dicc1=False)
+check("queue:dicc1，dicc1 暂停检查（OFFLINE）→ 跳过，用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
+A.P.AUTO = dict(A.P.AUTO, dicc1=False)
+A.P.PLACE = dict(BASE, infer=["queue:dicc", "box:gpu"])
 A.P.OFFLINE = {"dicc": "停机"}
 x = tc(A.plan(snap())[0])
-check("queue:dicc，还没换、DICC 暂停检查 → 跳过，用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
+check("queue:dicc，DICC 暂停检查 → 跳过，用下一个地方", len(x) == 1 and x[0].get("group") == "gpu")
 A.P.OFFLINE = {}
 A.P.PLACE = dict(BASE)
 REMOTE["have"] = set(TNEEDS) - {f"{TCM}/frag_2/final.ckpt"}

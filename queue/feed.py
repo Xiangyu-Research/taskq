@@ -19,8 +19,6 @@ RELAY 的执行机（envs/machines.py 的 RELAY，lab1、lab0 等）由 relay.py
      只送数据已到位的：任务说明的 data 每个路径在那边的文件数、字节数都不少于 box 上的，没有 .incomplete，也没有在传；
      缺的排一个传输（box 的 wait 组，scripts/sync/sync_data.sh <机器> push <路径>），同时只传一份。
      别的机器上有进度的、这台跳过的（skips）不送。补不满、而总队列里还有能给它的任务时，持续 60 分钟后报出来。
-  这台已经换成接替它的执行机（envs/machines.py 的 replaces，接替的那台 AUTO 开着、这台关着）：分给这台、没人在做的从缓冲里删掉，
-  有进度的在总队列里改分给接替的那台（它从老数据目录收编存档，接着训），其余交还。
   执行机连不上：什么都不动，分给它的也不交还；连不上 2 小时以上报出来。那边的代码不是最新的（health 的 code 检查）时不送新任务。
   先在缓冲里删成功，再在总队列交还；分过去后那边明确送不进缓冲时马上交还，结果未知（超时、断线）时留着，下次按"缓冲里没有"补送。
 总队列里分给了一个不是执行机的名字（执行机换了名字、撤掉了以后留下的）：没有谁会做它，报出来（feed:nobody），交还后照常重新分。
@@ -224,8 +222,6 @@ def plan(s, name, st, data=None, now=None):
     def removable(k):
         return not (refs.get(k, set()) - gone - {k})
 
-    heir = M.successor(name)  # 接替这台的执行机（machines.py 的 replaces）开着、这台关着：分给这台的都交出去
-    heir = heir if heir and P.AUTO.get(heir) and not P.AUTO.get(name) and heir not in P.OFFLINE else None
     for t in mine:
         k, b = t["key"], bt.get(t["key"])
         if t["state"] == "done":
@@ -235,17 +231,6 @@ def plan(s, name, st, data=None, now=None):
                 acts.append(dict(op="bremove", key=k))
                 gone.add(k)
             acts.append(dict(op="release", key=k, why="box 上有了"))
-            continue
-        if heir and t["state"] != "stopped":
-            if b and b.get("worker"):
-                continue  # 还有人在做：做完或交还以后再交出去
-            if b:
-                acts.append(dict(op="bremove", key=k))
-                gone.add(k)
-            if refill.progress(s, k, name):
-                acts.append(dict(op="handover", key=k, to=heir, why=f"换成了 {heir}，这个任务在 {L} 上有进度，从存档接着训"))
-            else:
-                acts.append(dict(op="release", key=k, why=f"换成了 {heir}"))
             continue
         if t["state"] == "stopped":
             if b is None or (b["state"] in ("stopped", "done") and not b.get("worker")):
@@ -395,12 +380,6 @@ def execute(name, acts, central=None, remote=None, add=None):
                     continue
                 rc, out, err = central(["release", "--worker", a.get("worker", name), k] + (["--skip", a["skip"]] if a.get("skip") else []))
                 msgs.append(f"总队列交还 {k}（{L}，{a['why']}）" if rc == 0 else f"总队列交还 {k} 出错：{(out + err)[-150:]}")
-            elif a["op"] == "handover":
-                if k in failed:
-                    continue
-                central(["release", "--worker", name, k])
-                rc, out, err = central(["take", "--worker", a["to"], "--assign", k])
-                msgs.append(f"总队列里 {k} 改分给 {a['to']}（{a['why']}）" if rc == 0 else f"{k} 改分给 {a['to']} 出错：{(out + err)[-150:]}")
             elif a["op"] == "binputok":
                 r = buf("input-ok " + shlex.quote(k))
                 msgs.append(f"{L} 缓冲里 {k} 撤掉缺输入的标记，重试" if r and r[0] == 0 else f"{L} 缓冲里 {k} 撤掉缺输入的标记出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
