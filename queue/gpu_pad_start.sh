@@ -23,6 +23,8 @@ if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${TASKQ_TEST_FAKEBIN:-
             done
         ' _ "$_pad" "$$" "$_padlog" "$_switch" "$_retry" "$_py" > /dev/null 2>&1 &
         echo "$(date '+%F %T') 显存填充 supervisor pid=$!"
+    elif [[ ! -f $_pad ]]; then
+        echo "$(date '+%F %T') 显存填充没开：找不到 $_pad"
     fi
     unset _pad _switch _padlog _retry _py
 fi

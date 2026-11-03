@@ -251,9 +251,15 @@ def test_plan():
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K), ("fetch", K)], acts
-    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "done", "123")), st)
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(dict(rtask(A, "done", "123"), beat=time.time() - 60)), st)
     assert ops(acts) == [("beat", K)], acts
     ok("那边有了做完的标志、worker 还领着（训练命令还在写结果）→ 只续约，不拉回")
+    for kw in (dict(beat=time.time() - 3600), dict(beat=time.time() - 3600, task_log_age=3600), dict()):
+        acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(dict(rtask(A, "done", "123"), **kw)), st)
+        assert ops(acts) == [("beat", K), ("fetch", K)], (kw, acts)
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(dict(rtask(A, "done", "123"), beat=time.time() - 3600, task_log_age=30)), st)
+    assert ops(acts) == [("beat", K)], acts
+    ok("做完的标志有了、领取已过期（worker 没交还就没了）→ 照常拉回；心跳旧但日志还在写 → 仍算领着")
     frec = dict(machine=M.hub(), id=8, label="relay_fetch:" + K, step="relay_fetch", key=K, added=2000.0)
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=8, label=frec["label"], status="Running")], [frec]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K)] and not stuck, acts
@@ -812,19 +818,25 @@ def test_adapters_in_relay():
 
 def test_fresh_site():
     """新机器第一次：连得上、根目录里还没有代码包（读状态失败）→ 先部署、再读状态；部署失败时这次当连不上。
-    已有旧代码包、换新包失败（11/3：切换当天新路径对着旧包）→ 这次也当连不上，只续约。"""
+    已有旧代码包、换新包失败（11/3：切换当天新路径对着旧包；推的时候出错、超时，或打包出错）→ 这次也当连不上，只续约。"""
     keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "deploy", "write_status", "update_state", "load_state", "plan", "fill", "topup", "log")}
     build, auto = relay.RB.build, dict(relay.P.AUTO)
     try:
-        for fail, old in ((False, False), (True, False), (True, True)):
+        for fail, old in ((None, False), ("rt", False), ("rt", True), ("timeout", True), ("build", True)):
             calls = []
             seq = [{"bundle": "b0", "jobs": [], "squeue": None}] if old else [None, {"bundle": "b1", "jobs": [], "squeue": None}]
             relay.remote_status = lambda n: seq.pop(0) if seq else None
             relay.undeployed = lambda n: not old
-            relay.RB.build = lambda n, c: ("b1", "/nonexistent")
+            def bld(n, c):
+                if fail == "build":
+                    raise RuntimeError("打包出错")
+                return "b1", "/nonexistent"
+            relay.RB.build = bld
             def dep(n, b, p):
-                if fail:
+                if fail == "rt":
                     raise RuntimeError("推不过去")
+                if fail == "timeout":
+                    raise subprocess.TimeoutExpired("ssh", 600)
                 calls.append(("deploy", n, b))
             relay.deploy = dep
             relay.write_status = lambda n, rs, st: calls.append(("status", rs.get("bundle")))
@@ -1023,6 +1035,68 @@ def test_deploy_keeps_busy():
     ok("清理旧包：排着的作业的工作目录所在的包留着；squeue 读不到时不删；pueue 照旧")
 
 
+def test_deploy_safety():
+    """推代码包：传了一半不装、current 不动；重推一个已有的旧包时不当场删掉它；同时推两次时 current 只指向完整的包。"""
+    import threading
+    c0 = M.RELAY[NAME]
+    src = os.path.join(T, "ds_src")
+    for i in range(200):
+        TN.wb(os.path.join(src, "d", f"f{i}"), os.urandom(4096))
+    n_files = 200
+    full = lambda r, b: sum(len(fs) for _, _, fs in os.walk(os.path.join(r, "code", b)))  # noqa: E731
+    import tarfile
+    tb = subprocess.run(["tar", "-C", src, "-cf", "-", "."], capture_output=True, check=True).stdout
+    at = tarfile.open(fileobj=io.BytesIO(tb)).getmembers()[100].offset  # 断在两个文件之间：tar 不报错
+    cut = os.path.join(T, "cut_ssh")
+    with open(cut, "w") as f:
+        f.write(f"#!/bin/bash\nhead -c {at} | {FAKE} \"$@\"\n")
+    os.chmod(cut, 0o755)
+    try:
+        r = tempfile.mkdtemp(dir=T, prefix="ds_")
+        M.RELAY[NAME] = dict(c0, root=r, scheduler="pueue")
+        relay.deploy(NAME, "good", src)
+        os.environ["RELAY_SSH"] = cut
+        try:
+            relay.deploy(NAME, "half", src)
+            raise AssertionError("传了一半应出错")
+        except RuntimeError:
+            pass
+        finally:
+            os.environ["RELAY_SSH"] = FAKE
+        assert os.readlink(os.path.join(r, "code", "current")) == "good" and not os.path.exists(os.path.join(r, "code", "half")), \
+            os.listdir(os.path.join(r, "code"))
+        ok("推代码包：传了一半 → 出错，不装、current 不动")
+
+        old = time.time() - 10 * 86400
+        for i, d in enumerate("abcd"):
+            os.makedirs(os.path.join(r, "code", d))
+            t = old if d == "a" else time.time() - 600 * (4 - i)
+            os.utime(os.path.join(r, "code", d), (t, t))
+        relay.deploy(NAME, "a", src)
+        assert os.readlink(os.path.join(r, "code", "current")) == "a" and os.path.isdir(os.path.join(r, "code", "a")), \
+            os.listdir(os.path.join(r, "code"))
+        ok("重推一个那边已有的旧包（回退）：切过去，不被同一次的清理删掉")
+
+        r = tempfile.mkdtemp(dir=T, prefix="ds_")
+        M.RELAY[NAME] = dict(c0, root=r, scheduler="pueue")
+        errs = []
+        def go(b):
+            try:
+                relay.deploy(NAME, b, src)
+            except Exception as e:  # noqa: BLE001
+                errs.append(e)
+        for _ in range(3):
+            th = [threading.Thread(target=go, args=(b,)) for b in ("x", "x", "y", "y")]
+            [t.start() for t in th]
+            [t.join() for t in th]
+            cur = os.readlink(os.path.join(r, "code", "current"))
+            assert not errs and full(r, cur) == n_files and all(full(r, b) == n_files for b in "xy"), (errs, cur, full(r, cur))
+        ok("同时推几次（同一个包、不同的包）：都完整，current 指向完整的包")
+    finally:
+        M.RELAY[NAME] = c0
+        os.environ["RELAY_SSH"] = FAKE
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
@@ -1039,6 +1113,7 @@ if __name__ == "__main__":
     test_view_lock()
     test_list_unreadable()
     test_deploy_keeps_busy()
+    test_deploy_safety()
     shutil.rmtree(T)
     shutil.rmtree(STATE_DIR)
     print("全部通过")

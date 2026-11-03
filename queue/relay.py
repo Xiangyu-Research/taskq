@@ -488,17 +488,24 @@ def parse_sched(name, rs):
 
 # ---------------- 代码包 ----------------
 def deploy(name, bid, path):
-    """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。清理旧包时留下排着、在跑的作业还在用的（适配器的 busy_cmd），读不到就不清理。"""
+    """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。
+    整份收下、sha256 对上才解开（ssh 断在两个文件之间时 tar 不报错）；同一台同时只推一个（flock），临时目录各用各的。
+    清理旧包时留下刚切过去的、排着和在跑的作业还在用的（适配器的 busy_cmd），读不到就不清理。"""
     r = R.q(root(name))
     b = shlex.quote(bid)
     tar = subprocess.run(["tar", "-C", path, "-cf", "-", "."], capture_output=True, check=True).stdout
+    sha = hashlib.sha256(tar).hexdigest()
+    busy = (SL if conf(name)["scheduler"] == "slurm" else PQ).busy_cmd()
     cmd = (f"set -e; R={r}; mkdir -p $R/code $R/queue $R/blobs $R/tmp $R/state $R/data/logs/tasks $R/data/logs/workers; "
            f"[ -e $R/queue/tasks.jsonl ] || {{ : > $R/queue/tasks.jsonl; touch $R/queue/ENABLED; }}; cd $R/code; "
-           f"if [ ! -d {b} ]; then rm -rf {b}.tmp; mkdir {b}.tmp; tar -xf - -C {b}.tmp; mv -T {b}.tmp {b}; fi; "
-           f"ln -sfn {b} current.tmp; mv -T current.tmp current; "
-           f"if busy=$({(SL if conf(name)['scheduler'] == 'slurm' else PQ).busy_cmd()}); then busy=$(printf '%s\\n' \"$busy\" | sed 's#$#/#'); "
-           "ls -1t | grep -vx current | grep -v '\\.tmp$' | tail -n +4 | "
-           "while read -r d; do case \"$busy\" in *\"/code/$d/\"*) continue;; esac; "
+           "exec 9> $R/state/deploy.lock; flock -w 300 9; "
+           f"t={b}.tmp.$$; rm -rf $t $t.tar; cat > $t.tar; "
+           f"if [ \"$(sha256sum < $t.tar | cut -d' ' -f1)\" != {sha} ]; then rm -f $t.tar; echo '代码包没传完整' >&2; exit 3; fi; "
+           f"if [ ! -d {b} ]; then mkdir $t; tar -xf $t.tar -C $t; mv -T $t {b}; fi; rm -f $t.tar; "
+           f"touch {b}; ln -sfn {b} current.tmp.$$; mv -T current.tmp.$$ current; "
+           f"if busy=$({busy}); then busy=$(printf '%s\\n' \"$busy\" | sed 's#$#/#'); "
+           "ls -1t | grep -vx current | grep -v '\\.tmp' | tail -n +4 | "
+           f"while read -r d; do [ \"$d\" = {b} ] && continue; case \"$busy\" in *\"/code/$d/\"*) continue;; esac; "
            "find \"$d\" -maxdepth 0 -mtime +4 -exec rm -rf {} +; done; fi")
     r2 = subprocess.run(ssh_argv() + [conf(name)["ssh"], C.remote_timeout(f"bash -c {shlex.quote(cmd)}", 600)], input=tar,
                         capture_output=True, timeout=600)
@@ -825,8 +832,10 @@ def plan(s, name, rs, st, now=None):
                                               f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）")
             continue
         ast = a["state"]
-        if ast == "done" and a.get("worker"):
-            pass  # 做完的标志有了、worker 还领着：训练命令还在写结果，只续约，交还以后再拉回（11/3）
+        held = a.get("worker") and (now - (a.get("beat") or 0) < taskq.STALE_BEAT
+                                    or (a.get("task_log_age") is not None and a["task_log_age"] < taskq.FRESH_LOG))
+        if ast == "done" and held:
+            pass  # 做完的标志有了、worker 还领着：训练命令还在写结果，只续约，交还以后再拉回（11/3）；领取过期了（worker 没交还就没了）照常拉回
         elif ast == "done":
             ft = box_task(s, "relay_fetch", key, since)
             if ft is None:
@@ -1205,7 +1214,8 @@ def run_one(s, name, dry):
                         notes.append(str(e))
                         rs = None  # 那边还是旧包，和这边的命令、路径可能对不上：这次当连不上，只续约，下次再推（11/3）
         except Exception as e:  # noqa: BLE001
-            notes.append(f"{L} 打包出错：{e}")
+            notes.append(f"{L} 打包或推代码包出错：{e}")
+            rs = None  # 同上：超时、打包出错时那边也还是旧包
     if fresh and rs == {"bundle": None}:
         rs = None
     if rs is not None and not dry:

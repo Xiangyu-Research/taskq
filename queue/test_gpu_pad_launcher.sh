@@ -102,6 +102,8 @@ source_it "$T/bin" SLURM_JOB_ID=1008 CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "DISABLED 开关：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/nobin" SLURM_JOB_ID=1009 CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "没有 nvidia-smi：不启动" test "$(lines)" -eq 0
+reset; out=$(source_it "$T/bin" SLURM_JOB_ID=1013 CUDA_VISIBLE_DEVICES=0 TASKQ_GPU_PAD_SCRIPT=$T/nope.py 2>&1)
+sleep 0.3; check "找不到 pad 脚本：不启动，作业日志里写一行" bash -c "test $(lines) -eq 0 && grep -q '显存填充没开：找不到' <<< '$out'"
 
 reset
 source_it_twice
