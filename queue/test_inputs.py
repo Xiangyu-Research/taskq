@@ -131,6 +131,14 @@ ino = lambda p: os.stat(p).st_ino  # noqa: E731
 ok("别的作业：本节点已有的硬链接过来，不重拷", rc == 0 and "硬链接 6 个" in out and "新拷 1 个" in out
    and ino(os.path.join(L8, "views", "k3", "in", "ds1", "sub/c2.b2nd")) == ino(os.path.join(L7, "views", "k1", "in", "ds1", "sub/c2.b2nd")))
 
+# 作业数组：squeue 的 %i 是 <数组号>_<序号>，本地目录用的是每个子任务自己的作业号（%A）；别的作业不能删它
+with open(os.path.join(BIN, "squeue"), "w") as f:
+    f.write('#!/bin/sh\ncase "$*" in *%A*) echo "7 7"; echo "8 3_0";; *) echo 7; echo 3_0;; esac\n')
+rc, out, err = run("prepare", DATA, "k1", L7, V, env=env)
+ok("作业数组的子任务（作业号 8、显示成 3_0）还在：不删它的本地目录", rc == 0 and os.path.isdir(L8))
+with open(os.path.join(BIN, "squeue"), "w") as f:
+    f.write("#!/bin/sh\necho 7\necho 8\n")
+
 # 同一路径、大小不变、内容改了（改动时间变了）：不复用本地旧副本（11/1）
 dj = os.path.join(V, "dataset.json")
 st0 = os.stat(dj)

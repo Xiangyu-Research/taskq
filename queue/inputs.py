@@ -77,11 +77,12 @@ def blob_id(real, size, mtime=0, ino=0):
 
 
 def live_jobs():
-    """本账号在 Slurm 里还在的作业号；查不了 → None（这时不删别的作业的目录）。"""
+    """本账号在 Slurm 里还在的作业号；查不了 → None（这时不删别的作业的目录）。
+    作业数组的子任务 %i 显示成 <数组号>_<序号>，SLURM_JOB_ID（本地目录的名字）是 %A，两样都收。"""
     if not shutil.which("squeue"):
         return None
     try:
-        r = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", ""), "-o", "%i"], capture_output=True, text=True, timeout=60)
+        r = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", ""), "-o", "%A %i"], capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode:
