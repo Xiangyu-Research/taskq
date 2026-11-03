@@ -995,6 +995,34 @@ def test_list_unreadable():
     ok("拉回前列结果：读不了的子目录 → 出错（不拉回、不算做完）；不存在的结果文件夹照样跳过")
 
 
+def test_deploy_keeps_busy():
+    """清理旧包：Slurm 排着、在跑的作业的工作目录（交作业时在那个包里）不删；读不到 squeue 时一个都不删；pueue 照旧按新旧删。"""
+    c0, sq = M.RELAY[NAME], os.path.join(BIN, "squeue")
+    src = os.path.join(T, "dk_src")
+    os.makedirs(src, exist_ok=True)
+    TN.wb(os.path.join(src, "f"), b"x")
+    old = time.time() - 10 * 86400
+    try:
+        for sched, squeue, want in (("slurm", "busy", {"a", "n", "c", "d"}), ("slurm", "fail", {"a", "b", "n", "c", "d"}),
+                                    ("pueue", "busy", {"n", "c", "d"})):
+            r = tempfile.mkdtemp(dir=T, prefix="dk_")
+            M.RELAY[NAME] = dict(c0, root=r, scheduler=sched)
+            for i, d in enumerate("abcd"):
+                os.makedirs(os.path.join(r, "code", d, "scripts", "queue"))
+                t = old if d in "ab" else time.time() - 3600 * (4 - i)
+                os.utime(os.path.join(r, "code", d), (t, t))
+            with open(sq, "w") as f:
+                f.write(f"#!/bin/bash\necho {r}/code/a/scripts/queue\n" if squeue == "busy" else "#!/bin/bash\nexit 1\n")
+            os.chmod(sq, 0o755)
+            relay.deploy(NAME, "n", src)
+            got = set(os.listdir(os.path.join(r, "code"))) - {"current"}
+            assert got == want and os.readlink(os.path.join(r, "code", "current")) == "n", (sched, squeue, got)
+    finally:
+        M.RELAY[NAME] = c0
+        os.path.exists(sq) and os.remove(sq)
+    ok("清理旧包：排着的作业的工作目录所在的包留着；squeue 读不到时不删；pueue 照旧")
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
@@ -1010,6 +1038,7 @@ if __name__ == "__main__":
     test_e2e_path(test_e2e())
     test_view_lock()
     test_list_unreadable()
+    test_deploy_keeps_busy()
     shutil.rmtree(T)
     shutil.rmtree(STATE_DIR)
     print("全部通过")

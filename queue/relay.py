@@ -488,7 +488,7 @@ def parse_sched(name, rs):
 
 # ---------------- 代码包 ----------------
 def deploy(name, bid, path):
-    """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。"""
+    """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。清理旧包时留下排着、在跑的作业还在用的（适配器的 busy_cmd），读不到就不清理。"""
     r = R.q(root(name))
     b = shlex.quote(bid)
     tar = subprocess.run(["tar", "-C", path, "-cf", "-", "."], capture_output=True, check=True).stdout
@@ -496,8 +496,10 @@ def deploy(name, bid, path):
            f"[ -e $R/queue/tasks.jsonl ] || {{ : > $R/queue/tasks.jsonl; touch $R/queue/ENABLED; }}; cd $R/code; "
            f"if [ ! -d {b} ]; then rm -rf {b}.tmp; mkdir {b}.tmp; tar -xf - -C {b}.tmp; mv -T {b}.tmp {b}; fi; "
            f"ln -sfn {b} current.tmp; mv -T current.tmp current; "
+           f"if busy=$({(SL if conf(name)['scheduler'] == 'slurm' else PQ).busy_cmd()}); then busy=$(printf '%s\\n' \"$busy\" | sed 's#$#/#'); "
            "ls -1t | grep -vx current | grep -v '\\.tmp$' | tail -n +4 | "
-           "while read -r d; do find \"$d\" -maxdepth 0 -mtime +4 -exec rm -rf {} +; done")
+           "while read -r d; do case \"$busy\" in *\"/code/$d/\"*) continue;; esac; "
+           "find \"$d\" -maxdepth 0 -mtime +4 -exec rm -rf {} +; done; fi")
     r2 = subprocess.run(ssh_argv() + [conf(name)["ssh"], C.remote_timeout(f"bash -c {shlex.quote(cmd)}", 600)], input=tar,
                         capture_output=True, timeout=600)
     if r2.returncode:

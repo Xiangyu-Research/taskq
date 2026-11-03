@@ -53,6 +53,12 @@ def probe(name):
     return out
 
 
+
+def busy_cmd():
+    """打印我们排着和在跑的作业的工作目录（squeue 的 %Z），一行一个；读不到时出错。
+    Slurm 在交作业时记下工作目录（交的那个代码包里），作业开始时要进去开日志，所以开始前不能删。"""
+    return "squeue -u $USER -h -r -o %Z"
+
 def parse(out):
     """probe 的输出 → dict(counts={QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}, cpu=CPU worker 作业数或 None,
     free=还剩几个提交名额或 None)；读不出数的 QOS 行不算（那个 QOS 当读不到）。"""

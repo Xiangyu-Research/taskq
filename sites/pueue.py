@@ -39,6 +39,11 @@ def workers(name, jobs, kind="gpu"):
     return [j for j in jobs or [] if j[1] == f"worker:{w['id']}"]
 
 
+
+def busy_cmd():
+    """排着的 worker 开始时才解析 code/current，不占着旧包：没有要留的。"""
+    return "true"
+
 def worker_cmd(name, kind="gpu"):
     """开 worker 的 pueue add 命令。整条 bash -c 作为一个参数：pueue 把 -- 后面的参数用空格拼起来交给 sh（ccb0ba6）。
     前面加 exec：pueue 的子进程就是 worker 本身。不加时 sh 收到 pueue kill 的 SIGTERM 先退出，pueue 马上记为结束，
