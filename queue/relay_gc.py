@@ -67,15 +67,18 @@ if free()<soft:
         rmtree(d)
         out['removed_views'].append(rel)
 import time
-pinned=set()
 PD=os.path.join(R,'state','pins')
-for f in (os.listdir(PD) if os.path.isdir(PD) else []):
-    try:
-        p=os.path.join(PD,f)
-        if f.endswith('.json') and time.time()-os.path.getmtime(p)<12*3600:
-            pinned|=set(json.load(open(p)))
-    except (OSError,ValueError):
-        continue
+def pins():
+    s=set()
+    for f in (os.listdir(PD) if os.path.isdir(PD) else []):
+        try:
+            p=os.path.join(PD,f)
+            if f.endswith('.json') and time.time()-os.path.getmtime(p)<12*3600:
+                s|=set(json.load(open(p)))
+        except (OSError,ValueError):
+            continue
+    return s
+pinned=pins()
 def skip(p,f):
     if f in pinned:
         return True
@@ -108,7 +111,7 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
     for _,p,sz in sorted(cand):
         if free()>=soft:
             break
-        if not inside(p,B):
+        if not inside(p,B) or os.path.basename(p) in pins():
             continue
         try:
             os.remove(p)
@@ -135,6 +138,8 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
                 except OSError:
                     continue
                 if o.st_ino==st.st_ino and o.st_dev==st.st_dev:
+                    if f in pins():
+                        break
                     os.remove(p)
                     out['unlinked']=out.get('unlinked',0)+1
                     break

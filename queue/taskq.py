@@ -143,11 +143,17 @@ class Lock:
                 os.mkdir(self.d)
             except FileExistsError:
                 try:
-                    age = time.time() - os.path.getmtime(self.d)
+                    old = os.stat(self.d)
+                    age = time.time() - old.st_mtime
                     if age > 900 or (age > 120 and not self._holder_alive()):  # 拿锁的进程死了（pid 可能被复用：15 分钟后不管）
-                        os.rename(self.d, f"{self.d}.stale{os.getpid()}")
-                        shutil.rmtree(f"{self.d}.stale{os.getpid()}", ignore_errors=True)
-                        continue
+                        stale = f"{self.d}.stale{os.getpid()}"
+                        os.rename(self.d, stale)
+                        if os.stat(stale).st_ino != old.st_ino:  # 判断之后别人已经抢过、重新拿到了锁：还给它
+                            if not os.path.lexists(self.d):
+                                os.rename(stale, self.d)
+                        else:
+                            shutil.rmtree(stale, ignore_errors=True)
+                            continue
                 except OSError:
                     pass
                 time.sleep(0.5)

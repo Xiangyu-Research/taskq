@@ -739,6 +739,8 @@ def plan(s, name, rs, st, now=None):
     acts, stuck = [], {}
     if not mtq or not mtq.get("enabled"):
         return [], {}
+    if rs is not None and "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):
+        rs = None  # box 的 pueue 读不到：在跑的拉回、归档看不见，不能当成没有，只续约（11/3）
     if rs is None:
         acts = [dict(op="beat", key=t["key"]) for t in mine if t["state"] != "done"]
         last = (st.get("last_ok") or {}).get(name, 0)
