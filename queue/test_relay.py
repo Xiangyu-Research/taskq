@@ -912,9 +912,14 @@ def test_drop_refused():
         relay.rtq = lambda name, cmd: (1, f"队列里没有：{K}")
         msgs = relay.execute(NAME, acts, S0([]))
         assert seen and central, (seen, central, msgs)
+        central.clear()
+        relay.rtq = lambda name, cmd: (0, "")
+        relay.rpy = lambda name, code, data=None, **kw: (_ for _ in ()).throw(OSError("ssh 断了"))
+        msgs = relay.execute(NAME, acts, S0([]))
+        assert not central and any("先不交还" in m for m in msgs), (central, msgs)
     finally:
         relay.rpy, relay.rtq, relay.taskq.central = rpy0, rtq0, cen0
-    ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果")
+    ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果；删路径时出错也不交还")
 
 
 def test_view_lock():

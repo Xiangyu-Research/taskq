@@ -1082,6 +1082,8 @@ def execute(name, acts, s, run_add=None):
                 msgs.append(f"{L} 上{what} {k}" if r and r[0] == 0 else f"{L} 上{what} {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
         except Exception as e:  # noqa: BLE001
             msgs.append(f"{L} {a['op']} {k} 出错：{e}")
+            if a["op"] in ("drop", "redo"):
+                kept.add(k)
     return msgs
 
 
