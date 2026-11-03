@@ -143,12 +143,12 @@ class Lock:
                 os.mkdir(self.d)
             except FileExistsError:
                 try:
-                    old = os.stat(self.d)
-                    age = time.time() - old.st_mtime
+                    old = self._ident(self.d)
+                    age = time.time() - old[1] / 1e9
                     if age > 900 or (age > 120 and not self._holder_alive()):  # 拿锁的进程死了（pid 可能被复用：15 分钟后不管）
                         stale = f"{self.d}.stale{os.getpid()}"
                         os.rename(self.d, stale)
-                        if os.stat(stale).st_ino != old.st_ino:  # 判断之后别人已经抢过、重新拿到了锁：还给它
+                        if self._ident(stale) != old:  # 判断之后别人已经抢过、重新拿到了锁：还给它
                             if not os.path.lexists(self.d):
                                 os.rename(stale, self.d)
                         else:
@@ -167,6 +167,16 @@ class Lock:
                 pass
             return self
         raise SystemExit("拿不到队列的锁")
+
+    @staticmethod
+    def _ident(d):
+        """认一把锁：inode 号（ext4 会马上复用）、mtime（纳秒）、owner 的内容。"""
+        st = os.stat(d)
+        try:
+            owner = open(os.path.join(d, "owner")).read()
+        except OSError:
+            owner = None
+        return (st.st_ino, st.st_mtime_ns, owner)
 
     def _holder_alive(self):
         """持有者记的是本机、进程还在 → True（共享盘卡顿时不按年龄抢）。"""

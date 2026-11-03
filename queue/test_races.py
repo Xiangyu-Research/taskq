@@ -29,9 +29,20 @@ assert taskq.TQ == os.environ["TASKQ_DIR"], taskq.TQ
 
 
 def test_lock():
-    """两个等锁的进程都看到同一把死锁过期：A 抢下并拿到新锁后，B 把 A 的新锁当成旧的再抢一次 → 两个同时持锁。"""
-    os.makedirs(taskq.TQ, exist_ok=True)
-    d = os.path.join(taskq.TQ, "lock")
+    """两个等锁的进程都看到同一把死锁过期：A 抢下并拿到新锁后，B 把 A 的新锁当成旧的再抢一次 → 两个同时持锁。
+    tmpfs（/tmp）不复用 inode 号，ext4 会把刚删的号马上给新目录：两种盘都跑。"""
+    _lock_race(taskq.TQ)
+    if os.path.isdir("/var/tmp"):
+        disk = tempfile.mkdtemp(prefix="test_races_", dir="/var/tmp")
+        try:
+            _lock_race(disk)
+        finally:
+            shutil.rmtree(disk, ignore_errors=True)
+
+
+def _lock_race(base):
+    os.makedirs(base, exist_ok=True)
+    d = os.path.join(base, "lock")
     p = subprocess.Popen(["true"])
     p.wait()
     os.mkdir(d)
@@ -40,6 +51,7 @@ def test_lock():
     old = time.time() - 200
     os.utime(d, (old, old))
     A, B = taskq.Lock(tries=4), taskq.Lock(tries=4)
+    A.d = B.d = d
     orig = taskq.Lock._holder_alive
     state = dict(done=False)
 
@@ -59,7 +71,7 @@ def test_lock():
         except SystemExit:
             pass
         a_owner_now = open(os.path.join(d, "owner")).read() if os.path.exists(os.path.join(d, "owner")) else None
-        assert not both, (f"A 持锁期间 B 也拿到了锁（A={A.me!r}，B={B.me!r}，锁里现在记的是 {a_owner_now!r}）："
+        assert not both, (f"{base}：A 持锁期间 B 也拿到了锁（A={A.me!r}，B={B.me!r}，锁里现在记的是 {a_owner_now!r}）："
                           "B 把 A 刚建的新锁当成过期的旧锁 rename 掉了")
     finally:
         taskq.Lock._holder_alive = orig
