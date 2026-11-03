@@ -1201,6 +1201,7 @@ def run_one(s, name, dry):
                         rs = remote_status(name)
                     except RuntimeError as e:
                         notes.append(str(e))
+                        rs = None  # 那边还是旧包，和这边的命令、路径可能对不上：这次当连不上，只续约，下次再推（11/3）
         except Exception as e:  # noqa: BLE001
             notes.append(f"{L} 打包出错：{e}")
     if fresh and rs == {"bundle": None}:

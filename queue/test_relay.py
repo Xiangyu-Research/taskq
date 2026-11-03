@@ -796,14 +796,16 @@ def test_adapters_in_relay():
 
 
 def test_fresh_site():
-    """新机器第一次：连得上、根目录里还没有代码包（读状态失败）→ 先部署、再读状态；部署失败时这次当连不上。"""
+    """新机器第一次：连得上、根目录里还没有代码包（读状态失败）→ 先部署、再读状态；部署失败时这次当连不上。
+    已有旧代码包、换新包失败（11/3：切换当天新路径对着旧包）→ 这次也当连不上，只续约。"""
     keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "deploy", "write_status", "update_state", "load_state", "plan", "fill", "topup", "log")}
     build, auto = relay.RB.build, dict(relay.P.AUTO)
     try:
-        for fail in (False, True):
-            calls, seq = [], [None, {"bundle": "b1", "jobs": [], "squeue": None}]
+        for fail, old in ((False, False), (True, False), (True, True)):
+            calls = []
+            seq = [{"bundle": "b0", "jobs": [], "squeue": None}] if old else [None, {"bundle": "b1", "jobs": [], "squeue": None}]
             relay.remote_status = lambda n: seq.pop(0) if seq else None
-            relay.undeployed = lambda n: True
+            relay.undeployed = lambda n: not old
             relay.RB.build = lambda n, c: ("b1", "/nonexistent")
             def dep(n, b, p):
                 if fail:
@@ -824,7 +826,7 @@ def test_fresh_site():
             except Exception:  # noqa: BLE001  后面的步骤不在这里测
                 pass
             if fail:
-                assert ("plan", None) in calls and not any(c[0] == "status" for c in calls), calls
+                assert ("plan", None) in calls and not any(c[0] == "status" for c in calls), (old, calls)
             else:
                 assert calls[:3] == [("deploy", "lab0", "b1"), ("status", "b1"), ("plan", "b1")], calls
     finally:
@@ -832,7 +834,7 @@ def test_fresh_site():
             setattr(relay, k, v)
         relay.RB.build = build
         relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
-    print("通过：新机器还没有代码包时先部署再读状态；部署失败这次当连不上")
+    print("通过：新机器还没有代码包时先部署再读状态；部署失败（新机器或换新包）这次当连不上")
 
 
 def test_auto_off():
