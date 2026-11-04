@@ -191,8 +191,11 @@ class Serve:
         return H
 
 
-def relay_of(host):
-    """这个 ssh 名字是执行机（送去的脚本换名、不带注释，工作目录在根目录下）→ 它的条目；不是 → None。"""
+def relay_of(host, site=None):
+    """执行机（送去的脚本换名、不带注释，工作目录在根目录下）→ 它的条目；不是 → None。
+    site：执行机的名字，按名字查（几台执行机的 ssh 可以相同，如 lab1、lab0，11/4）；不给时按 ssh 名字找第一台。"""
+    if site is not None:
+        return machines().RELAY.get(site)
     return next((m for m in machines().RELAY.values() if m.get("ssh") == host), None)
 
 
@@ -265,22 +268,23 @@ def status_cmd(wd):
             f"elif [ -e done ]; then echo done; else echo dead; fi; grep '^在 ' log 2> /dev/null | tail -1")
 
 
-def run_remote(host, mode, plan, serve, total):
+def run_remote(host, mode, plan, serve, total, site=None):
     """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。"""
     M = machines()
-    relay = relay_of(host)
-    name = next((n for n, m in M.MACHINES.items() if m.get("ssh") == host), host)
+    relay = relay_of(host, site)
+    name = site if relay else next((n for n, m in M.MACHINES.items() if m.get("ssh") == host), host)
     pyx = "python3"
     with open(__file__) as f:
         src = f.read()
     if relay:  # 执行机（scripts/taskq/queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
         sys.path.insert(0, os.path.join(CORE, "queue"))
+        import proto
         import relay_bundle
         base = relay["root"].rstrip("/")
         job = relay.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
         pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(src, base)
         script = "xfer.py"
-        base += "/tmp"
+        base += "/" + proto.ROOT["tmp"]
     else:
         job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
         script = "tunnel.py"
@@ -332,9 +336,9 @@ def run_remote(host, mode, plan, serve, total):
         ssh(host, f"rm -rf {wd}", check=False)
 
 
-def push(host, src, dst, rels):
+def push(host, src, dst, rels, site=None):
     """box 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
-    返回最后还对不上、已删掉的文件。"""
+    返回最后还对不上、已删掉的文件。site：执行机的名字（relay_of）。"""
     files = {}
     for r in rels:
         st = os.stat(os.path.join(src, r))
@@ -343,7 +347,7 @@ def push(host, src, dst, rels):
     token = secrets.token_urlsafe(24)
     serve = Serve(token, files, src=src)
     lk = take_lock()
-    srv, url = start_server(serve, quick=bool((relay_of(host) or {}).get("quick_tunnel")))
+    srv, url = start_server(serve, quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
     log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
     t0, bad = time.time(), list(files)
     try:
@@ -354,7 +358,7 @@ def push(host, src, dst, rels):
                 serve.sent.pop(r, None)
             plan = dict(base=f"{url}/{token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad])
             try:
-                res, stop = run_remote(host, "_fetch", plan, serve, sum(files[r][0] for r in bad)), False
+                res, stop = run_remote(host, "_fetch", plan, serve, sum(files[r][0] for r in bad), site), False
             except RuntimeError as e:
                 if not k:
                     raise
@@ -373,7 +377,7 @@ def push(host, src, dst, rels):
     return bad
 
 
-def pull(host, src, dst, items):
+def pull(host, src, dst, items, site=None):
     """那边的 src/<rel> → box 的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
@@ -381,7 +385,7 @@ def pull(host, src, dst, items):
     os.makedirs(dst, exist_ok=True)
     serve = Serve(token, files, dst=dst)
     lk = take_lock()
-    srv, url = start_server(serve, quick=bool((relay_of(host) or {}).get("quick_tunnel")))
+    srv, url = start_server(serve, quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
     log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
     t0, bad = time.time(), list(files)
     try:
@@ -392,7 +396,7 @@ def pull(host, src, dst, items):
                 serve.done.pop(r, None)
             plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, npar=NPAR, round=k, files=[[r, files[r][0]] for r in bad])
             try:
-                run_remote(host, "_send", plan, serve, sum(files[r][0] for r in bad))
+                run_remote(host, "_send", plan, serve, sum(files[r][0] for r in bad), site)
                 stop = False
             except RuntimeError as e:
                 if not k:
@@ -638,11 +642,11 @@ def main(argv):
         return 0
     if cmd in ("push", "pull") and len(a) == 4:
         M = machines()
-        host = M.machine(a[0])["ssh"]
+        host, site = M.machine(a[0])["ssh"], (a[0] if a[0] in M.RELAY else None)
         lines = [ln for ln in open(a[3]).read().splitlines() if ln]
         if cmd == "push":
-            return 1 if push(host, a[1], a[2], lines) else 0
-        return 1 if pull(host, a[1], a[2], [ln.split("\t") for ln in lines]) else 0
+            return 1 if push(host, a[1], a[2], lines, site=site) else 0
+        return 1 if pull(host, a[1], a[2], [ln.split("\t") for ln in lines], site=site) else 0
     print(__doc__, file=sys.stderr)
     return 2
 

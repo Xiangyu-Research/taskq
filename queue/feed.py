@@ -16,6 +16,7 @@ import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 import machines as M  # noqa: E402
+from proto import alert, alert_id, alert_msg  # noqa: E402
 
 LOG = os.path.expanduser(os.environ.get("FEED_LOG", "~/feed.log"))  # 环境变量只给测试用
 
@@ -27,14 +28,15 @@ def log(lines):
 
 
 def nobody(ctq):
-    """总队列里分给了不是执行机的名字的 → {问题编号: 说明}。"""
+    """总队列里分给了不是执行机的名字的 → {问题编号: 说明（带 data）}。"""
     own = set(M.RELAY)
     by = {}
     for t in (ctq or {}).get("tasks") or []:
         if t.get("assigned") and t["assigned"] not in own and t["state"] != "done":
             by.setdefault(t["assigned"], []).append(t["key"])
-    return {f"feed:nobody:{w}": (f"总队列里 {len(ks)} 个任务分给了 {w}，但 {w} 不是执行机，没有谁会做（{ks[0]}…）；"
-                                 f"交还：python3 scripts/taskq/queue/taskq.py release --worker {w} <key>…") for w, ks in by.items()}
+    return {alert_id("feed", "nobody", w): alert(f"总队列里 {len(ks)} 个任务分给了 {w}，但 {w} 不是执行机，没有谁会做（{ks[0]}…）；"
+                                                 f"交还：python3 scripts/taskq/queue/taskq.py release --worker {w} <key>…",
+                                                 worker=w, n=len(ks), keys=ks) for w, ks in by.items()}
 
 
 def run_all(s, dry=False):
@@ -43,7 +45,7 @@ def run_all(s, dry=False):
         import relay as RL  # scripts/taskq/queue/relay.py
         events, stuck = RL.run_all(s, dry=dry)
     except Exception as e:  # noqa: BLE001
-        events, stuck = [], {"relay:error": f"scripts/taskq/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
+        events, stuck = [], {alert_id("relay", "error"): f"scripts/taskq/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
     if events and not dry:
         log([f"执行机 {'、'.join(sorted(M.RELAY))}（relay.py）：{len(events)} 条，见 ~/relay.log"])
     stuck = dict(stuck)
@@ -58,4 +60,4 @@ if __name__ == "__main__":
     ap.add_argument("--dry", action="store_true", help="只打印会做什么（默认就是）")
     ap.parse_args()
     ev, st = run_all(H.gather(), dry=True)
-    print("\n".join(ev + [f"卡住：{v}" for v in st.values()]))
+    print("\n".join(ev + [f"卡住：{alert_msg(v)}" for v in st.values()]))

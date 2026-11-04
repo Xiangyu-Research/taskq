@@ -196,6 +196,13 @@ st = lambda **e: subprocess.run(["bash", "-c", cmd], env=dict(ENV, PATH=fbin + "
 ok("状态：进程没了、没有 done → dead", st() == "dead")
 ok("状态：查完 done 之后、查进程之前刚写完 done 退出 → done，不当 dead", st(FINISH="1") == "done")
 
+sys.path.insert(0, HERE)
+import tunnel  # noqa: E402
+ok("执行机按名字查（lab1、lab0 的 ssh 相同）：给 site 时拿到那一台；不给时按 ssh 找第一台；不是执行机 → None",
+   tunnel.relay_of("lab", site="lab0") is tunnel.machines().RELAY["lab0"]
+   and tunnel.relay_of("lab", site="lab1") is tunnel.machines().RELAY["lab1"]
+   and tunnel.relay_of("lab") is not None and tunnel.relay_of(HOST) is None)
+
 shutil.rmtree(T)
 print(f"\n{len(FAILS)} 项失败" if FAILS else "\n全部通过")
 sys.exit(1 if FAILS else 0)

@@ -20,6 +20,7 @@ DEST=${3:?用法：tunnel_push.sh <机器> <源目录> <目标目录> <子目录
 shift 3
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
+eval "$(python3 "$CORE/queue/proto.py" sh)"  # TQ_INCOMPLETE
 H=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以传过去的机器 $HOST" >&2; exit 2; }
 (( $# > 0 )) || { echo "至少给一个子目录" >&2; exit 2; }
@@ -31,7 +32,7 @@ trap 'rm -rf "$W"' EXIT
 (cd "$SRC" && find -L "${SUBS[@]}" -type f | sort) > "$W/files.txt"
 N=$(wc -l < "$W/files.txt")
 (( N > 0 )) || { echo "没有文件" >&2; exit 1; }
-MARKS=$(printf " ~/$DEST/%q/.incomplete" "${SUBS[@]}")
+MARKS=$(printf " ~/$DEST/%q/$TQ_INCOMPLETE" "${SUBS[@]}")
 ssh "$H" "for f in $MARKS; do mkdir -p \"\$(dirname \$f)\" && touch \$f; done"
 python3 "$CORE/sync/tunnel.py" push "$HOST" "$SRC" "$DEST" "$W/files.txt"
 
