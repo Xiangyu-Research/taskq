@@ -2,7 +2,9 @@
 进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）。说明见 scripts/taskq/queue/README.md 的"开关和配置"。
 
     import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import machines、policy
-    cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连起来，没有时为空）
+    cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连，元组的元组每项一行；没有时为空）
+    cfg.py state [名字…]             本机的状态文件夹（或其中的路径，~ 展开）
+    cfg.py log <名字>                日志文件 <名字>.log 的位置（~ 展开）
 """
 import importlib.util
 import os
@@ -31,8 +33,10 @@ def rel(*parts):
     return os.path.normpath(os.path.join(CORE_REL, *parts))
 
 
-STATE_HOME = "~/.cache/phd/"
-STATE_PLACES = {"taskq": "~/.cache/phd/taskq", "gpu_pad/DISABLED": "~/.cache/phd/gpu_pad/DISABLED"}
+# 状态文件夹：TASKQ_STATE > policy.py 的 OUTPUTS["state"] > 下面的默认（11/4）。代码包里 relay_bundle.py 把这几个字面量换成
+# 根目录下的（STATE_PLACES 的 → queue/，其余 → state/），键同 proto.STATE_IN_ROOT
+STATE_HOME = "~/.cache/taskq/"
+STATE_PLACES = {"taskq": "~/.cache/taskq/taskq", "gpu_pad/DISABLED": "~/.cache/taskq/gpu_pad/DISABLED"}
 
 
 def config_dir():
@@ -56,14 +60,27 @@ def outputs(key, default=None):
     return getattr(policy, "OUTPUTS", {}).get(key, default)
 
 
+def state_home():
+    """配置的状态文件夹（不展开 ~，以 / 结尾）：OUTPUTS["state"]，没写时 STATE_HOME。"""
+    h = outputs("state")
+    return (h.rstrip("/") + "/") if h else STATE_HOME
+
+
 def state(*parts, expand=True):
     rel = "/".join(parts)
     base = os.environ.get("TASKQ_STATE")
-    if base:
-        p = base.rstrip("/") + ("/" + rel if rel else "")
+    home = None if base else outputs("state")
+    if base or home:
+        p = (base or home).rstrip("/") + ("/" + rel if rel else ("" if base else "/"))
     else:
         p = next((v + rel[len(k):] for k, v in STATE_PLACES.items() if rel == k or rel.startswith(k + "/")), STATE_HOME + rel)
     return os.path.expanduser(p) if expand else p
+
+
+def log(name):
+    """日志文件 <name>.log：环境变量 <NAME>_LOG（给测试用）> OUTPUTS["logs"] 文件夹 > 家目录。"""
+    v = os.environ.get(name.upper() + "_LOG")
+    return os.path.expanduser(v or os.path.join(outputs("logs") or "~", name + ".log"))
 
 
 def env(name, default=None):
@@ -121,7 +138,17 @@ def extend(ns, name, tables):
 
 
 if __name__ == "__main__":
-    if sys.argv[1:2] != ["get"] or len(sys.argv) != 3:
+    a = sys.argv[1:]
+    if a[:1] == ["state"]:
+        print(state(*a[1:]))
+    elif a[:1] == ["log"] and len(a) == 2:
+        print(log(a[1]))
+    elif a[:1] == ["get"] and len(a) == 2:
+        v = outputs(a[1])
+        if isinstance(v, (tuple, list)):  # 元组用空格连；元组的元组每项一行（11/4）
+            seq = (tuple, list)
+            print(("\n" if any(isinstance(x, seq) for x in v) else " ").join(" ".join(map(str, x)) if isinstance(x, seq) else str(x) for x in v))
+        else:
+            print("" if v is None else v)
+    else:
         sys.exit(__doc__.split("\n\n")[1])
-    v = outputs(sys.argv[2])
-    print("" if v is None else " ".join(map(str, v)) if isinstance(v, (tuple, list)) else v)

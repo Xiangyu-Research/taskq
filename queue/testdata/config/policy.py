@@ -49,6 +49,10 @@ SLURM = {
 READY = {"dicc2": 2, "lab1": 2, "lab0": 1, "dicc1": 2}
 
 OUTPUTS = dict(
+    state="~/.cache/phd/",
+    entry="bin/loop.sh",
+    cron=(("5,35 * * * *", "health"), ("30 8-20/2 * * *", "registry")),
+    origin="git@example.org:demo/demo.git",
     bundle=(os.path.dirname(cfg.CORE_REL) or ".",),  # 调度代码所在的文件夹（单独的检出时是整个仓库）
     experiments=QR + "/testdata/exps/*/experiments.py",
     plans=QR + "/testdata/exps/*/plans.md",

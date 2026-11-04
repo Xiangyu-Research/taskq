@@ -1,17 +1,23 @@
 #!/bin/bash
-# 开机后（crontab 的 @reboot，scripts/taskq/queue/setup.sh 写进去）：启动 pueue 常驻进程，把重启时被打断的任务原地放回队列；
-# envs/machines.py 里 gpu_log 的机器（lab）同时启动 GPU 使用记录（scripts/monitor/gpu_log.sh）。2026-10-16。
+# 开机后（crontab 的 @reboot，queue/setup.sh 写进去）：启动 pueue 常驻进程，把重启时被打断的任务原地放回队列；
+# 带 --gpu-log 时（机器表里 gpu_log 的机器，setup.sh 按表加上）同时启动 GPU 使用记录（monitor/gpu_log.sh）。2026-10-16。
+#   on_boot.sh [--gpu-log]   不带时按本机的机器表（代码包里的机器表只有执行机那一项，所以 setup.sh 写成带参数的；11/4）
 #   被打断的任务：开机前 15 分钟到现在结束、没成功的（被杀的训练 / 推理等）。
-#   nnU-Net 从存档接着训，推理跳过已经做好的病例。
-# 日志 ~/on_boot.log；box 上的健康检查（scripts/taskq/monitor/health.py）看到重启会推送一条。
+#   训练从存档接着训，推理跳过已经做好的。
+# 日志在 crontab 里重定向到 ~/on_boot.log；box 上的健康检查看到重启会推送一条。
 set -u
 P=~/.local/bin/pueue
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 log() { echo "$(date '+%F %T') $*"; }
-sleep 30  # 等网络和数据盘
-if [[ -n $(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . gpu_log) ]] && ! pgrep -f "scripts/monitor/gpu_log.sh" > /dev/null; then
-    setsid -f bash "$REPO/scripts/monitor/gpu_log.sh" > /dev/null 2>&1 < /dev/null && log "已启动 GPU 使用记录"
+case ${1:-} in
+    --gpu-log) GL=1 ;;
+    "") GL=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . gpu_log) ;;
+    *) echo "用法：on_boot.sh [--gpu-log]" >&2; exit 2 ;;
+esac
+sleep "${ON_BOOT_WAIT:-30}"  # 等网络和数据盘
+if [[ -n $GL ]] && ! pgrep -f "gpu_log\.sh" > /dev/null; then
+    setsid -f bash "$CORE/monitor/gpu_log.sh" > /dev/null 2>&1 < /dev/null && log "已启动 GPU 使用记录"
 fi
 if ! $P status > /dev/null 2>&1; then
     rm -f ~/.local/share/pueue/pueue_"$(whoami)".socket  # 上次留下的 socket（或过渡用的链接）

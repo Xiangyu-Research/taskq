@@ -141,9 +141,10 @@ def test_bundle(T):
     sb = open(os.path.join(cur, f"{QR}/worker.sbatch")).read().split("\n")
     real = open(os.path.join(REPO, f"{QR}/worker.sbatch")).read()
     for ln in real.split("\n"):
-        if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
+        if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem", "--partition", "--gres")):
             assert ln in sb, ln
     assert "#SBATCH --cpus-per-task=30" in sb and "#SBATCH --mem=60G" in sb, sb
+    assert "#SBATCH --partition=gpu-a" in sb and "#SBATCH --gres=gpu:a:1" in sb, sb  # 条目的 sbatch 覆盖模板（11/4）
     assert not any(x.startswith("#SBATCH --job-name") for x in sb), sb
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb

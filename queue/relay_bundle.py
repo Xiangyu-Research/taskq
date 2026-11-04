@@ -41,10 +41,12 @@ OUT = cfg.state("relay", "bundles", expand=False)
 TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("envs",)))  # envs/policy.py 的 OUTPUTS：使用者的文件夹或文件
 SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # 不进包的通配（fnmatch，* 跨目录）
 # 调度核心里执行机要用的：worker 的入口和循环、跑任务、队列、任务说明、实验表、显存填充、输入的本地副本；
-# 其余（box 上的计划、传数据、健康检查、同步）不进包
-RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), "queue", f)) for f in (
-    "worker_start.sh", "dicc_worker.sh", "run_task.sh", "gpu_pad_start.sh", "gpu_pad.py", "taskq.py", "spec.py", "common.py",
-    "cfg.py", "recipes.py", "experiments.py", "steps.py", "inputs.py", "worker.sbatch", "cpu_worker.sbatch"))
+# 机器级的（开机、装 pueue、建组、GPU 使用记录，11/4：lab 不再用克隆）；其余（box 上的计划、传数据、健康检查、同步）不进包
+RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), f)) for f in (
+    "queue/worker_start.sh", "queue/dicc_worker.sh", "queue/run_task.sh", "queue/gpu_pad_start.sh", "queue/gpu_pad.py",
+    "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/recipes.py", "queue/experiments.py",
+    "queue/steps.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
+    "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "monitor/gpu_log.sh"))
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
@@ -195,13 +197,17 @@ def sbatch_over(m, kind):
 
 
 def gen_sbatch(real, m, root, kind="gpu"):
-    over = {"cpus-per-task": sbatch_over(m, kind).get("cpus"), "mem": sbatch_over(m, kind).get("mem")}
-    keep = []
+    """模板的 #SBATCH 行，按条目的 sbatch 覆盖（cpus → cpus-per-task，其余同名，如 partition、gres、mem；11/4 起分区、GPU 型号写在条目里），
+    模板里没有的选项接在后面。"""
+    over = {("cpus-per-task" if k == "cpus" else k): v for k, v in sbatch_over(m, kind).items() if v is not None}
+    keep, seen = [], set()
     for ln in real.splitlines():
         o = re.match(r"#SBATCH\s+--([\w-]+)", ln)
         if not o or o.group(1) in ("job-name", "output"):
             continue
+        seen.add(o.group(1))
         keep.append(f"#SBATCH --{o.group(1)}={over[o.group(1)]}" if over.get(o.group(1)) else ln)
+    keep += [f"#SBATCH --{k}={v}" for k, v in over.items() if k not in seen and k not in ("job-name", "output")]
     if kind not in (m.get("jobs") or ()):
         raise BundleError(f"RELAY 的 jobs 里没有 {kind}")
     # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/<核心>/queue 交，嵌着时往上 5 级是根目录）
@@ -222,14 +228,15 @@ HOME_MAP = {"taskq": "queue", "gpu_pad/DISABLED": "queue/gpu_pad_DISABLED"}  # c
 def home_paths(text, root, path=""):
     """家目录下的状态文件夹（cfg.py 的 STATE_HOME 的默认写法）换成根目录下的：任务队列 → queue/，显存填充的开关 →
     queue/gpu_pad_DISABLED，其余 → state/。只换代码（.py 的注释、文档字符串和别的文件里 # 开头的行不换，11/4）。"""
-    h = cfg.STATE_HOME[2:]
+    homes = [x[2:] for x in dict.fromkeys((cfg.state_home(), cfg.STATE_HOME)) if x.startswith("~/")]  # 配置的和核心的默认（11/4）
 
     def sub(s):
         for pre in ("$HOME/", "~/"):
             r = pre + root[2:] if root.startswith("~/") else root  # 根目录在家目录下时沿用原来的写法（双引号里的 ~ 不展开）
-            for k, v in HOME_MAP.items():
-                s = s.replace(pre + h + k, f"{r}/{v}")
-            s = s.replace(pre + h, f"{r}/state/")
+            for h in homes:
+                for k, v in HOME_MAP.items():
+                    s = s.replace(pre + h + k, f"{r}/{v}")
+                s = s.replace(pre + h, f"{r}/state/")
         return s
     keep = _prose(text) if path.endswith(".py") else None
     if keep is None:

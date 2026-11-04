@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """cfg.py 的测试（2026-11-02）：TASKQ_CONFIG / TASKQ_PLUGINS / TASKQ_STATE 没设、空、不存在、相对路径；state()、outputs()、env() 和旧名、
-cfg.py get；插件合并（extend）的重名。临时文件，不连机器。
+cfg.py get / state / log；插件合并（extend）的重名。临时文件，不连机器。
     python3 scripts/taskq/queue/test_cfg.py
 """
 import os
@@ -84,14 +84,14 @@ ok("cfg.rel：嵌着时 scripts/taskq/…，单独的检出时没有前缀（不
 
 # 状态文件夹
 setenv(TASKQ_STATE=None)
-ok("TASKQ_STATE 没设：taskq → ~/.cache/phd/taskq", cfg.state("taskq") == os.path.join(HOME, ".cache/phd/taskq"))
-ok("TASKQ_STATE 没设：taskq 下的子路径", cfg.state("taskq", "claims", "k") == os.path.join(HOME, ".cache/phd/taskq/claims/k"))
-ok("TASKQ_STATE 没设：gpu_pad/DISABLED", cfg.state("gpu_pad/DISABLED") == os.path.join(HOME, ".cache/phd/gpu_pad/DISABLED"))
-ok("TASKQ_STATE 没设：别的名字在 ~/.cache/phd/ 下", cfg.state("tasks.json") == os.path.join(HOME, ".cache/phd/tasks.json"))
-ok("TASKQ_STATE 没设：taskqx 不算 taskq 下", cfg.state("taskqx") == os.path.join(HOME, ".cache/phd/taskqx"))
-ok("expand=False 保留 ~（给远程命令拼）", cfg.state("taskq", expand=False) == "~/.cache/phd/taskq")
+ok("TASKQ_STATE 没设：taskq → ~/.cache/taskq/taskq", cfg.state("taskq") == os.path.join(HOME, ".cache/taskq/taskq"))
+ok("TASKQ_STATE 没设：taskq 下的子路径", cfg.state("taskq", "claims", "k") == os.path.join(HOME, ".cache/taskq/taskq/claims/k"))
+ok("TASKQ_STATE 没设：gpu_pad/DISABLED", cfg.state("gpu_pad/DISABLED") == os.path.join(HOME, ".cache/taskq/gpu_pad/DISABLED"))
+ok("TASKQ_STATE 没设：别的名字在 ~/.cache/taskq/ 下", cfg.state("tasks.json") == os.path.join(HOME, ".cache/taskq/tasks.json"))
+ok("TASKQ_STATE 没设：taskqx 不算 taskq 下", cfg.state("taskqx") == os.path.join(HOME, ".cache/taskq/taskqx"))
+ok("expand=False 保留 ~（给远程命令拼）", cfg.state("taskq", expand=False) == "~/.cache/taskq/taskq")
 setenv(TASKQ_STATE="")
-ok("TASKQ_STATE 空 → 同没设", cfg.state("taskq") == os.path.join(HOME, ".cache/phd/taskq"))
+ok("TASKQ_STATE 空 → 同没设", cfg.state("taskq") == os.path.join(HOME, ".cache/taskq/taskq"))
 setenv(TASKQ_STATE=os.path.join(T, "st") + "/")
 ok("TASKQ_STATE 设了：都在它下面（末尾 / 去掉）",
    cfg.state("taskq") == os.path.join(T, "st/taskq") and cfg.state("gpu_pad/DISABLED") == os.path.join(T, "st/gpu_pad/DISABLED"))
@@ -142,6 +142,30 @@ ok("cfg.py get：没有 OUTPUTS → 空行", r.returncode == 0 and r.stdout == "
 r = cfg_get(fixture.CONFIG, "get")
 r2 = cfg_get(fixture.CONFIG, "set", "name")
 ok("cfg.py：参数不对 → 打印用法、退出码非 0", r.returncode != 0 and r2.returncode != 0 and "cfg.py get" in r.stderr)
+
+# OUTPUTS["state"]、OUTPUTS["logs"]（11/4）：每种情况单独的进程
+cs = os.path.join(T, "c_state")
+write(os.path.join(cs, "policy.py"), 'OUTPUTS = dict(state="~/st_o", logs="~/lg")\n')
+r = cfg_get(cs, "state", "taskq")
+ok("cfg.py state：OUTPUTS[\"state\"] 代替默认（STATE_PLACES 也不用）", r.returncode == 0 and r.stdout == os.path.join(HOME, "st_o/taskq") + "\n")
+r = cfg_get(cs, "state")
+ok("cfg.py state：不带名字 → 文件夹本身，末尾带 /", r.returncode == 0 and r.stdout == os.path.join(HOME, "st_o") + "/\n")
+r = subprocess.run([sys.executable, os.path.join(HERE, "cfg.py"), "state", "taskq"], capture_output=True, text=True,
+                   env=dict(os.environ, TASKQ_CONFIG=cs, TASKQ_STATE=os.path.join(T, "st2")))
+ok("cfg.py state：TASKQ_STATE 比 OUTPUTS[\"state\"] 优先", r.stdout == os.path.join(T, "st2/taskq") + "\n")
+r = cfg_get(c1, "state", "taskq")
+ok("cfg.py state：没有 OUTPUTS[\"state\"] → 核心的默认", r.stdout == os.path.join(HOME, ".cache/taskq/taskq") + "\n")
+r = cfg_get(cs, "log", "feed")
+ok("cfg.py log：OUTPUTS[\"logs\"] 下的 <名字>.log", r.returncode == 0 and r.stdout == os.path.join(HOME, "lg/feed.log") + "\n")
+r = cfg_get(c1, "log", "feed")
+ok("cfg.py log：没有 OUTPUTS[\"logs\"] → ~/<名字>.log", r.stdout == os.path.join(HOME, "feed.log") + "\n")
+r = subprocess.run([sys.executable, os.path.join(HERE, "cfg.py"), "log", "feed"], capture_output=True, text=True,
+                   env=dict(os.environ, TASKQ_CONFIG=cs, FEED_LOG="~/x.log"))
+ok("cfg.py log：<名字大写>_LOG 优先", r.stdout == os.path.join(HOME, "x.log") + "\n")
+write(os.path.join(T, "c_cron", "policy.py"), 'OUTPUTS = dict(cron=(("5 * * * *", "a"), ("@daily", "b")), dirs=("x", "y"))\n')
+r, r2 = cfg_get(os.path.join(T, "c_cron"), "get", "cron"), cfg_get(os.path.join(T, "c_cron"), "get", "dirs")
+ok("cfg.py get：元组的元组每项一行，平的元组仍用空格连", r.stdout == "5 * * * * a\n@daily b\n" and r2.stdout == "x y\n")
+
 
 # 插件合并
 NAME = "extmod"
