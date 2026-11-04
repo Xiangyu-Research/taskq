@@ -54,9 +54,9 @@ def test_source_files_from_commit():
     assert B._wanted("x/a.R", 10) and not B._wanted("x/big.json", B.SMALL_MAX + 1) and not B._wanted("x/__pycache__/a.py", 1)
     assert not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
     assert not any("__pycache__" in f for f in files) and all(len(files[f][0]) <= B.SMALL_MAX for f in files if f.endswith(B.SMALL))
-    head = subprocess.run(["git", "-C", REPO, "show", f"HEAD:{STEP}"], capture_output=True).stdout
-    mode = subprocess.run(["git", "-C", REPO, "ls-tree", "HEAD", STEP], capture_output=True, text=True).stdout.split()[0]
-    assert files[STEP] == (head, mode == "100755")
+    (_, mode, oid, _, repo), = B._entries("HEAD", [STEP], REPO)  # 核心可能是子模块（11/4）
+    head = subprocess.run(["git", "-C", repo, "cat-file", "blob", oid], capture_output=True).stdout
+    assert head and files[STEP] == (head, mode == "100755")
     ok("从提交取文件：OUTPUTS[\"bundle\"] 下的代码（含 .R）和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
 
 

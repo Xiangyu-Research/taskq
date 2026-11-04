@@ -1,7 +1,8 @@
 #!/bin/bash
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(git -C "$HERE" rev-parse --show-toplevel)
+CORE=$(dirname "$HERE")
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 export REPO
 T=$(mktemp -d)
 export T

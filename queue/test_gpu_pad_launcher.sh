@@ -3,7 +3,8 @@
 # 什么情况下启动、只启动一次、失败重启。  bash scripts/taskq/queue/test_gpu_pad_launcher.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(git -C "$HERE" rev-parse --show-toplevel)
+CORE=$(dirname "$HERE")
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 source "$HERE/testdata/fixture.sh"
 ENV_SCRIPT=$REPO/$(python3 "$HERE/cfg.py" get env_script)
 T=$(mktemp -d)

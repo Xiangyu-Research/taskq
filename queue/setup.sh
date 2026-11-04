@@ -54,7 +54,7 @@ crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | { grep -v
 roles=" $($M get . roles) " entry=$($C get entry)
 if [[ $roles == *" hub "* && -n $entry ]]; then  # 从只给 cron 用的克隆（这台的 repo）运行，只跑已提交的代码
     H=$($M get . repo)
-    [[ -d $H/.git ]] || git clone -q "$($C get origin)" "$H"
+    [[ -d $H/.git ]] || git clone -q --recurse-submodules "$($C get origin)" "$H"
     while read -r line; do
         [[ -n $line ]] && cron "bash $H/$entry ${line##* }" "${line% *}"
     done <<< "$($C get cron)"
