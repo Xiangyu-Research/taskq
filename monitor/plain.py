@@ -10,6 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
+import proto  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
@@ -21,7 +22,7 @@ STEP = {"eval": "评测", "oof": "五折汇总", "paired": "和 T0 的配对比�
         "lprob": "病灶概率汇总", "prune": "删单折概率图", "p1": "P1 水肿反事实", "p2": "P2 合成病灶插入", "p2cmp": "P2 和 T0 的比较",
         "t18cmp": "T18 的后续比较", "j1b3": "J1B3 覆盖梯度回归",
         "archive": "存档", "train": "训练",
-        "compare_all": "对比表"}
+        "compare_all": "对比表", "relay_fetch": "结果拉回", "relay_stage": "数据传送", "relay_archive": "存档"}
 QUIET = {"infer", "archive", "train", "prune"}  # 中间步骤：进度报告里不列
 _tasks = _plan = _steps = None
 
@@ -108,9 +109,31 @@ def task(lab):
         return f"{fold(who)} 的训练"
     if step in QUIET:
         e, t = E.parse_label(who)
-        return (" ".join(x for x in (exp_name(e), E.short(t) if t else "") if x) if e else who) + " 的" + step_name(step)
+        if not e:
+            return f"{step_name(step)}任务 {who}"
+        return " ".join(x for x in (exp_name(e), E.short(t) if t else "") if x) + " 的" + step_name(step)
     r = label(lab)
-    return f"{r[0]}{' ' + r[2] if r[2] else ''} 的{r[1]}" if r else lab
+    if r and r[0] == "分析":
+        return f"分析 {r[1]}"
+    if r and r[0] == "所有实验":
+        return f"{r[1]}（所有实验）"
+    if r and r[0] != "其他":
+        return f"{r[0]}{' ' + r[2] if r[2] else ''} 的{r[1]}"
+    if lab.startswith(proto.WORKER_LABEL):
+        return f"worker {who}"
+    if who and known_step(step):
+        return f"{fold(who)} 的{step_name(step)}" if fold(who) != who else f"{step_name(step)}任务 {who}"
+    return f"一次性任务 {lab}"
+
+
+def _cat(*parts):
+    """拼中文句子：中文和英文、数字相邻处加一个空格。"""
+    out = ""
+    for x in parts:
+        if out and x and (out[-1].isascii() and out[-1].isalnum() or x[0].isascii() and x[0].isalnum()) and out[-1] != " " and x[0] != " ":
+            out += " "
+        out += x
+    return out
 
 
 def _who(key):
@@ -143,7 +166,7 @@ def problem(pid, p):
         if kind == "pueued":
             return f"{L(part[1])} 的任务队列程序没有响应，上面的训练和分析可能都停了。"
         if kind == "pueue" and "label" in d:
-            return f"{L(part[1])} 上 {task(d['label'])}出错停了。"
+            return f"{_cat(L(part[1]), '上的', task(d['label']), '出错停了。')}"
         if kind == "idle":
             gpu = M.MACHINES[part[1]]["groups"][part[2]][1]
             return f"{L(part[1])} {gpu} 号卡空着，没有训练。"
@@ -157,8 +180,6 @@ def problem(pid, p):
             return f"{what}，盘满了训练和存档会失败。"
         if kind == "gpulog":
             return f"{L(part[1])} 的 GPU 使用记录停了（不影响训练）。"
-        if kind == "code":
-            return f"{L(part[1])} 2 小时没拉到最新代码，那里跑的是旧版本的脚本。"
         if kind == "boot":
             return f"{L(part[1])} {(d.get('time') or pid.split(':', 2)[2])[5:16]} 重启过，被打断的任务已自动放回队列，要确认训练接上了。"
         if kind == "board" and "n" in d:

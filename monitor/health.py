@@ -3,28 +3,28 @@
 同时记进状态文件，make_registry.py 把当前的问题放在实验登记表最上面（"需要处理"）。各机器的状态只在 gather() 里取，
 登记表 make_registry.py 也用它。
 
-    python3 scripts/taskq/monitor/health.py              检查、推送、更新状态
-    python3 scripts/taskq/monitor/health.py --dry-run    只打印这次查到的问题，不推送、不改任何文件
-    python3 scripts/taskq/monitor/health.py --test       推送一条测试消息
+    taskq tick              检查、推送、更新状态
+    taskq tick --dry-run    只打印这次查到的问题，不推送、不改任何文件
+    taskq tick --test       推送一条测试消息
 
 查什么（每项一个问题编号，同一个问题只推送一次）：
   - 连不上：pueue 机器 ssh 不通 30 分钟。
-  - pueue：常驻进程连不上；任务失败（手动停的 143 / Killed 只记进登记表，不推送）。
+  - pueue：常驻进程连不上；任务失败（手动停的 143 / Killed 只记进登记表，不推送；调度停的 worker 不算）。
   - 训练卡住：pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
   - 同一个任务两处：同一个任务在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
   - 执行机（relay.py 管的）的问题由 relay.py 报（经 feed.run_all）。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
-  - GPU 使用记录（表里 gpu_log 的机器，monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
-  - pueue 机器 24 小时内重启过（scripts/taskq/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
-提醒（10/21 起）：每个问题推送一次，用 scripts/taskq/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
+  - GPU 使用记录（表里 gpu_log 的机器，monitor/gpu_log.sh）10 分钟没有新记录。
+  - pueue 机器 24 小时内重启过（queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
+提醒（10/21 起）：每个问题推送一次，用 monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
 文件（envs/policy.py 的 OUTPUTS）：topic（ntfy 频道名，不进仓库）、health 下的 state.json（问题和推送记录，
   make_registry.py 读）、health.log（每次有变化记一行）。
 每次检查后还做这几件事（10/18 起）：
-  - scripts/taskq/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）。
-  - scripts/taskq/queue/feed.py：送任务的唯一入口（10/31），交给 scripts/taskq/queue/relay.py（领任务、传数据、补 worker、拉回，
+  - queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）。
+  - queue/feed.py：送任务的唯一入口（10/31），交给 queue/relay.py（领任务、传数据、补 worker、拉回，
     记在 ~/relay.log；停住等人处理的报成问题）。
-  - scripts/taskq/queue/advance.py：box 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
+  - queue/advance.py：box 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
 """
 import argparse
 import json
@@ -51,7 +51,6 @@ OUT = getattr(policy, "OUTPUTS", {})
 HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
 NAME = OUT.get("name", "taskq")
 STATE = os.path.join(HDIR, "state.json")
-CODE_HEADS = os.path.expanduser(OUT.get("heads") or cfg.state("code", "heads.tsv", expand=False))  # 快进别的机器的代码后写（PhD：auto_refresh.sh）
 LOG = os.path.join(HDIR, "health.log")
 TOPIC = os.path.expanduser(OUT.get("topic", "~/.config/taskq-health/ntfy_topic"))
 H_PENDING = os.path.join(HDIR, "board_pending.txt")  # scripts/dashboard/publish.py --auto 写
@@ -80,11 +79,11 @@ def load_failed(e, dry=False):
 
 
 try:
-    import experiments as E  # noqa: E402  scripts/taskq/queue/experiments.py：实验表
-    import spec  # noqa: E402  scripts/taskq/queue/spec.py：任务说明、各机器上的收集
-    import taskq  # noqa: E402  scripts/taskq/queue/taskq.py：总队列（box，10/31）
-    import plain as PL  # noqa: E402  scripts/taskq/monitor/plain.py：推送的白话说法
-    import common as C  # noqa: E402  scripts/taskq/queue/common.py
+    import experiments as E  # noqa: E402  queue/experiments.py：实验表
+    import spec  # noqa: E402  queue/spec.py：任务说明、各机器上的收集
+    import taskq  # noqa: E402  queue/taskq.py：总队列（box，10/31）
+    import plain as PL  # noqa: E402  monitor/plain.py：推送的白话说法
+    import common as C  # noqa: E402  queue/common.py
     from common import write_json  # noqa: E402
 except Exception as _e:
     if __name__ != "__main__":
@@ -145,28 +144,15 @@ def run_on(m, script, timeout=120):
 
 
 # ---------------- 收集 ----------------
-def code_heads():
-    """各台机器的代码在哪个提交（auto_refresh.sh 快进后写的 heads.tsv）和 GitHub 上的 main → dict(main, heads={机器: 提交号})。"""
-    rc, main = sh(["git", "-C", REPO, "rev-parse", "HEAD"])
-    heads = {}
-    try:
-        for line in open(CODE_HEADS):
-            name, _, head = (line.rstrip("\n").split("\t") + ["", ""])[:3]
-            heads[name] = head
-    except OSError:
-        pass
-    return dict(main=main.strip() if rc == 0 else "", heads=heads)
-
-
 def gather(remote=True):
     """各机器的状态（只读）。remote=False：只看本机（不连别的机器）。"""
-    s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, src={}, taskq={}, code=code_heads())
+    s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, src={}, taskq={})
     here = [n for n in M.names("pueue") if (remote or M.MACHINES[n]["ssh"] is None) and n not in policy.OFFLINE]
     for n in set(M.names("pueue")) & set(policy.OFFLINE):
         s["ok"][n], s["why"][n] = False, f"暂停检查：{policy.OFFLINE[n]}"
     rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"] + ([] if remote else here), timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in here}
-    s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（scripts/taskq/queue/common.py），main() 里写回
+    s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（queue/common.py），main() 里写回
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
@@ -245,12 +231,6 @@ def check(s):
             er = sorted(d["errors"].items())
             add(alert_id("readerr", name), f"{L(name)} 上 {len(er)} 个任务读状态出错，先不分、不交还："
                 f"{'；'.join(f'{k}（{v}）' for k, v in er[:3])}{' …' if len(er) > 3 else ''}", after=60, data=dict(n=len(er)))
-    code = s.get("code") or {}
-    for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了；只查有 git 克隆（repo）的机器
-        if head and code.get("main") and head != code["main"] and (M.MACHINES.get(name) or {}).get("repo") \
-                and name not in policy.OFFLINE:
-            add(alert_id("code", name), f"{L(name)} 的代码停在 {head[:7]}，GitHub 上是 {code['main'][:7]}"
-                f"（{M.MACHINES[name].get('repo')} 快进不了？auto_refresh.sh 每 30 分钟快进一次）", after=120)
     # --- 总队列（box，10/31）---
     hub = M.hub()
     ctq = s.get("taskq", {}).get(hub)
@@ -287,6 +267,8 @@ def check(s):
                         add(alert_id("stuck", name, t["id"]), f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）",
                             data=dict(key=key, label=tname))
             if st in LIVE or st == "Success":
+                continue
+            if stopped(t) and tname.startswith(proto.WORKER_LABEL):  # 时段结束、让卡时调度停的 worker；worker 出错由 relay 报 site:<机器>:worker
                 continue
             end = C.local_time(t["end"])
             if end and now - end > timedelta(hours=24):
@@ -408,27 +390,27 @@ def main(argv=None):
     P = check(s)
     # 这几步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
     try:
-        import shift  # scripts/taskq/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）
+        import shift  # queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）
         shift_msgs = shift.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
-        shift_msgs, shift_err = [], f"scripts/taskq/queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
+        shift_msgs, shift_err = [], f"queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
     else:
         shift_err = None
     events, stuck = shift_msgs, {}
     if shift_err:
         stuck["shift:error"] = shift_err
     try:
-        import feed  # scripts/taskq/queue/feed.py：送任务的唯一入口，转给 relay.py（10/31）
+        import feed  # queue/feed.py：送任务的唯一入口，转给 relay.py（10/31）
         ev, st = feed.run_all(s, dry=a.dry_run)
         events.extend(ev)
         stuck.update(st)
     except Exception as e:  # noqa: BLE001
-        stuck["feed:error"] = f"scripts/taskq/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
+        stuck["feed:error"] = f"queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
     try:
-        import advance  # scripts/taskq/queue/advance.py：box 上按状态排下一步
+        import advance  # queue/advance.py：box 上按状态排下一步
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
-        done, stuck2 = [], {"advance:error": f"scripts/taskq/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
+        done, stuck2 = [], {"advance:error": f"queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
     update(P, s["now"], dry=a.dry_run)

@@ -92,12 +92,16 @@ s = snap(pueue={"box": {"groups": {}, "tasks": [
     task(3, "gpu", "Failed (1)", "bash z", "old", end=NOW - timedelta(hours=30)),
     task(4, "cpu", "Failed (143)", "bash w", "stopped", end=NOW - timedelta(hours=1)),
     task(5, "cpu", "Killed", "bash v", "killed", end=NOW - timedelta(hours=1)),
-    task(6, "gpu", "Failed (137)", "bash u", "oom", end=NOW - timedelta(hours=1))]}})
+    task(6, "gpu", "Failed (137)", "bash u", "oom", end=NOW - timedelta(hours=1)),
+    task(8, "gpu", "Killed", "bash t", "worker:w1", end=NOW - timedelta(hours=1)),
+    task(9, "gpu", "Failed (1)", "bash s", "worker:w2", end=NOW - timedelta(hours=1))]}})
 P = H.check(s)
 ok("任务失败、依赖失败都报", any(p.startswith("pueue:box:1:") for p in P) and any(p.startswith("pueue:box:2:") for p in P))
 ok("24 小时前的失败不再报", not any(p.startswith("pueue:box:3:") for p in P))
 ok("手动停的（143、pueue kill）只记不推", [p["level"] for k, p in P.items() if k.startswith(("pueue:box:4:", "pueue:box:5:"))] == ["info"] * 2)
 ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["level"] for k, p in P.items() if k.startswith("pueue:box:6:")] == ["normal"])
+ok("调度停的 worker（时段结束、让卡）不报；worker 出错照常报", not any(p.startswith("pueue:box:8:") for p in P)
+   and any(p.startswith("pueue:box:9:") for p in P))
 
 lab_train = task(7, "gpu1", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
@@ -215,12 +219,8 @@ s["probe"]["box"]["DISK"] = str(int(50e9))
 P = H.check(s)
 ok("lab 盘不到 15 GB → 紧急；box 盘不到 100 GB → 提醒", P["disk:lab"]["level"] == "urgent" and P["disk:box"]["level"] == "normal")
 s["probe"]["lab"]["GPULOG"] = ts(NOW - timedelta(minutes=30))
-s["code"] = dict(main="a" * 40, heads={"dicc": "b" * 40, "box": "a" * 40, "gone": "c" * 40})
 P = H.check(s)
-ok("GPU 记录停了 → 报；代码停在别的提交 → 报（持续 2 小时才算），和 main 一样的、表里没有的机器不报",
-   "gpulog:lab" in P and P.get("code:dicc", {}).get("after") == 120 and "code:box" not in P and "code:gone" not in P)
-s["code"]["heads"]["dicc"] = ""
-ok("连不上（提交号空着）→ 不报代码", "code:dicc" not in H.check(s))
+ok("GPU 记录停了 → 报", "gpulog:lab" in P)
 
 s = snap(board_pending=["data/demo_v50.json"])
 s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00 开机：放回队列 3 4"
@@ -238,12 +238,9 @@ s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks
               "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}})
 s["ok"]["fake"] = True
 s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|"}
-s["code"] = dict(main="a" * 40, heads={"fake": "b" * 40})
 P = H.check(s)
 ok("第四台机器：同一折和 lab 两边都在训 → 紧急", P.get(f"dup:{MEN0}", {}).get("level") == "urgent")
-ok("第四台机器：盘、代码按表里的字段查", P["disk:fake"]["level"] == "urgent" and "code:fake" in P and "gpulog:fake" not in P)
-H.M.MACHINES["fake"].pop("repo")
-ok("没有 git 克隆（repo）的机器不查代码（代码由代码包管）", "code:fake" not in H.check(s))
+ok("第四台机器：盘按表里的字段查", P["disk:fake"]["level"] == "urgent" and "gpulog:fake" not in P)
 s["ok"]["fake"] = False
 ok("第四台机器连不上：报", "down:fake" in ids(s))
 del H.M.MACHINES["fake"]
@@ -349,8 +346,8 @@ P.update({k: H.from_step(v) for k, v in _rl.items()})
 _f, _l1, _pe = PL.fold(MEN0), H.M.machine("lab1")["label"], sorted(k for k in P if k.startswith("pueue:box:"))
 want = {"unread:lab": "lab 上 2 个任务的文件读不动（多半是那边的存储挂住），这些任务先不分出去，别的照常。",
         "stuck:lab:7": f"lab 上 {_f} 90 分钟没有进展，可能卡住了，GPU 白占着。",
-        _pe[0]: f"box 上 {_n} {EX.short(_t)} 的推理出错停了。",
-        _pe[1]: "box 上 其他 的#2出错停了。",
+        _pe[0]: f"box 上的 {_n} {EX.short(_t)} 的推理出错停了。",
+        _pe[1]: "box 上的一次性任务 #2 出错停了。",
         f"tqblocked:{_ki}": f"{PL.fold(_ki)} 的推理在等的前一步失败了（或不在队列里），不会自己开始。",
         "disk:lab": "lab /mnt/disk1 只剩 10 GB，盘满了训练和存档会失败。",
         "boot:box:" + ts(NOW - timedelta(hours=2)): "box 10-16 10:00 重启过，被打断的任务已自动放回队列，要确认训练接上了。",
