@@ -183,6 +183,19 @@ ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout an
 r = run("rsync", "-rlt", "lab:x/", os.path.join(T, "lab/"))
 ok("不走隧道的机器（lab）：直接 rsync", "经隧道" not in r.stdout)
 
+wd, fbin = os.path.join(T, "wd"), os.path.join(T, "fbin")
+os.makedirs(wd)
+os.makedirs(fbin)
+with open(os.path.join(fbin, "pgrep"), "w") as f:
+    f.write(f'#!/bin/bash\n[ -n "$FINISH" ] && touch {wd}/done\nexit 1\n')
+os.chmod(os.path.join(fbin, "pgrep"), 0o755)
+cmd = subprocess.run([sys.executable, "-c", f"import tunnel; print(tunnel.status_cmd({wd!r}))"], cwd=HERE, env=ENV,
+                     capture_output=True, text=True).stdout.strip()
+st = lambda **e: subprocess.run(["bash", "-c", cmd], env=dict(ENV, PATH=fbin + ":" + ENV["PATH"], **e),  # noqa: E731
+                                capture_output=True, text=True).stdout.split("\n")[0]
+ok("状态：进程没了、没有 done → dead", st() == "dead")
+ok("状态：查完 done 之后、查进程之前刚写完 done 退出 → done，不当 dead", st(FINISH="1") == "done")
+
 shutil.rmtree(T)
 print(f"\n{len(FAILS)} 项失败" if FAILS else "\n全部通过")
 sys.exit(1 if FAILS else 0)
