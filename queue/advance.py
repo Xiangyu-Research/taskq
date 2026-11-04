@@ -96,7 +96,10 @@ def targets(step, group):
         elif (a in HUB_PLACES or a == M.hub()) and b in M.MACHINES[M.hub()]["groups"]:
             d.update(kind="box", machine=M.hub(), group=b)
         else:
-            raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的地方（box:<组>、trainer、queue:<机器>）")
+            hub = M.hub()
+            raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的地方。能写的："
+                             f"trainer（训练所在的执行机）、queue:<{'|'.join([hub] + sorted(M.RELAY))}>、"
+                             f"box:<{'|'.join(M.MACHINES[hub]['groups'])}>")
         out.append(d)
     return out
 
@@ -150,7 +153,7 @@ def plan(s, root=None):
     try:
         check_policy({st["name"] for e in E.load()[0] for st in e.get("after", []) + [x for c in e.get("group_after", []) for x in c]})
     except ValueError as e:
-        return [], {alert_id("advance", "policy"): f"{e}，这次什么都不排"}
+        return [], {alert_id("advance", "policy"): f"{e}。训完以后的步骤这次一个都没排；改好、提交推送后下一次检查自动恢复"}
 
     live, done = set(), {}
     for t in ptasks:
