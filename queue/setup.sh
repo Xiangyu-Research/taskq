@@ -4,7 +4,7 @@
 #   bash scripts/taskq/queue/setup.sh <名字>    在 hub 上替别的机器做：按完整的表算好组、gpu_log，ssh 过去跑那边代码目录里的 setup.sh（11/4）
 # 组按 envs/machines.py 建；表里没有、也没有任务的组删掉（只有执行机自己那份的代码包里不删）。
 # crontab（lab 没开 linger 用不了 systemd 用户服务，都用 cron）：
-#   所有 pueue 机器：@reboot scripts/taskq/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务；gpu_log 的加 --gpu-log），从表里的 code（没有就 repo）跑
+#   所有 pueue 机器：@reboot on_boot.sh（启动 pueued、放回重启时被打断的任务；gpu_log 的加 --gpu-log），从代码包、仓库的克隆或装好的 taskq（taskq boot）跑
 #   角色 hub：克隆 policy.py 的 OUTPUTS["origin"] 到这台的 repo，按 OUTPUTS["cron"] 写 cron 调 OUTPUTS["entry"]
 set -euo pipefail
 P=~/.local/bin/pueue
@@ -49,14 +49,15 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
     fi
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
-# 代码包：经 code（current 的链接）找 BUNDLE_CORE，换包后照样找得到；仓库的克隆：表里的 repo 下同一位置；核心在仓库外：这份核心
+# 这份核心在代码包里：经 code（current 的链接）找 BUNDLE_CORE，换包后照样找得到；在仓库的克隆里：表里的 repo 下同一位置；
+# 装在仓库外（hub 上装好的 taskq）：这份核心的 taskq boot，项目是表里的 repo（开机时的当前目录找不到 .taskq.toml）
 CODE=$($M get . code)
-if [[ -n $CODE ]]; then OB=$CODE/$TQ_BUNDLE_CORE
-elif [[ $CORE == "$REPO"/* ]]; then OB=$($M get . repo)${CORE#"$REPO"}
-else OB=$CORE; fi
 [[ -n ${SETUP_GPU_LOG-$($M get . gpu_log)} ]] && GL=" --gpu-log" || GL=
-crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | { grep -v "on_boot.sh" || true; } | crontab -; }
-cron "bash $OB/queue/on_boot.sh$GL >> $($C log on_boot) 2>&1" "@reboot"
+if [[ -n $CODE && $CORE == "$(readlink -f "$CODE")"/* ]]; then OB="bash $CODE/$TQ_BUNDLE_CORE/queue/on_boot.sh$GL"
+elif [[ $CORE == "$REPO"/* ]]; then OB="bash $($M get . repo)${CORE#"$REPO"}/queue/on_boot.sh$GL"
+else OB="python3 $CORE/bin/taskq --project $($M get . repo) boot$GL"; fi
+crontab -l 2> /dev/null | grep -qE "on_boot\.sh|taskq.* boot" && { crontab -l | { grep -vE "on_boot\.sh|taskq.* boot" || true; } | crontab -; }
+cron "$OB >> $($C log on_boot) 2>&1" "@reboot"
 crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | { grep -v "git_pull_cron.sh" || true; } | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) " entry=$($C get entry)
 if [[ $roles == *" hub "* && -n $entry ]]; then  # 从只给 cron 用的克隆（这台的 repo）运行，只跑已提交的代码
