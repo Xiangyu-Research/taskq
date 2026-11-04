@@ -229,10 +229,9 @@ def fetch(name, key, say=print):
 def drop_remote(name, key, rk, gone=False):
     """删那边的任务（taskq.py remove 在锁里查过没人领着），再删这个任务占的、别的任务不用的路径和日志，最后删记录 → 出错说明或 None。"""
     if not gone:
+        import taskq
         r = RM.rtq(name, f"remove {shlex.quote(rk)}")
-        if r and r[0] and "不删" not in r[1] and "队列里没有" in r[1]:
-            r = (0, r[1])  # 上次删了任务、没删完路径
-        if not r or r[0]:
+        if not r or r[0] not in (0, taskq.GONE):  # GONE：上次删了任务、没删完路径
             return f"任务没删掉，路径留着：{(r or [0, 'ssh 不通'])[1][-150:]}"
     keys = ST.keys_of(ST.load_state(), name)
     paths = ST.droppable(keys, key, ST.paths_of(keys.get(key) or {}))

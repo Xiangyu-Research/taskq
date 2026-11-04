@@ -962,14 +962,14 @@ def test_drop_refused():
     relay.taskq.central = lambda args, timeout=300: (central.append(args), (0, "", ""))[1]
     acts = [dict(op="drop", key=K, rkey=K), dict(op="release", key=K, why="测试")]
     try:
-        for r in [(1, f"不删：{K}：claimed，有人在做"), None]:
+        for r in [(relay.taskq.REFUSED, f"不删：{K}：claimed，有人在做"), (1, f"队列里没有：{K}"), (1, "Traceback"), None]:
             seen.clear(); central.clear()
             RM.rtq = lambda name, cmd, r=r: r
             msgs = relay.execute(NAME, acts, S0([]))
             assert not seen, (r, seen)
             assert not central, (r, central, msgs)
         seen.clear()
-        RM.rtq = lambda name, cmd: (1, f"队列里没有：{K}")
+        RM.rtq = lambda name, cmd: (relay.taskq.GONE, "")
         msgs = relay.execute(NAME, acts, S0([]))
         assert seen and central, (seen, central, msgs)
         central.clear()
@@ -979,7 +979,7 @@ def test_drop_refused():
         assert not central and any("先不交还" in m for m in msgs), (central, msgs)
     finally:
         RM.rpy, RM.rtq, relay.taskq.central = rpy0, rtq0, cen0
-    ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果；删路径时出错也不交还")
+    ok("那边拒绝删任务（退出码 3）、别的错（含旧版的 1）或连不上时不删结果、不交还；任务已经删掉的（退出码 4）照常删结果；删路径时出错也不交还")
 
 
 def blocked_on_lock(pid):
