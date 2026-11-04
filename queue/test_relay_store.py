@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""relay_gc.py 的测试（2026-10-31）：在临时目录造一个假根目录，本地跑 GC_PY（同 relay.rpy 的调用方式），剩余用 free 参数假装。
-    python3 scripts/taskq/queue/test_relay_gc.py
+"""relay_store.py 的清理（gc）的测试（2026-10-31）：在临时目录造一个假根目录，本地跑 GC_PY（同 relay_remote.rpy 的调用方式），剩余用 free 参数假装。
+    python3 scripts/taskq/queue/test_relay_store.py
 """
 import json
 import os
@@ -19,7 +19,7 @@ import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)
-import relay_gc as G  # noqa: E402
+import relay_store as G  # noqa: E402
 import spec as S  # noqa: E402
 
 GB = 10 ** 9
@@ -89,7 +89,7 @@ def exists(R, h):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="test_relay_gc_")
+    tmp = tempfile.mkdtemp(prefix="test_relay_store_")
     try:
         R, outside = build(tmp)
         rpy = local_rpy(R)

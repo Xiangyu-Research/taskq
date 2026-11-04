@@ -59,6 +59,9 @@ cfg.use_config()
 import machines as M  # noqa: E402
 import spec as S  # noqa: E402
 import relay  # noqa: E402
+import relay_remote as RM  # noqa: E402
+import relay_store as ST  # noqa: E402
+import relay_transfer as RT  # noqa: E402
 import relay_bundle  # noqa: E402
 
 NAME = next(iter(M.RELAY))
@@ -72,7 +75,7 @@ assert relay.taskq.queue_host() == Q
 
 
 def test_pueue_worker():
-    w = relay.conf("lab1")["worker"]
+    w = RM.conf("lab1")["worker"]
     lab = f"worker:{w['id']}"
     ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
     none = dict(tasks=[dict(key="a/x/1", state="claimed")])
@@ -88,7 +91,7 @@ def test_pueue_worker():
     assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
     ok("pueue 类：没有备好的任务不开 worker（空闲退出的那个不算失败），有了再开")
 
-    cw = relay.conf("lab1")["cpu_worker"]
+    cw = RM.conf("lab1")["cpu_worker"]
     clab = f"worker:{cw['id']}"
     cpu = dict(tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu")), dict(key="a/x/1", state="claimed")])
     both = dict(tasks=cpu["tasks"] + ready["tasks"][:1])
@@ -180,7 +183,7 @@ def test_adopt_out():
         open(os.path.join(src, f), "wb").write(b)
     dirs = [ssrc, src]
     run = lambda: S.json_in(subprocess.run(
-        [sys.executable, "-c", relay.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/frag_3", resume=["latest.ckpt", "final.ckpt"],
+        [sys.executable, "-c", RM.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/frag_3", resume=["latest.ckpt", "final.ckpt"],
                                                                          done=["check/summary.json", "final.ckpt|ARCHIVED"])),
         capture_output=True, text=True, cwd=_cfg.REPO, check=True).stdout)
     r = run()
@@ -222,12 +225,12 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K, nice=-101)]), NAME, RS(rtask(A, "done")), st)
     assert "rnice" not in [a["op"] for a in acts], acts
     calls = []
-    old_rtq = relay.rtq
-    relay.rtq = lambda name, args, timeout=180: calls.append(args) or (0, "")
+    old_rtq = RM.rtq
+    RM.rtq = lambda name, args, timeout=180: calls.append(args) or (0, "")
     try:
         msgs = relay.execute(NAME, [dict(op="rnice", key=K, rkey=A, nice=-101)], S0([mtask(K)]))
     finally:
-        relay.rtq = old_rtq
+        RM.rtq = old_rtq
     assert calls == [f"set-nice --nice -101 {A}"] and "档位 -101" in msgs[0], (calls, msgs)
     ok("总队列里改了档位 → 那边跟着改（set-nice）；那边训完的不改")
 
@@ -279,8 +282,8 @@ def test_plan():
     ok("总队列显示训完（box 上有了）→ 交还、删那边的任务和结果；拉回、归档还在跑 → 等；出错 → 报、不删")
 
     import common as C
-    old_lookup, old_down = relay.lookup, C.backup_down
-    relay.lookup = lambda k: dict(archive=True)
+    old_lookup, old_down = RT.lookup, C.backup_down
+    RT.lookup = lambda k: dict(archive=True)
     arec = dict(machine=M.hub(), id=9, label="relay_archive:" + K, step="relay_archive", key=K, added=2000.0)
     fcmd = dict(fdone[0], command="python3 scripts/taskq/queue/relay.py fetch x k && bash scripts/taskq/queue/archive_task.sh box k")
     plain_fail = [dict(fdone[0], status="Failed")]
@@ -315,7 +318,7 @@ def test_plan():
                                  RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K), ("drop", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
     finally:
-        relay.lookup, C.backup_down = old_lookup, old_down
+        RT.lookup, C.backup_down = old_lookup, old_down
     ok("要归档的折：box 上有了就删那边的；备份机能用时单独排归档（relay_archive），归档成功才交还，归档出错 → 报、领取保留；"
        "备份机停用时直接交还（没有归档）；只是这次连不上 → 等；单独的拉回出错 → 报")
 
@@ -389,7 +392,7 @@ def test_plan():
     cands = [mtask(K2, "free", None, nice=3), mtask(K3, "free", None, nice=4), mtask("D4_c/tr/0", "free", None, relay_=None)]
     relay.refill.data_gb = lambda paths: 10.0
     relay.P.READY[NAME] = 2
-    HARD0 = (relay.conf(NAME).get("budget") or (None, relay.HARD_GB))[1]
+    HARD0 = (RM.conf(NAME).get("budget") or (None, relay.HARD_GB))[1]
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "claimed", "1")), st, [])
     assert [a["key"] for a in more] == [K2, K3], (more, why)
     berr = S0([mtask(K)] + cands)
@@ -472,8 +475,8 @@ def test_plan():
 
     relay.PLANNED.clear()
     OUT = relay.refill.TRAIN_OUT_GB
-    cap0 = relay.conf(NAME).get("cap")
-    relay.conf(NAME)["cap"] = 90
+    cap0 = RM.conf(NAME).get("cap")
+    RM.conf(NAME)["cap"] = 90
     try:
         three = RS(rtask(A, "claimed", "1"), rtask("Dataset9_h/tr/0", "done"), rtask("Dataset9_h/tr/1", "claimed", "2"))
         sep = dict(three, free=(3 * OUT + 5) * 1e9, out_used=12e9, dev=1, blob_dev=2, blob_free=500e9)
@@ -492,7 +495,7 @@ def test_plan():
         more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(same, free=(3 * OUT + 15) * 1e9), st, [])
         assert more == [], (more, why)
     finally:
-        relay.conf(NAME)["cap"] = cap0
+        RM.conf(NAME)["cap"] = cap0
         relay.PLANNED.clear()
     ok("有 cap 的执行机：那边每个任务（含训完没拉回的、这次领的）的输出各留 TRAIN_OUT_GB；输入按放 blobs 的盘查（11/4）")
 
@@ -528,7 +531,7 @@ def test_place():
         real_replace(a, b)
     relay.os.replace = spy
     try:
-        relay.place(src, D, written, real)
+        RT.place(src, D, written, real)
         raise AssertionError("应出错")
     except OSError:
         pass
@@ -536,7 +539,7 @@ def test_place():
         relay.os.replace = real_replace
     assert not os.path.exists(os.path.join(D, real["out"], "check/summary.json"))
     assert not os.path.exists(os.path.join(D, real["out"], "final.ckpt"))
-    relay.place(src, D, [w for w in written if os.path.exists(os.path.join(src, w))], real)
+    RT.place(src, D, [w for w in written if os.path.exists(os.path.join(src, w))], real)
     assert open(os.path.join(D, "results/X/tr/plans.json"), "rb").read() == b"old"
     assert seen[:2] == ["results/X/tr/frag_0/check/a.dat", "logs/tasks/k__1_seg1.log"], seen
     assert os.path.exists(os.path.join(D, real["out"], "check/summary.json"))
@@ -555,7 +558,7 @@ def test_place():
         real_replace(a, b)
     relay.os.replace = spy2
     try:
-        relay.place(src, D, written, real)
+        RT.place(src, D, written, real)
     finally:
         relay.os.replace = real_replace
     assert seen == ["preds/m/frag_0/c1.dat", "preds/m/note.txt", "preds/m/frag_0/MANIFEST.json",
@@ -571,7 +574,7 @@ def test_place():
     seen = []
     relay.os.replace = spy2
     try:
-        relay.place(src, D, written, real)
+        RT.place(src, D, written, real)
     finally:
         relay.os.replace = real_replace
     assert seen == ["o/f0/x.dat", "o/f0/third.flag", "o/f0/second.flag", "o/f0/first.flag"], seen
@@ -582,8 +585,8 @@ def test_place():
 def test_e2e():
     TN.setup()
     sp = S.resolve("toy", dict(ds=TN.DS, frag="0"))
-    relay.lookup = lambda k: sp
-    relay.box_data = lambda: TN.ROOT
+    RT.lookup = lambda k: sp
+    RT.box_data = lambda: TN.ROOT
     bid, path = relay_bundle.build(NAME, None, os.path.join(T, "bundles"), root=RROOT)
     relay.deploy(NAME, bid, path)
     rs = relay.remote_status(NAME)
@@ -601,20 +604,20 @@ def test_e2e():
 
     if os.path.exists(os.path.join(T, "srun_args")):
         os.remove(os.path.join(T, "srun_args"))
-    assert relay.rpy(NAME, relay.MISSING_PY, ["ab" * 32], job="-p cpu -t 10") == ["ab" * 32]
+    assert RM.rpy(NAME, RM.MISSING_PY, ["ab" * 32], job="-p cpu -t 10") == ["ab" * 32]
     sa = open(os.path.join(T, "srun_args")).read()
-    assert f"-I{relay.JOB_WAIT} -p cpu -t 10 -J " in sa and " bash -c " in sa, sa
+    assert f"-I{RM.JOB_WAIT} -p cpu -t 10 -J " in sa and " bash -c " in sa, sa
     open(os.path.join(T, "no_slot"), "w").close()
     try:
-        relay.rpy(NAME, relay.MISSING_PY, [], job="-p cpu")
+        RM.rpy(NAME, RM.MISSING_PY, [], job="-p cpu")
         raise AssertionError("应出 NoSlot")
-    except relay.NoSlot:
+    except RM.NoSlot:
         pass
     finally:
         os.remove(os.path.join(T, "no_slot"))
     ok("adopt_job：收编在 srun 的 CPU 作业里跑（-I 等排队）；排不上 → NoSlot（这次不传）")
 
-    rkey_ = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
+    rkey_ = RT.stage(NAME, sp["key"], nice=5, say=lambda m: None)
     assert rkey_ == sp["key"]
     pre = os.path.join(RROOT, "data", "prepared", TN.DS)
     links = [os.path.join(dp, f) for dp, _, fs in os.walk(pre) for f in fs]
@@ -626,11 +629,11 @@ def test_e2e():
     blobs = sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs")))
     rs = relay.remote_status(NAME)
     assert [(t["key"], t["state"]) for t in rs["taskq"]["tasks"]] == [(sp["key"], "free")], rs["taskq"]["tasks"]
-    k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
+    k = ST.keys_of(ST.load_state(), NAME)[sp["key"]]
     assert k["views"] == [f"prepared/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
     ok(f"传数据：{blobs} 个文件按内容存、软链接放在和 box 一样的路径，key 和参数原样，加进那边的队列")
 
-    rkey2 = relay.stage(NAME, sp["key"], nice=5, say=lambda m: None)
+    rkey2 = RT.stage(NAME, sp["key"], nice=5, say=lambda m: None)
     assert rkey2 == sp["key"] and sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs"))) == blobs
     ok("再传一次：不重传、不重复加")
 
@@ -648,7 +651,7 @@ def test_e2e():
     os.environ["TUNNEL_TEST_BADMD5"] = sp["out"] + "/final.ckpt"
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            relay.fetch(NAME, sp["key"], say=lambda m: None)
+            RT.fetch(NAME, sp["key"], say=lambda m: None)
         raise AssertionError("有文件没拉到应报错")
     except relay.RN.RelayError as e:
         assert "1 个文件没拉到" in str(e), e
@@ -661,7 +664,7 @@ def test_e2e():
     TN.wb(os.path.join(inbox, sp["out"], "debug.json.tunnelpart"), b"{")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        relay.fetch(NAME, sp["key"], say=lambda m: None)
+        RT.fetch(NAME, sp["key"], say=lambda m: None)
     assert "拉 2 个文件" in buf.getvalue(), buf.getvalue()
     assert not os.path.exists(os.path.join(out, "check", "old.dat")) and not os.path.exists(os.path.join(out, "debug.json.tunnelpart"))
     assert json.load(open(os.path.join(out, "check", "summary.json"))) == dict(metric_per_case=[{}, {}])
@@ -676,7 +679,7 @@ def test_e2e():
     assert logs == [S.safe(sp["key"]) + "__12345_seg1.log"], logs
     ok("拉回：同样的相对路径、不拉 latest.ckpt、上一级的 json 和分段日志、临时目录删掉")
 
-    relay.write_status(NAME, relay.remote_status(NAME), relay.load_state())
+    relay.write_status(NAME, relay.remote_status(NAME), ST.load_state())
     st = json.load(open(relay.STATUS))[NAME]
     assert sp["key"] in st["tasks"] and st["tasks"][sp["key"]]["final"], st
     ok("status.json 里有这一折（真 key）")
@@ -688,9 +691,9 @@ def test_e2e_path(pre):
     before = sorted((os.path.relpath(os.path.join(dp, f), pre), os.readlink(os.path.join(dp, f)) if os.path.islink(os.path.join(dp, f)) else None)
                     for dp, _, fs in os.walk(pre) for f in fs)
     sp = TN.path_setup()
-    relay.lookup = lambda k: sp
-    rk = relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
-    k = relay.keys_of(relay.load_state(), NAME)[sp["key"]]
+    RT.lookup = lambda k: sp
+    rk = RT.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    k = ST.keys_of(ST.load_state(), NAME)[sp["key"]]
     D = os.path.join(RROOT, "data")
     assert rk == sp["key"] and k["views"] == ["proj/inputs/cohortA"], k
     assert set(k["outs"]) == {sp["out"], "proj/analysis/thing/shared"}, k
@@ -705,7 +708,7 @@ def test_e2e_path(pre):
     TN.wb(os.path.join(D, "proj/inputs/cohortA", "stray.txt"), b"?")
     blob = next(os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs)
     os.symlink(blob, os.path.join(D, "proj/inputs/cohortA", "stale"))
-    relay.stage(NAME, sp["key"], add=False, say=lambda m: None)
+    RT.stage(NAME, sp["key"], add=False, say=lambda m: None)
     assert not os.path.lexists(os.path.join(D, "proj/inputs/cohortA", "stale"))
     assert os.path.exists(os.path.join(D, "proj/inputs/cohortA", "stray.txt"))  # 不是指向 blobs 的链接：不碰
     os.remove(os.path.join(D, "proj/inputs/cohortA", "stray.txt"))
@@ -715,31 +718,31 @@ def test_e2e_path(pre):
     TN.wb(os.path.join(D, os.path.dirname(sp["out"]), "plans.json"), b"{}")
     TN.wb(os.path.join(D, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"), b"log")
     try:
-        relay.fetch(NAME, sp["key"], say=lambda m: None)
+        RT.fetch(NAME, sp["key"], say=lambda m: None)
         raise AssertionError("少 .done 应报没做完")
     except relay.RN.RelayError as e:
         assert "还没" in str(e), e
     assert not os.path.exists(os.path.join(TN.ROOT, sp["out"]))
     TN.wb(os.path.join(D, sp["out"], ".done"), b"")
-    relay.fetch(NAME, sp["key"], say=lambda m: None)
+    RT.fetch(NAME, sp["key"], say=lambda m: None)
     out = os.path.join(TN.ROOT, sp["out"])
     assert sorted(os.listdir(out)) == [".done", "a.csv"], os.listdir(out)
     assert os.path.exists(os.path.join(TN.ROOT, "proj/analysis/thing/plans.json"))
     assert os.path.exists(os.path.join(TN.ROOT, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"))
     ok("通用插件拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志放进 box")
 
-    keys = relay.keys_of(relay.load_state(), NAME)
+    keys = ST.keys_of(ST.load_state(), NAME)
     tk = next(r for r in keys if r != sp["key"])
-    assert relay.droppable(keys, sp["key"], relay.paths_of(keys[sp["key"]])) == sorted(relay.paths_of(keys[sp["key"]]))
-    relay.drop_remote(NAME, sp["key"], sp["key"], gone=True)
+    assert ST.droppable(keys, sp["key"], ST.paths_of(keys[sp["key"]])) == sorted(ST.paths_of(keys[sp["key"]]))
+    RT.drop_remote(NAME, sp["key"], sp["key"], gone=True)
     assert not os.path.lexists(os.path.join(D, "raw/Set/c1/c1-seg.dat")) and not os.path.exists(os.path.join(D, "proj/inputs"))
-    assert not os.path.exists(os.path.join(D, sp["out"])) and os.listdir(pre) and sp["key"] not in relay.keys_of(relay.load_state(), NAME)
+    assert not os.path.exists(os.path.join(D, sp["out"])) and os.listdir(pre) and sp["key"] not in ST.keys_of(ST.load_state(), NAME)
     assert not [f for f in os.listdir(os.path.join(D, "logs", "tasks")) if f.startswith(S.safe(sp["key"]))]
     ok(f"删任务：它独占的输入、产出、日志删掉，空了的上级目录删掉；别的任务（{tk}）的视图不动")
 
     for bad in ("/etc", "a/../../x", "in"):
         try:
-            relay.safe_rel(bad)
+            ST.safe_rel(bad)
             raise AssertionError(bad)
         except relay.RN.RelayError:
             pass
@@ -751,14 +754,14 @@ def test_tilde_root():
     c0 = M.RELAY[NAME]
     M.RELAY[NAME] = dict(c0, root="~/st/t123")
     try:
-        assert relay.prefix(NAME).startswith("cd ~/st/t123/code/current && TASKQ_DIR=~/st/t123/queue "), relay.prefix(NAME)
+        assert RM.prefix(NAME).startswith("cd ~/st/t123/code/current && TASKQ_DIR=~/st/t123/queue "), RM.prefix(NAME)
         seen = []
-        relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "{}", ""))[1]), relay.rsh
+        RM.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append(cmd), (0, "{}", ""))[1]), RM.rsh
         try:
-            relay.rpy(NAME, "print(1)")
+            RM.rpy(NAME, "print(1)")
         except RuntimeError:
             pass
-        relay.rsh = rsh0
+        RM.rsh = rsh0
         assert seen and seen[0].endswith(" ~/st/t123"), seen
     finally:
         M.RELAY[NAME] = c0
@@ -785,11 +788,11 @@ def test_adapters_in_relay():
     rs = relay.parse_sched(NAME, dict(sched_raw="101|w|RUNNING|1:00|long|n1\n"))
     assert rs["jobs"] is None and rs["squeue"] == [["101", "w", "RUNNING", "1:00", "long", "n1"]]
     seen = []
-    relay.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append((name, cmd)), (0, "4870\n", ""))[1]), relay.rsh
+    RM.rsh, rsh0 = (lambda name, cmd, input=None, timeout=300: (seen.append((name, cmd)), (0, "4870\n", ""))[1]), RM.rsh
     try:
         msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2, "worker.sbatch")])
         assert not stuck and len(seen) == 2 and all(re.search(r"sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=1:00:00 worker.sbatch", c) for _, c in seen)
-        assert seen[0][1].startswith(f"cd {relay.R.q(relay.root(NAME))}/code/current/scripts/taskq/queue && ")
+        assert seen[0][1].startswith(f"cd {relay.R.q(RM.root(NAME))}/code/current/scripts/taskq/queue && ")
         seen.clear()
         msgs, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
         assert not stuck and len(seen) == 1 and seen[0][1].endswith("--qos=normal --time=08:00:00 cpu_worker.sbatch") and "CPU worker" in msgs[0], (seen, msgs)
@@ -798,9 +801,9 @@ def test_adapters_in_relay():
         assert not stuck and len(seen) == 1 and " add -g " in seen[0][1] and "worker:" in seen[0][1], seen
         seen.clear()
         msgs, stuck = relay.submit("lab1", [("pueue", "cpu", 1)])
-        cw = relay.conf("lab1")["cpu_worker"]
+        cw = RM.conf("lab1")["cpu_worker"]
         assert not stuck and len(seen) == 1 and f"add -g {cw['group']} -l worker:{cw['id']}" in seen[0][1] and "WORKER_DEVICE=cpu" in seen[0][1], seen
-        relay.rsh = lambda name, cmd, input=None, timeout=300: (1, "boom", "")
+        RM.rsh = lambda name, cmd, input=None, timeout=300: (1, "boom", "")
         _, stuck = relay.submit("lab1", [("pueue", "gpu", 1), ("pueue", "cpu", 1)])
         assert list(stuck) == ["site:lab1:worker", "site:lab1:worker:cpu"], stuck
         _, stuck = relay.submit(NAME, [("long", "1:00:00", 1, "worker.sbatch")])
@@ -808,7 +811,7 @@ def test_adapters_in_relay():
         _, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
         assert list(stuck) == ["topup:dicc1:normal:cpu"], stuck
     finally:
-        relay.rsh = rsh0
+        RM.rsh = rsh0
     assert not hasattr(relay, "worker_jobs")
     raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status="Running"),
                                  "5": dict(group="cpu", label="worker:w2", status="Queued"),
@@ -822,7 +825,8 @@ def test_adapters_in_relay():
 def test_fresh_site():
     """新机器第一次：连得上、根目录里还没有代码包（读状态失败）→ 先部署、再读状态；部署失败时这次当连不上。
     已有旧代码包、换新包失败（11/3：切换当天新路径对着旧包；推的时候出错、超时，或打包出错）→ 这次也当连不上，只续约。"""
-    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "deploy", "write_status", "update_state", "load_state", "plan", "fill", "topup", "log")}
+    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "deploy", "write_status", "plan", "fill", "topup", "log")}
+    keep_st = {k: getattr(ST, k) for k in ("update_state", "load_state")}
     build, auto = relay.RB.build, dict(relay.P.AUTO)
     try:
         for fail, old in ((None, False), ("rt", False), ("rt", True), ("timeout", True), ("build", True)):
@@ -843,8 +847,8 @@ def test_fresh_site():
                 calls.append(("deploy", n, b))
             relay.deploy = dep
             relay.write_status = lambda n, rs, st: calls.append(("status", rs.get("bundle")))
-            relay.update_state = lambda fn: None
-            relay.load_state = lambda: {}
+            ST.update_state = lambda fn: None
+            ST.load_state = lambda: {}
             relay.plan = lambda s, n, rs, st: calls.append(("plan", rs and rs.get("bundle"))) or ([], {})
             relay.fill = lambda *a: ([], "")
             relay.topup = lambda *a: ([], "")
@@ -862,6 +866,8 @@ def test_fresh_site():
     finally:
         for k, v in keep.items():
             setattr(relay, k, v)
+        for k, v in keep_st.items():
+            setattr(ST, k, v)
         relay.RB.build = build
         relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
     print("通过：新机器还没有代码包时先部署再读状态；部署失败（新机器或换新包）这次当连不上")
@@ -869,16 +875,17 @@ def test_fresh_site():
 
 def test_auto_off():
     """AUTO 关着（11/2）：不传、不重传、不让那边接着训、不领新的、不交作业；训完的照常拉回。"""
-    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "write_status", "update_state", "load_state", "plan", "fill",
-                                           "topup", "log", "execute", "submit")}
+    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "write_status", "plan", "fill", "topup", "log", "execute",
+                                           "submit")}
+    keep_st = {k: getattr(ST, k) for k in ("update_state", "load_state")}
     auto = dict(relay.P.AUTO)
     try:
         ran = []
         relay.remote_status = lambda n: {"bundle": None, "free": 1e12}
         relay.undeployed = lambda n: False
         relay.write_status = lambda n, rs, st: None
-        relay.update_state = lambda fn: None
-        relay.load_state = lambda: {}
+        ST.update_state = lambda fn: None
+        ST.load_state = lambda: {}
         relay.plan = lambda s, n, rs, st: ([dict(op=o, key=o) for o in ("beat", "stage", "restage", "rresume", "fetch")], {})
         relay.fill = lambda *a: ([dict(op="take", key="t")], "")
         relay.topup = lambda *a: ([("long", "x", 1, "worker.sbatch")], "")
@@ -892,6 +899,8 @@ def test_auto_off():
     finally:
         for k, v in keep.items():
             setattr(relay, k, v)
+        for k, v in keep_st.items():
+            setattr(ST, k, v)
         relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
     print("通过：AUTO 关着 → 只续领取、拉回训完的；不传、不接着训、不领新的、不交作业")
 
@@ -903,28 +912,28 @@ def test_refcount():
             "inf": dict(inputs=["res/X/tr/frag_0/final.ckpt", "res/X/tr/dataset.json", "raw/A/img/a.dat"],
                         outs=["pred/X/tr/frag_0"]),
             "ev": dict(inputs=["pred/X/tr/frag_0/a.dat", "raw/A/lab/a.dat"], outs=["an/X/frag_0/eval"])}
-    P = lambda k: relay.paths_of(keys[k])  # noqa: E731
-    assert relay.droppable(keys, "t0", P("t0")) == []
-    assert relay.droppable(keys, "t1", P("t1")) == ["res/X/tr/frag_1"]
-    assert relay.droppable(keys, "inf", P("inf")) == ["raw/A/img/a.dat", "res/X/tr/dataset.json"]
-    assert relay.droppable(keys, "ev", P("ev")) == ["an/X/frag_0/eval", "raw/A/lab/a.dat"]
+    P = lambda k: ST.paths_of(keys[k])  # noqa: E731
+    assert ST.droppable(keys, "t0", P("t0")) == []
+    assert ST.droppable(keys, "t1", P("t1")) == ["res/X/tr/frag_1"]
+    assert ST.droppable(keys, "inf", P("inf")) == ["raw/A/img/a.dat", "res/X/tr/dataset.json"]
+    assert ST.droppable(keys, "ev", P("ev")) == ["an/X/frag_0/eval", "raw/A/lab/a.dat"]
     k2 = {k: v for k, v in keys.items() if k not in ("t1", "inf")}
-    assert relay.droppable(k2, "t0", P("t0")) == ["pre/X", "res/X/tr/frag_0"]
-    assert relay.overlaps("a/b", {"a/b/c"}, relay.ancestors({"a/b/c"})) and relay.overlaps("a/b/c/d", {"a/b"}, set())
-    assert not relay.overlaps("a/bc", {"a/b"}, relay.ancestors({"a/b"}))
+    assert ST.droppable(k2, "t0", P("t0")) == ["pre/X", "res/X/tr/frag_0"]
+    assert ST.overlaps("a/b", {"a/b/c"}, ST.ancestors({"a/b/c"})) and ST.overlaps("a/b/c/d", {"a/b"}, set())
+    assert not ST.overlaps("a/bc", {"a/b"}, ST.ancestors({"a/b"}))
     ok("引用计数：共用的视图、别的任务输入所在的产出不删；只是名字前缀相同的不算")
 
-    seen, rpy0, rtq0, st0 = [], relay.rpy, relay.rtq, relay.load_state
-    relay.rpy = lambda name, code, data=None, **kw: (seen.append((code, data)), 1)[1]
-    relay.rtq = lambda name, cmd: (0, "")
-    relay.load_state = lambda: dict(keys={NAME: keys})
-    up0 = relay.update_state
-    relay.update_state = lambda fn: None
+    seen, rpy0, rtq0, st0 = [], RM.rpy, RM.rtq, ST.load_state
+    RM.rpy = lambda name, code, data=None, **kw: (seen.append((code, data)), 1)[1]
+    RM.rtq = lambda name, cmd: (0, "")
+    ST.load_state = lambda: dict(keys={NAME: keys})
+    up0 = ST.update_state
+    ST.update_state = lambda fn: None
     try:
         msgs = relay.execute(NAME, [dict(op="drop", key="inf", rkey="inf")], S0([]))
-        assert seen and seen[-1][0] == relay.DROP_PY and seen[-1][1] == dict(paths=["raw/A/img/a.dat", "res/X/tr/dataset.json"], logs="inf"), (seen, msgs)
+        assert seen and seen[-1][0] == RM.DROP_PY and seen[-1][1] == dict(paths=["raw/A/img/a.dat", "res/X/tr/dataset.json"], logs="inf"), (seen, msgs)
     finally:
-        relay.rpy, relay.rtq, relay.load_state, relay.update_state = rpy0, rtq0, st0, up0
+        RM.rpy, RM.rtq, ST.load_state, ST.update_state = rpy0, rtq0, st0, up0
     ok("drop 只删算出来能删的路径和自己的日志")
 
 
@@ -932,28 +941,28 @@ def test_drop_refused():
     """那边拒绝删任务（有人在训）时不删结果、总队列里也不交还；上次删了任务没删完结果的照常删（审查 11/1）。"""
     K = "D1_x/tr/0"
     seen, central = [], []
-    rpy0, rtq0, cen0 = relay.rpy, relay.rtq, relay.taskq.central
-    relay.rpy = lambda name, code, data=None, **kw: (seen.append(data), 1)[1]
+    rpy0, rtq0, cen0 = RM.rpy, RM.rtq, relay.taskq.central
+    RM.rpy = lambda name, code, data=None, **kw: (seen.append(data), 1)[1]
     relay.taskq.central = lambda args, timeout=300: (central.append(args), (0, "", ""))[1]
     acts = [dict(op="drop", key=K, rkey=K), dict(op="release", key=K, why="测试")]
     try:
         for r in [(1, f"不删：{K}：claimed，有人在做"), None]:
             seen.clear(); central.clear()
-            relay.rtq = lambda name, cmd, r=r: r
+            RM.rtq = lambda name, cmd, r=r: r
             msgs = relay.execute(NAME, acts, S0([]))
             assert not seen, (r, seen)
             assert not central, (r, central, msgs)
         seen.clear()
-        relay.rtq = lambda name, cmd: (1, f"队列里没有：{K}")
+        RM.rtq = lambda name, cmd: (1, f"队列里没有：{K}")
         msgs = relay.execute(NAME, acts, S0([]))
         assert seen and central, (seen, central, msgs)
         central.clear()
-        relay.rtq = lambda name, cmd: (0, "")
-        relay.rpy = lambda name, code, data=None, **kw: (_ for _ in ()).throw(OSError("ssh 断了"))
+        RM.rtq = lambda name, cmd: (0, "")
+        RM.rpy = lambda name, code, data=None, **kw: (_ for _ in ()).throw(OSError("ssh 断了"))
         msgs = relay.execute(NAME, acts, S0([]))
         assert not central and any("先不交还" in m for m in msgs), (central, msgs)
     finally:
-        relay.rpy, relay.rtq, relay.taskq.central = rpy0, rtq0, cen0
+        RM.rpy, RM.rtq, relay.taskq.central = rpy0, rtq0, cen0
     ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果；删路径时出错也不交还")
 
 
@@ -972,7 +981,7 @@ def test_view_lock():
     fcntl.flock(lk, fcntl.LOCK_EX)
     data = json.dumps(dict(views=["prepared/D1"], links={}, texts={"prepared/D1/a.json": "e30="}))
     repo = _cfg.REPO
-    p = subprocess.Popen([sys.executable, "-c", relay.VIEW_PY, root], cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    p = subprocess.Popen([sys.executable, "-c", RM.VIEW_PY, root], cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     p.stdin.write(data)
     p.stdin.close()
     t0 = time.time()
@@ -998,7 +1007,7 @@ def test_list_unreadable():
     open(os.path.join(out, "part", "a"), "w").close()
     spec = dict(key="k", out="out/k", done=["check/DONE"])
     repo = _cfg.REPO
-    run = lambda outs: subprocess.run([sys.executable, "-c", relay.LIST_PY, root], input=json.dumps(dict(spec=spec, outs=outs, key="k")),
+    run = lambda outs: subprocess.run([sys.executable, "-c", RM.LIST_PY, root], input=json.dumps(dict(spec=spec, outs=outs, key="k")),
                                       cwd=repo, capture_output=True, text=True)
     r = run(["out/k", "out/none"])
     res = S.json_in(r.stdout)

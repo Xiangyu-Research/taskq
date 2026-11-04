@@ -73,8 +73,10 @@ import common as C  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
 import relay  # noqa: E402
+import relay_remote as RM  # noqa: E402
+import relay_store as ST  # noqa: E402
+import relay_transfer as RT  # noqa: E402
 import relay_bundle as RB  # noqa: E402
-import relay_gc  # noqa: E402
 import envs as E  # noqa: E402
 
 NAME = "lab1"
@@ -211,12 +213,12 @@ def setup():
     P.READY[NAME] = len(KEYS)
     M.MACHINES[M.hub()] = dict(M.MACHINES[M.hub()], data=BD)  # box 的数据目录（relay.box_data、refill.data_gb 都读它）
     relay.refill.add = fake_add
-    relay.place = place_rec
+    RT.place = place_rec
     # 代码包：工作区的代码，换成临时的根目录；run_one 认这个包（不按 origin/main 重打）
     bid, path = RB.build(NAME, None, os.path.join(T, "bundles"), root=RROOT, entry=ENTRY)
     relay.deploy(NAME, bid, path)
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
-    relay.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME}:{commit}": bid}))
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME}:{commit}": bid}))
     rs = relay.remote_status(NAME)
     step(f"准备：代码包 {bid} 推过去，那边的队列开着、是空的，自己的 pueued 起来了",
          rs is not None and rs["bundle"] == bid and rs["taskq"]["enabled"] and rs["taskq"]["tasks"] == [] and rs["jobs"] == [], rs)
@@ -230,7 +232,7 @@ def setup():
 
 
 # ---------------- box 的 wait 组：在进程里直接做 ----------------
-_place = relay.place
+_place = RT.place
 
 
 def place_rec(src, D, written, real):
@@ -249,9 +251,9 @@ def place_rec(src, D, written, real):
 
 def fake_add(host, lab, step_, key, args, run=None, **rec):
     if step_ == "relay_stage":
-        relay.stage(rec.get("to") or NAME, key, nice=int(re.search(r"--nice (-?\d+)", args).group(1)), say=LOG.append)
+        RT.stage(rec.get("to") or NAME, key, nice=int(re.search(r"--nice (-?\d+)", args).group(1)), say=LOG.append)
     elif step_ == "relay_fetch":
-        relay.fetch(rec.get("to") or NAME, key, say=LOG.append)
+        RT.fetch(rec.get("to") or NAME, key, say=LOG.append)
     else:
         raise AssertionError(f"没想到的 box 任务 {step_} {key}")
     LOG.append(f"box 任务 {step_} {key}")
@@ -277,7 +279,7 @@ def box_tasks():
 
 
 def keys():
-    return relay.keys_of(relay.load_state(), NAME)
+    return ST.keys_of(ST.load_state(), NAME)
 
 
 def central(args):
@@ -361,7 +363,7 @@ def step_stage():
     os.symlink(blob, os.path.join(D, own1, "stray1.txt"))
     os.symlink(blob, os.path.join(D, "guest/e2e/code", "stray0.txt"))
     before = view_files()
-    relay.stage(NAME, SLOW, nice=50, add=False, say=LOG.append)
+    RT.stage(NAME, SLOW, nice=50, add=False, say=LOG.append)
     after = view_files()
     step("几个任务的视图共存：t1 重新传数据只删自己独占的视图里多出来的链接，不碰 t2 的、大家共用的",
          not os.path.lexists(os.path.join(D, own1, "stray1.txt")) and os.path.lexists(os.path.join(D, own2, "stray2.txt"))
@@ -406,10 +408,10 @@ def step_stop():
          os.listdir(remote_out(SLOW)))
     # 别的任务还在用视图时清理：只删不要的
     before = view_files()
-    reg = (relay.load_state().get("views") or {}).get(NAME) or {}
-    keep = {v for k in keys().values() for v in relay.paths_of(k)}
-    g = relay_gc.gc(NAME, keep, relay.rpy, soft_gb=1e9, views=reg)
-    step("还有任务要用时 relay_gc 清理：要用的视图和 blob 一个不删",
+    reg = (ST.load_state().get("views") or {}).get(NAME) or {}
+    keep = {v for k in keys().values() for v in ST.paths_of(k)}
+    g = ST.gc(NAME, keep, RM.rpy, soft_gb=1e9, views=reg)
+    step("还有任务要用时清理（relay_store.gc）：要用的视图和 blob 一个不删",
          g["removed_views"] == [] and view_files() == before and all(os.path.isfile(os.path.join(RROOT, "data", p)) for p in before), g)
     central(f"resume {SLOW}")
 
@@ -442,15 +444,15 @@ def step_finish():
 
 
 def step_gc():
-    relay.conf(NAME)["budget"] = (1e6, 0)  # 软线高得够不着：能删的都删
+    RM.conf(NAME)["budget"] = (1e6, 0)  # 软线高得够不着：能删的都删
     relay.VIEW_KEEP_S = 0
     check()
     D = os.path.join(RROOT, "data")
     left = [os.path.relpath(os.path.join(dp, f), D) for dp, _, fs in os.walk(D) for f in fs]
     blobs = [f for _, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs]
-    reg = (relay.load_state().get("views") or {}).get(NAME) or {}
+    reg = (ST.load_state().get("views") or {}).get(NAME) or {}
     top = sorted(os.listdir(RROOT))
-    step("全部做完后 relay_gc 清理：视图、blob 都删了，数据目录只剩 worker 的日志，登记的视图清空",
+    step("全部做完后清理（relay_store.gc）：视图、blob 都删了，数据目录只剩 worker 的日志，登记的视图清空",
          not blobs and all(p.startswith("logs/workers/") for p in left) and not reg, (left[:10], blobs[:5], reg))
     step("根目录只剩还要用的：代码、队列、环境和它的状态", set(top) <= {"code", "queue", "blobs", "data", "tmp", "state", "envs", "conda", "bin"}
          and os.path.isfile(os.path.join(RROOT, "state/envs/toy.ok")), top)
@@ -463,7 +465,7 @@ K6 = "guest/e2e/t6"
 
 
 def keys0():
-    return relay.keys_of(relay.load_state(), NAME0)
+    return ST.keys_of(ST.load_state(), NAME0)
 
 
 def out0(key):
@@ -484,14 +486,14 @@ def step_shift():
     e0 = dict(ENTRY, groups={"gpu0": (1, None, {})}, worker=dict(group="gpu0", id="wtest0"), env_root=RLINK0 + "/envs")
     c0 = dict(M.SITES[NAME0], root=RLINK0, ssh="lab", adopt=[NAME], budget=(0, 0), transfer_job=None, **e0)
     M.SITES[NAME0] = M.RELAY[NAME0] = c0
-    relay.conf(NAME).update(adopt=[NAME0], budget=(0, 0))
+    RM.conf(NAME).update(adopt=[NAME0], budget=(0, 0))
     relay.VIEW_KEEP_S = 3600
     P.AUTO.update({NAME0: True, NAME: True})
     P.READY.update({NAME0: 1, NAME: 0})  # 夜里 lab1 不领（让 lab0 领到）；交接时直接改分，不用它领
     bid, path = RB.build(NAME0, None, os.path.join(T, "bundles0"), root=RLINK0, entry=e0)
     relay.deploy(NAME0, bid, path)
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
-    relay.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME0}:{commit}": bid}))
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME0}:{commit}": bid}))
     rc, out = E.build(NAME0, "toy", run=run_local)
     assert rc == 0, out
     sheet = dict(key=K6, owner="alice", env="toy", inputs=["guest/e2e/code", "guest/e2e/d1"],

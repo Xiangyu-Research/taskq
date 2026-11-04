@@ -2,15 +2,9 @@
 """relay 执行机（envs/machines.py 的 RELAY：lab1、lab0、dicc1、dicc2）的接力：由 box 替它在总队列（box 上的任务队列，10/31 起）
 领任务（GPU 或 CPU，按它有的 worker 种类和环境）、把输入放到和 box 一样的相对路径、放进它自己的任务队列，做完拉回、归档。
 执行机和 box 用同样的名字和路径；执行机之间不直接通信，一切经 box。
+这里是每次检查的计划和命令行；和那边说话、发过去跑的小程序在 relay_remote.py（那边根目录的布局也在那里），box 上的记账和那边的清理
+在 relay_store.py，传数据、拉回、删那边的任务在 relay_transfer.py。
 
-那边（根目录 R，machines.py 的 root）：
-  R/code/<包名>、R/code/current   scripts/taskq/queue/relay_bundle.py 打的代码包（origin/main 变了就重打、切换 current；旧包留最新 3 个，
-                                  4 天以上的删）；worker 和 DICC 同一套脚本（作业名、资源、脚本名分开，见 machines.py 的 RELAY）
-  R/queue/                        它自己的任务队列（taskq.py，key 和总队列相同）
-  R/blobs/<id[:2]>/<id>           数据文件，id = sha256（内容相同的只传一次）
-  R/data/                         数据目录，相对路径和 box 的一样：每个任务的输入是指向 blobs 的软链接（和插件生成的小文件，
-                                  scripts/taskq/sites/names.py），产出照常写。state.json 记下每个任务放了哪些路径（视图、输入、产出），
-                                  删一个任务时只删别的任务不用的（相同、上级、下级都算在用）
 每次健康检查（scripts/taskq/monitor/health.py，每 30 分钟）经 scripts/taskq/queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
   1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
   2. 总队列里 worker 是它的每个任务：
@@ -41,16 +35,12 @@
     python3 scripts/taskq/queue/relay.py status <名字>           那边的队列
 """
 import argparse
-import base64
-import fcntl
 import hashlib
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,7 +56,6 @@ import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
-import relay_gc  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
 import remote as R  # noqa: E402
@@ -74,14 +63,14 @@ import pueue as PQ  # noqa: E402
 import slurm as SL  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import relay_bundle as RB  # noqa: E402
+import relay_remote as RM  # noqa: E402
+import relay_store as ST  # noqa: E402
+import relay_transfer as RT  # noqa: E402
 import names as N  # noqa: E402
 import shift  # noqa: E402
 from common import write_json  # noqa: E402
 
-DIR = RN.RELAY_DIR
-STATE = os.path.join(DIR, "state.json")
-STATUS = os.path.join(DIR, "status.json")
-HASHES = os.path.join(DIR, "hashes.json")
+STATUS = os.path.join(ST.DIR, "status.json")
 LOG = os.path.expanduser(os.environ.get("RELAY_LOG", "~/relay.log"))
 HARD_GB = 100  # 领之前：传过去以后那边至少还剩这么多
 DOWN_S = 2 * 3600  # 领着任务、连不上这么久就报
@@ -89,96 +78,9 @@ LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就�
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传完、还没加进队列或刚交还）
 STATUS_S = 90  # 读状态的超时：那边的存储挂住时跳过这台，不等
-JOB_WAIT = 600  # 在 CPU 作业里跑（machines.py 的 adopt_job）时最多等这么久排上
 NOSLOT_RC = 75  # relay.py stage 这次排不上 CPU 作业的退出码：下次检查再传，不报
 NOSLOT_ALERT_S = 3 * 3600  # 领了这么久还一直排不上就报
 PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记：同一个盘上的几台合起来算
-
-
-class NoSlot(RuntimeError):
-    """CPU 作业这次排不上。"""
-
-
-def conf(name):
-    return M.RELAY[name]
-
-
-def root(name):
-    return conf(name)["root"].rstrip("/")
-
-
-def py(name):
-    return conf(name)["conda"][0] + "/bin/python3"
-
-
-def box_data():
-    return M.expand(M.MACHINES[M.hub()]["data"])
-
-
-def ssh_argv():
-    return shlex.split(os.environ.get("RELAY_SSH", "ssh")) + C.SSH[1:]  # RELAY_SSH 只给测试用
-
-
-# ---------------- 状态文件 ----------------
-def update_state(fn):
-    os.makedirs(DIR, exist_ok=True)
-    with open(STATE + ".lock", "a") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
-        st = load_state()
-        out = fn(st)
-        write_json(STATE, st)
-    return out
-
-
-def load_state():
-    try:
-        with open(STATE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def keys_of(st, name):
-    """key → dict(recipe, params, data, staged, views, inputs, outs, cleanup)。inputs：放过去的文件、视图里的除外（相对 R/data）；
-    outs：产出的文件夹。"""
-    return (st.get("keys") or {}).get(name) or {}
-
-
-def paths_of(k):
-    """一个任务在那边占的路径（相对 R/data）：视图、输入、产出、要清理的。"""
-    return set(views_of(k)) | set(k.get("inputs") or []) | set(k.get("outs") or []) | set(k.get("cleanup") or [])
-
-
-def overlaps(p, used, anc):
-    """p 和 used 里的某个路径相同、是它的上级或下级 → True。anc：used 里各路径的所有上级。"""
-    if p in used or p in anc:
-        return True
-    parts = p.split("/")
-    return any("/".join(parts[:i]) in used for i in range(1, len(parts)))
-
-
-def ancestors(paths):
-    return {"/".join(q.split("/")[:i]) for q in paths for i in range(1, len(q.split("/")))}
-
-
-def droppable(keys, key, paths):
-    """删 key 时 paths 里能删的：别的任务（keys 里的其余记录）还用着的（相同、上级或下级）不删。"""
-    used = set().union(*[paths_of(k) for r, k in keys.items() if r != key]) if len(keys) > 1 else set()
-    anc = ancestors(used)
-    return sorted(p for p in paths if not overlaps(p, used, anc))
-
-
-def views_of(k):
-    """一个任务的视图文件夹。"""
-    return list(k.get("views") or [])
-
-
-def safe_rel(rel):
-    """相对 R/data 的路径：不能是绝对路径、不能有 ..、至少两层（不删到 data 下的第一层）。"""
-    r = os.path.normpath(rel)
-    if r.startswith("/") or ".." in r.split("/") or len(r.split("/")) < 2:
-        raise RN.RelayError(f"路径不对：{rel}")
-    return r
 
 
 def relayable(i):
@@ -193,277 +95,14 @@ def relayable(i):
     return N.accepts(relay, params)
 
 
-# ---------------- 在那边跑 ----------------
-def rsh(name, cmd, input=None, timeout=300):
-    return C.run(cmd, conf(name)["ssh"], timeout, input=input, ssh=ssh_argv())
-
-
-def prefix(name):
-    r = R.q(root(name))
-    return f"cd {r}/code/current && TASKQ_DIR={r}/queue TASKQ_DATA={r}/data"
-
-
-def rtq(name, args, timeout=180):
-    """那边的 taskq.py <args> → (退出码, 输出)；连不上 → None。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} scripts/taskq/queue/taskq.py {args}", timeout=timeout)
-    return None if rc in (124, 255) else (rc, (out + err).strip())
-
-
-def rpy(name, code, data=None, timeout=600, job=None):
-    """在那边跑一段 Python（第一个参数是根目录，data 以 JSON 经标准输入）→ 它 json_out 的结果。出错 → RuntimeError。
-    job：Slurm 的 srun 参数（machines.py 的 adopt_job），在 CPU 节点上跑；排不上 → NoSlot。"""
-    cmd = f"{prefix(name)} {py(name)} -c {shlex.quote(code)} {R.q(root(name))}"
-    if job:
-        cmd = f"srun -I{JOB_WAIT} {job} -J {SL.jobname(conf(name).get('job_names'))} bash -c {shlex.quote(cmd)}"
-        timeout += JOB_WAIT
-    rc, out, err = rsh(name, cmd, input=json.dumps(data), timeout=timeout)
-    if job and rc and S.json_in(out) is None and any(x in err for x in ("Unable to allocate", "Immediate", "revoked")):
-        raise NoSlot(f"{conf(name)['label']} 的 CPU 作业排不上：{err.strip()[-200:]}")
-    res = S.json_in(out)
-    if rc or res is None:
-        raise RuntimeError(f"{conf(name)['label']} 上出错（{rc}）：{(err or out).strip()[-300:]}")
-    return res
-
-
-HEAD = "import json,os,sys\nsys.path[:0]=['scripts/taskq/queue','scripts/queue']\nimport spec\nR=sys.argv[1]\nA=json.load(sys.stdin)\n"
-
-STATUS_PY = HEAD + """import shutil,subprocess,taskq
-st=taskq.local_status()
-sp=[{k:t['spec'].get(k) for k in spec.COLLECT_FIELDS} for t in st['tasks'] if t.get('spec')]
-col=spec.collect(sp,os.environ['TASKQ_DATA'])
-raw=None
-try:
-    if A.get('sched')=='pueue':
-        q=subprocess.run([os.path.expanduser(A['pueue']),'status','--json'],capture_output=True,text=True,timeout=60)
-    else:
-        q=subprocess.run(['squeue','-u',os.environ.get('USER',''),'-h','-o','%i|%j|%T|%M|%q|%R'],capture_output=True,text=True,timeout=60)
-    raw=q.stdout if q.returncode==0 else None
-except Exception:
-    raw=None
-ed=os.path.join(R,'state','envs')
-oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
-free=shutil.disk_usage(R).free
-out_used=None
-if A.get('cap'):
-    used,seen,out_used=0,set(),0
-    for dp,dns,fns in os.walk(R):
-        top=os.path.relpath(dp,R).split(os.sep)[0]
-        for f in fns:
-            x=os.lstat(os.path.join(dp,f))
-            if x.st_nlink>1:
-                if (x.st_dev,x.st_ino) in seen:
-                    continue
-                seen.add((x.st_dev,x.st_ino))
-            if not os.path.islink(os.path.join(dp,f)):
-                used+=x.st_blocks*512
-                if top not in ('blobs','code'):
-                    out_used+=x.st_blocks*512
-    free=min(free,max(0,int(A['cap']*1e9)-used))
-B=os.path.realpath(os.path.join(R,'blobs'))
-bdev=os.stat(B).st_dev if os.path.isdir(B) else os.stat(R).st_dev
-spec.json_out(dict(taskq=st,tasks=col.get('tasks'),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,out_used=out_used,
-                   blob_dev=bdev,blob_free=free if bdev==os.stat(R).st_dev else shutil.disk_usage(B).free,
-                   bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
-"""
-
-MISSING_PY = HEAD + "spec.json_out([i for i in A if not os.path.isfile(os.path.join(R,'blobs',i[:2],i))])\n"
-
-PIN_PY = HEAD + """d=os.path.join(R,'state','pins')
-os.makedirs(d,exist_ok=True)
-p=os.path.join(d,A['key']+'.json')
-if A.get('hashes') is None:
-    if os.path.exists(p):
-        os.remove(p)
-else:
-    with open(p+'.tmp','w') as f:
-        json.dump(A['hashes'],f)
-    os.replace(p+'.tmp',p)
-spec.json_out(1)
-"""
-
-ADOPT_PY = HEAD + """import hashlib
-def sha(p):
-    x=hashlib.sha256()
-    with open(p,'rb') as f:
-        for b in iter(lambda:f.read(1<<22),b''):
-            x.update(b)
-    return x.hexdigest()
-got=[]
-for h,(rel,size) in A['files'].items():
-    t=os.path.join(R,'blobs',h[:2],h)
-    for s in A['srcs']:
-        base=os.path.expanduser(s['path'])
-        p=os.path.join(base,'blobs',h[:2],h) if s.get('site') else (os.path.join(base,rel) if rel else None)
-        try:
-            if not p or os.path.getsize(p)!=size:
-                continue
-        except OSError:
-            continue
-        if not s.get('site') and sha(p)!=h:
-            continue
-        os.makedirs(os.path.dirname(t),exist_ok=True)
-        if not os.path.exists(t):
-            try:
-                os.link(os.path.realpath(p),t)
-            except OSError:
-                continue
-        got.append(h)
-        break
-spec.json_out(got)
-"""
-
-VIEW_PY = HEAD + """import base64,fcntl
-D=os.path.join(R,'data')
-os.makedirs(os.path.join(R,'state'),exist_ok=True)
-L=open(os.path.join(R,'state','view.lock'),'w')
-fcntl.flock(L,fcntl.LOCK_EX)
-def rel_ok(r):
-    r=os.path.normpath(r)
-    if r.startswith('/') or '..' in r.split('/'):
-        sys.exit('bad path '+r)
-    return r
-views=[rel_ok(v) for v in A['views']]
-if any(len(v.split('/'))<2 for v in views):
-    sys.exit('bad views '+repr(views))
-incs=[]
-for v in views:
-    d=os.path.join(D,v)
-    os.makedirs(d,exist_ok=True)
-    inc=os.path.join(d,'.incomplete')
-    open(inc,'w').close()
-    incs.append(inc)
-want=set(incs)
-def put(p,f):
-    os.makedirs(os.path.dirname(p),exist_ok=True)
-    tmp=p+'.relaytmp'
-    if os.path.lexists(tmp):
-        os.remove(tmp)
-    f(tmp)
-    os.replace(tmp,p)
-for rel,h in A['links'].items():
-    p=os.path.join(D,rel_ok(rel))
-    t=os.path.join(R,'blobs',h[:2],h)
-    want.add(p)
-    if not os.path.isfile(t):
-        sys.exit('missing '+h)
-    if not (os.path.islink(p) and os.readlink(p)==t):
-        put(p,lambda x:os.symlink(t,x))
-for rel,b in A['texts'].items():
-    p=os.path.join(D,rel_ok(rel))
-    want.add(p)
-    def w(x,b=b):
-        with open(x,'wb') as f:
-            f.write(base64.b64decode(b))
-    put(p,w)
-B=os.path.realpath(os.path.join(R,'blobs'))+'/'
-for v in A.get('clean',views):
-    for dp,_,fs in os.walk(os.path.join(D,rel_ok(v))):
-        for f in fs:
-            p=os.path.join(dp,f)
-            if p not in want and os.path.islink(p) and os.path.realpath(p).startswith(B):
-                os.remove(p)
-for inc in incs:
-    os.remove(inc)
-spec.json_out(len(want)-len(incs))
-"""
-
-LIST_PY = HEAD + """import fnmatch,glob
-D=os.path.join(R,'data')
-B=os.path.realpath(os.path.join(R,'blobs'))+'/'
-T=A['spec']
-ex=(T.get('fetch') or {}).get('exclude') or []
-items=[]
-def add(p):
-    if os.path.isfile(p) and not os.path.realpath(p).startswith(B):
-        st=os.stat(p)
-        items.append([os.path.relpath(p,D),st.st_size,st.st_mtime_ns])
-def bad(e,top=None):
-    if not (isinstance(e,FileNotFoundError) and e.filename==top):
-        raise e
-for o in A['outs']:
-    top=os.path.join(D,o)
-    for dp,_,fs in os.walk(top,onerror=lambda e:bad(e,top)):
-        for f in fs:
-            if not any(fnmatch.fnmatch(f,x) for x in ex):
-                add(os.path.join(dp,f))
-for x in (T.get('fetch') or {}).get('extra') or []:
-    for p in glob.glob(os.path.join(os.path.dirname(os.path.join(D,A['outs'][0])),x)):
-        add(p)
-for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(spec.safe(A['key']))+'__*')):
-    add(p)
-spec.json_out(dict(done=spec.is_done(T,D),items=items))
-"""
-
-DROP_PY = HEAD + """import glob,shutil
-D=os.path.join(R,'data')
-n=0
-for rel in A['paths']:
-    r=os.path.normpath(rel)
-    if r.startswith('/') or '..' in r.split('/') or len(r.split('/'))<2:
-        continue
-    p=os.path.join(D,r)
-    if os.path.islink(p) or os.path.isfile(p):
-        os.remove(p)
-    elif os.path.isdir(p):
-        shutil.rmtree(p)
-    else:
-        continue
-    n+=1
-    d=os.path.dirname(p)
-    while len(os.path.relpath(d,D).split('/'))>=2:
-        try:
-            os.rmdir(d)
-        except OSError:
-            break
-        d=os.path.dirname(d)
-for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(A['logs'])+'__*')):
-    os.remove(p)
-spec.json_out(n)
-"""
-
-STATES_PY = HEAD + "import taskq\nspec.json_out({t['key']:t['state'] for t in taskq.local_status()['tasks']})\n"
-
-
-ADOPT_OUT_PY = HEAD + """import glob,shutil
-new=os.path.join(R,'data',A['out'])
-def mt(d):
-    ts=[os.path.getmtime(p) for g in A['resume'] for p in glob.glob(os.path.join(glob.escape(d),g)) if os.path.isfile(p)]
-    return max(ts) if ts else None
-best,bt=None,mt(new)
-if A['done'] and all(any(os.path.exists(os.path.join(new,x)) for x in it.split('|')) for it in A['done']):
-    bt=float('inf')
-for d in A['srcs']:
-    d=os.path.expanduser(d)
-    if os.path.realpath(d)==os.path.realpath(new):
-        continue
-    m=mt(d)
-    if m is not None and (bt is None or m>bt):
-        best,bt=d,m
-n=0
-if best:
-    os.makedirs(new,exist_ok=True)
-    rs={os.path.basename(p) for g in A['resume'] for p in glob.glob(os.path.join(glob.escape(best),g))}
-    for f in sorted(os.listdir(best),key=lambda f:f in rs):
-        if os.path.isfile(os.path.join(best,f)):
-            shutil.copy2(os.path.join(best,f),os.path.join(new,f+'.relaytmp'))
-            os.replace(os.path.join(new,f+'.relaytmp'),os.path.join(new,f))
-            n+=1
-spec.json_out(dict(n=n,src=best))
-"""
-
-
-def adopt_srcs(name):
-    """收编来源（machines.py 的 adopt）：同一个盘上别的执行机的根目录在前（按哈希直接认，不重算），老数据目录在后。"""
-    return sorted(M.adopt_sources(name), key=lambda x: not x["site"])
-
-
+# ---------------- 那边的状态 ----------------
 def remote_status(name):
     """→ 那边的状态 dict；连不上或出错 → None。"""
-    c = conf(name)
-    if c.get("ssh_master") and subprocess.run(ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
+    c = RM.conf(name)
+    if c.get("ssh_master") and subprocess.run(RM.ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
         return None  # 长连接断着：不另起连接（中转执行机认证失败多了会被锁）
     try:
-        rs = rpy(name, STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap")), timeout=STATUS_S)
+        rs = RM.rpy(name, RM.STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap")), timeout=STATUS_S)
     except RuntimeError:
         return None
     return parse_sched(name, rs)
@@ -471,16 +110,16 @@ def remote_status(name):
 
 def undeployed(name):
     """连得上、但根目录里还没有代码包（新机器第一次）→ True：先部署，再读状态。"""
-    c = conf(name)
-    if c.get("ssh_master") and subprocess.run(ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
+    c = RM.conf(name)
+    if c.get("ssh_master") and subprocess.run(RM.ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
         return False
-    return rsh(name, f"test -e {R.q(root(name))}/code/current", timeout=30)[0] == 1
+    return RM.rsh(name, f"test -e {R.q(RM.root(name))}/code/current", timeout=30)[0] == 1
 
 
 def parse_sched(name, rs):
     """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：各种 worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
     一次 ssh 读完、在 box 上用适配器解析（scripts/taskq/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
-    raw, c = rs.pop("sched_raw", None), conf(name)
+    raw, c = rs.pop("sched_raw", None), RM.conf(name)
     rs["jobs"] = rs["squeue"] = None
     if raw is not None and c["scheduler"] == "pueue":
         rs["jobs"] = PQ.parse(raw, [M.worker_of(name, k)["group"] for k in M.kinds(name)])
@@ -494,11 +133,11 @@ def deploy(name, bid, path):
     """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。
     整份收下、sha256 对上才解开（ssh 断在两个文件之间时 tar 不报错）；同一台同时只推一个（flock），临时目录各用各的。
     清理旧包时留下刚切过去的、排着和在跑的作业还在用的（适配器的 busy_cmd），读不到就不清理。"""
-    r = R.q(root(name))
+    r = R.q(RM.root(name))
     b = shlex.quote(bid)
     tar = subprocess.run(["tar", "-C", path, "-cf", "-", "."], capture_output=True, check=True).stdout
     sha = hashlib.sha256(tar).hexdigest()
-    busy = (SL if conf(name)["scheduler"] == "slurm" else PQ).busy_cmd()
+    busy = (SL if RM.conf(name)["scheduler"] == "slurm" else PQ).busy_cmd()
     cmd = (f"set -e; R={r}; mkdir -p $R/code $R/queue $R/blobs $R/tmp $R/state $R/data/logs/tasks $R/data/logs/workers; "
            f"[ -e $R/queue/tasks.jsonl ] || {{ : > $R/queue/tasks.jsonl; touch $R/queue/ENABLED; }}; cd $R/code; "
            "exec 9> $R/state/deploy.lock; flock -w 300 9; "
@@ -510,10 +149,10 @@ def deploy(name, bid, path):
            "ls -1t | grep -vx current | grep -v '\\.tmp' | tail -n +4 | "
            f"while read -r d; do [ \"$d\" = {b} ] && continue; case \"$busy\" in *\"/code/$d/\"*) continue;; esac; "
            "find \"$d\" -maxdepth 0 -mtime +4 -exec rm -rf {} +; done; fi")
-    r2 = subprocess.run(ssh_argv() + [conf(name)["ssh"], C.remote_timeout(f"bash -c {shlex.quote(cmd)}", 600)], input=tar,
+    r2 = subprocess.run(RM.ssh_argv() + [RM.conf(name)["ssh"], C.remote_timeout(f"bash -c {shlex.quote(cmd)}", 600)], input=tar,
                         capture_output=True, timeout=600)
     if r2.returncode:
-        raise RuntimeError(f"推代码包 {bid} 到 {conf(name)['label']} 出错：{r2.stderr.decode(errors='replace')[-300:]}")
+        raise RuntimeError(f"推代码包 {bid} 到 {RM.conf(name)['label']} 出错：{r2.stderr.decode(errors='replace')[-300:]}")
 
 
 def bundle(name, commit="origin/main", have=None, run_build=None):
@@ -522,210 +161,7 @@ def bundle(name, commit="origin/main", have=None, run_build=None):
     if bid == have:
         return None
     deploy(name, bid, path)
-    return f"{conf(name)['label']} 的代码换成 {bid}（{commit}）"
-
-
-# ---------------- 传数据（box 的 wait 组里跑） ----------------
-def sha256s(paths):
-    """真实路径 → sha256，按（路径、大小、修改时间）缓存在 HASHES。"""
-    try:
-        cache = json.load(open(HASHES))
-    except (OSError, ValueError):
-        cache = {}
-    out, new = {}, False
-    for p in paths:
-        st = os.stat(p)
-        k = f"{p}|{st.st_size}|{st.st_mtime_ns}"
-        if k not in cache:
-            h = hashlib.sha256()
-            with open(p, "rb") as f:
-                for blk in iter(lambda: f.read(1 << 22), b""):
-                    h.update(blk)
-            cache[k], new = h.hexdigest(), True
-        out[p] = cache[k]
-    if new:
-        write_json(HASHES, cache, indent=None)
-    return out
-
-
-def lookup(key):
-    s = S.lookup(key)
-    if s is None:
-        raise RN.RelayError(f"实验表和总队列里都没有 {key}")
-    return s if s.get("exp") else S.resolve(s["recipe"], s["params"])
-
-
-def stage(name, key, nice=None, add=True, say=print):
-    """box 上的数据 → 那边（和 box 一样的相对路径）；add 时再加进那边的队列。→ key。"""
-    real, D = lookup(key), box_data()
-    ex = N.export(real, D)
-    hs = sha256s(sorted({p for _, p in ex["files"]}))
-    links = {rel: hs[p] for rel, p in ex["files"]}
-    pin = S.safe(key)
-    rpy(name, PIN_PY, dict(key=pin, hashes=sorted(set(links.values()))))  # 视图建好前那边的清理不删这些块（11/1）
-    try:
-        return _stage(name, key, nice, add, say, real, D, ex, hs, links)
-    finally:
-        try:
-            rpy(name, PIN_PY, dict(key=pin, hashes=None))
-        except RuntimeError as e:
-            say(f"撤掉 {key} 的钉住记录没成（{e}），清理 12 小时后不再认它")
-
-
-def check_overlap(name, key, paths):
-    """这个任务要放的路径和同一台上别的没做完的任务的产出重叠（相同、上级或下级）→ RelayError，不传。"""
-    keys = keys_of(load_state(), name)
-    hit = []
-    for r, k in keys.items():
-        if r == key:
-            continue
-        outs = set(k.get("outs") or [])
-        anc = ancestors(outs)
-        if any(overlaps(p, outs, anc) for p in paths):
-            hit.append(r)
-    if not hit:
-        return
-    states = rpy(name, STATES_PY, None)
-    busy = [r for r in hit if states.get(r) not in (None, "done")]
-    if busy:
-        raise RN.RelayError(f"{key} 要放的输入和 {conf(name)['label']} 上还没做完的 {', '.join(busy)} 的产出重叠，先不传")
-
-
-def _stage(name, key, nice, add, say, real, D, ex, hs, links):
-    import tunnel
-    views = [safe_rel(v) for v in ex["views"]]
-    inputs = sorted({safe_rel(r) for r in list(links) + list(ex["texts"])} - {r for r in links if any(r.startswith(v + "/") for v in views)})
-    outs = [safe_rel(o) for o in ex.get("outs") or N.outs(real)]
-    cleanup = [safe_rel(c) for c in ex["cleanup"]]
-    check_overlap(name, key, views + inputs)
-    miss = rpy(name, MISSING_PY, sorted(set(links.values())))
-    say(f"{key}：{len(links)} 个文件，那边缺 {len(miss)} 个")
-    srcs, job = adopt_srcs(name), conf(name).get("adopt_job")
-    if miss:  # 那边老数据目录、同一个盘上别的执行机、它自己的数据目录里内容一样的文件硬链接进 blobs，不重传
-        by = {h: p for p, h in hs.items()}
-        files = {h: (os.path.relpath(by[h], D) if by[h].startswith(D.rstrip("/") + "/") else None, os.path.getsize(by[h])) for h in miss}
-        try:
-            got = set(rpy(name, ADOPT_PY, dict(srcs=srcs + [dict(path=root(name) + "/data", site=False)], files=files),
-                          timeout=3 * 3600, job=job))
-        except NoSlot as e:
-            say(f"{e}；这次不传，下次检查再来")
-            return None
-        miss = [h for h in miss if h not in got]
-        say(f"那边已有的数据里收编了 {len(got)} 个，还缺 {len(miss)} 个")
-    if miss:
-        by = {h: p for p, h in hs.items()}
-        os.makedirs(DIR, exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix="push_", dir=DIR)
-        try:
-            for h in miss:
-                os.makedirs(os.path.join(tmp, h[:2]), exist_ok=True)
-                os.symlink(by[h], os.path.join(tmp, h[:2], h))
-            bad = tunnel.push(conf(name)["ssh"], tmp, root(name) + "/blobs", [f"{h[:2]}/{h}" for h in miss])
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        if bad:
-            raise RN.RelayError(f"{len(bad)} 个文件没传到或对不上（下次重传）")
-    now = time.time()
-    update_state(lambda st: st.setdefault("views", {}).setdefault(name, {}).update({v: now for v in views}))
-    texts = {k: (v if isinstance(v, bytes) else v.encode()) for k, v in ex["texts"].items()}
-    others = [k for r, k in keys_of(load_state(), name).items() if r != key]
-    used = set().union(*[paths_of(k) for k in others]) if others else set()
-    clean = [v for v in views if not overlaps(v, used, ancestors(used))]  # 视图里多出来的旧链接只在别的任务不用这个视图时删
-    n = rpy(name, VIEW_PY, dict(views=views, clean=clean, links=links,
-                                texts={k: base64.b64encode(v).decode() for k, v in texts.items()}))
-    say(f"那边的输入放好了（{n} 个文件，视图 {'、'.join(views) or '无'}）")
-    if add and srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
-        dirs = [f"{x['path']}/data/{real['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
-        try:
-            r = rpy(name, ADOPT_OUT_PY, dict(srcs=dirs, out=real["out"], resume=real["resume"], done=real.get("done") or []), job=job)
-        except NoSlot as e:
-            say(f"{e}；这次不加进队列，下次检查再来")
-            return None
-        if r["n"]:
-            say(f"{r['src']} 的存档拷过来了（{r['n']} 个文件），接着训")
-
-    def rec(st):
-        st.setdefault("keys", {}).setdefault(name, {})[key] = dict(
-            recipe=real["recipe"], params=ex["params"], data=real.get("data") or [], staged=time.time(), views=views,
-            inputs=inputs, outs=outs, cleanup=cleanup)
-    update_state(rec)
-    if add:
-        r = rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(x) for x in S.kv_args(real["recipe"], ex["params"])))
-        if r is None or r[0]:
-            raise RuntimeError(f"加进 {conf(name)['label']} 的队列出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
-        say(r[1])
-    else:  # 补传（那边查到缺输入）：撤掉标记，那边接着领
-        r = rtq(name, f"input-ok {shlex.quote(key)}")
-        if r is None or r[0]:
-            raise RuntimeError(f"{conf(name)['label']} 上撤掉缺输入的标记出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
-        say(r[1] or "那边没有缺输入的标记")
-    return key
-
-
-# ---------------- 拉回（box 的 wait 组里跑） ----------------
-def place(src, D, written, real):
-    """核对过的结果（src 下，和数据目录一样的相对路径）挪进数据目录：普通文件 → out 上一级里 fetch.extra 的文件（已有的不动）→
-    MANIFEST.json → 做完的标志（按 done 倒着放，第一项最后放）。"""
-    import fnmatch
-    rout = real["out"].strip("/")
-    par = os.path.dirname(rout)
-    extra = (real.get("fetch") or {}).get("extra") or []
-    rank = {}
-    for n, item in enumerate(real["done"]):
-        for alt in item.split("|"):
-            rank[f"{rout}/{alt}"] = n
-    done = sorted((w for w in written if w in rank), key=lambda w: -rank[w])
-    parent = [w for w in written if w not in rank and os.path.dirname(w) == par
-              and any(fnmatch.fnmatch(os.path.basename(w), x) for x in extra)]
-    man = [w for w in written if w == f"{rout}/MANIFEST.json" and w not in rank]
-    first = [w for w in written if w not in rank and w not in parent and w not in man]
-
-    def mv(w):
-        p = os.path.join(D, w)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        os.replace(os.path.join(src, w), p)
-    for w in first:
-        mv(w)
-    for w in parent:
-        if not os.path.exists(os.path.join(D, w)):
-            mv(w)
-    for w in man + done:
-        mv(w)
-
-
-def fetch(name, key, say=print):
-    import stat
-    import tunnel
-    real, D = lookup(key), box_data()
-    k = keys_of(load_state(), name).get(key)
-    if not k:
-        raise RN.RelayError(f"{key} 没有传给 {conf(name)['label']} 的记录")
-    res = rpy(name, LIST_PY, dict(spec=real, outs=k.get("outs") or N.outs(real), key=key))
-    if not res["done"]:
-        raise RN.RelayError(f"{conf(name)['label']} 上 {key} 还没做完")
-    inbox = os.path.join(D, ".relay_in", S.safe(key))
-    out = inbox + ".real"
-    shutil.rmtree(out, ignore_errors=True)
-    # 上次拉到一半的（11/2）：清单里有、大小和修改时间都对上的留着（隧道核对过 MD5 才放进来），只拉其余的；别的删掉
-    want = {i[0]: list(i[1:]) for i in res["items"]}
-    for dp, _, fs in os.walk(inbox):
-        for f in fs:
-            p = os.path.join(dp, f)
-            st = os.lstat(p)
-            rel = os.path.relpath(p, inbox)
-            if rel in want and stat.S_ISREG(st.st_mode) and [st.st_size, st.st_mtime_ns][:len(want[rel])] == want[rel]:
-                want.pop(rel)
-            else:
-                os.remove(p)
-    todo = [(r, v[0]) for r, v in want.items()]
-    bad = tunnel.pull(conf(name)["ssh"], root(name) + "/data", inbox, todo) if todo else []
-    if bad:
-        raise RN.RelayError(f"{len(bad)} 个文件没拉到（{bad[:3]}）")
-    written = N.import_(real, inbox, out, D)
-    place(out, D, written, real)
-    for d in (inbox, out):
-        shutil.rmtree(d, ignore_errors=True)
-    say(f"{key} 拉回了 {len(written)} 个文件")
+    return f"{RM.conf(name)['label']} 的代码换成 {bid}（{commit}）"
 
 
 # ---------------- 每次检查 ----------------
@@ -750,7 +186,7 @@ def plan(s, name, rs, st, now=None):
     动作 dict(op=beat|release|stage|restage|fetch|drop|unq|rstop|rresume|rnice|archive, key, …)；rkey：那边队列里的 key。"""
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
-    L, keys = conf(name)["label"], keys_of(st, name)
+    L, keys = RM.conf(name)["label"], ST.keys_of(st, name)
     mine = [t for t in (mtq or {}).get("tasks", []) if t.get("worker") == name]
     acts, stuck = [], {}
     if not mtq or not mtq.get("enabled"):
@@ -789,7 +225,7 @@ def plan(s, name, rs, st, now=None):
             if k:  # box 上有了就删那边的任务和结果，不等归档（11/3 定：执行机的盘只用来中转）
                 acts.append(dict(op="drop", key=key, rkey=key))
             try:
-                want = ft is not None and bool(lookup(key).get("archive"))
+                want = ft is not None and bool(RT.lookup(key).get("archive"))
             except (RN.RelayError, S.SpecError):
                 want = False
             archived = (at is not None and at["status"] == "Success") or (ft is not None and ft["status"] == "Success" and "archive_task.sh" in fcmd)
@@ -871,7 +307,7 @@ def plan(s, name, rs, st, now=None):
         real = a["key"] if a["key"] in keys else None
         m = mt.get(real) if real else None
         if real is None:
-            stuck[f"site:{name}:orphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪个任务（{DIR}/state.json 里没有）"
+            stuck[f"site:{name}:orphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪个任务（{ST.DIR}/state.json 里没有）"
         elif a["state"] in ("claimed", "busy"):
             stuck[f"site:{name}:orphan:{real}"] = f"{L} 在训 {real}，但总队列里不是它领着；看总队列和 {L} 的队列"
         elif m is None or m["state"] == "done":
@@ -900,7 +336,7 @@ def fill(s, name, rs, st, acts):
     if "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):  # 传数据要在 box 的 pueue 排，在跑的看不见（11/3）
         return [], "box 的 pueue 读不到"
     want, kinds = P.READY.get(name, 1), M.kinds(name)
-    keys = keys_of(st, name)
+    keys = ST.keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
 
     def remote(t):
@@ -927,12 +363,12 @@ def fill(s, name, rs, st, acts):
     urgent = [t for t in cands if t["nice"] < 0]  # 第 ⓪ 档（训完后的推理等）不受 READY 限制（11/1）
     room = {k: want - have[k] for k in kinds}
     same = rs.get("blob_dev", rs.get("dev")) == rs.get("dev")
-    disk = (conf(name)["ssh"], rs.get("blob_dev", rs.get("dev")))
+    disk = (RM.conf(name)["ssh"], rs.get("blob_dev", rs.get("dev")))
     free = rs.get("blob_free", rs.get("free", 0)) / 1e9 - PLANNED.get(disk, 0)
-    hard = (conf(name).get("budget") or (None, HARD_GB))[1]
+    hard = (RM.conf(name).get("budget") or (None, HARD_GB))[1]
     # 有 cap 的（home）：那边每个任务（排着、在训、训完没拉回的，加这次领的）的输出各留 TRAIN_OUT_GB（11/4）
     spare = None
-    if conf(name).get("cap") and rs.get("out_used") is not None:
+    if RM.conf(name).get("cap") and rs.get("out_used") is not None:
         n = len(rt) + sum(1 for t in held if remote(t) is None)
         spare = (rs.get("free", 0) + rs["out_used"]) / 1e9 - n * refill.TRAIN_OUT_GB - (PLANNED.get(disk, 0) if same else 0)
     out, took = [], set()
@@ -995,7 +431,7 @@ def topup(name, rs, run=None):
     run：fn(名字, 命令) → (退出码, 输出, 错误)，测试替换。"""
     if not shift.allowed(name):
         return [], "不在时段里（envs/policy.py 的 SHIFT）"
-    if conf(name)["scheduler"] == "pueue":
+    if RM.conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
             return [], "读不到 pueue"
         subs, why = [], []
@@ -1013,7 +449,7 @@ def topup(name, rs, run=None):
     conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
     if not conf_:
         return [], "envs/policy.py 的 SLURM 里没有它"
-    st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or rsh)(name, c)))
+    st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
     if st is None:
         return [], "读不到作业数"
     return refill.slurm_plan(rs["taskq"], st, conf_)
@@ -1025,7 +461,7 @@ def label(op, key):
 
 def execute(name, acts, s, run_add=None):
     """做动作 → [说明]。出错的那一步写进说明，后面的照做。"""
-    L, msgs = conf(name)["label"], []
+    L, msgs = RM.conf(name)["label"], []
     add = run_add or refill.add
 
     def master(args):
@@ -1075,24 +511,24 @@ def execute(name, acts, s, run_add=None):
                           to=name, group="wait")
                 msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
             elif a["op"] == "unq":
-                r = rtq(name, f"remove {shlex.quote(a['rkey'])}")
+                r = RM.rtq(name, f"remove {shlex.quote(a['rkey'])}")
                 if r and r[0] == 0:
-                    update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(k) or {}).update(unq=time.time()))
+                    ST.update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(k) or {}).update(unq=time.time()))
                     msgs.append(f"{L} 的队列里删了 {k}（总队列里分给了 {a['to']}，结果留着给它收编）")
                 else:
                     msgs.append(f"{L} 的队列里删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "drop":
-                err = drop_remote(name, k, a["rkey"], gone=a.get("gone"))
+                err = RT.drop_remote(name, k, a["rkey"], gone=a.get("gone"))
                 if err:
                     msgs.append(f"{L} 上删 {k} 出错（{err}）")
                     kept.add(k)
                 else:
                     msgs.append(f"{L} 上删了 {k} 的任务和结果")
             elif a["op"] == "rnice":
-                r = rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
+                r = RM.rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
                 msgs.append(f"{L} 上 {k} 改到档位 {a['nice']}" if r and r[0] == 0 else f"{L} 上 {k} 改档位出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] in ("rstop", "rresume"):
-                r = rtq(name, ("stop --why 总队列里停了 " if a["op"] == "rstop" else "resume ") + shlex.quote(a["rkey"]))
+                r = RM.rtq(name, ("stop --why 总队列里停了 " if a["op"] == "rstop" else "resume ") + shlex.quote(a["rkey"]))
                 what = "停" if a["op"] == "rstop" else "撤销停止"
                 msgs.append(f"{L} 上{what} {k}" if r and r[0] == 0 else f"{L} 上{what} {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
         except Exception as e:  # noqa: BLE001
@@ -1102,26 +538,11 @@ def execute(name, acts, s, run_add=None):
     return msgs
 
 
-def drop_remote(name, key, rk, gone=False):
-    """删那边的任务（taskq.py remove 在锁里查过没人领着），再删这个任务占的、别的任务不用的路径和日志，最后删记录 → 出错说明或 None。"""
-    if not gone:
-        r = rtq(name, f"remove {shlex.quote(rk)}")
-        if r and r[0] and "不删" not in r[1] and "队列里没有" in r[1]:
-            r = (0, r[1])  # 上次删了任务、没删完路径
-        if not r or r[0]:
-            return f"任务没删掉，路径留着：{(r or [0, 'ssh 不通'])[1][-150:]}"
-    keys = keys_of(load_state(), name)
-    paths = droppable(keys, key, paths_of(keys.get(key) or {}))
-    rpy(name, DROP_PY, dict(paths=paths, logs=S.safe(rk)))
-    update_state(lambda st: (st.get("keys") or {}).get(name, {}).pop(key, None))
-    return None
-
-
 def submit(name, subs):
     """照 topup 算好的开 worker（scripts/taskq/sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
-    L, msgs, stuck = conf(name)["label"], [], {}
-    run = lambda c: (lambda r: (r[0], r[1] + r[2]))(rsh(name, c))  # noqa: E731
-    if conf(name)["scheduler"] == "pueue":
+    L, msgs, stuck = RM.conf(name)["label"], [], {}
+    run = lambda c: (lambda r: (r[0], r[1] + r[2]))(RM.rsh(name, c))  # noqa: E731
+    if RM.conf(name)["scheduler"] == "pueue":
         for _, k, n in subs:
             for _ in range(n):
                 ok, out = PQ.start_worker(name, run, k)
@@ -1130,8 +551,8 @@ def submit(name, subs):
                 else:
                     stuck[kkey(f"site:{name}:worker", k)] = f"{L} 开 {wname(k)} 出错：{out}"
         return msgs, stuck
-    cwd = R.q(root(name)) + "/code/current/scripts/taskq/queue"
-    for r in SL.start_workers(cwd, subs, run, conf(name).get("job_names")):
+    cwd = R.q(RM.root(name)) + "/code/current/scripts/taskq/queue"
+    for r in SL.start_workers(cwd, subs, run, RM.conf(name).get("job_names")):
         k = sub_kind((r["qos"], r["time"], r["n"], r["file"]))
         if r["err"] is not None:
             stuck[kkey(f"topup:{name}:{r['qos']}", k)] = f"{L} {r['qos']} 补交 {wname(k)} 作业出错：{r['err']}"
@@ -1141,7 +562,7 @@ def submit(name, subs):
 
 
 def write_status(name, rs, st):
-    keys = keys_of(st, name)
+    keys = ST.keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     out = {}
     for real, k in keys.items():
@@ -1154,7 +575,7 @@ def write_status(name, rs, st):
         allst = json.load(open(STATUS))
     except (OSError, ValueError):
         allst = {}
-    allst[name] = dict(time=time.time(), label=conf(name)["label"], tasks=out, squeue=rs.get("squeue"), free=rs.get("free"),
+    allst[name] = dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, squeue=rs.get("squeue"), free=rs.get("free"),
                        bundle=rs.get("bundle"))
     write_json(STATUS, allst)
 
@@ -1185,7 +606,7 @@ def run_one(s, name, dry):
     live = bool(P.AUTO.get(name))
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     mine = [t for t in (mtq or {}).get("tasks", []) if t.get("worker") == name]
-    L, st = conf(name)["label"], load_state()
+    L, st = RM.conf(name)["label"], ST.load_state()
     if not mine and not live and not dry:
         return [], {}
     if not s["ok"].get(M.hub()) or not mtq:
@@ -1200,7 +621,7 @@ def run_one(s, name, dry):
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
             if fresh or rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
                 bid, path = RB.build(name, commit or "origin/main")
-                update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
+                ST.update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
                 if rs.get("bundle") != bid:
                     try:
                         deploy(name, bid, path)
@@ -1215,18 +636,18 @@ def run_one(s, name, dry):
     if fresh and rs == {"bundle": None}:
         rs = None
     if rs is not None and not dry:
-        update_state(lambda x: x.setdefault("last_ok", {}).update({name: time.time()}))
-        write_status(name, rs, load_state())
-    if rs is not None and not dry and live and conf(name).get("budget"):
+        ST.update_state(lambda x: x.setdefault("last_ok", {}).update({name: time.time()}))
+        write_status(name, rs, ST.load_state())
+    if rs is not None and not dry and live and RM.conf(name).get("budget"):
         try:
-            st = load_state()
+            st = ST.load_state()
             reg = (st.get("views") or {}).get(name) or {}
-            keep = {v for k in keys_of(st, name).values() for v in (k.get("outs") or [] if k.get("unq") else paths_of(k))}
+            keep = {v for k in ST.keys_of(st, name).values() for v in (k.get("outs") or [] if k.get("unq") else ST.paths_of(k))}
             keep |= {v for v, t in reg.items() if time.time() - t < VIEW_KEEP_S}
-            g = relay_gc.gc(name, keep, rpy, views=reg, siblings=[x["path"] for x in M.adopt_sources(name) if x["site"]],
-                            free=rs.get("free") if conf(name).get("cap") else None)
+            g = ST.gc(name, keep, RM.rpy, views=reg, siblings=[x["path"] for x in M.adopt_sources(name) if x["site"]],
+                      free=rs.get("free") if RM.conf(name).get("cap") else None)
             if g and g["removed_views"]:
-                update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
+                ST.update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
             if g and (g["removed_views"] or g["removed_blobs"]):
                 notes.append(f"{L} 清理：删了 {len(g['removed_views'])} 个数据集视图、{g['removed_blobs']} 个 blob，"
                              f"放出 {g['freed'] / 1e9:.0f} GB，剩 {g['free'] / 1e9:.0f} GB")
@@ -1280,10 +701,10 @@ def main(argv):
     if a.cmd == "stage":
         if a.nice is None and not a.no_add:
             ap.error("要给 --nice（或 --no-add）")
-        if stage(a.name, a.key, a.nice, add=not a.no_add) is None:
+        if RT.stage(a.name, a.key, a.nice, add=not a.no_add) is None:
             return NOSLOT_RC
     elif a.cmd == "fetch":
-        fetch(a.name, a.key)
+        RT.fetch(a.name, a.key)
     elif a.cmd == "bundle":
         rs = remote_status(a.name)
         print(bundle(a.name, a.commit, (rs or {}).get("bundle")) or "没变")

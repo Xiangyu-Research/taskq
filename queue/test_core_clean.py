@@ -11,7 +11,7 @@ ROOT = CORE  # 清单里的路径相对它
 
 CLEAN = [
     "queue/common.py", "queue/inputs.py", "queue/feed.py", "queue/refill.py",
-    "queue/shift.py", "queue/relay_gc.py",
+    "queue/shift.py", "queue/relay_store.py", "queue/relay_remote.py", "queue/relay_transfer.py",
     "sites/envs.py", "sites/pueue.py", "sites/remote.py", "sites/site.py",
     "sites/slurm.py",
     "monitor/health.py", "sync/tunnel.py",
