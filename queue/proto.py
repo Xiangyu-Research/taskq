@@ -174,13 +174,13 @@ OVERVIEW_TOP = ("version", "now", "hub", "data", "queue", "sources", "machines",
 OVERVIEW_QUEUE_TOP = ("enabled", "readable")               # 总队列开着没、读到没
 OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # 收集到训练状态的地方；kind：machine（gather 收集的）/ relay（relay.py 的 status.json）
 OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus：[{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
-OVERVIEW_PUEUE = ("groups", "tasks", "error")              # tasks 每个：qs --json 的字段，加 start_ts、end_ts（秒）
+OVERVIEW_PUEUE = ("groups", "tasks", "error")              # tasks 每个：qs --json 的字段，加 start_ts、end_ts（秒）、about（plain.label：[实验, 做了什么, 简称] 或 null，11/4）
 OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
                  "eta", "parts", "commits")
 OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank：总队列里没做完的任务中排第几（1 起）
 OVERVIEW_COPY = ("where", "source", "final", "archived", "epochs", "start", "last", "runs", "dice", "debug", "resumable")
 OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # 分段日志：作业、第几段、哪台机器、至少做完一轮没、代码提交号
-OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified")
+OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain：推送用的白话（plain.problem，11/4）
 TOTAL_INFO = "num_epochs"  # 进度读法 INFO 里"一共几轮"的键（runs 里没有 total 时用；overview 的 total、progress、eta）
 
 # ---------------- 报警（health.py 的问题编号；plain.py 按 kind 说白话） ----------------

@@ -78,6 +78,7 @@ ok("commits 只算训了的段", T[A]["commits"] == ["abc1234"])
 ok("机器：连不上的带原因，pueue 出错的带 error，任务带时间戳", [m["name"] for m in o["machines"]] == ["box", "lab"]
    and o["machines"][1]["why"] == "连不上" and o["machines"][1]["pueue"]["error"] == "ssh"
    and isinstance(o["machines"][0]["pueue"]["tasks"][0]["start_ts"], float))
+ok("pueue 的任务带 about（plain.label）：没有标签的算其他", o["machines"][0]["pueue"]["tasks"][0]["about"] == ["其他", "", None])
 ok("sources：机器在前、执行机在后", [(x["label"], x["kind"]) for x in o["sources"]][-1] == ("relay-lab1", "relay"))
 ok("没有健康检查记录时 problems 是空的", o["health"] == dict(checked=None, problems=[]))
 ok("JSON 一行、能读回", "\n" not in line and json.loads(line)["version"] == proto.VERSION)
@@ -94,6 +95,7 @@ json.dump({"lab1": dict(time=NOW.timestamp() - 60, label="L1", tasks={C: prog(ep
 o = O.build(s)
 T = {t["key"]: t for t in o["tasks"]}
 ok("problems 带 id、字段 = proto.OVERVIEW_PROBLEM", [tuple(p) for p in o["health"]["problems"]] == [proto.OVERVIEW_PROBLEM])
+ok("problems 带白话 plain（认不出的 kind 用原来的说明）", o["health"]["problems"][0]["plain"] == "m")
 ok("relay 的 status.json：2 小时以内的才算", T[C]["copy"]["where"] == "L1" and T[C]["copy"]["epochs"] == 5)
 ok("问题出现在给人看的表里", "p:1" in O.text(o))
 

@@ -34,6 +34,7 @@ import proto  # noqa: E402
 import health as H  # noqa: E402
 import common as C  # noqa: E402
 import experiments as E  # noqa: E402
+import plain as PL  # noqa: E402
 import spec as S  # noqa: E402
 
 M = H.M
@@ -111,8 +112,25 @@ def pueue_view(d):
         return None
     if "error" in d:
         return dict(groups={}, tasks=[], error=d["error"])
-    tasks = [dict(t, start_ts=C.pueue_time(t.get("start")), end_ts=C.pueue_time(t.get("end"))) for t in d.get("tasks") or []]
+    tasks = [dict(t, start_ts=C.pueue_time(t.get("start")), end_ts=C.pueue_time(t.get("end")), about=about(t.get("label")))
+             for t in d.get("tasks") or []]
     return dict(groups=d.get("groups") or {}, tasks=tasks, error=None)
+
+
+def about(label):
+    """pueue 标签 → plain.label 的 [实验, 做了什么, 简称]（中间步骤 → None）；认不出 → ["其他", 标签, None]。"""
+    try:
+        r = PL.label(label or "")
+    except Exception:  # noqa: BLE001
+        return ["其他", label or "", None]
+    return list(r) if r else None
+
+
+def plain_problem(pid, p):
+    try:
+        return PL.problem(pid, p)
+    except Exception:  # noqa: BLE001
+        return p.get("msg")
 
 
 def health_view():
@@ -120,7 +138,8 @@ def health_view():
         h = json.load(open(H.STATE))
     except (OSError, ValueError):
         return dict(checked=None, problems=[])
-    ps = [dict(id=pid, **{k: p.get(k) for k in proto.OVERVIEW_PROBLEM if k != "id"}) for pid, p in (h.get("problems") or {}).items()]
+    ps = [dict(id=pid, **{k: p.get(k) for k in proto.OVERVIEW_PROBLEM if k not in ("id", "plain")}, plain=plain_problem(pid, p))
+          for pid, p in (h.get("problems") or {}).items()]
     return dict(checked=h.get("checked"), problems=ps)
 
 
