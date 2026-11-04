@@ -250,6 +250,12 @@ def take_lock():
     return f
 
 
+def status_cmd(wd):
+    """那边的传输：done / run / dead，再加最近一行"在 …"。进程没了时再看一次 done（刚写完 done 就退出的不算 dead）。"""
+    return (f"cd {wd} && if [ -e done ]; then echo done; elif pgrep -f '[b]ash {wd}/run.sh' > /dev/null; then echo run; "
+            f"elif [ -e done ]; then echo done; else echo dead; fi; grep '^在 ' log 2> /dev/null | tail -1")
+
+
 def run_remote(host, mode, plan, serve, total):
     """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。"""
     M = machines()
@@ -289,8 +295,7 @@ def run_remote(host, mode, plan, serve, total):
             time.sleep(min(wait, POLL))
             wait *= 2
             try:
-                st = ssh(host, f"cd {wd} && if [ -e done ]; then echo done; elif pgrep -f '[b]ash {wd}/run.sh' > /dev/null; "
-                               f"then echo run; else echo dead; fi; grep '^在 ' log 2> /dev/null | tail -1").split("\n")
+                st = ssh(host, status_cmd(wd)).split("\n")
                 seen = time.time()
             except RuntimeError:
                 st = [""]
