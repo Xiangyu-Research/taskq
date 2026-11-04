@@ -10,9 +10,9 @@
 任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。
 
 队列目录（总队列和执行机上的一样）：
-  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}
-  claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号等）、主机、领取和最近一次心跳的时间，
-                可选 ttl（心跳多久不更新算过期，默认 20 分钟）；总队列里是 assigned（分给哪台执行机，不过期）
+  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}；执行机的队列另有 spec（box 解析好的说明，11/4）
+  claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号等）、主机、领取和最近一次心跳的时间、token
+                （心跳 20 分钟不更新算过期）；总队列里是 assigned（分给哪台执行机，不过期）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
   skips/<key>   某台机器训不了的任务（release --skip）：这台机器不再领它，别的机器照常领；不算失败
@@ -26,24 +26,31 @@
   说明解析不了的（参数写错，status 里显示 bad）。
 
 worker 调用（执行机上的队列）：
-    taskq.py next --worker <作业号> --envs <环境,…> [--device gpu|cpu] [--free-slots N] [--patience-until 时间] [--exclude key...]
-        领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领；只领 device 和 --device 一样的，默认 gpu）→ 打印两行：key、run_task.sh 的参数（shell 引号），退出码 0。没有能领的退出码 10；
+    taskq.py next --worker <作业号> --envs <环境,…> [--device gpu|cpu] [--cpus N] [--mem-mb N] [--gpu-mem GB]
+                  [--free-slots N] [--patience-until 时间] [--exclude key...]
+        领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领；只领 device 和 --device 一样的，默认 gpu；res 超出
+        --cpus / --mem-mb / --gpu-mem 的不领）→ 打印三行：key、run_task.sh 的参数（shell 引号）、这次领取的 token，退出码 0。没有能领的退出码 10；
         排在前面的刚停下、还在等它（--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
-    taskq.py beat --worker <作业号> <key>...            心跳
-    taskq.py release --worker <作业号> <key>... [--failed 原因] [--skip 原因]
-    taskq.py missing --worker <作业号> <key> [--why 说明]   缺输入（11/1）：交还，记 inputs/<key>，补齐前不再领
-box 上（总队列；在没有队列的机器上跑这些命令时退出码 2）：
+    taskq.py beat --worker <作业号> [--token T] <key>...            心跳
+    taskq.py release --worker <作业号> [--token T] <key>... [--failed 原因] [--skip 原因]
+    taskq.py missing --worker <作业号> [--token T] <key> [--why 说明]   缺输入（11/1）：交还，记 inputs/<key>，补齐前不再领
+        --token：只动这一轮的领取（领取已被别人接管或已经没了时，交还什么都不记）
+改队列（box 上改总队列；add --spec-stdin、set-nice、remove、stop、resume、input-ok 也由 box 的 relay.py 在执行机的队列上调用；
+在不是 box、本机又没有队列的机器上跑时退出码 2）：
     taskq.py add [--nice <档位>] --exp <实验 id> [--only <参数>=<取值>[,<取值>…]]…   从实验表加（已有的跳过；不给 --nice 用表里的档位；
                                        --only 只加 each 里这个参数取这些值的任务，如 --only fold=1,2）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py add [--nice <档位>] --file <任务单.json>               按任务单加（别人的训练、测试；不给 --nice 用单子里的）
     taskq.py add --nice <档位> --spec-stdin [--update-only] < 说明.json   加解析好的说明（执行机的队列，relay.py 送；已有的换成新说明，
-                                       --update-only 只换已有的，11/4）
-    taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
+                                       --update-only 只换已有的，11/4）。在训的任务 out / done 变了的先不换；--update-only 时
+                                       解析不了的逐个报（退出码 2）、别的照换
+    taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）；
+                                       带 spec 的（执行机的队列）不改：改总队列，再 relay.py resend
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
-    taskq.py remove <key>...         删掉没人领着的任务（after 里有它的任务要一起删；结果文件不动；分出去的先 stop）
+    taskq.py remove <key>...         删掉没人领着的任务和它的失败、停止、缺输入、交还记录（执行机的队列连跳过也删）；after 里有它的任务
+                                     要一起删；结果文件不动；分出去的先 stop。退出码 0 删了，3 不删（有人领着等），4 队列里没有
     taskq.py stop [--why 原因] <key>...   停止任务（10/30）：在训的 30 秒内停下、交还（存档是原子写的，从存档接着训），
                                       之后不再领它；分给执行机的由 box 下次检查时在那边停（relay.py）
     taskq.py resume <key>...         撤销停止，照常排
@@ -67,7 +74,6 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
 import spec as S  # noqa: E402
-import common as C  # noqa: E402
 from common import write_json  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", cfg.state("taskq", expand=False)))  # TASKQ_DIR：测试和中转执行机（relay.py）用
@@ -75,10 +81,12 @@ TASKS = "tasks.jsonl"
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
 LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", 0.5))  # 等锁时每次重试的间隔（秒，环境变量只给测试用）
+LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = 120, 600, 900  # 锁目录这么久没动就抢：持有者已死 / 在别的主机（看不到死活）/ 本机还活着（pid 可能被复用）
 HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过期
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
+REFUSED, GONE = 3, 4  # remove 的退出码：不删（有人领着、分出去了、别的任务等它）、队列里没有（11/4）
 safe = S.safe
 
 
@@ -138,7 +146,7 @@ class Lock:
                 try:
                     old = self._ident(self.d)
                     age = time.time() - old[1] / 1e9
-                    if age > 900 or (age > 120 and not self._holder_alive()):  # 拿锁的进程死了（pid 可能被复用：15 分钟后不管）
+                    if age > {"alive": LOCK_MAX, "remote": LOCK_REMOTE}.get(self._holder(), LOCK_DEAD):
                         stale = f"{self.d}.stale{os.getpid()}"
                         os.rename(self.d, stale)
                         if self._ident(stale) != old:  # 判断之后别人已经抢过、重新拿到了锁：还给它
@@ -171,18 +179,18 @@ class Lock:
             owner = None
         return (st.st_ino, st.st_mtime_ns, owner)
 
-    def _holder_alive(self):
-        """持有者记的是本机、进程还在 → True（共享盘卡顿时不按年龄抢）。"""
+    def _holder(self):
+        """持有者 → alive（本机、进程还在）/ remote（别的主机）/ dead（进程不在、没有 owner）。"""
         try:
             host, pid, _ = open(os.path.join(self.d, "owner")).read().split("\t")
             if host != socket.gethostname():
-                return False
+                return "remote"
             os.kill(int(pid), 0)
         except PermissionError:
-            return True
+            return "alive"
         except (OSError, ValueError):
-            return False
-        return True
+            return "dead"
+        return "alive"
 
     def __exit__(self, *a):
         p = os.path.join(self.d, "owner")
@@ -210,9 +218,9 @@ def spec_of(t):
             else:
                 import experiments as E
                 _specs[k] = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
-        except (S.SpecError, KeyError) as e:
+        except (KeyError, TypeError, ValueError, AttributeError) as e:  # 一条坏记录只坏它自己，不拖垮整个队列（11/4）
             _specs[k] = None
-            t["bad"] = str(e)
+            t["bad"] = str(e) if isinstance(e, S.SpecError) else f"{type(e).__name__}: {e}"
     s = _specs[k]
     if s is not None and s["key"] != t["key"]:
         t["bad"] = f"参数算出的任务名是 {s['key']}，和记录的 {t['key']} 不一致"
@@ -347,19 +355,10 @@ def state(t, root):
     w = after_state(s, root)
     if w:
         return w
-    ci = claim_info(t["key"])
     age = S.log_age(s, root)
-    if ci is None and os.path.isdir(os.path.join(TQ, "claims", safe(t["key"]))):
-        # 只建了目录、info 没写上（领的进程在中间被杀）：几分钟后算过期，下一个照常领走（10/25）
-        if time.time() - os.stat(os.path.join(TQ, "claims", safe(t["key"]))).st_mtime > HALF_CLAIM:
-            return "stale", "领取记录不完整（只有目录，没有 info）"
-        return "claimed", "正在领"
-    if ci and ci.get("assigned"):
-        return "claimed", f"分给 {ci['assigned']}"
-    if ci:
-        if time.time() - ci.get("beat", 0) < ci.get("ttl", STALE_BEAT) or (age is not None and age < FRESH_LOG):
-            return "claimed", f"作业 {ci.get('worker')} @ {ci.get('host')}"
-        return "stale", f"作业 {ci.get('worker')} 的领取已过期"
+    cs = claim_state(t["key"], age)
+    if cs:
+        return cs
     if age is not None and age < FRESH_LOG:
         rel = released_at(t["key"])
         if rel is None or time.time() - age > rel + 5:  # 交还之后日志又更新过（或从没交还过）：队列外有人在训
@@ -367,6 +366,24 @@ def state(t, root):
     if failures(t["key"]) >= MAX_FAIL:
         return "failed", f"失败 {failures(t['key'])} 次"
     return "free", ""
+
+
+def claim_state(key, age):
+    """领取记录（age：训练日志多久没更新）→ None（没有）/ ("claimed", 说明)（活着的）/ ("stale", 说明)（过期了，可以重新领）。"""
+    d = os.path.join(TQ, "claims", safe(key))
+    ci = claim_info(key)
+    if ci is None:
+        # 只建了目录、info 没写上（领的进程在中间被杀）：几分钟后算过期，下一个照常领走（10/25）
+        try:
+            made = os.stat(d).st_mtime
+        except OSError:
+            return None
+        return ("stale", "领取记录不完整（只有目录，没有 info）") if time.time() - made > HALF_CLAIM else ("claimed", "正在领")
+    if ci.get("assigned"):
+        return "claimed", f"分给 {ci['assigned']}"
+    if time.time() - ci.get("beat", 0) < STALE_BEAT or (age is not None and age < FRESH_LOG):
+        return "claimed", f"作业 {ci.get('worker')} @ {ci.get('host')}"
+    return "stale", f"作业 {ci.get('worker')} 的领取已过期"
 
 
 # ---------------- DICC 上：领、心跳、交还 ----------------
@@ -471,7 +488,9 @@ def cmd_release(a):
 def _release(a, key):
     d = os.path.join(TQ, "claims", safe(key))
     ci = claim_info(key)
-    if getattr(a, "token", None) and ci and not owns(ci, a):  # 已被新一轮接管的迟到交还：什么都不记
+    if getattr(a, "token", None) and not owns(ci, a):  # 迟到的交还（领取已被新一轮接管，或者已经没了）：什么都不记
+        if ci is None and (a.failed or a.skip):
+            print(f"{key}：这一轮的领取已经没了（过期后被别人领走、交还过），不记失败 / 跳过")
         return
     if a.skip:
         os.makedirs(os.path.join(TQ, "skips"), exist_ok=True)
@@ -519,8 +538,8 @@ def cmd_input_ok(a):
 
 
 def cmd_take(a):
-    """领指定的一个（box 替 lab 领，2026-10-18）：只领 free / stale 的；已经是自己领的就续上（since 不变）。
-    --assign（10/31）：分给执行机 a.worker，不过期；waiting 的也能分（提前送到那边，after 做完后那边接着做）。"""
+    """把指定的一个分给执行机 a.worker（10/31，relay.py、shift.py 调用）：不过期；free / stale / waiting 的能分（waiting 的提前送到那边，
+    after 做完后那边接着做）；已经分给它的再分一次照样成功（since 不变）。"""
     root = data_root()
     err = root_error(root)
     if err:
@@ -537,8 +556,7 @@ def cmd_take(a):
             print(f"{a.key}：已分给 {ci['assigned']}")
             return NOTHING
         st, note = state(t, root)
-        ok = ("free", "stale", "waiting") if a.assign else ("free", "stale")
-        if st in ("done", "stopped") or (not mine and st not in ok):
+        if st in ("done", "stopped") or (not mine and st not in ("free", "stale", "waiting")):
             print(f"{a.key}：{st} {note}")
             return NOTHING
         d = os.path.join(TQ, "claims", safe(a.key))
@@ -551,8 +569,7 @@ def cmd_take(a):
             print(f"{a.key}：刚被别人领走")
             return NOTHING
         now = time.time()
-        info = dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now, beat=now)
-        info.update(assigned=a.worker) if a.assign else info.update(ttl=a.ttl)
+        info = dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now, beat=now, assigned=a.worker)
         write_json(os.path.join(d, "info"), info, indent=None)
         print(t["key"])
         return 0
@@ -577,23 +594,40 @@ def _resolve_new(t):
 
 
 def _insert(new, nice, update_only=False):
-    """把新任务（dict(key, exp, recipe, params[, spec])）加进队列，已有的跳过（带 spec 的换成新的说明）。先解析一遍，写错参数的不加。"""
+    """把新任务（dict(key, exp, recipe, params[, spec])）加进队列，已有的跳过（带 spec 的换成新的说明）。先解析一遍，写错参数的不加。
+    update_only（relay.py resend）：只换已有的说明；解析不了的逐个报（退出码 2），别的照换；队列里没有的打印出来。
+    在训的任务 out / done 变了的先不换（worker 手上是旧说明，完成判断会对不上；下次 resend 再换，11/4）。"""
+    errs = []
     with Lock():
         tasks = read_tasks()
-        have = {t["key"] for t in tasks}
+        have = {t["key"]: t for t in tasks}
         order = max([t["order"] for t in tasks] or [0])
+        pairs = []
+        for t in new:
+            try:
+                pairs.append((t, _resolve_new(t)))
+            except S.SpecError as e:
+                if not update_only:
+                    raise
+                errs.append(f"{(t.get('spec') or {}).get('key', '?')}：{e}")
         if update_only:
-            new = [t for t in new if _resolve_new(t)["key"] in have]
-        specs = [_resolve_new(t) for t in new]
-        bad = same_file([s["key"] for s, t in zip(specs, new) if not (t.get("spec") and s["key"] in have)], have)
+            for _, s in pairs:
+                if s["key"] not in have:
+                    print(f"队列里没有，不换：{s['key']}")
+            pairs = [(t, s) for t, s in pairs if s["key"] in have]
+        bad = same_file([s["key"] for t, s in pairs if not (t.get("spec") and s["key"] in have)], have)
         if bad:
             print("加不进去：" + "；".join(bad))
             return 2
         clash = 0
-        for t, s in zip(new, specs):
+        for t, s in pairs:
             if s["key"] in have:
-                old = next(x for x in tasks if x["key"] == s["key"])
+                old = have[s["key"]]
                 if t.get("spec") and old.get("spec") != t["spec"]:
+                    was = spec_of(dict(old))
+                    if was and (was["out"], was["done"]) != (s["out"], s["done"]) and (claim_state(s["key"], None) or ("",))[0] == "claimed":
+                        print(f"在训，out / done 变了，先不换（下次 resend 再换）：{s['key']}")
+                        continue
                     old.update(spec=t["spec"], recipe=t["recipe"], params=t["params"])
                     print(f"换了说明：{s['key']}")
                 elif not t.get("spec") and not t.get("exp") and _differs(spec_of(old), s):  # --recipe、--file 加的撞名（11/4）
@@ -604,10 +638,12 @@ def _insert(new, nice, update_only=False):
                 continue
             order += 1
             tasks.append(dict(t, key=s["key"], order=order, nice=nice))
-            have.add(s["key"])
+            have[s["key"]] = tasks[-1]
             print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {','.join(S.envs_of(s))}）")
         write_tasks(tasks)
-    return 2 if clash else 0
+    for e in errs:
+        print(f"换不了：{e}")
+    return 2 if errs or clash else 0
 
 
 def _differs(a, b):
@@ -660,8 +696,14 @@ def cmd_add(a):
                     sys.exit(f"实验表里 {a.exp} 没有 nice，要给 --nice")
                 print(f"档位用实验表里的 {a.nice}")
         elif a.spec_stdin:
-            got = json.loads(sys.stdin.read())
-            new = [dict(exp=None, recipe=x.get("recipe"), params=x.get("params") or {}, spec=x) for x in (got if isinstance(got, list) else [got])]
+            try:
+                got = json.loads(sys.stdin.read())
+            except ValueError as e:
+                raise S.SpecError(f"说明不是 JSON：{e}") from None
+            got = got if isinstance(got, list) else [got]
+            if not all(isinstance(x, dict) for x in got):
+                raise S.SpecError("说明要是 JSON 对象或一列对象")
+            new = [dict(exp=None, recipe=x.get("recipe"), params=x.get("params") or {}, spec=x) for x in got]
         elif a.recipe:
             new = [dict(exp=None, recipe=a.recipe, params=S.parse_kv(a.args))]
         elif a.file:
@@ -686,6 +728,9 @@ def cmd_set(a):
         if t is None:
             print(f"队列里没有 {a.key}")
             return 1
+        if t.get("spec"):  # 执行机的队列：说明是 box 解析好送来的，这边按参数重新解析会丢掉它（11/4）
+            print(f"{a.key} 的说明是 box 送来的：改总队列里的参数，再 relay.py resend")
+            return 2
         p = dict(t["params"])
         for k, v in S.parse_kv(a.kv).items():
             if v == "":
@@ -702,7 +747,6 @@ def cmd_set(a):
             return 2
         print(f"{t['key']}：{json.dumps(t['params'], ensure_ascii=False)} → {json.dumps(p, ensure_ascii=False)}")
         t["params"] = p
-        t.pop("spec", None)  # 解析好的说明作废，按新参数重新解析
         write_tasks(tasks)
     return 0
 
@@ -721,9 +765,14 @@ def cmd_set_nice(a):
     return 0 if not missing else 1
 
 
+RECORDS = ("failures", "stopped", "inputs", "released")  # remove 时和任务一起删的记录（执行机的队列另加 skips/）
+
+
 def cmd_remove(a):
-    """从队列里删掉没人在做的任务（10/28：DICC 停机期间把排在那边的评测挪回 box）。有人领着、在做的不删；
-    别的任务的 after 里有它、又不一起删的不删。结果文件不动。"""
+    """从队列里删掉没人在做的任务（10/28：DICC 停机期间把排在那边的评测挪回 box）。有活着的领取（不管状态）、训练日志刚更新的不删；
+    别的任务的 after 里有它、又不一起删的不删。删的时候连同它的失败、停止、缺输入、交还记录和过期的领取一起删（同一个 key 以后再加进来
+    是新任务，11/4）；跳过（skips/）只在执行机的队列（带 spec 的记录）里删，总队列里留着（哪台执行机训不了，换个时候再加也一样）。
+    结果文件不动。退出码 0 删了；REFUSED 不删；GONE 队列里没有（什么都没删）。"""
     root = data_root()
     with Lock():
         tasks = read_tasks()
@@ -732,25 +781,37 @@ def cmd_remove(a):
         bad = []
         for k in a.keys:
             if k in by:
-                st, _ = state(by[k], root)
+                s = spec_of(by[k])
+                cs = claim_state(k, S.log_age(s, root) if s else None)  # 不看状态：停了的、done 齐了的 worker 也可能还领着（11/4）
                 ci = claim_info(k) or {}
                 if ci.get("assigned"):
                     bad.append(f"{k}：分给了 {ci['assigned']}，先 stop，交还后再删")
-                elif st in ("claimed", "busy"):
-                    bad.append(f"{k}：{st}，有人在做")
+                elif cs and cs[0] == "claimed":
+                    bad.append(f"{k}：claimed（{cs[1]}），有人领着")
+                elif state(by[k], root)[0] == "busy":
+                    bad.append(f"{k}：busy，有人在做")
         for t in tasks:
             if t["key"] in a.keys:
                 continue
-            dep = [k for k in ((spec_of(t) or {}).get("after") or []) if k in a.keys]
+            dep = [k for k in ((spec_of(t) or {}).get("after") or []) if k in a.keys and k in by]
             if dep:
                 bad.append(f"{t['key']} 的 after 里有 {' '.join(dep)}（一起删，或者先改它）")
         for k in missing:
             print(f"队列里没有：{k}")
         for b in bad:
             print(f"不删：{b}")
-        if missing or bad:
-            return 1
+        if bad:
+            return REFUSED
+        if missing:
+            return GONE
         write_tasks([t for t in tasks if t["key"] not in a.keys])
+        for k in a.keys:
+            for sub in RECORDS + (("skips",) if by[k].get("spec") else ()):
+                try:
+                    os.remove(os.path.join(TQ, sub, safe(k)))
+                except FileNotFoundError:
+                    pass
+            shutil.rmtree(os.path.join(TQ, "claims", safe(k)), ignore_errors=True)  # 只剩过期的
     for k in a.keys:
         print(f"删了：{k}")
     return 0
@@ -814,7 +875,7 @@ def cmd_show(a):
     return 0
 
 
-# ---------------- 状态（DICC 上直接读，box 上 ssh 过去） ----------------
+# ---------------- 状态 ----------------
 def task_log_age(root, key, worker):
     """领着这个任务的作业写的分段日志（run_task.sh）多久没更新（秒）；没有 → None。"""
     if not worker:
@@ -856,37 +917,12 @@ def local_status():
                 recent_skips={w: day.count(w) for w in set(day)})
 
 
-def remote_status(host):
-    """box 上：ssh 到 host、跑那边仓库里的本脚本 --json-status → dict 或 None。"""
-    r = remote(host, "--json-status", timeout=180)
-    if r is None:
-        return None
-    rc, out, _ = r
-    return S.json_in(out) if rc == 0 else None
-
-
-def remote(host, args, timeout=120, env="", input=None):
-    """box 上：在 host 的仓库里跑 taskq.py <args>（env：前面加的环境变量）→ (退出码, 标准输出, 标准错误)，
-    ssh 不通时 None。"""
-    import machines as M
-    m = M.MACHINES[host]
-    ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
-    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}TASKQ_DATA={m['data']} python3 {cfg.rel('queue', 'taskq.py')} {args}"
-    rc, out, err = C.run(cmd, m["ssh"], timeout, ssh=ssh, input=input)
-    return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
-
-
 def central(args, timeout=420):  # 比锁的最长等待（300 秒）长：等不到锁时拿到退出码，不是超时
     """box 上改总队列：本机跑 taskq.py <args>（参数列表或 shell 写法的字符串）→ (退出码, 标准输出, 标准错误)。"""
     import subprocess
     argv = shlex.split(args) if isinstance(args, str) else list(args)
     r = subprocess.run([sys.executable, os.path.abspath(__file__)] + argv, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout, r.stderr
-
-
-def status(name):
-    """一台机器的队列状态：本机直接读，别的机器 ssh 过去 → dict 或 None。"""
-    return local_status() if name == here() or (name == queue_host() and have_queue()) else remote_status(name)
 
 
 def queue_host():
@@ -961,8 +997,7 @@ def main(argv):
     p.add_argument("keys", nargs="+")
     p = sub.add_parser("take")
     p.add_argument("--worker", required=True)
-    p.add_argument("--ttl", type=int, default=STALE_BEAT)
-    p.add_argument("--assign", action="store_true", help="分给执行机：不过期，waiting 的也能分（10/31）")
+    p.add_argument("--assign", action="store_true", required=True, help="分给执行机：不过期，waiting 的也能分（10/31）")
     p.add_argument("key")
     p = sub.add_parser("add")
     p.add_argument("--nice", type=int, help="档位；--exp 时不给就用实验表里的 nice")

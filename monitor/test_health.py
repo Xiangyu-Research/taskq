@@ -168,7 +168,7 @@ ok("GPU 探查实跑：每张卡一项，卡上的进程带命令行，对不上
    and [(a["pid"], a["mem"], a["args"]) for a in gp[0]["apps"]] == [(str(sl.pid), "1100", "sleep 30")] and gp[1]["apps"] == [])
 ok("探查脚本里有 GPU 那几行", H.GPU_PROBE in H.probe_script(H.M.MACHINES["box"]))
 calls = []
-saved = (H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect, H.taskq.local_status)
+saved = (H.sh, H.run_on, H.spec.remote_collect, H.spec.collect, H.taskq.local_status)
 H.taskq.local_status = lambda: dict(enabled=True, tasks=[])  # box 上的总队列（10/31）
 
 
@@ -185,7 +185,6 @@ def fake_run_on(m, script, timeout=120):
 
 
 H.sh, H.run_on = fake_sh, fake_run_on
-H.taskq.remote_status = lambda n: dict(enabled=True, tasks=[])
 H.spec.remote_collect = lambda ssh, specs, root: {"tasks": {}, "seglogs": []}
 H.spec.collect = lambda specs, root: {"tasks": {}, "seglogs": []}
 g = H.gather()
@@ -208,7 +207,7 @@ qs_call = next(c[1] for c in calls if c[0] == "sh" and c[1][0] != "git")
 ok("gather(remote=False)：只探查本机，qs 只问本机",
    [c for c in calls if c[0] == "run_on"] == [("run_on", "box")] and qs_call[1:] == ["--json", "box"]
    and set(g["ok"]) == {"box"} and set(g["taskq"]) == {"box"} and set(g["pueue"]) == {"box"})
-H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect, H.taskq.local_status = saved
+H.sh, H.run_on, H.spec.remote_collect, H.spec.collect, H.taskq.local_status = saved
 
 s = snap()
 s["probe"]["lab"]["DISK"] = str(int(10e9))

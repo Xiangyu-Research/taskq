@@ -57,7 +57,7 @@ def _lock_race(base):
     os.utime(d, (old, old))
     A, B = taskq.Lock(tries=4), taskq.Lock(tries=4)
     A.d = B.d = d
-    orig = taskq.Lock._holder_alive
+    orig = taskq.Lock._holder
     state = dict(done=False)
 
     def hook(self):
@@ -67,7 +67,7 @@ def _lock_race(base):
             A.__enter__()
         return r
 
-    taskq.Lock._holder_alive = hook
+    taskq.Lock._holder = hook
     try:
         both = False
         try:
@@ -79,7 +79,7 @@ def _lock_race(base):
         assert not both, (f"{base}：A 持锁期间 B 也拿到了锁（A={A.me!r}，B={B.me!r}，锁里现在记的是 {a_owner_now!r}）："
                           "B 把 A 刚建的新锁当成过期的旧锁 rename 掉了")
     finally:
-        taskq.Lock._holder_alive = orig
+        taskq.Lock._holder = orig
         shutil.rmtree(d, ignore_errors=True)
 
 

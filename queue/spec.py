@@ -134,7 +134,16 @@ RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
 
 def _check(s, progress=True):
     """任务单的通用字段：data（= inputs）、resume、res、progress 统一格式并检查（2026-10-31）。
-    progress=False：不查进度解析方法（box 送来的说明已经查过；跑任务用不到，读进度的地方自己会报）。"""
+    progress=False：不查进度解析方法（box 送来的说明已经查过；跑任务用不到，读进度的地方自己会报）。
+    key、cmd、out、done、vars、log、fetch 只查类型（11/4：类型不对的说明在 add 时就拒绝，不等读队列时出错）。"""
+    for k in ("key", "cmd", "out"):
+        if k in s and not (isinstance(s[k], str) and s[k]):
+            raise SpecError(f"{k} 要是非空的字符串：{s[k]!r}")
+    if "done" in s and not (isinstance(s["done"], list) and all(isinstance(x, str) and x for x in s["done"])):
+        raise SpecError(f"done 要是文件名的列表：{s['done']!r}")
+    for k, typ in (("vars", dict), ("fetch", dict), ("res", dict), ("log", str)):
+        if s.get(k) is not None and not isinstance(s[k], typ):
+            raise SpecError(f"{k} 要是{'字典' if typ is dict else '字符串'}：{s[k]!r}")
     for k in ("data", "resume"):
         v = s.get(k)
         if isinstance(v, str):
@@ -493,8 +502,10 @@ def from_sent(text):
     """送来的说明（JSON）→ 说明；格式不对 → SpecError。"""
     try:
         s = json.loads(text) if isinstance(text, str) else dict(text)
-    except ValueError as e:
-        raise SpecError(f"说明不是 JSON：{e}")
+    except (ValueError, TypeError) as e:
+        raise SpecError(f"说明不是 JSON 对象：{e}")
+    if not isinstance(s, dict):
+        raise SpecError(f"说明不是 JSON 对象：{s!r:.80}")
     miss = [k for k in ("key", "cmd", "out", "done", "data", "res", "vars") if k not in s]
     if miss:
         raise SpecError(f"说明缺字段 {', '.join(miss)}")

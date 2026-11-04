@@ -166,20 +166,20 @@ check "一直在写结果文件夹（不写日志）的不算卡住" '! grep -q 
 check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 fi
 
-# 4. box 替 lab 领的（ttl 24 小时、beat 30 分钟前）不被 DICC 作业领走
+# 4. 分出去的领取（take --assign，不过期；beat 30 分钟前）不被 DICC 作业领走
 if want 4; then
 reset
 table << EOF
 t/a base
 EOF
-python3 "$HERE/taskq.py" take --worker lab --ttl 86400 t/a > /dev/null
+python3 "$HERE/taskq.py" take --worker lab --assign t/a > /dev/null
 python3 - "$TASKQ_DIR" << 'EOF'
 import json, os, sys, time
 p = os.path.join(sys.argv[1], "claims", os.listdir(os.path.join(sys.argv[1], "claims"))[0], "info")
 i = json.load(open(p)); i["beat"] = time.time() - 1800; json.dump(i, open(p, "w"))
 EOF
 SLURM_JOB_ID=900112 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4.out" 2>&1
-check "lab 领着的（30 分钟没续，但在 24 小时内）：DICC 作业不领" '[[ ! -s $T/train.log ]] && grep -q "没有能领的任务" $T/w4.out'
+check "分给 lab 的（30 分钟没续也不过期）：DICC 作业不领" '[[ ! -s $T/train.log ]] && grep -q "没有能领的任务" $T/w4.out'
 fi
 
 # 5. 队列出错（任务表读不了）连续一段时间、手上没有在训的：结束作业（不再按作业名的参数训）
