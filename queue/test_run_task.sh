@@ -37,6 +37,19 @@ TASKQ_PLUGINS=$T/noplug $R --spec "$SP" > /dev/null; rc=$?
 check "--spec：按 box 解析好的说明跑，执行机上没有做法插件也行（11/4）" "(( rc == 0 )) && [[ -e $T/toy/s/DONE ]] && head -1 $T/logs/tasks/toy__s__test-1_part1.log | grep -q '任务=toy/s'"
 $R --spec '{"key": "x"}' > /dev/null 2>&1; rc=$?
 check "--spec 说明缺字段：退出码 2" "(( rc == 2 ))"
+check "说明有问题：原因写进这个任务的分段日志（第一行照常）" "head -1 $T/logs/tasks/x__test-1_part1.log | grep -q '任务=x，' && grep -q '没开训：任务说明有问题：.' $T/logs/tasks/x__test-1_part1.log"
+check "环境没有：原因写进分段日志" "grep -q '没开训：这台机器没有环境 nosuchenv' $T/logs/tasks/toy__d__test-1_part1.log"
+# 读不了盘（spec.py done 退出 5）：代码副本里的 spec.py 在 FAKE_DONE5 这个文件在时 done 退出 5
+mkdir -p "$T/core"; cp -r "$HERE" "$T/core/queue"
+sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)' "$T/core/queue/spec.py"
+R5="env FAKE_DONE5=$T/unreadable bash $T/core/queue/run_task.sh"
+touch "$T/unreadable"
+$R5 command key=toy/u1 'cmd=touch $TASKQ_DATA/toy/u1/ran' env=base out=toy/u1 'done=["DONE"]' > /dev/null 2>&1; rc=$?
+check "开训前读不了盘：退出码 5、不跑命令、日志写原因" "(( rc == 5 )) && [[ ! -e $T/toy/u1/ran ]] && grep -q '没开训：读不了盘' $T/logs/tasks/toy__u1__test-1_part1.log"
+rm -f "$T/unreadable"
+RUN_TASK_TRIES=3 $R5 command key=toy/u2 "cmd=touch $T/unreadable; exit 1" env=base out=toy/u2 'done=["DONE"]' > /dev/null 2>&1; rc=$?
+check "命令结束后读不了盘：退出码 5（不当成没训完、不重试）" "(( rc == 5 )) && grep -q '读不了盘，判断不了训完没有' $T/logs/tasks/toy__u2__test-1_part1.log && ! grep -q '第 1 次' $T/logs/tasks/toy__u2__test-1_part1.log"
+rm -f "$T/unreadable"
 # desc：某个进程的所有后代；started：等后代里出现命令行正好是 $2 的进程（最多 60 秒），打印后代里命令行含 $2 的
 desc() { local c; for c in $(pgrep -P "$1"); do echo "$c"; desc "$c"; done; }
 started() {

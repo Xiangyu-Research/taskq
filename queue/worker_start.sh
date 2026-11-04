@@ -8,7 +8,7 @@ QD=${TASKQ_DIR:-${TASKQ_STATE:+$TASKQ_STATE/taskq}}
 read -r CONDA_BASE CONDA_ENV < <(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . conda) || true
 [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]] || { echo "envs/machines.py 里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2; exit 1; }
 source "$CONDA_BASE/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+conda activate "$CONDA_ENV" || echo "$(date '+%F %T') !! conda activate $CONDA_ENV 失败（$CONDA_BASE）：任务照常各自激活环境，显存填充多半起不来"
 TASKQ_DATA=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)
 export TASKQ_DATA
 source "$HERE/gpu_pad_start.sh"

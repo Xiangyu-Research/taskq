@@ -10,8 +10,9 @@
 # 设了 TASK_GPU_IDLE（分钟，envs/machines.py 里组的环境变量）时，还要 GPU 使用记录（scripts/monitor/gpu_log.sh）里最近这么久这张卡上没有别人（11/2）；
 # 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
 # 退出码（scripts/taskq/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
-# 4 缺输入（data 里的文件不全，没开训，11/1）；
+# 4 缺输入（data 里的文件不全，没开训，11/1）；5 读不了盘、判断不了训完没有（spec.py done 退出 5，11/4）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
+# 说明、环境有问题（退出码 2）时原因也写进分段日志（key 取 worker 给的 TASK_KEY 或参数里的）。
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练（8 秒没停下就强制停）再退出，下次从存档接着训。
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -21,16 +22,9 @@ REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] 
 DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
 [[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit 2; }
 export TASKQ_DATA=$DATA
-SH=$(python3 "$HERE/spec.py" shell "$@") || exit 2
-eval "$SH"
 ts() { date '+%F %T'; }
-done_() { python3 "$HERE/spec.py" done "$@"; }
-if done_ "$@"; then echo "$(ts) 已经训完：$TASK_KEY"; exit 0; fi
-ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { echo "这台机器没有环境 $TASK_ENV（envs/machines.py）" >&2; exit 2; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
 PART=${TASK_PART:-1}
-mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
-LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_part${PART}.log
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
@@ -38,6 +32,29 @@ if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f
 else
     COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名是内容哈希（16 位）
 fi
+ARGS=("$@")
+early() {  # 开训前就停下：原因写到标准错误和这个任务的分段日志
+    echo "$1" >&2
+    local k=${TASK_KEY:-}
+    [[ -n $k ]] || k=$(python3 -c 'import json, sys
+a = sys.argv[1:]
+print(json.loads(a[1]).get("key") or "" if a[0] == "--spec" else next((x[4:] for x in a[1:] if x.startswith("key=")), ""))' "${ARGS[@]}" 2> /dev/null)
+    [[ -n $k ]] || return 0
+    mkdir -p "$DATA/logs/tasks" 2> /dev/null
+    { echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$k，第 $PART 段，环境 ${TASK_ENV:-未知}，代码 $COMMIT，$(ts)"
+      echo "$(ts) 没开训：$1"; } 2> /dev/null >> "$DATA/logs/tasks/${TASK_SAFE:-${k//\//__}}__${JOBTAG}_part${PART}.log"
+}
+if ! SH=$(python3 "$HERE/spec.py" shell "$@" 2> /dev/null); then
+    early "任务说明有问题：$(python3 "$HERE/spec.py" shell "$@" 2>&1 > /dev/null | tail -n 1)"; exit 2
+fi
+eval "$SH"
+done_() { python3 "$HERE/spec.py" done "$@"; }
+done_ "$@"; rc=$?
+(( rc == 0 )) && { echo "$(ts) 已经训完：$TASK_KEY"; exit 0; }
+(( rc == 5 )) && { early "读不了盘，判断不了训完没有"; exit 5; }
+ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（envs/machines.py）"; exit 2; }
+mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
+LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_part${PART}.log
 TRIES=3
 [[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
@@ -136,8 +153,11 @@ for (( try = 1; ; try++ )); do
     ( eval "$ACT" && cd "$REPO" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &  # 自己一个进程组，停的时候整组停
     pid=$!
     wait "$pid"; rc=$?; pid=
-    if done_ "$@"; then
+    done_ "$@"; drc=$?
+    if (( drc == 0 )); then
         echo "训完 $(ts)" >> "$LOG"; echo "$(ts) 训完：$TASK_KEY"; exit 0
+    elif (( drc == 5 )); then
+        echo "$(ts) 命令结束（退出码 $rc），读不了盘，判断不了训完没有" | tee -a "$LOG"; exit 5
     fi
     echo "$(ts) 命令结束（退出码 $rc），没训完（第 $try 次）" | tee -a "$LOG"
     (( rc == 0 )) && exit 3
