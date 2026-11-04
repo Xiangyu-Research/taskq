@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""测 check.py（2026-11-04）：固定配置没有问题；改坏的副本（机器表、policy）、改坏的实验表（在进程里改）都报出来。
+
+    python3 queue/test_check.py
+"""
+import copy
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "testdata"))
+import fixture  # noqa: E402
+fixture.use()
+os.environ["HOME"] = tempfile.mkdtemp()
+sys.path.insert(0, HERE)
+
+fails = 0
+
+
+def ok(what, cond):
+    global fails
+    print(("通过：" if cond else "失败：") + what)
+    fails += 0 if cond else 1
+
+
+def run(*a, env=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "check.py"), *a], capture_output=True, text=True, env={**os.environ, **(env or {})})
+    return r.returncode, r.stdout, r.stderr
+
+
+rc, out, err = run()
+ok("固定配置：退出码 0、每组都查了、没有\"错\"", rc == 0 and "错  " not in err and all(g in out for g in
+   ("machines", "policy", "plugins", "experiments", "tasks", "steps", "needs", "bundle")))
+rc, out, err = run("--quick")
+ok("--quick：不跑 needs、bundle", rc == 0 and "needs" not in out and "bundle" not in out)
+rc, out, err = run("--only", "policy")
+ok("--only：只查那一组", rc == 0 and out.splitlines()[0].startswith("policy") and "machines" not in out)
+
+# 改坏的配置副本
+bad = tempfile.mkdtemp()
+cfgdir = os.path.join(bad, "config")
+shutil.copytree(os.environ["TASKQ_CONFIG"], cfgdir, ignore=shutil.ignore_patterns("__pycache__"))
+
+
+def edit(name, old, new):
+    p = os.path.join(cfgdir, name)
+    t = open(p, encoding="utf-8").read()
+    assert old in t, (name, old)
+    open(p, "w", encoding="utf-8").write(t.replace(old, new, 1))
+
+
+edit("policy.py", '"eval": ["box:cpu"]', '"eval": ["lab:gpu0"]')
+edit("policy.py", 'READY = {"dicc2": 2', 'READY = {"dicc2": -1')
+edit("policy.py", "AUTO = dict(advance=True,", "AUTO = dict(advance=True, nosuch=True,")
+edit("machines.py", 'worker=dict(group="gpu1", id="w7e2837")', 'worker=dict(group="gpuX", id="w7e2837")')
+edit("machines.py", '"alt": ("venv", FAKE + "/venv/alt", "base"),', '"alt": ("venv", FAKE + "/venv/alt", "nobase"),')
+rc, out, err = run("--quick", env={"TASKQ_CONFIG": cfgdir})
+ok("改坏的配置：退出码 1", rc == 1)
+ok("PLACE 写错：说出哪一项、能写什么", "'lab:gpu0'" in err and "能写的" in err)
+ok("READY 负数、AUTO 不认识的机器", "READY['dicc2']" in err and "nosuch" in err)
+ok("pueue 执行机的 worker 组不在 groups 里", "SITES['lab1']" in err and "gpuX" in err)
+ok("venv 的底子不在 envs 里", "nobase" in err)
+ok("问题在 stderr、每组的结果在 stdout", "个问题" in out and "错  " not in out)
+
+# 改坏的实验表（在进程里改缓存的实验表）
+import check as K  # noqa: E402
+import experiments as E  # noqa: E402
+exps, final = E.load()
+saved = copy.copy(exps), copy.copy(final)
+e0 = exps[0]
+st0 = dict(e0["after"][0])
+st0.pop("done")
+st1 = dict(e0["after"][-1], cmd="echo {nosuch}")
+exps[0] = dict(e0, after=[st0] + e0["after"][1:-1] + [st1], nice="x")
+r = K.run(only=["experiments", "steps"])
+msgs = "\n".join(m for _, m in r.problems)
+ok("步骤缺 done、nice 类型不对", f"步骤 {st0['name']} 缺 ['done']" in msgs and f"实验 {e0['id']} 的 nice 类型不对" in msgs)
+ok("命令里不认识的名字", "{nosuch}" in msgs)
+exps[:], final[:] = saved
+ok("改回来以后没有问题", not K.run(only=["experiments", "steps"]).problems)
+
+print("全部通过" if not fails else f"{fails} 项失败")
+sys.exit(1 if fails else 0)
