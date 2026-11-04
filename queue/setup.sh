@@ -39,9 +39,9 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
 CODE=$($M get . code); [[ -n $CODE ]] || CODE=$($M get . repo)
-crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | grep -v "on_boot.sh" | crontab -; }
+crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | { grep -v "on_boot.sh" || true; } | crontab -; }
 cron "bash $CODE/scripts/taskq/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
-crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | grep -v "git_pull_cron.sh" | crontab -; }  # 10/25 起由 box 快进
+crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | { grep -v "git_pull_cron.sh" || true; } | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) "
 if [[ $roles == *" hub "* ]]; then  # 健康检查；登记表和看板。从只给 cron 用的克隆 ~/auto/PhD 运行（只跑已提交的代码）
     [[ -d ~/auto/PhD/.git ]] || git clone -q git@github.com:Xiangyu-Research/PhD.git ~/auto/PhD
