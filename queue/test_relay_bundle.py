@@ -60,6 +60,57 @@ def test_source_files_from_commit():
     ok("从提交取文件：OUTPUTS[\"bundle\"] 下的代码（含 .R）和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
 
 
+def test_source_files_submodule(T):
+    """核心是子模块（11/4）：从提交、从工作区取到的文件和普通目录时一样（包名不变）。"""
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+    def g(*a, cwd):
+        subprocess.run(["git", "-c", "protocol.file.allow=always", *a], cwd=cwd, env=env, check=True, capture_output=True)
+
+    def fill(d):
+        for f, body, exe in (("core/q/a.sh", "echo a\n", True), ("core/q/b.py", "B = 1\n", False), ("core/big.json", "x" * 10, False),
+                             ("cfg/m.py", "M = 2\n", False), ("other/c.py", "", False)):
+            os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write(body)
+            os.chmod(os.path.join(d, f), 0o755 if exe else 0o644)
+
+    flat, core, sup = (os.path.join(T, "sub", x) for x in ("flat", "core", "sup"))
+    for d in (flat, core, sup):
+        os.makedirs(d)
+        g("init", "-q", "-b", "main", cwd=d)
+    fill(flat)
+    g("add", "-A", cwd=flat)
+    g("commit", "-qm", "f", cwd=flat)
+    fill(core)
+    shutil.rmtree(os.path.join(core, "cfg"))
+    shutil.rmtree(os.path.join(core, "other"))
+    for f in os.listdir(os.path.join(core, "core")):
+        os.rename(os.path.join(core, "core", f), os.path.join(core, f))
+    os.rmdir(os.path.join(core, "core"))
+    g("add", "-A", cwd=core)
+    g("commit", "-qm", "c", cwd=core)
+    fill(sup)
+    shutil.rmtree(os.path.join(sup, "core"))
+    g("submodule", "add", "-q", core, "core", cwd=sup)
+    g("add", "-A", cwd=sup)
+    g("commit", "-qm", "s", cwd=sup)
+    saved = B.REPO, B.TOPS, B.RUNTIME
+    try:
+        B.TOPS, B.RUNTIME = ("cfg",), ("core/q/a.sh", "core/q/b.py", "core/big.json")
+        got = {}
+        for repo in (flat, sup):
+            B.REPO = repo
+            got[repo] = (B.source_files("HEAD"), B.source_files(None), B.read("HEAD", "core/q/b.py"))
+    finally:
+        B.REPO, B.TOPS, B.RUNTIME = saved
+    files = got[flat][0]
+    assert sorted(files) == ["cfg/m.py", "core/big.json", "core/q/a.sh", "core/q/b.py"], sorted(files)
+    assert files["core/q/a.sh"] == (b"echo a\n", True) and files["core/q/b.py"] == (b"B = 1\n", False)
+    assert got[sup] == got[flat], (got[sup], got[flat])
+    ok("核心是子模块：从提交（取它钉的提交）、从工作区取到的文件、可执行位和普通目录时相同")
+
+
 def test_secrets():
     sk = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
     tok = "ghp_" + "a1" * 18
@@ -328,6 +379,7 @@ def main():
     try:
         test_source_files_from_commit()
         test_secrets()
+        test_source_files_submodule(T)
         test_bundle(T)
         test_scope_and_id(T)
         test_cpu_sbatch(T)

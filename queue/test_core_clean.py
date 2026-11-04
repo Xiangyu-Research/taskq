@@ -49,7 +49,7 @@ print("\n".join(bad) if bad else f"{len(CLEAN)} 个文件都没有领域词")
 # 核心（testdata 外）不直接用使用者的路径、仓库（11/4）；KNOWN 是还没改的，个数只能减少
 HOST = re.compile(r"scripts/monitor|Xiangyu-Research/PhD|\.cache/phd|/work/PhD")
 KNOWN = {
-    "monitor/health.py": 2, "monitor/report.py": 1, "queue/run_task.sh": 1, "sites/test_e2e.py": 1,
+    "monitor/report.py": 1, "sites/test_e2e.py": 1,
     "queue/advance.py": 1, "queue/common.py": 1, "queue/gpu_pad.py": 1, "queue/relay.py": 1, "queue/shift.py": 2,
     "queue/taskq.py": 1, "queue/dicc_worker.sh": 1, "queue/worker_start.sh": 1, "queue/gpu_pad_start.sh": 1,
     "queue/README.md": 11, "queue/test_relay.py": 4, "queue/test_relay_bundle.py": 8, "sync/test_tunnel.py": 1,

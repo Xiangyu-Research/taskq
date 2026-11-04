@@ -73,8 +73,8 @@ class BundleError(Exception):
 
 
 # ---------------- 取文件 ----------------
-def git(*args, binary=False, input=None):
-    r = subprocess.run(["git", "-C", REPO, *args], capture_output=True, input=input)
+def git(*args, binary=False, input=None, repo=None):
+    r = subprocess.run(["git", "-C", repo or REPO, *args], capture_output=True, input=input)
     if r.returncode:
         raise BundleError(f"git {' '.join(args)}：{r.stderr.decode(errors='replace').strip()}")
     return r.stdout if binary else r.stdout.decode()
@@ -86,38 +86,73 @@ def _wanted(path, size):
     return path in RUNTIME or not any(fnmatch.fnmatchcase(path, x) for x in SKIP)
 
 
-def source_files(commit):
-    """{相对路径: (内容 bytes, 可执行)}；commit 为 None 时读工作区（git 跟踪的文件）。"""
-    out = {}
+def _inside(specs, sub):
+    """路径里落在子模块 sub 下的 → 相对子模块的路径。"""
+    return [p[len(sub) + 1:] if p != sub else "." for p in specs if p == sub or p.startswith(sub + "/")]
+
+
+def _entries(commit, specs, repo, prefix=""):
+    """git 跟踪的文件 → [(相对 REPO 的路径, mode, oid, size, 所在仓库)]；子模块（gitlink）进去取它钉的提交（11/4：核心是子模块）。
+    commit 为 None 时读工作区（子模块读它的工作区）。"""
+    out = []
     if commit is None:
-        for ent in git("ls-files", "-z", "-s", "--", *TOPS, *RUNTIME).split("\0"):
-            if not ent:
-                continue
-            meta, path = ent.split("\t", 1)
-            p = os.path.join(REPO, path)
-            if meta.startswith("100") and os.path.isfile(p) and _wanted(path, os.path.getsize(p)):
-                out[path] = (open(p, "rb").read(), os.access(p, os.X_OK))
-        return out
-    objs = []
-    for ent in git("ls-tree", "-r", "-l", "-z", commit, "--", *TOPS, *RUNTIME).split("\0"):
+        raw = git("ls-files", "-z", "-s", "--", *specs, repo=repo)
+        links = [e.split("\t", 1)[1] for e in git("ls-files", "-z", "-s", repo=repo).split("\0") if e.startswith("160000 ")]
+    else:
+        raw = git("ls-tree", "-r", "-l", "-z", commit, "--", *specs, repo=repo)
+        links = [(e.split("\t", 1)[1], e.split()[2]) for e in git("ls-tree", "-r", "-z", commit, repo=repo).split("\0")
+                 if e.startswith("160000 ")]
+    for ent in raw.split("\0"):
         if not ent:
             continue
         meta, path = ent.split("\t", 1)
-        mode, kind, oid, size = meta.split()
-        if kind == "blob" and mode.startswith("100") and _wanted(path, int(size)):
-            objs.append((path, oid, mode == "100755"))
-    data = git("cat-file", "--batch", binary=True, input="".join(f"{o}\n" for _, o, _ in objs).encode())
-    pos = 0
-    for path, oid, exe in objs:
-        nl = data.index(b"\n", pos)
-        n = int(data[pos:nl].split()[2])
-        out[path] = (data[nl + 1:nl + 1 + n], exe)
-        pos = nl + 1 + n + 1
+        f = meta.split()
+        if f[0] == "160000":
+            continue
+        if commit is None:
+            p = os.path.join(repo, path)
+            if f[0].startswith("100") and os.path.isfile(p):
+                out.append((prefix + path, f[0], None, os.path.getsize(p), repo))
+        elif f[1] == "blob":
+            out.append((prefix + path, f[0], f[2], int(f[3]), repo))
+    for link in links:
+        path, sha = (link, None) if commit is None else link
+        sub = _inside(specs, path)
+        if sub:
+            out += _entries(sha, sub, os.path.join(repo, path), prefix + path + "/")
     return out
 
 
+def source_files(commit):
+    """{相对路径: (内容 bytes, 可执行)}；commit 为 None 时读工作区（git 跟踪的文件）。"""
+    out = {}
+    objs = {}
+    for path, mode, oid, size, repo in _entries(commit, [*TOPS, *RUNTIME], REPO):
+        if not (mode.startswith("100") and _wanted(path, size)):
+            continue
+        if oid is None:
+            p = os.path.join(REPO, path)
+            out[path] = (open(p, "rb").read(), os.access(p, os.X_OK))
+        else:
+            objs.setdefault(repo, []).append((path, oid, mode == "100755"))
+    for repo, lst in objs.items():
+        data = git("cat-file", "--batch", binary=True, input="".join(f"{o}\n" for _, o, _ in lst).encode(), repo=repo)
+        pos = 0
+        for path, oid, exe in lst:
+            nl = data.index(b"\n", pos)
+            n = int(data[pos:nl].split()[2])
+            out[path] = (data[nl + 1:nl + 1 + n], exe)
+            pos = nl + 1 + n + 1
+    return dict(sorted(out.items()))
+
+
 def read(commit, path):
-    return open(os.path.join(REPO, path), "rb").read().decode() if commit is None else git("show", f"{commit}:{path}")
+    if commit is None:
+        return open(os.path.join(REPO, path), "rb").read().decode()
+    hit = _entries(commit, [path], REPO)
+    if not hit:
+        raise BundleError(f"{commit} 里没有 {path}")
+    return git("cat-file", "blob", hit[0][2], repo=hit[0][4])
 
 
 def read_machines(commit):
