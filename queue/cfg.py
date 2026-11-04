@@ -39,8 +39,22 @@ CORE_REL = os.path.relpath(CORE, REPO)  # 使用者的仓库里调度代码的�
 
 
 def rel(*parts):
-    """调度代码里的文件相对使用者仓库根（代码包的根同样布局）的路径：嵌着时 scripts/taskq/…，单独的检出时 …"""
+    """调度代码里的文件相对使用者仓库根的路径：嵌着时 scripts/taskq/…，单独的检出时 …（核心在仓库外时带 ..）。
+    只给在本机仓库根目录下跑的命令；执行机、代码包里的用 bundle_rel，box 上排进 pueue 的用 local。"""
     return os.path.normpath(os.path.join(CORE_REL, *parts))
+
+
+def bundle_rel(*parts):
+    """调度代码里的文件在代码包里（相对包的根，即那边的 code/current）的路径：总是 proto.BUNDLE_CORE（scripts/taskq）/…"""
+    if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from proto import BUNDLE_CORE
+    return "/".join((BUNDLE_CORE,) + parts)
+
+
+def local(*parts):
+    """调度代码里的文件在本机的绝对路径（box 上生成、在 box 上跑的命令用）。"""
+    return os.path.join(CORE, *parts)
 
 
 # 状态文件夹：TASKQ_STATE > policy.py 的 OUTPUTS["state"] > 下面的默认（11/4）。代码包里 relay_bundle.py 把这几个字面量换成

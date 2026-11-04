@@ -517,20 +517,20 @@ def execute(name, acts, s, run_add=None):
                 a = dict(a, op="stage")
             if a["op"] in ("stage", "restage"):
                 lab = label("relay_stage", k)
-                cmd = f"python3 {cfg.rel('queue', 'relay.py')} stage {name} {shlex.quote(k)} " + (
+                cmd = f"python3 {shlex.quote(cfg.local('queue', 'relay.py'))} stage {name} {shlex.quote(k)} " + (
                     "--no-add" if a["op"] == "restage" else f"--nice {int(a['nice'])}")
                 tid = add(M.hub(), lab, "relay_stage", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 的 {k} 排了{'补传缺的输入' if a['op'] == 'restage' else '传数据'}（box 任务 {tid}）")
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
-                cmd = f"python3 {cfg.rel('queue', 'relay.py')} fetch {name} {shlex.quote(k)}"
+                cmd = f"python3 {shlex.quote(cfg.local('queue', 'relay.py'))} fetch {name} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完了 {k}，排了拉回（box 任务 {tid}）")
             elif a["op"] == "archive":
                 lab = label("relay_archive", k)
-                cmd = f"bash {cfg.rel('queue', 'archive_task.sh')} {M.hub()} {shlex.quote(k)}"
+                cmd = f"bash {shlex.quote(cfg.local('queue', 'archive_task.sh'))} {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_archive", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
@@ -578,7 +578,7 @@ def submit(name, subs):
                 else:
                     stuck[kkey("site", name, "worker", wkind=k)] = alert(f"{L} 开 {wname(k)} 出错：{out}", kind=k, start=True)
         return msgs, stuck
-    cwd = f"{R.q(RM.root(name))}/{ROOT['current']}/{cfg.rel('queue')}"
+    cwd = f"{R.q(RM.root(name))}/{ROOT['current']}/{cfg.bundle_rel('queue')}"
     for r in SL.start_workers(cwd, subs, run, RM.conf(name).get("job_names")):
         k = sub_kind((r["qos"], r["time"], r["n"], r["file"]))
         if r["err"] is not None:
@@ -648,9 +648,11 @@ def run_one(s, name, dry):
     if not dry and (live or mine) and rs is not None:
         try:
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", BUNDLE_REF], capture_output=True, text=True).stdout.strip()
-            if cur == "" or rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
-                bid, path = RB.build(name, commit or "origin/main")
-                ST.update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
+            core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
+            key = f"{name}:{commit}:{core}"  # 核心有自己的仓库（11/4）：两边哪个换了提交都重新打包
+            if cur == "" or rs.get("bundle") != st.get("bundle_for", {}).get(key):  # 每台的包不同（机器条目、开关）
+                bid, path = RB.build(name, commit or "origin/main", core=core or RB.CORE_REF)
+                ST.update_state(lambda x: x.setdefault("bundle_for", {}).update({key: bid}))
                 if rs.get("bundle") != bid:
                     try:
                         deploy(name, bid, path)

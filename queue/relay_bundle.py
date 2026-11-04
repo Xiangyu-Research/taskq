@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/4 起只装执行机要用的、只按内容命名）：
-调度核心里执行机要用的文件（RUNTIME：worker、run_task.sh、队列、任务说明），加上提交里跟踪的 envs/policy.py 的 OUTPUTS["bundle"]
+调度核心里执行机要用的文件（RUNTIME：worker、run_task.sh、队列、任务说明；取自核心自己的仓库的 HEAD，放在包里的 scripts/taskq/
+（proto.BUNDLE_CORE），和本机的核心装在哪无关），旧位置的转交（COMPAT）、核心的提交号（scripts/taskq/VERSION，不算进包名）、
+使用者仓库根目录下的 .taskq.toml（有就带上），加上使用者仓库的提交里跟踪的 envs/policy.py 的 OUTPUTS["bundle"]
 （使用者的文件夹或文件）下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），去掉 OUTPUTS["bundle_skip"] 的通配
 （测试、只在 box 上用的）；另外生成只有这一台的 envs/machines.py（去掉说明和整行注释）、envs/policy.py（OUTPUTS 只留 experiments），
 Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的状态文件夹
 （cfg.py 的 STATE_HOME）换成那边根目录下的 queue/、state/。
 核对：本机和 OUTPUTS["bundle_check"] 那个环境的两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。
 包名 = 内容哈希的前 16 位，不带提交号：只改 box 上的代码或文档时包名不变，执行机不换包；同样的内容只建一次。
-哪个提交建的包记在 relay.py 的状态 bundle_for（<名字>:<提交> → 包名）。
+哪个提交建的包记在 relay.py 的状态 bundle_for（<名字>:<提交>:<核心的提交> → 包名）。
 
-    relay_bundle.py build <名字> [--commit 提交] [--out 目录]   → 打印"包名 路径"
-    （--commit 默认 origin/main；--commit '' = 工作区，只给测试用）
+    relay_bundle.py build <名字> [--commit 提交] [--core-commit 提交] [--out 目录]   → 打印"包名 路径"
+    （--commit 是使用者仓库的，默认 origin/main；--core-commit 是核心仓库的，默认 HEAD；--commit '' = 两边都读工作区，只给测试用）
 """
 import argparse
 import ast
@@ -41,19 +43,26 @@ import remote as RM  # noqa: E402
 OUT = cfg.state("relay", "bundles", expand=False)
 TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("envs",)))  # envs/policy.py 的 OUTPUTS：使用者的文件夹或文件
 SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # 不进包的通配（fnmatch，* 跨目录）
-# 调度核心里执行机要用的：worker 的入口和循环、跑任务、队列、任务说明、实验表、显存填充、输入的本地副本；
-# 机器级的（开机、装 pueue、建组、GPU 使用记录，11/4：lab 不再用克隆）；其余（box 上的计划、传数据、健康检查、同步）不进包
-RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), f)) for f in (
+BC = proto.BUNDLE_CORE  # 包里核心的位置（固定，和本机的核心在哪无关）
+CORE_REF = "HEAD"  # 核心文件取自核心自己的仓库的这个提交（装好的那一份，11/4）
+# 调度核心里执行机要用的（相对核心的根；包里放在 BC/ 下）：worker 的入口和循环、跑任务、队列、任务说明、实验表、显存填充、
+# 输入的本地副本；机器级的（开机、装 pueue、建组、GPU 使用记录，11/4：lab 不再用克隆）；命令行 bin/taskq（有就带上）；
+# 其余（box 上的计划、传数据、健康检查、同步）不进包
+RUNTIME = (
     "queue/worker_start.sh", "queue/dicc_worker.sh", "queue/run_task.sh", "queue/gpu_pad_start.sh", "queue/gpu_pad.py",
     "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
     "queue/steps.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
-    "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "monitor/gpu_log.sh"))
+    "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "monitor/gpu_log.sh", "bin/taskq")
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
-SBATCH = {"gpu": cfg.rel("queue", "worker.sbatch"), "cpu": cfg.rel("queue", "cpu_worker.sbatch")}  # worker 的种类 → 模板（也是包里的位置）
-# 已经交给 Slurm、还在排队的老作业脚本里写的是改名时的 start.sh；running 的老 worker 换包时找 loop.sh
+SBATCH = {"gpu": "queue/worker.sbatch", "cpu": "queue/cpu_worker.sbatch"}  # worker 的种类 → 模板（相对核心；包里在 BC/ 下）
+PROJECT_FILE = ".taskq.toml"  # 使用者仓库根目录下的项目说明，有就带上
+VERSION = BC + "/VERSION"  # 核心的提交号（短）；不算进包名：只改 box 上的核心代码时包名不变、执行机不换包
+# 旧位置的入口，核心生成、每个包都有：排着的 Slurm 作业开始时跑 $REPO/scripts/queue/worker_start.sh，换包时找 dicc_worker.sh（转交）；
+# 已经交给 Slurm、还在排队的老作业脚本里写的是改名时的 start.sh；running 的老 worker 换包时找 loop.sh（软链接）。
 # 等 2026-11 前交的作业都结束后删
+COMPAT = {"scripts/queue/worker_start.sh": "queue/worker_start.sh", "scripts/queue/dicc_worker.sh": "queue/dicc_worker.sh"}
 LINKS = {"scripts/queue/start.sh": "worker_start.sh", "scripts/queue/loop.sh": "dicc_worker.sh"}
 SECRETS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
@@ -81,13 +90,21 @@ def git(*args, binary=False, input=None, repo=None):
 
 
 def _wanted(path, size):
-    if "__pycache__" in path or not (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX):
+    """path：包里的路径。"""
+    if "__pycache__" in path:
         return False
-    return path in RUNTIME or not any(fnmatch.fnmatchcase(path, x) for x in SKIP)
+    if path in RUNTIME_B:
+        return True
+    if not (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX):
+        return False
+    return not any(fnmatch.fnmatchcase(path, x) for x in SKIP)
+
+
+RUNTIME_B = frozenset(f"{BC}/{f}" for f in RUNTIME)
 
 
 def _inside(specs, sub):
-    """路径里落在子模块 sub 下的 → 相对子模块的路径；sub 本身或它的上级目录 → 整个子模块。"""
+    """路径里落在子目录 sub 下的 → 相对 sub 的路径；sub 本身或它的上级目录 → 整个 sub（"."）。"""
     out = []
     for p in (x.rstrip("/") for x in specs):
         if p in ("", ".") or p == sub or sub.startswith(p + "/"):
@@ -97,10 +114,18 @@ def _inside(specs, sub):
     return out
 
 
-def _entries(commit, specs, repo, prefix=""):
-    """git 跟踪的文件 → [(相对 REPO 的路径, mode, oid, size, 所在仓库)]；子模块（gitlink）进去取它钉的提交（11/4：核心是子模块）。
-    commit 为 None 时读工作区（子模块读它的工作区）。"""
+def core_in_repo():
+    """核心在使用者仓库里的位置（相对仓库根；"." = 核心就是这个仓库）；核心在仓库外 → None。"""
+    r = os.path.relpath(os.path.realpath(CORE), os.path.realpath(REPO))
+    return None if r == ".." or r.startswith("../") else r
+
+
+def _entries(commit, specs, repo, prefix="", skip=()):
+    """git 跟踪的文件 → [(路径（相对 repo，带 prefix）, mode, oid, size, 所在仓库, 工作区里的文件)]；子模块（gitlink）进去取它钉的提交，
+    路径（带 prefix）在 skip 里的子模块不进（核心，11/4 起另取）。commit 为 None 时读工作区（子模块读它的工作区，oid 为 None）。"""
     out = []
+    if not specs:
+        return out
     if commit is None:
         raw = git("ls-files", "-z", "-s", "--", *specs, repo=repo)
         links = [e.split("\t", 1)[1] for e in git("ls-files", "-z", "-s", repo=repo).split("\0") if e.startswith("160000 ")]
@@ -118,27 +143,25 @@ def _entries(commit, specs, repo, prefix=""):
         if commit is None:
             p = os.path.join(repo, path)
             if f[0].startswith("100") and os.path.isfile(p):
-                out.append((prefix + path, f[0], None, os.path.getsize(p), repo))
+                out.append((prefix + path, f[0], None, os.path.getsize(p), repo, p))
         elif f[1] == "blob":
-            out.append((prefix + path, f[0], f[2], int(f[3]), repo))
+            out.append((prefix + path, f[0], f[2], int(f[3]), repo, None))
     for link in links:
         path, sha = (link, None) if commit is None else link
+        if prefix + path in skip:
+            continue
         sub = _inside(specs, path)
         if sub:
             out += _entries(sha, sub, os.path.join(repo, path), prefix + path + "/")
     return out
 
 
-def source_files(commit):
-    """{相对路径: (内容 bytes, 可执行)}；commit 为 None 时读工作区（git 跟踪的文件）。"""
-    out = {}
-    objs = {}
-    for path, mode, oid, size, repo in _entries(commit, [*TOPS, *RUNTIME], REPO):
-        if not (mode.startswith("100") and _wanted(path, size)):
-            continue
+def _load(ents):
+    """_entries 的结果 → {路径: (内容 bytes, 可执行)}。"""
+    out, objs = {}, {}
+    for path, mode, oid, _, repo, wd in ents:
         if oid is None:
-            p = os.path.join(REPO, path)
-            out[path] = (open(p, "rb").read(), os.access(p, os.X_OK))
+            out[path] = (open(wd, "rb").read(), os.access(wd, os.X_OK))
         else:
             objs.setdefault(repo, []).append((path, oid, mode == "100755"))
     for repo, lst in objs.items():
@@ -149,16 +172,66 @@ def source_files(commit):
             n = int(data[pos:nl].split()[2])
             out[path] = (data[nl + 1:nl + 1 + n], exe)
             pos = nl + 1 + n + 1
-    return dict(sorted(out.items()))
+    return out
+
+
+def _core_owned(path):
+    return path == BC or path.startswith(BC + "/")
+
+
+def project_entries(commit, specs=None):
+    """使用者仓库里的文件（specs 默认 TOPS，相对仓库根、放在包里同样的位置）。核心在仓库里时（子模块）跳过它，
+    包里 BC/ 下归核心；核心就是这个仓库时（单独的检出跑核心的测试）照样取。"""
+    cr = core_in_repo()
+    specs = list(TOPS) if specs is None else specs
+    if cr == ".":
+        return _entries(commit, specs, REPO)
+    return [e for e in _entries(commit, specs, REPO, skip={x for x in (cr, BC) if x}) if not _core_owned(e[0])]
+
+
+def core_entries(core):
+    """核心的文件，取自核心自己的仓库（core 是提交；None = 工作区），放在包里的 BC/ 下：RUNTIME，加上 TOPS 里落在核心里的
+    （核心在使用者的仓库里时，如测试用的配置）。"""
+    cr = core_in_repo()
+    extra = [] if cr is None else list(TOPS) if cr == "." else _inside(TOPS, cr)
+    return _entries(core, list(RUNTIME) + extra, CORE, prefix=BC + "/")
+
+
+def source_files(commit, core=CORE_REF):
+    """{包里的路径: (内容 bytes, 可执行)}：使用者仓库 commit 的文件 + 核心仓库 core 的文件（commit 为 None 时两边都读工作区）。"""
+    core = None if commit is None else core
+    ents = [e for e in project_entries(commit) + core_entries(core) if e[1].startswith("100") and _wanted(e[0], e[3])]
+    return dict(sorted(_load(ents).items()))
 
 
 def read(commit, path):
+    """使用者仓库 commit 里的一个文件（文本）。"""
     if commit is None:
         return open(os.path.join(REPO, path), "rb").read().decode()
     hit = _entries(commit, [path], REPO)
     if not hit:
         raise BundleError(f"{commit} 里没有 {path}")
     return git("cat-file", "blob", hit[0][2], repo=hit[0][4])
+
+
+def read_core(core, path):
+    """核心仓库 core 里的一个文件（文本，path 相对核心）；core 为 None 时读工作区。"""
+    if core is None:
+        return open(os.path.join(CORE, path), "rb").read().decode()
+    return git("show", f"{core}:{path}", repo=CORE)
+
+
+def core_version(core):
+    """核心的提交号（短）：core 为 None（工作区）时是 HEAD 的。"""
+    return git("rev-parse", "--short", core or "HEAD", repo=CORE).strip()
+
+
+def project_file(commit):
+    """使用者仓库根目录下的 .taskq.toml（有就返回文本）。"""
+    try:
+        return read(commit, PROJECT_FILE)
+    except (BundleError, FileNotFoundError):
+        return None
 
 
 def read_machines(commit):
@@ -183,7 +256,7 @@ def machine_entry(name, e, root, entry=None):
     m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/{proto.ROOT['current']}", code=None,
              data=f"{root}/{proto.ROOT['data']}", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
-    m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars") if k in e})
+    m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars", "task_unset") if k in e})
     m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/taskq/sites/envs.py）在根目录下
     m.update(entry or {})
     return m
@@ -252,8 +325,8 @@ def gen_sbatch(real, m, root, kind="gpu"):
     keep += [f"#SBATCH --{k}={v}" for k, v in over.items() if k not in seen and k not in ("job-name", "output")]
     if kind not in (m.get("jobs") or ()):
         raise BundleError(f"RELAY 的 jobs 里没有 {kind}")
-    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/<核心>/queue 交，嵌着时往上 5 级是根目录）
-    up = "/".join([".."] * (2 + len(cfg.rel("queue").split("/"))))
+    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/<BC>/queue 交，往上 5 级是根目录）
+    up = "/".join([".."] * (2 + len(f"{BC}/queue".split("/"))))
     logs = f"{up if root.startswith('~') else root}/{proto.ROOT['data']}/{proto.WORKER_LOGS}/%x_%j.out"
     return "\n".join(["#!/bin/bash", *keep,
                       f"#SBATCH --output={logs}",
@@ -261,7 +334,7 @@ def gen_sbatch(real, m, root, kind="gpu"):
                       f'REPO=$(readlink -f "$R/{proto.ROOT["current"]}")',
                       f'export TASKQ_DIR=$R/{proto.ROOT["queue"]} TASKQ_GPU_PAD_SWITCH=$R/{proto.STATE_IN_ROOT["gpu_pad/DISABLED"]}'
                       + (" WORKER_DEVICE=cpu" if kind == "cpu" else ""),
-                      f'exec bash "$REPO/{cfg.rel("queue", "worker_start.sh")}"', ""])
+                      f'exec bash "$REPO/{BC}/queue/worker_start.sh"', ""])
 
 
 HOME_MAP = dict(proto.STATE_IN_ROOT)  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/
@@ -280,7 +353,7 @@ def home_paths(text, root, path=""):
                     s = s.replace(pre + h + k, f"{r}/{v}")
                 s = s.replace(pre + h, f"{r}/{proto.ROOT['state']}/")
         return s
-    keep = _prose(text) if path.endswith(".py") else None
+    keep = _prose(text) if path.endswith(".py") or _python_script(path, text) else None
     if keep is None:
         return "\n".join(ln if ln.lstrip().startswith("#") and not ln.startswith("#!") else sub(ln) for ln in text.split("\n"))
     out, pos = [], 0
@@ -288,6 +361,11 @@ def home_paths(text, root, path=""):
         out += [sub(text[pos:a]), text[a:b]]
         pos = b
     return "".join(out + [sub(text[pos:])])
+
+
+def _python_script(path, text):
+    """没有扩展名、第一行是 python 的脚本（如 bin/taskq）。"""
+    return "." not in os.path.basename(path) and text.startswith("#!") and "python" in text.split("\n", 1)[0]
 
 
 def _prose(src):
@@ -349,13 +427,25 @@ def check(d, files):
 
 
 # ---------------- 建包 ----------------
-def contents(name, commit="origin/main", root=None, entry=None):
-    """→ {相对路径: (文本, 可执行)}（不含 LINKS 的软链接）。root、entry（覆盖生成的 machines.py 那一项的字段）只给测试用。"""
+def forwarder(old, target):
+    """旧位置 old 的转交脚本：source 时 source 新的，否则 exec（target 相对核心，包里在 BC/ 下）。"""
+    new = os.path.relpath(f"{BC}/{target}", os.path.dirname(old))
+    return ("#!/bin/bash\n"
+            f"# split_apply.py 生成的旧路径转交：{BC}/{target}（scripts/queue/SPLIT.md）\n"
+            f'_new="$(dirname "$(readlink -f "${{BASH_SOURCE[0]}}")")/{new}"\n'
+            '[[ ${BASH_SOURCE[0]} != "$0" ]] && { source "$_new" "$@"; return; }\n'
+            'exec bash "$_new" "$@"\n')
+
+
+def contents(name, commit="origin/main", root=None, entry=None, core=CORE_REF):
+    """→ {包里的路径: (文本, 可执行)}（不含 LINKS 的软链接）。使用者的文件取自 commit，核心的取自核心仓库的 core
+    （commit 为 None 时两边都读工作区）。root、entry（覆盖生成的 machines.py 那一项的字段）只给测试用。"""
+    core = None if commit is None else core
     e = relay_entry(commit, name)
     root = (root or e["root"]).rstrip("/")
     m = machine_entry(name, e, root, entry)
     out = {}
-    for path, (raw, exe) in source_files(commit).items():
+    for path, (raw, exe) in source_files(commit, core).items():
         try:
             text = raw.decode()
         except UnicodeDecodeError as err:
@@ -363,21 +453,27 @@ def contents(name, commit="origin/main", root=None, entry=None):
         out[path] = (home_paths(text, root, path), exe or path.endswith(".sh"))
     out["envs/machines.py"] = (home_paths(gen_machines(read_machines(commit), name, m), root, "envs/machines.py"), True)
     out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True)), False)
+    for old, target in COMPAT.items():
+        out[old] = (forwarder(old, target), True)
+    toml = project_file(commit)
+    if toml is not None:
+        out[PROJECT_FILE] = (toml, False)
     for tpl in SBATCH.values():
-        out.pop(tpl, None)
+        out.pop(f"{BC}/{tpl}", None)
     if m["scheduler"] == "slurm":
         for kind, tpl in SBATCH.items():
             if kind in (m.get("jobs") or ()):
-                out[tpl] = (gen_sbatch(read(commit, tpl), m, root, kind), False)
+                out[f"{BC}/{tpl}"] = (gen_sbatch(read_core(core, tpl), m, root, kind), False)
     hits = secret_hits(out)
     if hits:
         raise BundleError("包里有像钥匙的内容：" + "；".join(f"{f}:{n} {w}…" for f, n, w in hits[:10]))
+    out[VERSION] = (core_version(core) + "\n", False)
     return out
 
 
 def bundle_id(files):
     h = hashlib.sha256()
-    for path in sorted(files):
+    for path in sorted(set(files) - {VERSION}):
         data = files[path][0].encode()
         h.update(f"{path}\0{len(data)}\0{int(bool(files[path][1]))}\0".encode() + data)
     for path, target in sorted(LINKS.items()):
@@ -385,9 +481,9 @@ def bundle_id(files):
     return h.hexdigest()[:16]
 
 
-def build(name, commit="origin/main", out=None, root=None, entry=None):
+def build(name, commit="origin/main", out=None, root=None, entry=None, core=CORE_REF):
     """建包 → (包名, 路径)。commit=None：读工作区（只给测试用）。已经有同名的包时直接用。"""
-    files = contents(name, commit, root, entry)
+    files = contents(name, commit, root, entry, core)
     bid = bundle_id(files)
     out = os.path.expanduser(out or OUT)
     path = os.path.join(out, bid)
@@ -403,7 +499,7 @@ def build(name, commit="origin/main", out=None, root=None, entry=None):
                 f.write(text)
             os.chmod(p, 0o755 if exe else 0o644)
         for rel, target in LINKS.items():
-            if os.path.dirname(rel) + "/" + target in files and rel not in files:
+            if rel not in files:
                 os.symlink(target, os.path.join(tmp, rel))
         check(tmp, sorted(files))
         os.chmod(tmp, 0o755)
@@ -422,10 +518,11 @@ def main(argv):
     p = sub.add_parser("build")
     p.add_argument("name")
     p.add_argument("--commit", default="origin/main")
+    p.add_argument("--core-commit", default=CORE_REF)
     p.add_argument("--out")
     a = ap.parse_args(argv)
     try:
-        bid, path = build(a.name, a.commit or None, a.out)
+        bid, path = build(a.name, a.commit or None, a.out, core=a.core_commit)
     except BundleError as e:
         print(f"建不了包：{e}", file=sys.stderr)
         return 1

@@ -12,10 +12,13 @@ CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
 C="python3 $CORE/queue/cfg.py"
+eval "$(python3 "$CORE/queue/proto.py" sh)"
 if [[ -n ${1:-} && $1 != "$($M whoami 2> /dev/null)" ]]; then
-    ssh=$($M get "$1" ssh) code=$($M get "$1" code); [[ -n $code ]] || code=$($M get "$1" repo)
+    # 代码包（表里有 code）：核心在包里的 BUNDLE_CORE；仓库的克隆（只有 repo）：和这边同一布局
+    ssh=$($M get "$1" ssh) code=$($M get "$1" code) sub=/$TQ_BUNDLE_CORE
+    [[ -n $code ]] || { code=$($M get "$1" repo); sub=${CORE#"$REPO"}; }
     [[ -n $ssh && -n $code ]] || { echo "$1：表里没有 ssh 或代码目录" >&2; exit 1; }
-    exec ssh "$ssh" "SETUP_GROUPS='$($M groups "$1" | tr '\n' ' ')' SETUP_GPU_LOG='$($M get "$1" gpu_log)' bash $code${CORE#"$REPO"}/queue/setup.sh"
+    exec ssh "$ssh" "SETUP_GROUPS='$($M groups "$1" | tr '\n' ' ')' SETUP_GPU_LOG='$($M get "$1" gpu_log)' bash $code$sub/queue/setup.sh"
 fi
 me=$($M whoami) || { echo "envs/machines.py 里没有这台机器（$(hostname -s)）" >&2; exit 1; }
 [[ $($M get . scheduler) == pueue ]] || { echo "$me 不用 pueue" >&2; exit 1; }
@@ -46,10 +49,14 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
     fi
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
-CODE=$($M get . code); [[ -n $CODE ]] || CODE=$($M get . repo)
+# 代码包：经 code（current 的链接）找 BUNDLE_CORE，换包后照样找得到；仓库的克隆：表里的 repo 下同一位置；核心在仓库外：这份核心
+CODE=$($M get . code)
+if [[ -n $CODE ]]; then OB=$CODE/$TQ_BUNDLE_CORE
+elif [[ $CORE == "$REPO"/* ]]; then OB=$($M get . repo)${CORE#"$REPO"}
+else OB=$CORE; fi
 [[ -n ${SETUP_GPU_LOG-$($M get . gpu_log)} ]] && GL=" --gpu-log" || GL=
 crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | { grep -v "on_boot.sh" || true; } | crontab -; }
-cron "bash $CODE${CORE#"$REPO"}/queue/on_boot.sh$GL >> $($C log on_boot) 2>&1" "@reboot"
+cron "bash $OB/queue/on_boot.sh$GL >> $($C log on_boot) 2>&1" "@reboot"
 crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | { grep -v "git_pull_cron.sh" || true; } | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) " entry=$($C get entry)
 if [[ $roles == *" hub "* && -n $entry ]]; then  # 从只给 cron 用的克隆（这台的 repo）运行，只跑已提交的代码

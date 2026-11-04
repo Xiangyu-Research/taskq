@@ -20,7 +20,7 @@ import slurm as SL  # noqa: E402
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 import cfg  # noqa: E402
-QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
+QR = cfg.bundle_rel("queue")  # 代码包里调度代码的 queue/（总是 scripts/taskq/queue，11/4）
 
 
 def ok(msg):

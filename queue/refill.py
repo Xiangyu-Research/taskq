@@ -124,7 +124,8 @@ def sh(cmd, host=None, timeout=300):
 def q(name, args, run=sh):
     """在某台 pueue 机器上用 scripts/taskq/queue/q 加任务 → 任务号。"""
     m = M.MACHINES[name]
-    rc, out = run(f"cd {m['repo']} && {cfg.rel('queue', 'q')} {args}", m["ssh"])
+    qp = shlex.quote(cfg.local("queue", "q")) if m["ssh"] is None else cfg.rel("queue", "q")  # 本机：核心的绝对路径（11/4）
+    rc, out = run(f"cd {m['repo']} && {qp} {args}", m["ssh"])
     # 带 -p 时只输出任务号，不带时是"New task added (id 118)."（10/17 改成两种都认）
     hit = re.fullmatch(r"(?:New task added \(id )?(\d+)\)?\.?", out.strip().splitlines()[-1].strip()) if out.strip() else None
     if rc or not hit:
