@@ -248,7 +248,7 @@ with tempfile.TemporaryDirectory() as d:
     ok("DISABLED 时不填充并退出", b.live[0] == 0 and any("DISABLED" in x for x in logs))
 
 b = FakeBackend()
-p, logs = pad_of(b, parent_pid=999999)
+p, logs = pad_of(b, parent_pid=fixture.dead_pid())
 p.run()
 ok("父进程不在了就退出、不占显存", any("父进程" in x for x in logs) and b.live[0] == 0)
 

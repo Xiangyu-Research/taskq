@@ -102,7 +102,7 @@ ok("本地视图：要拷的清单里是全部 7 个文件", len(todo) == 7)
 
 # 拷到一半：死掉的进程留下的 .partial、一个 blob 内容和名字对不上
 os.makedirs(os.path.join(L7, "blobs"), exist_ok=True)
-stale = os.path.join(L7, "blobs", "abc.partial.999999")
+stale = os.path.join(L7, "blobs", f"abc.partial.{fixture.dead_pid()}")
 open(stale, "w").write("half")
 bad_rel = "sub/c1.b2nd"
 bad_real = os.path.realpath(os.path.join(V, bad_rel))
@@ -135,6 +135,24 @@ ok("别的作业：本节点已有的硬链接过来，不重拷", rc == 0 and "
 sys.path.insert(0, HERE)
 import inputs as I  # noqa: E402
 import fcntl  # noqa: E402
+
+
+def _kill_raises(exc):
+    def k(pid, sig):
+        raise exc
+    return k
+
+
+_kill = I.os.kill
+try:
+    I.os.kill = _kill_raises(PermissionError())
+    perm = I.alive(12345)
+    I.os.kill = _kill_raises(ProcessLookupError())
+    gone = I.alive(12345)
+finally:
+    I.os.kill = _kill
+ok("进程在不在：PermissionError 算在（别人的进程），ProcessLookupError 算不在", perm is True and gone is False
+   and I.alive(os.getpid()) and not I.alive(fixture.dead_pid()))
 L10 = os.path.join(TMP, "phd_stage_10")
 run("prepare", DATA, "k10", L10, V, env=env)
 _du, _keep = I.shutil.disk_usage, I.KEEP_GB

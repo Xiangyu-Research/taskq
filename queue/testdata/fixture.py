@@ -7,6 +7,7 @@ use() 在 import 读配置的模块（machines、policy、recipes、relay_plugin
 TASKQ_PLUGINS 指到这里（覆盖已经设了的），子进程跟着继承。bash 的测试 source fixture.sh。
 """
 import os
+import subprocess
 
 FIX = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(FIX, "config")
@@ -19,3 +20,11 @@ def use():
     os.environ["TASKQ_CONFIG"] = CONFIG
     os.environ["TASKQ_PLUGINS"] = PLUGINS
     return CONFIG, PLUGINS
+
+
+def dead_pid():
+    """一个已经结束、回收过的子进程的 pid（os.kill(pid, 0) 报 ProcessLookupError）。不用 999999 这类"多半不存在"的号：
+    有的沙箱对看不到的 pid 报 PermissionError，按 POSIX 那算"进程在"。"""
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
