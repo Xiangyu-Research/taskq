@@ -27,11 +27,12 @@
 
 worker 调用（执行机上的队列）：
     taskq.py next --worker <作业号> --envs <环境,…> [--device gpu|cpu] [--cpus N] [--mem-mb N] [--gpu-mem GB]
-                  [--free-slots N] [--patience-until 时间] [--exclude key...]
+                  [--free-slots N] [--patience-until 时间] [--exclude key...] [--log-tag 作业名]
         领一个本机有环境的（任务说明写了 machines 的，只在列出的机器上领；只领 device 和 --device 一样的，默认 gpu；res 超出
         --cpus / --mem-mb / --gpu-mem 的不领）→ 打印三行：key、run_task.sh 的参数（shell 引号）、这次领取的 token，退出码 0。没有能领的退出码 10；
         排在前面的刚停下、还在等它（--patience-until 之前）退出码 11；队列因为连续失败暂停了退出码 12；
         其他退出码都是队列本身出错（包括没有任务表：退出码 2）。
+        --log-tag：分段日志名里的作业名和 worker 名不同时（Slurm 外）给，记进领取记录的 log，status 按它找分段日志（11/4）。
     taskq.py beat --worker <作业号> [--token T] <key>...            心跳
     taskq.py release --worker <作业号> [--token T] <key>... [--failed 原因] [--skip 原因]
     taskq.py missing --worker <作业号> [--token T] <key> [--why 说明]   缺输入（11/1）：交还，记 inputs/<key>，补齐前不再领
@@ -56,7 +57,8 @@ worker 调用（执行机上的队列）：
     taskq.py resume <key>...         撤销停止，照常排
     taskq.py input-ok <key>...       撤掉"缺输入"（输入补齐了，11/1）
     taskq.py take --worker <机器> --assign <key>   分给一台执行机（free / stale / waiting 的）：分到退出码 0，分不到 10
-    taskq.py status                   打印队列
+    taskq.py status [--json]          打印队列；--json：@@JSON 一行 {version, enabled, tasks, recent_failures, paused, recent_skips}，
+                                      每个任务是 tasks.jsonl 的一行加 proto.STATUS_FIELDS（跨版本读用它，11/4；--json-status 照旧，没有 version）
 """
 import argparse
 import glob
@@ -74,21 +76,24 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
 import spec as S  # noqa: E402
+import proto  # noqa: E402
 from common import write_json  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", cfg.state("taskq", expand=False)))  # TASKQ_DIR：测试和中转执行机（relay.py）用
-TASKS = "tasks.jsonl"
-STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
-FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
+Q = proto.QUEUE  # 队列目录里的名字
+TASKS = Q["tasks"]
+STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", proto.STALE_BEAT))  # 心跳超过这么久算过期（环境变量只给测试用）
+FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", proto.FRESH_LOG))    # 训练日志这么久内更新过算有人在训
 LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", 0.5))  # 等锁时每次重试的间隔（秒，环境变量只给测试用）
 LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = 120, 600, 900  # 锁目录这么久没动就抢：持有者已死 / 在别的主机（看不到死活）/ 本机还活着（pid 可能被复用）
-HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过期
+HALF_CLAIM = proto.HALF_CLAIM  # 领取只建了目录、没写 info，过这么久算过期
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
-NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
-REFUSED, GONE = 3, 4  # remove 的退出码：不删（有人领着、分出去了、别的任务等它）、队列里没有（11/4）
-LOST = 13  # beat --strict：有的领取已经不是自己的（11/4）
-safe = S.safe
+X = proto.EXIT
+NOTHING, WAIT, PAUSED = X["nothing"], X["wait"], X["paused"]   # 领任务的退出码
+REFUSED, GONE = X["refused"], X["gone"]  # remove 的退出码：不删（有人领着、分出去了、别的任务等它）、队列里没有（11/4）
+LOST = X["lost"]  # beat --strict：有的领取已经不是自己的（11/4）
+safe = proto.safe
 
 
 def tasks_path():
@@ -125,7 +130,7 @@ def write_tasks(tasks, path=None):
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
-            rec = {k: t.get(k) for k in ("order", "nice", "key", "exp", "recipe", "params")}
+            rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec"}
             if t.get("spec"):
                 rec["spec"] = t["spec"]  # 执行机的队列：box 解析好的说明（11/4）
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -134,7 +139,7 @@ def write_tasks(tasks, path=None):
 
 class Lock:
     def __init__(self, tries=600):
-        self.d = os.path.join(TQ, "lock")
+        self.d = os.path.join(TQ, Q["lock"])
         self.tries = tries
         self.me = None
 
@@ -252,13 +257,13 @@ def root_error(root):
 # ---------------- 状态 ----------------
 def claim_info(key):
     try:
-        return json.load(open(os.path.join(TQ, "claims", safe(key), "info")))
+        return json.load(open(os.path.join(TQ, Q["claims"], safe(key), proto.CLAIM_INFO)))
     except Exception:  # noqa: BLE001
         return None
 
 
 def failures(key):
-    p = os.path.join(TQ, "failures", safe(key))
+    p = os.path.join(TQ, Q["failures"], safe(key))
     return sum(1 for _ in open(p)) if os.path.exists(p) else 0
 
 
@@ -266,7 +271,7 @@ def skips(key=None):
     """skips/ 的记录 → [(时间戳, worker, 原因)]：某台机器训不了（多半是放不下）的任务，只是这台机器不再领它；
     不算失败（不影响 MAX_FAIL 和暂停）。key=None 时是所有任务的。"""
     out = []
-    for p in glob.glob(os.path.join(TQ, "skips", safe(key) if key else "*")):
+    for p in glob.glob(os.path.join(TQ, Q["skips"], safe(key) if key else "*")):
         for ln in open(p, encoding="utf-8"):
             f = ln.rstrip("\n").split("\t")
             try:
@@ -279,7 +284,7 @@ def skips(key=None):
 def stopped_info(key):
     """停止记录 → "时间 原因"；没有 → None。"""
     try:
-        return open(os.path.join(TQ, "stopped", safe(key)), encoding="utf-8").read().strip().replace("\t", " ")
+        return open(os.path.join(TQ, Q["stopped"], safe(key)), encoding="utf-8").read().strip().replace("\t", " ")
     except OSError:
         return None
 
@@ -287,7 +292,7 @@ def stopped_info(key):
 def input_info(key):
     """缺输入的记录 → (时间戳, 说明)；没有 → None。"""
     try:
-        f = open(os.path.join(TQ, "inputs", safe(key)), encoding="utf-8").read().rstrip("\n").split("\t")
+        f = open(os.path.join(TQ, Q["inputs"], safe(key)), encoding="utf-8").read().rstrip("\n").split("\t")
         return float(f[0]), " ".join(f[1:])
     except (OSError, ValueError, IndexError):
         return None
@@ -295,7 +300,7 @@ def input_info(key):
 
 def released_at(key):
     try:
-        return float(open(os.path.join(TQ, "released", safe(key))).read().split()[0])
+        return float(open(os.path.join(TQ, Q["released"], safe(key))).read().split()[0])
     except (OSError, ValueError, IndexError):
         return None
 
@@ -303,7 +308,7 @@ def released_at(key):
 def recent_failures(window=PAUSE_WINDOW):
     """整个队列最近 window 秒内的失败次数。"""
     n, cut = 0, time.time() - window
-    for p in glob.glob(os.path.join(TQ, "failures", "*")):
+    for p in glob.glob(os.path.join(TQ, Q["failures"], "*")):
         for ln in open(p, encoding="utf-8"):
             try:
                 n += time.mktime(time.strptime(ln.split("\t")[0], "%Y-%m-%d %H:%M:%S")) >= cut
@@ -371,18 +376,19 @@ def state(t, root):
 
 def claim_state(key, age):
     """领取记录（age：训练日志多久没更新）→ None（没有）/ ("claimed", 说明)（活着的）/ ("stale", 说明)（过期了，可以重新领）。"""
-    d = os.path.join(TQ, "claims", safe(key))
+    d = os.path.join(TQ, Q["claims"], safe(key))
     ci = claim_info(key)
+    now = time.time()
     if ci is None:
         # 只建了目录、info 没写上（领的进程在中间被杀）：几分钟后算过期，下一个照常领走（10/25）
         try:
             made = os.stat(d).st_mtime
         except OSError:
             return None
-        return ("stale", "领取记录不完整（只有目录，没有 info）") if time.time() - made > HALF_CLAIM else ("claimed", "正在领")
+        return ("claimed", "正在领") if proto.claim_alive(None, made, now, half=HALF_CLAIM) else ("stale", "领取记录不完整（只有目录，没有 info）")
     if ci.get("assigned"):
         return "claimed", f"分给 {ci['assigned']}"
-    if time.time() - ci.get("beat", 0) < STALE_BEAT or (age is not None and age < FRESH_LOG):
+    if proto.claim_alive(ci, None, now, age, stale=STALE_BEAT, fresh=FRESH_LOG):
         return "claimed", f"作业 {ci.get('worker')} @ {ci.get('host')}"
     return "stale", f"作业 {ci.get('worker')} 的领取已过期"
 
@@ -393,7 +399,7 @@ def _claim(a, pick):
     if not have_queue():
         # 不能当成"没有任务"（退出码 10）：那样每个开始的作业都会马上结束，排队的作业几分钟内全部用掉
         print(f"没有 {tasks_path()}", file=sys.stderr)
-        return 2, None
+        return X["no_queue"], None
     root = data_root()
     err = root_error(root)
     if err:
@@ -416,7 +422,7 @@ def _claim(a, pick):
                 continue
             if busy_ahead >= a.free_slots and time.time() < a.patience_until:
                 return WAIT, None  # 给排在前面的留着位置，等它的日志过了 15 分钟再领
-            d = os.path.join(TQ, "claims", safe(t["key"]))
+            d = os.path.join(TQ, Q["claims"], safe(t["key"]))
             if st == "stale":
                 gone = f"{d}.old{os.getpid()}"
                 try:
@@ -431,8 +437,10 @@ def _claim(a, pick):
                 continue
             now = time.time()
             a.token = os.urandom(6).hex()
-            write_json(os.path.join(d, "info"), dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now,
-                                                     token=a.token), indent=None)
+            info = dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now, token=a.token)
+            if getattr(a, "log_tag", None):
+                info["log"] = a.log_tag  # 分段日志名里的作业名和 worker 名不同时（Slurm 外，11/4）
+            write_json(os.path.join(d, proto.CLAIM_INFO), info, indent=None)
             return 0, out
     return NOTHING, None
 
@@ -472,7 +480,7 @@ def cmd_beat(a):
     lost = []
     with Lock():  # 和领取用同一把锁：读到自己的记录、写回之间不会被别人接管
         for key in a.keys:
-            p = os.path.join(TQ, "claims", safe(key), "info")
+            p = os.path.join(TQ, Q["claims"], safe(key), proto.CLAIM_INFO)
             ci = claim_info(key)
             if owns(ci, a):
                 ci["beat"] = time.time()
@@ -487,7 +495,7 @@ def cmd_beat(a):
 
 def _no_claim(key):
     try:
-        return safe(key) not in os.listdir(os.path.join(TQ, "claims"))
+        return safe(key) not in os.listdir(os.path.join(TQ, Q["claims"]))
     except OSError:
         return False
 
@@ -500,23 +508,23 @@ def cmd_release(a):
 
 
 def _release(a, key):
-    d = os.path.join(TQ, "claims", safe(key))
+    d = os.path.join(TQ, Q["claims"], safe(key))
     ci = claim_info(key)
     if getattr(a, "token", None) and not owns(ci, a):  # 迟到的交还（领取已被新一轮接管，或者已经没了）：什么都不记
         if ci is None and (a.failed or a.skip):
             print(f"{key}：这一轮的领取已经没了（过期后被别人领走、交还过），不记失败 / 跳过")
         return
     if a.skip:
-        os.makedirs(os.path.join(TQ, "skips"), exist_ok=True)
-        with open(os.path.join(TQ, "skips", safe(key)), "a") as f:
+        os.makedirs(os.path.join(TQ, Q["skips"]), exist_ok=True)
+        with open(os.path.join(TQ, Q["skips"], safe(key)), "a") as f:
             f.write(f"{time.strftime('%F %T')}\t{a.worker}\t{a.skip}\n")
     if a.failed:
-        os.makedirs(os.path.join(TQ, "failures"), exist_ok=True)
-        with open(os.path.join(TQ, "failures", safe(key)), "a") as f:
+        os.makedirs(os.path.join(TQ, Q["failures"]), exist_ok=True)
+        with open(os.path.join(TQ, Q["failures"], safe(key)), "a") as f:
             f.write(f"{time.strftime('%F %T')}\t作业 {a.worker}\t{a.failed}\n")
     if owns(ci, a):
-        os.makedirs(os.path.join(TQ, "released"), exist_ok=True)
-        with open(os.path.join(TQ, "released", safe(key)), "w") as f:
+        os.makedirs(os.path.join(TQ, Q["released"]), exist_ok=True)
+        with open(os.path.join(TQ, Q["released"], safe(key)), "w") as f:
             f.write(f"{time.time()} {a.worker}\n")
         shutil.rmtree(d, ignore_errors=True)
 
@@ -532,19 +540,19 @@ def _missing(a):
     if not owns(ci, a):
         print(f"{a.key} 不是 {a.worker} 领着的", file=sys.stderr)
         return 1
-    os.makedirs(os.path.join(TQ, "inputs"), exist_ok=True)
-    with open(os.path.join(TQ, "inputs", safe(a.key)), "w", encoding="utf-8") as f:
+    os.makedirs(os.path.join(TQ, Q["inputs"]), exist_ok=True)
+    with open(os.path.join(TQ, Q["inputs"], safe(a.key)), "w", encoding="utf-8") as f:
         f.write(f"{time.time()}\t{a.worker}\t{(a.why or '').replace(chr(9), ' ').replace(chr(10), ' ')}\n")
-    os.makedirs(os.path.join(TQ, "released"), exist_ok=True)
-    with open(os.path.join(TQ, "released", safe(a.key)), "w") as f:
+    os.makedirs(os.path.join(TQ, Q["released"]), exist_ok=True)
+    with open(os.path.join(TQ, Q["released"], safe(a.key)), "w") as f:
         f.write(f"{time.time()} {a.worker}\n")
-    shutil.rmtree(os.path.join(TQ, "claims", safe(a.key)), ignore_errors=True)
+    shutil.rmtree(os.path.join(TQ, Q["claims"], safe(a.key)), ignore_errors=True)
     return 0
 
 
 def cmd_input_ok(a):
     for k in a.keys:
-        p = os.path.join(TQ, "inputs", safe(k))
+        p = os.path.join(TQ, Q["inputs"], safe(k))
         if os.path.exists(p):
             os.remove(p)
             print(f"输入补齐了：{k}")
@@ -573,7 +581,7 @@ def cmd_take(a):
         if st in ("done", "stopped") or (not mine and st not in ("free", "stale", "waiting")):
             print(f"{a.key}：{st} {note}")
             return NOTHING
-        d = os.path.join(TQ, "claims", safe(a.key))
+        d = os.path.join(TQ, Q["claims"], safe(a.key))
         if ci or st == "stale":
             shutil.rmtree(d, ignore_errors=True)
         os.makedirs(os.path.dirname(d), exist_ok=True)
@@ -584,7 +592,7 @@ def cmd_take(a):
             return NOTHING
         now = time.time()
         info = dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now, beat=now, assigned=a.worker)
-        write_json(os.path.join(d, "info"), info, indent=None)
+        write_json(os.path.join(d, proto.CLAIM_INFO), info, indent=None)
         print(t["key"])
         return 0
 
@@ -779,7 +787,7 @@ def cmd_set_nice(a):
     return 0 if not missing else 1
 
 
-RECORDS = ("failures", "stopped", "inputs", "released")  # remove 时和任务一起删的记录（执行机的队列另加 skips/）
+RECORDS = tuple(Q[k] for k in ("failures", "stopped", "inputs", "released"))  # remove 时和任务一起删的记录（执行机的队列另加 skips/）
 
 
 def cmd_remove(a):
@@ -821,12 +829,12 @@ def cmd_remove(a):
             return GONE
         write_tasks([t for t in tasks if t["key"] not in keys])
         for k in keys:
-            for sub in RECORDS + (("skips",) if by[k].get("spec") else ()):
+            for sub in RECORDS + ((Q["skips"],) if by[k].get("spec") else ()):
                 try:
                     os.remove(os.path.join(TQ, sub, safe(k)))
                 except FileNotFoundError:
                     pass
-            shutil.rmtree(os.path.join(TQ, "claims", safe(k)), ignore_errors=True)  # 只剩过期的
+            shutil.rmtree(os.path.join(TQ, Q["claims"], safe(k)), ignore_errors=True)  # 只剩过期的
     for k in keys:
         print(f"删了：{k}")
     return 0
@@ -841,10 +849,10 @@ def cmd_stop(a):
             print(f"队列里没有：{k}")
         if missing:
             return 1
-        os.makedirs(os.path.join(TQ, "stopped"), exist_ok=True)
+        os.makedirs(os.path.join(TQ, Q["stopped"]), exist_ok=True)
         for k in a.keys:
             ci = claim_info(k)
-            with open(os.path.join(TQ, "stopped", safe(k)), "w", encoding="utf-8") as f:
+            with open(os.path.join(TQ, Q["stopped"], safe(k)), "w", encoding="utf-8") as f:
                 f.write(f"{time.strftime('%F %T')}\t{a.why or ''}\n")
             w = str((ci or {}).get("worker", ""))
             if (ci or {}).get("assigned"):
@@ -860,7 +868,7 @@ def cmd_stop(a):
 
 def cmd_resume(a):
     for k in a.keys:
-        p = os.path.join(TQ, "stopped", safe(k))
+        p = os.path.join(TQ, Q["stopped"], safe(k))
         if os.path.exists(p):
             os.remove(p)
             print(f"撤销停止：{k}")
@@ -891,12 +899,14 @@ def cmd_show(a):
 
 
 # ---------------- 状态 ----------------
-def task_log_age(root, key, worker):
-    """领着这个任务的作业写的分段日志（run_task.sh）多久没更新（秒）；没有 → None。"""
-    if not worker:
+def task_log_age(root, key, worker, log=None):
+    """领着这个任务的作业写的分段日志（run_task.sh）多久没更新（秒）；没有 → None。
+    log：领取记录里的日志名（next --log-tag，11/4）；没有时按 worker 名找。"""
+    tag = log or worker
+    if not tag:
         return None
-    pre = os.path.join(root, "logs", "tasks", f"{glob.escape(safe(key))}__{glob.escape(str(worker))}_")
-    logs = glob.glob(pre + "part*.log") + glob.glob(pre + "seg*.log")  # _seg：10/31 前的名字
+    pre = os.path.join(root, proto.TASK_LOGS, f"{glob.escape(safe(key))}{proto.SAFE}{glob.escape(str(tag))}_")
+    logs = [p for w in proto.LOG_PARTS for p in glob.glob(f"{pre}{w}*.log")]  # _seg：10/31 前的名字
     try:
         return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
     except OSError:
@@ -923,12 +933,12 @@ def local_status():
         out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
                         assigned=ci.get("assigned"), input_since=(input_info(t["key"]) or (None,))[0],
                         beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None,
-                        task_log_age=task_log_age(root, t["key"], ci.get("worker")),
+                        task_log_age=task_log_age(root, t["key"], ci.get("worker"), ci.get("log")),
                         out_age=out_age(s, root) if s and st == "claimed" else None, failures=failures(t["key"]),
                         skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
-    return dict(enabled=os.path.exists(os.path.join(TQ, "ENABLED")), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,
+    return dict(enabled=os.path.exists(os.path.join(TQ, Q["enabled"])), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,
                 recent_skips={w: day.count(w) for w in set(day)})
 
 
@@ -959,6 +969,9 @@ def cmd_status(a):
     if s is None:
         print("读不到队列")
         return 1
+    if a.json:
+        S.json_out({"version": proto.VERSION, **s})
+        return 0
     print(f"总开关：{'开' if s['enabled'] else '关'}；任务 {len(s['tasks'])} 个"
           + (f"；{PAUSE_WINDOW // 3600} 小时内失败 {s.get('recent_failures')} 次，暂停领任务" if s.get("paused") else ""))
     n = {}
@@ -979,7 +992,7 @@ def main(argv):
     if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
             and not have_queue() and here() != queue_host():
         print(f"总队列在 {queue_host()}，在那边跑（本机没有 {tasks_path()}）")
-        return 2
+        return X["no_queue"]
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("next")
@@ -992,6 +1005,7 @@ def main(argv):
     p.add_argument("--cpus", type=int, help="这个 worker 每个任务给的 CPU 数；任务的 res.cpus 更多的不领（11/1，不给不查）")
     p.add_argument("--mem-mb", type=int, help="每个任务给的内存（MB）；res.mem 更多的不领")
     p.add_argument("--gpu-mem", type=float, help="卡的显存（GB）；res.gpu_mem 更多的不领")
+    p.add_argument("--log-tag", help="分段日志名里的作业名（run_task.sh 的 TASK_JOBTAG），和 --worker 不同时给；记进领取记录的 log（11/4）")
     tok = "next 打印的第三行；给了就只动这一轮的领取（11/1）"
     p = sub.add_parser("beat")
     p.add_argument("--worker", required=True)
@@ -1042,6 +1056,7 @@ def main(argv):
     p.add_argument("--json", action="store_true")
     p.add_argument("key")
     p = sub.add_parser("status")
+    p.add_argument("--json", action="store_true", help="@@JSON 一行：{version, enabled, tasks, …}（proto.STATUS_TOP、STATUS_FIELDS；跨版本用，11/4）")
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,

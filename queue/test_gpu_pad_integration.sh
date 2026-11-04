@@ -17,7 +17,7 @@ cleanup() {
     rm -rf "$T"
 }
 mkdir -p "$T/pad"
-cp "$HERE/gpu_pad.py" "$T/pad/"
+cp "$HERE/gpu_pad.py" "$HERE/proto.py" "$T/pad/"
 cat > "$T/pad/fake_train.py" << 'EOF'
 import sys, time, torch
 x = torch.zeros(int(sys.argv[1]) * 1024 * 1024, dtype=torch.uint8, device=0)

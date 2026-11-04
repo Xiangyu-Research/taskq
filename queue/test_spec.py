@@ -4,6 +4,7 @@
     python3 scripts/taskq/queue/test_spec.py
 """
 import itertools
+import json
 import os
 import subprocess
 import sys
@@ -333,6 +334,24 @@ finally:
 ok("remote_collect：经 stdin 跑时 readers 一起送过去（toy_log 读出训完 1 轮，oldlogs 目录里的分段日志算训完一轮）",
    rc and rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1
    and [x["trained"] for x in rc["seglogs"] if x["name"].startswith(ns["oldlogs"]["prefix"])] == [True])
+
+# 11/4：送过去的程序前面拼着 proto.py，那边空目录里、不读本机任何文件也能跑；spec.py collect --json（跨版本读）
+_empty = tempfile.mkdtemp()
+_prog = S.remote_program() + (f"\njson_out(collect(json.loads({json.dumps(json.dumps([{k: ns.get(k) for k in S.COLLECT_FIELDS}]))}), "
+                              f"{rr!r}, wait=30))\nos._exit(0)\n")
+_r = subprocess.run([sys.executable, "-I", "-"], input=_prog, capture_output=True, text=True, cwd=_empty, env={"PATH": os.environ.get("PATH", "")})
+_rc = S.json_in(_r.stdout)
+ok("remote_program：空目录里 python3 -I - 跑得起来（proto 的名字在程序里），读出的和 remote_collect 一样",
+   _r.returncode == 0 and _rc and _rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1 and _rc == rc and not os.listdir(_empty))
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect", "--json"], capture_output=True, text=True,
+                    input=json.dumps({"specs": [{k: ns.get(k) for k in S.COLLECT_FIELDS}], "root": rr, "wait": 30}))
+_cj = S.json_in(_r.stdout)
+ok("spec.py collect --json：标准输入给说明和数据目录 → @@JSON 一行，带 version，其余和 collect() 一样",
+   _r.returncode == 0 and len(_r.stdout.strip().splitlines()) == 1 and _cj["version"] == S.P.VERSION
+   and {k: v for k, v in _cj.items() if k != "version"} == rc)
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect"], capture_output=True, text=True, input="{}")
+_r2 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect", "--json"], capture_output=True, text=True, input="[1]")
+ok("spec.py collect：不带 --json、输入不对 → 退出码 2", _r.returncode == 2 and _r2.returncode == 2)
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

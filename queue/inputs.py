@@ -24,11 +24,14 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-MISSING = 4
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import proto  # noqa: E402
+
+MISSING = proto.EXIT["run_missing"]
 PAR = int(os.environ.get("STAGE_PAR", 16))
 KEEP_GB = float(os.environ.get("STAGE_KEEP_GB", 300))
 HEX = re.compile(r"[0-9a-f]{64}")
-PREFIX = "phd_stage_"
+PREFIX = proto.STAGE_PREFIX
 PARTIAL = ".partial."
 
 
@@ -50,7 +53,7 @@ def entries(data, inp):
     if os.path.isdir(inp):
         out, bad = [], []
         for d, ds, fs in os.walk(inp, onerror=lambda e: bad.append(f"{os.path.relpath(e.filename, data)}（读不了）"), followlinks=True):
-            if ".incomplete" in fs or ".incomplete" in ds:  # 任一层建到一半
+            if proto.INCOMPLETE in fs or proto.INCOMPLETE in ds:  # 任一层建到一半
                 return [], [f"{os.path.relpath(d, data)}（建到一半）"]
             for f in fs:
                 p = os.path.join(d, f)

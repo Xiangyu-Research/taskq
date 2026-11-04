@@ -980,5 +980,65 @@ rc, out = tqx("add", "--nice", "0", "--spec-stdin", "--update-only", stdin=json.
 tx = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQX, "tasks.jsonl"))}
 check("--update-only：在训的只改命令（out、done 不变）照换", rc == 0 and tx["x/b"]["spec"]["cmd"] == "python3 -c 8")
 
+# ---------------- 11/4：next --log-tag（lab 的分段日志名不是 worker 名）、status --json、proto.claim_alive ----------------
+import proto  # noqa: E402
+TQL = os.path.join(T, "taskq_l")
+os.makedirs(TQL)
+open(os.path.join(TQL, "tasks.jsonl"), "w").close()
+
+
+def tql(*args, stdin=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQL, TASKQ_DATA=DATA),
+                       capture_output=True, text=True, input=stdin)
+    return r.returncode, r.stdout.strip()
+
+
+tql("add", "--nice", "0", "--spec-stdin", stdin=json.dumps([cspec("l/a"), cspec("l/b")]))
+rc, out = tql("next", "--worker", "lab1", "--envs", "stats", "--log-tag", "labhost-202611041200")
+rc2, out2 = tql("next", "--worker", "lab1", "--envs", "stats")
+ia = json.load(open(os.path.join(TQL, "claims", taskq.safe("l/a"), "info")))
+ib = json.load(open(os.path.join(TQL, "claims", taskq.safe("l/b"), "info")))
+check("next --log-tag：领取记录多一个 log 字段；不给时没有这个字段（老格式不变）",
+      rc == 0 and rc2 == 0 and ia.get("log") == "labhost-202611041200" and ia["worker"] == "lab1" and "log" not in ib
+      and set(ia) <= set(proto.CLAIM_FIELDS) and set(ib) <= set(proto.CLAIM_FIELDS))
+lg = os.path.join(DATA, proto.TASK_LOGS)
+os.makedirs(lg, exist_ok=True)
+open(os.path.join(lg, f"{taskq.safe('l/a')}__labhost-202611041200_part1.log"), "w").write("x\n")
+open(os.path.join(lg, f"{taskq.safe('l/b')}__lab1_seg1.log"), "w").write("x\n")
+old_t = time.time() - 4000
+os.utime(os.path.join(lg, f"{taskq.safe('l/b')}__lab1_seg1.log"), (old_t, old_t))
+check("task_log_age：有 log 按它找；没有按 worker 名找（_seg 老名字也认）；都没有 → None",
+      taskq.task_log_age(DATA, "l/a", "lab1", "labhost-202611041200") < 60
+      and taskq.task_log_age(DATA, "l/a", "lab1") is None
+      and 3900 < taskq.task_log_age(DATA, "l/b", "lab1") < 4100
+      and taskq.task_log_age(DATA, "l/b", None) is None)
+rc, out = tql("status", "--json")
+lines = out.splitlines()
+js = taskq.S.json_in(out)
+rows = {t["key"]: t for t in js["tasks"]}
+rc_old, out_old = tql("--json-status")
+check("status --json：一行 @@JSON，带 version 和 local_status 的顶层字段；task_log_age 按 log 字段找；老的 --json-status 照旧",
+      rc == 0 and len(lines) == 1 and lines[0].startswith(proto.JSON_MARK) and js["version"] == proto.VERSION
+      and set(proto.STATUS_TOP) <= set(js) and rows["l/a"]["task_log_age"] < 60 and rows["l/b"]["task_log_age"] > 3900
+      and rc_old == 0 and "version" not in taskq.S.json_in(out_old) and {t["key"] for t in taskq.S.json_in(out_old)["tasks"]} == set(rows))
+
+
+def old_alive(ci, made, now, age, stale, fresh, half):  # 11/4 前 claim_state 的写法
+    if ci is None:
+        return not now - made > half
+    if ci.get("assigned"):
+        return True
+    return now - ci.get("beat", 0) < stale or (age is not None and age < fresh)
+
+
+now = time.time()
+grid = [(ci, made, age) for ci in (None, dict(assigned="lab1"), dict(beat=now - 10), dict(beat=now - 1199), dict(beat=now - 1201),
+                                   dict(beat=now - 9000), dict(worker="w"))
+        for made in (now - 10, now - 299, now - 301) for age in (None, 10, 899, 901)]
+check("proto.claim_alive 和 11/4 前 claim_state 的判断一样（默认值和改过的阈值）",
+      all(proto.claim_alive(ci, made, now, age) == old_alive(ci, made, now, age, 1200, 900, 300) for ci, made, age in grid)
+      and all(proto.claim_alive(ci, made, now, age, stale=100, fresh=50, half=20) == old_alive(ci, made, now, age, 100, 50, 20)
+              for ci, made, age in grid))
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

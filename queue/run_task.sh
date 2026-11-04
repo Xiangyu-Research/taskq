@@ -16,11 +16,12 @@
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练（8 秒没停下就强制停）再退出，下次从存档接着训。
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不了 $HERE/proto.py" >&2; exit 2; }  # 共用的名字和退出码 TQ_*
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
-(( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v… 或 run_task.sh --spec <JSON>" >&2; exit 2; }
+(( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v… 或 run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
-[[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit 2; }
+[[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 export TASKQ_DATA=$DATA
 ts() { date '+%F %T'; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
@@ -40,21 +41,21 @@ early() {  # 开训前就停下：原因写到标准错误和这个任务的分�
 a = sys.argv[1:]
 print(json.loads(a[1]).get("key") or "" if a[0] == "--spec" else next((x[4:] for x in a[1:] if x.startswith("key=")), ""))' "${ARGS[@]}" 2> /dev/null)
     [[ -n $k ]] || return 0
-    mkdir -p "$DATA/logs/tasks" 2> /dev/null
+    mkdir -p "$DATA/$TQ_TASK_LOGS" 2> /dev/null
     { echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$k，第 $PART 段，环境 ${TASK_ENV:-未知}，代码 $COMMIT，$(ts)"
-      echo "$(ts) 没开训：$1"; } 2> /dev/null >> "$DATA/logs/tasks/${TASK_SAFE:-${k//\//__}}__${JOBTAG}_part${PART}.log"
+      echo "$(ts) 没开训：$1"; } 2> /dev/null >> "$DATA/$TQ_TASK_LOGS/${TASK_SAFE:-${k//\//$TQ_SAFE}}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log"
 }
 if ! SH=$(python3 "$HERE/spec.py" shell "$@" 2> /dev/null); then
-    early "任务说明有问题：$(python3 "$HERE/spec.py" shell "$@" 2>&1 > /dev/null | tail -n 1)"; exit 2
+    early "任务说明有问题：$(python3 "$HERE/spec.py" shell "$@" 2>&1 > /dev/null | tail -n 1)"; exit "$TQ_EXIT_RUN_BAD"
 fi
 eval "$SH"
 done_() { python3 "$HERE/spec.py" done "$@"; }
 done_ "$@"; rc=$?
-(( rc == 0 )) && { echo "$(ts) 已经训完：$TASK_KEY"; exit 0; }
-(( rc == 5 )) && { early "读不了盘，判断不了训完没有"; exit 5; }
-ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（envs/machines.py）"; exit 2; }
-mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
-LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_part${PART}.log
+(( rc == TQ_EXIT_DONE_YES )) && { echo "$(ts) 已经训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"; }
+(( rc == TQ_EXIT_DONE_UNREADABLE )) && { early "读不了盘，判断不了训完没有"; exit "$TQ_EXIT_RUN_UNREADABLE"; }
+ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（envs/machines.py）"; exit "$TQ_EXIT_RUN_BAD"; }
+mkdir -p "$DATA/$TQ_TASK_LOGS" "$TASK_OUT"
+LOG=$DATA/$TQ_TASK_LOGS/${TASK_SAFE}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log
 TRIES=3
 [[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
@@ -115,7 +116,7 @@ on_term() {  # 先 SIGTERM 整个进程组，8 秒没停下就 SIGKILL（存档�
         fi
         gone "$pid" || echo "$(ts) 训练进程强制停之后还在（多半卡在读写上）" | tee -a "$LOG"
     fi
-    exit 143
+    exit "$TQ_EXIT_RUN_TERM"
 }
 trap on_term TERM INT
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -129,12 +130,12 @@ if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
     if [[ ${TASK_LOCAL:-0} == 1 && -n ${SLURM_JOB_ID:-} ]]; then
         ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; cfg.use_config(); import machines, policy; print(int(bool(policy.STAGE_TMP.get(machines.whoami()))))" 2> /dev/null || echo 0)}
-        [[ $ST == 1 ]] && LROOT=${TMPDIR:-/tmp}/phd_stage_$SLURM_JOB_ID
+        [[ $ST == 1 ]] && LROOT=${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX$SLURM_JOB_ID
     fi
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?
-    if (( rc == 4 )); then
+    if (( rc == TQ_EXIT_RUN_MISSING )); then
         echo "$(ts) 不开训：$(tail -n 1 "$LOG")"
-        exit 4
+        exit "$TQ_EXIT_RUN_MISSING"
     elif (( rc == 0 )) && [[ -n $V ]]; then
         TASK_INPUTS_ROOT=$V
         if [[ $V != "$DATA" ]]; then
@@ -149,18 +150,18 @@ fi
 export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
-    wait_gpu || exit 1
+    wait_gpu || exit "$TQ_EXIT_RUN_FAILED"
     ( eval "$ACT" && cd "$REPO" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &  # 自己一个进程组，停的时候整组停
     pid=$!
     wait "$pid"; rc=$?; pid=
     done_ "$@"; drc=$?
-    if (( drc == 0 )); then
-        echo "训完 $(ts)" >> "$LOG"; echo "$(ts) 训完：$TASK_KEY"; exit 0
-    elif (( drc == 5 )); then
-        echo "$(ts) 命令结束（退出码 $rc），读不了盘，判断不了训完没有" | tee -a "$LOG"; exit 5
+    if (( drc == TQ_EXIT_DONE_YES )); then
+        echo "$TQ_DONE_LINE $(ts)" >> "$LOG"; echo "$(ts) 训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"
+    elif (( drc == TQ_EXIT_DONE_UNREADABLE )); then
+        echo "$(ts) 命令结束（退出码 $rc），读不了盘，判断不了训完没有" | tee -a "$LOG"; exit "$TQ_EXIT_RUN_UNREADABLE"
     fi
     echo "$(ts) 命令结束（退出码 $rc），没训完（第 $try 次）" | tee -a "$LOG"
-    (( rc == 0 )) && exit 3
-    (( try >= TRIES )) && exit $(( rc >= 128 ? rc : 1 ))
+    (( rc == 0 )) && exit "$TQ_EXIT_RUN_NOT_DONE"
+    (( try >= TRIES )) && exit $(( rc >= 128 ? rc : TQ_EXIT_RUN_FAILED ))
     sleep "$POLL" & wait $!
 done

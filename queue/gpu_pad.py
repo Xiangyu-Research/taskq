@@ -13,6 +13,9 @@ try:
     import cfg as tcfg
 except ImportError:
     tcfg = None
+import proto  # noqa: E402
+
+MIB_F, READY_F, START_F = proto.GPU_PAD_FILES  # 和 worker 握手的文件 <base>.mib、.ready、.start
 
 MIB = 1024 * 1024
 STABLE_TOL_MIB = 1024
@@ -41,7 +44,7 @@ def env_int(name, default):
 
 
 def default_base():
-    return pad_env("BASE") or f"/tmp/gpu_pad_{os.environ.get('SLURM_JOB_ID', 'nojob')}"
+    return pad_env("BASE") or f"{proto.GPU_PAD_BASE}{os.environ.get('SLURM_JOB_ID', 'nojob')}"
 
 
 def env_float(name, default):
@@ -157,7 +160,7 @@ class Pad:
 
     def _start_mtime(self):
         try:
-            return os.path.getmtime(self.c.base + ".start") if self.c.base else 0.0
+            return os.path.getmtime(self.c.base + START_F) if self.c.base else 0.0
         except OSError:
             return 0.0
 
@@ -165,9 +168,9 @@ class Pad:
         if not self.c.base:
             return
         try:
-            with open(self.c.base + ".mib.tmp", "w") as f:
+            with open(self.c.base + MIB_F + ".tmp", "w") as f:
                 f.write(f"{sum(self.b.pad_mib(d) for d in self.devices)}\n")
-            os.replace(self.c.base + ".mib.tmp", self.c.base + ".mib")
+            os.replace(self.c.base + MIB_F + ".tmp", self.c.base + MIB_F)
         except OSError:
             pass
 
@@ -175,9 +178,9 @@ class Pad:
         if not self.c.base:
             return
         try:
-            with open(self.c.base + ".ready.tmp", "w") as f:
+            with open(self.c.base + READY_F + ".tmp", "w") as f:
                 f.write(f"{self.seen_start}\n")
-            os.replace(self.c.base + ".ready.tmp", self.c.base + ".ready")
+            os.replace(self.c.base + READY_F + ".tmp", self.c.base + READY_F)
         except OSError:
             pass
 

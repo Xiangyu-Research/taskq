@@ -49,7 +49,7 @@ QUEUE = dict(
 )
 CLAIM_INFO = "info"
 # claims/<key>/info 的字段：worker 领的（执行机的队列）/ 总队列分给执行机的
-CLAIM_FIELDS = ("worker", "host", "since", "beat", "token")
+CLAIM_FIELDS = ("worker", "host", "since", "beat", "token", "log")  # log：分段日志名里的作业名（next --log-tag，11/4；没有时同 worker）
 ASSIGN_FIELDS = ("worker", "host", "since", "beat", "assigned")
 
 # ---------------- 状态目录在执行机根目录里的位置（家目录下的默认位置见 cfg.py 的 STATE_HOME、STATE_PLACES，键相同；
@@ -100,16 +100,17 @@ HALF_CLAIM = 5 * 60    # 只建了目录、没有 info 的领取，这么久后�
 BEAT = 5 * 60          # worker 心跳间隔
 
 
-def claim_alive(info, made, now, log_age=None):
+def claim_alive(info, made, now, log_age=None, stale=None, fresh=None, half=None):
     """一个执行机队列里的领取还活着吗（taskq.py 和 box 上读那边的 relay_remote.py 都用这一条）。
-    info：claims/<key>/info 的内容（读不到 = None）；made：目录的修改时间；log_age：分段日志多久没更新（秒）。"""
+    info：claims/<key>/info 的内容（读不到 = None）；made：目录的修改时间；log_age：分段日志多久没更新（秒）。
+    stale、fresh、half：代替 STALE_BEAT、FRESH_LOG、HALF_CLAIM（taskq.py 的测试用环境变量改）。"""
     if info is None:
-        return now - made <= HALF_CLAIM
+        return now - made <= (HALF_CLAIM if half is None else half)
     if info.get("assigned"):
         return True
-    if now - (info.get("beat") or 0) < STALE_BEAT:
+    if now - (info.get("beat") or 0) < (STALE_BEAT if stale is None else stale):
         return True
-    return log_age is not None and log_age < FRESH_LOG
+    return log_age is not None and log_age < (FRESH_LOG if fresh is None else fresh)
 
 
 # ---------------- 任务的状态（taskq.py state()，local_status 的 state） ----------------
@@ -227,6 +228,8 @@ def sh_vars():
            "TQ_WORKER_LOGS": WORKER_LOGS, "TQ_STALL_LINE": STALL_LINE, "TQ_DONE_LINE": DONE_LINE, "TQ_JSON_MARK": JSON_MARK,
            "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT,
            "TQ_GPU_LOG_DIR": GPU_LOG_DIR, "TQ_GPU_LOG_FILE": GPU_LOG_FILE}
+    out.update({f"TQ_GPU_PAD_{x[1:].upper()}": x for x in GPU_PAD_FILES})  # TQ_GPU_PAD_MIB、_READY、_START
+    out["TQ_LOG_PART"] = LOG_PARTS[0]
     out.update({f"TQ_ROOT_{k.upper()}": v for k, v in ROOT.items()})
     out.update({f"TQ_Q_{k.upper()}": v for k, v in QUEUE.items()})
     out.update({f"TQ_EXIT_{k.upper()}": v for k, v in EXIT.items()})
