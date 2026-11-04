@@ -20,6 +20,7 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 import spec  # noqa: E402
+import recipes as R  # noqa: E402  核心的做法表；要在实验表把插件文件夹加进 sys.path 之前加载，免得同名插件顶掉（11/4）
 
 _cache = {}
 
@@ -67,7 +68,6 @@ def _check_fields(where, d, allowed):
 
 def check_fields(path, mod):
     """实验表模块里每个实验、步骤、queue 的字段都认识；不认识的报 SpecError。"""
-    import recipes as R
     cmd = R.RECIPES["command"]
     qf = list(QUEUE_FIELDS) + [k for k in cmd if k not in ("params", "open")]
     steps = [(f"FINAL 的步骤 {st.get('name')}", st) for st in getattr(mod, "FINAL", [])]
@@ -188,7 +188,6 @@ def task_names(t, data, python):
 
 def _task_of(model_dir):
     """模型文件夹（放在哪里都行）→ 实验表里训它的第一个任务（做法插件的 model_of 钩子给出 model 参数）；表里没有 → None。"""
-    import recipes as R
     if "model_of" not in R.HOOKS:
         raise spec.SpecError("做法插件里没有 model_of 钩子（recipes.py 的 HOOKS），按模型文件夹查不了实验表")
     m = R.HOOKS["model_of"](model_dir)

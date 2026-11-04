@@ -11,7 +11,6 @@ G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 HERE=$REPO
-SUB=${CORE#"$REPO"}  # 仓库里调度代码的位置（嵌着时 /scripts/taskq，单独的检出时空）
 SRC=$(python3 "$CORE/sites/mtab.py" get . repo) CODE=$(python3 "$CORE/sites/mtab.py" get . code)
 if [[ -n $CODE ]]; then
     bash "$CORE/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
@@ -24,6 +23,6 @@ echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）
 ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-ES=$(python3 "$REPO$SUB/queue/cfg.py" get env_script)
+ES=$(TASKQ_REPO=$REPO python3 "$CORE/queue/cfg.py" get env_script)
 [[ -z $ES ]] || source "$REPO/$ES"
 exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"
