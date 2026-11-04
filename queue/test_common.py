@@ -59,17 +59,14 @@ ok("任务删掉了：记录删掉", C.sync_records({"box": dict(tasks=[])}, [r1
 ok("任务号被别的任务重用（标签不同）：记录删掉", C.sync_records({"box": dict(tasks=[task(8, "other")])}, [r1]) == [])
 ok("lab 读不到（error）：lab 的记录不删",
    C.sync_records({"lab": {"error": "ssh"}}, [dict(r1, machine="lab")]) == [dict(r1, machine="lab")])
-r2 = dict(r1, machine="lab", label="infer:t16_f3", out="preds/x/frag_3")
-ok("训练机上做的步骤（有 out）：那边的任务删了也留着，等清理完", C.sync_records({"lab": dict(tasks=[])}, [r2]) == [r2])
 
 # 写文件
 C.write_json(C.tasks_path(), [])
-a = C.new_record("lab", "infer:t16_f3", "infer", "k3", out="preds/x/frag_3", group="gpu1")
+a = C.new_record("lab", "infer:t16_f3", "infer", "k3", group="gpu1")
 C.set_record_id(a, 30)
-b = C.new_record("lab", "infer:t16_f3", "infer", "k3", out="preds/x/frag_3", group="gpu1")
+b = C.new_record("lab", "infer:t16_f3", "infer", "k3", group="gpu1")
 recs = C.load_records()
-ok("新记录先没有任务号，set_record_id 补上；同一台机器同标签的旧的训练机步骤作废",
-   len(recs) == 1 and recs[0]["id"] is None and recs[0]["added"] == b["added"])
+ok("新记录先没有任务号，set_record_id 补上", [r["id"] for r in recs] == [30, None] and recs[1]["added"] == b["added"])
 C.new_record("box", "eval:t3_f1", "eval", "k1", src=None)
 ok("值为 None 的字段不写", "src" not in C.load_records()[-1])
 C.drop_records(lambda r: r["machine"] == "lab")
@@ -105,17 +102,20 @@ ok("run：给了 host → 那边用 timeout -k 包住、比本机早 15 秒，�
    and cmd[-2] == "dicc" and to == 120)
 ok("run：本机的不套", C.run("echo hi")[1] == "hi\n")
 
-# have_script：数据目录进不去 → 没有结束标记，parse_have 是 None（未知），不当成"什么都没有"（11/3）
-hd = os.path.join(T, "have")
-os.makedirs(os.path.join(hd, "a"))
-os.makedirs(os.path.join(hd, "b"))
-open(os.path.join(hd, "b", ".incomplete"), "w").close()
-r = _sp.run(["bash", "-s"], input=C.have_script(["a", "b", "c"], hd), capture_output=True, text=True)
-ok("have_script：目录在 → 列出有的（建到一半的不算），有结束标记", C.parse_have(r.stdout) == {"a"})
-r = _sp.run(["bash", "-s"], input=C.have_script(["a"], os.path.join(T, "nothere")), capture_output=True, text=True)
-ok("have_script：数据目录进不去 → 没有 @@END，parse_have 返回 None", C.HAVE_END not in r.stdout and C.parse_have(r.stdout) is None)
-r = _sp.run(["bash", "-c", C.have_script(["a"], "~/have")], capture_output=True, text=True, env=dict(os.environ, HOME=T))
-ok("have_script：~/ 开头的数据目录留给那边展开", C.parse_have(r.stdout) == {"a"})
+# backup_down：备份机暂停检查或这次连不上 → 说明（relay.py 据此先不排归档，11/1）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+fixture.use()
+import cfg  # noqa: E402
+cfg.use_config()
+import machines as M  # noqa: E402
+import policy as P  # noqa: E402
+bk = next(b for b in M.backups() if b != M.hub())
+P.OFFLINE = {bk: "停机"}
+ok("backup_down：备份机暂停检查 → 说明", C.backup_down() == f"{bk} 暂停检查（停机）")
+P.OFFLINE = {}
+ok("backup_down：这次连不上 → 说明；能用 → None", C.backup_down({bk: False}) == f"{bk} 这次连不上"
+   and C.backup_down({bk: True}) is None and C.backup_down() is None)
 
 print("\n全部通过" if not fails else f"\n{fails} 项失败")
 sys.exit(1 if fails else 0)

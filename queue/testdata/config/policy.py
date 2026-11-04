@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """测试用的"怎么跑"（2026-11-03）：形状同真的 policy.py（字段说明见 scripts/taskq/queue/README.md 的"开关和配置"），值取自
-11/3 的真表，去掉了和日期有关的部分（OFFLINE_UNTIL 为空，SHIFT 不限日期）；dicc 是有缓冲的假执行机，真表里 11/3 起没有这类。
+11/3 的真表，去掉了和日期有关的部分（OFFLINE_UNTIL 为空，SHIFT 不限日期）。
 """
 
-AUTO = dict(advance=True, lab=False, dicc=True, lab1=True, dicc2=True, lab0=True, dicc1=True)
+AUTO = dict(advance=True, lab1=True, dicc2=True, lab0=True, dicc1=True)
 
 OFFLINE_UNTIL = {
 }
@@ -29,7 +29,7 @@ PLACE = {
     "p2": ["queue:dicc1"],
 }
 
-STAGE_TMP = {"dicc": True}
+STAGE_TMP = {}
 
 # 全天（每个时段 24 小时、首尾相接），不限日期：测试结果和现在几点无关
 SHIFT = {
@@ -37,14 +37,11 @@ SHIFT = {
 }
 
 SLURM = {
-    "dicc": dict(gpu={"long": ("3-00:00:00", 4)}, cpu=("normal", "08:00:00", 2)),
     "dicc2": dict(gpu={"long": ("3-00:00:00", 1)}),
     "dicc1": dict(gpu={"long": ("3-00:00:00", 4)}, cpu=("normal", "08:00:00", 2)),
 }
 
-READY = {"dicc": 10, "dicc2": 2, "lab1": 2, "lab0": 1, "dicc1": 2}
-
-MAX_NICE = {}
+READY = {"dicc2": 2, "lab1": 2, "lab0": 1, "dicc1": 2}
 
 OUTPUTS = dict(
     bundle=("scripts",),

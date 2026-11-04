@@ -36,7 +36,7 @@ check "不在 Slurm 里：队列连续出错超过 ERR_MAX 也不退出" 'kill -
 mv "$TASKQ_DIR/tasks.jsonl.bak" "$TASKQ_DIR/tasks.jsonl"
 echo b > "$T/head"
 waitfor 15 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了" $T/w6.out && grep -q "退出，由 feed.py 用新代码重开" $T/w6.out'
+check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了" $T/w6.out && grep -q "退出，由 relay.py 用新代码重开" $T/w6.out'
 fi
 
 if want 6d; then

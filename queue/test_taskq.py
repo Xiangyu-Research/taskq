@@ -578,7 +578,7 @@ s6 = st6()
 check("remove：连同依赖它的一起删 → 都删掉，别的不动", rc == 0 and "infer/x/frag_4" not in s6 and "eval/x/frag_4" not in s6
       and kt in s6 and "free/z" in s6)
 
-# ---------------- 10/31：总队列在 box、执行机的缓冲（BUFFER、put、take --assign） ----------------
+# ---------------- 10/31：总队列在 box、分给执行机（take --assign） ----------------
 TQ7 = os.path.join(T, "taskq7")
 os.makedirs(TQ7)
 kt7 = "D121_x/V_save/3"
@@ -625,70 +625,31 @@ rc, out = tq7("take", "--worker", "dicc", "--assign", kt7)  # 变异审查（11/
 check("take：停了的（就算是自己领着的）不领", rc == 10 and "stopped" in out)
 tq7("resume", kt7)
 
-BUF = os.path.join(T, "buffer7")
-os.makedirs(BUF)
-open(os.path.join(BUF, "BUFFER"), "w").close()
-open(os.path.join(BUF, "ENABLED"), "w").close()
+# 缺输入（11/1）：worker 记 missing → input，不领、不算失败；input-ok 撤掉（执行机上的队列，relay.py 补传后撤）
+EQ = os.path.join(T, "exec7")
+os.makedirs(EQ)
+open(os.path.join(EQ, "ENABLED"), "w").close()
+with open(os.path.join(EQ, "tasks.jsonl"), "w") as f:
+    f.writelines(json.dumps(r) + "\n" for r in r7)
 
 
-def tqb(*args, feed=False, stdin=None):
-    env = dict(ENV, TASKQ_DIR=BUF, TASKQ_DATA=DATA)
-    if feed:
-        env["TASKQ_FEED"] = "1"
-    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=env, capture_output=True, text=True, input=stdin)
+def tqe(*args):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=EQ, TASKQ_DATA=DATA),
+                       capture_output=True, text=True)
     return r.returncode, r.stdout.strip()
 
 
-rc, out = tqb("put", stdin="[]")
-check("缓冲：不带 TASKQ_FEED 的 put 不做（退出码 2，提示去 box）", rc == 2 and "缓冲" in out)
-for cmd in (["add", "--nice", "1", "--recipe", "toy", "ds=D121_x", "variant=V_save", "frag=1"],
-            ["set-nice", "--nice", "5", kt7], ["stop", kt7], ["remove", kt7]):
-    rc, out = tqb(*cmd)
-    check(f"缓冲：不带 TASKQ_FEED 的 {cmd[0]} 不做", rc == 2)
-rc, out = tqb("put", feed=True, stdin=json.dumps(r7))
-sb = st7(BUF)
-check("缓冲：put 原样写进记录（order、nice、params 不变）", rc == 0 and sb[kt7]["order"] == 1 and sb[kt7]["nice"] == 0
-      and sb["infer/x/frag_3"]["params"] == r7[1]["params"])
-bad = dict(r7[0], params=dict(r7[0]["params"], frag="2"))
-rc, out = tqb("put", feed=True, stdin=json.dumps(bad))
-check("缓冲：put 的参数算出的任务名和 key 不一样 → 退出码 2，不写", rc == 2 and len(st7(BUF)) == 2)
-rc, out = tqb("put", feed=True, stdin=json.dumps(dict(r7[0], nice=-5)))
-check("缓冲：put 已有的记录 → 改档位", rc == 0 and st7(BUF)[kt7]["nice"] == -5)
-# worker 那一组在缓冲上照常用（不带 TASKQ_FEED）
-rc, out = tqb("next", "--worker", "961", "--envs", ALL)
-check("缓冲：worker 的 next 照常领", rc == 0 and out.startswith(kt7 + "\n"))
-rc, _ = tqb("beat", "--worker", "961", kt7)
-check("缓冲：worker 的 beat 照常", rc == 0)
-rc, _ = tqb("release", "--worker", "961", kt7)
-check("缓冲：worker 的 release 照常", rc == 0 and st7(BUF)[kt7]["state"] == "free")
-dep = dict(order=0, nice=0, key="D121_x/V_save/2", exp=None, recipe="toy",
-           params=dict(ds="D121_x", variant="V_save", frag="2"), hold=True)
-rc, out = tqb("put", feed=True, stdin=json.dumps(dep))
-sb = st7(BUF)
-check("缓冲：put hold → 依赖记录（停止着、held），worker 不领", rc == 0 and sb[dep["key"]]["state"] == "stopped" and sb[dep["key"]]["held"])
-tqb("stop", kt7, feed=True)
-rc, out = tqb("next", "--worker", "962", "--envs", ALL)
-check("缓冲：依赖记录和停止的都不领", rc == 10)
-rc, out = tqb("put", feed=True, stdin=json.dumps(dict(dep, hold=False)))
-check("缓冲：put hold=false → 撤掉依赖记录的停止", st7(BUF)[dep["key"]]["state"] == "free")
-rc, out = tqb("put", feed=True, stdin=json.dumps(dict(r7[0], nice=-5, hold=False)))
-check("缓冲：put hold=false 不撤掉真正的停止（stop 的）", st7(BUF)[kt7]["state"] == "stopped")
-rc, out = tqb("status")
-check("缓冲：status 照常（只读）", rc == 0)
-# 缺输入（11/1）：worker 记 missing → input，不领、不算失败；input-ok 只有 feed 能做
-tqb("resume", kt7, feed=True)
-rc, out = tqb("next", "--worker", "963", "--envs", ALL)
-rc1, _ = tqb("missing", "--worker", "999", "--why", "x", kt7)
-rc2, _ = tqb("missing", "--worker", "963", "--why", "作业 963 开训前查到", kt7)
-sb = st7(BUF)
-check("缺输入：不是自己领的不能记；自己领的记上 → input、交还、不算失败", rc == 0 and rc1 == 1 and rc2 == 0 and sb[kt7]["state"] == "input"
-      and "缺输入" in sb[kt7]["note"] and not sb[kt7]["worker"] and sb[kt7]["failures"] == 0 and sb[kt7]["input_since"])
-rc, out = tqb("next", "--worker", "964", "--envs", ALL)
+rc, out = tqe("next", "--worker", "963", "--envs", ALL)
+rc1, _ = tqe("missing", "--worker", "999", "--why", "x", kt7)
+rc2, _ = tqe("missing", "--worker", "963", "--why", "作业 963 开训前查到", kt7)
+sb = st7(EQ)
+check("缺输入：不是自己领的不能记；自己领的记上 → input、交还、不算失败", rc == 0 and out.startswith(kt7 + "\n") and rc1 == 1 and rc2 == 0
+      and sb[kt7]["state"] == "input" and "缺输入" in sb[kt7]["note"] and not sb[kt7]["worker"] and sb[kt7]["failures"] == 0
+      and sb[kt7]["input_since"])
+rc, out = tqe("next", "--worker", "964", "--envs", ALL)
 check("缺输入：不再领它", rc == 10 or not out.startswith(kt7 + "\n"))
-rc, _ = tqb("input-ok", kt7)
-check("缺输入：不带 TASKQ_FEED 的 input-ok 不做", rc == 2 and st7(BUF)[kt7]["state"] == "input")
-rc, out = tqb("input-ok", kt7, feed=True)
-check("缺输入：input-ok 撤掉标记 → 照常领", rc == 0 and st7(BUF)[kt7]["state"] == "free")
+rc, out = tqe("input-ok", kt7)
+check("缺输入：input-ok 撤掉标记 → 照常领", rc == 0 and st7(EQ)[kt7]["state"] == "free")
 
 # ---------------- 10/31：add --file（任务单） ----------------
 TQF = os.path.join(T, "taskqf")

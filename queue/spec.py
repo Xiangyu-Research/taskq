@@ -500,7 +500,7 @@ def main(argv):
     if not data:
         import machines as M
         me = M.whoami()
-        data = M.expand(M.MACHINES[me]["data"]) if me else ""
+        data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
     if cmd == "lookup":
         print(json.dumps(s, ensure_ascii=False, indent=1))
     elif cmd == "shell":

@@ -87,14 +87,6 @@ ok("没有 .ok：只送 conda 环境的任务", got(None) == ["b"])
 ok("base 的 .ok 对上：也送 base 的", got({"base": h}) == ["a", "b"])
 ok("alt 的 .ok 是旧的：不送", got({"base": h, "alt": "x"}) == ["a", "b"])
 
-# feed.py 的同一道门槛
-import feed as F  # noqa: E402
-t = dict(key="a", state="free", spec=dict(env="base"))
-F.spec = lambda t_: t_["spec"]
-ok("feed：没有 .ok 不送", not F.runnable("tsite", t))
-ok("feed：.ok 对上送", F.runnable("tsite", t, {"base": h}))
-ok("feed：从收集的状态里读 envs_ok", F.envs_ok({"src": {"tsite": {"envs_ok": {"base": h}}}}, "tsite") == {"base": h})
-
 # ---------- 建环境的脚本和命令 ----------
 s_ = E.build_script("tsite", "alt")
 ok("venv：先激活基础环境（它的 .activate）", "source /r/x1/envs/base/.activate" in s_)

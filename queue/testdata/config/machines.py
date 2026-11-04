@@ -26,19 +26,19 @@ MACHINES = {
                 transfer=("https://transfer.example.org", "172.18.0.1:18090"),
                 quick=("cloudflare/cloudflared:2026.10.4", r"https://[a-z0-9-]+\.trycloudflare\.com")),
     "lab": dict(label="lab", hostname=r"lab-host", ssh="lab", scheduler="pueue", repo="~/demo", code=None,
-                data="~/DEMO_DATA", conda=(FAKE_CONDA, "w0"),
+                conda=(FAKE_CONDA, "w0"),
                 envs={"base": ("conda", "w0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                       "alt2": ("venv", FAKE + "/venv/alt2", "base")},
                 groups={"gpu1": (1, "1", {}), "gpu0": (1, "0", {}), "cpu": (1, None, {}),
                         "wait": (0, None, {})},
-                roles=("train",), disk=("/mnt/disk1", 40, 15), gpu_log=True, tunnel=("push",), task_vars=WS_TASK_VARS),
+                roles=(), disk=("/mnt/disk1", 40, 15), gpu_log=True, tunnel=("push",)),
     "dicc": dict(label="DICC", hostname=r"(login|gpu|cpu)\d+", ssh="dicc", scheduler="slurm", repo="~/Projects/demo", code=None,
                  data="~/st/DEMO_DATA", conda=(FAKE_CONDA, "base0"),
                  envs={"base": ("conda", "base0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                        "alt2": ("venv", FAKE + "/venv/alt2", "base"), "x3": ("venv", FAKE + "/venv/x3", "base"),
                        "x1": ("venv", FAKE + "/venv/x1", "base"), "stats": ("conda", "stats0")},
-                 groups={}, roles=("train", "backup"), disk=None, gpu_log=False,
-                 jobs=("gpu", "cpu"), tunnel=("push", "pull"),
+                 groups={}, roles=("backup",), disk=None, gpu_log=False,
+                 tunnel=("push", "pull"),
                  transfer_job="-p cpu-part --qos=normal -c 2 --mem=2G",
                  env_job="-p cpu-part --qos=normal -c 8 --mem=16G -t 120"),
 }
@@ -53,7 +53,7 @@ SITES = {
                        "alt2": ("venv", FAKE + "/venv/alt2", "base")}, roles=("train",),
                  groups={"gpu1": (1, "1", {}), "cpu": (1, None, {})}, worker=dict(group="gpu1", id="w7e2837"), slots=1,
                  cpu_worker=dict(group="cpu", id="w1dadee", cpus=8),
-                 pueue="~/.local/bin/pueue", tunnel=("push", "pull"), adopt=["~/DEMO_DATA", "lab0"], budget=(100, 50),
+                 pueue="~/.local/bin/pueue", tunnel=("push", "pull"), adopt=["lab0"], budget=(100, 50),
                  task_vars=WS_TASK_VARS, stage_tmp=False, relay=True),
     "dicc1": dict(label="DICC", hostname=r"(login|gpu|cpu)\d+", ssh="dicc", scheduler="slurm", root="~/q", cap=85, budget=(15, 30),
                   conda=(FAKE_CONDA, "base0"),
@@ -67,7 +67,7 @@ SITES = {
                  conda=(FAKE_CONDA, "w0"), envs={"base": ("conda", "w0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                        "alt2": ("venv", FAKE + "/venv/alt2", "base")}, roles=("train",),
                  groups={"gpu0": (1, "0", {"TASK_GPU_IDLE": "60"})}, worker=dict(group="gpu0", id="wd2c85f"), slots=1,
-                 pueue="~/.local/bin/pueue", tunnel=("push", "pull"), adopt=["~/DEMO_DATA", "lab1"],
+                 pueue="~/.local/bin/pueue", tunnel=("push", "pull"), adopt=["lab1"],
                  budget=(100, 50), task_vars=WS_TASK_VARS, stage_tmp=False, relay=True),
 }
 RELAY = {k: v for k, v in SITES.items() if v.get("relay")}
@@ -121,7 +121,7 @@ def whoami():
         if re.match(m["hostname"], h):
             return name
     for name, m in MACHINES.items():
-        if os.path.isdir(expand(m["data"])):
+        if m.get("data") and os.path.isdir(expand(m["data"])):
             return name
     return None
 

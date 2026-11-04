@@ -6,11 +6,11 @@
 # 还空着一半显存，再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。
 # CPU 跟不上的训练（nnU-Net）会变成 2 个，GPU 跑满的（SwinUNETR、U-Mamba）自然只训 1 个。训完一个再领下一个；
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的，空着等（有了就领），等满 40 分钟还没有就退出
-# （11/2 起：排了几天的作业开始时缓冲刚好空着、数据还在传，不再几秒就结束）。作业到时限被停掉时，没训完的任务交还队列，
+# （11/2 起：排了几天的作业开始时队列里刚好没有能领的、数据还在传，不再几秒就结束）。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
 #   bash dicc_worker.sh                     （scripts/taskq/queue/worker.sbatch → worker_start.sh）
 # WORKER_DEVICE=cpu（scripts/taskq/queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
-# 不等排在前面的、不看 GPU；没有能领的就结束（由 box 上的 refill.py 在有这类任务时才交）。
+# 不等排在前面的、不看 GPU；没有能领的就结束（由 box 上的 relay.py 在有这类任务时才交）。
 # 出问题时不让排队的作业空跑掉：
 #   - 任务卡住（10/23 起）：开始 30 分钟以后，任务的日志和结果文件夹都 30 分钟没有变化，就停掉它、交还（不算失败），
 #     马上领下一个；本作业不再领它。停不下来的（卡在读写上）3 分钟后不再等它。读不了日志或结果文件夹时不判断；
@@ -248,7 +248,7 @@ on_term() {  # run_task.sh 自己 8 秒后强制停训练；15 秒还没退出�
     rm -f "$ERRF"
     rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"
     (( INSLURM )) && exit 143
-    exit 0  # 不在 Slurm 里：交还好了算正常结束，feed.py 照常重开（失败的 worker 它不重开）
+    exit 0  # 不在 Slurm 里：交还好了算正常结束，relay.py 照常重开（失败的 worker 它不重开）
 }
 trap on_term TERM INT
 
@@ -427,11 +427,11 @@ done
 kill_tree "$GPUMON"
 rm -f "$ERRF"
 rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
-# 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；不是代码包的退出，由 feed.py 重开
+# 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；不是代码包的退出，由 relay.py 重开
 NEW=$(readlink -f "$(dirname "$REPO")/current" 2> /dev/null)
 if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $NEW/scripts/taskq/queue/worker_start.sh ]]; then
     echo "$(ts) 换成新代码 $(basename "$NEW") 接着跑"
     exec bash "$NEW/scripts/taskq/queue/worker_start.sh"
 fi
-[[ -n $RESTART ]] && echo "$(ts) 退出，由 feed.py 用新代码重开"
+[[ -n $RESTART ]] && echo "$(ts) 退出，由 relay.py 用新代码重开"
 exit 0

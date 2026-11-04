@@ -52,28 +52,6 @@ def run(cmd, host=None, timeout=120, input=None, ssh=None):
         return 124, "", str(e)
 
 
-HAVE_END = "@@END"
-HAVE_NODATA = "@@NODATA"
-
-
-def have_script(paths, data):
-    """bash 片段：在数据目录 data 下，打印 paths 里已经有的（文件夹里有 .incomplete 的是没传完的，不算），每行一个，最后一行 @@END。
-    数据目录不在或进不去时只打 @@NODATA、不打 @@END（parse_have → None）、退出码 3。"""
-    import shlex
-    ps = " ".join(shlex.quote(p) for p in paths)
-    return (f'(cd {data} 2>/dev/null || {{ echo "{HAVE_NODATA}"; exit 3; }}; for p in {ps}; do [[ -e $p && ! -e $p/.incomplete ]] && echo "HAVE|$p"; done; '
-            f'echo "{HAVE_END}")\n')
-
-
-def parse_have(out):
-    """have_script 的输出 → 有的路径的 set；没有结束标记（输出被截断、脚本没跑完）→ None，不当成"文件不在"。"""
-    lines = out.splitlines()
-    if HAVE_END not in lines:
-        return None
-    return {ln[5:] for ln in lines[:lines.index(HAVE_END)] if ln.startswith("HAVE|")}
-
-
-# ---------------- 时间 ----------------
 def pueue_time(x):
     """pueue 的时间（带时区；秒的小数部分可能是 0、3、6、9 位）→ 时间戳；没有 → None。"""
     import re
@@ -136,12 +114,7 @@ def new_record(machine, label, step, key, **kw):
     import time
     rec = dict(machine=machine, id=None, label=label, added=time.time(), step=step, key=key,
                **{k: v for k, v in kw.items() if v is not None})
-
-    def add(recs):
-        if rec.get("out"):  # 训练机上做的步骤：同一个标签以前的记录作废
-            recs = [r for r in recs if not (r.get("out") and r["machine"] == machine and r["label"] == label)]
-        return recs + [rec]
-    update_records(add)
+    update_records(lambda recs: recs + [rec])
     return rec
 
 
@@ -165,7 +138,7 @@ LOST = 3600  # 加任务时出错、找不到任务的记录留多久
 
 def sync_records(pueue, recs, now=None):
     """各机器的 pueue（qs --json）+ 记录 → 新的记录（不写文件）：没有任务号的按"同一台机器、同标签、创建时间不早于
-    记录的时间"找回；任务不在了的删掉，训练机上做的步骤（有 out）留到那边的结果清理完。读不到的机器的记录不动。"""
+    记录的时间"找回；任务不在了的删掉。读不到的机器的记录不动。"""
     import time
     now = now or time.time()
     taken = {(r["machine"], r["id"]) for r in recs if r.get("id") is not None}
@@ -185,15 +158,14 @@ def sync_records(pueue, recs, now=None):
                 continue
             out.append(r)
             continue
-        if r.get("out") or any(t["id"] == r["id"] and (t.get("label") or "") == r["label"] for t in tasks):
+        if any(t["id"] == r["id"] and (t.get("label") or "") == r["label"] for t in tasks):
             out.append(r)
     return out
 
 
 def identify(machine, task, recs):
-    """这台机器上的 pueue 任务是谁 → dict(step, key, 可能还有 src、to、of、paths、group、out…)；认不出 → None。
-    先看记录（任务号和标签都对上）；没有记录的（手动加的）按命令认训练（run_task.sh）、拉回（fetch_task.sh <源> <key>）、
-    归档（archive_task.sh <机器> <key>）。"""
+    """这台机器上的 pueue 任务是谁 → dict(step, key, …)；认不出 → None。
+    先看记录（任务号和标签都对上）；没有记录的（手动加的）按命令只认训练（run_task.sh）。"""
     label = task.get("label") or ""
     for r in recs:
         if r["machine"] == machine and r.get("id") == task["id"] and r["label"] == label:
@@ -221,8 +193,6 @@ def from_command(cmd):
                 return dict(step="train", key=spec.resolve(rest[0], spec.parse_kv([r for r in rest[1:] if "=" in r]))["key"])
             except Exception:  # noqa: BLE001
                 return None
-        if b in ("fetch_task.sh", "archive_task.sh") and len(rest) >= 2:
-            return dict(step="fetch" if b == "fetch_task.sh" else "archive", src=rest[0], key=rest[1])
     return None
 
 

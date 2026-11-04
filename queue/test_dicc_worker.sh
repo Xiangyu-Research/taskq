@@ -40,7 +40,7 @@ SLURM_JOB_ID=900102 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1b.out" 2>&1
 check "本机没有的环境不领，别的照常领" '[[ $(grep -c ^end $T/train.log) == 1 ]] && grep -q "end .* t/y" $T/train.log && grep -q "没有能领的任务" $T/w1b.out'
 fi
 
-# 1c. Slurm 里开始时没有能领的（缓冲刚好空着，11/2）：空着等，来了任务就领；一直没有，空等 IDLE_MAX 后结束
+# 1c. Slurm 里开始时没有能领的（11/2）：空着等，来了任务就领；一直没有，空等 IDLE_MAX 后结束
 if want 1c; then
 reset
 : > "$TASKQ_DIR/tasks.jsonl"
