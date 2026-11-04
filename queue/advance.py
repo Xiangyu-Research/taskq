@@ -56,6 +56,7 @@ import experiments as E  # noqa: E402
 import refill  # noqa: E402
 import shift  # noqa: E402
 import common as C  # noqa: E402
+import taskq  # noqa: E402
 
 LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
 LIVE_ST = refill.LIVE
@@ -478,7 +479,7 @@ def run(s, dry=False, q=None, tq=None, rm=None):
             what = f"{t['label']}：{t['why']}：{' '.join(t['qks'])}"
             if live_mode:
                 rc, out = (rm or taskq_remove)(t["qks"])
-                if rc == 0:
+                if rc in (0, taskq.GONE):  # GONE：都已经不在队列里
                     lines.append(f"撤了 {what}")
                 else:
                     stuck[f"advance:unqueue:{t['key']}"] = f"{t['label']}：从任务队列撤掉出错（{out[-200:]}）"

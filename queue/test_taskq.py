@@ -547,10 +547,10 @@ rc, out = tq6("next", "--worker", "970", "--envs", ALL, "--device", "cpu")
 rc2, out2 = tq6("remove", "free/z")
 check("remove：有人领着的不删（退出码 3）", rc == 0 and out.startswith("free/z\n") and rc2 == taskq.REFUSED and "claimed" in out2
       and "free/z" in st6())
-rc, out = tq6("remove", "infer/x/frag_4", "eval/x/frag_4")
+rc, out = tq6("remove", "infer/x/frag_4", "eval/x/frag_4", "nosuch/key")
 s6 = st6()
-check("remove：连同依赖它的一起删 → 都删掉，别的不动", rc == 0 and "infer/x/frag_4" not in s6 and "eval/x/frag_4" not in s6
-      and kt in s6 and "free/z" in s6)
+check("remove：连同依赖它的一起删 → 都删掉，别的不动；一批里已经不在的跳过，退出码 0（11/4）", rc == 0 and "infer/x/frag_4" not in s6
+      and "eval/x/frag_4" not in s6 and kt in s6 and "free/z" in s6 and "队列里没有：nosuch/key" in out)
 
 # ---------------- 10/31：总队列在 box、分给执行机（take --assign） ----------------
 TQ7 = os.path.join(T, "taskq7")

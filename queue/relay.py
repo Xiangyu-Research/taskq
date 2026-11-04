@@ -519,7 +519,7 @@ def execute(name, acts, s, run_add=None):
                 msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
             elif a["op"] == "unq":
                 r = RM.rtq(name, f"remove {shlex.quote(a['rkey'])}")
-                if r and r[0] == 0:
+                if r and r[0] in (0, taskq.GONE):  # GONE：那边已经没有了
                     ST.update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(k) or {}).update(unq=time.time()))
                     msgs.append(f"{L} 的队列里删了 {k}（总队列里分给了 {a['to']}，结果留着给它收编）")
                 else:

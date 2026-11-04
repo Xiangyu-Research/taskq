@@ -772,7 +772,7 @@ def cmd_remove(a):
     """从队列里删掉没人在做的任务（10/28：DICC 停机期间把排在那边的评测挪回 box）。有活着的领取（不管状态）、训练日志刚更新的不删；
     别的任务的 after 里有它、又不一起删的不删。删的时候连同它的失败、停止、缺输入、交还记录和过期的领取一起删（同一个 key 以后再加进来
     是新任务，11/4）；跳过（skips/）只在执行机的队列（带 spec 的记录）里删，总队列里留着（哪台执行机训不了，换个时候再加也一样）。
-    结果文件不动。退出码 0 删了；REFUSED 不删；GONE 队列里没有（什么都没删）。"""
+    结果文件不动。退出码 0 删了（一批里已经不在的跳过）；REFUSED 不删；GONE 一个都不在队列里（什么都没删）。"""
     root = data_root()
     with Lock():
         tasks = read_tasks()
@@ -802,17 +802,18 @@ def cmd_remove(a):
             print(f"不删：{b}")
         if bad:
             return REFUSED
-        if missing:
+        keys = [k for k in a.keys if k in by]
+        if not keys:
             return GONE
-        write_tasks([t for t in tasks if t["key"] not in a.keys])
-        for k in a.keys:
+        write_tasks([t for t in tasks if t["key"] not in keys])
+        for k in keys:
             for sub in RECORDS + (("skips",) if by[k].get("spec") else ()):
                 try:
                     os.remove(os.path.join(TQ, sub, safe(k)))
                 except FileNotFoundError:
                     pass
             shutil.rmtree(os.path.join(TQ, "claims", safe(k)), ignore_errors=True)  # 只剩过期的
-    for k in a.keys:
+    for k in keys:
         print(f"删了：{k}")
     return 0
 

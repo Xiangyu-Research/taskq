@@ -724,6 +724,10 @@ check("训练交还了（free）→ 先前提前排的推理撤掉", len(x) == 1
 rm_ = []
 A.run(psnap(state="free", assigned=None, extra=[IR]), q=lambda *a: 0, tq=lambda n, a: (0, ""), rm=lambda ks: rm_.append(ks) or (0, ""))
 check("撤掉的调用 taskq.py remove", rm_ == [[SBI]])
+_, st_ = A.run(psnap(state="free", assigned=None, extra=[IR]), q=lambda *a: 0, tq=lambda n, a: (0, ""), rm=lambda ks: (A.taskq.GONE, "队列里没有"))
+check("撤的时候队列里已经没有了（remove 退出码 GONE）：不算卡住（11/4）", not any(k.startswith("advance:unqueue") for k in st_))
+_, st_ = A.run(psnap(state="free", assigned=None, extra=[IR]), q=lambda *a: 0, tq=lambda n, a: (0, ""), rm=lambda ks: (A.taskq.REFUSED, "不删"))
+check("remove 拒绝（REFUSED）：报卡住", any(k.startswith("advance:unqueue") for k in st_))
 A.M.RELAY["dicc2"].pop("cap")
 if CAPLF is not None:
     A.M.RELAY["dicc2"]["cap"] = CAPLF
