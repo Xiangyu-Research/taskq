@@ -9,6 +9,7 @@ taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后�
 import glob
 import importlib.util
 import itertools
+import json
 import os
 import shlex
 import sys
@@ -217,16 +218,97 @@ def names_of(model_dir, *names):
     return [str((e.get("names") or {}).get(n, "")) for n in names]
 
 
+# ---------------- 命令行 ----------------
+def jsonable(v):
+    """实验表里的值 → 能写成 JSON 的：函数、类写成名字，别的对象（如步骤的 done）写成 {"type": 类名, 属性…}（属性里的函数也写成名字）。"""
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    if isinstance(v, dict):
+        return {str(k): jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return [jsonable(x) for x in (sorted(v, key=str) if isinstance(v, (set, frozenset)) else v)]
+    if callable(v) and hasattr(v, "__name__"):
+        return getattr(v, "__qualname__", v.__name__)
+    attrs = {k: jsonable(x) for k, x in vars(v).items() if not k.startswith("_")} if hasattr(v, "__dict__") else {}
+    return dict(type=type(v).__name__, **attrs)
+
+
+def task_json(t):
+    """一个展开的任务 → proto.EXP_TASK_FIELDS。"""
+    e = experiment(t["exp"]) or {}
+    return dict(key=t["key"], exp=t["exp"], recipe=t["recipe"], params=jsonable(t["params"]), each=jsonable(t.get("each") or {}),
+                short=short(t), label=label(e, t) if e else t["key"], names=jsonable(t["spec"].get("names") or {}),
+                spec=jsonable(t["spec"]))
+
+
+def _line(obj):
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
+
+
+def main(argv):
+    """env-of、name-of（执行机上的脚本用，输出不变）；list、tasks（--json 一行 JSON，字段见 proto.EXP_*）。"""
+    import argparse
+    import proto
+    if argv[:1] == ["env-of"] or argv[:1] == ["name-of"]:
+        if argv[0] == "env-of" and len(argv) == 2:
+            try:
+                print(env_of(argv[1]))
+            except spec.SpecError as err:
+                print(err, file=sys.stderr)
+                return 1
+            return 0
+        if argv[0] == "name-of" and len(argv) >= 3:
+            try:
+                print("\n".join(names_of(argv[1], *argv[2:])))
+            except spec.SpecError as err:
+                print(err, file=sys.stderr)
+                return 1
+            return 0
+        print(USAGE, file=sys.stderr)
+        return 2
+    ap = argparse.ArgumentParser(prog="experiments.py", description="实验表（OUTPUTS[\"experiments\"]）",
+                                 epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("list", help="实验表的条目")
+    p.add_argument("--json", action="store_true", help="一行 JSON（proto.EXP_LIST_TOP）")
+    p = sub.add_parser("tasks", help="展开后的任务")
+    p.add_argument("--exp", nargs="+", metavar="ID", help="只列这几个实验的")
+    p.add_argument("--json", action="store_true", help="一行 JSON（proto.EXP_TASKS_TOP，每个任务 proto.EXP_TASK_FIELDS）")
+    a = ap.parse_args(argv)
+    try:
+        exps, final = load()
+        if a.cmd == "list":
+            if a.json:
+                _line(dict(version=proto.VERSION, experiments=jsonable(exps), final=jsonable(final)))
+            else:
+                n = {}
+                for t in tasks().values():
+                    n[t["exp"]] = n.get(t["exp"], 0) + 1
+                for e in exps:
+                    print(f"{e['id']}\t{e.get('exp', '')}\t{e.get('recipe', '')}\t{n.get(e['id'], 0)} 个任务\t{e.get('label', '')}")
+            return 0
+        want = a.exp or []
+        bad = [x for x in want if experiment(x) is None]
+        if bad:
+            print(f"实验表里没有 {'、'.join(bad)}", file=sys.stderr)
+            return 1
+        ts = [t for t in tasks().values() if not want or t["exp"] in want]
+        if a.json:
+            _line(dict(version=proto.VERSION, tasks=[task_json(t) for t in ts]))
+        else:
+            for t in ts:
+                print(f"{t['key']}\t{t['exp']}\t{label(experiment(t['exp']), t)}")
+        return 0
+    except spec.SpecError as err:
+        print(err, file=sys.stderr)
+        return 1
+
+
+USAGE = """用法：experiments.py env-of <模型文件夹>
+      experiments.py name-of <模型文件夹> <名字>…（每行一个）
+      experiments.py list [--json]
+      experiments.py tasks [--exp ID…] [--json]"""
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "env-of":
-        try:
-            print(env_of(sys.argv[2]))
-        except spec.SpecError as err:
-            sys.exit(str(err))
-    elif len(sys.argv) >= 4 and sys.argv[1] == "name-of":
-        try:
-            print("\n".join(names_of(sys.argv[2], *sys.argv[3:])))
-        except spec.SpecError as err:
-            sys.exit(str(err))
-    else:
-        sys.exit("用法：experiments.py env-of <模型文件夹>\n      experiments.py name-of <模型文件夹> <名字>…（每行一个）")
+    sys.exit(main(sys.argv[1:]))

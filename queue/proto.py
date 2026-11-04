@@ -158,6 +158,26 @@ COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "r
 COLLECT_TOP = ("tasks", "seglogs", "stuck", "errors")  # spec.collect 的结果
 COLLECT_TASK = ("runs", "final", "archived", "dice", "debug", "resumable")  # 每个任务
 SEGLOG_FIELDS = ("name", "first", "trained")
+LOG_HEAD_CODE = r"代码 (\S+?)，"  # 分段日志第一行（run_task.sh 写）里代码提交号的写法（正则）
+
+# experiments.py list --json / tasks --json（11/4）：一行 JSON，可调用的对象写成名字，别的对象写成 {"type": 类名, 属性…}
+EXP_LIST_TOP = ("version", "experiments", "final")      # experiments：实验表的条目（experiments.EXP_FIELDS 的字段）；final：FINAL 的步骤
+EXP_TASKS_TOP = ("version", "tasks")
+EXP_TASK_FIELDS = ("key", "exp", "recipe", "params", "each", "short", "label", "names", "spec")  # label：box pueue 标签里的任务名
+
+# overview.py --json（11/4）：登记表这类汇总要的全部状态，一行 JSON
+OVERVIEW_TOP = ("version", "now", "hub", "data", "queue", "sources", "machines", "tasks", "health", "code")
+OVERVIEW_QUEUE_TOP = ("enabled", "readable")               # 总队列开着没、读到没
+OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # 收集到训练状态的地方；kind：machine（gather 收集的）/ relay（relay.py 的 status.json）
+OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus：[{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
+OVERVIEW_PUEUE = ("groups", "tasks", "error")              # tasks 每个：qs --json 的字段，加 start_ts、end_ts（秒）
+OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
+                 "eta", "parts", "commits")
+OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank：总队列里没做完的任务中排第几（1 起）
+OVERVIEW_COPY = ("where", "source", "final", "archived", "epochs", "start", "last", "runs", "dice", "debug", "resumable")
+OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # 分段日志：作业、第几段、哪台机器、至少做完一轮没、代码提交号
+OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified")
+TOTAL_INFO = "num_epochs"  # 进度读法 INFO 里"一共几轮"的键（runs 里没有 total 时用；overview 的 total、progress、eta）
 
 # ---------------- 报警（health.py 的问题编号；plain.py 按 kind 说白话） ----------------
 # 编号 = kind:<参数>…，参数按下面的顺序用 ":" 连起来；同一编号的问题只推一次
