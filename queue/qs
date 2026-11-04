@@ -64,11 +64,18 @@ def tasks(d):
     return sorted(rows, key=lambda r: (r["group"], r["id"]))
 
 
-def main():
-    args = sys.argv[1:]
-    as_json = "--json" in args
+def main(argv=None):
+    import argparse
     hosts = M.names("pueue")
-    machines = [a for a in args if a in hosts] or hosts
+    ap = argparse.ArgumentParser(description="各 pueue 机器的队列（只看）")
+    ap.add_argument("machines", nargs="*", metavar="机器", help=f"只看这几台（{'、'.join(hosts)}）；不给就都看")
+    ap.add_argument("--json", action="store_true", help="机器 → 任务列表，一行 JSON")
+    a = ap.parse_args(argv)
+    bad = [m for m in a.machines if m not in hosts]
+    if bad:
+        ap.error(f"不是 pueue 机器：{'、'.join(bad)}")
+    as_json = a.json
+    machines = a.machines or hosts
     out = {}
     for m in machines:
         try:
@@ -104,4 +111,4 @@ def _row(r):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

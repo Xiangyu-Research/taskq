@@ -633,6 +633,10 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
     cmd, a = argv[0], argv[1:]
+    helps = ("-h", "--help")
+    if cmd in helps or (cmd == "rsync" and a[:1] and a[0] in helps) or (cmd in ("push", "pull") and set(a) & set(helps)):
+        print(__doc__.strip())  # --help 不做事（rsync 只认紧跟着的第一个参数，后面的 -h 是 rsync 自己的）
+        return 0
     if cmd == "rsync":
         return wrap(a)
     if cmd in ("_fetch", "_send"):

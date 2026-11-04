@@ -413,7 +413,7 @@ rc2, p2 = _health(_bad, 12)
 ok("插件写错：health 退出码非零，推送一次（带出错的文件），同样的错下次不再推",
    rc1 != 0 and len(p1) == 1 and "zz_broken" in p1[0] and rc2 != 0 and len(p2) == 1)
 _mark = os.path.join(_lt, "home", ".cache", "phd-health", "load_error.txt")
-rc3, _ = _health(os.environ["TASKQ_PLUGINS"], 12, "--help")
+rc3, _ = _health(os.environ["TASKQ_PLUGINS"], 12, "--test")  # 不推真的（urlopen 换掉了）；--help 不做事，不清记录
 ok("插件修好后：正常 import，清掉出错记录", rc3 == 0 and not os.path.exists(_mark))
 shutil.rmtree(os.path.join(_lt, "home"))
 if os.path.exists(os.path.join(_lt, "pushed.log")):

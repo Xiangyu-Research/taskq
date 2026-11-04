@@ -967,7 +967,7 @@ def here():
 def cmd_status(a):
     s = local_status() if have_queue() or here() == queue_host() else None
     if s is None:
-        print("读不到队列")
+        print("读不到队列", file=sys.stderr)
         return 1
     if a.json:
         S.json_out({"version": proto.VERSION, **s})
@@ -988,11 +988,6 @@ def main(argv):
     if argv[:1] == ["--json-status"]:
         S.json_out(local_status())
         return 0
-    cmd = argv[0] if argv else ""
-    if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
-            and not have_queue() and here() != queue_host():
-        print(f"总队列在 {queue_host()}，在那边跑（本机没有 {tasks_path()}）")
-        return X["no_queue"]
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("next")
@@ -1042,10 +1037,10 @@ def main(argv):
     p = sub.add_parser("set")
     p.add_argument("key")
     p.add_argument("kv", nargs="+")
-    p = sub.add_parser("set-nice")
+    p = sub.add_parser("set-nice", aliases=["nice"])
     p.add_argument("--nice", type=int, required=True)
     p.add_argument("keys", nargs="+")
-    p = sub.add_parser("remove")
+    p = sub.add_parser("remove", aliases=["rm"])
     p.add_argument("keys", nargs="+")
     p = sub.add_parser("stop")
     p.add_argument("--why", default="")
@@ -1057,11 +1052,16 @@ def main(argv):
     p.add_argument("key")
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true", help="一行 JSON（前缀 proto.JSON_MARK）：{version, enabled, tasks, …}（proto.STATUS_TOP、STATUS_FIELDS；跨版本用，11/4）")
-    a = ap.parse_args(argv)
+    a = ap.parse_args(argv)  # 先解析：--help、用法错都不碰队列
+    cmd = {"nice": "set-nice", "rm": "remove"}.get(a.cmd, a.cmd)
+    if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
+            and not have_queue() and here() != queue_host():
+        print(f"总队列在 {queue_host()}，在那边跑（本机没有 {tasks_path()}）", file=sys.stderr)
+        return X["no_queue"]
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,
                 stop=cmd_stop, resume=cmd_resume,
-                missing=cmd_missing, input_ok=cmd_input_ok)[a.cmd.replace("-", "_")](a)
+                missing=cmd_missing, input_ok=cmd_input_ok)[cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

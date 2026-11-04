@@ -47,7 +47,7 @@ CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
-from proto import alert_id, S_CLAIMED, S_DONE, S_WAITING, S_FREE  # noqa: E402
+from proto import alert_id, alert_msg, S_CLAIMED, S_DONE, S_WAITING, S_FREE  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
@@ -545,19 +545,32 @@ def log(lines, stuck, live_mode):
             f.writelines(f"{datetime.now():%F %T}{mode} {ln}\n" for ln in out)
 
 
-if __name__ == "__main__":
-    import health as H  # noqa: E402
-    todo, stuck = plan(H.gather())
+def describe(todo, stuck):
+    """plan() 的结果 → 给人看的行。"""
+    out = []
     for t in todo:
         if t.get("op") == "taskq":
-            print(f"会排 {t['label']:28} 任务队列（档位 {t['qnice']}） {' '.join(shlex.quote(a) for a in t['args'])}")
+            out.append(f"会排 {t['label']:28} 任务队列（档位 {t['qnice']}） {' '.join(shlex.quote(a) for a in t['args'])}")
         elif t.get("op") == "unqueue":
-            print(f"会撤 {t['label']:28} {t['why']}：{' '.join(t['qks'])}")
+            out.append(f"会撤 {t['label']:28} {t['why']}：{' '.join(t['qks'])}")
         else:
-            print(f"会排 {t['label']:28} {t['group']:9} {t['cmd']}")
-    for x in NOTES:
-        print(f"没排 {x}")
-    for k, v in stuck.items():
-        print(f"卡住 {v}")
+            out.append(f"会排 {t['label']:28} {t['group']:9} {t['cmd']}")
+    out += [f"没排 {x}" for x in NOTES]
+    out += [f"卡住 {alert_msg(v)}" for v in stuck.values()]
     if not todo and not stuck:
-        print("没有要排的")
+        out.append("没有要排的")
+    return out
+
+
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description="训完以后的步骤：只看现在会排什么（真排由健康检查调用 run）")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看（默认就是）")
+    ap.parse_args(argv)
+    import health as H  # noqa: E402
+    print("\n".join(describe(*plan(H.gather()))))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
