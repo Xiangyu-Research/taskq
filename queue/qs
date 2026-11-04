@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """查看各 pueue 机器（envs/machines.py）的队列（2026-10-16）：每个任务一行，按机器、组排列；已结束的只列最近 24 小时的。
 
-    scripts/taskq/queue/qs            都看（在 box 上运行；别的机器经 ssh）
-    scripts/taskq/queue/qs <机器>     只看一台（如 qs lab）
-    scripts/taskq/queue/qs --json     机器 → 任务列表（scripts/taskq/monitor/health.py 用）：status 是给人看的（如 "Failed (1)"），
-                                程序看 result（Success / Failed / Killed / …，没结束是 None）和 code（退出码，没有是 None）
+    taskq pueue-status              都看（在 box 上运行；别的机器经 ssh）
+    taskq pueue-status <机器>       只看一台（如 taskq pueue-status lab1）
+    taskq pueue-status --json       机器 → 任务列表（monitor/health.py 用）：status 是给人看的（如 "Failed (1)"），
+                                    程序看 result（Success / Failed / Killed / …，没结束是 None）和 code（退出码，没有是 None）
+（原来的 queue/qs 照旧能用，参数一样。）
 wait 组里在跑的任务（拉回、归档、传输）下面多一行：输出的最后一行。
 单个任务的输出：pueue log <编号>（别的机器上：ssh lab ~/.local/bin/pueue log <编号>）。
 """
@@ -18,7 +19,7 @@ import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "sites"))
 import mtab as M  # noqa: E402
-import common as C  # noqa: E402  scripts/taskq/queue/common.py
+import common as C  # noqa: E402
 
 PUEUE = os.path.expanduser("~/.local/bin/pueue")
 ME = M.whoami()

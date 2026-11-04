@@ -41,14 +41,16 @@ plugins = ["research/common/taskq_plugins"]  # 插件文件夹
 | `taskq boot [--gpu-log]` | 开机：启动 pueued、放回被打断的任务 | `queue/on_boot.sh` |
 | **执行机** | | |
 | `taskq site status\|bundle\|resend <名字>` | 那边的队列；打包推过去；重新解析传过去的任务 | `relay.py status\|bundle\|resend` |
-| `taskq site env <机器> <环境> [-n]`、`taskq site envs <机器>` | 建环境；看环境的状态 | `sites/site.py` |
+| `taskq site env <机器> <环境> [-n]`、`taskq site envs <机器>` | 建环境；看环境的状态 | `sites/envs_cli.py`（11/4 前叫 `sites/site.py`） |
 | `taskq site setup [名字]` | pueue 常驻进程、组、crontab | `queue/setup.sh` |
 | **实验** | | |
 | `taskq exp list`、`taskq exp tasks [--json]` | 实验、展开后的任务 | — |
 | `taskq exp env-of <模型文件夹>`、`taskq exp name-of <模型文件夹> <名字>…` | 训它用的环境；实验的 `names` | `experiments.py env-of\|name-of` |
 | **其他** | | |
 | `taskq tunnel rsync\|push\|pull …` | 经隧道传大批文件 | `sync/tunnel.py` |
+| `taskq tunnel push-dirs <机器> <源目录> <目标目录> <子目录>…` | 几个子目录整个传过去，带未完成标记，最后逐个文件核对 MD5 | `sync/tunnel_push.sh` |
 | `taskq pueue-add <组> [选项] -- '<命令>'` | 往本机 pueue 加一次性任务 | `queue/q` |
+| `taskq pueue-status [机器…] [--json]` | 各 pueue 机器的队列（只看） | `queue/qs` |
 | `taskq snapshot <克隆>` | 按提交号的代码副本 | `sync/snapshot.sh` |
 | `taskq check` | 核对整个项目 | — |
 | `taskq path lib\|api\|core` | 核心的 `queue/`（插件 `import taskq_api` 用）、核心的根 | — |

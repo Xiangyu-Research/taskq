@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""任务说明（2026-10-18）：做法（scripts/taskq/queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
-调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（scripts/taskq/monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
+"""任务说明（2026-10-18）：做法（queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
+调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
 
 命令行：
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
@@ -40,7 +40,7 @@ BUILTIN = ("data", "repo")  # 运行时按机器展开的名字
 FRESH_LOG = P.FRESH_LOG
 SAFE = P.SAFE
 safe = P.safe  # key → 文件名（领取记录、分段日志）
-JSON_MARK = P.JSON_MARK  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/taskq/queue/README.md 的"约定"）
+JSON_MARK = P.JSON_MARK  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（queue/README.md 的"约定"）
 
 
 COLLECT_WAIT = 90  # remote_collect 一共等几秒（各任务同时读）
@@ -579,7 +579,7 @@ def main(argv):
         return DISK_RC
 
 
-DISK_RC = P.EXIT["done_unreadable"]  # spec.py done 读不了盘（scripts/taskq/queue/README.md 的"约定"）
+DISK_RC = P.EXIT["done_unreadable"]  # spec.py done 读不了盘（queue/README.md 的"约定"）
 
 
 def _main(cmd, args):

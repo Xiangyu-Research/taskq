@@ -4,7 +4,7 @@ box 上的记账见 relay_store.py，传数据和拉回见 relay_transfer.py，�
 那边的根目录 R（machines.py 的 root）的布局、标志文件、时间常数都在 proto.py（ROOT、MKDIRS、blob、QUEUE、claim_alive）：
 代码包在 code/<包名>，code/current 指向在用的那个（relay_bundle.py 打包，relay.py deploy 推过去、旧包留最新 3 个，4 天以上的删）；
 queue 是它自己的任务队列（taskq.py，key 和总队列相同）；blobs/<h[:2]>/<h> 是按 sha256 存的数据文件（内容相同的只传一次）；
-data 是数据目录，相对路径和 box 的一样：每个任务的输入是指向 blobs 的软链接（和插件生成的小文件，scripts/taskq/sites/names.py），
+data 是数据目录，相对路径和 box 的一样：每个任务的输入是指向 blobs 的软链接（和插件生成的小文件，sites/names.py），
 产出照常写。box 上 state.json 记下每个任务放了哪些路径（视图、输入、产出），删一个任务时只删别的任务不用的（相同、上级、下级都算在用）。
 
 发过去的小程序在那边的代码包里跑（那边可能是旧包，没有 proto.py）：用到的协议常数在这里嵌进去（PRE），不在那边 import 调度的文件；

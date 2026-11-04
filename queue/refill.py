@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""relay 用的挑任务和补作业的规则（2026-10-18）：scripts/taskq/queue/relay.py 替执行机领任务时调用。
+"""relay 用的挑任务和补作业的规则（2026-10-18）：queue/relay.py 替执行机领任务时调用。
   - 挑任务：candidates（能领的、按先后排）、next_pick（下一个领哪个、要传哪些数据）、progress（哪台机器上有进度）、data_gb；
   - Slurm 补作业：slurm_plan（GPU worker 按 envs/policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)，
-    排着和在跑的不到上限（sacctmgr 的 MaxSubmitPU，没设时按 scripts/taskq/sites/slurm.py 的 SUBMIT_CAP）减去留给别的作业的名额时，
-    每个空位交一个 scripts/taskq/queue/worker.sbatch；纯 CPU 任务（device=cpu）有 SLURM[机器]["cpu"] 时交 cpu_worker.sbatch，
+    排着和在跑的不到上限（sacctmgr 的 MaxSubmitPU，没设时按 sites/slurm.py 的 SUBMIT_CAP）减去留给别的作业的名额时，
+    每个空位交一个 queue/worker.sbatch；纯 CPU 任务（device=cpu）有 SLURM[机器]["cpu"] 时交 cpu_worker.sbatch，
     不超过 min(这类任务数, 最多几个)，作业领不到任务就结束）。读作业数、交作业经 slurm.py；
   - box 上的任务：add（先记任务记录再用 q 加）、then_check（做完马上跑一次健康检查）。
 """
@@ -122,7 +122,7 @@ def sh(cmd, host=None, timeout=300):
 
 
 def q(name, args, run=sh):
-    """在某台 pueue 机器上用 scripts/taskq/queue/q 加任务 → 任务号。"""
+    """在某台 pueue 机器上用 queue/q 加任务 → 任务号。"""
     m = M.MACHINES[name]
     qp = shlex.quote(cfg.local("queue", "q")) if m["ssh"] is None else cfg.rel("queue", "q")  # 本机：核心的绝对路径（11/4）
     rc, out = run(f"cd {m['repo']} && {qp} {args}", m["ssh"])
@@ -134,7 +134,7 @@ def q(name, args, run=sh):
 
 
 def add(name, label, step, key, args, run=sh, **rec):
-    """先记下（scripts/taskq/queue/common.py 的任务记录）、再在这台机器上加任务 → 任务号。"""
+    """先记下（queue/common.py 的任务记录）、再在这台机器上加任务 → 任务号。"""
     r = C.new_record(name, label, step, key, **rec)
     tid = q(name, args, run)
     C.set_record_id(r, tid)
@@ -198,7 +198,7 @@ def cpu_plan(tq, have, conf, free=None):
 
 
 def slurm_plan(tq, st, conf):
-    """Slurm 类机器要补交的 worker 作业 → ([(QOS, 时限, 交几个, sbatch 文件)], 不交的原因)。st：scripts/taskq/sites/slurm.py 的 status；
+    """Slurm 类机器要补交的 worker 作业 → ([(QOS, 时限, 交几个, sbatch 文件)], 不交的原因)。st：sites/slurm.py 的 status；
     conf：envs/policy.py 的 SLURM[机器]（有 gpu 补 GPU worker，有 cpu 补 CPU worker）。"""
     subs, why = topup_plan(tq, st["counts"], conf["gpu"]) if conf.get("gpu") else ([], "")
     if conf.get("cpu"):

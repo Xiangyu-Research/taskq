@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """advance.py 的测试（2026-10-18）：临时目录里的假 box 文件、假的 pueue 快照，不连任何机器、不加任务。配置和实验表用
 testdata/ 的（toy 做法、demo 实验表）；真实验表的那几条在领域一侧的 test_advance_phd.py。
-    python3 scripts/taskq/queue/test_advance.py
+    python3 queue/test_advance.py
 """
 import json
 import os

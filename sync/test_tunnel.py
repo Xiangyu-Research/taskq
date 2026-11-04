@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/taskq/sync/tunnel.py 的测试：在本机模拟"那边"（假的 ssh 在本地 HOME 下跑命令），服务开在 127.0.0.1。在 box 上跑。"""
+"""sync/tunnel.py 的测试：在本机模拟"那边"（假的 ssh 在本地 HOME 下跑命令），服务开在 127.0.0.1。在 box 上跑。"""
 import hashlib
 import os
 import shutil

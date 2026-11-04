@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """relay_store.py 的清理（gc）的测试（2026-10-31）：在临时目录造一个假根目录，本地跑 GC_PY（同 relay_remote.rpy 的调用方式），剩余用 free 参数假装。
-    python3 scripts/taskq/queue/test_relay_store.py
+    python3 queue/test_relay_store.py
 """
 import json
 import os

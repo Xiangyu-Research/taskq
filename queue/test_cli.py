@@ -91,6 +91,14 @@ class Help(unittest.TestCase):
                 self.assertTrue(r.stdout.strip(), (path, h))
         self.assertEqual(tree(T), before, "--help 不改任何文件")
 
+    def test_usage_names_the_command(self):
+        """用法的第一行写的是调用的命令（不是别名的本名，如 rm 不显示成 remove；不是模块的文件名）。"""
+        for path in all_commands():
+            if not path:
+                continue
+            head = taskq(*path, "--help").stdout.strip().splitlines()[0]
+            self.assertIn(" ".join(["taskq", *path]), head, path)
+
     def test_help_word(self):
         self.assertEqual(taskq("help", "site", "status").stdout, taskq("site", "status", "--help").stdout)
 
@@ -103,12 +111,15 @@ class Help(unittest.TestCase):
 
     def test_old_scripts_help_does_not_act(self):
         before = tree(T)
-        for script in ("queue/shift.py", "queue/advance.py", "queue/feed.py", "monitor/health.py", "sites/site.py",
+        for script in ("queue/shift.py", "queue/advance.py", "queue/feed.py", "monitor/health.py", "sites/envs_cli.py",
                        "queue/qs", "queue/relay.py", "queue/taskq.py"):
             r = old(script, "--help")
             self.assertEqual(r.returncode, 0, (script, r.stderr[-500:]))
         for args in (("push", "--help"), ("rsync", "--help"), ("--help",)):
             self.assertEqual(old("sync/tunnel.py", *args).returncode, 0, args)
+        for h in ("--help", "-h"):
+            r = subprocess.run(["bash", os.path.join(CORE, "sync", "tunnel_push.sh"), h], env=OLD_ENV, capture_output=True, text=True)
+            self.assertEqual((r.returncode, bool(r.stdout.strip())), (0, True), h)
         self.assertEqual(tree(T), before)
 
 
@@ -132,6 +143,21 @@ class Routing(unittest.TestCase):
         self.assertEqual({t["key"]: t["nice"] for t in rows}["D1/V/1"], 3)
         self.assertEqual(taskq("rm", "D2/V/0").returncode, 0)
         self.assertEqual(taskq("rm", "D2/V/0").returncode, 4, "退出码照旧（4 = 队列里没有）")
+
+    def test_pueue_status_and_push_dirs_usage(self):
+        """新的两个入口转到原来的脚本：用法错退出码 2，什么也不连。"""
+        self.assertEqual(taskq("pueue-status", "no-such-machine").returncode, 2)
+        self.assertEqual(old("queue/qs", "no-such-machine").returncode, 2)
+        self.assertEqual(taskq("tunnel", "push-dirs", "lab1", T).returncode, 2)
+        self.assertEqual(taskq("tunnel", "push-dirs", "no-such-machine", T, "x", "y").returncode, 2)
+
+    def test_unknown_site_name(self):
+        """不是执行机的名字（如显示用的标签）：退出码 2，说有哪些，不连那边。"""
+        for args in (("site", "status", "NOPE2"), ("site", "bundle", "NOPE2"), ("site", "resend", "NOPE2"),
+                     ("internal", "fetch", "NOPE2", "k")):
+            r = taskq(*args)
+            self.assertEqual(r.returncode, 2, args)
+            self.assertIn("没有执行机 NOPE2（有：", r.stderr)
 
     def test_worker_next_exit_code(self):
         r = taskq("worker", "next", "--worker", "w1", "--envs", "nothing-here")

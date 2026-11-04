@@ -2,8 +2,8 @@
 同样的相对路径，参数原样送过去，结果在同样的相对路径拉回。唯一的换法：box 上数据目录外的绝对路径输入放到 abs/<路径>，
 参数里换成 {data}/abs/<路径>。
   path（通用，任何任务）：输入（spec 的 inputs 或 data）是数据目录下的文件夹（视图）、文件或 glob（展开成文件），或 box 上的绝对路径。
-  nnunet、nnunet_infer（research/common/taskq_plugins/relay_plugins.py，经 scripts/taskq/queue/relay_plugins.py 加载）：nnU-Net 训练、推理按参数列出要的文件，拉回后核对。
-任务用哪种：说明的 relay 字段（scripts/taskq/queue/recipes.py）。
+  nnunet、nnunet_infer（research/common/taskq_plugins/relay_plugins.py，经 queue/relay_plugins.py 加载）：nnU-Net 训练、推理按参数列出要的文件，拉回后核对。
+任务用哪种：说明的 relay 字段（queue/recipes.py）。
 
 export(spec, root) → dict(params, files, texts, views, outs, cleanup)：
   params   那边加任务用的参数

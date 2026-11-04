@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """测 health.py 的检查和推送规则（2026-10-16）：假的队列、训练日志、时钟，不连任何机器、不真的推送。
 
-    python3 scripts/taskq/monitor/test_health.py
+    python3 monitor/test_health.py
 """
 import json
 import os

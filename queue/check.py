@@ -480,7 +480,7 @@ def run(only=None, quick=False, data=None):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="check.py", description="核对机器表、policy、插件、实验表、任务、步骤、代码包（只读）")
+    ap = argparse.ArgumentParser(description="核对机器表、policy、插件、实验表、任务、步骤、代码包（只读）")
     ap.add_argument("--quick", action="store_true", help="不跑 --stage needs、不建代码包")
     ap.add_argument("--only", nargs="+", choices=GROUPS, metavar="组", help=" ".join(GROUPS))
     ap.add_argument("--data", help="--stage needs 用的数据目录（默认 TASKQ_DATA、本机的 hub 数据目录，都没有时用空的临时目录）")

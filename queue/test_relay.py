@@ -5,7 +5,7 @@
   3. 真跑一遍：本机模拟"那边"（假的 ssh、srun 在本地跑，服务开在 127.0.0.1），推代码包、传数据（stage）、
      那边的队列、拉回（fetch），和 box 一样的真名路径；
   4. 删任务时按引用计数只删别的任务不用的路径。
-跑法：python3 scripts/taskq/queue/test_relay.py（配置用测试用的 testdata/；包里的 Python 文件用本机 bundle_check 那个环境核对，没有时用当前的 Python）"""
+跑法：python3 queue/test_relay.py（配置用测试用的 testdata/；包里的 Python 文件用本机 bundle_check 那个环境核对，没有时用当前的 Python）"""
 import contextlib
 import io
 import json
@@ -839,7 +839,7 @@ def test_tilde_root():
 
 
 def test_adapters_in_relay():
-    """调度器的读写都经 scripts/taskq/sites/pueue.py、slurm.py（10/31）。"""
+    """调度器的读写都经 sites/pueue.py、slurm.py（10/31）。"""
     raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status=dict(Done=dict(result="Success"))),
                                  "4": dict(group="other", label="x", status="Running")}))
     rs = relay.parse_sched("lab1", dict(sched_raw=raw, taskq={}))

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 在 pueue 机器（envs/machines.py 里 scheduler=pueue 的）上启动 pueue 的常驻进程、建组、写 crontab（2026-10-16），重复运行没关系。
-#   bash scripts/taskq/queue/setup.sh           在这台上
-#   bash scripts/taskq/queue/setup.sh <名字>    在 hub 上替别的机器做：按完整的表算好组、gpu_log，ssh 过去跑那边代码目录里的 setup.sh（11/4）
+#   taskq site setup           在这台上（即 bash queue/setup.sh）
+#   taskq site setup <名字>    在 hub 上替别的机器做：按完整的表算好组、gpu_log，ssh 过去跑那边代码目录里的 setup.sh（11/4）
 # 组按 envs/machines.py 建；表里没有、也没有任务的组删掉（只有执行机自己那份的代码包里不删）。
 # crontab（lab 没开 linger 用不了 systemd 用户服务，都用 cron）：
 #   所有 pueue 机器：@reboot on_boot.sh（启动 pueued、放回重启时被打断的任务；gpu_log 的加 --gpu-log），从代码包、仓库的克隆或装好的 taskq（taskq boot）跑

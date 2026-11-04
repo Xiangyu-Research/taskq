@@ -2,12 +2,12 @@
 """box 和别的机器之间经 box 的 Cloudflare 隧道传大批文件（2026-10-26），两个方向的连接都由那边发起，那边不开服务：
   push：box 临时开文件服务，那边下载（DICC 上 1 GB 以上的在 CPU 节点上下载，见 envs/machines.py 的 transfer_job）
   pull：box 临时开接收服务，那边按 90 MB 一块上传（Cloudflare 一次请求最多 100 MB）
-做法、测速和安全措施见 scripts/sync/README.md。
+在哪里收发、地址见 queue/README.md 的“传输”一条。
 
-  tunnel.py rsync <rsync 的参数> <源> <目标>     rsync 的替身：先把要传的文件经隧道传到目标旁边的暂存目录，再照原样跑 rsync
+  taskq tunnel rsync <rsync 的参数> <源> <目标>  rsync 的替身：先把要传的文件经隧道传到目标旁边的暂存目录，再照原样跑 rsync
                                                 （加 --link-dest，对上的文件不再经 ssh 传），最后删暂存目录
-  tunnel.py push <机器> <box 上的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
-  tunnel.py pull <机器> <那边的源目录> <box 上的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
+  taskq tunnel push <机器> <box 上的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
+  taskq tunnel pull <机器> <那边的源目录> <box 上的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
 """
 import fcntl
 import hashlib
@@ -275,7 +275,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
     pyx = "python3"
     with open(__file__) as f:
         src = f.read()
-    if relay:  # 执行机（scripts/taskq/queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
+    if relay:  # 执行机（queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
         sys.path.insert(0, os.path.join(CORE, "queue"))
         import proto
         import relay_bundle

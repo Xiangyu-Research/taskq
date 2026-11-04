@@ -266,7 +266,7 @@ def main(argv):
             return 0
         print(USAGE, file=sys.stderr)
         return 2
-    ap = argparse.ArgumentParser(prog="experiments.py", description="实验表（OUTPUTS[\"experiments\"]）",
+    ap = argparse.ArgumentParser(description="实验表（OUTPUTS[\"experiments\"]）",
                                  epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("list", help="实验表的条目")

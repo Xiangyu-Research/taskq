@@ -1,5 +1,5 @@
 """测试用的做法 toy（2026-11-02）：形状同真的领域插件里的训练做法（参数、结果文件夹、训完的标志、存档、进度、拉回、归档、中继），
-命令是 testdata/bin/toy_train.sh。字段说明见 scripts/taskq/queue/recipes.py 开头。"""
+命令是 testdata/bin/toy_train.sh。字段说明见 queue/recipes.py 开头。"""
 import os
 
 from taskq_api import REQUIRED, rel

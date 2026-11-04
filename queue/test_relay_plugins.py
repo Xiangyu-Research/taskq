@@ -1,6 +1,6 @@
-"""relay_plugins.py 和 scripts/taskq/sites/names.py 的测试：测试用的配置（testdata/）里的 toy、toy_infer 插件和通用的 path 插件，
+"""relay_plugins.py 和 sites/names.py 的测试：测试用的配置（testdata/）里的 toy、toy_infer 插件和通用的 path 插件，
 假的数据集、训练结果、推理结果，按真名送出、拉回、核对。
-跑法：python3 scripts/taskq/queue/test_relay_plugins.py"""
+跑法：python3 queue/test_relay_plugins.py"""
 import hashlib
 import json
 import os

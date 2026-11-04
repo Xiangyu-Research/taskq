@@ -2,7 +2,7 @@
 # dicc_worker.sh 的模拟测试（2026-10-18）：临时的假队列（TASKQ_DIR）、临时数据目录、假作业号，任务用 command 做法跑假训练
 # （睡几秒后写训完的文件）；环境按测试用的机器表（testdata/config）激活：假的 conda、venv（本机 box 的 base、alt）。不用 Slurm、不用 GPU。
 # 这里是领、训、交还的基本情况；停止和失败在 test_dicc_worker_stop.sh，不在 Slurm 里的和代码包在 test_dicc_worker_code.sh。
-#   bash scripts/taskq/queue/test_dicc_worker.sh        WORKER_TEST_ONLY="1 4" 只跑这几个情况
+#   bash queue/test_dicc_worker.sh        WORKER_TEST_ONLY="1 4" 只跑这几个情况
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"

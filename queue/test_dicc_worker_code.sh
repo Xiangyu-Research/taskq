@@ -1,6 +1,6 @@
 #!/bin/bash
 # dicc_worker.sh 的模拟测试（同 test_dicc_worker.sh）：不在 Slurm 里（pueue 常驻）、代码更新、代码包，gpu_stats / pad_now
-#   bash scripts/taskq/queue/test_dicc_worker_code.sh        WORKER_TEST_ONLY="6 6e" 只跑这几个情况
+#   bash queue/test_dicc_worker_code.sh        WORKER_TEST_ONLY="6 6e" 只跑这几个情况
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）

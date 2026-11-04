@@ -2,11 +2,11 @@
 """训练任务队列（2026-10-17 起；10/18 起任务不限于 nnU-Net；10/31 起总队列在 box）。
 
 总队列（box 的 ~/.cache/phd/taskq/）：所有训练和要进队列的步骤。只有 box 写它（实验表加任务、改档位、停止都在 box 上做）；
-  分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（scripts/taskq/queue/relay.py 交还）。
+  分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（queue/relay.py 交还）。
 执行机上的队列（relay.py 在执行机根目录里建的 R/queue/）：relay.py 替它从总队列领来的任务，key 和总队列相同。
-  worker（scripts/taskq/queue/dicc_worker.sh）在那边领、心跳、交还，box 不在线时照常跑。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
+  worker（queue/dicc_worker.sh）在那边领、心跳、交还，box 不在线时照常跑。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
 
-每个任务 = 做法 + 参数（scripts/taskq/queue/recipes.py，解析在 scripts/taskq/queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
+每个任务 = 做法 + 参数（queue/recipes.py，解析在 queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
 任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。
 
 队列目录（总队列和执行机上的一样）：
@@ -20,7 +20,7 @@
                 （relay.py 补传）taskq.py input-ok 撤掉。不算失败
   released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
   stopped/<key> 停止的任务（taskq.py stop，10/30）：不再领；在训的 worker 每 5 秒看一次，30 秒内停下、交还。
-  ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（scripts/taskq/queue/worker_start.sh）
+  ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（queue/worker_start.sh）
   lock          改队列时的锁（mkdir）
 不领的任务：已经训完（任务说明的 done）；别处正在训（claims 里有、心跳在 ttl 内，或者训练日志 15 分钟内更新过）；
   说明解析不了的（参数写错，status 里显示 bad）。
@@ -675,7 +675,7 @@ def _differs(a, b):
 
 def read_sheets(path):
     """任务单文件（JSON：一张 {字段: 值} 或一列）→ ([dict(exp, recipe, params)], 档位)。recipe 不写 = command；
-    nice 写在单子里（几张单子的 nice 要一样）；其余字段都是做法的参数（scripts/taskq/queue/README.md 的"别人的任务"）。"""
+    nice 写在单子里（几张单子的 nice 要一样）；其余字段都是做法的参数（queue/README.md 的"别人的任务"）。"""
     try:
         d = json.load(open(path, encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -990,6 +990,9 @@ def main(argv):
         return 0
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def named(name, alias):  # 帮助和用法里显示调用时用的名字（taskq rm、taskq nice）
+        return sub.add_parser(alias, aliases=[name]) if argv[:1] == [alias] else sub.add_parser(name, aliases=[alias])
     p = sub.add_parser("next")
     p.add_argument("--worker", required=True)
     p.add_argument("--free-slots", type=int, default=1)
@@ -1037,10 +1040,10 @@ def main(argv):
     p = sub.add_parser("set")
     p.add_argument("key")
     p.add_argument("kv", nargs="+")
-    p = sub.add_parser("set-nice", aliases=["nice"])
+    p = named("set-nice", "nice")
     p.add_argument("--nice", type=int, required=True)
     p.add_argument("keys", nargs="+")
-    p = sub.add_parser("remove", aliases=["rm"])
+    p = named("remove", "rm")
     p.add_argument("keys", nargs="+")
     p = sub.add_parser("stop")
     p.add_argument("--why", default="")

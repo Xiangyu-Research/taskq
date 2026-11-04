@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """feed.py 的测试（2026-10-31）：run_all 转给替身 relay.py，nobody 用构造的总队列。不连任何机器。
-  python3 scripts/taskq/queue/test_feed.py"""
+  python3 queue/test_feed.py"""
 import os
 import sys
 import tempfile

@@ -177,8 +177,9 @@ def _value(name, field):
 
 
 def main(argv):
+    prog = os.path.basename(sys.argv[0])  # mtab.py，或 taskq machines
     if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__.split("命令行：\n")[1], file=sys.stderr if not argv else sys.stdout)
+        print(__doc__.split("命令行：\n")[1].replace("mtab.py", prog), file=sys.stderr if not argv else sys.stdout)
         return 2 if not argv else 0
     cmd, args = argv[0], argv[1:]
     me = whoami()
@@ -188,7 +189,7 @@ def main(argv):
         print(me)
     elif cmd == "get":
         if len(args) != 2:
-            print("用法：mtab.py get <名|.> <字段>", file=sys.stderr)
+            print(f"用法：{prog} get <名|.> <字段>", file=sys.stderr)
             return 2
         name = me if args[0] == "." else args[0]
         if name not in MACHINES and name not in SITES:

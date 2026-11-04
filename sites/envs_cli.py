@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""执行机的准备（2026-10-31）。在 box 上跑。
+"""执行机的环境（2026-10-31；11/4 前叫 site.py，和标准库的 site 重名）：envs.py 的命令行。在 box 上跑。
 
-    site.py env <机器> <环境> [--dry-run]   按 envs/specs/<环境>.yml 在那台的 CPU 上建环境、跑检查，过了写 <环境>.ok
-                                          （--dry-run：只打印要跑的命令和脚本）
-    site.py envs <机器>                    只读：每个环境的状态（ok / 描述变了 / 没建 / 检查失败 / 在建）
+    taskq site env <机器> <环境> [-n]   按 envs/specs/<环境>.yml 在那台的 CPU 上建环境、跑检查，过了写 <环境>.ok
+                                      （-n / --dry-run：只打印要跑的命令和脚本）
+    taskq site envs <机器>              只读：每个环境的状态（ok / 描述变了 / 没建 / 检查失败 / 在建）
 """
 import os
 import sys
@@ -27,14 +27,14 @@ def main(argv):
         try:
             rc, out = E.build(a.machine, a.env, dry=a.dry_run)
         except (E.EnvError, KeyError) as e:
-            print(f"site.py：{e}", file=sys.stderr)
+            print(f"{ap.prog}：{e}", file=sys.stderr)
             return 2
         print(out)
         return rc
     try:
         st = E.states(a.machine)
     except KeyError as e:
-        print(f"site.py：不认识的机器 {e}", file=sys.stderr)
+        print(f"{ap.prog}：不认识的机器 {e}", file=sys.stderr)
         return 2
     if st is None:
         print(f"连不上 {a.machine}", file=sys.stderr)

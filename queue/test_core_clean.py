@@ -1,4 +1,4 @@
-"""调度核心里已经没有领域词的文件，保持没有（剥离的准备，11/2）；核心里使用者的路径、仓库只减不增（11/4）。清单和其余文件的情况见 SPLIT.md。"""
+"""调度核心里已经没有领域词的文件，保持没有（剥离的准备，11/2）；核心里使用者的路径、仓库只减不增（11/4）。"""
 import os
 import re
 import sys
@@ -12,7 +12,7 @@ ROOT = CORE  # 清单里的路径相对它
 CLEAN = [
     "queue/common.py", "queue/inputs.py", "queue/feed.py", "queue/refill.py",
     "queue/shift.py", "queue/relay_store.py", "queue/relay_remote.py", "queue/relay_transfer.py",
-    "sites/envs.py", "sites/pueue.py", "sites/remote.py", "sites/site.py",
+    "sites/envs.py", "sites/pueue.py", "sites/remote.py", "sites/envs_cli.py",
     "sites/slurm.py",
     "monitor/health.py", "sync/tunnel.py",
     "queue/run_task.sh", "queue/worker_start.sh",
@@ -50,10 +50,10 @@ print("\n".join(bad) if bad else f"{len(CLEAN)} 个文件都没有领域词")
 # 核心（testdata 外）不直接用使用者的路径、仓库（11/4）；KNOWN 是还没改的，个数只能减少
 HOST = re.compile(r"scripts/monitor|Xiangyu-Research/PhD|\.cache/phd|/work/PhD")
 KNOWN = {
-    "monitor/report.py": 1, "sites/test_e2e.py": 1,
+    "monitor/report.py": 1,
     "queue/advance.py": 1, "queue/common.py": 1, "queue/gpu_pad.py": 1, "queue/relay.py": 1, "queue/shift.py": 2,
     "queue/taskq.py": 1, "queue/dicc_worker.sh": 1, "queue/worker_start.sh": 1, "queue/gpu_pad_start.sh": 1,
-    "queue/README.md": 11, "queue/test_relay.py": 4, "queue/test_relay_bundle.py": 8, "sync/test_tunnel.py": 1,
+    "queue/README.md": 10, "queue/test_relay.py": 4, "queue/test_relay_bundle.py": 8, "sync/test_tunnel.py": 1,
 }
 seen = {}
 for d, ds, fs in os.walk(ROOT):

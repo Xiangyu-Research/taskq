@@ -1,5 +1,5 @@
 """Slurm 类机器（我的 DICC、SITES 里 scheduler="slurm" 的执行机）的适配器（2026-10-31）：读各 QOS 的作业数、按 QOS 分配、交 worker 作业。
-和 pueue.py 对应：读状态 → 调用方算交几个（scripts/taskq/queue/refill.py 的 topup_plan）→ start_workers 交。
+和 pueue.py 对应：读状态 → 调用方算交几个（queue/refill.py 的 topup_plan）→ start_workers 交。
 交的是那台的 worker.sbatch，它转交 worker_start.sh（开显存填充 gpu_pad，gpu-a100 要求 >= 40GB）。
 run：fn(命令) → (退出码, 输出)，由调用方绑好机器（测试替换）。"""
 import os
