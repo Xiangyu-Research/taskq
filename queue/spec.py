@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""任务说明（2026-10-18）：做法（scripts/queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
-调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（scripts/monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
+"""任务说明（2026-10-18）：做法（scripts/taskq/queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
+调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（scripts/taskq/monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
 
 命令行：
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
@@ -21,7 +21,13 @@ import time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
+try:
+    import cfg as _cfg  # noqa: E402
+    REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
+except ImportError:  # 本文件经 ssh 送到别的机器上单独跑时（remote_collect）
+    REPO = CORE
 BUILTIN = ("data", "repo")  # 运行时按机器展开的名字
 FRESH_LOG = 15 * 60
 SAFE = "__"
@@ -32,7 +38,7 @@ def safe(key):
     return key.replace("/", SAFE)
 
 
-JSON_MARK = "@@JSON "  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/queue/README.md 的"约定"）
+JSON_MARK = "@@JSON "  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/taskq/queue/README.md 的"约定"）
 
 
 COLLECT_WAIT = 90  # remote_collect 一共等几秒（各任务同时读）

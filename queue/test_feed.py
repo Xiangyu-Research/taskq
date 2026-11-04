@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """feed.py 的测试（2026-10-31）：plan() 用构造的状态，execute() 用假的总队列和缓冲，最后在临时目录里真跑一次缓冲上的 worker
-（box 不在线时）。不连任何机器。  python3 scripts/queue/test_feed.py"""
+（box 不在线时）。不连任何机器。  python3 scripts/taskq/queue/test_feed.py"""
 import json
 import os
 import subprocess
@@ -9,7 +9,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 T = tempfile.mkdtemp()
 os.environ.update(FEED_STATE=os.path.join(T, "feed.json"), FEED_LOG=os.path.join(T, "feed.log"),
                   PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"))

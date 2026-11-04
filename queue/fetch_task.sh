@@ -1,21 +1,22 @@
 #!/bin/bash
 # 把某台机器（envs/machines.py 里的名字，如 lab）上训完的一个任务拉回 box（2026-10-18，取代 fetch_fold.sh）。
-# 由 box 上的 scripts/queue/advance.py 在那边训完以后放进 wait 组：
-#   q wait --label fetch:<标签> -- 'bash scripts/queue/fetch_task.sh <机器> <key>'
-# 结果文件夹、训完的标志、不拉的文件、上一级里还要拉的文件都按任务说明（scripts/queue/spec.py lookup <key>：实验表或训练队列）：
+# 由 box 上的 scripts/taskq/queue/advance.py 在那边训完以后放进 wait 组：
+#   q wait --label fetch:<标签> -- 'bash scripts/taskq/queue/fetch_task.sh <机器> <key>'
+# 结果文件夹、训完的标志、不拉的文件、上一级里还要拉的文件都按任务说明（scripts/taskq/queue/spec.py lookup <key>：实验表或训练队列）：
 #   out、done、fetch.exclude、fetch.extra（如模型文件夹里推理要用的配置文件）、fetch.also（另外要拉的文件夹，
 #   相对数据目录，先于 out 拉；如五折集成的预测）、log。
 # 那边还没训完时每 10 分钟查一次，每小时记一行最新训练日志的情况（pueue log 里能看到）；不设等待上限，没进展由健康检查提醒。
 # 只新增 / 更新，不删 box 上的文件；box 上已经训完（done 都有）时直接结束。训完的标志最后拉。拉回失败重试 3 次。
 set -euo pipefail
 HOST=${1:?用法：fetch_task.sh <机器> <key>} KEY=${2:?用法：fetch_task.sh <机器> <key>}
-REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
-source "$REPO/scripts/queue/legacy_names.sh" map
+source "$CORE/queue/legacy_names.sh" map
 SSH=$($M get "$HOST" ssh)
 [[ -n $SSH ]] || { echo "envs/machines.py 里没有可以拉回的机器 $HOST" >&2; exit 2; }
 RDATA=$($M get "$HOST" data) LDATA=${TASKQ_DATA:-$($M get . data)}
-SPEC=$(python3 "$REPO/scripts/queue/spec.py" lookup "$KEY") || { echo "找不到任务 $KEY（实验表、训练队列里都没有）" >&2; exit 2; }
+SPEC=$(python3 "$CORE/queue/spec.py" lookup "$KEY") || { echo "找不到任务 $KEY（实验表、训练队列里都没有）" >&2; exit 2; }
 # 从说明里取：out；done 的 shell 判断（在 out 里跑）；不拉的文件（每行一个）；上一级里要拉的文件（每行一个）；训练日志的 glob
 sp() { python3 -c '
 import json, shlex, sys
@@ -61,10 +62,10 @@ for i in 1 2 3; do
         rsync -rlt --partial --update "$SSH:$RDATA/$PARENT/$x" "$LDATA/$PARENT/" || ok=0
     done
     for x in ${ALSO[@]+"${ALSO[@]}"}; do
-        mkdir -p "$LDATA/$x" && python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --update "$SSH:$RDATA/$x/" "$LDATA/$x/" || ok=0
+        mkdir -p "$LDATA/$x" && python3 "$CORE/sync/tunnel.py" rsync -rlt --partial --update "$SSH:$RDATA/$x/" "$LDATA/$x/" || ok=0
     done
-    (( ok )) && python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} ${EXD[@]+"${EXD[@]}"} "$SSH:$SRC/" "$DST/" \
-        && python3 "$REPO/scripts/sync/tunnel.py" rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
+    (( ok )) && python3 "$CORE/sync/tunnel.py" rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} ${EXD[@]+"${EXD[@]}"} "$SSH:$SRC/" "$DST/" \
+        && python3 "$CORE/sync/tunnel.py" rsync -rlt --partial --update ${EX[@]+"${EX[@]}"} "$SSH:$SRC/" "$DST/" && break
     (( i == 3 )) && { echo "拉回失败 3 次" >&2; exit 1; }
     sleep "${FETCH_TEST_RETRY:-300}"
 done

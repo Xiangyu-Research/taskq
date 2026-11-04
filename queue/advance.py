@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由 envs/policy.py 的 PLACE 定）：box 上的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的任务提前排（见下）。
-步骤和判断都从实验表（research/*/experiments.py，经 scripts/queue/experiments.py 读）和任务说明（scripts/queue/spec.py）来，
+（scripts/taskq/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的任务提前排（见下）。
+步骤和判断都从实验表（research/*/experiments.py，经 scripts/taskq/queue/experiments.py 读）和任务说明（scripts/taskq/queue/spec.py）来，
 这里不认识具体模型。
 
 每个任务（实验表里的，加上队列里不属于任何实验的）：
-  fetch    别的机器上训完了（说明里的 done），box 上还没有 → scripts/queue/fetch_task.sh <机器> <key>（wait 组）
+  fetch    别的机器上训完了（说明里的 done），box 上还没有 → scripts/taskq/queue/fetch_task.sh <机器> <key>（wait 组）
   after    实验表里每个任务的步骤（如推理 → 评测），按顺序做第一个没做完的
-  archive  pueue 训练机（lab）上训完、拉回 box 以后，那边还没归档 → scripts/queue/archive_task.sh <机器> <key>（wait 组：
+  archive  pueue 训练机（lab）上训完、拉回 box 以后，那边还没归档 → scripts/taskq/queue/archive_task.sh <机器> <key>（wait 组：
            备份、核对后删那边的大文件）。那边还在用这个任务做别的步骤时等；要进任务队列的步骤等归档做完再加
 一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs = 要每个任务都做完的步骤）。
 最后：FINAL 的步骤（如所有实验的汇总比较，在 box 上）。有 rerun_if_newer 的，列出的步骤有比它开始时更新的结果、这些步骤（和同一串
@@ -36,12 +36,12 @@
 box 上排的任务（不连别的机器的）做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
 失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排；那边的任务、传输、拉回一样。
-在不在跑：box、lab 的 pueue 任务按任务记录认（~/.cache/phd/tasks.json，scripts/queue/common.py 的 identify；这里加的任务都先记下），
+在不在跑：box、lab 的 pueue 任务按任务记录认（~/.cache/phd/tasks.json，scripts/taskq/queue/common.py 的 identify；这里加的任务都先记下），
   没有记录的（手动加的）只认训练、拉回、归档的命令。这一步的结果还在往 box 上拷（拉回、传输在跑）时不算做完、不清理那边。
 envs/policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/advance.log，不真排；HOLD 对上的步骤在 box 上加成暂停的
   （pueue add --stashed），进任务队列的先不加。
 
-    python3 scripts/queue/advance.py           看现在会排什么（不改任何东西）
+    python3 scripts/taskq/queue/advance.py           看现在会排什么（不改任何东西）
 """
 import itertools
 import os
@@ -52,11 +52,12 @@ from datetime import datetime
 from fnmatch import fnmatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
-sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
+sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, HERE)
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
@@ -273,7 +274,7 @@ def plan(s, root=None):
             missing = [p for p in needs if p not in have]
             if missing:
                 dirs = [p for p in missing if not os.path.isfile(os.path.join(root, p))]
-                pcmd = "bash scripts/queue/offload_io.sh push " + " ".join([mach] + [shlex.quote(p) for p in missing])
+                pcmd = "bash scripts/taskq/queue/offload_io.sh push " + " ".join([mach] + [shlex.quote(p) for p in missing])
                 # 同样的传输（同一个实验的另一步要的同一批文件）也算
                 pushes = sorted((x for x in ptasks if is_push(x, st, t["key"], mach, missing)), key=lambda x: x["id"])
                 if dirs or (pushes and pushes[-1]["status"] not in LIVE_ST):
@@ -460,7 +461,7 @@ def plan(s, root=None):
         if not trained[key]:
             frm = next((h for h in sorted(src) if (src[h].get(key) or {}).get("final")), None)
             if frm and not here:
-                want("fetch", key, f"fetch:{t['lab']}", f"bash scripts/queue/fetch_task.sh {frm} {key}", "wait", n, src=frm)
+                want("fetch", key, f"fetch:{t['lab']}", f"bash scripts/taskq/queue/fetch_task.sh {frm} {key}", "wait", n, src=frm)
             prequeue(t, after)
             continue
         archive_due = [h for h in TRAINERS if sp.get("archive") and (t["e"] or {}).get("archive", True) is not False
@@ -489,7 +490,7 @@ def plan(s, root=None):
                 if down:
                     NOTES.append(f"archive:{t['lab']}：备份机{down}，回来后再归档")
                     continue
-                want("archive", key, f"archive:{t['lab']}", f"bash scripts/queue/archive_task.sh {h} {key}", "wait", n, src=h)
+                want("archive", key, f"archive:{t['lab']}", f"bash scripts/taskq/queue/archive_task.sh {h} {key}", "wait", n, src=h)
 
     newest = 0  # rerun_if_newer 列出的步骤里最新的结果（决定要不要重跑最后的步骤）
     watch = {name for f in final for name in f.get("rerun_if_newer", [])}
@@ -644,7 +645,7 @@ class Leftover:
                                                      f"（看 pueue log {x['id']}；处理好以后 pueue remove {x['id']}）")
             return
         self.todo.append(dict(step="pull", key=r["key"], group="wait", label=f"pull:{label}", nice=NO_NICE, of=r["step"], src=r["machine"],
-                              cmd=f"bash scripts/queue/offload_io.sh pull {r['machine']} {shlex.quote(r['out'])}"))
+                              cmd=f"bash scripts/taskq/queue/offload_io.sh pull {r['machine']} {shlex.quote(r['out'])}"))
 
     def finished(self, label):
         if label in self.state:

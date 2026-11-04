@@ -7,4 +7,4 @@
 #SBATCH --mem=64G
 #SBATCH --output=%x_%j.out
 REPO=$(cd "${SLURM_SUBMIT_DIR:-$(dirname "${BASH_SOURCE[0]}")}" && git rev-parse --show-toplevel)
-WORKER_DEVICE=cpu exec bash "$REPO/scripts/queue/worker_start.sh"
+WORKER_DEVICE=cpu exec bash "$REPO/scripts/taskq/queue/worker_start.sh"

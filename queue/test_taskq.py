@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""taskq.py 的测试（2026-10-17，10/18 改成任务说明）：临时目录里的假队列、假训练结果，不连任何机器。  python3 scripts/queue/test_taskq.py"""
+"""taskq.py 的测试（2026-10-17，10/18 改成任务说明）：临时目录里的假队列、假训练结果，不连任何机器。  python3 scripts/taskq/queue/test_taskq.py"""
 import glob
 import json
 import os
@@ -11,6 +11,8 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
+import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
 T = tempfile.mkdtemp()
 TQ, DATA = os.path.join(T, "taskq"), os.path.join(T, "data")
 RES = os.path.join(DATA, "results")
@@ -287,7 +289,7 @@ fake = os.path.join(T, "fakessh")
 pat = M.MACHINES["dicc"]["repo"].replace("~", "\\~").replace("/", "\\/")
 open(fake, "w").write("#!/bin/bash\n# 假 ssh：去掉选项和主机名，命令里的仓库路径换成本仓库\n"
                       "while [[ $1 == -o ]]; do shift 2; done; shift\n"
-                      f"cmd=${{1//{pat}/{os.path.dirname(os.path.dirname(HERE))}}}\n"
+                      f"cmd=${{1//{pat}/{_cfg.REPO}}}\n"
                       f"cmd=$(printf '%s' \"$cmd\" | sed -e 's#TASKQ_DATA=[^ ]*#TASKQ_DATA={DATA}#')\n"
                       f"export TASKQ_DIR={TQ2} TASKQ_MACHINE=dicc\nbash -c \"$cmd\"\n")
 os.chmod(fake, 0o755)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cfg.py 的测试（2026-11-02）：TASKQ_CONFIG / TASKQ_PLUGINS / TASKQ_STATE 没设、空、不存在、相对路径；state()、outputs()、env() 和旧名、
 cfg.py get；插件合并（extend）的重名。临时文件，不连机器。
-    python3 scripts/queue/test_cfg.py
+    python3 scripts/taskq/queue/test_cfg.py
 """
 import os
 import subprocess
@@ -10,6 +10,8 @@ import tempfile
 import textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
+import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
@@ -127,7 +129,7 @@ def cfg_get(config, *args):
 r = cfg_get(fixture.CONFIG, "get", "name")
 ok("cfg.py get：字符串原样", r.returncode == 0 and r.stdout == "Demo\n")
 r = cfg_get(fixture.CONFIG, "get", "code_dirs")
-ok("cfg.py get：元组用空格连起来", r.returncode == 0 and r.stdout == "scripts/queue scripts/queue/testdata/code\n")
+ok("cfg.py get：元组用空格连起来", r.returncode == 0 and r.stdout == "scripts/taskq/queue scripts/taskq/queue/testdata/code\n")
 r = cfg_get(fixture.CONFIG, "get", "no_such_key")
 ok("cfg.py get：没有的键 → 空行，退出码 0", r.returncode == 0 and r.stdout == "\n")
 r = cfg_get(c1, "get", "name")

@@ -2,7 +2,7 @@
 """测 refill.py（2026-10-18；10/31 起只有 lab 上的数据清理、传数据和 DICC 补作业）：假的队列状态、pueue、训练进度，
 命令不真的执行（记下来核对）。
 
-    python3 scripts/queue/test_refill.py
+    python3 scripts/taskq/queue/test_refill.py
 """
 import copy
 import json
@@ -64,7 +64,7 @@ def task(i, group, status, cmd, label=""):
 
 def train(i, ds, f, status="Running", tr=""):
     extra = f" variant={tr}" + (" env=alt2" if tr == UM else "") if tr else ""
-    return task(i, "gpu1", status, f"bash scripts/queue/run_task.sh toy ds={DS[ds]} frag={f}{extra}", f"x{i}")
+    return task(i, "gpu1", status, f"bash scripts/taskq/queue/run_task.sh toy ds={DS[ds]} frag={f}{extra}", f"x{i}")
 
 
 def tq(key, nice, order, state="free", worker=None, skipped_by=()):
@@ -129,7 +129,7 @@ ok("传数据的任务传完后马上跑一次健康检查（带 PHD_TASK_DONE�
    f"PHD_TASK_DONE=sync_lab_D103_alpha_one bash {R.KICK} kick" in cmds[0][1])
 R.transfer("lab", [P103], run=fake_run)
 ok("同一个数据集再传一次：transferred 里不重复", json.load(open(R.STATE))["transferred"]["lab"] == [P103])
-SY = task(50, "wait", "Running", "bash scripts/sync/tunnel_push.sh lab …", "sync_lab_D103_alpha_one")
+SY = task(50, "wait", "Running", "bash scripts/taskq/sync/tunnel_push.sh lab …", "sync_lab_D103_alpha_one")
 sync, bad = R.syncing(snap(box_tasks=[SY]), "lab")
 ok("syncing：还在传的按数据集认出来", list(sync) == ["D103_alpha_one"] and bad == {})
 sync, bad = R.syncing(snap(box_tasks=[dict(SY, status="Failed (1)")]), "lab")
@@ -142,7 +142,7 @@ cmds.clear()
 transferred(P103)
 busy = snap([train(1, 103, 3, "Running")], queue=NO103)
 ok("lab 上还有训练在用：不删", R.cleanup(busy, "lab", run=fake_run) == [] and not cmds)
-arch = task(40, "wait", "Queued", "bash scripts/queue/archive_task.sh lab D103_alpha_one/x/0", "a")
+arch = task(40, "wait", "Queued", "bash scripts/taskq/queue/archive_task.sh lab D103_alpha_one/x/0", "a")
 ok("box 上还有这台机器的归档任务：不删", R.cleanup(snap(queue=NO103, box_tasks=[arch]), "lab", run=fake_run) == [] and not cmds)
 ok("box 上还在往 lab 传这个数据集：不删", R.cleanup(snap(queue=NO103, box_tasks=[SY]), "lab", run=fake_run) == [] and not cmds)
 ok("lab 上还有训完没归档的任务：不删",
@@ -262,7 +262,7 @@ ok("留 1 个、已有 4 个（2 个在排）：再交 5 个", p == [("long", "3
 p, why = R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "done")])["taskq"]["box"], {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 0)})
 ok("没有要卡的任务：不交", p == [] and "没有要卡的任务" in why)
 ok("slurm.parse：5 段才算，少一段当读不到", R.SL.parse("QOS|long|10|3|1\nQOS|normal|10|2\n")["counts"] == {"long": (10, 3, 1)})
-ok("refill 里和 scripts/sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
+ok("refill 里和 scripts/taskq/sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
 
 # 纯 CPU 任务（device=cpu，10/24）：GPU worker 不为它们补，有这类任务时才交 CPU worker
 K_EV = "eval/D101_alpha/x/frag_0"
@@ -330,7 +330,7 @@ ok("--dry-run：打印会交什么，不交", not sub and ev == ["dicc：会 交
 R.P.AUTO["dicc"] = True
 ev, st = R.topup(snap(), "dicc", run=topup_run(PROBE))
 ok("开关开着：交 worker.sbatch（long，1 个普通作业，不用数组），记日志、不推送",
-   len(sub) == 1 and re.fullmatch(DREPO + r"/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=3-00:00:00 worker.sbatch", sub[0][1])
+   len(sub) == 1 and re.fullmatch(DREPO + r"/scripts/taskq/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=3-00:00:00 worker.sbatch", sub[0][1])
    and ev == [] and not st and "交了 1 个 worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 
@@ -365,7 +365,7 @@ ok("作业数读不出来：不补（不按 0 算）", ev == [] and not st and n
 sub.clear()
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5|0\nCPU|0\nALL|10|6\n"))
 ok("开关开着、有纯 CPU 任务：只交 cpu_worker.sbatch（normal、8 小时），记日志",
-   len(sub) == 1 and re.fullmatch(DREPO + r"/scripts/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=normal --time=08:00:00 cpu_worker.sbatch", sub[0][1])
+   len(sub) == 1 and re.fullmatch(DREPO + r"/scripts/taskq/queue && sbatch --parsable -J [a-z]+-[a-z]+ --qos=normal --time=08:00:00 cpu_worker.sbatch", sub[0][1])
    and not st and "交了 1 个 CPU worker 作业 487001" in open(R.LOG).read())
 sub.clear()
 ev, st = R.topup(snap(queue=cpu_q), "dicc", run=topup_run("QOS|long|10|5|0\nCPU|1\nALL|10|7\n"))

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """进度汇报（2026-10-16；10/21 起每 2 小时、改成白话）：box 上 cron 每 2 小时（08:30–20:30）在更新登记表和看板之后跑一次
 （scripts/monitor/auto_refresh.sh registry），推送到手机（和健康检查同一个 ntfy 频道）：训完的任务数和上次以来多了几个任务、剩余天数、在训的任务和预计训完时间、
-上次以来训完的任务和出了结果的实验、要处理的问题（说法见 scripts/monitor/plain.py）。
+上次以来训完的任务和出了结果的实验、要处理的问题（说法见 scripts/taskq/monitor/plain.py）。
 
-    python3 scripts/monitor/report.py            推送
-    python3 scripts/monitor/report.py --dry-run  只打印
-读：登记表（envs/policy.py 的 OUTPUTS["registry"]）的实验登记_状态.json、实验登记表.csv（make_registry.py 刚生成的）、scripts/queue/qs --json、
+    python3 scripts/taskq/monitor/report.py            推送
+    python3 scripts/taskq/monitor/report.py --dry-run  只打印
+读：登记表（envs/policy.py 的 OUTPUTS["registry"]）的实验登记_状态.json、实验登记表.csv（make_registry.py 刚生成的）、scripts/taskq/queue/qs --json、
   健康检查的 state.json（当前问题）。上一次的训完任务数和时间记在同一文件夹的 report.json。
 """
 import argparse
@@ -17,10 +17,13 @@ import sys
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
+import cfg as _cfg  # noqa: E402
+REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
 sys.path.insert(0, HERE)
 import health as H  # noqa: E402  push、机器表
-import common as C  # noqa: E402  scripts/queue/common.py（health 已经把路径加上）
+import common as C  # noqa: E402  scripts/taskq/queue/common.py（health 已经把路径加上）
 import plain as PL  # noqa: E402  白话说法
 
 REG = os.path.join(REPO, H.OUT.get("registry", {}).get("dir", ""))
@@ -62,7 +65,7 @@ def build(now):
         lines.append(f"{span}内训完：" + "；".join(f"{k} {'、'.join(v)}" for k, v in fin.items()))
     res, other = {}, set()
     try:
-        q = json.loads(subprocess.run([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], capture_output=True, text=True, timeout=180).stdout)
+        q = json.loads(subprocess.run([os.path.join(CORE, "queue", "qs"), "--json"], capture_output=True, text=True, timeout=180).stdout)
     except Exception:  # noqa: BLE001
         q = {}
     for name, d in q.items():

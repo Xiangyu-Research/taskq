@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测试用的"怎么跑"（2026-11-03）：形状同真的 policy.py（字段说明见 scripts/queue/README.md 的"开关和配置"），值取自
+"""测试用的"怎么跑"（2026-11-03）：形状同真的 policy.py（字段说明见 scripts/taskq/queue/README.md 的"开关和配置"），值取自
 11/3 的真表，去掉了和日期有关的部分（OFFLINE_UNTIL 为空，SHIFT 不限日期）；dicc 是有缓冲的假执行机，真表里 11/3 起没有这类。
 """
 
@@ -48,15 +48,15 @@ MAX_NICE = {}
 
 OUTPUTS = dict(
     bundle=("scripts",),
-    experiments="scripts/queue/testdata/exps/*/experiments.py",
-    plans="scripts/queue/testdata/exps/*/plans.md",
-    code_dirs=("scripts/queue", "scripts/queue/testdata/code"),
+    experiments="scripts/taskq/queue/testdata/exps/*/experiments.py",
+    plans="scripts/taskq/queue/testdata/exps/*/plans.md",
+    code_dirs=("scripts/taskq/queue", "scripts/taskq/queue/testdata/code"),
     bundle_check="base",
-    env_script="scripts/queue/testdata/env.sh",
+    env_script="scripts/taskq/queue/testdata/env.sh",
     health="~/.cache/phd-health",
     topic="~/.config/phd-health/ntfy_topic",
     name="Demo",
     heads="~/.cache/phd/code/heads.tsv",
-    registry=dict(cmd="scripts/queue/testdata/bin/registry.py", dir="scripts/queue/testdata/exps/demo",
+    registry=dict(cmd="scripts/taskq/queue/testdata/bin/registry.py", dir="scripts/taskq/queue/testdata/exps/demo",
                   files=("registry.csv", "registry.md")),
 )

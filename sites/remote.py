@@ -4,8 +4,8 @@ import shlex
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
 import machines as M  # noqa: E402

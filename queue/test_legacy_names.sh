@@ -1,6 +1,6 @@
 #!/bin/bash
 # legacy_names.sh 的测试（2026-11-02）：新名设了不被旧名盖掉；只有旧名时取旧名；都没有时为空；map 不 export；export 给出旧名。
-#   bash scripts/queue/test_legacy_names.sh
+#   bash scripts/taskq/queue/test_legacy_names.sh
 HERE=$(cd "$(dirname "$0")" && pwd)
 L=$HERE/legacy_names.sh
 fails=0

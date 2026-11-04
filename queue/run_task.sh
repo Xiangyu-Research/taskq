@@ -1,7 +1,7 @@
 #!/bin/bash
 # 跑一个训练任务（2026-10-18）：所有机器共用（DICC 的 dicc_worker.sh、lab 的 pueue 任务、手动跑）。
 #   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
-# 按任务说明（scripts/queue/spec.py，做法在 scripts/queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
+# 按任务说明（scripts/taskq/queue/spec.py，做法在 scripts/taskq/queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
 # 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART；10/31 前的 worker
 # 传 TASK_SEG，日志照旧叫 _seg<段>.log，它按这个名字看日志），第一行记作业、机器、
 # 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
@@ -9,13 +9,14 @@
 # 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；
 # 设了 TASK_GPU_IDLE（分钟，envs/machines.py 里组的环境变量）时，还要 GPU 使用记录（scripts/monitor/gpu_log.sh）里最近这么久这张卡上没有别人（11/2）；
 # 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
-# 退出码（scripts/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
+# 退出码（scripts/taskq/queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # 4 缺输入（data 里的文件不全，没开训，11/1）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练（8 秒没停下就强制停）再退出，下次从存档接着训。
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(dirname "$(dirname "$HERE")")
+CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v…" >&2; exit 2; }
 source "$HERE/legacy_names.sh" map
 DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
@@ -109,7 +110,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$TASK_KEY，第 $PART 段，环境 $TASK_ENV，代码 $COMMIT，$(ts)" >> "$LOG"
 echo "$(ts) 开始：$TASK_KEY（环境 $TASK_ENV，日志 $LOG）"
 # 输入（任务说明的 data）：开训前查全没有，不全退出码 4；STAGE_TMP 开着、任务的 res.local_inputs 时在节点本地盘建私有视图，
-# 后台拷过去（scripts/queue/inputs.py，11/1）。命令从 TASK_INPUTS_ROOT 读输入（和数据目录一样的相对路径）
+# 后台拷过去（scripts/taskq/queue/inputs.py，11/1）。命令从 TASK_INPUTS_ROOT 读输入（和数据目录一样的相对路径）
 TASK_INPUTS_ROOT=$DATA CPID=
 if (( ${#TASK_INPUTS[@]} )); then
     LROOT=

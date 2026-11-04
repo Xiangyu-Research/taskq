@@ -21,11 +21,12 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
-sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+sys.path.insert(0, os.path.join(CORE, "sites"))
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 import remote as RM  # noqa: E402
@@ -35,7 +36,7 @@ TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("scripts", "envs")))  # en
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
-SBATCH = {"gpu": "scripts/queue/worker.sbatch", "cpu": "scripts/queue/cpu_worker.sbatch"}  # worker 的种类 → 模板（也是包里的位置）
+SBATCH = {"gpu": "scripts/taskq/queue/worker.sbatch", "cpu": "scripts/taskq/queue/cpu_worker.sbatch"}  # worker 的种类 → 模板（也是包里的位置）
 # 已经交给 Slurm、还在排队的老作业脚本里写的是改名时的 start.sh；running 的老 worker 换包时找 loop.sh
 # 等 2026-11 前交的作业都结束后删
 LINKS = {"scripts/queue/start.sh": "worker_start.sh", "scripts/queue/loop.sh": "dicc_worker.sh"}
@@ -125,7 +126,7 @@ def machine_entry(name, e, root, entry=None):
              data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
     m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars") if k in e})
-    m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/sites/envs.py）在根目录下
+    m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/taskq/sites/envs.py）在根目录下
     m.update(entry or {})
     return m
 
@@ -173,15 +174,15 @@ def gen_sbatch(real, m, root, kind="gpu"):
         keep.append(f"#SBATCH --{o.group(1)}={over[o.group(1)]}" if over.get(o.group(1)) else ln)
     if kind not in (m.get("jobs") or ()):
         raise BundleError(f"RELAY 的 jobs 里没有 {kind}")
-    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/scripts/queue 交，往上 4 级是根目录）
-    logs = ("../../../.." if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
+    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/scripts/taskq/queue 交，往上 5 级是根目录）
+    logs = ("../../../../.." if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
     return "\n".join(["#!/bin/bash", *keep,
                       f"#SBATCH --output={logs}",
                       f"R={RM.q(root)}",
                       'REPO=$(readlink -f "$R/code/current")',
                       'export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED'
                       + (" WORKER_DEVICE=cpu" if kind == "cpu" else ""),
-                      'exec bash "$REPO/scripts/queue/worker_start.sh"', ""])
+                      'exec bash "$REPO/scripts/taskq/queue/worker_start.sh"', ""])
 
 
 HOME_MAP = {"taskq": "queue", "gpu_pad/DISABLED": "queue/gpu_pad_DISABLED"}  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/

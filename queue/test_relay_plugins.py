@@ -1,6 +1,6 @@
-"""relay_plugins.py 和 scripts/sites/names.py 的测试：测试用的配置（testdata/）里的 toy、toy_infer 插件和通用的 path 插件，
+"""relay_plugins.py 和 scripts/taskq/sites/names.py 的测试：测试用的配置（testdata/）里的 toy、toy_infer 插件和通用的 path 插件，
 假的数据集、训练结果、推理结果，按真名送出、拉回、核对。
-跑法：python3 scripts/queue/test_relay_plugins.py"""
+跑法：python3 scripts/taskq/queue/test_relay_plugins.py"""
 import hashlib
 import json
 import os
@@ -139,7 +139,7 @@ INS = {"raw/holdout/A/inputs": ["A-001", "A-002"],
        "raw/ext/C-x/inputs": ["C-010"]}
 COH = {"raw/holdout/A/inputs": "A_holdout", "raw/ext/B/inputs": "B",
        "raw/ext/C/inputs": "C", "raw/ext/C-x/inputs": "C-x"}
-INFER_SH = "scripts/queue/testdata/bin/infer_task.sh"
+INFER_SH = "scripts/taskq/queue/testdata/bin/infer_task.sh"
 
 
 def infer_setup():

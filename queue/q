@@ -3,15 +3,17 @@
 #   q <组> [pueue add 的选项，如 --label 名字] -- '<命令>'
 # 各机器有哪些组、每组用哪张卡、带哪些环境变量，写在 envs/machines.py（setup.sh 按它建组）；
 # 没有卡的组 CUDA_VISIBLE_DEVICES 设为空（看不到卡）。每个任务都带上 envs/policy.py 的 OUTPUTS["env_script"] 设的数据路径。
-# 表里这台机器有 code（box）时，任务的工作目录是按提交号的代码副本（先用 scripts/sync/snapshot.sh 更新到 GitHub 上的 main），
+# 表里这台机器有 code（box）时，任务的工作目录是按提交号的代码副本（先用 scripts/taskq/sync/snapshot.sh 更新到 GitHub 上的 main），
 # 只跑已经推送的代码，以后的代码更新不改到这个任务；没有 code 时是表里的 repo。
-# 例：q gpu1 --label demo -- 'bash scripts/queue/run_task.sh command key=demo/a "cmd=python3 train.py" env=<环境> out=demo/a done=DONE'
+# 例：q gpu1 --label demo -- 'bash scripts/taskq/queue/run_task.sh command key=demo/a "cmd=python3 train.py" env=<环境> out=demo/a done=DONE'
 set -euo pipefail
 G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
-HERE=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
+HERE=$REPO
 SRC=$(python3 "${TASKQ_CONFIG:-$HERE/envs}/machines.py" get . repo) CODE=$(python3 "${TASKQ_CONFIG:-$HERE/envs}/machines.py" get . code)
 if [[ -n $CODE ]]; then
-    bash "$HERE/scripts/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
+    bash "$CORE/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
     REPO=$(readlink -f "$CODE")
 else
     REPO=$(readlink -f "$SRC")
@@ -21,6 +23,6 @@ echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）
 ENV=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-ES=$(python3 "$REPO/scripts/queue/cfg.py" get env_script)
+ES=$(python3 "$REPO/scripts/taskq/queue/cfg.py" get env_script)
 [[ -z $ES ]] || source "$REPO/$ES"
 exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"

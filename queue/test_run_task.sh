@@ -1,6 +1,6 @@
 #!/bin/bash
 # run_task.sh 的测试（2026-10-18）：command 做法、临时数据目录，按测试用的机器表（testdata/config）激活假的环境，不用 GPU。
-#   bash scripts/queue/test_run_task.sh
+#   bash scripts/taskq/queue/test_run_task.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # 显存填充的启动器（gpu_pad_start.sh）：经环境脚本（policy.py 的 OUTPUTS["env_script"]，这里是测试用的 testdata/env.sh）source 时
-# 什么情况下启动、只启动一次、失败重启。  bash scripts/queue/test_gpu_pad_launcher.sh
+# 什么情况下启动、只启动一次、失败重启。  bash scripts/taskq/queue/test_gpu_pad_launcher.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)

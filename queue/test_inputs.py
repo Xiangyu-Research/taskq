@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """inputs.py 和 run_task.sh 查输入、本地私有视图的测试（2026-11-01）：临时目录里的假数据目录、假 blob、假 squeue。
-  python3 scripts/queue/test_inputs.py"""
+  python3 scripts/taskq/queue/test_inputs.py"""
 import hashlib
 import json
 import os

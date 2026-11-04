@@ -1,5 +1,5 @@
 """测试用的实验表（2026-11-02）：形状同真的实验表（每份做的步骤、所有份做完以后的几串步骤、档位、跳过的外部集、折外划分、
-看板名称），做法是 toy（testdata/plugins/recipes.py），步骤的命令是 testdata/bin/ 下的假脚本。字段说明见 scripts/queue/experiments.py。
+看板名称），做法是 toy（testdata/plugins/recipes.py），步骤的命令是 testdata/bin/ 下的假脚本。字段说明见 scripts/taskq/queue/experiments.py。
 
 每个实验（_x 的参数）：id、exp、label、model、ds、variant、env、frags（训哪几份）、steps（训完以后的步骤，STEPS 的名字）、
 nice、board、skip_ext、only_ext、splits、probe、hours、vars、plan。
@@ -44,13 +44,13 @@ def _manifest_ok(path):
 
 
 # ---------------- 步骤（{data} = box 的数据目录，{python} = box 上 base 环境的 python） ----------------
-PE = "bash scripts/queue/testdata/bin/step.sh"
+PE = "bash scripts/taskq/queue/testdata/bin/step.sh"
 AN = "demo/analysis/{model}"
 T0_ENS = "D101_alpha/V_save__PlanM__full/frags_0-1-2-3-4"
 INFER = dict(name="infer", group="gpu", cmd=PE + " --stage infer {data}/results/{model} {frag}",
              done=check("preds/{model}/frag_{frag}/MANIFEST.json", _manifest_ok),
              queue=dict(nice=-100, key="infer/{model}/frag_{frag}", env="base",
-                        cmd="bash scripts/queue/testdata/bin/infer_task.sh {data}/results/{model} {frag}",
+                        cmd="bash scripts/taskq/queue/testdata/bin/infer_task.sh {data}/results/{model} {frag}",
                         out="preds/{model}/frag_{frag}", done=[".infer_done"], relay="toy_infer", disk=75,
                         res=dict(wait_gpu=120)))
 EVAL = dict(name="eval", group="cpu", cmd=PE + " --stage eval {data}/results/{model} {frag}",
@@ -59,10 +59,10 @@ EVAL = dict(name="eval", group="cpu", cmd=PE + " --stage eval {data}/results/{mo
                        cmd=PE + " --stage eval {data}/results/{model} {frag} && touch {data}/" + AN + "/frag_{frag}/.eval_done",
                        out=AN + "/frag_{frag}", done=[".eval_done"],
                        inputs=["preds/{model}/frag_{frag}/.infer_done", "results/{model}/frag_{frag}/check"]))
-OOF = dict(name="oof", group="cpu", cmd="{python} scripts/queue/testdata/bin/oof.py {data}/results/{model}",
+OOF = dict(name="oof", group="cpu", cmd="{python} scripts/taskq/queue/testdata/bin/oof.py {data}/results/{model}",
            done=runlog(AN + "/oof/oof.run.json", "check.txt"))
 PAIRED = dict(name="paired", group="cpu",
-              cmd="{python} scripts/queue/testdata/bin/paired.py --ref {data}/demo/analysis/" + T0_ENS
+              cmd="{python} scripts/taskq/queue/testdata/bin/paired.py --ref {data}/demo/analysis/" + T0_ENS
                   + " --cmp {exp}={data}/demo/analysis/{model}/oof/eval --out {data}/demo/analysis/{model}/oof/paired",
               done=runlog(AN + "/oof/paired/paired.run.json", "paired.csv"))
 ENS_CMD = "ENSEMBLE_ONLY=1 " + PE + " --stage all {data}/results/{model} {frag_list_q}"
@@ -73,7 +73,7 @@ ENS = dict(name="ens", group="cpu", needs="infer", cmd=ENS_CMD,
                       out=AN + "/frags_0-1-2-3-4", done=[".ens_done"], disk=90,
                       fetch=dict(exclude=[], extra=[], also=["preds/{model}/frags_0-1-2-3-4"]),
                       inputs=["preds/{model}/frag_{frag}/.infer_done"]))
-LPROB_CMD = "scripts/queue/testdata/bin/lprob.py {data}/results/{model} {frag} --workers 12"
+LPROB_CMD = "scripts/taskq/queue/testdata/bin/lprob.py {data}/results/{model} {frag} --workers 12"
 LPROB = dict(name="lprob", group="cpu", cmd="{python} " + LPROB_CMD,
              done=runlog(AN + "/frag_{frag}/lprob/lprob.run.json"),
              queue=dict(nice=-100, key="lprob/{model}/frag_{frag}", env="base", device="cpu", relay="path",
@@ -101,15 +101,15 @@ def _pruned(pred):
 
 
 PRUNE = dict(name="prune", group="cpu", needs=["infer", "eval"],
-             cmd="{python} scripts/queue/testdata/bin/prune.py {data}/preds/{model} --frags {frag_list_q}",
+             cmd="{python} scripts/taskq/queue/testdata/bin/prune.py {data}/preds/{model} --frags {frag_list_q}",
              done=check("preds/{model}", _pruned))
-FINAL = [dict(name="compare_all", group="cpu", cmd="{python} scripts/queue/testdata/bin/compare_all.py",
+FINAL = [dict(name="compare_all", group="cpu", cmd="{python} scripts/taskq/queue/testdata/bin/compare_all.py",
               done=runlog("demo/analysis/compare/all/compare_all.run.json"), rerun_if_newer=["paired", "ens"])]
 
 
 def _probe(p, inputs):
     out = "demo/probe/" + p + "_{probe}"
-    cmd = "MODEL={data}/results/{model} TAG={probe} bash scripts/queue/testdata/bin/" + p + "_run.sh && touch {data}/" + out + "/.probe_done"
+    cmd = "MODEL={data}/results/{model} TAG={probe} bash scripts/taskq/queue/testdata/bin/" + p + "_run.sh && touch {data}/" + out + "/.probe_done"
     model = ["results/{model}/" + f for f in ["dataset.json", "plans.json"] + [f"frag_{k}/final.ckpt" for k in F5]]
     return dict(name=p, group="gpu", cmd=cmd, done=exists(out + "/.probe_done"),
                 queue=dict(nice=-100, key="probe/" + p + "_{probe}", env="base", cmd=cmd, out=out, done=[".probe_done"],
@@ -118,9 +118,9 @@ def _probe(p, inputs):
 
 P1 = _probe("p1", ["demo/probe/p1/inputs", "demo/probe/p1/targets.csv"])
 P2 = _probe("p2", ["demo/probe/p2/inputs", "demo/probe/p2/items"])
-P2CMP = dict(name="p2cmp", group="cpu", cmd="{python} scripts/queue/testdata/bin/p2_compare.py --tags {probe} --out {data}/demo/probe/p2_compare_{probe}",
+P2CMP = dict(name="p2cmp", group="cpu", cmd="{python} scripts/taskq/queue/testdata/bin/p2_compare.py --tags {probe} --out {data}/demo/probe/p2_compare_{probe}",
              done=runlog("demo/probe/p2_compare_{probe}/p2_compare.run.json"))
-T18CMP = dict(name="t18cmp", group="cpu", cmd="{python} scripts/queue/testdata/bin/cmp18.py --out {data}/demo/analysis/followups/T18",
+T18CMP = dict(name="t18cmp", group="cpu", cmd="{python} scripts/taskq/queue/testdata/bin/cmp18.py --out {data}/demo/analysis/followups/T18",
               done=runlog("demo/analysis/followups/T18/cmp18.run.json"))
 
 STEPS = {s["name"]: s for s in [INFER, EVAL, LPROB, OOF, PAIRED, ENS, PRUNE, P1, P2, P2CMP, T18CMP]}

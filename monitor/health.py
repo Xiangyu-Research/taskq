@@ -3,9 +3,9 @@
 同时记进状态文件，make_registry.py 把当前的问题放在实验登记表最上面（"需要处理"）。各机器的状态只在 gather() 里取，
 登记表 make_registry.py 也用它。
 
-    python3 scripts/monitor/health.py              检查、推送、更新状态
-    python3 scripts/monitor/health.py --dry-run    只打印这次查到的问题，不推送、不改任何文件
-    python3 scripts/monitor/health.py --test       推送一条测试消息
+    python3 scripts/taskq/monitor/health.py              检查、推送、更新状态
+    python3 scripts/taskq/monitor/health.py --dry-run    只打印这次查到的问题，不推送、不改任何文件
+    python3 scripts/taskq/monitor/health.py --test       推送一条测试消息
 
 查什么（每项一个问题编号，同一个问题只推送一次）：
   - 连不上：ssh 不通（pueue 机器 30 分钟、Slurm 集群 1 小时后才报）。
@@ -17,16 +17,16 @@
   - 训练机的卡空了：pueue 训练机（角色 train）上有卡的组里没有排着的训练任务（只剩在训的一个，或者全空），这次也没领到新的。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
   - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
-  - pueue 机器 24 小时内重启过（scripts/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
-提醒（10/21 起）：每个问题推送一次，用 scripts/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
+  - pueue 机器 24 小时内重启过（scripts/taskq/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
+提醒（10/21 起）：每个问题推送一次，用 scripts/taskq/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
 文件（envs/policy.py 的 OUTPUTS）：topic（ntfy 频道名，不进仓库）、health 下的 state.json（问题和推送记录，
   make_registry.py 读）、health.log（每次有变化记一行）。
 每次检查后还做两件事（10/18 起）：
-  - scripts/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
-  - scripts/queue/feed.py：送任务的唯一入口（10/31）。SITES 里 relay=True 的执行机交给 scripts/queue/relay.py（领任务、传数据、
+  - scripts/taskq/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
+  - scripts/taskq/queue/feed.py：送任务的唯一入口（10/31）。SITES 里 relay=True 的执行机交给 scripts/taskq/queue/relay.py（领任务、传数据、
     拉回，记在 ~/relay.log；停住等人处理的报成问题），其余往缓冲送任务、交还，记在 ~/feed.log。
-  - scripts/queue/advance.py：box 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
+  - scripts/taskq/queue/advance.py：box 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
 """
 import argparse
 import json
@@ -38,12 +38,13 @@ import urllib.request
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 TQS = cfg.state("taskq", expand=False)
-sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+sys.path.insert(0, os.path.join(CORE, "sites"))
 import machines as M  # noqa: E402
 import policy  # noqa: E402
 
@@ -80,12 +81,12 @@ def load_failed(e):
 
 
 try:
-    import experiments as E  # noqa: E402  scripts/queue/experiments.py：实验表
-    import spec  # noqa: E402  scripts/queue/spec.py：任务说明、各机器上的收集
-    import taskq  # noqa: E402  scripts/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
-    import plain as PL  # noqa: E402  scripts/monitor/plain.py：推送的白话说法
-    import common as C  # noqa: E402  scripts/queue/common.py
-    import slurm as SL  # noqa: E402  scripts/sites/slurm.py
+    import experiments as E  # noqa: E402  scripts/taskq/queue/experiments.py：实验表
+    import spec  # noqa: E402  scripts/taskq/queue/spec.py：任务说明、各机器上的收集
+    import taskq  # noqa: E402  scripts/taskq/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
+    import plain as PL  # noqa: E402  scripts/taskq/monitor/plain.py：推送的白话说法
+    import common as C  # noqa: E402  scripts/taskq/queue/common.py
+    import slurm as SL  # noqa: E402  scripts/taskq/sites/slurm.py
     from common import write_json  # noqa: E402
 except Exception as _e:
     if __name__ == "__main__":
@@ -152,7 +153,7 @@ def probe_script(m, paths=()):
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
-    if "train" in m["roles"] and paths:  # 训练要用的数据哪些已经在了（scripts/queue/refill.py 判断要不要先传）
+    if "train" in m["roles"] and paths:  # 训练要用的数据哪些已经在了（scripts/taskq/queue/refill.py 判断要不要先传）
         lines.append(C.have_script(paths, m["data"]).rstrip("\n"))
     return "\n".join(lines) + "\n"
 
@@ -198,9 +199,9 @@ def gather(remote=True):
     for n in set(M.MACHINES) & set(policy.OFFLINE):
         s["ok"][n], s["why"][n] = False, f"暂停检查：{policy.OFFLINE[n]}"
     pq = [n for n in M.names("pueue") if n in here]
-    rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"] + ([] if remote else pq), timeout=180)
+    rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"] + ([] if remote else pq), timeout=180)
     s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in pq}
-    s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（scripts/queue/common.py），main() 里写回
+    s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（scripts/taskq/queue/common.py），main() 里写回
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
@@ -488,24 +489,24 @@ def main():
     P = check(s)
     # 这两步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
     try:
-        import shift  # scripts/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）
+        import shift  # scripts/taskq/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）
         shift_msgs = shift.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
-        shift_msgs, shift_err = [], f"scripts/queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
+        shift_msgs, shift_err = [], f"scripts/taskq/queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
     else:
         shift_err = None
     try:
-        import refill  # scripts/queue/refill.py：清理 lab 上用不着的数据
+        import refill  # scripts/taskq/queue/refill.py：清理 lab 上用不着的数据
         events, stuck, _ = refill.run_all(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
-        events, stuck = [], {"refill:error": f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}
+        events, stuck = [], {"refill:error": f"scripts/taskq/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}
     events = shift_msgs + events
     if shift_err:
         stuck["shift:error"] = shift_err
     try:
-        import feed  # scripts/queue/feed.py：往执行机的缓冲送任务（10/31）
+        import feed  # scripts/taskq/queue/feed.py：往执行机的缓冲送任务（10/31）
     except Exception as e:  # noqa: BLE001
-        feed, stuck["feed:error"] = None, f"scripts/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
+        feed, stuck["feed:error"] = None, f"scripts/taskq/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
 
     def run_feed(relay):
         if feed is None:
@@ -515,19 +516,19 @@ def main():
             events.extend(ev)
             stuck.update(st)
         except Exception as e:  # noqa: BLE001
-            stuck["feed:error"] = f"scripts/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
+            stuck["feed:error"] = f"scripts/taskq/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
 
     run_feed(relay=True)  # 送任务只从 feed.py 进：SITES 里 relay=True 的由它转给 relay.py
     try:
-        import advance  # scripts/queue/advance.py：box 上按状态排下一步
+        import advance  # scripts/taskq/queue/advance.py：box 上按状态排下一步
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
-        done, stuck2 = [], {"advance:error": f"scripts/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
+        done, stuck2 = [], {"advance:error": f"scripts/taskq/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
     if not a.dry_run and any(d.startswith("任务队列") for d in done):
         # 刚加进总队列的（如评测）这一次就送到执行机，不等下一次检查（10/25、10/31）
         # 第一遍送过的任务、排过的传输都要重读，不然会再送一遍、再传一遍（10/31 同一份数据传了两次）
         s["taskq"][M.hub()] = taskq.local_status() or s["taskq"].get(M.hub())
-        rc, out = sh([os.path.join(REPO, "scripts", "queue", "qs"), "--json"], timeout=180)
+        rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"], timeout=180)
         if rc == 0:
             s["pueue"] = json.loads(out)
         for name in feed.sites() if feed else []:
@@ -543,7 +544,7 @@ def main():
         events.extend(ev2)
         stuck.update(st3)
     except Exception as e:  # noqa: BLE001
-        stuck["refill:error"] = f"scripts/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
+        stuck["refill:error"] = f"scripts/taskq/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
     for pid, msg in {**stuck, **stuck2}.items():
         # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的任务"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=0)

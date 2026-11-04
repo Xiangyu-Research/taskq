@@ -3,28 +3,31 @@ import os
 import re
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ROOT = REPO  # 清单里的路径相对它
+CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
+import cfg as _cfg  # noqa: E402
+REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
+ROOT = CORE  # 清单里的路径相对它
 
 CLEAN = [
-    "scripts/queue/common.py", "scripts/queue/inputs.py", "scripts/queue/feed.py", "scripts/queue/refill.py",
-    "scripts/queue/shift.py", "scripts/queue/relay_gc.py",
-    "scripts/sites/envs.py", "scripts/sites/pueue.py", "scripts/sites/remote.py", "scripts/sites/site.py",
-    "scripts/sites/slurm.py",
-    "scripts/monitor/health.py", "scripts/sync/tunnel.py",
-    "scripts/queue/run_task.sh", "scripts/queue/worker_start.sh", "scripts/queue/fetch_task.sh",
-    "scripts/queue/archive_task.sh", "scripts/queue/offload_io.sh", "scripts/queue/gpu_pad.py",
-    "scripts/queue/gpu_pad_start.sh", "scripts/queue/relay_plugins.py", "scripts/queue/relay_bundle.py",
-    "scripts/queue/experiments.py", "scripts/queue/spec.py", "scripts/queue/q", "scripts/sync/snapshot.sh",
-    "scripts/queue/test_feed.py", "scripts/queue/test_common.py", "scripts/queue/test_shift.py", "scripts/sites/test_adapters.py",
-    "scripts/sites/test_e2e.py", "scripts/sites/test_envs.py", "scripts/sync/test_tunnel.py", "scripts/queue/test_archive_task.sh",
-    "scripts/queue/test_races.py", "scripts/queue/test_worker_stall.sh", "scripts/monitor/test_probe.py",
+    "queue/common.py", "queue/inputs.py", "queue/feed.py", "queue/refill.py",
+    "queue/shift.py", "queue/relay_gc.py",
+    "sites/envs.py", "sites/pueue.py", "sites/remote.py", "sites/site.py",
+    "sites/slurm.py",
+    "monitor/health.py", "sync/tunnel.py",
+    "queue/run_task.sh", "queue/worker_start.sh", "queue/fetch_task.sh",
+    "queue/archive_task.sh", "queue/offload_io.sh", "queue/gpu_pad.py",
+    "queue/gpu_pad_start.sh", "queue/relay_plugins.py", "queue/relay_bundle.py",
+    "queue/experiments.py", "queue/spec.py", "queue/q", "sync/snapshot.sh",
+    "queue/test_feed.py", "queue/test_common.py", "queue/test_shift.py", "sites/test_adapters.py",
+    "sites/test_e2e.py", "sites/test_envs.py", "sync/test_tunnel.py", "queue/test_archive_task.sh",
+    "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py",
 ]
 WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b",
                    re.I)
 
 # 测试用的固定配置（testdata/）整个查；PLACE 的地方 "trainer"（训练所在的执行机）是核心的写法
-FIXTURE = "scripts/queue/testdata"
+FIXTURE = "queue/testdata"
 FIXED = sorted(os.path.relpath(os.path.join(d, f), ROOT) for d, ds, fs in os.walk(os.path.join(ROOT, FIXTURE))
                if "__pycache__" not in d for f in fs if not f.endswith(".pyc"))
 if not FIXED:

@@ -1,7 +1,7 @@
 """送到执行机的任务按做法（recipes.py 的 relay 字段）挑插件（2026-11-01 起都用真名）：插件列出任务要用的 box 上的文件，
-拉回后核对结果。路径在两边一样（相对数据目录），文件内容不改。通用的 path 插件和统一的入口见 scripts/sites/names.py。
+拉回后核对结果。路径在两边一样（相对数据目录），文件内容不改。通用的 path 插件和统一的入口见 scripts/taskq/sites/names.py。
 
-插件在 TASKQ_PLUGINS 各文件夹的 relay_plugins.py 里（scripts/queue/cfg.py），加载时合进 PLUGINS、ACCEPTS、VIEW_ROOTS。
+插件在 TASKQ_PLUGINS 各文件夹的 relay_plugins.py 里（scripts/taskq/queue/cfg.py），加载时合进 PLUGINS、ACCEPTS、VIEW_ROOTS。
 每个插件一对函数：
   export(spec, root) → dict(files=[(相对路径, box 上的真实文件)], views=[视图文件夹], cleanup=[…]（可省，默认 = 结果文件夹）)
   check(spec, src, root)：src 下是拉回的文件（真的相对路径），对不上时报 RelayError"""
@@ -9,7 +9,7 @@ import hashlib
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 
 
 

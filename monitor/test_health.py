@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """测 health.py 的检查和推送规则（2026-10-16）：假的队列、训练日志、DICC 输出、时钟，不连任何机器、不真的推送。
 
-    python3 scripts/monitor/test_health.py
+    python3 scripts/taskq/monitor/test_health.py
 """
 import json
 import os
@@ -61,9 +61,9 @@ def task(i, group, status, cmd, label="", start=NOW - timedelta(hours=3), end=No
 
 
 LAB_BUSY = {"groups": {}, "tasks": [dict(id=90, group="gpu1", status="Running", label="busy_a", deps=[], start=None, end=None,
-                                         command="bash scripts/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=2"),
+                                         command="bash scripts/taskq/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=2"),
                                     dict(id=91, group="gpu1", status="Queued", label="busy_b", deps=[], start=None, end=None,
-                                         command="bash scripts/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=3")]}
+                                         command="bash scripts/taskq/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=3")]}
 
 
 def snap(**kw):
@@ -103,14 +103,14 @@ ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["
 s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "train_worker", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
 ok("DICC 作业失败", "dicc:486300_1" in ids(s))
 
-lab_train = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
+lab_train = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
          src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
 s["src"]["lab"]["tasks"][MEN0] = prog(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 
-fetch = task(9, "wait", "Running", f"bash scripts/queue/fetch_task.sh dicc {MET2}", "fetch_t3g_f2")
+fetch = task(9, "wait", "Running", f"bash scripts/taskq/queue/fetch_task.sh dicc {MET2}", "fetch_t3g_f2")
 s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}})
 ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
 s["slurm"], s["ok"]["dicc"] = {}, False
@@ -127,7 +127,7 @@ def tqrow(key, state, worker=None, since=None, log_age=None, kind="toy", task_lo
 
 
 old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
-lab_men = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
+lab_men = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_men]}},
          src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}},
          taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")]),
@@ -136,7 +136,7 @@ H.time.time = lambda: NOW.timestamp()
 P = H.check(s)
 ok("总队列分给 lab、lab 在训：不算同一折两处，也不算卡住", f"dup:{MEN0}" not in P and not [k for k in P if k.startswith("stuck:") and MEN0 in k])
 s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
-s["slurm"] = sq(["brave-otter", "486191_2", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+s["slurm"] = sq(["brave-otter", "486191_2", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
 ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
 INF = "infer/D103_alpha_one/x/frag_2"
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=120)]
@@ -149,21 +149,21 @@ s["taskq"]["dicc"]["tasks"] = []
 s["pueue"]["lab"]["tasks"] = []
 ok("在跑的 DICC 作业、缓冲里没人领：报有卡空着", "tqidle:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "waiting", None), tqrow(MET2, "claimed", "491480", since=old, task_log_age=60)]
-s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
 ok("提前排的推理在等训练（waiting）：不报、不算没人训、不算有卡空着", not {f"tqblocked:{INF}", "tqorphan:dicc", "tqidle:dicc"} & ids(s))
 s["taskq"]["dicc"]["tasks"][0] = dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次")
 ok("等的任务失败了（blocked）：报出来", "失败 2 次" in H.check(s).get(f"tqblocked:{INF}", {}).get("msg", ""))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None, since=old)]
 s["slurm"] = sq()
 ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "AUTO" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
-s["slurm"] = sq(["brave-otter", "486300_1", "PENDING", "0:00", "Priority", "2000", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+s["slurm"] = sq(["brave-otter", "486300_1", "PENDING", "0:00", "Priority", "2000", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
 ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
-s["slurm"] = sq(["brave-otter", "487000_1", "PENDING", "0:00", "Priority", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+s["slurm"] = sq(["brave-otter", "487000_1", "PENDING", "0:00", "Priority", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
 ok("排着的 worker 作业（按交的脚本认，名字随机）也算：不提醒", "tqorphan:dicc" not in H.check(s))
-s["slurm"] = sq(["calm-heron", "487001", "RUNNING", "1:00:00", "None", "0", "normal", "/home/u/q/code/current/scripts/queue/cpu_worker.sbatch"])
+s["slurm"] = sq(["calm-heron", "487001", "RUNNING", "1:00:00", "None", "0", "normal", "/home/u/q/code/current/scripts/taskq/queue/cpu_worker.sbatch"])
 ok("只有 CPU worker 在跑：还是提醒没人训（按交的脚本认）", "tqorphan:dicc" in H.check(s))
 s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None)]
-s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/queue/worker.sbatch"])
+s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
 ok("在跑的 worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
 
 H.time.time = time_orig
@@ -181,15 +181,15 @@ def tk(cmd):
     return (r["step"], r["key"]) if r else (None, None)
 
 
-ok("run_task.sh 的训练命令 → key", tk("bash scripts/queue/run_task.sh toy ds=D111_beta "
+ok("run_task.sh 的训练命令 → key", tk("bash scripts/taskq/queue/run_task.sh toy ds=D111_beta "
                                               "variant=V_save_n470 frag=0") == ("train", MEN0))
-ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c 'bash scripts/queue/run_task.sh toy "
+ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c 'bash scripts/taskq/queue/run_task.sh toy "
                                                            "ds=D116_gamma frag=2'") == ("train", MET2))
-ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/queue/run_task.sh command key=x/y cmd=true env=base "
+ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/taskq/queue/run_task.sh command key=x/y cmd=true env=base "
                                                      "out=runs/x done=ok") == ("train", "x/y"))
-ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/queue/run_task.sh toy dss=x frag=0") == (None, None))
-ok("fetch_task.sh <机器> <key> → 拉回", H.C.from_command(f"bash scripts/queue/fetch_task.sh dicc {MET2}") == dict(step="fetch", src="dicc", key=MET2))
-lab_rt = task(7, "gpu1", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0",
+ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/taskq/queue/run_task.sh toy dss=x frag=0") == (None, None))
+ok("fetch_task.sh <机器> <key> → 拉回", H.C.from_command(f"bash scripts/taskq/queue/fetch_task.sh dicc {MET2}") == dict(step="fetch", src="dicc", key=MET2))
+lab_rt = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0",
               "train:" + MEN0)
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
          src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
@@ -301,7 +301,7 @@ ok("看板有结果等确认 → 报", "board" in P)
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
                             groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
-fk = task(3, "gpu0", "Running", "bash scripts/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
+fk = task(3, "gpu0", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
          src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "fake": {"tasks": {}},
               "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}})

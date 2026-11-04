@@ -1,6 +1,6 @@
 #!/bin/bash
-# DICC 训练作业的任务队列 worker（2026-10-17；10/18 起不认识具体模型）：从 scripts/queue/taskq.py 的队列里按顺序领任务，
-# 每个任务交给 scripts/queue/run_task.sh 跑（环境、命令、怎么算训完都在任务说明里，见 scripts/queue/recipes.py）。
+# DICC 训练作业的任务队列 worker（2026-10-17；10/18 起不认识具体模型）：从 scripts/taskq/queue/taskq.py 的队列里按顺序领任务，
+# 每个任务交给 scripts/taskq/queue/run_task.sh 跑（环境、命令、怎么算训完都在任务说明里，见 scripts/taskq/queue/recipes.py）。
 # 只领本机有环境的任务（envs/machines.py 的 envs）。
 # 一张卡训几个看实际情况：先训 1 个；最近一个训练开始 15 分钟以后，如果近 10 分钟 GPU 平均使用率低于 90%（10/18 前 80%）、
 # 还空着一半显存，再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。
@@ -8,8 +8,8 @@
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的，空着等（有了就领），等满 40 分钟还没有就退出
 # （11/2 起：排了几天的作业开始时缓冲刚好空着、数据还在传，不再几秒就结束）。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
-#   bash dicc_worker.sh                     （scripts/queue/worker.sbatch → worker_start.sh）
-# WORKER_DEVICE=cpu（scripts/queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
+#   bash dicc_worker.sh                     （scripts/taskq/queue/worker.sbatch → worker_start.sh）
+# WORKER_DEVICE=cpu（scripts/taskq/queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
 # 不等排在前面的、不看 GPU；没有能领的就结束（由 box 上的 refill.py 在有这类任务时才交）。
 # 出问题时不让排队的作业空跑掉：
 #   - 任务卡住（10/23 起）：开始 30 分钟以后，任务的日志和结果文件夹都 30 分钟没有变化，就停掉它、交还（不算失败），
@@ -27,11 +27,12 @@
 # 没有时限、不查 squeue、没有显存填充；没有在训的、领不到的、队列出错、本 worker 失败太多次都不退出，每 60 秒再看；
 # 代码变了（仓库的提交号，或代码包的 current 换了）就不再领新的，手上的做完后退出（退出码 0），由 box 用新代码重开（11/1）。
 # GPU 记录只看 CUDA_VISIBLE_DEVICES 那张卡（lab 另一张卡别人在用）。
-# TASKQ_* 环境变量只给测试用（scripts/queue/test_dicc_worker.sh）。
+# TASKQ_* 环境变量只给测试用（scripts/taskq/queue/test_dicc_worker.sh）。
 set -uo pipefail
 unset _envs
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(dirname "$(dirname "$HERE")")
+CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 TQPY="python3 $HERE/taskq.py"
 if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
 W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
@@ -428,9 +429,9 @@ rm -f "$ERRF"
 rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
 # 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；不是代码包的退出，由 feed.py 重开
 NEW=$(readlink -f "$(dirname "$REPO")/current" 2> /dev/null)
-if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $NEW/scripts/queue/worker_start.sh ]]; then
+if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $NEW/scripts/taskq/queue/worker_start.sh ]]; then
     echo "$(ts) 换成新代码 $(basename "$NEW") 接着跑"
-    exec bash "$NEW/scripts/queue/worker_start.sh"
+    exec bash "$NEW/scripts/taskq/queue/worker_start.sh"
 fi
 [[ -n $RESTART ]] && echo "$(ts) 退出，由 feed.py 用新代码重开"
 exit 0

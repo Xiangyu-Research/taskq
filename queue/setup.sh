@@ -1,17 +1,18 @@
 #!/bin/bash
 # 在 pueue 机器（envs/machines.py 里 scheduler=pueue 的）上启动 pueue 的常驻进程、建组、写 crontab（2026-10-16），重复运行没关系。
-#   bash scripts/queue/setup.sh
+#   bash scripts/taskq/queue/setup.sh
 # 组按 envs/machines.py 建；表里没有、也没有任务的组删掉。
 # crontab（lab 没开 linger 用不了 systemd 用户服务，都用 cron）：
-#   所有 pueue 机器：@reboot scripts/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务），从表里的 code（没有就 repo）跑
+#   所有 pueue 机器：@reboot scripts/taskq/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务），从表里的 code（没有就 repo）跑
 #   角色 hub（box）：每 30 分钟健康检查；08:30–20:30 每 2 小时更新登记表和看板、推送进度（scripts/monitor/auto_refresh.sh）
 set -euo pipefail
 P=~/.local/bin/pueue
-REPO=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" rev-parse --show-toplevel)
+CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
 me=$($M whoami) || { echo "envs/machines.py 里没有这台机器（$(hostname -s)）" >&2; exit 1; }
 [[ $($M get . scheduler) == pueue ]] || { echo "$me 不用 pueue" >&2; exit 1; }
-[[ -x $P ]] || bash "$REPO/scripts/queue/install_pueue.sh"
+[[ -x $P ]] || bash "$CORE/queue/install_pueue.sh"
 # socket 固定放在 ~/.local/share/pueue（默认跟着 XDG_RUNTIME_DIR 走：ssh 登录时是 /run/user/<uid>，cron 里没有这个变量，
 # 两边会对不上；lab 没开 linger，/run/user/<uid> 在所有登录都结束后还会被删掉）
 D=$HOME/.local/share/pueue CFG=~/.config/pueue/pueue.yml
@@ -39,7 +40,7 @@ done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
 CODE=$($M get . code); [[ -n $CODE ]] || CODE=$($M get . repo)
 crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | grep -v "on_boot.sh" | crontab -; }
-cron "bash $CODE/scripts/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
+cron "bash $CODE/scripts/taskq/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
 crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | grep -v "git_pull_cron.sh" | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) "
 if [[ $roles == *" hub "* ]]; then  # 健康检查；登记表和看板。从只给 cron 用的克隆 ~/auto/PhD 运行（只跑已提交的代码）

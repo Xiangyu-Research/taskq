@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""测任务说明的解析（2026-10-18；11/2 起用 testdata/ 的配置和实验表）：scripts/queue/spec.py、recipes.py、experiments.py。不连机器。
+"""测任务说明的解析（2026-10-18；11/2 起用 testdata/ 的配置和实验表）：scripts/taskq/queue/spec.py、recipes.py、experiments.py。不连机器。
 
-    python3 scripts/queue/test_spec.py
+    python3 scripts/taskq/queue/test_spec.py
 """
 import itertools
 import os
@@ -40,7 +40,7 @@ s = S.resolve("toy", {"ds": "D111_beta", "variant": "V_save_n470", "frag": "1"})
 ok("toy：key、out、env 默认值", s["key"] == "D111_beta/V_save_n470/1"
    and s["out"] == "results/D111_beta/V_save_n470__PlanM__full/frag_1"
    and s["env"] == "base" and s["data"] == ["prepared/D111_beta"])
-ok("toy：命令按参数填", s["cmd"] == "bash scripts/queue/testdata/bin/toy_train.sh D111_beta full 1 PlanM V_save_n470")
+ok("toy：命令按参数填", s["cmd"] == "bash scripts/taskq/queue/testdata/bin/toy_train.sh D111_beta full 1 PlanM V_save_n470")
 ok("toy：{data}、{repo} 留到运行时展开", "{data}" in s["vars"]["DEMO_RESULTS"] and "{repo}" in s["vars"]["DEMO_CODE"])
 ok("缺必填参数（frag）：报错", raises(lambda: S.resolve("toy", {"ds": "D101_alpha"})))
 ok("写错参数名：报错", raises(lambda: S.resolve("toy", {"ds": "D101_alpha", "frag": "0", "variantt": "x"})))

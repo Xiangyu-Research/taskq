@@ -4,14 +4,14 @@
 执行机和 box 用同样的名字和路径（11/1 起不换名）；执行机之间不直接通信，一切经 box。
 
 那边（根目录 R，machines.py 的 root）：
-  R/code/<包名>、R/code/current   scripts/queue/relay_bundle.py 打的代码包（origin/main 变了就重打、切换 current；旧包留最新 3 个，
+  R/code/<包名>、R/code/current   scripts/taskq/queue/relay_bundle.py 打的代码包（origin/main 变了就重打、切换 current；旧包留最新 3 个，
                                   4 天以上的删）；worker 和 DICC 同一套脚本（作业名、资源、脚本名分开，见 machines.py 的 RELAY）
   R/queue/                        它自己的任务队列（taskq.py，key 和总队列相同）
   R/blobs/<id[:2]>/<id>           数据文件，id = sha256（内容相同的只传一次）
   R/data/                         数据目录，相对路径和 box 的一样：每个任务的输入是指向 blobs 的软链接（和插件生成的小文件，
-                                  scripts/sites/names.py），产出照常写。state.json 记下每个任务放了哪些路径（视图、输入、产出），
+                                  scripts/taskq/sites/names.py），产出照常写。state.json 记下每个任务放了哪些路径（视图、输入、产出），
                                   删一个任务时只删别的任务不用的（相同、上级、下级都算在用）
-每次健康检查（scripts/monitor/health.py，每 30 分钟）经 scripts/queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
+每次健康检查（scripts/taskq/monitor/health.py，每 30 分钟）经 scripts/taskq/queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
   1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
   2. 总队列里 worker 是它的每个任务：
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（补传缺的数据、建软链接、加进那边的队列；要放的路径和那边没做完的
@@ -30,16 +30,16 @@
      refill.TRAIN_OUT_GB，cap 里留不出来就不领。blobs 可以是指到别的盘的链接（DICC：/scr，11/4），输出和队列在根目录）；
   4. 那边排着和在跑的 worker 作业不够、又有要卡的任务（备好的或在训的）时排满（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
-按时段的执行机（envs/policy.py 的 SHIFT，scripts/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
+按时段的执行机（envs/policy.py 的 SHIFT，scripts/taskq/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
 每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的任务，那边的队列里删掉任务
 （结果留着，接手的那台收编存档，见 machines.py 的 adopt），总队列里训完了再删结果。
 连不上它时只续总队列的领取；领着任务、连不上 2 小时以上报出来。
 
-    python3 scripts/queue/relay.py                         看现在会做什么（不改任何东西）
-    python3 scripts/queue/relay.py stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
-    python3 scripts/queue/relay.py fetch <名字> <key>      拉回做完的任务、核对，放进 box 的数据目录
-    python3 scripts/queue/relay.py bundle <名字> [--commit C]   打包、推过去、切换 current
-    python3 scripts/queue/relay.py status <名字>           那边的队列
+    python3 scripts/taskq/queue/relay.py                         看现在会做什么（不改任何东西）
+    python3 scripts/taskq/queue/relay.py stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
+    python3 scripts/taskq/queue/relay.py fetch <名字> <key>      拉回做完的任务、核对，放进 box 的数据目录
+    python3 scripts/taskq/queue/relay.py bundle <名字> [--commit C]   打包、推过去、切换 current
+    python3 scripts/taskq/queue/relay.py status <名字>           那边的队列
 """
 import argparse
 import base64
@@ -55,13 +55,14 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
-sys.path.insert(0, os.path.join(REPO, "scripts", "sync"))
-sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
-sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+sys.path.insert(0, os.path.join(CORE, "sync"))
+sys.path.insert(0, os.path.join(CORE, "monitor"))
+sys.path.insert(0, os.path.join(CORE, "sites"))
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 import spec as S  # noqa: E402
@@ -188,7 +189,7 @@ def safe_rel(rel):
 
 def relayable(i):
     """refill.info 的结果 → 能不能领给它：做法能翻译（按本机的 recipes.py 算，总队列那边的代码可能还没更新），插件接受这个任务
-    （scripts/sites/names.py 的 accepts，如 nnU-Net 的训练器不读仓库里的病例子集）。"""
+    （scripts/taskq/sites/names.py 的 accepts，如 nnU-Net 的训练器不读仓库里的病例子集）。"""
     sp = i["spec"]
     rec, params = i["recipe"] or sp.get("recipe"), i["params"] or sp.get("params") or {}
     try:
@@ -210,7 +211,7 @@ def prefix(name):
 
 def rtq(name, args, timeout=180):
     """那边的 taskq.py <args> → (退出码, 输出)；连不上 → None。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} scripts/queue/taskq.py {args}", timeout=timeout)
+    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} scripts/taskq/queue/taskq.py {args}", timeout=timeout)
     return None if rc in (124, 255) else (rc, (out + err).strip())
 
 
@@ -230,7 +231,7 @@ def rpy(name, code, data=None, timeout=600, job=None):
     return res
 
 
-HEAD = "import json,os,sys\nsys.path.insert(0,'scripts/queue')\nimport spec\nR=sys.argv[1]\nA=json.load(sys.stdin)\n"
+HEAD = "import json,os,sys\nsys.path[:0]=['scripts/taskq/queue','scripts/queue']\nimport spec\nR=sys.argv[1]\nA=json.load(sys.stdin)\n"
 
 STATUS_PY = HEAD + """import shutil,subprocess,taskq
 st=taskq.local_status()
@@ -484,7 +485,7 @@ def undeployed(name):
 
 def parse_sched(name, rs):
     """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：各种 worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
-    一次 ssh 读完、在 box 上用适配器解析（scripts/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
+    一次 ssh 读完、在 box 上用适配器解析（scripts/taskq/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
     raw, c = rs.pop("sched_raw", None), conf(name)
     rs["jobs"] = rs["squeue"] = None
     if raw is not None and c["scheduler"] == "pueue":
@@ -1079,20 +1080,20 @@ def execute(name, acts, s, run_add=None):
                 a = dict(a, op="stage")
             if a["op"] in ("stage", "restage"):
                 lab = label("relay_stage", k)
-                cmd = f"python3 scripts/queue/relay.py stage {name} {shlex.quote(k)} " + (
+                cmd = f"python3 scripts/taskq/queue/relay.py stage {name} {shlex.quote(k)} " + (
                     "--no-add" if a["op"] == "restage" else f"--nice {int(a['nice'])}")
                 tid = add(M.hub(), lab, "relay_stage", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 的 {k} 排了{'补传缺的输入' if a['op'] == 'restage' else '传数据'}（box 任务 {tid}）")
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
-                cmd = f"python3 scripts/queue/relay.py fetch {name} {shlex.quote(k)}"
+                cmd = f"python3 scripts/taskq/queue/relay.py fetch {name} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完了 {k}，排了拉回（box 任务 {tid}）")
             elif a["op"] == "archive":
                 lab = label("relay_archive", k)
-                cmd = f"bash scripts/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
+                cmd = f"bash scripts/taskq/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_archive", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
@@ -1143,7 +1144,7 @@ def drop_remote(name, key, rk, gone=False):
 
 
 def submit(name, subs):
-    """照 topup 算好的开 worker（scripts/sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
+    """照 topup 算好的开 worker（scripts/taskq/sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
     L, msgs, stuck = conf(name)["label"], [], {}
     run = lambda c: (lambda r: (r[0], r[1] + r[2]))(rsh(name, c))  # noqa: E731
     if conf(name)["scheduler"] == "pueue":
@@ -1155,7 +1156,7 @@ def submit(name, subs):
                 else:
                     stuck[kkey(f"site:{name}:worker", k)] = f"{L} 开 {wname(k)} 出错：{out}"
         return msgs, stuck
-    cwd = R.q(root(name)) + "/code/current/scripts/queue"
+    cwd = R.q(root(name)) + "/code/current/scripts/taskq/queue"
     for r in SL.start_workers(cwd, subs, run, conf(name).get("job_names")):
         k = sub_kind((r["qos"], r["time"], r["n"], r["file"]))
         if r["err"] is not None:
@@ -1200,7 +1201,7 @@ def run_all(s, dry=False):
         try:
             ev, st_ = run_one(s, name, dry)
         except Exception as e:  # noqa: BLE001
-            ev, st_ = [], {f"relay:{name}": f"scripts/queue/relay.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
+            ev, st_ = [], {f"relay:{name}": f"scripts/taskq/queue/relay.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
     return events, stuck

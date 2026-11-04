@@ -28,7 +28,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 CHUNK = int(os.environ.get("TUNNEL_CHUNK", 90 * 2 ** 20))
 NPAR = int(os.environ.get("TUNNEL_NPAR", 8))
 MIN_JOB = float(os.environ.get("TUNNEL_MIN_JOB", 1e9))
@@ -47,7 +47,7 @@ def log(msg):
 
 
 def machines():
-    sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+    sys.path.insert(0, os.path.join(CORE, "queue"))
     import cfg
     cfg.use_config()
     import machines as M
@@ -273,8 +273,8 @@ def run_remote(host, mode, plan, serve, total):
     pyx = "python3"
     with open(__file__) as f:
         src = f.read()
-    if relay:  # 执行机（scripts/queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
-        sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+    if relay:  # 执行机（scripts/taskq/queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
+        sys.path.insert(0, os.path.join(CORE, "queue"))
         import relay_bundle
         base = relay["root"].rstrip("/")
         job = relay.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
@@ -291,7 +291,7 @@ def run_remote(host, mode, plan, serve, total):
     run = [f"cd {wd}"]
     if job:
         t = max(30, int(total / 5e6 / 60) + 10)
-        sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+        sys.path.insert(0, os.path.join(CORE, "sites"))
         import slurm  # 作业名每次随机
         run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname((relay or M.MACHINES.get(name, {})).get('job_names'))} {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")

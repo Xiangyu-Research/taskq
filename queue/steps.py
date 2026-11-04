@@ -1,5 +1,5 @@
 """训练以后的步骤怎么判断做完了（2026-10-18）：实验表（research/*/experiments.py）的 after、group_after、FINAL 里的 done 用这些写，
-scripts/queue/advance.py 调用。路径都相对数据目录，可以用 {参数}（任务说明的参数，如 {model}、{fold}）。"""
+scripts/taskq/queue/advance.py 调用。路径都相对数据目录，可以用 {参数}（任务说明的参数，如 {model}、{fold}）。"""
 import json
 import os
 from datetime import datetime

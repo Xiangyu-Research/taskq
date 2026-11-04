@@ -1,9 +1,11 @@
 #!/bin/bash
 # dicc_worker.sh 的模拟测试（2026-10-18）：临时的假队列（TASKQ_DIR）、临时数据目录、假作业号，任务用 command 做法跑假训练
 # （睡几秒后写训完的文件）；环境按测试用的机器表（testdata/config）激活：假的 conda、venv（本机 box 的 base、alt）。不用 Slurm、不用 GPU。
-#   bash scripts/queue/test_dicc_worker.sh
+#   bash scripts/taskq/queue/test_dicc_worker.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
@@ -368,14 +370,14 @@ reset
 table << EOF
 t/k base
 EOF
-mkdir -p "$T/code/a" "$T/code/b/scripts/queue"
-cp -r "$HERE/../../scripts" "$T/code/a/"   # 配置、插件经 TASKQ_CONFIG、TASKQ_PLUGINS 找（testdata）
+mkdir -p "$T/code/a" "$T/code/b/scripts/taskq/queue"
+cp -r "$REPO/scripts" "$T/code/a/"   # 配置、插件经 TASKQ_CONFIG、TASKQ_PLUGINS 找（testdata）
 printf '#!/bin/bash
 echo "新包的 start $WORKER_ID"
-' > "$T/code/b/scripts/queue/worker_start.sh"
+' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
 ln -sfn a "$T/code/current"
 touch -d "5 days ago" "$T/code/a"
-(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 exec bash "$T/code/a/scripts/queue/dicc_worker.sh") > "$T/w6e.out" 2>&1 &
+(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/w6e.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "没有能领的任务" $T/w6e.out'
 ln -sfn b "$T/code/current"

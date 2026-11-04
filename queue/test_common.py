@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """common.py 的测试（2026-10-25）：任务记录的读写、找回任务号、清理；pueue 的时间。临时文件，不连机器。
-    python3 scripts/queue/test_common.py
+    python3 scripts/taskq/queue/test_common.py
 """
 import json
 import os

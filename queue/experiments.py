@@ -14,9 +14,10 @@ import shlex
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 import spec  # noqa: E402
 
 _cache = {}

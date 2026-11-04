@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """relay_gc.py 的测试（2026-10-31）：在临时目录造一个假根目录，本地跑 GC_PY（同 relay.rpy 的调用方式），剩余用 free 参数假装。
-    python3 scripts/queue/test_relay_gc.py
+    python3 scripts/taskq/queue/test_relay_gc.py
 """
 import json
 import os
@@ -10,7 +10,10 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
+import cfg as _cfg  # noqa: E402
+REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 

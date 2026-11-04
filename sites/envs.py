@@ -19,11 +19,12 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
-sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
+sys.path.insert(0, os.path.join(CORE, "monitor"))
 import machines as M  # noqa: E402
 
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'

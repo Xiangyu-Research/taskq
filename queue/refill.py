@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """训练机的数据清理和 DICC 补作业（2026-10-18；10/31 起 lab 不在这里领训练）。由 box 上的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用：run_all 管 pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，
+（scripts/taskq/monitor/health.py，每 30 分钟）调用：run_all 管 pueue 训练机（envs/machines.py 里 scheduler=pueue、角色 train 的，
 现在是 lab）上的数据，topup_all 给 Slurm 训练机（DICC）补交 worker 作业。
 
-lab 的两张卡 10/31 起是 RELAY 的执行机 lab1、lab0（scripts/queue/relay.py，数据由 relay_gc.py 清理）；下面"lab 上的数据"只管
+lab 的两张卡 10/31 起是 RELAY 的执行机 lab1、lab0（scripts/taskq/queue/relay.py，数据由 relay_gc.py 清理）；下面"lab 上的数据"只管
 10/31 前的老数据目录，等那里剩下的存档备份到 DICC 后删掉。
 传数据（transfer）、box 任务（add、then_check）、挑下一个任务（candidates、next_pick）这些共用的函数在这里，feed.py、relay.py、
 advance.py 调用。
@@ -18,14 +18,14 @@ lab 上的数据：
 开关：envs/policy.py 的 AUTO["lab"] 是 False 时只算、不删（"会删什么"有变化时记进 ~/refill.log）。
 
 DICC 补作业：每个 QOS（envs/policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)）排着和在跑的作业（数组按段算）不到上限（sacctmgr 的 MaxSubmitPU，
-没设时按 SUBMIT_CAP；读作业数、交作业用 scripts/sites/slurm.py）减去留给别的作业的名额、DICC 的缓冲里还有没人领的任务时，交 scripts/queue/worker.sbatch 补满（每个空位交一个
+没设时按 SUBMIT_CAP；读作业数、交作业用 scripts/taskq/sites/slurm.py）减去留给别的作业的名额、DICC 的缓冲里还有没人领的任务时，交 scripts/taskq/queue/worker.sbatch 补满（每个空位交一个
 普通作业，不用数组：10/21 起 DICC 的使用率检查会在数组作业开始约 65 分钟后把它取消；同时跑几个由 QOS 的 GPU 上限管）。
 空出一个补一个，作业的排队时间分从交上去开始累积。只看要卡的任务（任务说明的 device=gpu）。
 纯 CPU 的任务（device=cpu，如评测，2026-10-24）：SLURM[机器] 里有 cpu 的机器，缓冲里有没人领的这类任务、我们的 CPU worker 作业
-（排着和在跑的）不到 min(这类任务数, 最多几个) 时交 scripts/queue/cpu_worker.sbatch；作业领不到任务就结束，不在节点上空等。
+（排着和在跑的）不到 min(这类任务数, 最多几个) 时交 scripts/taskq/queue/cpu_worker.sbatch；作业领不到任务就结束，不在节点上空等。
 开关：envs/policy.py 的 AUTO[机器]，False 时只把"会交什么"记进 ~/refill.log。交上去的作业记进 ~/refill.log，不推送。
 
-    python3 scripts/queue/refill.py            看现在会做什么（不改任何东西）
+    python3 scripts/taskq/queue/refill.py            看现在会做什么（不改任何东西）
 """
 import glob
 import json
@@ -37,13 +37,13 @@ import sys
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
-sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
+sys.path.insert(0, os.path.join(CORE, "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "scripts", "sites"))
+sys.path.insert(0, os.path.join(CORE, "sites"))
 import machines as M  # noqa: E402
 import slurm as SL  # noqa: E402
 import policy as P  # noqa: E402
@@ -57,13 +57,13 @@ TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练�
 SOFT = 2  # 自动传过去、留着以后用的数据：盘至少剩"硬线（提醒线 + TRAIN_OUT_GB）× SOFT"
 KICK = M.MACHINES[M.hub()]["repo"] + "/scripts/monitor/auto_refresh.sh"  # 健康检查（在 hub 上 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
 STATE = cfg.state("refill.json")
-SUBMIT_CAP = SL.SUBMIT_CAP  # QOS 没设排队上限时，每个 QOS 最多排这么多段（scripts/sites/slurm.py）
+SUBMIT_CAP = SL.SUBMIT_CAP  # QOS 没设排队上限时，每个 QOS 最多排这么多段（scripts/taskq/sites/slurm.py）
 LOG = os.path.expanduser("~/refill.log")
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 
 def kind_key(s, name, t):
-    """这台机器上的 pueue 任务 → (步骤, key)（任务记录，scripts/queue/common.py 的 identify）；认不出 → (None, None)。"""
+    """这台机器上的 pueue 任务 → (步骤, key)（任务记录，scripts/taskq/queue/common.py 的 identify）；认不出 → (None, None)。"""
     r = C.identify(name, t, s.get("records") or [])
     return (r["step"], r["key"]) if r else (None, None)
 
@@ -168,9 +168,9 @@ def sh(cmd, host=None, timeout=300):
 
 
 def q(name, args, run=sh):
-    """在某台 pueue 机器上用 scripts/queue/q 加任务 → 任务号。"""
+    """在某台 pueue 机器上用 scripts/taskq/queue/q 加任务 → 任务号。"""
     m = M.MACHINES[name]
-    rc, out = run(f"cd {m['repo']} && scripts/queue/q {args}", m["ssh"])
+    rc, out = run(f"cd {m['repo']} && scripts/taskq/queue/q {args}", m["ssh"])
     # 带 -p 时只输出任务号，不带时是"New task added (id 118)."（10/17 改成两种都认）
     hit = re.fullmatch(r"(?:New task added \(id )?(\d+)\)?\.?", out.strip().splitlines()[-1].strip()) if out.strip() else None
     if rc or not hit:
@@ -179,7 +179,7 @@ def q(name, args, run=sh):
 
 
 def add(name, label, step, key, args, run=sh, **rec):
-    """先记下（scripts/queue/common.py 的任务记录）、再在这台机器上加任务 → 任务号。"""
+    """先记下（scripts/taskq/queue/common.py 的任务记录）、再在这台机器上加任务 → 任务号。"""
     r = C.new_record(name, label, step, key, **rec)
     tid = q(name, args, run)
     C.set_record_id(r, tid)
@@ -206,7 +206,7 @@ def transfer(name, paths, run=sh):
         src = M.expand(M.MACHINES[M.hub()]["data"]) + (f"/{parent}" if parent else "")
         lab = f"sync_{name}_{tag(p)}"
         tids.append(add(M.hub(), lab, "sync", p, f"wait -p --label {lab} -- "
-                        + shlex.quote(then_check(f"bash scripts/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}", lab)), run,
+                        + shlex.quote(then_check(f"bash scripts/taskq/sync/tunnel_push.sh {name} {src} {rel} {tag(p)}", lab)), run,
                         to=name, group="wait"))
         if p not in lst:
             lst.append(p)
@@ -399,7 +399,7 @@ def cpu_plan(tq, have, conf, free=None):
 
 
 def slurm_plan(tq, st, conf):
-    """Slurm 类机器要补交的 worker 作业 → ([(QOS, 时限, 交几个, sbatch 文件)], 不交的原因)。st：scripts/sites/slurm.py 的 status；
+    """Slurm 类机器要补交的 worker 作业 → ([(QOS, 时限, 交几个, sbatch 文件)], 不交的原因)。st：scripts/taskq/sites/slurm.py 的 status；
     conf：envs/policy.py 的 SLURM[机器]（有 gpu 补 GPU worker，有 cpu 补 CPU worker）。"""
     subs, why = topup_plan(tq, st["counts"], conf["gpu"]) if conf.get("gpu") else ([], "")
     if conf.get("cpu"):
@@ -427,7 +427,7 @@ def topup(s, name, dry=False, run=None):
             shadow_log(f"{name}:topup", f"（开关没开）{m['label']} 会：{desc}")
         return [], {}
     msgs, stuck = [], {}
-    for r in SL.start_workers(f"{m['repo']}/scripts/queue", subs, lambda c: run(c, m["ssh"]), m.get("job_names")):
+    for r in SL.start_workers(f"{m['repo']}/scripts/taskq/queue", subs, lambda c: run(c, m["ssh"]), m.get("job_names")):
         q, t, n, ids, f = r["qos"], r["time"], r["n"], r["ids"], r["file"]
         if r["err"] is not None:
             stuck[f"topup:{name}:{q}{':cpu' if f == CPU_FILE else ''}"] = f"{m['label']} {q} 补交 {f} 出错：{r['err']}"

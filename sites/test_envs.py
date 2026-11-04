@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""测 scripts/sites/envs.py 和机器表里按描述建的环境（2026-10-31）：描述能读、激活语句、.ok 对不上时不送任务、
+"""测 scripts/taskq/sites/envs.py 和机器表里按描述建的环境（2026-10-31）：描述能读、激活语句、.ok 对不上时不送任务、
 建环境的命令只在 CPU 上跑；最后在临时目录里真建一个只有 numpy 的 venv（不联网时跳过装包那一步之外的部分不跑）。
 
-    python3 scripts/sites/test_envs.py [--real]
+    python3 scripts/taskq/sites/test_envs.py [--real]
 """
 import copy
 import glob
@@ -14,10 +14,10 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue", "testdata"))
+sys.path.insert(0, os.path.join(CORE, "queue"))
+sys.path.insert(0, os.path.join(CORE, "queue", "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()

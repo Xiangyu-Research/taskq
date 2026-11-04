@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/sites/pueue.py、slurm.py、remote.py 的测试：假的输出，核对解析和开 / 补 worker 的命令。"""
+"""scripts/taskq/sites/pueue.py、slurm.py、remote.py 的测试：假的输出，核对解析和开 / 补 worker 的命令。"""
 import json
 import os
 import re
@@ -83,7 +83,7 @@ def main():
     run = shlex.split(argv[argv.index("--") + 1])[3]
     assert argv[argv.index("-g") + 1] == cw["group"] and argv[argv.index("-l") + 1] == f"worker:{cw['id']}"
     assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES= TASKQ_CPUS={cw['cpus']};" in run, run
-    assert run.endswith('exec bash "$REPO/scripts/queue/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
+    assert run.endswith('exec bash "$REPO/scripts/taskq/queue/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
     assert "TASKQ_CPUS" not in PQ.worker_cmd("lab1")
     ok("pueue：CPU worker 在 cpu_worker 的组、WORKER_DEVICE=cpu、看不到卡、最多用 cpus 个核，入口是 worker_start.sh")
     raw2 = pueue_json((3, w["group"], wl, "Running"), (4, cw["group"], f"worker:{cw['id']}", "Queued"), (5, "gpu0", "x", "Running"))
@@ -97,7 +97,7 @@ def main():
 
     home = tempfile.mkdtemp()
     for root, shown in ((os.path.join(home, "r o'ot"), None), (os.path.join(home, "a b"), "~/a b")):
-        code = os.path.join(root, "code", "v1", "scripts", "queue")
+        code = os.path.join(root, "code", "v1", "scripts", "taskq", "queue")
         os.makedirs(code)
         os.symlink(os.path.join(root, "code", "v1"), os.path.join(root, "code", "current"))
         with open(os.path.join(code, "worker_start.sh"), "w") as f:
@@ -136,9 +136,9 @@ def main():
         ok("slurm.distribute：按 QOS 的顺序、各自的上限分（读不到上限按 SUBMIT_CAP），不超过要交的数")
 
         fake = Fake([("sbatch", (0, "4711\n"))])
-        res = SL.start_workers("~/'st/x'/code/current/scripts/queue", [("long", "3-00:00:00", 2, "worker.sbatch")], fake)
+        res = SL.start_workers("~/'st/x'/code/current/scripts/taskq/queue", [("long", "3-00:00:00", 2, "worker.sbatch")], fake)
         assert res == [dict(qos="long", time="3-00:00:00", n=2, file="worker.sbatch", ids=["4711", "4711"], err=None)]
-        c0 = re.fullmatch(r"cd ~/'st/x'/code/current/scripts/queue && sbatch --parsable -J ([a-z]+-[a-z]+) --qos=long --time=3-00:00:00 worker.sbatch", fake.calls[0])
+        c0 = re.fullmatch(r"cd ~/'st/x'/code/current/scripts/taskq/queue && sbatch --parsable -J ([a-z]+-[a-z]+) --qos=long --time=3-00:00:00 worker.sbatch", fake.calls[0])
         c1 = re.fullmatch(r".* -J ([a-z]+-[a-z]+) .*", fake.calls[1])
         assert c0 and c1, fake.calls
         names = {SL.jobname() for _ in range(50)}
@@ -150,7 +150,7 @@ def main():
             and all(re.fullmatch(r"[a-z]+[1-9][0-9]", x) for x in stars) and not names & stars
         ok("slurm.start_workers：交的是那边的 worker.sbatch（再转交 worker_start.sh、开显存填充），每个作业一个随机名字，"
            "按机器表的 job_names 用各自的一套（pair：<词>-<词>，star：<星名><两位数>）")
-        assert SL.kind_of("/home/user/a/q/code/current/scripts/queue/worker.sbatch") == "gpu" and SL.kind_of("cpu_worker.sbatch") == "cpu" \
+        assert SL.kind_of("/home/user/a/q/code/current/scripts/taskq/queue/worker.sbatch") == "gpu" and SL.kind_of("cpu_worker.sbatch") == "cpu" \
             and SL.kind_of("/bin/sh") is None and SL.kind_of("/x/worker.sbatch.bak") is None and SL.kind_of(None) is None
         pr = SL.probe("dicc1")
         assert "-n " not in pr and "%o" in pr and "cpu_worker[.]sbatch" in pr

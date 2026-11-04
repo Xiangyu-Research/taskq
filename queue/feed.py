@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""往执行机的缓冲送任务（2026-10-31）：box 是中心，总队列在 box（scripts/queue/taskq.py），有缓冲的执行机（Slurm 的，DICC）
-有一份缓冲，是总队列里分给它的任务的原样副本，由那边 refill.py 补交的 Slurm 作业里的 worker（scripts/queue/dicc_worker.sh）领。
+"""往执行机的缓冲送任务（2026-10-31）：box 是中心，总队列在 box（scripts/taskq/queue/taskq.py），有缓冲的执行机（Slurm 的，DICC）
+有一份缓冲，是总队列里分给它的任务的原样副本，由那边 refill.py 补交的 Slurm 作业里的 worker（scripts/taskq/queue/dicc_worker.sh）领。
 RELAY 的执行机（envs/machines.py 的 RELAY，lab1、lab0 等）由 relay.py 管，run_all 转过去。box 的健康检查
-（scripts/monitor/health.py，每 30 分钟）调用 run_all。那边没有 BUFFER 标记时（还没改成缓冲）什么都不做。
+（scripts/taskq/monitor/health.py，每 30 分钟）调用 run_all。那边没有 BUFFER 标记时（还没改成缓冲）什么都不做。
 
 每次检查，对每台执行机：
   1. 总队列里分给它的（assigned）：
@@ -24,7 +24,7 @@ RELAY 的执行机（envs/machines.py 的 RELAY，lab1、lab0 等）由 relay.py
 总队列里分给了一个不是执行机的名字（执行机换了名字、撤掉了以后留下的）：没有谁会做它，报出来（feed:nobody），交还后照常重新分。
 开关 envs/policy.py 的 AUTO[机器]：False 时第 3、4 步只把"会送什么"记进 ~/feed.log。
 
-    python3 scripts/queue/feed.py            看现在会做什么（不改任何东西）
+    python3 scripts/taskq/queue/feed.py            看现在会做什么（不改任何东西）
 """
 import json
 import os
@@ -33,12 +33,12 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
 TQS = cfg.state("taskq", expand=False)
-sys.path.insert(0, os.path.join(REPO, "scripts", "monitor"))
+sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, HERE)
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
@@ -454,19 +454,19 @@ def nobody(ctq):
         if t.get("assigned") and t["assigned"] not in own and t["state"] != "done":
             by.setdefault(t["assigned"], []).append(t["key"])
     return {f"feed:nobody:{w}": (f"总队列里 {len(ks)} 个任务分给了 {w}，但 {w} 不是执行机，没有谁会做（{ks[0]}…）；"
-                                 f"交还：python3 scripts/queue/taskq.py release --worker {w} <key>…") for w, ks in by.items()}
+                                 f"交还：python3 scripts/taskq/queue/taskq.py release --worker {w} <key>…") for w, ks in by.items()}
 
 
 def run_all(s, dry=False, relay=True):
     """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。送任务的唯一入口（10/31）：relay=True 时先处理 SITES 里 relay=True 的执行机
-    （scripts/queue/relay.py，细节记 ~/relay.log，这里记一行指过去），再给有缓冲的执行机（sites()）送任务。"""
+    （scripts/taskq/queue/relay.py，细节记 ~/relay.log，这里记一行指过去），再给有缓冲的执行机（sites()）送任务。"""
     events, stuck = [], {}
     if relay:
         try:
-            import relay as RL  # scripts/queue/relay.py
+            import relay as RL  # scripts/taskq/queue/relay.py
             ev, st_ = RL.run_all(s, dry=dry)
         except Exception as e:  # noqa: BLE001
-            ev, st_ = [], {"relay:error": f"scripts/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
+            ev, st_ = [], {"relay:error": f"scripts/taskq/queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
         if ev and not dry:
@@ -478,7 +478,7 @@ def run_all(s, dry=False, relay=True):
         try:
             ev, st_ = run_one(s, name, dry, st)
         except Exception as e:  # noqa: BLE001
-            ev, st_ = [], {f"feed:{name}": f"scripts/queue/feed.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
+            ev, st_ = [], {f"feed:{name}": f"scripts/taskq/queue/feed.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
     stuck.update(nobody((s.get("taskq") or {}).get(M.hub())))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑原来的测试。
 包从工作区建（commit=None），根目录换成临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 只有 scripts）。
-    python3 scripts/queue/test_relay_bundle.py
+    python3 scripts/taskq/queue/test_relay_bundle.py
 """
 import json
 import os
@@ -12,21 +12,22 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 
 cfg.use_config()
 import machines as M  # noqa: E402
 import relay_bundle as B  # noqa: E402
 
 NAME = "dicc2"
-STEP = "scripts/queue/testdata/bin/step.sh"
-FIX_PLUGINS = "scripts/queue/testdata/plugins"  # 包里的测试用插件（相对包）
+STEP = "scripts/taskq/queue/testdata/bin/step.sh"
+FIX_PLUGINS = "scripts/taskq/queue/testdata/plugins"  # 包里的测试用插件（相对包）
 
 
 def ok(msg):
@@ -43,8 +44,8 @@ def run(cmd, env=None, **kw):
 
 def test_source_files_from_commit():
     files = B.source_files("HEAD")
-    for f in ("scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh", STEP, "scripts/queue/testdata/exps/demo/experiments.py",
-              "scripts/queue/testdata/config/machines.py"):
+    for f in ("scripts/taskq/queue/taskq.py", "scripts/taskq/queue/dicc_worker.sh", STEP, "scripts/taskq/queue/testdata/exps/demo/experiments.py",
+              "scripts/taskq/queue/testdata/config/machines.py"):
         assert f in files, f
     assert B._wanted("x/a.R", 10) and not B._wanted("x/big.json", B.SMALL_MAX + 1) and not B._wanted("x/__pycache__/a.py", 1)
     assert not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
@@ -83,18 +84,18 @@ def test_bundle(T):
 
     files = sorted(os.path.relpath(os.path.join(d, f), path) for d, _, fs in os.walk(path) for f in fs)
     src = B.source_files(None)
-    for f in ("envs/machines.py", "envs/policy.py", "scripts/queue/worker.sbatch", "scripts/queue/taskq.py", "scripts/queue/dicc_worker.sh",
-              "scripts/queue/testdata/bin/toy_train.sh", STEP, "scripts/queue/testdata/exps/demo/experiments.py"):
+    for f in ("envs/machines.py", "envs/policy.py", "scripts/taskq/queue/worker.sbatch", "scripts/taskq/queue/taskq.py", "scripts/taskq/queue/dicc_worker.sh",
+              "scripts/taskq/queue/testdata/bin/toy_train.sh", STEP, "scripts/taskq/queue/testdata/exps/demo/experiments.py"):
         assert f in files, f
-    assert "scripts/queue/cpu_worker.sbatch" not in files, "这台没有 jobs.cpu"
-    for f in (STEP, "scripts/queue/testdata/bin/infer_task.sh", "scripts/queue/taskq.py"):
+    assert "scripts/taskq/queue/cpu_worker.sbatch" not in files, "这台没有 jobs.cpu"
+    for f in (STEP, "scripts/taskq/queue/testdata/bin/infer_task.sh", "scripts/taskq/queue/taskq.py"):
         assert open(os.path.join(path, f), encoding="utf-8").read() == B.home_paths(src[f][0].decode(), R), f"{f} 和提交的不一样"
         assert os.access(os.path.join(path, f), os.X_OK) == (src[f][1] or f.endswith(".sh")), f
     assert open(os.path.join(path, STEP), "rb").read() == src[STEP][0]
     for ln, tgt in B.LINKS.items():
         assert os.readlink(os.path.join(path, ln)) == tgt and os.path.isfile(os.path.join(path, ln)), ln
-    assert ".cache/phd" in src["scripts/queue/gpu_pad_start.sh"][0].decode()
-    gp = open(os.path.join(path, "scripts/queue/gpu_pad_start.sh"), encoding="utf-8").read()
+    assert ".cache/phd" in src["scripts/taskq/queue/gpu_pad_start.sh"][0].decode()
+    gp = open(os.path.join(path, "scripts/taskq/queue/gpu_pad_start.sh"), encoding="utf-8").read()
     assert ".cache/phd" not in gp, gp[:300]
     ok("包里的文件：提交里的代码原样（step.sh、infer_task.sh 等不改），~/.cache/phd 换成根目录下的，start.sh、loop.sh 指向新名字")
 
@@ -116,8 +117,8 @@ def test_bundle(T):
     assert pol == ["1", "0"], pol
     ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、没有 task_vars")
 
-    sb = open(os.path.join(cur, "scripts/queue/worker.sbatch")).read().split("\n")
-    real = open(os.path.join(REPO, "scripts/queue/worker.sbatch")).read()
+    sb = open(os.path.join(cur, "scripts/taskq/queue/worker.sbatch")).read().split("\n")
+    real = open(os.path.join(REPO, "scripts/taskq/queue/worker.sbatch")).read()
     for ln in real.split("\n"):
         if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
             assert ln in sb, ln
@@ -126,12 +127,12 @@ def test_bundle(T):
     assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
     assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
     assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
-    assert sb[-2] == 'exec bash "$REPO/scripts/queue/worker_start.sh"' and "git" not in "\n".join(sb)
-    assert run(["bash", "-n", os.path.join(cur, "scripts/queue/worker.sbatch")]).returncode == 0
+    assert sb[-2] == 'exec bash "$REPO/scripts/taskq/queue/worker_start.sh"' and "git" not in "\n".join(sb)
+    assert run(["bash", "-n", os.path.join(cur, "scripts/taskq/queue/worker.sbatch")]).returncode == 0
     fake = os.path.join(T, "fakeR")
-    os.makedirs(os.path.join(fake, "code", "b1", "scripts", "queue"))
-    with open(os.path.join(fake, "code", "b1", "scripts", "queue", "worker_start.sh"), "w") as f:
-        f.write('echo "$TASKQ_DIR|$TASKQ_GPU_PAD_SWITCH|$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")"\n')
+    os.makedirs(os.path.join(fake, "code", "b1", "scripts", "taskq", "queue"))
+    with open(os.path.join(fake, "code", "b1", "scripts", "taskq", "queue", "worker_start.sh"), "w") as f:
+        f.write('echo "$TASKQ_DIR|$TASKQ_GPU_PAD_SWITCH|$(dirname "$(dirname "$(dirname "$(dirname "${BASH_SOURCE[0]}")")")")"\n')
     os.symlink("b1", os.path.join(fake, "code", "current"))
     body = "\n".join(sb).replace(f"R={R}", f"R={fake}")
     out = run(["bash", "-c", body]).stdout.strip()
@@ -139,7 +140,7 @@ def test_bundle(T):
     ok("worker.sbatch：CPU、内存、作业名、输出位置按账号，其余资源和原来一样；开始时按 current 的实际包跑，队列和显存开关在根目录下")
 
     env = {"TASKQ_DATA": f"{R}/data", "TASKQ_DIR": f"{R}/queue", "TASKQ_PLUGINS": os.path.join(cur, FIX_PLUGINS)}
-    tq = ["python3", os.path.join(cur, "scripts/queue/taskq.py")]
+    tq = ["python3", os.path.join(cur, "scripts/taskq/queue/taskq.py")]
     key = "D999_abcdef/V_save/0"
     r = run(tq + ["add", "--nice", "0", "--recipe", "toy", "ds=D999_abcdef", "frag=0"], env)
     assert r.returncode == 0 and key in r.stdout, r
@@ -172,20 +173,20 @@ def test_cpu_sbatch(T):
     R = "~/st/abc"
     entry = dict(jobs=("gpu", "cpu"), sbatch=dict(gpu=dict(cpus=30, mem="60G"), cpu=dict(cpus=8, mem="16G")))
     files = B.contents(NAME, None, root=R, entry=entry)
-    sb = files["scripts/queue/cpu_worker.sbatch"][0].split("\n")
-    real = open(os.path.join(REPO, "scripts/queue/cpu_worker.sbatch")).read()
+    sb = files["scripts/taskq/queue/cpu_worker.sbatch"][0].split("\n")
+    real = open(os.path.join(REPO, "scripts/taskq/queue/cpu_worker.sbatch")).read()
     for ln in real.split("\n"):
         if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
             assert ln in sb, ln
     assert not any(x.startswith("#SBATCH --job-name") for x in sb) and "#SBATCH --cpus-per-task=8" in sb and "#SBATCH --mem=16G" in sb, sb
-    assert "#SBATCH --output=../../../../data/logs/workers/%x_%j.out" in sb and "R=~/st/abc" in sb, sb
+    assert "#SBATCH --output=../../../../../data/logs/workers/%x_%j.out" in sb and "R=~/st/abc" in sb, sb
     assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED WORKER_DEVICE=cpu" in sb
-    assert sb[-2] == 'exec bash "$REPO/scripts/queue/worker_start.sh"' and "git" not in "\n".join(sb)
-    gsb = files["scripts/queue/worker.sbatch"][0]
+    assert sb[-2] == 'exec bash "$REPO/scripts/taskq/queue/worker_start.sh"' and "git" not in "\n".join(sb)
+    gsb = files["scripts/taskq/queue/worker.sbatch"][0]
     assert "#SBATCH --cpus-per-task=30" in gsb and "WORKER_DEVICE" not in gsb
     old = B.contents(NAME, None, root=R, entry=dict(jobs=("gpu", "cpu"), sbatch=dict(cpus=30, mem="60G")))
-    assert "#SBATCH --cpus-per-task=30" in old["scripts/queue/worker.sbatch"][0]
-    assert "#SBATCH --cpus-per-task=30" not in old["scripts/queue/cpu_worker.sbatch"][0]
+    assert "#SBATCH --cpus-per-task=30" in old["scripts/taskq/queue/worker.sbatch"][0]
+    assert "#SBATCH --cpus-per-task=30" not in old["scripts/taskq/queue/cpu_worker.sbatch"][0]
     ok("cpu_worker.sbatch：jobs.cpu 有时生成，不带作业名，资源按 sbatch.cpu（老写法的 sbatch 只算 gpu），WORKER_DEVICE=cpu，入口 worker_start.sh")
 
 
@@ -194,8 +195,8 @@ def test_pueue_site(T):
     R = os.path.join(T, "pueue_site")
     entry = dict(scheduler="pueue", groups={"g1": (1, "1", {})}, slots=1, worker=dict(group="g1", id="w1"))
     files = B.contents(NAME, None, root=R, entry=entry)
-    assert not [f for f in files if f.startswith("scripts/queue/") and f.endswith(".sbatch")], sorted(files)
-    assert "scripts/queue/worker_start.sh" in files
+    assert not [f for f in files if f.startswith("scripts/taskq/queue/") and f.endswith(".sbatch")], sorted(files)
+    assert "scripts/taskq/queue/worker_start.sh" in files
     _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=entry)
     os.makedirs(os.path.join(R, "data"))
     mp = os.path.join(path, "envs", "machines.py")
@@ -220,7 +221,7 @@ def test_dicc_worker_in_bundle(T):
     os.makedirs(os.path.join(R, "data"))
     test = open(os.path.join(HERE, "test_dicc_worker.sh")).read()
     assert "TASKQ_MACHINE=dicc " in test
-    dst = os.path.join(path, "scripts", "queue", "test_in_bundle.sh")
+    dst = os.path.join(path, "scripts", "taskq", "queue", "test_in_bundle.sh")
     fx = 'source "$HERE/testdata/fixture.sh"'
     assert fx in test
     test = test.replace(fx, f'export TASKQ_CONFIG={shlex.quote(os.path.join(path, "envs"))} TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 envs/

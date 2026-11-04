@@ -2,12 +2,12 @@
 """训练任务队列（2026-10-17 起；10/18 起任务不限于 nnU-Net；10/31 起总队列在 box，各执行机有自己的缓冲）。
 
 总队列（box 的 ~/.cache/phd/taskq/）：所有训练和要进队列的步骤。只有 box 写它（实验表加任务、改档位、停止都在 box 上做）；
-  分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（scripts/queue/feed.py 交还）。
+  分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（scripts/taskq/queue/feed.py 交还）。
 缓冲（每台执行机的 ~/.cache/phd/taskq/，中转执行机是它自己的 R/queue/）：总队列里分给它的任务的原样副本（order、nice、exp、
-  recipe、params 不变），加一个 BUFFER 标记。worker（scripts/queue/dicc_worker.sh）在缓冲上领、心跳、交还，box 不在线时照常跑。
+  recipe、params 不变），加一个 BUFFER 标记。worker（scripts/taskq/queue/dicc_worker.sh）在缓冲上领、心跳、交还，box 不在线时照常跑。
   缓冲里改任务只由 feed.py 做（带 TASKQ_FEED=1）。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
 
-每个任务 = 做法 + 参数（scripts/queue/recipes.py，解析在 scripts/queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
+每个任务 = 做法 + 参数（scripts/taskq/queue/recipes.py，解析在 scripts/taskq/queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
 任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。
 
 队列目录（总队列和缓冲一样）：
@@ -22,7 +22,7 @@
   released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
   stopped/<key> 停止的任务（taskq.py stop，10/30）：不再领；在训的 worker 每 5 秒看一次，30 秒内停下、交还。
                 缓冲里"依赖记录"（put 的 hold）也是停止的：只给别的任务的 after 看，不训
-  ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（scripts/queue/worker_start.sh）
+  ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（scripts/taskq/queue/worker_start.sh）
   BUFFER        这是执行机的缓冲
   lock          改队列时的锁（mkdir）
 不领的任务：已经训完（任务说明的 done）；别处正在训（claims 里有、心跳在 ttl 内，或者训练日志 15 分钟内更新过）；
@@ -65,7 +65,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
+CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
@@ -634,7 +634,7 @@ def _insert(new, nice):
 
 def read_sheets(path):
     """任务单文件（JSON：一张 {字段: 值} 或一列）→ ([dict(exp, recipe, params)], 档位)。recipe 不写 = command；
-    nice 写在单子里（几张单子的 nice 要一样）；其余字段都是做法的参数（scripts/queue/README.md 的"别人的任务"）。"""
+    nice 写在单子里（几张单子的 nice 要一样）；其余字段都是做法的参数（scripts/taskq/queue/README.md 的"别人的任务"）。"""
     try:
         d = json.load(open(path, encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -885,7 +885,7 @@ def remote(host, args, timeout=120, env="", input=None):
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
     data = " ".join(f"{k}={m['data']}" for k in ("TASKQ_DATA", cfg.LEGACY["TASKQ_DATA"]))
-    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}{data} python3 scripts/queue/taskq.py {args}"
+    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}{data} python3 scripts/taskq/queue/taskq.py {args}"
     rc, out, err = C.run(cmd, m["ssh"], timeout, ssh=ssh, input=input)
     return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 

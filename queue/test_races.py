@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """并发和中途失败（11/3）：锁的抢占、box 的 pueue 读不到时 relay 只续约、GC 和 stage 抢 pin。
-跑法：python3 scripts/queue/test_races.py [lock|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
+跑法：python3 scripts/taskq/queue/test_races.py [lock|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
 全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
 import json
 import os
@@ -13,6 +13,8 @@ import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
+import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
 TMP = tempfile.mkdtemp(prefix="test_review_conc_")
 os.environ["HOME"] = os.path.join(TMP, "home")
 os.makedirs(os.environ["HOME"])
@@ -130,7 +132,7 @@ def test_gc_pin():
     gc_file = os.path.join(TMP, "gc_py.py")
     with open(gc_file, "w") as f:
         f.write(relay_gc.GC_PY)
-    repo = os.path.dirname(os.path.dirname(HERE))
+    repo = _cfg.REPO
     r = subprocess.run([sys.executable, "-c", code, gc_file, R], cwd=repo, capture_output=True, text=True,
                        input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["views/v"])))
     assert r.returncode == 0, r.stderr

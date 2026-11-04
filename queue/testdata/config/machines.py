@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测试用的机器表（2026-11-02）：形状和字段同真的机器表（字段说明见 scripts/queue/README.md 的"开关和配置"），
+"""测试用的机器表（2026-11-02）：形状和字段同真的机器表（字段说明见 scripts/taskq/queue/README.md 的"开关和配置"），
 机器名同真的，环境名、目录、作业参数是虚构的。conda 指向 testdata/conda（假的 conda.sh：activate 只记下环境名）。
 LOGIC 以下的函数和真的机器表逐字相同（PhD 一侧的 test_fixture_sync.py 核对）。
 
@@ -189,7 +189,7 @@ def activate(name, env):
     if e is None:
         return None
     lines = ['if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi']
-    if is_spec(e):  # 建环境时写好的激活语句（scripts/sites/envs.py）
+    if is_spec(e):  # 建环境时写好的激活语句（scripts/taskq/sites/envs.py）
         return "\n".join(lines + [f'source {env_root(m)}/{env}/.activate'])
     if e[0] == "venv":
         base = activate(name, e[2])

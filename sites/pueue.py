@@ -1,5 +1,5 @@
 """pueue 类执行机（SITES 里 scheduler="pueue"，如 lab1、lab0）的适配器（2026-10-31）：读 worker 所在组的任务、开常驻 worker。
-和 slurm.py 对应：读状态 → 调用方定开不开（scripts/queue/relay.py 的 topup）→ start_worker 开。
+和 slurm.py 对应：读状态 → 调用方定开不开（scripts/taskq/queue/relay.py 的 topup）→ start_worker 开。
 pueue 的原始输出由那边的状态脚本一次读回（relay.py 的 STATUS_PY），这里只解析。"""
 import json
 import os
@@ -8,7 +8,7 @@ import sys
 
 import remote as R
 
-sys.path.insert(0, os.path.join(R.REPO, "scripts", "queue"))
+sys.path.insert(0, os.path.join(R.CORE, "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
 import machines as M  # noqa: E402
@@ -53,7 +53,7 @@ def worker_cmd(name, kind="gpu"):
     env = f"WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
     env += "".join(f" {k}={shlex.quote(str(v))}" for k, v in (c["groups"][w["group"]][2] or {}).items())  # 组的环境变量（如 TASK_GPU_IDLE）
     run = (f'R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/code/current"); export TASKQ_DIR="$R/queue" {env}; '
-           'exec bash "$REPO/scripts/queue/worker_start.sh"')
+           'exec bash "$REPO/scripts/taskq/queue/worker_start.sh"')
     return f"{c['pueue']} add -g {w['group']} -l worker:{w['id']} -- {shlex.quote('exec bash -c ' + shlex.quote(run))}"
 
 

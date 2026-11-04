@@ -1,5 +1,5 @@
 """配置、插件、状态在哪（2026-11-02）：TASKQ_CONFIG（machines.py、policy.py 所在的文件夹）、TASKQ_PLUGINS（做法、中继插件、
-进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）。说明见 scripts/queue/README.md 的"开关和配置"。
+进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）。说明见 scripts/taskq/queue/README.md 的"开关和配置"。
 
     import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import machines、policy
     cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连起来，没有时为空）
@@ -8,7 +8,22 @@ import importlib.util
 import os
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 调度代码的根（嵌在使用者的仓库里时是 <仓库>/scripts/taskq）
+_EMBED = os.path.join("scripts", "taskq")
+
+
+def _user_repo():
+    """使用者的仓库根：TASKQ_REPO；没设时，嵌在 <仓库>/scripts/taskq 里就是那个仓库，否则（单独的检出）是 CORE。"""
+    v = os.environ.get("TASKQ_REPO")
+    if v:
+        return os.path.abspath(os.path.expanduser(v))
+    if CORE.endswith(os.sep + _EMBED):
+        return CORE[:-len(_EMBED) - 1]
+    return CORE
+
+
+REPO = _user_repo()
+CORE_REL = os.path.relpath(CORE, REPO)  # 使用者的仓库里调度代码的位置（给在仓库根目录下跑的命令用）
 STATE_HOME = "~/.cache/phd/"
 STATE_PLACES = {"taskq": "~/.cache/phd/taskq", "gpu_pad/DISABLED": "~/.cache/phd/gpu_pad/DISABLED"}
 LEGACY = {"TASKQ_DATA": "BRAIN_TUMOR", "TASKQ_GPU_PAD": "RQ1_GPU_PAD", "TASKQ_TEST_FAKEBIN": "RQ1_TEST_FAKEBIN"}

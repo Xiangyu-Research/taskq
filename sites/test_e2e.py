@@ -3,7 +3,7 @@
 建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理。
 完全隔离：执行机根目录、box 的数据目录、总队列都在临时目录里；pueue 是自己起的 pueued（自己的配置和 socket），结束时只停它；
 ssh 换成本机的 bash -c，不连任何机器；不改机器表（条目在进程里替换）。
-跑法：python3 scripts/sites/test_e2e.py（box 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
+跑法：python3 scripts/taskq/sites/test_e2e.py（box 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
 import glob
 import json
 import os
@@ -18,13 +18,14 @@ import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue", "testdata"))
+CORE = os.path.dirname(HERE)  # 调度代码的根
+sys.path.insert(0, os.path.join(CORE, "queue", "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
-sys.path.insert(0, os.path.join(REPO, "scripts", "queue"))
+sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
+REPO = cfg.REPO  # 使用者的仓库根
 
 LEGACY_UNSET = "".join(f" -u {v}" for v in cfg.LEGACY.values())
 for _v in cfg.LEGACY.values():
@@ -67,7 +68,7 @@ os.makedirs(os.environ["TASKQ_DIR"])
 open(os.path.join(os.environ["TASKQ_DIR"], "ENABLED"), "w").close()
 
 cfg.use_config()
-for d in ("scripts/queue", "scripts/sync", "scripts/monitor", "scripts/sites"):
+for d in ("scripts/taskq/queue", "scripts/sync", "scripts/monitor", "scripts/taskq/sites"):
     sys.path.insert(0, os.path.join(REPO, d))
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402
@@ -585,7 +586,7 @@ def main():
         step_finish()
         step_gc()
         step_shift()
-        print("真的训练做法的小任务：跳过（换名、拉回见 scripts/queue/test_relay.py）")
+        print("真的训练做法的小任务：跳过（换名、拉回见 scripts/taskq/queue/test_relay.py）")
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:
             print(f"失败：{type(e).__name__}: {e}")

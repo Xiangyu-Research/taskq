@@ -1,7 +1,7 @@
 #!/bin/bash
 # 不在 Slurm 里（pueue 常驻 worker）的卡住检测：日志名是主机名-时间，不是 WORKER_ID（11/3）
 # 假训练卡住不动：worker 停掉它、交还，接着训下一个；不用 Slurm、不用 GPU。
-#   bash scripts/queue/test_worker_stall.sh
+#   bash scripts/taskq/queue/test_worker_stall.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
