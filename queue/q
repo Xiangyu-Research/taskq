@@ -23,6 +23,7 @@ echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）
 ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export PATH="$CORE/bin:$PATH"  # 环境脚本和任务的命令里能用 taskq（cron 的 PATH 里没有 ~/.local/bin；同 run_task.sh）
 ES=$(TASKQ_REPO=$REPO python3 "$CORE/queue/cfg.py" get env_script)
 [[ -z $ES ]] || source "$REPO/$ES"
 exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"
