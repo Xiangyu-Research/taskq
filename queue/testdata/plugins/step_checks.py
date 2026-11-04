@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from steps import fill_path, file_mtime  # noqa: E402
+from taskq_api import fill_path, file_mtime  # noqa: E402
 
 
 class record:

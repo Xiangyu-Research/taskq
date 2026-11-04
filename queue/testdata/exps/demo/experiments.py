@@ -11,7 +11,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE)))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "plugins"))
-from steps import check, exists  # noqa: E402
+from taskq_api import check, exists  # noqa: E402
 from step_checks import record  # noqa: E402
 import cfg  # noqa: E402
 QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）

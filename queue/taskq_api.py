@@ -8,13 +8,15 @@
   sha256(p)             文件的 sha256
   REPO                  使用者的仓库根（任务命令里的相对路径相对它）
   rel(*parts)           调度代码里的文件相对 REPO 的路径
-只用标准库和 cfg.py。"""
+  check、exists         实验表步骤的 done（见 steps.py）；fill_path、file_mtime 给插件写别的 done 用
+只用标准库和 cfg.py、steps.py。"""
 import hashlib
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cfg as _cfg  # noqa: E402
+from steps import check, exists, fill_path, file_mtime  # noqa: E402,F401
 
 REPO = _cfg.REPO
 rel = _cfg.rel
