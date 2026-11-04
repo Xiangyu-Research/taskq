@@ -26,6 +26,8 @@ ROOT = dict(
     tmp="tmp",                   # 传到一半的临时文件
     envs="envs",                 # 执行机上装的环境（conda、venv）
 )
+# 代码包里调度核心的位置（相对包的根，11/4）：排着的 Slurm 作业、lab 的 worker 命令、旧包的转交都按这个位置找，不改
+BUNDLE_CORE = "scripts/taskq"
 MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/logs/workers")  # relay.py 第一次建根目录时建的
 
 
@@ -60,6 +62,7 @@ STATE_IN_ROOT = {"taskq": ROOT["queue"], "gpu_pad/DISABLED": ROOT["queue"] + "/"
 INCOMPLETE = ".incomplete"     # 文件夹建到一半（tunnel_push.sh、relay 建视图）；任一层有就算缺
 MANIFEST = "MANIFEST.json"     # 拉回的结果：最后拷，有它才算拉完（relay_transfer.py）
 INFER_DONE = ".infer_done"
+RELAY_INBOX = ".relay_in"      # box 数据目录下拉回到一半的结果 .relay_in/<safe key>（relay_transfer.py）
 ARCHIVED = "ARCHIVED"          # 10/31 前的归档标志：归档后删了 checkpoint 的模型；现在不再写，只认
 STAGE_PREFIX = "phd_stage_"    # 节点本地盘上的输入副本 $TMPDIR/phd_stage_<作业号>（inputs.py、run_task.sh）
 GPU_PAD_BASE = "/tmp/gpu_pad_"  # 显存填充和 worker 的握手 /tmp/gpu_pad_<作业号>{.mib,.ready,.start}
@@ -75,6 +78,7 @@ STALL_LINE = "当作卡住"        # 分段日志里以它开头的行 = 被 wor
 # ---------------- GPU 使用记录（monitor/gpu_log.sh 写；run_task.sh 的 TASK_GPU_IDLE、健康检查读） ----------------
 GPU_LOG_DIR = "~/gpu_usage"      # 环境变量 GPU_LOG_DIR 可以改
 GPU_LOG_FILE = "gpu_%Y-%m.csv"   # 每月一个（strftime）
+GPU_LOG_PID = "gpu_log.pid"      # GPU_LOG_DIR 里：在跑的那个 gpu_log.sh 的进程号，它跑着时一直锁着（flock）；on_boot.sh 看锁决定开不开
 
 # ---------------- key → 文件名 ----------------
 SAFE = "__"
@@ -201,6 +205,7 @@ ENV = dict(
     TASKQ_GPU_PAD_STARTED=("run", "显存填充已经开了（gpu_pad_start.sh 设，免得重复开）"),
     TASKQ_ZOMBIES=("run", "旧 worker 换新代码包时交给新进程的停不下来的训练，每行 pid sid key token why safe（dicc_worker.sh）"),
     TASKQ_STAGE_TMP=("run", "1/0：开训后把输入拷到节点本地盘；没设时看 machines.py 的 stage_tmp"),
+    TASKQ_LIB=("run", "调度核心的 queue/ 文件夹（run_task.sh 给任务的命令设，同时把核心的 bin/ 加在 PATH 前面）"),
     TASKQ_ENVS=("run", "worker 能领的环境（逗号分隔）；没设时看 machines.py 的 envs"),
     TASKQ_SLOTS=("tune", "一个 worker 最多同时训几个；Slurm 里按核数和内存（2 或 1），Slurm 外看 machines.py 的 slots"),
     TASKQ_MACHINE=("test", "当作哪台机器"),
@@ -227,7 +232,8 @@ def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_PREFIX": STAGE_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
            "TQ_WORKER_LOGS": WORKER_LOGS, "TQ_STALL_LINE": STALL_LINE, "TQ_DONE_LINE": DONE_LINE, "TQ_JSON_MARK": JSON_MARK,
            "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT,
-           "TQ_GPU_LOG_DIR": GPU_LOG_DIR, "TQ_GPU_LOG_FILE": GPU_LOG_FILE}
+           "TQ_GPU_LOG_DIR": GPU_LOG_DIR, "TQ_GPU_LOG_FILE": GPU_LOG_FILE, "TQ_GPU_LOG_PID": GPU_LOG_PID,
+           "TQ_BUNDLE_CORE": BUNDLE_CORE, "TQ_RELAY_INBOX": RELAY_INBOX}
     out.update({f"TQ_GPU_PAD_{x[1:].upper()}": x for x in GPU_PAD_FILES})  # TQ_GPU_PAD_MIB、_READY、_START
     out["TQ_LOG_PART"] = LOG_PARTS[0]
     out.update({f"TQ_ROOT_{k.upper()}": v for k, v in ROOT.items()})

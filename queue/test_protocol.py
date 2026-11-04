@@ -68,6 +68,8 @@ LITERALS = {
     ".infer_done": r"\.infer_done",
     "ARCHIVED": r"""['"]ARCHIVED['"]""",
     "code/current": r"code/current",
+    ".relay_in": r"\.relay_in",
+    "gpu_log.pid": r"gpu_log\.pid",
     # 目录名：拼路径时手写的（Q["claims"] 这种查表、任务状态的取值 "stopped" 不算）
     "stopped/": r"""stopped/|/stopped\b|join\([^)]*(?<!\[)['"]stopped['"]""",
     "claims/": r"""claims/|/claims\b|join\([^)]*(?<!\[)['"]claims['"]""",
