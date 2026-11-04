@@ -36,6 +36,7 @@
 set -uo pipefail
 unset _envs
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不了 $HERE/proto.py" >&2; exit 1; }  # 共用的名字和退出码 TQ_*
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 TQPY="python3 $HERE/taskq.py"
@@ -61,7 +62,7 @@ else
 fi
 ADD_AFTER=${TASKQ_ADD_AFTER:-900}       # 最近一个训练开始以后，过这么久才判断要不要再加一个
 UTIL_MAX=${TASKQ_UTIL_MAX:-90}          # 近 10 分钟 GPU 平均使用率低于这个才加
-PADBASE=${TASKQ_GPU_PAD_BASE:-$( (( INSLURM )) && echo "/tmp/gpu_pad_$W" || echo /nonexistent/gpu_pad)}
+PADBASE=${TASKQ_GPU_PAD_BASE:-$( (( INSLURM )) && echo "$TQ_GPU_PAD_BASE$W" || echo /nonexistent/gpu_pad)}
 MIN_LEFT=${TASKQ_MIN_LEFT:-3600}
 PATIENCE=${TASKQ_PATIENCE:-$([[ $DEVICE == cpu ]] && echo 0 || echo 1200)}        # 开始后最多等这么久，给排在前面、刚停下的任务留位置
 ERR_MAX=${TASKQ_ERR_MAX:-600}           # 队列连续出错这么久（手上又没有在训的）就结束作业
@@ -74,10 +75,10 @@ FAIL_WINDOW=${TASKQ_FAIL_WINDOW:-3600}  # 只数这么久以内的（10/24：隔
 STALL_MAX=${TASKQ_STALL_MAX:-1800}      # 任务的日志和结果文件夹都这么久没变化，算卡住
 STALL_FAILS=2                           # 一周内第几次卡住起记失败
 GIVEUP=${TASKQ_GIVEUP:-180}             # 停了这么久还没停下：空出位置（三分之一时 SIGKILL）
-BEAT=${TASKQ_BEAT:-300}                 # 心跳间隔
+BEAT=${TASKQ_BEAT:-$TQ_BEAT}                 # 心跳间隔
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
 unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
-LOGDIR=$DATA/logs/workers
+LOGDIR=$DATA/$TQ_WORKER_LOGS
 mkdir -p "$LOGDIR"
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
@@ -173,15 +174,15 @@ while read -r p sid k tok why safe; do  # 换代码包前停不下来的训练�
 done <<< "${TASKQ_ZOMBIES:-}"
 unset TASKQ_ZOMBIES
 pad_make_room() {
-    [[ -f $PADBASE.mib ]] || return 0
-    rm -f "$PADBASE.ready"
-    touch "$PADBASE.start"
+    [[ -f $PADBASE$TQ_GPU_PAD_MIB ]] || return 0
+    rm -f "$PADBASE$TQ_GPU_PAD_READY"
+    touch "$PADBASE$TQ_GPU_PAD_START"
     local i
     for i in $(seq 30); do
-        [[ -e $PADBASE.ready || $(cat "$PADBASE.mib" 2> /dev/null) == 0 ]] && return 0
+        [[ -e $PADBASE$TQ_GPU_PAD_READY || $(cat "$PADBASE$TQ_GPU_PAD_MIB" 2> /dev/null) == 0 ]] && return 0
         sleep 1
     done
-    echo "$(ts) 显存填充 30 秒内没回应（$PADBASE.mib = $(cat "$PADBASE.mib" 2> /dev/null)），照样开始"
+    echo "$(ts) 显存填充 30 秒内没回应（$PADBASE$TQ_GPU_PAD_MIB = $(cat "$PADBASE$TQ_GPU_PAD_MIB" 2> /dev/null)），照样开始"
 }
 gpu_stats() {  # 近 10 分钟的 GPU 平均使用率、样本数；现在的显存已用、总量（MiB）
     if [[ -n ${WORKER_TEST_GPU:-} ]]; then echo "$WORKER_TEST_GPU"; return; fi
@@ -193,8 +194,8 @@ gpu_stats() {  # 近 10 分钟的 GPU 平均使用率、样本数；现在的显
 }
 pad_now() {
     local v
-    v=$(cat "$PADBASE.mib" 2> /dev/null)
-    [[ $v =~ ^[0-9]+$ ]] && (( $(date +%s) - $(stat -c %Y "$PADBASE.mib") <= 60 )) && echo "$v" || echo 0
+    v=$(cat "$PADBASE$TQ_GPU_PAD_MIB" 2> /dev/null)
+    [[ $v =~ ^[0-9]+$ ]] && (( $(date +%s) - $(stat -c %Y "$PADBASE$TQ_GPU_PAD_MIB") <= 60 )) && echo "$v" || echo 0
 }
 can_add() {  # 手上有训练时，还能不能再加一个；不能时 why_not 里写原因
     local n=${#KEY[@]} util cnt used total pad
@@ -226,10 +227,10 @@ own_fails() {  # OWN_FAILS = FAIL_WINDOW 以内的次数
     FAIL_AT=(${keep[@]+"${keep[@]}"})
     OWN_FAILS=${#FAIL_AT[@]}
 }
-task_log() { echo "$DATA/logs/tasks/${SAFE[$1]}__${JTAG[$1]:-$W}_part1.log"; }
+task_log() { echo "$DATA/$TQ_TASK_LOGS/${SAFE[$1]}$TQ_SAFE${JTAG[$1]:-$W}_${TQ_LOG_PART}1.log"; }
 stalls() {  # key 的文件名 → 一周内的分段日志里记了几次卡住
     local n
-    n=$(find "$DATA/logs/tasks" -maxdepth 1 -name "$1__*" -newermt "@$(( $(date +%s) - 7 * 86400 ))" -exec grep -h -s '^当作卡住' {} + 2> /dev/null | wc -l)
+    n=$(find "$DATA/$TQ_TASK_LOGS" -maxdepth 1 -name "$1$TQ_SAFE*" -newermt "@$(( $(date +%s) - 7 * 86400 ))" -exec grep -h -s "^$TQ_STALL_LINE" {} + 2> /dev/null | wc -l)
     echo "${n:-0}"
 }
 release_stalled() {  # key 卡住的次数 跑了多少秒：一周内第 STALL_FAILS 次起记失败（健康检查报），之前的只交还
@@ -258,8 +259,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     TOK[$key]=$tok
     eval "local targs=($args)"
     pad_make_room
-    local jt
-    jt=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)")
+    local jt=$JT
     TASK_KEY=$key TASK_JOBTAG=$jt TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
     local pid=$! sh TASK_OUT= TASK_SAFE=
     KEY[$pid]=$key
@@ -268,7 +268,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     sh=$(python3 "$HERE/spec.py" shell "${targs[@]}" 2> /dev/null | grep -E '^TASK_(OUT|SAFE)=')
     eval "$sh"
     OUTDIR[$pid]=$TASK_OUT
-    SAFE[$pid]=${TASK_SAFE:-${key//\//__}}
+    SAFE[$pid]=${TASK_SAFE:-${key//\//$TQ_SAFE}}
     CHANGED=$(date +%s)
     echo "$(ts) 开训 $key（pid $pid：run_task.sh $args）"
 }
@@ -296,7 +296,7 @@ on_term() {  # run_task.sh 自己 8 秒后强制停训练；15 秒还没退出�
     let_go
     kill_tree "$GPUMON"
     rm -f "$ERRF"
-    rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"
+    rm -rf "${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX${SLURM_JOB_ID:-none}"
     (( INSLURM )) && exit 143
     exit 0  # 不在 Slurm 里：交还好了算正常结束，relay.py 照常重开（失败的 worker 它不重开）
 }
@@ -304,7 +304,7 @@ trap on_term TERM INT
 
 QDIR=${TASKQ_DIR:-${TASKQ_STATE:+$TASKQ_STATE/taskq}}
 QDIR=${QDIR:-$HOME/.cache/phd/taskq}
-SAFECH=$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import spec; print(spec.SAFE)" 2> /dev/null || echo __)
+SAFECH=$TQ_SAFE
 STOP_POLL=${TASKQ_STOP_POLL:-5}
 STOP_WAIT=${TASKQ_STOP_WAIT:-20}
 TERM_WAIT=${TASKQ_TERM_WAIT:-15}
@@ -313,7 +313,7 @@ check_stops() {
     for p in "${!KEY[@]}"; do
         k=${KEY[$p]}
         [[ -n ${STALLED[$p]:-} ]] && continue  # 已经在按卡住停
-        [[ -e $QDIR/stopped/${k//\//$SAFECH} ]] || continue
+        [[ -e $QDIR/$TQ_Q_STOPPED/${k//\//$SAFECH} ]] || continue
         echo "$(ts) $k 被停止（taskq.py stop），停训练、交还"
         stop_tree "$p"
         for (( i = 0; i < STOP_WAIT; i++ )); do alive "$p" || break; sleep 1; done
@@ -368,23 +368,23 @@ while true; do
         elif [[ -n $stalled ]]; then
             echo "$(ts) $key 已停下，交还"
             tq release "$key"
-        elif (( rc == 0 )); then
+        elif (( rc == TQ_EXIT_RUN_DONE )); then
                 echo "$(ts) 训完 $key"
                 tq release "$key"
-            elif (( rc == 4 )); then
+            elif (( rc == TQ_EXIT_RUN_MISSING )); then
                 echo "$(ts) $key 缺输入，没开训，交还，记为缺输入（不算失败，补齐前不再领）"
                 tq missing "$key" --why "作业 $W 开训前查到" || tq release "$key"
                 EXCL+=("$key")
-        elif (( rc == 5 )); then
+        elif (( rc == TQ_EXIT_RUN_UNREADABLE )); then
             echo "$(ts) $key 读不了盘、判断不了训完没有，交还（不算失败），本作业 10 分钟后再领"
             tq release "$key"
             LATER[$key]=$(( $(date +%s) + 600 ))
-        elif (( rc == 3 )); then
+        elif (( rc == TQ_EXIT_RUN_NOT_DONE )); then
             echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
             fail "$key" "退出码 0 但没训完" "$ran"
         else
             echo "$(ts) $key 训练失败（run_task.sh 退出码 $rc），交还并记一次失败"
-            fail "$key" "退出码 $rc$( (( rc == 2 )) && tail -n 1 "$log" 2> /dev/null | sed 's/^[-0-9: ]*/：/' | cut -c 1-300)" "$ran"
+            fail "$key" "退出码 $rc$( (( rc == TQ_EXIT_RUN_BAD )) && tail -n 1 "$log" 2> /dev/null | sed 's/^[-0-9: ]*/：/' | cut -c 1-300)" "$ran"
         fi
     done
     # 停不下来的：真停下了才交还
@@ -416,7 +416,7 @@ while true; do
         q=$(quiet_since "$p")
         [[ -n $q ]] && (( q >= STALL_MAX )) || continue
         echo "$(ts) ${KEY[$p]} 的日志和结果文件夹 $(( q / 60 )) 分钟没有变化，当作卡住：停掉、交还，领下一个"
-        echo "当作卡住 $(ts)：日志和结果文件夹 $(( q / 60 )) 分钟没有变化，作业 $W 停掉它" >> "$(task_log "$p")" 2> /dev/null
+        echo "$TQ_STALL_LINE $(ts)：日志和结果文件夹 $(( q / 60 )) 分钟没有变化，作业 $W 停掉它" >> "$(task_log "$p")" 2> /dev/null
         STALLED[$p]=$now WHY[$p]=stall
         stop_tree "$p"
     done
@@ -426,7 +426,7 @@ while true; do
             [[ ${WHY[$p]:-} == lost ]] && continue
             k=${KEY[$p]:-${ZOMB[$p]:-}}
             tq beat "$k" --strict > /dev/null
-            (( $? == 13 )) || continue
+            (( $? == TQ_EXIT_LOST )) || continue
             echo "$(ts) $k 的领取已经不是本作业的（过期后被别人接管，或者已经没了），停掉这个训练，不交还"
             WHY[$p]=lost
             EXCL+=("$k")
@@ -446,14 +446,17 @@ while true; do
         later=()
         for k in "${!LATER[@]}"; do (( LATER[$k] > now )) && later+=("$k") || unset "LATER[$k]"; done
         # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的任务留位置
-        t=$($TQPY next --worker "$W" --envs "$ENVS" --device "$DEVICE" "${RESARGS[@]}" --free-slots 1 \
+        # 分段日志名里的作业名：Slurm 里是作业号，不在 Slurm 里每次开训另起；记进领取记录（--log-tag，11/4）
+        JT=$W TAGARG=()
+        (( INSLURM )) || { JT=$(hostname -s)-$(date +%Y%m%d%H%M); TAGARG=(--log-tag "$JT"); }
+        t=$($TQPY next --worker "$W" ${TAGARG[@]+"${TAGARG[@]}"} --envs "$ENVS" --device "$DEVICE" "${RESARGS[@]}" --free-slots 1 \
                        --patience-until $(( T0 + PATIENCE )) --exclude ${EXCL[@]+"${EXCL[@]}"} ${later[@]+"${later[@]}"} 2> "$ERRF")
         rc=$?
         case $rc in
-            0)  err_since=0; start "$t" ;;
-            10) err_since=0; why=nothing; break ;;
-            11) err_since=0; why=wait; break ;;
-            12) err_since=0; why=paused; break ;;
+            "$TQ_EXIT_NEXT_OK") err_since=0; start "$t" ;;
+            "$TQ_EXIT_NOTHING") err_since=0; why=nothing; break ;;
+            "$TQ_EXIT_WAIT") err_since=0; why=wait; break ;;
+            "$TQ_EXIT_PAUSED") err_since=0; why=paused; break ;;
             *)  (( err_since )) || { err_since=$now; echo "$(ts) 队列出错（taskq.py 退出码 $rc：$(tail -n 1 "$ERRF")），之后每轮再试"; }
                 why=error; break ;;
         esac
@@ -511,7 +514,7 @@ while true; do
 done
 kill_tree "$GPUMON"
 rm -f "$ERRF"
-rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
+rm -rf "${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
 # 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；停不下来的训练交给新代码接着跟（11/4）；
 # 不是代码包的退出，由 relay.py 重开
 START=$(new_start)

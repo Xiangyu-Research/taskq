@@ -3,6 +3,13 @@ import json
 import os
 
 
+def _proto():
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import proto
+    return proto
+
+
 def _cfg():
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +56,7 @@ def run(cmd, host=None, timeout=120, input=None, ssh=None):
         r = subprocess.run(cmd, input=input, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
     except Exception as e:  # noqa: BLE001
-        return 124, "", str(e)
+        return _proto().EXIT["timeout"], "", str(e)
 
 
 def pueue_time(x):

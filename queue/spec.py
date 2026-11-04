@@ -10,6 +10,8 @@
   spec.py resolve <做法> k=v…        解析好的说明（JSON，一行）
   spec.py lookup <key>               按 key 找任务（先查实验表（experiments.py），再查训练队列），打印说明（JSON）
   spec.py outputs <key> [--sh]       这个任务的输出（outputs()，JSON）；--sh：给 archive_task.sh 的 shell 语句
+  spec.py collect --json < 输入.json  本机的 collect()（跨版本读用它，11/4）：输入 {"specs": [说明…], "root": 数据目录（可省，同 done），
+                                     "wait": 秒（可省，默认 COLLECT_WAIT）}；输出 @@JSON 一行 {"version": …, "tasks", "seglogs"[, "stuck", "errors"]}
 k=v 的值以 [ 或 { 开头时按 JSON 读（如 done='["a","b|c"]'），其他都是字符串。
 """
 import glob
@@ -30,17 +32,15 @@ try:
     REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
 except ImportError:  # 本文件经 ssh 送到别的机器上单独跑时（remote_collect）
     REPO = CORE
+if globals().get("_PROTO_INLINE"):  # remote_collect：proto.py 的源码拼在本文件前面，名字已经在这里
+    P = sys.modules[__name__]
+else:
+    import proto as P  # noqa: E402
 BUILTIN = ("data", "repo")  # 运行时按机器展开的名字
-FRESH_LOG = 15 * 60
-SAFE = "__"
-
-
-def safe(key):
-    """key → 文件名（领取记录、分段日志）。"""
-    return key.replace("/", SAFE)
-
-
-JSON_MARK = "@@JSON "  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/taskq/queue/README.md 的"约定"）
+FRESH_LOG = P.FRESH_LOG
+SAFE = P.SAFE
+safe = P.safe  # key → 文件名（领取记录、分段日志）
+JSON_MARK = P.JSON_MARK  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（scripts/taskq/queue/README.md 的"约定"）
 
 
 COLLECT_WAIT = 90  # remote_collect 一共等几秒（各任务同时读）
@@ -241,7 +241,7 @@ def outputs(s):
     old = s.get("oldlogs") or {}
     return dict(outs=[os.path.normpath(o.strip("/")) for o in [s["out"]] + list(f.get("also") or [])],
                 done=[d.split("|") for d in done], exclude=list(f.get("exclude") or []), extra=list(f.get("extra") or []),
-                archive=bool(s.get("archive")), logs=f"logs/tasks/{safe(s['key'])}{SAFE}" if s.get("key") else None,
+                archive=bool(s.get("archive")), logs=f"{P.TASK_LOGS}/{safe(s['key'])}{SAFE}" if s.get("key") else None,
                 oldlogs=old if old.get("dir") and old.get("prefix") else None)
 
 
@@ -372,7 +372,7 @@ def metrics(s, fd):
     return out
 
 
-COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume", "oldlogs")
+COLLECT_FIELDS = P.COLLECT_FIELDS
 
 
 def all_tasks(queue=()):
@@ -449,7 +449,7 @@ def one_task(s, root):
         pj = progress_json(fd)
         if pj:
             runs.append(pj)
-    return dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, "ARCHIVED")),
+    return dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, P.ARCHIVED)),
                 dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd), resumable=resumable(s, fd))
 
 
@@ -457,24 +457,31 @@ def seg_logs(specs, root):
     """collect 里的分段日志：[{name, first, trained}]。"""
     out = {"seglogs": []}
     dirs = sorted({s["oldlogs"]["dir"] for s in specs if (s.get("oldlogs") or {}).get("dir")})
-    pats = [os.path.join(root, d, "*_seg*.log") for d in dirs] + [os.path.join(root, "logs", "tasks", f"*_{w}*.log") for w in ("seg", "part")]
+    pats = [os.path.join(root, d, "*_seg*.log") for d in dirs] + [os.path.join(root, P.TASK_LOGS, f"*_{w}*.log") for w in P.LOG_PARTS[::-1]]
     for p in (q for pat in pats for q in glob.glob(pat)):
         first, trained = "", False
         try:
             with open(p, errors="replace") as f:
                 first = f.readline().strip()
-                trained = any(line.startswith("训完") or any(x in line for x in TRAINED) for line in f)  # 至少做完 1 轮
+                trained = any(line.startswith(P.DONE_LINE) or any(x in line for x in TRAINED) for line in f)  # 至少做完 1 轮
         except Exception:  # noqa: BLE001
             pass
         out["seglogs"].append(dict(name=os.path.basename(p), first=first, trained=trained))
     return out["seglogs"]
 
 
+def remote_program():
+    """经 stdin 送到别的机器单独跑的程序：proto.py（去掉命令行）+ 本文件（不跑命令行）+ readers/。"""
+    main_ = '\nif __name__ == "__main__":'
+    prog = open(os.path.abspath(P.__file__), encoding="utf-8").read().split(main_)[0] + "\n_PROTO_INLINE = True\n"
+    prog += open(os.path.abspath(__file__), encoding="utf-8").read().replace(main_, "\nif False:")
+    return prog + f"\nload_readers(json.loads({json.dumps(json.dumps(reader_sources()))}))"
+
+
 def remote_collect(ssh, specs, root, timeout=600):
-    """ssh 到别的机器上跑 collect()：把本文件、readers/ 和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
+    """ssh 到别的机器上跑 collect()：把 proto.py、本文件、readers/ 和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
     import common as C
-    prog = open(os.path.abspath(__file__), encoding="utf-8").read().replace('\nif __name__ == "__main__":', "\nif False:")
-    prog += f"\nload_readers(json.loads({json.dumps(json.dumps(reader_sources()))}))"
+    prog = remote_program()
     prog += (f"\njson_out(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r}), "
              f"wait={COLLECT_WAIT}))\nos._exit(0)\n")  # 卡住的线程不等
     try:
@@ -568,13 +575,15 @@ def main(argv):
         return DISK_RC
 
 
-DISK_RC = 5  # spec.py done 读不了盘（scripts/taskq/queue/README.md 的"约定"）
+DISK_RC = P.EXIT["done_unreadable"]  # spec.py done 读不了盘（scripts/taskq/queue/README.md 的"约定"）
 
 
 def _main(cmd, args):
     import cfg
     if cmd in ("shell", "done", "resolve", "lookup", "outputs") and not args:
         raise SpecError(f"{cmd} 缺参数")
+    if cmd == "collect":
+        return collect_cmd(args)
     if cmd in ("shell", "done") and args[:1] == ["--spec"] and len(args) == 2:
         s = from_sent(args[1])
     elif cmd in ("shell", "done", "resolve"):
@@ -587,11 +596,7 @@ def _main(cmd, args):
     else:
         print(f"spec.py：不认识的命令 {cmd}", file=sys.stderr)
         return 2
-    data = cfg.env("TASKQ_DATA")
-    if not data:
-        import machines as M
-        me = M.whoami()
-        data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
+    data = local_data()
     if cmd == "done" and not data:
         raise SpecError("不知道本机的数据目录（TASKQ_DATA 或 envs/machines.py 的 data）")
     if cmd == "lookup":
@@ -611,8 +616,35 @@ def _main(cmd, args):
     elif cmd == "shell":
         print("\n".join([shell_lines(s, data)] + machine_vars()))
     elif cmd == "done":
-        return 0 if is_done(s, data) else 1
+        return P.EXIT["done_yes"] if is_done(s, data) else P.EXIT["done_no"]
     return 0
+
+
+def local_data():
+    """本机的数据目录：TASKQ_DATA > envs/machines.py 的 data；都没有 → ""。"""
+    import cfg
+    data = cfg.env("TASKQ_DATA")
+    if not data:
+        import machines as M
+        me = M.whoami()
+        data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
+    return data
+
+
+def collect_cmd(args):
+    """spec.py collect --json：标准输入 {"specs": [...], "root": …, "wait": …} → @@JSON 一行（带 version）。"""
+    if args != ["--json"]:
+        raise SpecError("用法：spec.py collect --json < 输入.json")
+    try:
+        d = json.loads(sys.stdin.read())
+        specs, root, wait = d["specs"], d.get("root") or local_data(), d.get("wait", COLLECT_WAIT)
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        raise SpecError(f"输入要是 {{\"specs\": [...], \"root\": …}}：{type(e).__name__}: {e}") from None
+    if not root:
+        raise SpecError("不知道本机的数据目录（输入的 root、TASKQ_DATA 或 envs/machines.py 的 data）")
+    json_out({"version": P.VERSION, **collect(specs, os.path.expanduser(root), wait=wait)})
+    sys.stdout.flush()
+    os._exit(0)  # 卡住的读线程不等
 
 
 if __name__ == "__main__":

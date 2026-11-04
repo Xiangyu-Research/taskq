@@ -7,8 +7,10 @@ if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${TASKQ_TEST_FAKEBIN:-
     _switch=${_switch:-$HOME/.cache/phd/gpu_pad/DISABLED}
     if [[ -f $_pad && ! -e $_switch && -z ${TASKQ_GPU_PAD_STARTED:-} ]]; then
         export TASKQ_GPU_PAD_STARTED=1
-        _padlog=${TASKQ_DATA:-$HOME}/logs/workers/gpu_pad_${SLURM_JOB_ID}.log
-        mkdir -p "$(dirname "$_padlog")" 2> /dev/null || _padlog=/tmp/gpu_pad_${SLURM_JOB_ID}.log
+        eval "$(python3 "$_padhere/proto.py" sh | grep -E '^TQ_(WORKER_LOGS|GPU_PAD_BASE)=')"
+        _padlog=${TASKQ_DATA:-$HOME}/$TQ_WORKER_LOGS/gpu_pad_${SLURM_JOB_ID}.log
+        mkdir -p "$(dirname "$_padlog")" 2> /dev/null || _padlog=$TQ_GPU_PAD_BASE${SLURM_JOB_ID}.log
+        unset TQ_WORKER_LOGS TQ_GPU_PAD_BASE
         echo "$(date '+%F %T') 显存填充启动：floor=${TASKQ_GPU_PAD_FLOOR_MIB:-42000}MiB target=${TASKQ_GPU_PAD_TARGET_MIB:-55000}MiB 日志=$_padlog"
         _py=$(command -v python3)
         # 作业期间退出了就重启（间隔 1、2、4… 倍 RETRY_DELAY，最多 16 倍）；连续 MAX_FAILS 次跑不到 RESET_AFTER 秒就放弃

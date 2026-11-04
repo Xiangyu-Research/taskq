@@ -30,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+import proto  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
@@ -44,7 +45,7 @@ SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # 不进包的�
 # 其余（box 上的计划、传数据、健康检查、同步）不进包
 RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), "queue", f)) for f in (
     "worker_start.sh", "dicc_worker.sh", "run_task.sh", "gpu_pad_start.sh", "gpu_pad.py", "taskq.py", "spec.py", "common.py",
-    "cfg.py", "recipes.py", "experiments.py", "steps.py", "inputs.py", "worker.sbatch", "cpu_worker.sbatch"))
+    "cfg.py", "recipes.py", "experiments.py", "steps.py", "inputs.py", "worker.sbatch", "cpu_worker.sbatch", "proto.py"))
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
@@ -136,8 +137,8 @@ def relay_entry(commit, name):
 
 # ---------------- 生成的文件 ----------------
 def machine_entry(name, e, root, entry=None):
-    m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/code/current", code=None,
-             data=f"{root}/data", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
+    m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/{proto.ROOT['current']}", code=None,
+             data=f"{root}/{proto.ROOT['data']}", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
     m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars") if k in e})
     m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/taskq/sites/envs.py）在根目录下
@@ -206,17 +207,17 @@ def gen_sbatch(real, m, root, kind="gpu"):
         raise BundleError(f"RELAY 的 jobs 里没有 {kind}")
     # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/<核心>/queue 交，嵌着时往上 5 级是根目录）
     up = "/".join([".."] * (2 + len(cfg.rel("queue").split("/"))))
-    logs = (up if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
+    logs = f"{up if root.startswith('~') else root}/{proto.ROOT['data']}/{proto.WORKER_LOGS}/%x_%j.out"
     return "\n".join(["#!/bin/bash", *keep,
                       f"#SBATCH --output={logs}",
                       f"R={RM.q(root)}",
-                      'REPO=$(readlink -f "$R/code/current")',
-                      'export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED'
+                      f'REPO=$(readlink -f "$R/{proto.ROOT["current"]}")',
+                      f'export TASKQ_DIR=$R/{proto.ROOT["queue"]} TASKQ_GPU_PAD_SWITCH=$R/{proto.STATE_IN_ROOT["gpu_pad/DISABLED"]}'
                       + (" WORKER_DEVICE=cpu" if kind == "cpu" else ""),
                       f'exec bash "$REPO/{cfg.rel("queue", "worker_start.sh")}"', ""])
 
 
-HOME_MAP = {"taskq": "queue", "gpu_pad/DISABLED": "queue/gpu_pad_DISABLED"}  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/
+HOME_MAP = dict(proto.STATE_IN_ROOT)  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/
 
 
 def home_paths(text, root, path=""):
@@ -229,7 +230,7 @@ def home_paths(text, root, path=""):
             r = pre + root[2:] if root.startswith("~/") else root  # 根目录在家目录下时沿用原来的写法（双引号里的 ~ 不展开）
             for k, v in HOME_MAP.items():
                 s = s.replace(pre + h + k, f"{r}/{v}")
-            s = s.replace(pre + h, f"{r}/state/")
+            s = s.replace(pre + h, f"{r}/{proto.ROOT['state']}/")
         return s
     keep = _prose(text) if path.endswith(".py") else None
     if keep is None:

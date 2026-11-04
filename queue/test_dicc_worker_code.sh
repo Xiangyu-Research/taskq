@@ -142,7 +142,7 @@ fi
 # worker_start.sh：conda activate 失败时日志里写清楚，照样开 worker（11/4）
 if want ws; then
 mkdir -p "$T/ws" "$T/wscfg" "$T/wsconda/etc/profile.d"
-cp "$HERE/worker_start.sh" "$HERE/gpu_pad_start.sh" "$T/ws/"
+cp "$HERE/worker_start.sh" "$HERE/gpu_pad_start.sh" "$HERE/proto.py" "$T/ws/"
 printf '#!/bin/bash\necho "worker 开始"\n' > "$T/ws/dicc_worker.sh"
 printf 'import sys\nprint({"conda": "%s env0", "data": "%s"}[sys.argv[3]])\n' "$T/wsconda" "$TASKQ_DATA" > "$T/wscfg/machines.py"
 printf 'conda() { return 1; }\n' > "$T/wsconda/etc/profile.d/conda.sh"
@@ -156,7 +156,7 @@ sed -n '/^gpu_stats() {/,/^can_add() {/p' "$HERE/dicc_worker.sh" | sed '$d' > "$
 mkdir -p "$T/bin"; printf '#!/bin/bash\necho "30000, 81920"\n' > "$T/bin/nvidia-smi"; chmod +x "$T/bin/nvidia-smi"
 GPUCSV=$T/gpu.csv PADBASE=$T/pad
 for i in $(seq 12); do echo "2026/10/18 10:$i, 0, 30000 MiB, 81920 MiB, $(( i <= 2 ? 0 : 60 )) %"; done > "$GPUCSV"
-source "$T/fns.sh"; unset WORKER_TEST_GPU
+eval "$(python3 "$HERE/proto.py" sh)"; source "$T/fns.sh"; unset WORKER_TEST_GPU
 check "gpu_stats：只看最近 10 条使用率（前面的 0% 不算），显存读 nvidia-smi" '[[ $(PATH=$T/bin:$PATH gpu_stats) == "60 10 30000 81920" ]]'
 check "gpu_stats：没有记录时样本数 0" '[[ $(GPUCSV=$T/none PATH=$T/bin:$PATH gpu_stats) == "0 0 30000 81920" ]]'
 printf '#!/bin/bash\n[[ "$*" == "-i 1 "* ]] && echo "5000, 24576" || echo "30000, 81920"\n' > "$T/bin/nvidia-smi"
