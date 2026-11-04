@@ -27,9 +27,6 @@ sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 
-LEGACY_UNSET = "".join(f" -u {v}" for v in cfg.LEGACY.values())
-for _v in cfg.LEGACY.values():
-    os.environ.pop(_v, None)
 PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
 PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
 
@@ -47,7 +44,7 @@ for d in (BD, PQ, BIN):
     os.makedirs(d)
 with open(FAKE, "w") as f:  # 假的 ssh：跳过 -o 和机器名，在本机跑；box 这边的变量不带过去
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nshift\n'
-            f'cd / && exec env{LEGACY_UNSET} -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
+            f'cd / && exec env -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
 with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # 不碰真的卡
     f.write("#!/bin/bash\nexit 0\n")
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):

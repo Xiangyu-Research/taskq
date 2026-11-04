@@ -37,10 +37,8 @@ TQPY="python3 $HERE/taskq.py"
 if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
 W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
 DEVICE=${WORKER_DEVICE:-gpu}
-source "$HERE/legacy_names.sh" map
 DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
 export TASKQ_DATA=$DATA
-source "$HERE/legacy_names.sh" export
 ENVS=${TASKQ_ENVS:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 # Slurm 外（pueue 的常驻 worker）：最多用 TASKQ_CPUS 个核（envs/machines.py 的 cpu_worker 的 cpus），和别人共用这台机器

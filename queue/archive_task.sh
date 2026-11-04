@@ -21,7 +21,6 @@ DRY=${3:-}
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
-source "$CORE/queue/legacy_names.sh" map
 SRCH= SRCD=
 if [[ $HOST != "$($M names hub | head -1)" ]]; then
     SRCH=$($M get "$HOST" ssh) SRCD=$($M get "$HOST" data)

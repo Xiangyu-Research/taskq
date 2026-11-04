@@ -86,23 +86,13 @@ ok("TASKQ_STATE 的 ~：expand 时展开，不 expand 时留着",
    cfg.state("taskq") == os.path.join(HOME, "stx/taskq") and cfg.state("taskq", expand=False) == "~/stx/taskq")
 setenv(TASKQ_STATE=None)
 
-# env() 和旧名
-for k in ("TASKQ_DATA", "BRAIN_TUMOR", "TASKQ_GPU_PAD_BASE", "RQ1_GPU_PAD_BASE", "TASKQ_DATAX", "BRAIN_TUMORX"):
-    setenv(**{k: None})
-setenv(TASKQ_DATA="/new", BRAIN_TUMOR="/old")
-ok("env：新名旧名都设了 → 新名", cfg.env("TASKQ_DATA") == "/new")
-setenv(TASKQ_DATA=None)
-ok("env：只有旧名 → 旧名的值", cfg.env("TASKQ_DATA") == "/old")
+# env()
+setenv(TASKQ_DATA="/new")
+ok("env：设了 → 它的值", cfg.env("TASKQ_DATA") == "/new")
 setenv(TASKQ_DATA="")
-ok("env：新名是空的 → 旧名的值", cfg.env("TASKQ_DATA") == "/old")
-setenv(TASKQ_DATA=None, BRAIN_TUMOR=None)
-ok("env：都没有 → 默认值", cfg.env("TASKQ_DATA", "d") == "d" and cfg.env("TASKQ_DATA") is None)
-setenv(RQ1_GPU_PAD_BASE="/b")
-ok("env：前缀相同的名字也认旧名（TASKQ_GPU_PAD_BASE ← RQ1_GPU_PAD_BASE）", cfg.env("TASKQ_GPU_PAD_BASE") == "/b")
-setenv(BRAIN_TUMORX="/x")
-ok("env：只是开头一样、不隔 _ 的名字不算", cfg.env("TASKQ_DATAX") is None)
-ok("env：不在旧名表里的名字照常读", cfg.env("PATH") == os.environ["PATH"])
-setenv(RQ1_GPU_PAD_BASE=None, BRAIN_TUMORX=None)
+ok("env：空的 → 默认值", cfg.env("TASKQ_DATA", "d") == "d")
+setenv(TASKQ_DATA=None)
+ok("env：没设 → 默认值", cfg.env("TASKQ_DATA", "d") == "d" and cfg.env("TASKQ_DATA") is None)
 
 
 # outputs()：import policy 会缓存，每种情况在单独的进程里跑

@@ -26,7 +26,6 @@ REPO = _user_repo()
 CORE_REL = os.path.relpath(CORE, REPO)  # 使用者的仓库里调度代码的位置（给在仓库根目录下跑的命令用）
 STATE_HOME = "~/.cache/phd/"
 STATE_PLACES = {"taskq": "~/.cache/phd/taskq", "gpu_pad/DISABLED": "~/.cache/phd/gpu_pad/DISABLED"}
-LEGACY = {"TASKQ_DATA": "BRAIN_TUMOR", "TASKQ_GPU_PAD": "RQ1_GPU_PAD", "TASKQ_TEST_FAKEBIN": "RQ1_TEST_FAKEBIN"}
 
 
 def config_dir():
@@ -62,9 +61,6 @@ def state(*parts, expand=True):
 
 def env(name, default=None):
     v = os.environ.get(name)
-    if not v:
-        old = next((o + name[len(n):] for n, o in LEGACY.items() if name == n or name.startswith(n + "_")), None)
-        v = os.environ.get(old) if old else None
     return v if v else default
 
 
