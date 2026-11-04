@@ -215,12 +215,12 @@ s["probe"]["box"]["DISK"] = str(int(50e9))
 P = H.check(s)
 ok("lab 盘不到 15 GB → 紧急；box 盘不到 100 GB → 提醒", P["disk:lab"]["level"] == "urgent" and P["disk:box"]["level"] == "normal")
 s["probe"]["lab"]["GPULOG"] = ts(NOW - timedelta(minutes=30))
-s["code"] = dict(main="a" * 40, heads={"lab": "b" * 40, "dicc": "a" * 40, "gone": "c" * 40})
+s["code"] = dict(main="a" * 40, heads={"dicc": "b" * 40, "box": "a" * 40, "gone": "c" * 40})
 P = H.check(s)
 ok("GPU 记录停了 → 报；代码停在别的提交 → 报（持续 2 小时才算），和 main 一样的、表里没有的机器不报",
-   "gpulog:lab" in P and P.get("code:lab", {}).get("after") == 120 and "code:dicc" not in P and "code:gone" not in P)
-s["code"]["heads"]["lab"] = ""
-ok("连不上（提交号空着）→ 不报代码", "code:lab" not in H.check(s))
+   "gpulog:lab" in P and P.get("code:dicc", {}).get("after") == 120 and "code:box" not in P and "code:gone" not in P)
+s["code"]["heads"]["dicc"] = ""
+ok("连不上（提交号空着）→ 不报代码", "code:dicc" not in H.check(s))
 
 s = snap(board_pending=["data/demo_v50.json"])
 s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00 开机：放回队列 3 4"

@@ -7,7 +7,10 @@ if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${TASKQ_TEST_FAKEBIN:-
     _switch=${_switch:-$HOME/.cache/phd/gpu_pad/DISABLED}
     if [[ -f $_pad && ! -e $_switch && -z ${TASKQ_GPU_PAD_STARTED:-} ]]; then
         export TASKQ_GPU_PAD_STARTED=1
-        eval "$(python3 "$_padhere/proto.py" sh | grep -E '^TQ_(WORKER_LOGS|GPU_PAD_BASE)=')"
+        while IFS= read -r _l; do
+            case $_l in TQ_WORKER_LOGS=* | TQ_GPU_PAD_BASE=*) eval "$_l" ;; esac
+        done < <(python3 "$_padhere/proto.py" sh)
+        unset _l
         _padlog=${TASKQ_DATA:-$HOME}/$TQ_WORKER_LOGS/gpu_pad_${SLURM_JOB_ID}.log
         mkdir -p "$(dirname "$_padlog")" 2> /dev/null || _padlog=$TQ_GPU_PAD_BASE${SLURM_JOB_ID}.log
         unset TQ_WORKER_LOGS TQ_GPU_PAD_BASE
