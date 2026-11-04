@@ -88,6 +88,8 @@ ok("toy：也有 inputs、resume、一张卡、输入拷到本地，进度读插
 sl = S.shell_lines(s, "/d").splitlines()
 ok("shell：TASK_INPUTS 是输入的绝对路径（数组），TASK_LOCAL 跟 res.local_inputs", f"TASK_INPUTS=(/d/prepared/{s['params']['ds'] if 'params' in s else s['data'][0].split('/')[-1]})" in sl
    and "TASK_LOCAL=1" in sl and "TASK_LOCAL=0" in S.shell_lines(S.resolve("command", G), "/d").splitlines())
+raw = dict(S.resolve("command", G), params=dict(G, note="{trainer}_fold{fold}_"))
+ok("shell：params 里原样留着的 {名字} 不展开、不报错（10/31 起 oldlogs.prefix 这样写）", "TASK_LOCAL=0" in S.shell_lines(raw, "/d").splitlines())
 gr = tempfile.mkdtemp()
 gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
 gd = os.path.join(gr, "guest/x")
