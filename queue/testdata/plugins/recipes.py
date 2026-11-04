@@ -2,8 +2,6 @@
 命令是 testdata/bin/toy_train.sh。字段说明见 scripts/taskq/queue/recipes.py 开头。"""
 from recipes import REQUIRED
 
-INPUT_ROOTS = ["prepared", "raw"]
-
 RECIPES = {
     "toy": dict(
         params=dict(ds=REQUIRED, frag=REQUIRED, variant="V_save", plan="PlanM", cfg="full", env="base",

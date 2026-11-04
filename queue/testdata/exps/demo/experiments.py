@@ -137,7 +137,6 @@ GS = ["G-A", "G-B", "G-C", "G-D"]
 SNAP = {"DEMO_SNAPSHOTS": "100,250,500"}
 
 OLDLOGS = {"D101_alpha": dict(prefix="{variant}_frag{frag}_")}
-KEEP_DATA = ["D101_*"]
 
 
 def _x(id, exp, label, model, ds, board, nice, steps=FULL, variant="V_save", frags=F5, env=None,

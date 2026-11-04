@@ -8,13 +8,11 @@
     python3 scripts/taskq/monitor/health.py --test       推送一条测试消息
 
 查什么（每项一个问题编号，同一个问题只推送一次）：
-  - 连不上：ssh 不通（pueue 机器 30 分钟、Slurm 集群 1 小时后才报）。
+  - 连不上：pueue 机器 ssh 不通 30 分钟。
   - pueue：常驻进程连不上；任务失败（手动停的 143 / Killed 只记进登记表，不推送）。
-  - Slurm：过去 24 小时 FAILED / OUT_OF_MEMORY / NODE_FAIL 的作业（到时限停的段不算）。
-  - 训练卡住：Slurm 在跑的作业、pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
-  - 拉回：box 上在等的任务既没训完、也不在那台机器上排队 / 训练；或者训完 90 分钟了还没拉回。
+  - 训练卡住：pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
   - 同一个任务两处：同一个任务在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
-  - 训练机的卡空了：pueue 训练机（角色 train）上有卡的组里没有排着的训练任务（只剩在训的一个，或者全空），这次也没领到新的。
+  - 执行机（relay.py 管的）的问题由 relay.py 报（经 feed.run_all）。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
   - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
   - pueue 机器 24 小时内重启过（scripts/taskq/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
@@ -22,17 +20,16 @@
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
 文件（envs/policy.py 的 OUTPUTS）：topic（ntfy 频道名，不进仓库）、health 下的 state.json（问题和推送记录，
   make_registry.py 读）、health.log（每次有变化记一行）。
-每次检查后还做两件事（10/18 起）：
-  - scripts/taskq/queue/refill.py：清理 lab 上用不着的数据；送完任务后给 DICC 补交 worker 作业。做了什么记在 ~/refill.log。
-  - scripts/taskq/queue/feed.py：送任务的唯一入口（10/31）。SITES 里 relay=True 的执行机交给 scripts/taskq/queue/relay.py（领任务、传数据、
-    拉回，记在 ~/relay.log；停住等人处理的报成问题），其余往缓冲送任务、交还，记在 ~/feed.log。
+每次检查后还做这几件事（10/18 起）：
+  - scripts/taskq/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）。
+  - scripts/taskq/queue/feed.py：送任务的唯一入口（10/31），交给 scripts/taskq/queue/relay.py（领任务、传数据、补 worker、拉回，
+    记在 ~/relay.log；停住等人处理的报成问题）。
   - scripts/taskq/queue/advance.py：box 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
 """
 import argparse
 import json
 import os
 import sys
-import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -83,10 +80,9 @@ def load_failed(e):
 try:
     import experiments as E  # noqa: E402  scripts/taskq/queue/experiments.py：实验表
     import spec  # noqa: E402  scripts/taskq/queue/spec.py：任务说明、各机器上的收集
-    import taskq  # noqa: E402  scripts/taskq/queue/taskq.py：总队列（box）和执行机的缓冲（10/31）
+    import taskq  # noqa: E402  scripts/taskq/queue/taskq.py：总队列（box，10/31）
     import plain as PL  # noqa: E402  scripts/taskq/monitor/plain.py：推送的白话说法
     import common as C  # noqa: E402  scripts/taskq/queue/common.py
-    import slurm as SL  # noqa: E402  scripts/taskq/sites/slurm.py
     from common import write_json  # noqa: E402
 except Exception as _e:
     if __name__ == "__main__":
@@ -103,21 +99,6 @@ def stopped(t):
 
 
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
-
-SLURM_PROBE = ("squeue -u $USER -h -r -o '%j|%i|%T|%M|%r|%y|%P|%o'; echo '=====';"
-               " sacct -u $USER -X -n -P -S now-24hours -s F,OOM,NF,BF,DL -o JobID,JobName,State,End,ExitCode")
-
-
-def is_worker_job(row):
-    return SL.kind_of(row[7]) == "gpu"  # squeue 的一行：交的脚本是 worker.sbatch（CPU worker 不算；作业名每次随机，不按名字认）
-
-
-def data_candidates(queue=()):
-    """训练要用的数据（相对数据目录）：实验表里所有任务、加上队列里的任务（queue：taskq 状态里的任务列表）的 data。"""
-    out = {p for t in E.tasks().values() for p in t["spec"].get("data") or []}
-    out |= {p for t in queue for p in (t.get("spec") or {}).get("data") or []}
-    return sorted(out)
-
 
 GPU_PROBE = r"""timeout 20 nvidia-smi --query-gpu=index,uuid,utilization.gpu,memory.used --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU|/'
 timeout 20 nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while IFS=, read u p m; do
@@ -137,24 +118,17 @@ def gpus_of(lines):
     return list(gpus.values())
 
 
-def probe_ok(script, rc, out):
-    """probe_script 的结果 → (连得上没有, 已有的数据)。输出被截断：这次算没读到，不当成数据不在。
-    数据目录不在或进不去（@@NODATA）：机器算连得上，数据都不在（11/3）。"""
-    have = C.parse_have(out) if C.HAVE_END in script else set()
-    if have is None and rc == 3 and C.HAVE_NODATA in out.splitlines():
-        rc, have = 0, set()
-    return rc == 0 and "BOOT|" in out and have is not None, have
+def probe_ok(rc, out):
+    return rc == 0 and "BOOT|" in out
 
 
-def probe_script(m, paths=()):
-    """pueue 机器上要查的东西（按表里的字段），每行"项|值"。paths：训练机上要看在不在的数据（相对数据目录）。"""
+def probe_script(m):
+    """pueue 机器上要查的东西（按表里的字段），每行"项|值"。"""
     lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"', GPU_PROBE]
     if m["disk"]:
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
         lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
-    if "train" in m["roles"] and paths:  # 训练要用的数据哪些已经在了（scripts/taskq/queue/refill.py 判断要不要先传）
-        lines.append(C.have_script(paths, m["data"]).rstrip("\n"))
     return "\n".join(lines) + "\n"
 
 
@@ -170,15 +144,6 @@ def run_on(m, script, timeout=120):
 
 
 # ---------------- 收集 ----------------
-def minutes(elapsed):
-    """squeue 的 %M（[D-]HH:MM:SS 或 MM:SS）→ 分钟。"""
-    d, _, hms = elapsed.rpartition("-")
-    p = [int(x) for x in hms.split(":")]
-    while len(p) < 3:
-        p.insert(0, 0)
-    return int(d or 0) * 1440 + p[0] * 60 + p[1] + p[2] / 60
-
-
 def code_heads():
     """各台机器的代码在哪个提交（auto_refresh.sh 快进后写的 heads.tsv）和 GitHub 上的 main → dict(main, heads={机器: 提交号})。"""
     rc, main = sh(["git", "-C", REPO, "rev-parse", "HEAD"])
@@ -194,59 +159,40 @@ def code_heads():
 
 def gather(remote=True):
     """各机器的状态（只读）。remote=False：只看本机（不连别的机器）。"""
-    s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, slurm={}, src={}, taskq={}, code=code_heads())
-    here = [n for n in M.MACHINES if (remote or M.MACHINES[n]["ssh"] is None) and n not in policy.OFFLINE]
-    for n in set(M.MACHINES) & set(policy.OFFLINE):
+    s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, src={}, taskq={}, code=code_heads())
+    here = [n for n in M.names("pueue") if (remote or M.MACHINES[n]["ssh"] is None) and n not in policy.OFFLINE]
+    for n in set(M.names("pueue")) & set(policy.OFFLINE):
         s["ok"][n], s["why"][n] = False, f"暂停检查：{policy.OFFLINE[n]}"
-    pq = [n for n in M.names("pueue") if n in here]
-    rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"] + ([] if remote else pq), timeout=180)
-    s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in pq}
+    rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"] + ([] if remote else here), timeout=180)
+    s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in here}
     s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（scripts/taskq/queue/common.py），main() 里写回
     just = os.environ.get("PHD_TASK_DONE")  # box 的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完（2026-10-24）
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
             t.update(status="Success", result="Success", code=0)
-    # 总队列在 box（10/31）：收集训练状态、查训练机上的数据都要用队列里的任务；执行机的缓冲是其中一部分的副本
+    # 总队列在 box（10/31）：收集训练状态要用队列里的任务
     hub = M.hub()
     s["taskq"][hub] = taskq.local_status()
     queue = list((s["taskq"][hub] or {}).get("tasks", []))
-    order = sorted(here, key=lambda n: M.MACHINES[n]["scheduler"] != "slurm")
-    for name in order:
+    for name in here:
         m = M.MACHINES[name]
-        if m["scheduler"] == "slurm":
-            rc, out = run_on(m, SLURM_PROBE)
-            ok = rc == 0 and "=====" in out
-            if ok:
-                q, a = out.split("=====", 1)
-                s["slurm"][name] = dict(squeue=[ln.split("|", 7) for ln in q.splitlines() if ln.count("|") >= 7],  # 作业名、号、状态、已跑、原因、Nice、分区、脚本
-                                        sacct=[ln.split("|") for ln in a.splitlines() if ln.count("|") == 4])
-                if "train" in m["roles"]:
-                    s["taskq"][name] = taskq.remote_status(name)
-                    seen = {t["key"] for t in queue}
-                    queue += [t for t in (s["taskq"][name] or {}).get("tasks", []) if t["key"] not in seen]
-        else:
-            script = probe_script(m, data_candidates(queue))
-            rc, out = run_on(m, script)
-            ok, have = probe_ok(script, rc, out)
-            if ok:
-                lines = out.splitlines()
-                s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|", "HAVE|")))
-                if C.HAVE_END in script:
-                    s["probe"][name]["HAVE"] = " ".join(sorted(have))
-                s["gpus"][name] = gpus_of(lines)
+        rc, out = run_on(m, probe_script(m))
+        ok = probe_ok(rc, out)
+        if ok:
+            lines = out.splitlines()
+            s["probe"][name] = dict(ln.split("|", 1) for ln in lines if "|" in ln and not ln.startswith(("GPU|", "APP|")))
+            s["gpus"][name] = gpus_of(lines)
         s["ok"][name] = ok
     specs = spec.task_specs(queue)
-    for name in order:  # 各机器上每个任务的训练状态（spec.collect）
+    for name in here:  # 各机器上每个任务的训练状态（spec.collect）：有数据目录的
         m = M.MACHINES[name]
-        if s["ok"][name]:
+        if s["ok"][name] and m.get("data"):
             r = spec.collect(specs, M.expand(m["data"])) if m["ssh"] is None else spec.remote_collect(m["ssh"], specs, m["data"])
             if r:
                 s["src"][name] = r
             elif m["ssh"] is not None:  # 收集超时（多半是那边的存储挂住，10/31）：这次检查后面的步骤都当它连不上，不再去连
                 s["ok"][name] = False
                 s["why"][name] = "收集训练状态超时或出错（多半是那边的存储挂住）"
-                if name != hub:
-                    s["taskq"].pop(name, None)
     s["board_pending"] = open(H_PENDING).read().split() if os.path.exists(H_PENDING) else []
     return s
 
@@ -272,16 +218,16 @@ def check(s):
     def add(pid, msg, level="normal", kind="state", after=0):
         P[pid] = dict(msg=msg, level=level, kind=kind, after=after)
 
-    claims = {}  # key → {机器（pueue 的是"机器:组"，和同一台的缓冲分开）: [描述]}（排队或在训）
+    claims = {}  # key → {"机器:组": [描述]}（排队或在训）
     busy = {}  # key → {机器（同上）}：在训，或段间等待（有进度、下一段在排队）
 
     def claim(key, name, desc):
         claims.setdefault(key, {}).setdefault(name, []).append(desc)
 
-    for name, m in M.MACHINES.items():
-        if not s["ok"].get(name) and name not in policy.OFFLINE:
-            add(f"down:{name}", f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(m['ssh'])}）",
-                after=60 if m["scheduler"] == "slurm" else 30)
+    for name, ok in s["ok"].items():
+        if not ok and name not in policy.OFFLINE:
+            add(f"down:{name}", f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(M.MACHINES[name]['ssh'])}）",
+                after=30)
     for name, d in (s.get("src") or {}).items():  # 存储挂住、读不动的任务（spec.collect 的 stuck，11/1）
         if d.get("stuck"):
             add(f"unread:{name}", f"{L(name)} 上 {len(d['stuck'])} 个任务的文件读不动（多半是存储挂住），先不分、不交还："
@@ -302,50 +248,7 @@ def check(s):
         for t in ctq["tasks"]:
             if t["state"] == "blocked" and not t.get("assigned"):
                 add(f"tqblocked:{t['key']}", f"总队列任务 {t['key']} {t['note']}，不会开始")
-    # --- 执行机的缓冲（DICC、lab；10/31）：排队、在训都看缓冲（作业名、pueue 任务不对应训哪个任务）---
-    for name in [n for n in s.get("taskq", {}) if n != hub]:
-        tq = s["taskq"][name]
-        if name in s["slurm"] and tq is None:
-            add(f"taskq:{name}", f"{L(name)} 读不到任务队列（{TQS}/）")
-        if tq and tq["enabled"]:
-            for t in tq["tasks"]:
-                key, st = t["key"], t["state"]
-                if st in ("free", "stale", "claimed", "busy"):
-                    claim(key, name, "队列" if st in ("free", "stale") else f"在训（{t['note']}）")
-                if st in ("claimed", "busy"):
-                    busy.setdefault(key, set()).add(name)
-                ages = [a for a in (t["log_age"], t.get("task_log_age"), t.get("out_age")) if a is not None]
-                if st == "claimed" and t["since"] and time.time() - t["since"] > 3600 and (not ages or min(ages) > 5400):
-                    add(f"stuck:{name}:{key}", f"{L(name)} {'作业' if name in s['slurm'] else 'worker'} {t['worker']} 领了 {key} {(time.time() - t['since']) / 3600:.1f} 小时，"
-                        f"{'日志和结果文件夹 90 分钟没有变化' if ages else '还没有日志'}")
-                if st == "blocked":  # 提前排的推理、评测：前一步失败了或不在队列里（2026-10-25）
-                    add(f"tqblocked:{key}", f"{L(name)} 队列任务 {key} {t['note']}，不会开始")
-                if t["failures"] and st != "done":  # 后来训完了就不再报
-                    add(f"tqfail:{key}", f"{L(name)} 队列任务 {key} 失败 {t['failures']} 次"
-                        + (f"，不再领（看 {TQS}/failures/）" if st == "failed" else ""))
-    # --- Slurm ---
-    for name, d in s["slurm"].items():
-        tq = s.get("taskq", {}).get(name)
-        if tq and tq["enabled"]:
-            # 在跑的作业比领了任务的作业多，且跑了 30 分钟以上：有作业空着卡
-            run = [r for r in d["squeue"] if is_worker_job(r) and r[2] == "RUNNING" and minutes(r[3]) >= 30]
-            workers = {t["worker"] for t in tq["tasks"] if t["state"] == "claimed"}
-            if len(run) > len(workers):
-                add(f"tqidle:{name}", f"{L(name)} {len(run)} 个作业在跑超过 30 分钟，只有 {len(workers)} 个领到了任务，有卡空着"
-                    "（看作业的 .out：可能在等刚停下的任务、队列暂停或出错）")
-            # 队列里还有没人训的任务，但 Slurm 上已经没有排着或在跑的作业了：refill.py 应该已经补交了 worker.sbatch
-            left = sum(t["state"] in ("free", "stale") for t in tq["tasks"])
-            if left and not any(is_worker_job(r) for r in d["squeue"]):
-                add(f"tqorphan:{name}", f"{L(name)} 任务队列里还有 {left} 个任务没人训，但已经没有排着或在跑的作业"
-                    f"（envs/policy.py 的 AUTO[\"{name}\"] 关着？看 ~/refill.log）", after=60)
-            for jid, jname, st, end, code in d["sacct"]:
-                add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
-            continue
-        for jid, jname, st, end, code in d["sacct"]:
-            add(f"{name}:{jid}", f"{L(name)} 作业 {jid} {jname} {st}（{end}，退出码 {code}）", kind="event")
-
     # --- pueue ---
-    waits = []
     for name in M.names("pueue"):
         if not s["ok"].get(name):
             continue
@@ -368,8 +271,6 @@ def check(s):
                     if start and now - start > timedelta(minutes=60) and \
                             (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
                         add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
-            if kind == "fetch" and st == "Running":
-                waits.append((name, t, key, r.get("src")))
             if st in LIVE or st == "Success":
                 continue
             end = C.local_time(t["end"])
@@ -377,18 +278,6 @@ def check(s):
                 continue
             add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if stopped(t) else "normal", kind="event")
-
-    # --- 拉回 ---
-    for host, t, key, src in waits:
-        start = C.local_time(t["start"])
-        if not start or now - start < timedelta(minutes=60) or src not in M.MACHINES:
-            continue
-        fin = task_info(s, key).get(src)
-        if fin and fin[0]:
-            if fin[2] and now - fin[2] > timedelta(minutes=90):
-                add(f"fetch:{key}", f"{key} 在 {L(src)} 上训完了，{L(host)} 还没拉回（任务 {t['id']}）")
-        elif s["ok"].get(src) and src not in {n.split(":")[0] for n in claims.get(key, {})}:
-            add(f"orphan:{key}", f"{L(host)} 在等 {key} 在 {L(src)} 上训完再拉回（任务 {t['id']}），但它不在 {L(src)} 上排队、训练")
 
     # --- 同一个任务两处 ---
     for key in sorted(k for k, v in claims.items() if len(v) >= 2):
@@ -487,7 +376,7 @@ def main():
     if not a.dry_run:
         s["records"] = C.update_records(lambda recs: C.sync_records(s["pueue"], recs))
     P = check(s)
-    # 这两步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
+    # 这几步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
     try:
         import shift  # scripts/taskq/queue/shift.py：按时段开关 pueue 组（envs/policy.py 的 SHIFT）
         shift_msgs = shift.run(s, dry=a.dry_run)
@@ -495,65 +384,29 @@ def main():
         shift_msgs, shift_err = [], f"scripts/taskq/queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
     else:
         shift_err = None
-    try:
-        import refill  # scripts/taskq/queue/refill.py：清理 lab 上用不着的数据
-        events, stuck, _ = refill.run_all(s, dry=a.dry_run)
-    except Exception as e:  # noqa: BLE001
-        events, stuck = [], {"refill:error": f"scripts/taskq/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]}
-    events = shift_msgs + events
+    events, stuck = shift_msgs, {}
     if shift_err:
         stuck["shift:error"] = shift_err
     try:
-        import feed  # scripts/taskq/queue/feed.py：往执行机的缓冲送任务（10/31）
+        import feed  # scripts/taskq/queue/feed.py：送任务的唯一入口，转给 relay.py（10/31）
+        ev, st = feed.run_all(s, dry=a.dry_run)
+        events.extend(ev)
+        stuck.update(st)
     except Exception as e:  # noqa: BLE001
-        feed, stuck["feed:error"] = None, f"scripts/taskq/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
-
-    def run_feed(relay):
-        if feed is None:
-            return
-        try:
-            ev, st = feed.run_all(s, dry=a.dry_run, relay=relay)
-            events.extend(ev)
-            stuck.update(st)
-        except Exception as e:  # noqa: BLE001
-            stuck["feed:error"] = f"scripts/taskq/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
-
-    run_feed(relay=True)  # 送任务只从 feed.py 进：SITES 里 relay=True 的由它转给 relay.py
+        stuck["feed:error"] = f"scripts/taskq/queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
     try:
         import advance  # scripts/taskq/queue/advance.py：box 上按状态排下一步
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"scripts/taskq/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
-    if not a.dry_run and any(d.startswith("任务队列") for d in done):
-        # 刚加进总队列的（如评测）这一次就送到执行机，不等下一次检查（10/25、10/31）
-        # 第一遍送过的任务、排过的传输都要重读，不然会再送一遍、再传一遍（10/31 同一份数据传了两次）
-        s["taskq"][M.hub()] = taskq.local_status() or s["taskq"].get(M.hub())
-        rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"], timeout=180)
-        if rc == 0:
-            s["pueue"] = json.loads(out)
-        for name in feed.sites() if feed else []:
-            if s["ok"].get(name) and name in s["taskq"]:
-                s["taskq"][name] = taskq.remote_status(name)
-        run_feed(relay=False)
-    try:
-        # 缓冲有了任务、而那边没有排着的作业时补交 worker（送任务之后再补，10/31）
-        for name in s.get("taskq", {}):
-            if name != M.hub():
-                s["taskq"][name] = taskq.remote_status(name) or s["taskq"][name]
-        ev2, st3 = refill.topup_all(s, dry=a.dry_run)
-        events.extend(ev2)
-        stuck.update(st3)
-    except Exception as e:  # noqa: BLE001
-        stuck["refill:error"] = f"scripts/taskq/queue/refill.py 出错：{type(e).__name__}: {e}"[:300]
     for pid, msg in {**stuck, **stuck2}.items():
-        # 拉回任务刚拷完、还没退出时会被算成"在等已经在 box 上的任务"：持续到下一次检查才报
         P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
     update(P, s["now"], dry=a.dry_run)
     if a.dry_run:
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\n送任务、清理、补作业、按时段开关：" + "；".join(events))
+        print("\n送任务、补作业、按时段开关：" + "；".join(events))
         print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
 
 

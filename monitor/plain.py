@@ -17,10 +17,9 @@ import experiments as E  # noqa: E402
 
 STEP = {"eval": "评测", "oof": "五折汇总", "paired": "和 T0 的配对比较", "ens": "五折集成评测", "infer": "推理",
         "lprob": "病灶概率汇总",
-        "fetch": "拉回 box", "archive": "存档", "train": "训练",
+        "archive": "存档", "train": "训练",
         "compare_all": "对比表"}
-QUIET = {"infer", "fetch", "archive", "train", "wait"}  # 中间步骤：进度报告里不列
-SLURM = {"FAILED": "失败", "OUT_OF_MEMORY": "内存不够", "NODE_FAIL": "节点故障", "BOOT_FAIL": "启动失败", "DEADLINE": "超过截止时间"}
+QUIET = {"infer", "archive", "train"}  # 中间步骤：进度报告里不列
 _tasks = _plan = None
 
 
@@ -106,19 +105,9 @@ def problem(pid, p):
             m = re.search(r"train:(\S+?)：", msg) or re.search(r"（(\S+/\S+)）", msg)
             what = fold(m.group(1)) if m else (fold(part[2]) if "/" in part[2] else "一个训练")
             return f"{L(part[1])} 上 {what} 90 分钟没有进展，可能卡住了，GPU 白占着。"
-        if kind == "tqfail":
-            again = "，不会再自动重试" if "不再领" in msg else "，会自动重试"
-            step = {"infer": "推理", "eval": "评测"}.get(pid[7:].split("/")[0], "训练")
-            return f"{fold(pid[7:])} {step}失败了 {num(r'失败 ([0-9]+) 次')} 次{again}。"
         if kind == "tqblocked":
             step = {"infer": "推理", "eval": "评测"}.get(pid[10:].split("/")[0], "任务")
             return f"{fold(pid[10:])} 的{step}在等的前一步失败了（或不在队列里），不会自己开始。"
-        if kind == "tqpause":
-            return f"{L(part[1])} 3 小时内训练失败太多次，暂停领新任务；排着的作业会白白用掉。"
-        if kind == "tqidle":
-            return f"{L(part[1])} 有作业占着 GPU 却没在训练。"
-        if kind == "tqorphan":
-            return f"{L(part[1])} 还有 {num(r'还有 ([0-9]+) 个')} 个任务没训，但已经没有作业在排队，训练会停下来。"
         if kind == "taskq":
             return f"读不到 {L(part[1])} 的任务队列，看不到那边的训练情况。"
         if kind == "pueued":
@@ -129,10 +118,6 @@ def problem(pid, p):
         if kind == "idle":
             gpu = M.MACHINES[part[1]]["groups"][part[2]][1]
             return f"{L(part[1])} {gpu} 号卡空着，没有训练。"
-        if kind == "fetch":
-            return f"{fold(pid[6:])} 训完 1.5 小时了还没拉回 box，后面的评测会推迟。"
-        if kind == "orphan":
-            return f"box 在等 {fold(pid[7:])} 训完，但已经没有地方在训它，会一直等下去。"
         if kind == "dup":
             if p.get("level") == "urgent":
                 return f"{fold(pid[4:])} 同时在两处训练，存档会互相覆盖，要尽快停掉一边。"
@@ -147,16 +132,12 @@ def problem(pid, p):
             return f"{L(part[1])} {pid.split(':', 2)[2][5:16]} 重启过，被打断的任务已自动放回队列，要确认训练接上了。"
         if kind == "board":
             return f"看板有新结果，要确认后才发布（{num(r'（([0-9]+) 个文件')} 个文件）。"
-        if kind in ("refill", "advance") and part[1] == "error":
-            return "自动调度脚本出错了：" + ("DICC 不会补交作业，lab 上用完的数据不会清理。" if kind == "refill" else "训完的任务不会自动推理、评测。")
-        if kind == "site":  # 执行机（feed.py、relay.py，10/31）：site:<机器>:<类>[:<key 或数据集>]
+        if kind == "advance" and part[1] == "error":
+            return "自动调度脚本出错了：训完的任务不会自动推理、评测。"
+        if kind == "site":  # 执行机（relay.py，10/31）：site:<机器>:<类>[:<key>]
             site, sub, key = L(part[1]), part[2], ":".join(part[3:])
             if sub == "down":
                 return f"{site} 读不到了，看不到分给它的训练还在不在跑。"
-            if sub == "low":
-                return f"{site} 排着的训练不够（数据还没传到），卡可能会空着。"
-            if sub == "sync":
-                return f"给 {site} 传训练数据出错了，要这份数据的训练开不了。"
             if sub == "worker" and key:
                 return f"{site} 上的 {key.upper()} worker 出错停了，那边的 {key.upper()} 任务没人做，要看日志后重开。"
             if sub == "worker":
@@ -167,8 +148,6 @@ def problem(pid, p):
                 if "有进度" in msg:
                     return f"{site} 上 {fold(key)} 训练失败了，有进度，要决定接着训还是放弃。"
                 return f"{site} 上 {fold(key)} 的任务出了问题，不会开始训练。"
-            if sub == "input":
-                return f"{site} 上 {fold(key)} 的输入数据不全，没开训，过一小时自动重试。"
             if sub == "orphan":
                 if "认不出" in msg:
                     return f"{site} 的队列里有一个认不出来的任务。"
@@ -177,9 +156,6 @@ def problem(pid, p):
             return f"给 {L(part[1])} 补交作业出错，那边排队的作业会越来越少。"
         if kind == "advance":
             return f"{_who(':'.join(part[2:]))} 的{STEP.get(part[1], part[1])}出错停了，这个结果会推迟。"
-        if len(part) == 2 and part[0] in M.MACHINES:  # Slurm 作业异常结束
-            st = num(r" (\S+)（")
-            return f"{L(part[0])} 作业 {part[1]} 异常结束（{SLURM.get(st.split()[0], st)}）。"
     except Exception:  # noqa: BLE001
         pass
     return msg

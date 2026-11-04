@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测 health.py 的检查和推送规则（2026-10-16）：假的队列、训练日志、DICC 输出、时钟，不连任何机器、不真的推送。
+"""测 health.py 的检查和推送规则（2026-10-16）：假的队列、训练日志、时钟，不连任何机器、不真的推送。
 
     python3 scripts/taskq/monitor/test_health.py
 """
@@ -8,7 +8,6 @@ import os
 import re
 import sys
 import tempfile
-import time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +26,6 @@ NOW = datetime(2026, 10, 16, 12, 0)
 MET2 = "D116_gamma/V_save/2"
 MEN0 = "D111_beta/V_save_n470/0"
 fails = 0
-time_orig = time.time
 
 
 def ok(what, cond):
@@ -67,17 +65,13 @@ LAB_BUSY = {"groups": {}, "tasks": [dict(id=90, group="gpu1", status="Running", 
 
 
 def snap(**kw):
-    s = dict(now=NOW, ok={"box": True, "lab": True, "dicc": True}, slurm={"dicc": dict(squeue=[], sacct=[])},
+    s = dict(now=NOW, ok={"box": True, "lab": True},
              probe={"box": {"DISK": str(int(500e9)), "BOOT": "2026-10-01 08:00:00|"},
                     "lab": {"DISK": str(int(200e9)), "GPULOG": ts(NOW - timedelta(minutes=1)), "BOOT": "2026-10-01 08:00:00|"}},
-             src={"box": {"tasks": {}}, "lab": {"tasks": {}}, "dicc": {"tasks": {}}},
+             src={"box": {"tasks": {}}, "lab": {"tasks": {}}},
              pueue={"box": {"groups": {}, "tasks": []}, "lab": LAB_BUSY})
     s.update(kw)
     return s
-
-
-def sq(*rows):
-    return {"dicc": dict(squeue=[list(r) for r in rows], sacct=[])}
 
 
 def ids(s):
@@ -100,27 +94,15 @@ ok("24 小时前的失败不再报", not any(p.startswith("pueue:box:3:") for p 
 ok("手动停的（143、pueue kill）只记不推", [p["level"] for k, p in P.items() if k.startswith(("pueue:box:4:", "pueue:box:5:"))] == ["info"] * 2)
 ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["level"] for k, p in P.items() if k.startswith("pueue:box:6:")] == ["normal"])
 
-s = snap(slurm={"dicc": dict(squeue=[], sacct=[["486300_1", "train_worker", "FAILED", "2026-10-16T11:00:00", "1:0"]])})
-ok("DICC 作业失败", "dicc:486300_1" in ids(s))
-
 lab_train = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
 s["src"]["lab"]["tasks"][MEN0] = prog(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
 
-fetch = task(9, "wait", "Running", f"bash scripts/taskq/queue/fetch_task.sh dicc {MET2}", "fetch_t3g_f2")
-s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}})
-ok("在等的折不在任何地方排队 → 报", f"orphan:{MET2}" in ids(s))
-s["slurm"], s["ok"]["dicc"] = {}, False
-ok("DICC 连不上时不判断是否在排队", f"orphan:{MET2}" not in ids(s) and "down:dicc" in ids(s))
-s = snap(pueue={"box": {"groups": {}, "tasks": [fetch]}, "lab": {"groups": {}, "tasks": []}},
-         src={"box": {"tasks": {}}, "lab": {"tasks": {}}, "dicc": {"tasks": {MET2: prog(final=True, epochs=1000, end=NOW - timedelta(hours=3))}}})
-ok("训完 90 分钟还没拉回 → 报", f"fetch:{MET2}" in ids(s))
 
-
-# ---------------- DICC 任务队列（10/17）+ lab 领的折（10/18）----------------
+# ---------------- 总队列分给执行机（10/31）----------------
 def tqrow(key, state, worker=None, since=None, log_age=None, kind="toy", task_log_age=None, out_age=None):
     return dict(key=key, state=state, worker=worker, host=worker, since=since, beat=None, note="", log_age=log_age, failures=0,
                 kind=kind, nice=0, order=1, task_log_age=task_log_age, out_age=out_age)
@@ -129,53 +111,20 @@ def tqrow(key, state, worker=None, since=None, log_age=None, kind="toy", task_lo
 old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
 lab_men = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_men]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}},
-         taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")]),
-                "dicc": dict(enabled=True, buffer=True, paused=False, tasks=[])})
-H.time.time = lambda: NOW.timestamp()
+         src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}},
+         taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")])})
 P = H.check(s)
 ok("总队列分给 lab、lab 在训：不算同一折两处，也不算卡住", f"dup:{MEN0}" not in P and not [k for k in P if k.startswith("stuck:") and MEN0 in k])
-s["taskq"]["dicc"]["tasks"] = [tqrow(MEN0, "claimed", "486191_2", since=old, log_age=60)]
-s["slurm"] = sq(["brave-otter", "486191_2", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
-ok("DICC 作业领了、lab 也在训同一折 → 紧急", H.check(s).get(f"dup:{MEN0}", {}).get("level") == "urgent")
 INF = "infer/D103_alpha_one/x/frag_2"
-s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=120)]
-ok("推理任务（没有训练日志）：任务日志刚更新过，不算卡住", f"stuck:dicc:{INF}" not in H.check(s))
-s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=6000)]
-ok("推理任务：任务日志、结果文件夹 100 分钟没变，算卡住", "90 分钟没有变化" in H.check(s).get(f"stuck:dicc:{INF}", {}).get("msg", ""))
-s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "claimed", "491480", since=old, task_log_age=6000, out_age=300)]
-ok("推理任务：日志 100 分钟没更新、但预测文件夹 5 分钟前还在变（10/24）→ 不算卡住", f"stuck:dicc:{INF}" not in H.check(s))
-s["taskq"]["dicc"]["tasks"] = []
-s["pueue"]["lab"]["tasks"] = []
-ok("在跑的 DICC 作业、缓冲里没人领：报有卡空着", "tqidle:dicc" in H.check(s))
-s["taskq"]["dicc"]["tasks"] = [tqrow(INF, "waiting", None), tqrow(MET2, "claimed", "491480", since=old, task_log_age=60)]
-s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
-ok("提前排的推理在等训练（waiting）：不报、不算没人训、不算有卡空着", not {f"tqblocked:{INF}", "tqorphan:dicc", "tqidle:dicc"} & ids(s))
-s["taskq"]["dicc"]["tasks"][0] = dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次")
-ok("等的任务失败了（blocked）：报出来", "失败 2 次" in H.check(s).get(f"tqblocked:{INF}", {}).get("msg", ""))
-s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None, since=old)]
-s["slurm"] = sq()
-ok("队列里有没人训的任务、DICC 上一个作业都没有：提醒（补作业的开关）", "AUTO" in H.check(s).get("tqorphan:dicc", {}).get("msg", ""))
-s["slurm"] = sq(["brave-otter", "486300_1", "PENDING", "0:00", "Priority", "2000", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
-ok("还有排着的作业（什么模型的都行）：不提醒", "tqorphan:dicc" not in H.check(s))
-s["slurm"] = sq(["brave-otter", "487000_1", "PENDING", "0:00", "Priority", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
-ok("排着的 worker 作业（按交的脚本认，名字随机）也算：不提醒", "tqorphan:dicc" not in H.check(s))
-s["slurm"] = sq(["calm-heron", "487001", "RUNNING", "1:00:00", "None", "0", "normal", "/home/u/q/code/current/scripts/taskq/queue/cpu_worker.sbatch"])
-ok("只有 CPU worker 在跑：还是提醒没人训（按交的脚本认）", "tqorphan:dicc" in H.check(s))
-s["taskq"]["dicc"]["tasks"] = [tqrow(MET2, "free", None)]
-s["slurm"] = sq(["brave-otter", "487000_1", "RUNNING", "3:00:00", "None", "0", "long", "/home/u/q/code/current/scripts/taskq/queue/worker.sbatch"])
-ok("在跑的 worker 作业没领到任务：报有卡空着", "tqidle:dicc" in H.check(s))
-
-H.time.time = time_orig
 
 # 总队列在 box（10/31）
 ok("box 的总队列读不到 → 报", "taskq:box" in H.check(snap(taskq={"box": None})))
 ok("总队列关着（没有 ENABLED）→ 持续 60 分钟后报", H.check(snap(taskq={"box": dict(enabled=False, tasks=[])})).get("tqoff:box", {}).get("after") == 60)
-bq = [dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次"), dict(tqrow(MET2, "claimed", "dicc"), assigned="dicc")]
+bq = [dict(tqrow(INF, "blocked", None), note="等的 x 失败 2 次"), dict(tqrow(MET2, "claimed", "lab1"), assigned="lab1")]
 P = H.check(snap(taskq={"box": dict(enabled=True, paused=False, tasks=bq)}))
 ok("总队列里没分出去的任务 blocked → 报；分给执行机的不算同一折两处", f"tqblocked:{INF}" in P and f"dup:{MET2}" not in P)
 
-# ---------------- 通用的任务（10/18）：run_task.sh、fetch_task.sh、数据清单 ----------------
+# ---------------- 通用的任务（10/18）：run_task.sh ----------------
 def tk(cmd):
     r = H.C.from_command(cmd)
     return (r["step"], r["key"]) if r else (None, None)
@@ -188,29 +137,15 @@ ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c '
 ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/taskq/queue/run_task.sh command key=x/y cmd=true env=base "
                                                      "out=runs/x done=ok") == ("train", "x/y"))
 ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/taskq/queue/run_task.sh toy dss=x frag=0") == (None, None))
-ok("fetch_task.sh <机器> <key> → 拉回", H.C.from_command(f"bash scripts/taskq/queue/fetch_task.sh dicc {MET2}") == dict(step="fetch", src="dicc", key=MET2))
+ok("别的脚本（如老的 fetch_task.sh）不认", H.C.from_command(f"bash scripts/taskq/queue/fetch_task.sh dicc {MET2}") is None)
 lab_rt = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0",
               "train:" + MEN0)
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
+         src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
 ok("lab 上 run_task.sh 的训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
-cand = H.data_candidates([dict(key="x/y", spec=dict(data=["other/stuff"]))])
-ok("要查的数据：实验表里的 + 队列里临时任务的", "prepared/D111_beta" in cand and "other/stuff" in cand)
-ps = H.probe_script(H.M.MACHINES["lab"], ["prepared/D111_beta", "a b"])
-ok("训练机的探查脚本按清单查数据（HAVE），带空格的路径加引号", "HAVE|" in ps and "'a b'" in ps and "PREP" not in ps)
-ok("非训练机不查数据", "HAVE" not in H.probe_script(H.M.MACHINES["box"], ["x"]))
 import subprocess  # noqa: E402
-d = tempfile.mkdtemp()
-for p_ in ("prepared/A", "prepared/B", "C"):
-    os.makedirs(os.path.join(d, p_))
-open(os.path.join(d, "prepared/B/.incomplete"), "w").close()
-fake = dict(H.M.MACHINES["lab"], data=d, disk=None, gpu_log=False, roles=("train",))
-out = subprocess.run(["bash", "-s"], input=H.probe_script(fake, ["prepared/A", "prepared/B", "C", "D"]),
-                     capture_output=True, text=True).stdout
-ok("HAVE 实跑：在的列出来，没传完（.incomplete）和不在的不列", H.C.parse_have(out) == {"prepared/A", "C"})
-ok("HAVE 输出被截断（没有结束标记）→ 没读到", H.C.parse_have(out.split(H.C.HAVE_END)[0]) is None)
 
-# ---------------- gather：各卡和卡上的进程、Slurm 分区、只看本机 ----------------
+# ---------------- gather：各卡和卡上的进程、只看本机 ----------------
 fakebin = tempfile.mkdtemp()
 sl = subprocess.Popen(["sleep", "30"])
 with open(os.path.join(fakebin, "nvidia-smi"), "w") as f:
@@ -239,13 +174,7 @@ def fake_sh(cmd, inp=None, timeout=120):
 
 def fake_run_on(m, script, timeout=120):
     calls.append(("run_on", m["label"]))
-    if m["scheduler"] == "slurm":
-        return 0, "brave-otter|123|RUNNING|1:00|None|0|gpu-a100|/q/a|b/worker.sbatch\nbad|line\n=====\n"
-    have = "HAVE|prepared/x\nHAVE|a b\n@@END\n" if H.C.HAVE_END in script and not cut else ""
-    return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n" + have
-
-
-cut = False
+    return 0, "BOOT|2026-10-01 08:00:00|\nDISK|123\nGPU|0, GPU-a, 37, 1200\nAPP|GPU-a| 42| 1100|python x|y\n"
 
 
 H.sh, H.run_on = fake_sh, fake_run_on
@@ -254,28 +183,24 @@ H.spec.remote_collect = lambda ssh, specs, root: {"tasks": {}, "seglogs": []}
 H.spec.collect = lambda specs, root: {"tasks": {}, "seglogs": []}
 g = H.gather()
 ok("gather：GPU、APP 行进 gpus，不进 probe；命令行里的 | 原样留着",
-   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123", "HAVE": "a b prepared/x"}
+   g["probe"]["lab"] == {"BOOT": "2026-10-01 08:00:00|", "DISK": "123"}
    and g["gpus"]["lab"] == [dict(gpu="0", uuid="GPU-a", util="37", mem="1200", apps=[dict(pid="42", mem="1100", args="python x|y")])])
-ok("gather：squeue 每行 8 项（最后是交的脚本，里面的 | 原样留着），格式不对的行不要",
-   g["slurm"]["dicc"]["squeue"] == [["brave-otter", "123", "RUNNING", "1:00", "None", "0", "gpu-a100", "/q/a|b/worker.sbatch"]])
+ok("gather：只探查 pueue 机器（表里别的机器不连）", set(g["ok"]) == set(H.M.names("pueue"))
+   and {c[1] for c in calls if c[0] == "run_on"} == {H.M.MACHINES[n]["label"] for n in H.M.names("pueue")})
 calls.clear()
-H.policy.OFFLINE = {"dicc": "停机维护"}
+H.policy.OFFLINE = {"lab": "停机维护"}
 g = H.gather()
 P_off = H.check(dict(g, now=NOW))
-ok("gather：暂停检查的机器不连（不探查、不读缓冲），算连不上，但不报 down",
-   not [c for c in calls if c[0] == "run_on" and c[1] == H.M.MACHINES["dicc"]["label"]] and g["ok"]["dicc"] is False
-   and "暂停检查" in g["why"]["dicc"] and "down:dicc" not in P_off)
+ok("gather：暂停检查的机器不连（不探查），算连不上，但不报 down",
+   not [c for c in calls if c[0] == "run_on" and c[1] == H.M.MACHINES["lab"]["label"]] and g["ok"]["lab"] is False
+   and "暂停检查" in g["why"]["lab"] and "down:lab" not in P_off)
 H.policy.OFFLINE = {}
-cut = True
-g = H.gather()
-ok("gather：训练机的 HAVE 没有结束标记（输出被截断）→ 这台算没读到", g["ok"]["lab"] is False and "lab" not in g["probe"])
-cut = False
 calls.clear()
 g = H.gather(remote=False)
 qs_call = next(c[1] for c in calls if c[0] == "sh" and c[1][0] != "git")
-ok("gather(remote=False)：只探查本机，qs 只问本机，不碰 Slurm",
+ok("gather(remote=False)：只探查本机，qs 只问本机",
    [c for c in calls if c[0] == "run_on"] == [("run_on", "box")] and qs_call[1:] == ["--json", "box"]
-   and set(g["ok"]) == {"box"} and not g["slurm"] and set(g["taskq"]) == {"box"} and set(g["pueue"]) == {"box"})
+   and set(g["ok"]) == {"box"} and set(g["taskq"]) == {"box"} and set(g["pueue"]) == {"box"})
 H.sh, H.run_on, H.taskq.remote_status, H.spec.remote_collect, H.spec.collect, H.taskq.local_status = saved
 
 s = snap()
@@ -303,7 +228,7 @@ H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", sch
                             groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
 fk = task(3, "gpu0", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
-         src={"box": {"tasks": {}}, "dicc": {"tasks": {}}, "fake": {"tasks": {}},
+         src={"box": {"tasks": {}}, "fake": {"tasks": {}},
               "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}})
 s["ok"]["fake"] = True
 s["probe"]["fake"] = {"DISK": str(int(5e9)), "BOOT": "2026-10-01 08:00:00|"}
@@ -351,14 +276,13 @@ ok("同一次查到几件：并成一条", len(out) == 1 and "（2 件）" in ou
 I = {"idle:lab:gpu1": dict(msg="只剩在训的", level="info", kind="state", after=0)}
 ok("info 级不推送", run(I, datetime(2026, 10, 17, 11, 0)) == [])
 
-# ---------------- refill / advance 出错不让健康检查停掉 ----------------
+# ---------------- feed / advance 出错不让健康检查停掉 ----------------
 import types  # noqa: E402
 got = {}
 H.gather, H.update = (lambda: snap()), (lambda P, now, dry=False: got.update(P))
-sys.modules["refill"] = None  # import 出错
 fd = types.ModuleType("feed")
 feed_calls = []
-fd.run_all = lambda s, dry=False, relay=True: (feed_calls.append(relay), ([], {}))[1]
+fd.run_all = lambda s, dry=False: (feed_calls.append(dry), ([], {"x:y": "z"}))[1]
 sys.modules["feed"] = fd
 sys.modules["relay"] = None  # health.py 不直接调 relay.py（10/31：送任务只从 feed.run_all 进）
 adv = types.ModuleType("advance")
@@ -366,17 +290,14 @@ adv.run = lambda s, dry=False: 1 / 0
 sys.modules["advance"] = adv
 sys.argv = ["health.py"]
 H.main()
-ok("refill.py import 出错、advance.py 运行出错：都报出来，健康检查照常写完",
-   "refill:error" in got and "advance:error" in got and "ZeroDivisionError" in got["advance:error"]["msg"])
-ok("送任务只有一个入口：feed.run_all 第一次带上 relay，健康检查不直接 import relay",
-   feed_calls[:1] == [True] and "relay:error" not in got)
-rf = types.ModuleType("refill")
-rf.run_all = lambda s, dry=False: (["lab 领了 x", "lab 交还 y"], {}, set())
-rf.topup_all = lambda s, dry=False: ([], {})
-sys.modules["refill"] = rf
+ok("advance.py 运行出错：报出来，健康检查照常写完",
+   "advance:error" in got and "ZeroDivisionError" in got["advance:error"]["msg"])
+ok("送任务只有一个入口：feed.run_all 调一次，它报的问题照常进来，健康检查不直接 import relay",
+   feed_calls == [False] and got.get("x:y", {}).get("msg") == "z" and "relay:error" not in got)
+sys.modules["feed"] = None  # import 出错
 got.clear()
 H.main()
-ok("lab 领了 / 交还了：只记 refill.log，不进推送", not any(k.startswith("refill:") for k in got))
+ok("feed.py import 出错：报 feed:error，健康检查照常写完", "feed:error" in got and "advance:error" in got)
 
 # ---------------- 白话（plain.py）：标签、任务 key → 实验名 + 任务简称 ----------------
 import plain as PL  # noqa: E402

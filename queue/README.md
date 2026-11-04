@@ -17,18 +17,17 @@
 
 ```
  box ~/.cache/phd/taskq/：总队列 tasks.jsonl（唯一的待办，档位 = nice）+ claims/（分给哪台执行机：assigned）
-     ↓ feed.py 分给执行机（take --assign）：DICC 送进它的缓冲（put）；relay 执行机（DICC2、lab1、lab0）转给 relay.py，
-       传数据块、加进那边根目录里的队列
- DICC ~/.cache/phd/taskq/：缓冲（BUFFER，总队列一部分的原样副本）     relay 执行机：R/queue/
+     ↓ feed.py → relay.py 替执行机（dicc1、DICC2、lab1、lab0）领（take --assign）、传数据块、加进那边根目录里的队列
+ 执行机：R/queue/
      ↑ 领 / 续 / 交还（taskq.py next）：同一个 dicc_worker.sh
- DICC：worker.sbatch（GPU）、cpu_worker.sbatch 作业；DICC2：worker.sbatch     lab1、lab0：pueue gpu1 / gpu0 组里常驻一个 worker（machines.py 的 worker）
+ dicc1：worker.sbatch（GPU）、cpu_worker.sbatch 作业；DICC2：worker.sbatch     lab1、lab0：pueue gpu1 / gpu0 组里常驻一个 worker（machines.py 的 worker）
      └──────────── 都用 run_task.sh <做法> k=v… 跑：激活环境、设变量、跑命令、写分段日志 ────────────┘
                                    ↓ 训完（任务说明的 done；总队列看 box 上的结果，10/31）
- box 的 advance.py（跟着健康检查每 30 分钟）：拉回 → 归档（lab 训的）→ 实验表里的步骤（RQ1：推理 → 评测 → 五折分析）
+ box 的 advance.py（跟着健康检查每 30 分钟）：实验表里的步骤（RQ1：推理 → 评测 → 五折分析）
      每一步在哪里做：envs/policy.py 的 PLACE，按顺序用第一个现在能用的
        box:<组>      box 的 pueue
        trainer       训这个任务的执行机（machines=[那台]，after 接训练，nice -100；lab0 训的给 lab1）；中转执行机、找不到时用下一项
-       queue:<机器>  任务队列，那台机器的 worker 领；缺的文件先传过去，做完按任务拉回
+       queue:<执行机>  任务队列，那台执行机的 worker 领；relay.py 连同输入送过去，做完拉回
 ```
 
 pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ssh 不中断，不用暂存（`HOLD` 除外）、优先级、`--after`。
@@ -38,20 +37,18 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 在哪 | 是什么 | 作用 |
 |---|---|---|
 | `envs/policy.py` `AUTO["advance"]` | True / False | 训完以后的步骤真的排；False 时只把"会排什么"写进 box `~/advance.log` |
-| `envs/policy.py` `AUTO["lab"]` | True / False | 老的 lab 缓冲（10/31 17:50 关，换成 relay 执行机 lab1、lab0） |
-| `envs/policy.py` `AUTO[<有缓冲的执行机>]` | True / False | 往它的缓冲送新任务（`feed.py`）、补交它的 worker 作业（`refill.py`）；False 时只记"会送 / 会交什么"（`~/feed.log`、`~/refill.log`），已分过去的照常交还、同步。11/3 起没有这类执行机（老的 dicc 条目删了） |
-| `envs/policy.py` `READY` | 执行机 → 个数 | 缓冲里备几个没人领的训练（`feed.py`、`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领的一个交还换它（每次检查一个，11/2） |
+| `envs/policy.py` `READY` | 执行机 → 个数 | 备几个没人领的训练（`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领的一个交还换它（每次检查一个，11/2） |
 | `envs/policy.py` `AUTO["dicc2"]`、`AUTO["lab1"]`、`AUTO["lab0"]`、`AUTO["dicc1"]` | True / False | relay 执行机（DICC2、lab 的两张卡、我的 DICC 账号）：领新的任务、补交作业 / 开 worker；False 时只记进 box `~/relay.log`，已领的任务照常推进（见下面"执行机"） |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
-| `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头；条件只有 `have`）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
-| `envs/machines.py` `task_vars` | 机器 → {变量: 值} | 这台机器上 `run_task.sh` 跑的每个任务都带的环境变量（`spec.py shell` 设，任务自己已经设了的不改；执行机的代码包里生成的 `machines.py` 照样带）；新开始或续训的段生效。现在 lab、lab1、lab0 是 `RQ1_GPU_AUG=1`（训练集的数据增强在 GPU 上做）、`RQ1_GPU_AUG_LOADER=1`（GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集，`gpu_aug_loader.py`），没设时 `train.sh` 当 0；11/2 前是 `envs/policy.py` 的 `GPU_AUG`、`GPU_AUG_LOADER` |
-| `envs/policy.py` `SLURM` | 每台 Slurm 机器的 QOS、时限、个数 | `refill.py` 补交多少 GPU / CPU worker 作业 |
+| `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
+| `envs/machines.py` `task_vars` | 机器 → {变量: 值} | 这台机器上 `run_task.sh` 跑的每个任务都带的环境变量（`spec.py shell` 设，任务自己已经设了的不改；执行机的代码包里生成的 `machines.py` 照样带）；新开始或续训的段生效。现在 lab1、lab0 是 `RQ1_GPU_AUG=1`（训练集的数据增强在 GPU 上做）、`RQ1_GPU_AUG_LOADER=1`（GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集，`gpu_aug_loader.py`），没设时 `train.sh` 当 0；11/2 前是 `envs/policy.py` 的 `GPU_AUG`、`GPU_AUG_LOADER` |
+| `envs/policy.py` `SLURM` | 每台 Slurm 执行机的 QOS、时限、个数 | `relay.py` 补交多少 GPU / CPU worker 作业（`refill.slurm_plan` 算） |
 | `envs/policy.py` `SHIFT` | 执行机 → (开始, 结束, 第一个, 最后一个) | `shift.py` 跟着健康检查在时段开始时恢复执行机的 worker 组（卡上有别人的进程就等），`allowed()` 放行后 `relay.py` 才替它领任务、开 worker；结束时停 worker（等它交还），有进度的任务在总队列里改分给同一台上不按时段的执行机（`adopt` 收编存档、接着训），没开始的交还总队列，这台的队列里删掉（`unq`），那台训完后删这边的结果。每个时段只动这两次，记录在 box `~/.cache/phd/shift.json`，日志 `~/refill.log` |
 | `envs/policy.py` `OFFLINE_UNTIL` | 机器 → (到期时间, 原因) | 到期前健康检查、送任务、补交作业、拉回前的查看、代码同步都不连它，`advance.py` 不往它排（`OFFLINE` 由它算出）；到期后自动恢复 |
 | `envs/policy.py` `OUTPUTS` | 键 → 路径 | 调度在仓库里、本机上读写的地方（11/2）：代码包带的顶层文件夹（`relay_bundle.py`）、健康检查的状态文件夹和 ntfy 频道文件、推送标题的前缀（`health.py`、`report.py`）、各机器代码提交号的记录（`auto_refresh.sh` 写、`health.py` 读）、登记表的生成脚本、文件夹和生成文件（`auto_refresh.sh`、`report.py`）、实验表 `experiments`（`experiments.py`，glob；代码包里生成的 `policy.py` 也带）、分析计划表 `plans`（`plain.py`）、`code_dirs`（`run_task.sh`、`dicc_worker.sh` 的代码版本后面标"+改动"时看的目录）、`bundle_check`（`relay_bundle.py` 另用本机哪个环境的 python 核对能编译）、`env_script`（`q` 加的任务先 source 的环境脚本）。没写的键：没有实验表 / 分析计划、只看 `scripts/taskq/queue`、只用当前的 python 核对、不 source。bash 读：`python3 scripts/taskq/queue/cfg.py get <键>` |
 | `envs/machines.py` `backup` | 备份机（`roles` 有 `backup`）→ 备份目录 | `archive_task.sh` 把训完的任务备份到这里（`machines.py backups`；11/3 起是 dicc1 的 `~/st/BRAIN_TUMOR`，在 /scr 上） |
-| box `~/.cache/phd/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `feed.py`、`refill.py`、`relay.py` 什么都不分 |
-| DICC `~/.cache/phd/taskq/ENABLED` | 文件 | 缓冲的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`），`feed.py` 也不往里送 |
+| box `~/.cache/phd/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `relay.py` 什么都不分 |
+| 执行机 `R/queue/ENABLED` | 文件 | 那边队列的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`）；`relay.py` 建队列时放上 |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
 | `TASKQ_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"）；`gpu_pad*` 的参数 `TASKQ_GPU_PAD_*`（10/31 改名，旧名 `RQ1_GPU_PAD*` 照样认） |
 | `TASKQ_DATA` | 环境变量 | 本机的数据目录（`run_task.sh`、`dicc_worker.sh`、`taskq.py` 先读它，没有再读旧名 `BRAIN_TUMOR`，再查 `envs/machines.py`；`envs/nnunet_paths.sh` 两个都设，10/31） |
@@ -60,7 +57,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它（旧名 `RQ1_WAIT_GPU`） |
 | `TASKQ_*` | 环境变量 | `dicc_worker.sh` 的阈值，默认值写在脚本开头：`SLOTS`（一个作业最多同时几个，GPU 2、CPU 1）、`ADD_AFTER`（900 秒）、`UTIL_MAX`（90%）、`MIN_LEFT`（3600 秒）、`PATIENCE`（1200 秒）、`ERR_MAX`（600 秒）、`IDLE_MAX`（2400 秒）、`EARLY_FAIL`（600 秒）、`FAIL_WINDOW`（3600 秒）、`STALL_MAX`（1800 秒）；`TASKQ_DIR`、`TASKQ_SSH`、`TASKQ_MACHINE` 只给测试用 |
 | `TASKQ_CONFIG` | 环境变量 | `machines.py`、`policy.py` 所在的文件夹，默认 `<仓库>/envs`（11/2）。Python 脚本经 `scripts/taskq/queue/cfg.py` 的 `use_config()` 找，bash 脚本用 `${TASKQ_CONFIG:-$REPO/envs}`；`relay_bundle.py` 在它在仓库里时取提交里的 `machines.py`，在仓库外时读文件；执行机的代码包里生成的两个文件照旧在 `envs/` |
-| `TASKQ_PLUGINS` | 环境变量 | 领域专用的插件文件夹（`:` 隔开几个，空串 = 没有），默认 `<仓库>/research/common/taskq_plugins`（11/2）。每个文件夹里可以有 `recipes.py`（`RECIPES`、`INPUT_ROOTS`）、`relay_plugins.py`（`PLUGINS`、`ACCEPTS`、`VIEW_ROOTS`）、`readers/<名>.py`（`PROGRESS`、`INFO`、`TRAINED`，只用标准库）；核心的同名模块加载时合进来（字典里重名报错），插件里别的名字也挂在核心模块上 |
+| `TASKQ_PLUGINS` | 环境变量 | 领域专用的插件文件夹（`:` 隔开几个，空串 = 没有），默认 `<仓库>/research/common/taskq_plugins`（11/2）。每个文件夹里可以有 `recipes.py`（`RECIPES`）、`relay_plugins.py`（`PLUGINS`、`ACCEPTS`、`VIEW_ROOTS`）、`readers/<名>.py`（`PROGRESS`、`INFO`、`TRAINED`，只用标准库）；核心的同名模块加载时合进来（字典里重名报错），插件里别的名字也挂在核心模块上 |
 
 `envs/policy.py` 由 box 的健康检查每次读，在 `~/auto/PhD`（只给 cron 用的克隆，跟着 origin/main）里生效，所以改了要提交推送。写错了（不认识的地方、条件、步骤）时 `advance.py` 这次什么都不排，报到健康检查里。
 
@@ -68,10 +65,9 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 | 问题 | 看 |
 |---|---|
-| 哪个任务没人做、分给了哪台、失败了几次 | `python3 scripts/taskq/queue/taskq.py status`（box 上跑，读总队列）；执行机（dicc1、DICC2、lab1、lab0）：`python3 scripts/taskq/queue/relay.py status <名字>`；DICC 作业的 `.out`，lab1、lab0 worker 的日志在各自根目录的 `data/logs/workers/` 和 lab 上的 `pueue log <worker 的任务号>`；失败记录在执行机的缓冲 `~/.cache/phd/taskq/failures/`，训不了跳过的在总队列的 `skips/` |
-| 往 DICC 送了什么、为什么没送、传了哪些数据 | box `~/feed.log`；`python3 scripts/taskq/queue/feed.py`（只看会做什么） |
-| relay 执行机（lab1、lab0、DICC2）领了什么、传了哪些数据、清理了哪些、开了 worker、拉回 | box `~/relay.log`；`python3 scripts/taskq/queue/relay.py`（只看会做什么）、`relay.py status <名字>` |
-| DICC 补交了哪些作业 | box `~/refill.log`；`python3 scripts/taskq/queue/refill.py`（只看会做什么） |
+| 哪个任务没人做、分给了哪台、失败了几次 | `python3 scripts/taskq/queue/taskq.py status`（box 上跑，读总队列）；执行机（dicc1、DICC2、lab1、lab0）：`python3 scripts/taskq/queue/relay.py status <名字>`；DICC 作业的 `.out`，lab1、lab0 worker 的日志在各自根目录的 `data/logs/workers/` 和 lab 上的 `pueue log <worker 的任务号>`；失败记录在执行机根目录的 `queue/failures/`，训不了跳过的在总队列的 `skips/` |
+| 执行机（dicc1、DICC2、lab1、lab0）领了什么、传了哪些数据、清理了哪些、开了 worker、补交了哪些 DICC 作业、拉回 | box `~/relay.log`（`~/feed.log` 只有指过去的一行）；`python3 scripts/taskq/queue/relay.py`（只看会做什么）、`relay.py status <名字>` |
+| 按时段的执行机什么时候开、停 | box `~/refill.log`（`shift.py`） |
 | 训完之后卡在哪一步、为什么没排 | box `~/advance.log`（排了什么、会排什么、"没排"的原因、哪一步失败停住）；`python3 scripts/taskq/queue/advance.py`（只看会排什么）；`pueue log <号>` |
 | lab 训的任务的推理走到哪 | 总队列的 `taskq.py show infer/<key>`、`relay.py status lab1`；拉回看 box 上 `relay_fetch:…` 的 `pueue log`；box `~/advance.log` |
 | 某个 pueue 任务被认成哪一步 | box `~/.cache/phd/tasks.json`（见"约定"的任务记录） |
@@ -83,7 +79,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 |---|---|---|---|
 | box | `gpu` | 1 | 4070：PLACE 写了 `box:gpu` 的步骤、手动的推理 |
 | box | `cpu` | 1 | 评测、五折集成评测、删单折概率图、分析（`oof_eval.py`、`paired_compare.py`、`compare_all.py` 等）。一次一个（10/26 定）：10/25 两个大任务加上 box 上别的服务用光了 61 GB 内存 |
-| box | `wait` | 不限 | 拉回（`fetch_task.sh`）、归档（`archive_task.sh`）、传输（`offload_io.sh`、`tunnel_push.sh`） |
+| box | `wait` | 不限 | 拉回（`relay.py fetch`）、归档（`archive_task.sh`）、传输（`relay.py stage`、`tunnel_push.sh`） |
 | lab | `gpu1` | 1 | 1 号卡：执行机 lab1 常驻的 worker（代码包里的 `dicc_worker.sh`，`envs/machines.py` 的 `worker`），领 `relay.py` 替它领来的训练和推理（lab 训的任务，含 0 号卡训的） |
 | lab | `gpu0` | 1 | 0 号卡：执行机 lab0 的 worker（10/31 晚起，`SHIFT` 的时段里由 `shift.py` 开组、`relay.py` 替它领任务） |
 | lab | `cpu`、`wait` | 1、不限 | 备用 |
@@ -96,46 +92,32 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 - 先跑 1 个；最近一个开始 15 分钟后，近 10 分钟 GPU 平均使用率低于 90%、除去显存填充还空着一半显存，再领 1 个（最多 2 个）。nnU-Net 这类 CPU 跟不上的自然变成 2 个，GPU 跑满的只跑 1 个。CPU 少于 24 个或内存少于 56G 的作业只跑 1 个。
 - 跑完一个领下一个；离时限不到 1 小时不再领；到时限时把没做完的交还，下一个领到的从存档接着训。
-- 只领本机缓冲里的（`feed.py` 送来的）。不领：已做完的、别处在做的（领取在有效期内续过：20 分钟；或训练日志 15 分钟内更新过）、失败过 2 次的、依赖记录（只给 `after` 看的）。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
+- 只领本机队列里的（`relay.py` 送来的）。不领：已做完的、别处在做的（领取在有效期内续过：20 分钟；或训练日志 15 分钟内更新过）、失败过 2 次的、依赖记录（只给 `after` 看的）。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
 - 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败）；整个队列 3 小时内失败 3 次就暂停领任务；停止的任务（`taskq.py stop`）每 5 秒看一次，先发 SIGTERM，20 秒没停就 SIGKILL，交还（不算失败），30 秒内做完（存档是原子写的）；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
 - 每个训练 14 个数据增强进程（作业 32 个 CPU）。
-- 开训前 `run_task.sh` 查任务的输入（`inputs.py prepare`：文件都在、链接指得到文件、没有建到一半的 `.incomplete`）；缺了退出码 4，worker 用 `taskq.py missing` 交还、记进 `inputs/<key>`（状态 `input`，不算失败，补齐前没人领），执行机由 `relay.py` 补传缺的数据块后 `input-ok` 放回；DICC 本身缓冲里的一小时后自动再试（`feed.py`）（11/1）。
+- 开训前 `run_task.sh` 查任务的输入（`inputs.py prepare`：文件都在、链接指得到文件、没有建到一半的 `.incomplete`）；缺了退出码 4，worker 用 `taskq.py missing` 交还、记进 `inputs/<key>`（状态 `input`，不算失败，补齐前没人领），`relay.py` 补传缺的数据块后 `input-ok` 放回（11/1）。
 - 输入拷到节点本地盘（`envs/policy.py` 的 `STAGE_TMP` 开着、任务 `res.local_inputs` 时，11/1 起代替 `stage_tmp.sh` 开训前的整份拷贝）：在 `$TMPDIR/phd_stage_<作业号>/views/<任务>/` 建这个任务私有的链接树，先都指向共享盘，马上开训；后台 `inputs.py copy` 一个个拷到 `blobs/`、核对（sha256 名的按内容）后原子换掉链接，同一作业、本节点别的作业已有的直接用或硬链接；拷完要剩 `STAGE_KEEP_GB`（默认 300）GB，不够就不拷。命令从 `$TASK_INPUTS_ROOT` 读；作业结束时删自己的目录，下一个作业开始时清掉本节点上已结束作业留下的。
 - CPU worker（`cpu_worker.sbatch`，`WORKER_DEVICE=cpu`）只领 `device=cpu` 的任务，一次 1 个，领不到就结束。
 
 ### 往执行机送任务（`feed.py`，健康检查每 30 分钟调用，10/31）
 
-送任务只有一个入口：健康检查调用 `feed.run_all`，它先把 `envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（lab1、lab0、DICC2）交给 `relay.py`（见下面"执行机"，细节记 box `~/relay.log`，`~/feed.log` 里记一行指过去），再给有缓冲的执行机送任务（11/3 起没有这类）；`advance.py` 往总队列加了任务后的第二遍只送缓冲的（10/31）。`python3 scripts/taskq/queue/feed.py --dry` 只看会做什么（`--no-relay` 不看 relay 的那几台）。
-
-总队列在 box，执行机维护、连不上时总队列照常可读可改；执行机只从本机的缓冲领，box 不在线时照常训。规则写在 `feed.py` 开头，要点：
-
-- 训练：缓冲里没人领的不到 `READY[机器]` 个时，按总队列的先后补上，只送数据已到位的（每个数据路径在那边的文件数、字节数都不少于 box 上的，没有 `.incomplete`，也没有在传）；缺的由 box `wait` 组传（`sync_data.sh <机器> push <路径>`），同时只传一份。补不满持续 60 分钟报 `site:<机器>:low`。
-- 只有这台能跑的（`machines=[那台]`：推理、评测、P1 / P2）马上送，不受个数限制；`after` 里在这台训完、已交还的任务作为依赖记录一起送。
-- box 上训完（拉回、归档都做完）→ 删缓冲记录、总队列交还；总队列 `stop` → 缓冲里停，停下后删、交还；`set`、`set-nice` 同步过去。
-- 缓冲里失败、这台上没有进度的交还（`--skip <机器>`）；有进度的留着报出来；缓冲整个暂停时只报。连不上时什么都不交还，2 小时后报 `site:<机器>:down`。那边的代码不是最新时不送新任务。那边没有 `BUFFER` 时什么都不做。
-- lab 10/31 17:50 起不再有缓冲（`AUTO["lab"]` 关），两张卡是 relay 执行机 lab1、lab0（见下面"执行机"）。
-
-### 补交 DICC 作业（`refill.py`，健康检查每 30 分钟调用）
-
-- **DICC**：每个 QOS 排着和在跑的不到 `SLURM` 写的上限、这台有要卡的任务（备好没人领的或在训的）时，补交 `worker.sbatch` 排满名额，每个空位一个普通作业（不用数组），让排着的作业一直攒排队时间（11/2 定；10/31–11/2 排着的不超过备好的任务数）；开始时没有任务的 worker 空等 `IDLE_MAX` 再结束。缓冲里有没人领的纯 CPU 任务时才交 `cpu_worker.sbatch`，按剩下的提交名额交。在 `feed.py` 送完之后补。读作业数、交作业用 `scripts/taskq/sites/slurm.py`，交几个在 `refill.topup_plan` 算。
+送任务只有一个入口：健康检查调用 `feed.run_all`，它把 `envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（dicc1、DICC2、lab1、lab0）交给 `relay.py`（见下面"执行机"，细节记 box `~/relay.log`，`~/feed.log` 里记一行指过去），并报总队列里分给了不是执行机的名字的任务（`feed:nobody:<名字>`）。`advance.py` 在它之后跑，往总队列加的任务下次检查送过去。`python3 scripts/taskq/queue/feed.py --dry` 只看会做什么。
 
 ### 训完以后（`advance.py`，健康检查每 30 分钟调用）
 
 每次对每个任务看盘上的文件，算出它走到哪一步，下一步没在做就排上：
 
-1. 别的机器上训完、box 上没有 → `fetch_task.sh <机器> <key>`（`wait` 组）。
-2. 实验表里每个任务的步骤（RQ1：推理 → 评测），按顺序做第一个没做完的。
-3. 老 lab 路径（`~/BRAIN_TUMOR`，10/31 17:50 以前）上训的任务拉回以后 → `archive_task.sh lab <key>`：备份到 DICC，三份核对一致后删 lab 上的存档和验证集预测。那边还在用这个任务做别的步骤时等；要进任务队列的步骤等归档做完再加。
-4. 一个实验所有任务都在 box 上训完 → `group_after` 的每一串步骤（RQ1：oof、配对比较、五折集成、删单折概率图、P1 / P2 重跑）；最后 `FINAL` 的（`compare_all.py`，有比它上次开始时更新的结果就重跑）。
+执行机上训完的任务由 `relay.py fetch` 拉回 box（见下面"执行机"）。
 
-每一步放在哪：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有那边的）就接着那边的；否则按 `PLACE[步骤]` 的顺序用第一个现在能用的，都用不了时把原因写进 `~/advance.log`（"没排 …"），不报成问题。推理的第一个地方是 `trainer`：训这个任务的执行机（DICC、lab1；lab0 训的算 lab1，`advance.py` 的 `site_of`；分配结束后看哪台有没归档的模型），那台在归档、或是 DICC2 时用下一项。lab 训的任务，推理做完、拉回 box 以后才归档。
+1. 实验表里每个任务的步骤（RQ1：推理 → 评测），按顺序做第一个没做完的。
+2. 一个实验所有任务都在 box 上训完 → `group_after` 的每一串步骤（RQ1：oof、配对比较、五折集成、删单折概率图、P1 / P2 重跑）；最后 `FINAL` 的（`compare_all.py`，有比它上次开始时更新的结果就重跑）。
 
-- 放到别的 pueue 机器上的：缺的输入先从 box 传过去（文件夹经隧道、文件用 rsync；传完那边的盘要留够，另给结果留 15 GB），齐了在那边的组里排同样的标签（命令里的 `{data}`、`{python}` 换成那边的），成功后 box 拉回、按校验和核对，box 判断做完后删掉那边的结果和自动传过去的文件（别的步骤还要用的留着，文件夹留着）。
-- 进任务队列的：那边缺的文件先 `offload_io.sh push` 过去，缺文件夹就报出来；那边做完后按任务拉回（`fetch_task.sh`），拉回后照常按 `done` 判断。`have` 条件的地方只在那边已经有全部输入时用。
-- 失败过的不自动重排：最后一次成功之后有失败的任务，或者成功跑完了结果还是不对，就报到健康检查，看过、处理好以后 `pueue remove` 那个任务，下一次就会重排。别的机器上的任务、传输、拉回一样。lab 上训练没训完就停了、排在它后面的推理跟着失败的不算，接着训时重排。
-- 提前排（10/25，10/31 改看总队列的分配）：总队列里分给 DICC、lab1、lab0 的任务，进任务队列的每个任务步骤（推理；DICC 的还有评测）现在就加进总队列，`after` 接上前一步，`feed.py` / `relay.py` 跟着送到那台（lab0 训的推理给 lab1），worker 训完一个任务先领它的推理（nice -100），DICC 推理完马上有 CPU 作业评测。那台的代码不是最新的（`code:<机器>`）时不提前排。分给 DICC2 的和没分出去的任务等训完。
-- 五折集成（`ens`）各任务都在 DICC 推理的在 DICC 的 CPU 作业做，拉回时连同 `predictions/<模型>/folds_0-1-2-3-4` 一起（`fetch.also`）；有一个任务不在 DICC 就在 box 做。
-- box 上排的任务做完后马上跑一次健康检查（`auto_refresh.sh kick`，和定时的共用一把锁，最多等 5 分钟），下一步几分钟内排上；往总队列加了任务的那次检查里接着送到 DICC、补交 DICC 作业。
+每一步放在哪：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有那边的）就接着那边的；否则按 `PLACE[步骤]` 的顺序用第一个现在能用的，都用不了时把原因写进 `~/advance.log`（"没排 …"），不报成问题。推理的第一个地方是 `trainer`：训这个任务的执行机（dicc1、lab1；lab0 训的算 lab1，`advance.py` 的 `site_of`），是 DICC2 时用下一项。`queue:<执行机>` 只能写 hub 或 `RELAY` 里的执行机。
+
+- 进任务队列的：`relay.py` 领过去时连同输入传过去；那边做完后 `relay.py fetch` 拉回，拉回后照常按 `done` 判断，拉回在跑时不算做完。
+- 失败过的不自动重排：最后一次成功之后有失败的任务，或者成功跑完了结果还是不对，就报到健康检查，看过、处理好以后 `pueue remove` 那个任务，下一次就会重排。拉回一样。
+- 提前排（10/25，10/31 改看总队列的分配）：总队列里分给 dicc1、lab1、lab0 的任务，进任务队列的每个任务步骤（推理；dicc1 的还有评测）现在就加进总队列，`after` 接上前一步，`relay.py` 跟着送到那台（lab0 训的推理给 lab1），worker 训完一个任务先领它的推理（nice -100），dicc1 推理完马上有 CPU 作业评测。lab1 的 AUTO 关着时 lab0 训的任务不提前排。分给 DICC2 的和没分出去的任务等训完。
+- box 上排的任务做完后马上跑一次健康检查（`auto_refresh.sh kick`，和定时的共用一把锁，最多等 5 分钟），下一步几分钟内排上。
 - 判断做完看盘上的文件：推理要每个测试集的分割、概率图、输入病例数都对得上（盘上的文件数和 `MANIFEST.json` 记的一样）；结果还在往 box 上拷（拉回、传输在跑）时不算做完、不清理那边。
 
 ### 显存填充（DICC，`gpu_pad.py`）
@@ -146,20 +128,19 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - `TASKQ_GPU_PAD=0` 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/common/nnunet/smoke/epoch_bench.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`、`research/RQ1/probe/p1_predict_model.sh`、`research/RQ1/probe/p2_predict_model.sh`、`research/RQ1/analysis/validation_predict_eval.sh`、`research/RQ1/analysis/validation_prep.sh`、`research/RQ1/analysis/edema_intervention.sh`、`research/RQ1/analysis/edema_ring_probe.sh`。CPU 分区的作业本来就不启动。
 - pad 异常退出时最多重启 3 次；父进程退出、收到 SIGTERM、`DISABLED` 出现时放掉显存退出。退出码：0 正常 / 开关 / 父进程退出，1 没有 GPU 或初始化失败，2 参数错误；启动失败只记日志，不影响训练。
 
-### 执行机（DICC2、lab1、lab0，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
+### 执行机（dicc1、DICC2、lab1、lab0，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
 
-`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：中转执行机 DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径（11/1 起不换名）。流程细节写在 `relay.py` 开头。
+`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：DICC 的 dicc1、DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径（11/1 起不换名）。流程细节写在 `relay.py` 开头。
 
-- **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/taskq/sites/slurm.py`、`scripts/taskq/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`，和 DICC 的 `refill.py` 同一份；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
+- **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/taskq/sites/slurm.py`、`scripts/taskq/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
 - **根目录**写成 `~/…`（如 dicc1、DICC2 的 `~/q`）时，命令里开头的 `~` 留给那边展开（`scripts/taskq/sites/remote.py` 的 `q()`）；代码包里 `worker.sbatch` 的日志用相对路径（Slurm 不展开 `~`）。
 - **DICC 的两个执行机根目录在 home**（11/2 定）：`/scr` 11/2 卡住过（读不了队列、hash 文件报 "Communication error on send"），home 每个账号 100 GB。`cap`（`envs/machines.py`）是根目录最多占多少 GB，剩余按 cap 减去根目录已占的算（`relay.py` 的 `STATUS_PY`，硬链接只算一次、软链接不算），清理（`relay_gc.py`）、领任务（`fill`）都用它。数据都从 box 传，不收编 `/scr` 上的老数据（跨盘不能硬链接）。实验表 `queue` 的 `disk`（这一步大约要占多少 GB）加上 `budget` 的第二项超过 cap 的步骤，`advance.py` 不放这台，用 `PLACE` 的下一项：推理（输入约 60 GB、输出约 14 GB）放不下，DICC 训的折拉回 box 后由 lab1 推理；评测（约 15 GB）照旧在 dicc1。
 - **AUTO 关着 = 这台整个停下**（11/2）：不领新的、不传、不重传、不让那边接着训、不交作业，只续已有的领取、把训完的拉回、交还；`advance.py` 也不往它排步骤。
-- **档位上限**（`envs/policy.py` 的 `MAX_NICE`，11/2）：执行机只领档位不超过它的任务（`refill.candidates`）。
 - **传数据排不上 CPU 作业**（收编在 CPU 节点上做的执行机）：`relay.py stage` 退出码 75，box 上显示 Failed，下次定时检查再传、不报；领了 3 小时以上还排不上才报 `site:<名>:stage`。
 - **Slurm worker 开始时没有任务**：和等着的一样空等到 `IDLE_MAX`（40 分钟），这期间有任务进来就领；一直没有才结束（11/2；之前马上退出，排了几天的作业白白退出）。纯 CPU 的 worker 照旧领不到就结束。
 
 ```
- box 的 feed.py → relay.py（健康检查每 30 分钟，refill.py 之后）
+ box 的 feed.py → relay.py（健康检查每 30 分钟）
    总队列 take --worker dicc2 --assign → box wait 组 relay.py stage：插件列出输入（scripts/taskq/sites/names.py）、补传缺的数据块、建软链接、加进那边的队列
    那边：R/code/current 的 worker.sbatch → dicc_worker.sh → run_task.sh，做法和 DICC 一样（显存填充、加第二个、卡死、停止、到时限交还）
    那边训完 → box wait 组 relay.py fetch（拉回、插件核对，如验证集病例）
@@ -182,44 +163,42 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 文件 | 内容 |
 |---|---|
 | `q`、`qs` | 加任务：`q <组> [pueue add 选项] -- '<命令>'`（按 `envs/machines.py` 设好卡和组的环境变量，工作目录是仓库根目录）；`qs [机器]` 看各 pueue 机器的队列 |
-| `taskq.py` | 总队列（box）和执行机的缓冲：worker 领（`next`）、心跳（`beat`）、交还（`release`）、缺输入交还（`missing`，补齐后 `input-ok`）；分给一台执行机（`take --assign`）；往缓冲写原样的记录（`put`，只给 `feed.py` 用）；加（`add --exp`、`add --recipe`）、改参数（`set`）、改先后（`set-nice`）、删掉没人在做的（`remove`，依赖它的要一起删）、看说明（`show`）、看队列（`status`）。命令说明在文件开头 |
+| `taskq.py` | 总队列（box）和执行机的队列：worker 领（`next`）、心跳（`beat`）、交还（`release`）、缺输入交还（`missing`，补齐后 `input-ok`）；分给一台执行机（`take --assign`）；加（`add --exp`、`add --recipe`）、改参数（`set`）、改先后（`set-nice`）、删掉没人在做的（`remove`，依赖它的要一起删）、看说明（`show`）、看队列（`status`）。命令说明在文件开头 |
 | `recipes.py`、`spec.py`、`experiments.py`、`steps.py` | 做法、解析器、读实验表、步骤的"做完没"判断 |
 | `inputs.py` | 开训前查输入（缺了退出码 4）、节点本地盘上的私有视图和后台拷贝（见上面） |
 | `run_task.sh <做法> k=v…` | 所有机器共用的运行器：激活环境、设变量、跑命令、写分段日志；已经训完就直接退出；Slurm 外设了 `CUDA_VISIBLE_DEVICES` 时卡被别人占着就等（每分钟看一次，最多 `res.wait_gpu` 分钟；组的环境变量设了 `TASK_GPU_IDLE` 时，还要 GPU 使用记录里这张卡最近这么多分钟没有别人，11/2），出错隔 5 分钟重来、最多 3 次；SIGTERM 先停训练再退出 |
 | `worker.sbatch`、`worker_start.sh`、`cpu_worker.sbatch`、`dicc_worker.sh` | DICC 作业：`worker.sbatch`（long、3 天）只有资源申请和转交到 `worker_start.sh` 的一行；`worker_start.sh` 查 `ENABLED`、激活 conda、启动显存填充，交给 `dicc_worker.sh`。`cpu_worker.sbatch`：`cpu-epyc-genoa`、normal、32 核、64G、8 小时（`cpu-epyc` 的节点系统太旧） |
-| `feed.py` | 送任务的唯一入口：relay 的执行机转给 `relay.py`，往有缓冲的执行机送任务（见上面）；`python3 scripts/taskq/queue/feed.py --dry` 只看会做什么 |
-| `refill.py` | 补交有缓冲的 Slurm 执行机的 worker 作业（见上面）；`python3 scripts/taskq/queue/refill.py` 只看会做什么 |
+| `feed.py` | 送任务的唯一入口：转给 `relay.py`（见上面）；`python3 scripts/taskq/queue/feed.py --dry` 只看会做什么 |
+| `refill.py` | `relay.py` 用的挑任务（`candidates`、`next_pick`）和补交 Slurm 作业（`slurm_plan`）的规则 |
 | `advance.py` | 训完以后的步骤（见上面）；`python3 scripts/taskq/queue/advance.py` 只看会排什么 |
-| `fetch_task.sh <机器> <key>` | 等那台机器上的任务做完，把 `fetch.also` 的文件夹和 `out`（去掉 `fetch.exclude`，加上 `fetch.extra`）拉回 box，`out` 最后拉 |
-| `archive_task.sh <机器> <key> [--dry-run]` | 训练机上训完、拉回以后：备份到备份机（`envs/machines.py` 的 `backup`），三份核对一致后删训练机上 `archive.drop` 匹配的文件，留 `ARCHIVED`；`<机器>` 是 box 时只备份、不删 |
-| `offload_io.sh` | box 和别的机器之间传一步的输入、结果：`push <机器> <路径>…`（文件夹经 `scripts/taskq/sync/tunnel_push.sh`，文件经 `tunnel.py push`）、`pull <机器> <文件夹>`（rsync 拉回，再按校验和核对）。这里和 `fetch_task.sh`、`archive_task.sh` 的 rsync 都经 `scripts/taskq/sync/tunnel.py rsync`：`envs/machines.py` 的 `tunnel` 里有的方向文件都经隧道传（`scripts/sync/README.md`） |
+| `archive_task.sh box <key> [--dry-run]` | 执行机上训完、拉回 box 以后：备份到备份机（`envs/machines.py` 的 `backup`），核对一致后留 `ARCHIVED`；rsync 经 `scripts/taskq/sync/tunnel.py rsync`（`envs/machines.py` 的 `tunnel` 里有的方向经隧道传，`scripts/sync/README.md`） |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（nnU-Net 从存档接着训，推理跳过已做好的病例），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 的克隆；每天 04:20 的 `auto_refresh.sh backup`） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
 | `relay.py`、`relay_bundle.py`、`relay_plugins.py`、`relay_gc.py`、`shift.py` | 执行机（见上面）：接力、代码包、中继插件的加载、清理根目录、按时段开停 |
 | `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）、插件文件夹（`TASKQ_PLUGINS`）、状态文件夹（`TASKQ_STATE`），把插件合进核心的表；`OUTPUTS` 的读法（`get <键>` 给 bash）、旧名（`LEGACY`） |
 | `legacy_names.sh` | bash 脚本的旧名兼容（见"开关和配置"的"旧名"） |
-| `scripts/taskq/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`refill.py`、`relay.py` 共用） |
+| `scripts/taskq/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`relay.py` 用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口。核心的测试不读 `envs/`、`research/`，用 `testdata/` 的固定配置（11/2）；关于真的实验表、nnU-Net 插件、机器表和环境描述的检查在 `research/common/taskq_plugins/tests/` |
 | `testdata/` | 测试用的固定配置：`config/`（机器表、`policy.py`、环境描述，机器名同真的）、`plugins/`（`toy` 做法、中继插件、进度读法）、`exps/demo/experiments.py`（小实验表，步骤的写法同真的）、`bin/`（假的训练和步骤脚本）、假的 conda 和 venv；`fixture.py` / `fixture.sh` 设 `TASKQ_CONFIG`、`TASKQ_PLUGINS` |
 
 ## 约定
 
 - **DICC 作业提交时定下的**只有 `worker.sbatch`；其余脚本在作业开始时或每次调用时从仓库读。排着的作业依赖的只有 `ENABLED` 和 `worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它调用的 `taskq.py next / beat / release` 和 `run_task.sh` 的参数、退出码不改，只加新命令。
-- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，4 缺输入（开训前查到，没跑命令；11/1），2 任务说明或环境有问题，1 训练命令出错（命令自己的退出码 1–127 记在分段日志），128 以上是被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀如 137 原样传出；worker 据此区分"训不了"和"被杀"）（10/25 定）。`qs --json` 每个任务的 `status` 给人看（如 `Failed (1)`），程序读 `result`（`Success` / `Failed` / `Killed` / …，没结束是空）和 `code`（退出码）。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。不在 box、本机又没有队列时，改队列的命令退出码 2（"总队列在 box"）；缓冲（有 `BUFFER`）上 `add`、`set`、`set-nice`、`remove`、`stop`、`resume`、`put` 要带 `TASKQ_FEED=1`（`feed.py` 经 ssh 调用时带），否则退出码 2（10/31）。
+- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，4 缺输入（开训前查到，没跑命令；11/1），2 任务说明或环境有问题，1 训练命令出错（命令自己的退出码 1–127 记在分段日志），128 以上是被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀如 137 原样传出；worker 据此区分"训不了"和"被杀"）（10/25 定）。`qs --json` 每个任务的 `status` 给人看（如 `Failed (1)`），程序读 `result`（`Success` / `Failed` / `Killed` / …，没结束是空）和 `code`（退出码）。`taskq.py next` 0 领到（两行：key、`run_task.sh` 的参数），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到。不在 box、本机又没有队列时，改队列的命令退出码 2（"总队列在 box"）。
 - **经 ssh 读回的 JSON**：`taskq.py --json-status`、`taskq.py show --json`、`spec.py` 的 `remote_collect` 把 JSON 写在单独一行、以 `@@JSON ` 开头，读的一方只认这一行（`spec.py` 的 `json_out` / `json_in`），前后别的输出不影响。`taskq.remote` 分开返回标准输出和标准错误，ssh 不通（退出码 255）返回空（10/25 定）。
-- **各机器的状态只取一次**：`scripts/taskq/monitor/health.py` 的 `gather()`：pueue（`qs --json`）、每台 pueue 机器一次 ssh 的探查（开机、盘、GPU 使用记录、各卡和卡上的进程、训练要用的数据在不在）、Slurm 的 `squeue`（作业名、号、状态、已跑、原因、Nice、分区）和 `sacct`、任务队列、各任务的训练状态（`spec.collect`）。健康检查、`refill.py`、`advance.py` 和登记表 `make_registry.py` 都用它的结果，不另外去取（10/25 定）。
+- **各机器的状态只取一次**：`scripts/taskq/monitor/health.py` 的 `gather()`：pueue（`qs --json`）、每台 pueue 机器一次 ssh 的探查（开机、盘、GPU 使用记录、各卡和卡上的进程）、总队列、box 上各任务的训练状态（`spec.collect`）；执行机的状态由 `relay.py` 每次检查读一次（`relay.py status <名字>`）。健康检查、`relay.py`、`advance.py` 和登记表 `make_registry.py` 都用它的结果，不另外去取（10/25 定）。
 - **队列所在的机器**：`envs/machines.py` 的 hub（box，`taskq.queue_host()`，10/31 起）；在别的机器上跑 `taskq.py add / set / set-nice / take / show / remove / status` 时经 ssh 到那边跑。worker 用的 `next / beat / release` 不转发，没有 `tasks.jsonl` 就退出 2（10/25 定）。
-- **Slurm 作业名**（11/2 定）：每个作业交的时候随机取一个 `<词>-<词>`（`scripts/taskq/sites/slurm.py` 的 `jobname`：worker 作业、传输的 CPU 作业都是），各账号、各作业都不一样；sbatch 文件里不写 `--job-name`。认 worker 按 squeue 的 `%o`（交的脚本：`worker.sbatch` = GPU，`cpu_worker.sbatch` = CPU，`slurm.kind_of`），不按名字。健康检查只把 GPU worker 当成"还有训练作业"，`refill.py` 按交的脚本数已有几个 CPU worker；`envs/machines.py` 的 `jobs` 只写这台交哪几种 worker；查提交名额用的 QOS 来自 `envs/policy.py` 的 `SLURM`（10/25 定）。
-- **代码版本**：box 的 pueue 任务的工作目录是 `~/.cache/phd/code/<提交号>`（`envs/machines.py` 的 `code`，`q` 加任务时先跑 `scripts/taskq/sync/snapshot.sh` 更新到 origin/main），任务开始后代码再更新也不影响它；旧副本没有任务用、建了 7 天以上才删。lab、DICC 跑各自克隆里的代码（`repo`），box 每 30 分钟快进；relay 执行机的 worker 跑 `relay.py` 推过去的代码包（`R/code/current`）。
-- **跑命令、查文件**：调度脚本在本机或经 ssh 跑命令都用 `common.run`（返回退出码、标准输出、标准错误；超时、起不来是 124）；查别的机器上有哪些文件用 `common.have_script` / `parse_have`（输出以 `@@END` 结束，没有结束标记算没查到）（10/25 定）。
-- **到别的机器跑的命令那边也限时**（11/1）：`common.run`、`spec.remote_collect`、`relay.py` 推代码包、`tunnel.py` 的短命令在那边套 `timeout -k 10 <本机超时 - 15 秒>`（`common.remote_timeout`；健康检查的探查 `run_on` 本来就有），本机超时断开后那边卡在存储里的进程也结束，不留在登录节点上。`remote_collect` 各任务同时读、一共等 90 秒，没读完的记进结果的 `stuck`：`refill.progress` 当它们有进度（不当新任务分出去、不当没进度交还），健康检查报 `unread:<机器>`。
-- **日志不重复**：`advance.py`、`refill.py` 的"会做什么"和上次一样就不再写日志，上次的内容在 `~/.cache/phd/last/<名字>.json`（`common.changed`）。
+- **Slurm 作业名**（11/2 定）：每个作业交的时候随机取一个 `<词>-<词>`（`scripts/taskq/sites/slurm.py` 的 `jobname`：worker 作业、传输的 CPU 作业都是），各账号、各作业都不一样；sbatch 文件里不写 `--job-name`。认 worker 按 squeue 的 `%o`（交的脚本：`worker.sbatch` = GPU，`cpu_worker.sbatch` = CPU，`slurm.kind_of`），不按名字。`relay.py` 按交的脚本数已有几个 GPU / CPU worker；`envs/machines.py` 的 `jobs` 只写这台交哪几种 worker；查提交名额用的 QOS 来自 `envs/policy.py` 的 `SLURM`（10/25 定）。
+- **代码版本**：box 的 pueue 任务的工作目录是 `~/.cache/phd/code/<提交号>`（`envs/machines.py` 的 `code`，`q` 加任务时先跑 `scripts/taskq/sync/snapshot.sh` 更新到 origin/main），任务开始后代码再更新也不影响它；旧副本没有任务用、建了 7 天以上才删。lab 的克隆（`repo`）由 box 每 30 分钟快进；执行机的 worker 跑 `relay.py` 推过去的代码包（`R/code/current`）。
+- **跑命令**：调度脚本在本机或经 ssh 跑命令都用 `common.run`（返回退出码、标准输出、标准错误；超时、起不来是 124）（10/25 定）。
+- **到别的机器跑的命令那边也限时**（11/1）：`common.run`、`spec.remote_collect`、`relay.py` 推代码包、`tunnel.py` 的短命令在那边套 `timeout -k 10 <本机超时 - 15 秒>`（`common.remote_timeout`；健康检查的探查 `run_on` 本来就有），本机超时断开后那边卡在存储里的进程也结束，不留在登录节点上。`remote_collect` 各任务同时读、一共等 90 秒，没读完的记进结果的 `stuck`：`refill.progress` 当它们有进度（不当新任务分出去），健康检查报 `unread:<机器>`。
+- **日志不重复**：`advance.py`、`relay.py` 的"会做什么"和上次一样就不再写日志，上次的内容在 `~/.cache/phd/last/<名字>.json`（`common.changed`）。
 - **状态文件整份换**：`refill.json`、`tasks.json`、`last/` 下的文件、领取的 `info` 都先写临时文件再换过去（`scripts/taskq/queue/common.py` 的 `write_json`），断电、被杀时只有旧的或新的。领取只建了目录、没有 `info` 的，5 分钟后算过期。
-- **同一个任务不在两处做**：总队列里先分给一台执行机（`claims/<key>/info` 的 `assigned`：不过期，只靠交还结束），缓冲里再由那边的作业领（`info`：worker、host、since、beat、ttl；20 分钟没续就过期）才做。`put` 写的记录和总队列的一样（order、nice、exp、recipe、params），`hold` 为真时是依赖记录（停止着，原因"依赖记录"，只给 `after` 看）。`skips/<key>`：哪台执行机跳过了这个任务（删掉即撤销）；`released/`：刚交还的（10/31）。
+- **同一个任务不在两处做**：总队列里先分给一台执行机（`claims/<key>/info` 的 `assigned`：不过期，只靠交还结束），那边的队列里再由那边的作业领（`info`：worker、host、since、beat、ttl；20 分钟没续就过期）才做。`skips/<key>`：哪台执行机跳过了这个任务（删掉即撤销）；`released/`：刚交还的（10/31）。
 - **任务表** `tasks.jsonl` 每行 `{order, nice, key, exp, recipe, params}`；档位 = `nice`，同一档按 `order`。任务说明的 `device`（默认 `gpu`）、`machines`（默认不限，如 `["dicc1"]`）决定谁能领。`after`（默认 `[]`）：一组任务 key，都做完前这个任务是 `waiting`（不领、不算补交作业的数）；其中有失败 2 次的或不在队列里的是 `blocked`，健康检查报 `tqblocked:<key>`。
-- **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每个任务 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`。放到别的机器上的步骤在那边用同样的标签，box 上的传输是 `push:<标签>`（任务队列缺的文件）、`pull:<标签>`（10/31 以前在 lab pueue 里排的推理的拉回），relay 执行机的是 `relay_stage:<key>`、`relay_fetch:<key>`、`relay_archive:<key>`。标签只给人看，程序不靠它认任务（见下一条）。
-- **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/taskq/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`src`（从哪拉回）、`to`、`paths`（传给谁、传什么）、`of`（传输为哪一步）、`out`、`needs`、`train_id`（10/31 以前在 lab pueue 里排的推理）。`refill.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删，有 `out` 的留到那边的结果清理完；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）、拉回（`fetch_task.sh <机器> <key>`）、归档（`archive_task.sh <机器> <key>`）。
+- **pueue 任务标签**：训练 `train:<key>`；`advance.py` 排的每个任务 `<步骤>:<实验 id>_f<fold>`（如 `infer:t14met_f3`），实验一级 `<步骤>:<实验 id>`。执行机的是 `relay_stage:<key>`、`relay_fetch:<key>`、`relay_archive:<key>`。标签只给人看，程序不靠它认任务（见下一条）。
+- **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/taskq/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`needs`。`relay.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
 - **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_part<段>.log`（段号 `TASK_PART`；10/31 前叫 `_seg<段>.log`、`TASK_SEG`，旧版 worker 传 `TASK_SEG` 时照旧用旧名，读日志的地方两种都认），第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前的按任务说明的 `oldlogs`：`dir` 下以 `prefix` 开头的，登记表、归档两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
@@ -236,7 +215,7 @@ $TQ set-nice --nice 0 Dataset116_METrq1/nnUNetTrainer_save10_n470/2
 $TQ show Dataset116_METrq1/nnUNetTrainer_save10_n470/2
 # 改一个任务（会改变 key 的参数不能改，删掉重加）
 $TQ set Dataset101_GLIrq1/nnUNetTrainer_UMambaEnc/1 env=umamba
-# 停止一个任务（10/30）：分给执行机的由 feed.py / relay.py 下次检查时在那边停（在训的 30 秒内停下）、交还；之后不再分，resume 撤销
+# 停止一个任务（10/30）：分给执行机的由 relay.py 下次检查时在那边停（在训的 30 秒内停下）、交还；之后不再分，resume 撤销
 $TQ stop --why 原因 Dataset156_METrq1_erand/nnUNetTrainer_save10/0
 $TQ resume Dataset156_METrq1_erand/nnUNetTrainer_save10/0
 # box 上单独推理 / 评测一个任务

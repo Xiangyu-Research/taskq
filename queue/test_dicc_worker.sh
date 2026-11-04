@@ -82,7 +82,7 @@ EOF
 SLURM_JOB_ID=900007 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1b.out" 2>&1
 check "本机没有的环境不领，别的照常领" '[[ $(grep -c ^end $T/train.log) == 1 ]] && grep -q "end .* t/y" $T/train.log && grep -q "没有能领的任务" $T/w1b.out'
 
-# 1c. Slurm 里开始时没有能领的（缓冲刚好空着，11/2）：空着等，来了任务就领；一直没有，空等 IDLE_MAX 后结束
+# 1c. Slurm 里开始时没有能领的（11/2）：空着等，来了任务就领；一直没有，空等 IDLE_MAX 后结束
 reset
 : > "$TASKQ_DIR/tasks.jsonl"
 SLURM_JOB_ID=900040 TASKQ_IDLE_MAX=10 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w1c.out" 2>&1 &
@@ -317,7 +317,7 @@ check "不在 Slurm 里：队列连续出错超过 ERR_MAX 也不退出" 'kill -
 mv "$TASKQ_DIR/tasks.jsonl.bak" "$TASKQ_DIR/tasks.jsonl"
 echo b > "$T/head"
 waitfor 15 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了" $T/w6.out && grep -q "退出，由 feed.py 用新代码重开" $T/w6.out'
+check "不在 Slurm 里：空闲时提交号变了就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "代码更新了" $T/w6.out && grep -q "退出，由 relay.py 用新代码重开" $T/w6.out'
 
 reset
 (WORKER_ID=lab-test TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=3 exec bash "$HERE/dicc_worker.sh") > "$T/w6d.out" 2>&1 &

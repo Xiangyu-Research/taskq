@@ -40,12 +40,9 @@
     after      先要做完的任务（队列里的 key 列表）：没做完时这个任务是 waiting，谁都不领；前一个失败、不在队列里时是 blocked
                （2026-10-25，DICC 训的折提前排的推理、评测）
 
-INPUT_ROOTS：训练机上输入数据所在的文件夹（相对数据目录，下一级是一份数据）。自动传过去的数据只有在这些下面的才按空间预算删
-（refill.py 的 cleanup()）。
-领域专用的做法（如 nnunet）和 INPUT_ROOTS 在 TASKQ_PLUGINS 各文件夹的 recipes.py 里（scripts/taskq/queue/cfg.py），加载时合进来。
+领域专用的做法（如 nnunet）在 TASKQ_PLUGINS 各文件夹的 recipes.py 里（scripts/taskq/queue/cfg.py），加载时合进来。
 """
 
-INPUT_ROOTS = []
 
 REQUIRED = object()
 
@@ -62,4 +59,4 @@ RECIPES = {
 
 import cfg  # noqa: E402
 
-cfg.extend(globals(), "recipes", ("RECIPES", "INPUT_ROOTS"))
+cfg.extend(globals(), "recipes", ("RECIPES",))

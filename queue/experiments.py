@@ -5,7 +5,7 @@ taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后�
 实验的字段：id、exp、label、model、hours、recipe、params、fields、each、after、group_after、names（见各实验表），
 另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。
 each：{参数: [取值…]}，一个实验按这些参数的每种组合展开成一组任务（如 {"seed": ["0", "1"]}）；没有就是一个任务。
-表的模块里另外可以有 FINAL（所有实验做完后的步骤）、KEEP_DATA（keep_data()）。"""
+表的模块里另外可以有 FINAL（所有实验做完后的步骤）。"""
 import glob
 import importlib.util
 import itertools
@@ -27,7 +27,7 @@ def load():
     """→ (实验列表, 结束步骤列表)。每个实验加上 rq（实验表所在的文件夹名）。id、任务名重复时报错。"""
     if "exps" in _cache:
         return _cache["exps"], _cache["final"]
-    exps, final, keep = [], [], []
+    exps, final = [], []
     pat = cfg.outputs("experiments")
     for path in sorted(glob.glob(os.path.join(REPO, pat))) if pat else []:
         rq = os.path.basename(os.path.dirname(path))
@@ -37,19 +37,12 @@ def load():
         for e in mod.EXPERIMENTS:
             exps.append(dict(e, rq=rq))
         final += [dict(f, rq=rq) for f in getattr(mod, "FINAL", [])]
-        keep += [k for k in getattr(mod, "KEEP_DATA", []) if k not in keep]
     ids = [e["id"] for e in exps]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:
         raise spec.SpecError(f"实验表里 id 重复：{', '.join(dup)}")
-    _cache["exps"], _cache["final"], _cache["keep"] = exps, final, keep
+    _cache["exps"], _cache["final"] = exps, final
     return exps, final
-
-
-def keep_data():
-    """各实验表的 KEEP_DATA：自动传到训练机后不按空间预算删的数据（最后一级目录名的 fnmatch 模式）。"""
-    load()
-    return list(_cache.get("keep") or [])
 
 
 def experiment(eid):
