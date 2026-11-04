@@ -415,7 +415,12 @@ def main(argv):
     if not has_config():
         say("找不到项目：给 --project 目录、设 TASKQ_PROJECT，或在有 .taskq.toml 的目录（或它下面）运行")
         return USAGE
-    return node.fn(rest, prog)
+    try:
+        return node.fn(rest, prog)
+    except (FileNotFoundError, NotADirectoryError) as e:  # 数据目录不在（没建、盘没挂上）：说清是哪个，不打 traceback
+        say(f"读不了 {e.filename}：{e.strerror}（数据目录没建，或盘没挂上？）")
+        from proto import EXIT
+        return EXIT["done_unreadable"]
 
 
 if __name__ == "__main__":
