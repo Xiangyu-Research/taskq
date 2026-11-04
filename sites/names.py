@@ -151,7 +151,7 @@ def import_(spec, src, dst, root):
     par = os.path.dirname(out)
     got, odd = [], []
     for rel in RN.walk(src):
-        if any(_inside(rel, o) for o in os_) or rel.startswith(logs) or (
+        if any(_inside(rel, o) for o in os_) or (rel.startswith(logs) and "__" not in rel[len(logs):]) or (
                 par and os.path.dirname(rel) == par and any(fnmatch.fnmatch(os.path.basename(rel), x) for x in extra)):
             got.append(rel)
         else:

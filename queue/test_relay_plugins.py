@@ -124,6 +124,12 @@ def test_train():
     wj(os.path.join(out, "check", "summary.json"), dict(metric_per_case=[{}, {}]))
     ok("训练拉回：验证集缺样本、summary.json 例数不对都报错，目标不动")
 
+    longer = os.path.join(src, "logs", "tasks", S.safe(sp["key"]) + "__x__1_seg1.log")
+    wb(longer, b"log")
+    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="认不出")
+    os.remove(longer)
+    ok("训练拉回：key 更长的别的任务的分段日志不算这个任务的（报认不出，11/4）")
+
     os.remove(os.path.join(out, "final.ckpt"))
     fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="不全")
     wb(os.path.join(out, "final.ckpt"), b"ck")

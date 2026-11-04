@@ -36,7 +36,11 @@ done
 for o in "${OUTS[@]}"; do
     [[ -d $LD/$o ]] && "${RB[@]}" "$LD/$o/" "$BKH:$BKD/$o/"
 done
-compgen -G "$LD/${LOGS}*" > /dev/null && "${RB[@]}" "$LD/$LOGS"* "$BKH:$BKD/logs/tasks/"
+SEGS=()
+for f in "$LD/$LOGS"*; do  # 只要这个任务的：前缀后面再有 __ 的是 key 更长的别的任务
+    [[ -e $f && ${f#"$LD/$LOGS"} != *__* ]] && SEGS+=("$f")
+done
+(( ${#SEGS[@]} )) && "${RB[@]}" "${SEGS[@]}" "$BKH:$BKD/logs/tasks/"
 if [[ -n $OLDSEG && -d $LD/$OLDDIR ]]; then
     "${RB[@]}" --include="${OLDSEG}*" --exclude='*' "$LD/$OLDDIR/" "$BKH:$BKD/$OLDDIR/"
 fi

@@ -60,6 +60,7 @@ world() {
     echo log > "$T/box/$OUT/train_log_1.txt"
     echo plans > "$T/box/$(dirname "$OUT")/plans.json"
     echo seg > "$T/box/logs/tasks/${SAFE}__lab-1_part1.log"
+    echo other > "$T/box/logs/tasks/${SAFE}__x__lab-1_part1.log"  # key 更长的别的任务（D101_alpha/V_save/0/x）
     touch -d '2026-11-01 10:00' "$T/box/$OUT/final.ckpt" "$T/box/$OUT/check/val.dat"
 }
 half() {  # 备份机上 final.ckpt 只有半份（中断的传输留下的），别的都在
@@ -76,7 +77,7 @@ check "dry-run：退出码 0，不往备份机写" "(( rc == 0 )) && [[ -z \$(ls
 
 world
 $A > "$T/o1" 2>&1; rc=$?
-check "正常：退出码 0，备份机和 box 一样" "(( rc == 0 )) && diff -r '$T/box/$OUT' '$T/bk/$OUT' > /dev/null && cmp -s '$T/box/logs/tasks/${SAFE}__lab-1_part1.log' '$T/bk/logs/tasks/${SAFE}__lab-1_part1.log' && [[ -f $T/bk/results/D101_alpha/V_save__PlanM__full/plans.json ]]"
+check "正常：退出码 0，备份机和 box 一样；key 更长的别的任务的分段日志不带上" "(( rc == 0 )) && diff -r '$T/box/$OUT' '$T/bk/$OUT' > /dev/null && cmp -s '$T/box/logs/tasks/${SAFE}__lab-1_part1.log' '$T/bk/logs/tasks/${SAFE}__lab-1_part1.log' && [[ -f $T/bk/results/D101_alpha/V_save__PlanM__full/plans.json && ! -e $T/bk/logs/tasks/${SAFE}__x__lab-1_part1.log ]]"
 
 world
 bash "$HERE/archive_task.sh" lab "$KEY" > "$T/o2" 2>&1; rc=$?
