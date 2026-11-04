@@ -1,4 +1,4 @@
-"""执行机（envs/machines.py 的 SITES）共用的小工具：机器表里的一台、根目录的写法（2026-10-31）。"""
+"""执行机（envs/machines.py 的 SITES）共用的小工具：机器表里的一台、每台备几个任务、根目录的写法（2026-10-31）。"""
 import os
 import shlex
 import sys
@@ -9,11 +9,17 @@ sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
 import machines as M  # noqa: E402
+import policy as P  # noqa: E402
 
 
 def conf(name):
     """执行机（RELAY、SITES）或 MACHINES 里的一台（envs/machines.py 的 machine）。"""
     return M.machine(name)
+
+
+def ready(name):
+    """执行机那边备几个没人领的任务（每种 worker 各几个）：envs/policy.py 的 READY，没写的 1（11/4）。执行机 = envs/machines.py 的 RELAY。"""
+    return P.READY.get(name, 1)
 
 
 def q(path):

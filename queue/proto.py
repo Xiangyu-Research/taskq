@@ -22,6 +22,7 @@ ROOT = dict(
     pins="state/pins",           # 正在传、视图还没建好的任务钉住的 blob（relay.py stage 写，relay_store.py gc 不删）
     envs_ok="state/envs",        # 环境装好了的标志 <环境>.ok（sites/envs.py）
     view_lock="state/view.lock",  # 建视图、删视图的锁
+    deploy_lock="state/deploy.lock",  # 推代码包的锁（relay.py deploy）
     tmp="tmp",                   # 传到一半的临时文件
     envs="envs",                 # 执行机上装的环境（conda、venv）
 )
@@ -156,12 +157,26 @@ ALERTS = dict(
     down=("machine",), unread=("machine",), readerr=("machine",), code=("machine",), taskq=("machine",),
     tqoff=("machine",), tqblocked=("key",), pueued=("machine",), stuck=("machine", "id"), pueue=("machine", "id", "end"),
     idle=("machine", "group"), dup=("key",), disk=("machine",), gpulog=("machine",), boot=("machine", "time"), board=(),
-    site=("machine", "sub", "key"), topup=("machine",), advance=("step", "who"),
+    site=("machine", "sub", "key"), topup=("machine", "qos", "kind"), advance=("step", "who"),
+    relaystage=("key",), relayfetch=("key",), relay=("machine",), feed=("sub", "machine"),
 )
 
 
 def alert_id(kind, *args):
     return ":".join([kind] + [str(a) for a in args if a not in (None, "")])
+
+
+# 问题的值：说明文字（str），或带结构化数据的 dict(msg=说明, data={…})（11/4；plain.py 读 data，不从文字里抠）
+def alert(msg, **data):
+    return dict(msg=msg, data=data) if data else msg
+
+
+def alert_msg(v):
+    return v["msg"] if isinstance(v, dict) else v
+
+
+def alert_data(v):
+    return (v.get("data") or {}) if isinstance(v, dict) else {}
 
 
 # ---------------- 给 bash ----------------

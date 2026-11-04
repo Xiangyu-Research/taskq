@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
+from proto import ROOT  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 import machines as M  # noqa: E402
 
@@ -82,11 +83,11 @@ def sh_path(p):
 
 
 def state_dir(m):
-    return m["root"].rstrip("/") + "/state/envs" if m.get("root") else cfg.state("envs", expand=False)
+    return m["root"].rstrip("/") + "/" + ROOT["envs_ok"] if m.get("root") else cfg.state("envs", expand=False)
 
 
 def code_dir(m):
-    return m["root"].rstrip("/") + "/code/current" if m.get("root") else (m.get("code") or m.get("repo"))
+    return m["root"].rstrip("/") + "/" + ROOT["current"] if m.get("root") else (m.get("code") or m.get("repo"))
 
 
 def base_activation(name, base):

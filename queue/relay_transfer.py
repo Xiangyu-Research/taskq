@@ -15,6 +15,8 @@ CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
+import proto  # noqa: E402
+from proto import ROOT  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "sync"))
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import machines as M  # noqa: E402
@@ -45,7 +47,7 @@ def stage(name, key, nice=None, add=True, say=print):
     ex = N.export(real, D)
     hs = ST.sha256s(sorted({p for _, p in ex["files"]}))
     links = {rel: hs[p] for rel, p in ex["files"]}
-    pin = S.safe(key)
+    pin = proto.safe(key)
     want = dict(key=pin, hashes=sorted(set(links.values())))
     RM.rpy(name, RM.PIN_PY, want)  # 视图建好前那边的清理不删这些块（11/1）；传得久时定时重写，钉子不过期（11/4）
     stop = threading.Event()
@@ -102,7 +104,7 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
         by = {h: p for p, h in hs.items()}
         files = {h: (os.path.relpath(by[h], D) if by[h].startswith(D.rstrip("/") + "/") else None, os.path.getsize(by[h])) for h in miss}
         try:
-            got = set(RM.rpy(name, RM.ADOPT_PY, dict(srcs=srcs + [dict(path=RM.root(name) + "/data", site=False)], files=files),
+            got = set(RM.rpy(name, RM.ADOPT_PY, dict(srcs=srcs + [dict(path=f"{RM.root(name)}/{ROOT['data']}", site=False)], files=files),
                              timeout=3 * 3600, job=job))
         except RM.NoSlot as e:
             say(f"{e}；这次不传，下次检查再来")
@@ -114,10 +116,11 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
         os.makedirs(ST.DIR, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix="push_", dir=ST.DIR)
         try:
+            rels = {h: os.path.relpath(proto.blob(h), ROOT["blobs"]) for h in miss}  # 相对 blobs
             for h in miss:
-                os.makedirs(os.path.join(tmp, h[:2]), exist_ok=True)
-                os.symlink(by[h], os.path.join(tmp, h[:2], h))
-            bad = tunnel.push(RM.conf(name)["ssh"], tmp, RM.root(name) + "/blobs", [f"{h[:2]}/{h}" for h in miss])
+                os.makedirs(os.path.dirname(os.path.join(tmp, rels[h])), exist_ok=True)
+                os.symlink(by[h], os.path.join(tmp, rels[h]))
+            bad = tunnel.push(RM.conf(name)["ssh"], tmp, f"{RM.root(name)}/{ROOT['blobs']}", [rels[h] for h in miss], site=name)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         if bad:
@@ -132,11 +135,13 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
                                       texts={k: base64.b64encode(v).decode() for k, v in texts.items()}))
     say(f"那边的输入放好了（{n} 个文件，视图 {'、'.join(views) or '无'}）")
     if add and srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
-        dirs = [f"{x['path']}/data/{real['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
-        claims = [f"{x['path']}/queue/claims/{S.safe(key)}/info" for x in srcs if x["site"]]  # 那台还领着（心跳没过期）：存档可能写到一半
+        dirs = [f"{x['path']}/{ROOT['data']}/{real['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
+        # 那台还领着（proto.claim_alive）：存档可能写到一半
+        claims = [dict(claim=f"{x['path']}/{ROOT['queue']}/{proto.QUEUE['claims']}/{proto.safe(key)}",
+                       out=f"{x['path']}/{ROOT['data']}/{real['out']}") for x in srcs if x["site"]]
         try:
             r = RM.rpy(name, RM.ADOPT_OUT_PY, dict(srcs=dirs, out=real["out"], resume=real["resume"], done=S.outputs(real)["done"],
-                                                   claims=claims), job=job)
+                                                   claims=claims, log=real.get("log")), job=job)
         except RM.NoSlot as e:
             say(f"{e}；这次不加进队列，下次检查再来")
             return None
@@ -193,7 +198,7 @@ def place(src, D, written, real):
     done = sorted((w for w in written if w in rank), key=lambda w: -rank[w])
     parent = [w for w in written if w not in rank and os.path.dirname(w) == par
               and any(fnmatch.fnmatch(os.path.basename(w), x) for x in extra)]
-    man = [w for w in written if w == f"{rout}/MANIFEST.json" and w not in rank]
+    man = [w for w in written if w == f"{rout}/{proto.MANIFEST}" and w not in rank]
     first = [w for w in written if w not in rank and w not in parent and w not in man]
 
     def mv(w):
@@ -221,7 +226,7 @@ def fetch(name, key, say=print):
                                         outs=k.get("outs") or o["outs"], key=key))
     if not res["done"]:
         raise RN.RelayError(f"{RM.conf(name)['label']} 上 {key} 还没做完")
-    inbox = os.path.join(D, ".relay_in", S.safe(key))
+    inbox = os.path.join(D, ".relay_in", proto.safe(key))
     out = inbox + ".real"
     shutil.rmtree(out, ignore_errors=True)
     # 上次拉到一半的（11/2）：清单里有、大小和修改时间都对上的留着（隧道核对过 MD5 才放进来），只拉其余的；别的删掉
@@ -236,7 +241,7 @@ def fetch(name, key, say=print):
             else:
                 os.remove(p)
     todo = [(r, v[0]) for r, v in want.items()]
-    bad = tunnel.pull(RM.conf(name)["ssh"], RM.root(name) + "/data", inbox, todo) if todo else []
+    bad = tunnel.pull(RM.conf(name)["ssh"], f"{RM.root(name)}/{ROOT['data']}", inbox, todo, site=name) if todo else []
     if bad:
         raise RN.RelayError(f"{len(bad)} 个文件没拉到（{bad[:3]}）")
     written = N.import_(real, inbox, out, D)
@@ -250,12 +255,11 @@ def fetch(name, key, say=print):
 def drop_remote(name, key, rk, gone=False):
     """删那边的任务（taskq.py remove 在锁里查过没人领着），再删这个任务占的、别的任务不用的路径和日志，最后删记录 → 出错说明或 None。"""
     if not gone:
-        import taskq
         r = RM.rtq(name, f"remove {shlex.quote(rk)}")
-        if not r or r[0] not in (0, taskq.GONE):  # GONE：上次删了任务、没删完路径
+        if not r or r[0] not in (0, proto.EXIT["gone"]):  # gone：上次删了任务、没删完路径
             return f"任务没删掉，路径留着：{(r or [0, 'ssh 不通'])[1][-150:]}"
     keys = ST.keys_of(ST.load_state(), name)
     paths = ST.droppable(keys, key, ST.paths_of(keys.get(key) or {}))
-    RM.rpy(name, RM.DROP_PY, dict(paths=paths, logs=S.safe(rk)))
+    RM.rpy(name, RM.DROP_PY, dict(paths=paths, logs=proto.safe(rk)))
     ST.update_state(lambda st: (st.get("keys") or {}).get(name, {}).pop(key, None))
     return None

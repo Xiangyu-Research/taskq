@@ -183,18 +183,39 @@ def test_adopt_out():
     for f, b in (("latest.ckpt", b"L"), ("best.ckpt", b"B"), ("train_log.txt", b"t")):
         open(os.path.join(src, f), "wb").write(b)
     dirs = [ssrc, src]
+    cd = os.path.join(sib, "queue", "claims", "a__frag_3")
+    sout = os.path.join(sib, "data", "a", "frag_3")
     run = lambda: S.json_in(subprocess.run(
         [sys.executable, "-c", RM.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/frag_3", resume=["latest.ckpt", "final.ckpt"],
                                                                          done=[["check/summary.json"], ["final.ckpt", "ARCHIVED"]],
-                                                                         claims=[ci, os.path.join(sib, "nope", "info")])),
+                                                                         claims=[dict(claim=cd, out=sout),
+                                                                                 dict(claim=os.path.join(sib, "nope"), out=None)],
+                                                                         log="train_log*.txt")),
         capture_output=True, text=True, cwd=_cfg.REPO, check=True).stdout)
-    ci = os.path.join(sib, "queue", "claims", "a__frag_3", "info")
-    os.makedirs(os.path.dirname(ci))
-    json.dump(dict(beat=time.time()), open(ci, "w"))
-    r = run()
-    assert r["busy"] == os.path.dirname(ci) and not r["n"] and not os.path.exists(os.path.join(R, "data", "a")), r
-    json.dump(dict(beat=time.time() - 120, ttl=60), open(ci, "w"))
-    ok("来源那台还领着（心跳没过期）→ 不拷，下次再来")
+    ci = os.path.join(cd, "info")
+    os.makedirs(cd)
+    old_t = time.time() - 3600
+
+    def busy():
+        r = run()
+        return r.get("busy") == cd and not r["n"] and not os.path.exists(os.path.join(R, "data", "a"))
+    assert busy()  # 只有目录、没有 info，刚建的
+    os.utime(cd, (old_t, old_t))
+    r = run()  # 只有目录、建了超过 HALF_CLAIM：领取没了
+    assert "busy" not in r and r["n"] == 3, r
+    shutil.rmtree(os.path.join(R, "data", "a"))
+    json.dump(dict(assigned=True, beat=0), open(ci, "w"))
+    os.utime(cd, (old_t, old_t))
+    assert busy()
+    json.dump(dict(beat=time.time() - 120), open(ci, "w"))
+    os.utime(cd, (old_t, old_t))
+    assert busy()
+    json.dump(dict(beat=old_t), open(ci, "w"))
+    os.makedirs(sout)
+    open(os.path.join(sout, "train_log_1.txt"), "w").close()
+    assert busy()
+    os.utime(os.path.join(sout, "train_log_1.txt"), (old_t, old_t))
+    ok("来源那台还领着（proto.claim_alive：刚建没 info、assigned、心跳新、心跳旧但日志新）→ 不拷，下次再来；只有旧目录、全都旧了 → 拷")
     r = run()
     assert r["n"] == 3 and r["src"] == src, r
     new = os.path.join(R, "data", "a", "frag_3")
@@ -203,7 +224,7 @@ def test_adopt_out():
     open(os.path.join(new, "latest.ckpt"), "wb").write(b"N")
     assert run()["n"] == 0 and open(os.path.join(new, "latest.ckpt"), "rb").read() == b"N"
     ok("老目录的存档拷进结果目录；已有更新的存档时不覆盖")
-    os.makedirs(ssrc)
+    os.makedirs(ssrc, exist_ok=True)
     open(os.path.join(ssrc, "latest.ckpt"), "wb").write(b"S")
     t = time.time() + 60
     os.utime(os.path.join(ssrc, "latest.ckpt"), (t, t))
@@ -1258,6 +1279,73 @@ def test_pin_refresh():
     ok("传数据期间钉子定时重写，传完撤掉、不再写")
 
 
+def test_cross_version():
+    """读那边的状态：新包有 taskq.py status --json、spec.py collect --json 就用，旧包（退出码 2、没有 JSON 行）import；
+    两条路给 box 的结构一样；新命令输出不对 → 出错（11/4）。"""
+    cur = os.path.realpath(os.path.join(RROOT, "code", "current"))
+    mark = os.path.join(T, "xv_mark")
+    status_new = ('    if argv[:2] == ["status", "--json"]:\n'
+                  '        open(os.environ["XV_MARK"], "a").write("status\\n")\n'
+                  '        print("@@JSON " + json.dumps(dict(version=1, **local_status())))\n'
+                  '        return 0\n')
+    collect_new = ('    if argv[:2] == ["collect", "--json"]:\n'
+                   '        a = json.load(sys.stdin)\n'
+                   '        open(os.environ["XV_MARK"], "a").write("collect %d %s\\n" % (len(a["specs"]), a["wait"]))\n'
+                   '        print("@@JSON " + json.dumps(dict(version=1, **collect(a["specs"], a["root"], a["wait"]))))\n'
+                   '        return 0\n')
+    old_ = ('    if "--json" in argv:\n'
+            '        print("不认识的命令", file=sys.stderr)\n'
+            '        return 2\n')
+    bad = ('    if "--json" in argv:\n'
+           '        print("ok")\n'
+           '        return 0\n')
+    q = os.path.join(*cfg.rel("queue").split("/"))
+
+    def variant(tag, tq, sp):
+        d = os.path.join(T, "xv_" + tag)
+        shutil.copytree(cur, d, symlinks=True)
+        for f, h in (("taskq.py", tq), ("spec.py", sp)):
+            p_ = os.path.join(d, q, f)
+            txt = open(p_).read()
+            assert txt.count("def main(argv):\n") == 1
+            open(p_, "w").write(txt.replace("def main(argv):\n", "def main(argv):\n" + h))
+        return d
+
+    def run(d, code, data):
+        if os.path.exists(mark):
+            os.remove(mark)
+        env = dict(os.environ, TASKQ_DIR=os.path.join(RROOT, "queue"), TASKQ_DATA=os.path.join(RROOT, "data"), XV_MARK=mark)
+        r = subprocess.run([sys.executable, "-c", code, RROOT], input=json.dumps(data), capture_output=True, text=True, cwd=d, env=env)
+        used = open(mark).read().split("\n")[:-1] if os.path.exists(mark) else []
+        return r.returncode, (S.json_in(r.stdout) if r.returncode == 0 else r.stderr), used
+
+    arg = dict(sched="pueue", pueue="/bin/false", cap=None)
+    nd, od, bd = variant("new", status_new, collect_new), variant("old", old_, old_), variant("bad", bad, bad)
+    rc, new, used = run(nd, RM.STATUS_PY, arg)
+    assert rc == 0 and len(used) == 2 and used[0] == "status" and used[1].startswith("collect ") and used[1].endswith(" None"), (rc, new, used)
+    rc, old, used2 = run(od, RM.STATUS_PY, arg)
+    assert rc == 0 and used2 == [], (rc, old, used2)
+    strip = lambda x: {k: v for k, v in x.items() if k not in ("free", "blob_free")}
+    assert new["taskq"]["tasks"] and strip(new) == strip(old), (new, old)
+    assert run(nd, RM.STATES_PY, {})[1] == run(od, RM.STATES_PY, {})[1] == {t["key"]: t["state"] for t in old["taskq"]["tasks"]}
+    rc, err, _ = run(bd, RM.STATUS_PY, arg)
+    assert rc != 0 and "status --json" in err, (rc, err)
+    for d in (nd, od, bd):
+        shutil.rmtree(d)
+    ok("读状态：新包用 status --json、collect --json（wait=None），旧包 import，两条路结构一样；新命令没有带版本号的 JSON 行 → 出错")
+
+
+def test_programs_ascii():
+    """送到那边的小程序：只有 ASCII、能编译，不 import proto（那边的旧包里可能没有）。"""
+    for k in dir(RM):
+        if k.endswith("_PY"):
+            code = getattr(RM, k)
+            code.encode("ascii")
+            compile(code, k, "exec")
+            assert "import proto" not in code and "from proto" not in code, k
+    ok("送到那边的小程序只有 ASCII、能编译、不 import proto")
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
@@ -1271,6 +1359,8 @@ if __name__ == "__main__":
     test_adopt_out()
     test_place()
     test_e2e_path(test_e2e())
+    test_cross_version()
+    test_programs_ascii()
     test_view_lock()
     test_list_unreadable()
     test_deploy_keeps_busy()

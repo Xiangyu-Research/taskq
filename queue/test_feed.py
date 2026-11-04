@@ -34,7 +34,9 @@ q_ = dict(tasks=[ct("a/x/0", "claimed", assigned="lab"), ct("a/x/1", "claimed", 
                  ct("a/x/2", "claimed", assigned="dicc1"), ct("a/x/3", "done", assigned="old")])
 nb = F.nobody(q_)
 ok("分给 lab（不是执行机）的报 feed:nobody:lab，带交还的命令；分给 relay 执行机的不报；做完的不报",
-   list(nb) == ["feed:nobody:lab"] and "release --worker lab" in nb["feed:nobody:lab"] and "a/x/0" in nb["feed:nobody:lab"])
+   list(nb) == ["feed:nobody:lab"] and "release --worker lab" in F.alert_msg(nb["feed:nobody:lab"])
+   and "a/x/0" in F.alert_msg(nb["feed:nobody:lab"]))
+ok("feed:nobody 带结构化数据（11/4）：worker、n、keys", nb["feed:nobody:lab"]["data"] == dict(worker="lab", n=1, keys=["a/x/0"]))
 ok("总队列读不到：不报", F.nobody(None) == {})
 
 # ---------------- 送任务只有一个入口（10/31）：feed.run_all 转给 relay.py ----------------
