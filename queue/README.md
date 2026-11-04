@@ -147,7 +147,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 ### 执行机（DICC2、lab1、lab0，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
 
-`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：中转执行机 DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径（11/1 起不换名）。流程细节写在 `relay.py` 开头。
+`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：中转执行机 DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径。流程细节写在 `relay.py` 开头。
 
 - **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/taskq/sites/slurm.py`、`scripts/taskq/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`，和 DICC 的 `refill.py` 同一份；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
 - **根目录**写成 `~/…`（如 dicc1、DICC2 的 `~/q`）时，命令里开头的 `~` 留给那边展开（`scripts/taskq/sites/remote.py` 的 `q()`）；代码包里 `worker.sbatch` 的日志用相对路径（Slurm 不展开 `~`）。
