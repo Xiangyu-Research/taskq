@@ -16,7 +16,10 @@ case ${1:-} in
     *) echo "用法：on_boot.sh [--gpu-log]" >&2; exit 2 ;;
 esac
 sleep "${ON_BOOT_WAIT:-30}"  # 等网络和数据盘
-if [[ -n $GL ]] && ! pgrep -f "gpu_log\.sh" > /dev/null; then
+eval "$(python3 "$CORE/queue/proto.py" sh)"
+GLD=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}}
+# 在跑的 gpu_log.sh 一直锁着它的 pid 文件（11/4，不再按命令行找进程）；锁得上 = 没有在跑的
+if [[ -n $GL ]] && mkdir -p "$GLD" && flock -n "$GLD/$TQ_GPU_LOG_PID" true; then
     setsid -f bash "$CORE/monitor/gpu_log.sh" > /dev/null 2>&1 < /dev/null && log "已启动 GPU 使用记录"
 fi
 if ! $P status > /dev/null 2>&1; then
