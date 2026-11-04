@@ -163,6 +163,8 @@ def problem(pid, p):
             return f"{L(part[1])} {(d.get('time') or pid.split(':', 2)[2])[5:16]} 重启过，被打断的任务已自动放回队列，要确认训练接上了。"
         if kind == "board" and "n" in d:
             return f"看板有新结果，要确认后才发布（{d['n']} 个文件）。"
+        if kind == "advance" and part[1] == "policy":
+            return f"训完以后的步骤停了，一个都不排：{msg.split('。训完以后')[0]}。改好、提交推送后下一次检查自动恢复。"
         if kind == "advance" and part[1] == "error":
             return "自动调度脚本出错了：训完的任务不会自动推理、评测。"
         if kind == "site":  # 执行机（relay.py，10/31）：site:<机器>:<类>[:<key>]

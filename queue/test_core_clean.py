@@ -23,6 +23,7 @@ CLEAN = [
     "queue/test_feed.py", "queue/test_common.py", "queue/test_shift.py", "sites/test_adapters.py",
     "sites/test_e2e.py", "sites/test_envs.py", "sync/test_tunnel.py", "queue/test_archive_task.sh",
     "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py", "queue/test_relay_store.py",
+    "monitor/overview.py", "monitor/test_overview.py", "queue/test_experiments_cli.py", "queue/check.py", "queue/test_check.py",
 ]
 # 后两组（11/4）：使用者的运行记录格式（runlog 的 .run.json）、nnU-Net 结果文件夹的布局（<训练器>__<plans>__<配置>）
 WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b"

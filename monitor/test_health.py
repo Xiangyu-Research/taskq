@@ -317,6 +317,9 @@ ok("白话：任务 key → 实验名 + 简称（如 f0）", PL.fold(_k) == f"{_
 ok("白话：每个任务的步骤的标签 → (实验名, 步骤, 简称)；实验一级的 → 简称 None",
    PL.label(f"eval:{EX.label(_e, _t)}") == (_n, PL.STEP["eval"], EX.short(_t)) and PL.label(f"eval:{_e['id']}") == (_n, PL.STEP["eval"], None))
 ok("白话：认不出的标签 → 其他", PL.label("eval:nope_f1") == ("其他", "eval:nope_f1", None))
+_pm = "envs/policy.py PLACE['x'] 的 'y'：不认识的地方。能写的：trainer。训完以后的步骤这次一个都没排；改好、提交推送后下一次检查自动恢复"
+ok("白话：PLACE 写错（advance:policy）说清哪里错、怎么恢复，不当成某个任务的步骤出错",
+   PL.problem("advance:policy", dict(msg=_pm)).startswith("训完以后的步骤停了") and "能写的：trainer" in PL.problem("advance:policy", dict(msg=_pm)))
 ok("白话：推送里的一句话带简称", PL.task(f"infer:{EX.label(_e, _t)}") == f"{_n} {EX.short(_t)} 的{PL.STEP['infer']}")
 
 # 白话从结构化的 data 说（11/4，不再从说明里抠数字）：每种问题的推送文字和改之前逐字相同
