@@ -712,31 +712,36 @@ def run_one(s, name, dry):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="执行机的接力。不带命令：只看每台执行机现在会做什么")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看（不带命令时默认就是）")
     sub = ap.add_subparsers(dest="cmd")
-    p = sub.add_parser("stage")
+    p = sub.add_parser("stage", help="传数据、加进那边的队列")
     p.add_argument("name")
     p.add_argument("key")
     p.add_argument("--nice", type=int)
     p.add_argument("--no-add", action="store_true")
-    p = sub.add_parser("fetch")
+    p = sub.add_parser("fetch", help="拉回做完的任务、核对，放进 box 的数据目录")
     p.add_argument("name")
     p.add_argument("key")
-    p = sub.add_parser("bundle")
+    p = sub.add_parser("bundle", help="打包、推过去、切换 current")
     p.add_argument("name")
     p.add_argument("--commit", default="origin/main")
-    p = sub.add_parser("status")
+    p = sub.add_parser("status", help="那边的队列")
     p.add_argument("name")
-    p = sub.add_parser("resend")
+    p = sub.add_parser("resend", help="传过去的任务按现在的做法重新解析，换掉那边队列里的说明")
     p.add_argument("name")
     a = ap.parse_args(argv)
-    if a.cmd == "stage":
-        if a.nice is None and not a.no_add:
+    if a.cmd in ("stage", "fetch"):
+        if a.cmd == "stage" and a.nice is None and not a.no_add:
             ap.error("要给 --nice（或 --no-add）")
-        if RT.stage(a.name, a.key, a.nice, add=not a.no_add) is None:
-            return NOSLOT_RC
-    elif a.cmd == "fetch":
-        RT.fetch(a.name, a.key)
+        try:
+            if a.cmd == "fetch":
+                RT.fetch(a.name, a.key)
+            elif RT.stage(a.name, a.key, a.nice, add=not a.no_add) is None:
+                return NOSLOT_RC
+        except (RN.RelayError, S.SpecError, RuntimeError, OSError, subprocess.SubprocessError) as e:
+            print(f"relay.py {a.cmd} {a.name} {a.key}：{type(e).__name__}: {e}", file=sys.stderr)
+            return 1
     elif a.cmd == "bundle":
         rs = remote_status(a.name)
         print(bundle(a.name, a.commit, (rs or {}).get("bundle")) or "没变")
@@ -745,7 +750,7 @@ def main(argv):
     elif a.cmd == "status":
         rs = remote_status(a.name)
         if rs is None:
-            print("读不到")
+            print(f"读不到 {a.name}", file=sys.stderr)
             return 1
         for t in rs["taskq"]["tasks"]:
             print(f"  {t['nice']:>5} {t['key']:50} {t['state']} {t['note']}")

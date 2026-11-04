@@ -87,9 +87,9 @@ def env_of(root):
     return out
 
 
-def export(root):
-    """把项目的环境变量设进 os.environ（已经设了的不改）→ 新设的 {名: 值}。"""
-    new = {k: v for k, v in env_of(root).items() if k not in os.environ}
+def export(root, force=False):
+    """把项目的环境变量设进 os.environ（已经设了的不改；force：明确给了 --project 时都改）→ 新设的 {名: 值}。"""
+    new = {k: v for k, v in env_of(root).items() if force or k not in os.environ}
     os.environ.update(new)
     return new
 

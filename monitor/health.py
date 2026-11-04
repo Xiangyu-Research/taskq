@@ -66,11 +66,11 @@ def push(msg, title=f"{NAME} 作业", priority="default", tags=""):
     urllib.request.urlopen(req, timeout=30).read()
 
 
-def load_failed(e):
+def load_failed(e, dry=False):
     """实验表、插件加载出错：整个检查（送任务、拉回、排下一步）都停了，推送一次（同样的错不重复推；夜里等到早上）。"""
     msg = f"健康检查没法运行：实验表或插件加载出错，送任务、拉回、排下一步都停了。\n{type(e).__name__}: {e}"
     print(msg, file=sys.stderr)
-    if any(a in sys.argv for a in ("--dry-run", "-h", "--help")) or not NIGHT[1] <= datetime.now().hour < NIGHT[0]:
+    if dry or not NIGHT[1] <= datetime.now().hour < NIGHT[0]:
         return
     old = open(H_LOADERR).read() if os.path.exists(H_LOADERR) else None
     if old != msg:
@@ -87,12 +87,11 @@ try:
     import common as C  # noqa: E402  scripts/taskq/queue/common.py
     from common import write_json  # noqa: E402
 except Exception as _e:
-    if __name__ == "__main__":
-        load_failed(_e)
-        sys.exit(1)
-    raise
-if __name__ == "__main__" and "--dry-run" not in sys.argv and os.path.exists(H_LOADERR):
-    os.remove(H_LOADERR)
+    if __name__ != "__main__":
+        raise
+    LOAD_ERROR = _e  # 当脚本跑时由 main() 先解析参数（--help 不推送）再报
+else:
+    LOAD_ERROR = None
 
 
 def stopped(t):
@@ -389,15 +388,20 @@ def from_step(v):
     return problem(v)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--test", action="store_true")
-    a = ap.parse_args()
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="健康检查一轮：查各机器、推送问题、按时段开关、送任务、排下一步")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="只打印这次查到的问题，不推送、不改任何文件")
+    ap.add_argument("--test", action="store_true", help="推送一条测试消息")
+    a = ap.parse_args(argv)
+    if LOAD_ERROR is not None:
+        load_failed(LOAD_ERROR, dry=a.dry_run)
+        return 1
+    if not a.dry_run and os.path.exists(H_LOADERR):
+        os.remove(H_LOADERR)
     if a.test:
         push("测试：健康检查的推送能收到", tags="tada")
         print("已推送测试消息")
-        return
+        return 0
     s = gather()
     if not a.dry_run:
         s["records"] = C.update_records(lambda recs: C.sync_records(s["pueue"], recs))
@@ -434,7 +438,8 @@ def main():
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
         print("\n送任务、补作业、按时段开关：" + "；".join(events))
         print("box 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

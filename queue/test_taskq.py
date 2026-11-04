@@ -314,7 +314,7 @@ NOWHERE = os.path.join(T, "no_queue_here")
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "toy",
                     "ds=D113_delta", "variant=V_save", "frag=0"],
                    env=dict(os.environ, TASKQ_DIR=NOWHERE, TASKQ_MACHINE="lab"), capture_output=True, text=True)
-check("不在 box、本机也没有队列：add 退出码 2，提示总队列在 box，不建目录", r.returncode == 2 and "总队列在 box" in r.stdout
+check("不在 box、本机也没有队列：add 退出码 2，提示（标准错误）总队列在 box，不建目录", r.returncode == 2 and "总队列在 box" in r.stderr
       and not os.path.exists(NOWHERE))
 J = '{"tasks": [], "enabled": true}'
 check("@@JSON 行前后混着别的输出：只读那一行", taskq.S.json_in(f"警告：x {{1}}\n@@JSON {J}\n{{别的}}\n") == json.loads(J))

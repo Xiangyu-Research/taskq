@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""taskq：任务队列和调度的命令行（2026-11-04）。命令表和约定见 README.md。
+
+找项目（--project / TASKQ_PROJECT / 从当前目录往上找 .taskq.toml）要在 import 核心的模块之前：cfg.py 在 import 时读
+TASKQ_REPO、TASKQ_CONFIG。子命令在进程内调用各模块的 main(argv)；bash 脚本用 exec。
+"""
+import importlib
+import importlib.util
+import inspect
+import os
+import subprocess
+import sys
+import time
+
+CORE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DIRS = [os.path.join(CORE, d) for d in ("queue", "sites", "monitor", "sync")]
+HELP = ("-h", "--help")
+OK, ERR, USAGE = 0, 1, 2
+
+
+def say(msg):
+    print(f"taskq：{msg}", file=sys.stderr)
+
+
+def version():
+    p = os.path.join(CORE, "VERSION")  # 代码包里写好的
+    if os.path.isfile(p):
+        return open(p).read().strip()
+    r = subprocess.run(["git", "-C", CORE, "describe", "--always", "--dirty"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "unknown"
+
+
+# ---------------- 调用模块和脚本 ----------------
+def paths():
+    for d in reversed(DIRS):
+        if d not in sys.path:
+            sys.path.insert(0, d)
+
+
+def load(mod):
+    """核心的模块；和标准库重名的（sites/site.py）按文件加载。没有这个模块 → None。"""
+    paths()
+    if mod == "site":
+        p = os.path.join(CORE, "sites", "site.py")
+        s = importlib.util.spec_from_file_location("taskq_site", p)
+        m = importlib.util.module_from_spec(s)
+        sys.modules["taskq_site"] = m
+        s.loader.exec_module(m)
+        return m
+    try:
+        return importlib.import_module(mod)
+    except ModuleNotFoundError as e:
+        if e.name == mod:
+            return None
+        raise
+
+
+def exit_code(rc):
+    if rc is None or rc is True:
+        return OK
+    if isinstance(rc, int):
+        return rc
+    print(rc, file=sys.stderr)  # sys.exit("说明")
+    return ERR
+
+
+def run(fn, prog, argv):
+    """fn() 跑的时候 sys.argv[0] = prog（argparse 的帮助里显示成 taskq 的子命令）。"""
+    old = sys.argv
+    sys.argv = [prog, *argv]
+    try:
+        rc = fn()
+    except SystemExit as e:
+        rc = e.code
+    finally:
+        sys.argv = old
+    return exit_code(rc)
+
+
+def call(mod, argv, prog):
+    """mod.main(argv)（没有参数的 main() 读 sys.argv）。"""
+    m = load(mod)
+    if m is None or not hasattr(m, "main"):
+        return missing(f"{mod}.py 的命令行", argv, prog)
+    takes = bool(inspect.signature(m.main).parameters)
+    return run((lambda: m.main(argv)) if takes else m.main, prog, argv)
+
+
+def missing(what, argv, prog):
+    if set(argv) & set(HELP):
+        print(f"用法：{prog} …\n\n这个版本的 taskq 还没有{what}")
+        return OK
+    say(f"这个版本的 taskq 没有{what}（taskq self update）")
+    return ERR
+
+
+def script(rel, argv, prog):
+    """按 python3 <脚本> 的方式在进程内跑（__name__ == "__main__"；不用 runpy：它把 sys.argv[0] 换成文件名）。"""
+    import types
+    paths()
+    p = os.path.join(CORE, rel)
+    m = types.ModuleType("__main__")
+    m.__file__ = p
+    code = compile(open(p, "rb").read(), p, "exec")
+    return run(lambda: exec(code, m.__dict__), prog, argv)
+
+
+def bash(rel, argv):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp("bash", ["bash", os.path.join(CORE, rel), *argv])
+
+
+# ---------------- 命令 ----------------
+class Cmd:
+    """一个子命令。own_help：模块自己的 argparse 处理 -h（照样传过去）；否则这里打印 usage / doc，不调用模块。
+    project：要用项目的配置。help_in：在哪些参数里找 -h（默认 "--" 以前的全部）。"""
+
+    def __init__(self, summary, fn, usage="", doc="", own_help=False, project=True, help_in=None):
+        self.summary, self.fn, self.usage, self.doc = summary, fn, usage, doc
+        self.own_help, self.project, self.help_in = own_help, project, help_in
+
+    def wants_help(self, argv):
+        if self.own_help:
+            return False
+        scan = self.help_in(argv) if self.help_in else (argv[:argv.index("--")] if "--" in argv else argv)
+        return any(a in HELP for a in scan)
+
+    def help(self, prog):
+        out = f"用法：{prog} {self.usage}".rstrip() + f"\n\n{self.summary}"
+        return out + (f"\n\n{self.doc.strip()}" if self.doc else "")
+
+
+class Group:
+    def __init__(self, summary, cmds, hidden=False):
+        self.summary, self.cmds, self.hidden = summary, cmds, hidden
+
+    def help(self, prog):
+        w = max(map(len, self.cmds)) + 2
+        lines = [f"用法：{prog} <命令> [参数…]", "", self.summary, "", "命令："]
+        lines += [f"  {n:{w}}{c.summary}" for n, c in self.cmds.items()]
+        return "\n".join(lines + ["", f"每个命令的说明：{prog} <命令> --help"])
+
+
+def py(mod, *pre, prog="taskq"):
+    """在进程内调用 mod.main([*pre, *argv])。"""
+    return lambda argv, _p: call(mod, [*pre, *argv], prog)
+
+
+def sh(rel):
+    return lambda argv, _p: bash(rel, argv)
+
+
+def cmd_status(argv, prog):
+    if "--all" in argv:
+        return call("overview", [a for a in argv if a != "--all"], prog)
+    return call("taskq", ["status", *argv], "taskq")
+
+
+def cmd_plan(argv, prog):
+    import argparse
+    ap = argparse.ArgumentParser(prog=prog, description="只看：按时段开关、送任务（feed → relay）、训完以后（advance）这一轮会做什么")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看（默认就是）")
+    ap.parse_args(argv)
+    paths()
+    import health as H
+    import shift
+    import feed
+    import advance
+    from proto import alert_msg
+    s = H.gather()
+    ev, st = feed.run_all(s, dry=True)
+    parts = [("按时段开关（shift）", shift.run(s, dry=True) or ["不动"]),
+             ("送任务（feed → relay）", ev + [f"卡住：{alert_msg(v)}" for v in st.values()] or ["不动"]),
+             ("训完以后（advance）", advance.describe(*advance.plan(s)))]
+    print("\n\n".join(f"== {t}\n" + "\n".join(lines) for t, lines in parts))
+    return OK
+
+
+def cmd_exp(sub):
+    def fn(argv, prog):
+        E = load("experiments")
+        if hasattr(E, "main"):
+            return call("experiments", [sub, *argv], prog)
+        if sub == "env-of" and len(argv) == 1:
+            return run(lambda: print(E.env_of(argv[0])), prog, argv)
+        if sub == "name-of" and len(argv) >= 2:
+            return run(lambda: print("\n".join(E.names_of(*argv))), prog, argv)
+        if sub in ("env-of", "name-of"):
+            say(f"用法：{prog} {EXP_USAGE[sub]}")
+            return USAGE
+        return missing(f" exp {sub}", argv, prog)
+    return fn
+
+
+EXP_USAGE = {"env-of": "<模型文件夹>", "name-of": "<模型文件夹> <名字>…"}
+
+
+def cmd_path(argv, prog):
+    if len(argv) != 1 or argv[0] not in ("lib", "api", "core"):
+        say(f"用法：{prog} lib|api|core")
+        return USAGE
+    print(CORE if argv[0] == "core" else os.path.join(CORE, "queue"))
+    return OK
+
+
+def git(*args):
+    return subprocess.run(["git", "-C", CORE, *args], capture_output=True, text=True)
+
+
+def cmd_update(argv, prog):
+    if argv:
+        say(f"用法：{prog}")
+        return USAGE
+    if git("rev-parse", "--is-inside-work-tree").returncode:
+        say(f"{CORE} 不是 git 检出（代码包里的不更新）")
+        return ERR
+    before = git("rev-parse", "--short", "HEAD").stdout.strip()
+    tries, last = 5, ""
+    for i in range(1, tries + 1):
+        r = git("pull", "--ff-only", "--quiet", "origin", "main")
+        if r.returncode == 0:
+            break
+        last = (r.stderr or r.stdout).strip()
+        if i < tries:
+            time.sleep(i * 5)
+    else:
+        say(f"更新失败（试了 {tries} 次），留在 {before}：{last[-300:]}")
+        return ERR
+    after = git("rev-parse", "--short", "HEAD").stdout.strip()
+    say(f"已是最新：{after}" if after == before else f"更新了：{before} → {after}")
+    return OK
+
+
+def cmd_version(argv, prog):
+    if argv:
+        say(f"用法：{prog}")
+        return USAGE
+    print(version())
+    return OK
+
+
+def rsync_help(argv):
+    return argv[:1]  # 后面的 -h 是 rsync 自己的（--human-readable）
+
+
+SPEC_DOC = {
+    "shell": ("<做法> k=v… | --spec <JSON>", "给 run_task.sh 的 shell 语句（按本机展开）"),
+    "done": ("<做法> k=v… | --spec <JSON>", "训完了退出码 0，没训完 1，说明有问题 2，读不了数据目录 5"),
+    "resolve": ("<做法> k=v…", "解析好的说明（JSON，一行）"),
+    "lookup": ("<key>", "按 key 找任务（先查实验表，再查队列），打印说明（JSON）"),
+    "outputs": ("<key> [--sh]", "这个任务的输出（JSON）；--sh：给 archive_task.sh 的 shell 语句"),
+    "collect": ("--json < 输入.json", "本机的训练状态（跨版本读用）：输出 @@JSON 一行"),
+}
+
+TREE = {
+    # 队列
+    "add": Cmd("加任务：实验表（--exp）、做法（--recipe）或任务单（--file）", py("taskq", "add"), own_help=True),
+    "set": Cmd("改一个任务的参数", py("taskq", "set"), own_help=True),
+    "nice": Cmd("改档位（先后）", py("taskq", "nice"), own_help=True),
+    "show": Cmd("一个任务的完整说明和状态", py("taskq", "show"), own_help=True),
+    "status": Cmd("队列（--all：所有任务的状态、在哪台、进度、预计完成）", cmd_status, "[--all] [--json]",
+                  "不带 --all：本机的队列（taskq.py status）；--json：@@JSON 一行。\n--all：各机器汇总的每个任务的状态"),
+    "stop": Cmd("停止任务（在训的 30 秒内停下、交还，之后不再领）", py("taskq", "stop"), own_help=True),
+    "resume": Cmd("撤销停止", py("taskq", "resume"), own_help=True),
+    "rm": Cmd("删掉没人领着的任务", py("taskq", "rm"), own_help=True),
+    # 调度
+    "tick": Cmd("健康检查一轮（真做：推送、按时段开关、送任务、排下一步）",
+                lambda argv, prog: script(os.path.join("monitor", "health.py"), argv, prog), own_help=True),
+    "plan": Cmd("只看：这一轮按时段开关、送任务、训完以后会做什么", cmd_plan, own_help=True),
+    "boot": Cmd("开机（@reboot）：启动 pueued、放回被打断的任务", sh("queue/on_boot.sh"), "[--gpu-log]",
+                "--gpu-log：同时启动 GPU 使用记录（不给时按机器表的 gpu_log）"),
+    # 执行机
+    "site": Group("执行机", {
+        "status": Cmd("那边的队列", py("relay", "status", prog="taskq site"), own_help=True),
+        "bundle": Cmd("打包、推过去、切换 current", py("relay", "bundle", prog="taskq site"), own_help=True),
+        "resend": Cmd("传过去的任务按现在的做法重新解析、换掉那边的说明", py("relay", "resend", prog="taskq site"), own_help=True),
+        "env": Cmd("在那台上建环境、跑检查", py("site", "env", prog="taskq site"), own_help=True),
+        "envs": Cmd("只看：那台每个环境的状态", py("site", "envs", prog="taskq site"), own_help=True),
+        "setup": Cmd("pueue 常驻进程、组、crontab（不给名字：本机）", sh("queue/setup.sh"), "[名字]",
+                     "在本机，或在 hub 上经 ssh 替别的 pueue 机器做；重复运行没关系"),
+    }),
+    # 实验
+    "exp": Group("实验表", {
+        "list": Cmd("列出实验", cmd_exp("list"), own_help=True),
+        "tasks": Cmd("展开后的任务（--json）", cmd_exp("tasks"), own_help=True),
+        "env-of": Cmd("模型文件夹 → 训它用的环境", cmd_exp("env-of"), EXP_USAGE["env-of"]),
+        "name-of": Cmd("模型文件夹 → 它所属实验的 names 里这几项（每行一个）", cmd_exp("name-of"), EXP_USAGE["name-of"]),
+    }),
+    # 其他
+    "tunnel": Group("经隧道传大批文件", {
+        "rsync": Cmd("rsync 的替身：先经隧道传，再照原样跑 rsync", py("tunnel", "rsync", prog="taskq tunnel"),
+                     "<rsync 的参数> <源> <目标>", help_in=rsync_help),
+        "push": Cmd("box → 那边", py("tunnel", "push", prog="taskq tunnel"), "<机器> <box 上的源目录> <那边的目标目录> <清单>",
+                    "清单每行一个相对源目录的路径"),
+        "pull": Cmd("那边 → box", py("tunnel", "pull", prog="taskq tunnel"), "<机器> <那边的源目录> <box 上的目标目录> <清单>",
+                    "清单每行“相对路径<TAB>字节数”"),
+    }),
+    "pueue-add": Cmd("往本机 pueue 的一个组加一次性任务（工作目录是代码副本）", sh("queue/q"),
+                     "<组> [pueue add 的选项] -- '<命令>'", "按机器表设好卡和组的环境变量；有 code 的机器先更新代码副本"),
+    "snapshot": Cmd("按提交号的代码副本（拉取、建副本、切 current、删旧的）", sh("sync/snapshot.sh"), "<克隆>"),
+    "check": Cmd("核对整个项目（配置、插件、实验表、所有任务）", py("check", prog="taskq check"), own_help=True),
+    "path": Cmd("核心的位置：lib / api（queue/）、core（根）", cmd_path, "lib|api|core", project=False),
+    "machines": Cmd("机器表（get、names、activate…）", py("mtab", prog="taskq machines"), own_help=True),
+    "self": Group("taskq 本身", {
+        "update": Cmd("拉 origin/main（失败重试 5 次，拉不到就留在原来的版本）", cmd_update, project=False),
+        "version": Cmd("版本", cmd_version, project=False),
+    }),
+    # 底层（不在首页）
+    "worker": Group("worker 用的（参数、退出码冻结）", {
+        "next": Cmd("领一个任务", py("taskq", "next", prog="taskq worker"), own_help=True),
+        "beat": Cmd("心跳", py("taskq", "beat", prog="taskq worker"), own_help=True),
+        "release": Cmd("交还", py("taskq", "release", prog="taskq worker"), own_help=True),
+        "missing": Cmd("缺输入，交还", py("taskq", "missing", prog="taskq worker"), own_help=True),
+    }, hidden=True),
+    "spec": Group("任务说明（冻结）", {k: Cmd(d, py("spec", k, prog="taskq spec"), u) for k, (u, d) in SPEC_DOC.items()},
+                  hidden=True),
+    "internal": Group("调度自己排的步骤", {
+        "stage": Cmd("传数据、加进执行机的队列（排不上退出码 75）", py("relay", "stage", prog="taskq internal"), own_help=True),
+        "fetch": Cmd("拉回做完的任务", py("relay", "fetch", prog="taskq internal"), own_help=True),
+    }, hidden=True),
+}
+
+SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
+            ("调度", ["tick", "plan", "boot"]),
+            ("执行机和实验", ["site", "exp"]),
+            ("其他", ["tunnel", "pueue-add", "snapshot", "check", "path", "machines", "self"])]
+
+
+def top_help():
+    w = max(len(n) for _, ns in SECTIONS for n in ns) + 2
+    lines = ["用法：taskq [--project 目录] <命令> [参数…]", "",
+             "任务队列和调度。项目：--project、TASKQ_PROJECT，或从当前目录往上找 .taskq.toml。", ""]
+    for title, names in SECTIONS:
+        lines.append(f"{title}：")
+        lines += [f"  {n:{w}}{TREE[n].summary}" for n in names]
+        lines.append("")
+    hidden = [n for n, c in TREE.items() if isinstance(c, Group) and c.hidden]
+    lines += ["选项：", "  --project 目录   项目的根目录（有 .taskq.toml）", "  --version        版本", "  -h, --help       这页", "",
+              f"每个命令的说明：taskq <命令> --help。底层命令（{'、'.join(hidden)}）：taskq <它> --help"]
+    return "\n".join(lines)
+
+
+def unknown(name, choices, prog):
+    import difflib
+    near = difflib.get_close_matches(name, choices, n=1)
+    say(f"不认识的命令 {name}" + (f"，是不是 {prog} {near[0]}？" if near else f"（{prog} --help）"))
+    return USAGE
+
+
+def use_project(explicit):
+    """找到项目就导出 TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS；找不到时照旧（核心嵌在 <仓库>/scripts/taskq 里的老布局）。"""
+    sys.path.insert(0, os.path.join(CORE, "queue"))
+    import project
+    root = project.find(explicit)
+    given = explicit or os.environ.get("TASKQ_PROJECT")
+    if given and not os.path.isfile(os.path.join(root, project.NAME)):
+        raise ValueError(f"{root} 里没有 {project.NAME}")
+    if root:
+        project.export(root, force=bool(explicit))
+    return root
+
+
+def has_config():
+    paths()
+    import cfg
+    return os.path.isfile(os.path.join(cfg.config_dir(), "machines.py"))
+
+
+def main(argv):
+    explicit = None
+    while argv and argv[0].startswith("-"):
+        a = argv.pop(0)
+        if a in HELP:
+            print(top_help())
+            return OK
+        if a == "--version":
+            print(f"taskq {version()}")
+            return OK
+        if a == "--project" or a.startswith("--project="):
+            if a == "--project" and not argv:
+                say("--project 要给目录")
+                return USAGE
+            explicit = a.split("=", 1)[1] if "=" in a else argv.pop(0)
+            continue
+        say(f"不认识的选项 {a}（taskq --help）")
+        return USAGE
+    if not argv:
+        print(top_help(), file=sys.stderr)
+        return USAGE
+    name, rest, prog = argv[0], argv[1:], f"taskq {argv[0]}"
+    if name == "help":  # taskq help [命令…] = taskq [命令…] --help
+        return main([*rest, "--help"]) if rest else main(["--help"])
+    node = TREE.get(name)
+    if node is None:
+        return unknown(name, list(TREE), "taskq")
+    if isinstance(node, Group):
+        if not rest or rest[0] in HELP:
+            print(node.help(prog), file=sys.stdout if rest else sys.stderr)
+            return OK if rest else USAGE
+        sub, rest = rest[0], rest[1:]
+        if sub not in node.cmds:
+            return unknown(sub, list(node.cmds), prog)
+        node, prog = node.cmds[sub], f"{prog} {sub}"
+    if node.wants_help(rest):
+        print(node.help(prog))
+        return OK
+    if not node.project:
+        return node.fn(rest, prog)
+    try:
+        use_project(explicit)
+    except ValueError as e:
+        say(str(e))
+        return USAGE
+    if not has_config():
+        say("找不到项目：给 --project 目录、设 TASKQ_PROJECT，或在有 .taskq.toml 的目录（或它下面）运行")
+        return USAGE
+    return node.fn(rest, prog)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(ERR)

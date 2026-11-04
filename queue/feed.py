@@ -3,7 +3,7 @@
 转给 scripts/taskq/queue/relay.py 处理 envs/machines.py 里 RELAY 的执行机（lab1、lab0、dicc1 等，细节记 ~/relay.log，
 ~/feed.log 里记一行指过去）。另外查总队列里分给了不是执行机的名字的任务（执行机换了名字、撤掉以后留下的），报 feed:nobody。
 
-    python3 scripts/taskq/queue/feed.py --dry      看现在会做什么（不改任何东西）
+    python3 scripts/taskq/queue/feed.py [-n]       看现在会做什么（不改任何东西；-n / --dry-run / --dry 写不写都一样）
 """
 import os
 import sys
@@ -54,11 +54,16 @@ def run_all(s, dry=False):
     return events, stuck
 
 
-if __name__ == "__main__":
+def main(argv=None):
     import argparse
+    ap = argparse.ArgumentParser(description="往执行机送任务（health.py 每次检查调用 run_all）；这里只看、不改")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看会做什么（默认就是）")
+    ap.parse_args(argv)
     import health as H  # noqa: E402
-    ap = argparse.ArgumentParser(description="往执行机送任务（health.py 每次检查调用）；这里只看、不改")
-    ap.add_argument("--dry", action="store_true", help="只打印会做什么（默认就是）")
-    ap.parse_args()
     ev, st = run_all(H.gather(), dry=True)
     print("\n".join(ev + [f"卡住：{alert_msg(v)}" for v in st.values()]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -285,5 +285,14 @@ def run(s=None, dry=False, now=None):
     return msgs
 
 
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description="按时段开关执行机（envs/policy.py 的 SHIFT）：不带 -n 时真做（健康检查每次调用 run）")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看会做什么，不改任何东西")
+    a = ap.parse_args(argv)
+    print("\n".join(run(dry=a.dry_run)) or "不动")
+    return 0
+
+
 if __name__ == "__main__":
-    print("\n".join(run(dry="--dry-run" in sys.argv)) or "不动")
+    sys.exit(main())

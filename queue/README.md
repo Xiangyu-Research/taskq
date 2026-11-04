@@ -166,6 +166,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 | 文件 | 内容 |
 |---|---|
+| `bin/taskq`、`install.sh`（仓库根目录） | 命令行（见下面的"命令行"）、安装和更新 |
 | `q`、`qs` | 加任务：`q <组> [pueue add 选项] -- '<命令>'`（按 `envs/machines.py` 设好卡和组的环境变量，工作目录是仓库根目录）；`qs [机器]` 看各 pueue 机器的队列 |
 | `taskq.py` | 总队列（box）和执行机的队列：worker 领（`next`）、心跳（`beat`）、交还（`release`）、缺输入交还（`missing`，补齐后 `input-ok`）；分给一台执行机（`take --assign`）；加（`add --exp`、`add --recipe`；执行机的队列 `add --spec-stdin`）、改参数（`set`；执行机的队列里 box 送来的说明不改，改总队列后 `relay.py resend`）、改先后（`set-nice`）、删掉没人领着的（`remove`，依赖它的要一起删；失败、停止、缺输入、交还记录一起删，执行机的队列连跳过也删，11/4）、看说明（`show`）、看队列（`status`）。命令说明在文件开头 |
 | `recipes.py`、`spec.py`、`experiments.py`、`steps.py` | 做法、解析器、读实验表、步骤的"做完没"判断 |
@@ -187,6 +188,17 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `scripts/taskq/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`relay.py` 用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口（停止、失败在 `test_dicc_worker_stop.sh`，不在 Slurm 里的和代码包在 `test_dicc_worker_code.sh`，共用 `testdata/worker_harness.sh`；`WORKER_TEST_ONLY` 只跑几个情况）。核心的测试不读 `envs/`、`research/`，用 `testdata/` 的固定配置（11/2）；关于真的实验表、nnU-Net 插件、机器表和环境描述的检查在 `research/common/taskq_plugins/tests/` |
 | `testdata/` | 测试用的固定配置：`config/`（机器表、`policy.py`、环境描述，机器名同真的）、`plugins/`（`toy` 做法、中继插件、进度读法）、`exps/demo/experiments.py`（小实验表，步骤的写法同真的）、`bin/`（假的训练和步骤脚本）、假的 conda 和 venv；`fixture.py` / `fixture.sh` 设 `TASKQ_CONFIG`、`TASKQ_PLUGINS` |
+
+## 命令行（`bin/taskq`，11/4）
+
+命令表在仓库根目录的 `README.md`。`bin/taskq` 先找项目、导出 `TASKQ_REPO` / `TASKQ_CONFIG` / `TASKQ_PLUGINS`，再在进程内调用各模块的 `main(argv)`（bash 脚本用 exec），原来的脚本照旧能直接跑。
+
+- **`--help` 从不做事**：每个命令和老脚本（`shift.py`、`advance.py`、`feed.py`、`health.py`、`relay.py`、`site.py`、`qs`、`tunnel.py`）都先解析参数，`-h` / `--help` 打印说明、退出码 0。
+- **只看的命令统一认 `-n` / `--dry-run`**（老写法 `--dry` 照旧）：`plan`、`advance.py`、`feed.py`、`relay.py` 本来就只看，写不写一样；`shift.py`、`tick` 不带时真做。
+- **数据走标准输出，消息和出错走标准错误**：`taskq.py` 的"总队列在 …"、`status` 的"读不到队列"、`relay.py status` 的"读不到"在标准错误；`relay.py stage|fetch` 出错时打一行原因、退出码 1（不是 Python 的出错堆栈；排不上照旧 75）。
+- **`--json`**：一行 JSON。冻结的底层命令（`status --json`、`show --json`、`spec collect --json`）照旧以 `@@JSON ` 开头。
+- **退出码**：0 成功，1 出错，2 用法错，领域码沿用 `proto.EXIT`（表在根目录的 `README.md`）。冻结的底层命令（`worker …`、`spec …`、`internal stage`）的参数、输出、退出码不变。
+- `taskq.py` 另认 `nice`、`rm`（`set-nice`、`remove` 的别名），老名字照旧。
 
 ## 约定
 
