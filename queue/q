@@ -24,8 +24,6 @@ ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export PATH="$CORE/bin:$PATH"  # 环境脚本和任务的命令里能用 taskq（cron 的 PATH 里没有 ~/.local/bin；同 run_task.sh）
-# 核心在仓库里（代码包）时用工作目录里的那份 cfg.py，装在仓库外时用这份
-if [[ $CORE == "$HERE"/* ]]; then CFG=$REPO${CORE#"$HERE"}/queue/cfg.py; else CFG=$CORE/queue/cfg.py; fi
-ES=$(TASKQ_REPO=$REPO python3 "$CFG" get env_script)
+ES=$(TASKQ_REPO=$REPO python3 "$CORE/queue/cfg.py" get env_script)
 [[ -z $ES ]] || source "$REPO/$ES"
 exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"
