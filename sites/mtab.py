@@ -177,9 +177,9 @@ def _value(name, field):
 
 
 def main(argv):
-    if not argv:
-        print(__doc__.split("命令行：\n")[1], file=sys.stderr)
-        return 2
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.split("命令行：\n")[1], file=sys.stderr if not argv else sys.stdout)
+        return 2 if not argv else 0
     cmd, args = argv[0], argv[1:]
     me = whoami()
     if cmd == "whoami":

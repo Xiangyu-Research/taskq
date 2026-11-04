@@ -54,7 +54,7 @@ def _is_tuple(v, n=None):
 
 # ---------------- 机器表 ----------------
 def check_machines(r):
-    import machines as M
+    M = cfg.mtab()
     import slurm as SL
     g = "machines"
     hubs = [n for n, m in M.MACHINES.items() if "hub" in (m.get("roles") or ())]
@@ -120,7 +120,7 @@ def check_machines(r):
 
 # ---------------- policy ----------------
 def check_policy(r):
-    import machines as M
+    M = cfg.mtab()
     import policy as P
     import advance as A
     import experiments as E
@@ -240,7 +240,7 @@ def _steps(exps, final):
 def check_experiments(r):
     import experiments as E
     import spec as S
-    import machines as M
+    M = cfg.mtab()
     g = "experiments"
     try:
         exps, final = E.load()
@@ -357,7 +357,7 @@ def _step_cases(root, py):
 def check_steps(r, root):
     import spec as S
     import advance as A
-    import machines as M
+    M = cfg.mtab()
     g = "steps"
     py = sys.executable
     for where, st, names, e, per_task in _step_cases(root, py):
@@ -423,7 +423,7 @@ def check_needs(r, root):
 
 # ---------------- 代码包 ----------------
 def check_bundle(r):
-    import machines as M
+    M = cfg.mtab()
     import relay_bundle as B
     g = "bundle"
     skip = ("*/test_*", "*/tests/*", "*/testdata/*")
@@ -450,7 +450,7 @@ CHECKS = dict(machines=check_machines, policy=check_policy, plugins=check_plugin
 
 def data_root(given, empty):
     """--stage needs 用的数据目录：--data、TASKQ_DATA、本机有的 hub 数据目录，都没有 → empty。"""
-    import machines as M
+    M = cfg.mtab()
     d = given or os.environ.get("TASKQ_DATA") or M.MACHINES[M.hub()].get("data")
     return os.path.expanduser(d) if d and os.path.isdir(os.path.expanduser(d)) else empty
 
