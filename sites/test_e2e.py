@@ -218,6 +218,7 @@ def setup():
     bid, path = RB.build(NAME, None, os.path.join(T, "bundles"), root=RROOT, entry=ENTRY)
     relay.deploy(NAME, bid, path)
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+    relay.BUNDLE_REF = commit  # 测试中途别处推送 main 也不重打包（11/4）
     ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME}:{commit}": bid}))
     rs = relay.remote_status(NAME)
     step(f"准备：代码包 {bid} 推过去，那边的队列开着、是空的，自己的 pueued 起来了",
@@ -492,7 +493,7 @@ def step_shift():
     P.READY.update({NAME0: 1, NAME: 0})  # 夜里 lab1 不领（让 lab0 领到）；交接时直接改分，不用它领
     bid, path = RB.build(NAME0, None, os.path.join(T, "bundles0"), root=RLINK0, entry=e0)
     relay.deploy(NAME0, bid, path)
-    commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+    commit = relay.BUNDLE_REF
     ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME0}:{commit}": bid}))
     rc, out = E.build(NAME0, "toy", run=run_local)
     assert rc == 0, out

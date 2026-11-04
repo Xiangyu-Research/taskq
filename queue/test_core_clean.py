@@ -21,7 +21,7 @@ CLEAN = [
     "queue/experiments.py", "queue/spec.py", "queue/q", "sync/snapshot.sh",
     "queue/test_feed.py", "queue/test_common.py", "queue/test_shift.py", "sites/test_adapters.py",
     "sites/test_e2e.py", "sites/test_envs.py", "sync/test_tunnel.py", "queue/test_archive_task.sh",
-    "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py",
+    "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py", "queue/test_relay_store.py",
 ]
 WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b",
                    re.I)

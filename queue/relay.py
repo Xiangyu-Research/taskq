@@ -156,6 +156,9 @@ def deploy(name, bid, path):
         raise RuntimeError(f"推代码包 {bid} 到 {RM.conf(name)['label']} 出错：{r2.stderr.decode(errors='replace')[-300:]}")
 
 
+BUNDLE_REF = "origin/main"  # 打代码包用的提交（测试里钉住，别处推送 main 时不跟着换）
+
+
 def bundle(name, commit="origin/main", have=None, run_build=None):
     """origin/main 打的包和那边的 current 不同就推过去 → 说明（没变 → None）。"""
     bid, path = (run_build or RB.build)(name, commit)
@@ -199,7 +202,7 @@ def plan(s, name, rs, st, now=None):
         last = (st.get("last_ok") or {}).get(name, 0)
         if acts and now - last > DOWN_S:
             stuck[f"site:{name}:down"] = (f"{L} 读不到状态{f' {(now - last) / 3600:.0f} 小时' if last else ''}（ssh 不通，或那边的存储挂住），"
-                                           f"领着 {len(acts)} 个任务，那边的进度看不到")
+                                          f"领着 {len(acts)} 个任务，那边的进度看不到")
         return acts, stuck
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     tasks = rs.get("tasks") or {}
@@ -542,7 +545,10 @@ def execute(name, acts, s, run_add=None):
 def submit(name, subs):
     """照 topup 算好的开 worker（scripts/taskq/sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
     L, msgs, stuck = RM.conf(name)["label"], [], {}
-    run = lambda c: (lambda r: (r[0], r[1] + r[2]))(RM.rsh(name, c))  # noqa: E731
+
+    def run(c):
+        r = RM.rsh(name, c)
+        return r[0], r[1] + r[2]
     if RM.conf(name)["scheduler"] == "pueue":
         for _, k, n in subs:
             for _ in range(n):
@@ -571,7 +577,7 @@ def write_status(name, rs, st):
         if a:
             f = (rs.get("tasks") or {}).get(real) or {}
             out[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
-                               debug=f.get("debug") or {})
+                             debug=f.get("debug") or {})
     try:
         allst = json.load(open(STATUS))
     except (OSError, ValueError):
@@ -619,7 +625,7 @@ def run_one(s, name, dry):
         rs = {"bundle": None}
     if not dry and (live or mine) and rs is not None:
         try:
-            commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+            commit = subprocess.run(["git", "-C", REPO, "rev-parse", BUNDLE_REF], capture_output=True, text=True).stdout.strip()
             if fresh or rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
                 bid, path = RB.build(name, commit or "origin/main")
                 ST.update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
