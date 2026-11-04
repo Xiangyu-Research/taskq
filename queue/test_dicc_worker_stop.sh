@@ -67,7 +67,9 @@ check "不理停止信号的：$dt 秒内强制停、交还（≤ 30 秒）" '((
 waitfor 20 'grep -q "start .* t/c" $T/train.log'
 check "停止的不再领，空出的位置领下一个" '[[ $(grep -c "start .* t/a" $T/train.log) == 1 ]] && grep -q "start .* t/c" $T/train.log'
 python3 "$HERE/taskq.py" resume t/a > /dev/null
-check "撤销停止后照常排" '[[ ! -e $TASKQ_DIR/stopped/t__a ]] && python3 "$HERE/taskq.py" status | grep -q "t/a .* free"'
+# 撤销后有空位时 worker 可能马上又领走 t/a：只看不再是 stopped（free 或已经领了）
+waitfor 10 'python3 "$HERE/taskq.py" status | grep -q "t/a " && ! python3 "$HERE/taskq.py" status | grep -q "t/a .*stopped"'
+check "撤销停止后照常排" '[[ ! -e $TASKQ_DIR/stopped/t__a ]] && python3 "$HERE/taskq.py" status | grep "t/a " | grep -qv stopped'
 kill -TERM $wpid; wait $wpid 2> /dev/null
 fi
 
@@ -81,6 +83,7 @@ FAKE_SECS=60 FAKE_IGNORE=t/d SLURM_JOB_ID=900206 TASKQ_IDLE_MAX=60 RUN_TASK_STOP
 wpid=$!
 waitfor 30 'grep -q "^start .* t/d" $T/train.log 2> /dev/null'
 kill -TERM $wpid; wait $wpid; rc=$?
+waitfor 5 '! pgrep -f "$T/fake_train.sh t/d" > /dev/null'  # 强制停之后进程表里消失要一点时间
 check "停止信号、训练不理：强制停、交还，作业退出时假训练已经不在" '[[ $rc == 143 ]] && [[ -z $(ls $TASKQ_DIR/claims) ]] && ! pgrep -f "$T/fake_train.sh t/d" > /dev/null'
 fi
 
