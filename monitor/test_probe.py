@@ -7,7 +7,12 @@ import tempfile
 
 T = tempfile.mkdtemp(prefix="probe_")
 os.environ.update(HOME=T, TASKQ_STATE=os.path.join(T, "state"))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
+import fixture  # noqa: E402
+
+fixture.use()
+sys.path.insert(0, HERE)
 import health  # noqa: E402
 
 health.GPU_PROBE = "true"

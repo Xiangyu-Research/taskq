@@ -40,7 +40,7 @@ done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
 CODE=$($M get . code); [[ -n $CODE ]] || CODE=$($M get . repo)
 crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | { grep -v "on_boot.sh" || true; } | crontab -; }
-cron "bash $CODE/scripts/taskq/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
+cron "bash $CODE${CORE#"$REPO"}/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
 crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | { grep -v "git_pull_cron.sh" || true; } | crontab -; }  # 10/25 起由 box 快进
 roles=" $($M get . roles) "
 if [[ $roles == *" hub "* ]]; then  # 健康检查；登记表和看板。从只给 cron 用的克隆 ~/auto/PhD 运行（只跑已提交的代码）

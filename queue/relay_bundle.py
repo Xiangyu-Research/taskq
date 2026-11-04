@@ -48,7 +48,7 @@ RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), "queu
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
-SBATCH = {"gpu": "scripts/taskq/queue/worker.sbatch", "cpu": "scripts/taskq/queue/cpu_worker.sbatch"}  # worker 的种类 → 模板（也是包里的位置）
+SBATCH = {"gpu": cfg.rel("queue", "worker.sbatch"), "cpu": cfg.rel("queue", "cpu_worker.sbatch")}  # worker 的种类 → 模板（也是包里的位置）
 # 已经交给 Slurm、还在排队的老作业脚本里写的是改名时的 start.sh；running 的老 worker 换包时找 loop.sh
 # 等 2026-11 前交的作业都结束后删
 LINKS = {"scripts/queue/start.sh": "worker_start.sh", "scripts/queue/loop.sh": "dicc_worker.sh"}
@@ -203,15 +203,16 @@ def gen_sbatch(real, m, root, kind="gpu"):
         keep.append(f"#SBATCH --{o.group(1)}={over[o.group(1)]}" if over.get(o.group(1)) else ln)
     if kind not in (m.get("jobs") or ()):
         raise BundleError(f"RELAY 的 jobs 里没有 {kind}")
-    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/scripts/taskq/queue 交，往上 5 级是根目录）
-    logs = ("../../../../.." if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
+    # Slurm 不展开 ~：根目录以 ~ 开头时日志写相对路径（在 <根>/code/current/<核心>/queue 交，嵌着时往上 5 级是根目录）
+    up = "/".join([".."] * (2 + len(cfg.rel("queue").split("/"))))
+    logs = (up if root.startswith("~") else root) + "/data/logs/workers/%x_%j.out"
     return "\n".join(["#!/bin/bash", *keep,
                       f"#SBATCH --output={logs}",
                       f"R={RM.q(root)}",
                       'REPO=$(readlink -f "$R/code/current")',
                       'export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED'
                       + (" WORKER_DEVICE=cpu" if kind == "cpu" else ""),
-                      'exec bash "$REPO/scripts/taskq/queue/worker_start.sh"', ""])
+                      f'exec bash "$REPO/{cfg.rel("queue", "worker_start.sh")}"', ""])
 
 
 HOME_MAP = {"taskq": "queue", "gpu_pad/DISABLED": "queue/gpu_pad_DISABLED"}  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/

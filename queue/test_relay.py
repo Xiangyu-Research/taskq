@@ -21,6 +21,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
+QR = _cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
@@ -34,7 +35,7 @@ T = TN.TMP
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
     f.write(f'#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\n[[ $1 == -O ]] && {{ [[ -e {T}/master_down ]] && exit 255; exit 0; }}\n'
-            f'shift\ncd / && exec env -u TASKQ_CONFIG -u TASKQ_STATE TASKQ_PLUGINS={T}/remote/code/current/scripts/taskq/queue/testdata/plugins bash -c "$*"\n')
+            f'shift\ncd / && exec env -u TASKQ_CONFIG -u TASKQ_STATE TASKQ_PLUGINS={T}/remote/code/current/{QR}/testdata/plugins bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
 BIN = os.path.join(T, "bin")
 os.makedirs(BIN)
@@ -285,7 +286,7 @@ def test_plan():
     old_lookup, old_down = RT.lookup, C.backup_down
     RT.lookup = lambda k: dict(archive=True)
     arec = dict(machine=M.hub(), id=9, label="relay_archive:" + K, step="relay_archive", key=K, added=2000.0)
-    fcmd = dict(fdone[0], command="python3 scripts/taskq/queue/relay.py fetch x k && bash scripts/taskq/queue/archive_task.sh box k")
+    fcmd = dict(fdone[0], command=f"python3 {QR}/relay.py fetch x k && bash {QR}/archive_task.sh box k")
     plain_fail = [dict(fdone[0], status="Failed")]
     try:
         C.backup_down = lambda ok=None: "dicc1 暂停检查（停机）"
@@ -781,7 +782,8 @@ def test_tilde_root():
         M.RELAY[NAME] = c0
     files = relay_bundle.contents(NAME, commit="HEAD", root="~/st/t123")
     sb = next(t for p, (t, _) in files.items() if p.endswith("worker.sbatch"))
-    assert "#SBATCH --output=../../../../../data/logs/workers/%x_%j.out" in sb and "\nR=~/st/t123\n" in sb, sb
+    up = "/".join([".."] * (2 + len(QR.split("/"))))  # 在 <根>/code/current/<QR> 交，往上到根目录
+    assert f"#SBATCH --output={up}/data/logs/workers/%x_%j.out" in sb and "\nR=~/st/t123\n" in sb, sb
     assert "worker_start.sh" in sb  # 显存填充那条路（worker.sbatch → worker_start.sh）不绕开
     txt = "\n".join(t for t, _ in files.values())
     assert "~/st/t123/queue" in txt or "$HOME/st/t123/queue" in txt
@@ -806,7 +808,7 @@ def test_adapters_in_relay():
     try:
         msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2, "worker.sbatch")])
         assert not stuck and len(seen) == 2 and all(re.search(r"sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=1:00:00 worker.sbatch", c) for _, c in seen)
-        assert seen[0][1].startswith(f"cd {relay.R.q(RM.root(NAME))}/code/current/scripts/taskq/queue && ")
+        assert seen[0][1].startswith(f"cd {relay.R.q(RM.root(NAME))}/code/current/{QR} && ")
         seen.clear()
         msgs, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
         assert not stuck and len(seen) == 1 and seen[0][1].endswith("--qos=normal --time=08:00:00 cpu_worker.sbatch") and "CPU worker" in msgs[0], (seen, msgs)
@@ -1055,11 +1057,11 @@ def test_deploy_keeps_busy():
             r = tempfile.mkdtemp(dir=T, prefix="dk_")
             M.RELAY[NAME] = dict(c0, root=r, scheduler=sched)
             for i, d in enumerate("abcd"):
-                os.makedirs(os.path.join(r, "code", d, "scripts", "taskq", "queue"))
+                os.makedirs(os.path.join(r, "code", d, QR))
                 t = old if d in "ab" else time.time() - 3600 * (4 - i)
                 os.utime(os.path.join(r, "code", d), (t, t))
             with open(sq, "w") as f:
-                f.write(f"#!/bin/bash\necho {r}/code/a/scripts/taskq/queue\n" if squeue == "busy" else "#!/bin/bash\nexit 1\n")
+                f.write(f"#!/bin/bash\necho {r}/code/a/{QR}\n" if squeue == "busy" else "#!/bin/bash\nexit 1\n")
             os.chmod(sq, 0o755)
             relay.deploy(NAME, "n", src)
             got = set(os.listdir(os.path.join(r, "code"))) - {"current"}

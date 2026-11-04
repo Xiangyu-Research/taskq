@@ -12,6 +12,7 @@ import textwrap
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
+QR = _cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
@@ -67,6 +68,20 @@ ok("TASKQ_PLUGINS 用 : 隔开，~ 展开，空的跳过，相对路径原样",
 setenv(TASKQ_PLUGINS=os.path.join(T, "nonexistent"))
 ok("TASKQ_PLUGINS 不存在的文件夹：没有插件，不报错", cfg.plugins("recipes") == [])
 
+# 调度代码在使用者仓库里的位置：嵌着（<仓库>/scripts/taskq）和单独的检出（核心就是仓库）
+lay = {}
+for name, sub in (("embed", "scripts/taskq/queue"), ("alone", "queue")):
+    d = os.path.join(T, "layout", name, sub)
+    os.makedirs(d)
+    with open(os.path.join(HERE, "cfg.py")) as src, open(os.path.join(d, "cfg.py"), "w") as dst:
+        dst.write(src.read())
+    lay[name] = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import cfg; "
+                                "print(cfg.CORE_REL, cfg.rel('queue', 'taskq.py'), cfg.rel('queue'))", d],
+                               capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "TASKQ_REPO"}).stdout.split()
+ok("cfg.rel：嵌着时 scripts/taskq/…，单独的检出时没有前缀（不带 ./）",
+   lay["embed"] == ["scripts/taskq", "scripts/taskq/queue/taskq.py", "scripts/taskq/queue"]
+   and lay["alone"] == [".", "queue/taskq.py", "queue"])
+
 # 状态文件夹
 setenv(TASKQ_STATE=None)
 ok("TASKQ_STATE 没设：taskq → ~/.cache/phd/taskq", cfg.state("taskq") == os.path.join(HOME, ".cache/phd/taskq"))
@@ -119,7 +134,7 @@ def cfg_get(config, *args):
 r = cfg_get(fixture.CONFIG, "get", "name")
 ok("cfg.py get：字符串原样", r.returncode == 0 and r.stdout == "Demo\n")
 r = cfg_get(fixture.CONFIG, "get", "code_dirs")
-ok("cfg.py get：元组用空格连起来", r.returncode == 0 and r.stdout == "scripts/taskq/queue scripts/taskq/queue/testdata/code\n")
+ok("cfg.py get：元组用空格连起来", r.returncode == 0 and r.stdout == f"{QR} {QR}/testdata/code\n")
 r = cfg_get(fixture.CONFIG, "get", "no_such_key")
 ok("cfg.py get：没有的键 → 空行，退出码 0", r.returncode == 0 and r.stdout == "\n")
 r = cfg_get(c1, "get", "name")

@@ -65,7 +65,7 @@ os.makedirs(os.environ["TASKQ_DIR"])
 open(os.path.join(os.environ["TASKQ_DIR"], "ENABLED"), "w").close()
 
 cfg.use_config()
-for d in ("scripts/taskq/queue", "scripts/sync", "scripts/monitor", "scripts/taskq/sites"):
+for d in (cfg.rel("queue"), "scripts/sync", "scripts/monitor", cfg.rel("sites")):
     sys.path.insert(0, os.path.join(REPO, d))
 import machines as M  # noqa: E402
 import policy as P  # noqa: E402

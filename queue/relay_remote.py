@@ -61,7 +61,7 @@ def prefix(name):
 
 def rtq(name, args, timeout=180, input=None):
     """那边的 taskq.py <args>（input：标准输入）→ (退出码, 输出)；连不上 → None。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} scripts/taskq/queue/taskq.py {args}", input=input, timeout=timeout)
+    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} {cfg.rel('queue', 'taskq.py')} {args}", input=input, timeout=timeout)
     return None if rc in (124, 255) else (rc, (out + err).strip())
 
 
@@ -81,7 +81,8 @@ def rpy(name, code, data=None, timeout=600, job=None):
     return res
 
 
-HEAD = "import json,os,sys\nsys.path[:0]=['scripts/taskq/queue','scripts/queue']\nimport spec\nR=sys.argv[1]\nA=json.load(sys.stdin)\n"
+PATHS = f"sys.path[:0]=[{cfg.rel('queue')!r},'scripts/queue']\n"  # 在代码包的根目录下跑（代码包和仓库同一布局）
+HEAD = "import json,os,sys\n" + PATHS + "import spec\nR=sys.argv[1]\nA=json.load(sys.stdin)\n"
 
 STATUS_PY = HEAD + """import shutil,subprocess,taskq
 st=taskq.local_status()
@@ -321,8 +322,7 @@ def adopt_srcs(name):
 
 # 清理（relay_store.gc 发过去跑）
 GC_PY = """import json,os,shutil,stat,sys
-sys.path[:0]=['scripts/taskq/queue','scripts/queue']
-import spec
+""" + PATHS + """import spec
 R=os.path.realpath(sys.argv[1])
 A=json.load(sys.stdin)
 soft=int(A['soft_gb']*1e9)

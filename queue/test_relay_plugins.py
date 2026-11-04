@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "sites"))
 import relay_plugins as RN  # noqa: E402
 import names as N  # noqa: E402
 import spec as S  # noqa: E402
+import cfg  # noqa: E402
+QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 
 DS = "D777_fake"
 CASES = ["s101", "s101_b", "s102", "x-00582-000-syn"]
@@ -139,7 +141,7 @@ INS = {"raw/holdout/A/inputs": ["A-001", "A-002"],
        "raw/ext/C-x/inputs": ["C-010"]}
 COH = {"raw/holdout/A/inputs": "A_holdout", "raw/ext/B/inputs": "B",
        "raw/ext/C/inputs": "C", "raw/ext/C-x/inputs": "C-x"}
-INFER_SH = "scripts/taskq/queue/testdata/bin/infer_task.sh"
+INFER_SH = f"{QR}/testdata/bin/infer_task.sh"
 
 
 def infer_setup():

@@ -2,6 +2,11 @@
 """测试用的"怎么跑"（2026-11-03）：形状同真的 policy.py（字段说明见 scripts/taskq/queue/README.md 的"开关和配置"），值取自
 11/3 的真表，去掉了和日期有关的部分（OFFLINE_UNTIL 为空，SHIFT 不限日期）。
 """
+import os
+
+import cfg  # 读配置的是核心的模块，核心的 queue/ 已经在 sys.path 上
+
+QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 
 AUTO = dict(advance=True, lab1=True, dicc2=True, lab0=True, dicc1=True)
 
@@ -44,16 +49,16 @@ SLURM = {
 READY = {"dicc2": 2, "lab1": 2, "lab0": 1, "dicc1": 2}
 
 OUTPUTS = dict(
-    bundle=("scripts",),
-    experiments="scripts/taskq/queue/testdata/exps/*/experiments.py",
-    plans="scripts/taskq/queue/testdata/exps/*/plans.md",
-    code_dirs=("scripts/taskq/queue", "scripts/taskq/queue/testdata/code"),
+    bundle=(os.path.dirname(cfg.CORE_REL) or ".",),  # 调度代码所在的文件夹（单独的检出时是整个仓库）
+    experiments=QR + "/testdata/exps/*/experiments.py",
+    plans=QR + "/testdata/exps/*/plans.md",
+    code_dirs=(QR, QR + "/testdata/code"),
     bundle_check="base",
-    env_script="scripts/taskq/queue/testdata/env.sh",
+    env_script=QR + "/testdata/env.sh",
     health="~/.cache/phd-health",
     topic="~/.config/phd-health/ntfy_topic",
     name="Demo",
     heads="~/.cache/phd/code/heads.tsv",
-    registry=dict(cmd="scripts/taskq/queue/testdata/bin/registry.py", dir="scripts/taskq/queue/testdata/exps/demo",
+    registry=dict(cmd=QR + "/testdata/bin/registry.py", dir=QR + "/testdata/exps/demo",
                   files=("registry.csv", "registry.md")),
 )

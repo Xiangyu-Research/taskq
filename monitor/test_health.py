@@ -20,6 +20,8 @@ os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "queue"))
 import health as H  # noqa: E402
 import shift  # noqa: E402
+import cfg  # noqa: E402
+QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 _sd = tempfile.mkdtemp()
 shift.LOG, shift.STATE = f"{_sd}/refill.log", f"{_sd}/shift.json"  # 不写真的 ~/refill.log、状态文件夹
 
@@ -62,9 +64,9 @@ def task(i, group, status, cmd, label="", start=NOW - timedelta(hours=3), end=No
 
 
 LAB_BUSY = {"groups": {}, "tasks": [dict(id=90, group="gpu1", status="Running", label="busy_a", deps=[], start=None, end=None,
-                                         command="bash scripts/taskq/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=2"),
+                                         command=f"bash {QR}/run_task.sh toy ds=D101_alpha variant=V_save frag=2"),
                                     dict(id=91, group="gpu1", status="Queued", label="busy_b", deps=[], start=None, end=None,
-                                         command="bash scripts/taskq/queue/run_task.sh toy ds=D101_alpha variant=V_save frag=3")]}
+                                         command=f"bash {QR}/run_task.sh toy ds=D101_alpha variant=V_save frag=3")]}
 
 
 def snap(**kw):
@@ -97,7 +99,7 @@ ok("24 小时前的失败不再报", not any(p.startswith("pueue:box:3:") for p 
 ok("手动停的（143、pueue kill）只记不推", [p["level"] for k, p in P.items() if k.startswith(("pueue:box:4:", "pueue:box:5:"))] == ["info"] * 2)
 ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["level"] for k, p in P.items() if k.startswith("pueue:box:6:")] == ["normal"])
 
-lab_train = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
+lab_train = task(7, "gpu1", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}},
          src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
@@ -112,7 +114,7 @@ def tqrow(key, state, worker=None, since=None, log_age=None, kind="toy", task_lo
 
 
 old = NOW.timestamp() - 3 * 3600  # 领了 3 小时
-lab_men = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
+lab_men = task(7, "gpu1", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_men]}},
          src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}},
          taskq={"box": dict(enabled=True, tasks=[dict(tqrow(MEN0, "claimed", "lab", since=old), assigned="lab")])})
@@ -133,15 +135,15 @@ def tk(cmd):
     return (r["step"], r["key"]) if r else (None, None)
 
 
-ok("run_task.sh 的训练命令 → key", tk("bash scripts/taskq/queue/run_task.sh toy ds=D111_beta "
+ok("run_task.sh 的训练命令 → key", tk(f"bash {QR}/run_task.sh toy ds=D111_beta "
                                               "variant=V_save_n470 frag=0") == ("train", MEN0))
-ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk("bash -c 'bash scripts/taskq/queue/run_task.sh toy "
+ok("q 加的、整条命令包在引号里的 run_task.sh 也认", tk(f"bash -c 'bash {QR}/run_task.sh toy "
                                                            "ds=D116_gamma frag=2'") == ("train", MET2))
-ok("command 做法的任务 → 它自己给的 key", tk("bash scripts/taskq/queue/run_task.sh command key=x/y cmd=true env=base "
+ok("command 做法的任务 → 它自己给的 key", tk(f"bash {QR}/run_task.sh command key=x/y cmd=true env=base "
                                                      "out=runs/x done=ok") == ("train", "x/y"))
-ok("参数写错的 run_task.sh 不当成训练", tk("bash scripts/taskq/queue/run_task.sh toy dss=x frag=0") == (None, None))
-ok("别的脚本（如老的 fetch_task.sh）不认", H.C.from_command(f"bash scripts/taskq/queue/fetch_task.sh dicc {MET2}") is None)
-lab_rt = task(7, "gpu1", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0",
+ok("参数写错的 run_task.sh 不当成训练", tk(f"bash {QR}/run_task.sh toy dss=x frag=0") == (None, None))
+ok("别的脚本（如老的 fetch_task.sh）不认", H.C.from_command(f"bash {QR}/fetch_task.sh dicc {MET2}") is None)
+lab_rt = task(7, "gpu1", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0",
               "train:" + MEN0)
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_rt]}},
          src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}}})
@@ -229,7 +231,7 @@ ok("看板有结果等确认 → 报", "board" in P)
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
                             groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
-fk = task(3, "gpu0", "Running", "bash scripts/taskq/queue/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
+fk = task(3, "gpu0", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
          src={"box": {"tasks": {}}, "fake": {"tasks": {}},
               "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(minutes=5))}}})

@@ -17,6 +17,8 @@ import fixture  # noqa: E402
 fixture.use()
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402
+import cfg  # noqa: E402
+QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 
 fails = 0
 
@@ -40,7 +42,7 @@ s = S.resolve("toy", {"ds": "D111_beta", "variant": "V_save_n470", "frag": "1"})
 ok("toy：key、out、env 默认值", s["key"] == "D111_beta/V_save_n470/1"
    and s["out"] == "results/D111_beta/V_save_n470__PlanM__full/frag_1"
    and s["env"] == "base" and s["data"] == ["prepared/D111_beta"])
-ok("toy：命令按参数填", s["cmd"] == "bash scripts/taskq/queue/testdata/bin/toy_train.sh D111_beta full 1 PlanM V_save_n470")
+ok("toy：命令按参数填", s["cmd"] == f"bash {QR}/testdata/bin/toy_train.sh D111_beta full 1 PlanM V_save_n470")
 ok("toy：{data}、{repo} 留到运行时展开", "{data}" in s["vars"]["DEMO_RESULTS"] and "{repo}" in s["vars"]["DEMO_CODE"])
 ok("缺必填参数（frag）：报错", raises(lambda: S.resolve("toy", {"ds": "D101_alpha"})))
 ok("写错参数名：报错", raises(lambda: S.resolve("toy", {"ds": "D101_alpha", "frag": "0", "variantt": "x"})))

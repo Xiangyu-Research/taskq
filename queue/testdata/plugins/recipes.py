@@ -1,14 +1,16 @@
 """测试用的做法 toy（2026-11-02）：形状同真的领域插件里的训练做法（参数、结果文件夹、训完的标志、存档、进度、拉回、归档、中继），
 命令是 testdata/bin/toy_train.sh。字段说明见 scripts/taskq/queue/recipes.py 开头。"""
 from recipes import REQUIRED
+import cfg
+QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 
 RECIPES = {
     "toy": dict(
         params=dict(ds=REQUIRED, frag=REQUIRED, variant="V_save", plan="PlanM", cfg="full", env="base",
-                    code="scripts/taskq/queue/testdata/code", model="{ds}/{variant}__{plan}__{cfg}"),
+                    code=QR + "/testdata/code", model="{ds}/{variant}__{plan}__{cfg}"),
         key="{ds}/{variant}/{frag}",
         env="{env}",
-        cmd="bash scripts/taskq/queue/testdata/bin/toy_train.sh {ds} {cfg} {frag} {plan} {variant}",
+        cmd="bash " + QR + "/testdata/bin/toy_train.sh {ds} {cfg} {frag} {plan} {variant}",
         vars=dict(DEMO_RAW="{data}/raw", DEMO_PREPARED="{data}/prepared", DEMO_RESULTS="{data}/results", DEMO_CODE="{repo}/{code}"),
         out="results/{model}/frag_{frag}",
         done=["check/summary.json", "final.ckpt|ARCHIVED"],

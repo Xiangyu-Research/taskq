@@ -24,6 +24,13 @@ def _user_repo():
 
 REPO = _user_repo()
 CORE_REL = os.path.relpath(CORE, REPO)  # 使用者的仓库里调度代码的位置（给在仓库根目录下跑的命令用）
+
+
+def rel(*parts):
+    """调度代码里的文件相对使用者仓库根（代码包的根同样布局）的路径：嵌着时 scripts/taskq/…，单独的检出时 …"""
+    return os.path.normpath(os.path.join(CORE_REL, *parts))
+
+
 STATE_HOME = "~/.cache/phd/"
 STATE_PLACES = {"taskq": "~/.cache/phd/taskq", "gpu_pad/DISABLED": "~/.cache/phd/gpu_pad/DISABLED"}
 

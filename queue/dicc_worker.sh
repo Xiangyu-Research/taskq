@@ -427,9 +427,10 @@ rm -f "$ERRF"
 rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
 # 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；不是代码包的退出，由 relay.py 重开
 NEW=$(readlink -f "$(dirname "$REPO")/current" 2> /dev/null)
-if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $NEW/scripts/taskq/queue/worker_start.sh ]]; then
+START=$NEW${CORE#"$REPO"}/queue/worker_start.sh
+if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $START ]]; then
     echo "$(ts) 换成新代码 $(basename "$NEW") 接着跑"
-    exec bash "$NEW/scripts/taskq/queue/worker_start.sh"
+    exec bash "$START"
 fi
 [[ -n $RESTART ]] && echo "$(ts) 退出，由 relay.py 用新代码重开"
 exit 0

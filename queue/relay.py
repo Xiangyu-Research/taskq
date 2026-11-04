@@ -497,20 +497,20 @@ def execute(name, acts, s, run_add=None):
                 a = dict(a, op="stage")
             if a["op"] in ("stage", "restage"):
                 lab = label("relay_stage", k)
-                cmd = f"python3 scripts/taskq/queue/relay.py stage {name} {shlex.quote(k)} " + (
+                cmd = f"python3 {cfg.rel('queue', 'relay.py')} stage {name} {shlex.quote(k)} " + (
                     "--no-add" if a["op"] == "restage" else f"--nice {int(a['nice'])}")
                 tid = add(M.hub(), lab, "relay_stage", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 的 {k} 排了{'补传缺的输入' if a['op'] == 'restage' else '传数据'}（box 任务 {tid}）")
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
-                cmd = f"python3 scripts/taskq/queue/relay.py fetch {name} {shlex.quote(k)}"
+                cmd = f"python3 {cfg.rel('queue', 'relay.py')} fetch {name} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完了 {k}，排了拉回（box 任务 {tid}）")
             elif a["op"] == "archive":
                 lab = label("relay_archive", k)
-                cmd = f"bash scripts/taskq/queue/archive_task.sh {M.hub()} {shlex.quote(k)}"
+                cmd = f"bash {cfg.rel('queue', 'archive_task.sh')} {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_archive", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
                 msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
@@ -558,7 +558,7 @@ def submit(name, subs):
                 else:
                     stuck[kkey(f"site:{name}:worker", k)] = f"{L} 开 {wname(k)} 出错：{out}"
         return msgs, stuck
-    cwd = R.q(RM.root(name)) + "/code/current/scripts/taskq/queue"
+    cwd = R.q(RM.root(name)) + "/code/current/" + cfg.rel("queue")
     for r in SL.start_workers(cwd, subs, run, RM.conf(name).get("job_names")):
         k = sub_kind((r["qos"], r["time"], r["n"], r["file"]))
         if r["err"] is not None:

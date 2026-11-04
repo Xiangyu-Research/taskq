@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
+QR = _cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 T = tempfile.mkdtemp()
 os.environ["ADVANCE_BT"] = T
 os.environ["ADVANCE_LOG"] = os.path.join(T, "advance.log")
@@ -149,7 +150,7 @@ T3 = "D116_gamma/V_save"       # T3：只有 oof
 
 def relay_fetch(s_, i, mach, qk, status="Running"):
     """box pueue 里加一个 relay.py 排的拉回（带它写的任务记录）。"""
-    s_["pueue"]["box"]["tasks"].append(dict(id=i, status=status, command=f"python3 scripts/taskq/queue/relay.py fetch {mach} {qk}",
+    s_["pueue"]["box"]["tasks"].append(dict(id=i, status=status, command=f"python3 {QR}/relay.py fetch {mach} {qk}",
                                             label=f"relay_fetch:{qk}", group="wait", end=None))
     s_["records"] = (s_.get("records") or []) + [dict(machine="box", id=i, label=f"relay_fetch:{qk}", step="relay_fetch", key=qk)]
     return s_
@@ -184,7 +185,7 @@ check("10/16 前的评测（没有 run.json、有 report.md）算做完", todo =
 
 # 5. 失败过的不重排，报出来；成功跑完却没结果的也不重排
 trained("D116_gamma", "V_save", "3")
-cmd3 = f"bash scripts/taskq/queue/testdata/bin/step.sh --stage infer {T}/results/D116_gamma/V_save__{P} 3"
+cmd3 = f"bash {QR}/testdata/bin/step.sh --stage infer {T}/results/D116_gamma/V_save__{P} 3"
 now = datetime.now().astimezone()
 todo, stuck = A.plan(snap([("Failed (1)", cmd3, now.isoformat())]))
 check("推理失败过：不重排，报到卡住", todo == [] and f"advance:infer:{T3}/3" in stuck and "pueue remove 0" in stuck[f"advance:infer:{T3}/3"])
@@ -237,7 +238,7 @@ check("compare_all 比所有实验结果新：没有要排的", todo == [])
 os.utime(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.run.json")
 os.utime(cp, (os.path.getmtime(cp) - 120,) * 2)
 touch(cp, json.dumps({"status": "ok", "start": (datetime.now() - timedelta(minutes=5)).astimezone().isoformat(timespec="seconds")}))
-todo, stuck = A.plan(snap([("Success", "/py scripts/taskq/queue/testdata/bin/compare_all.py", None)]))
+todo, stuck = A.plan(snap([("Success", f"/py {QR}/testdata/bin/compare_all.py", None)]))
 check("compare_all 成功过、之后又有新结果：照常重排（不当成卡住）", steps(todo) == [("compare_all", "all")] and not stuck)
 touch(cp, json.dumps({"status": "ok", "start": datetime.now().astimezone().isoformat(timespec="seconds")}))
 for k in F5:
@@ -261,7 +262,7 @@ todo, _ = A.plan(snap())
 pr_ = [t for t in todo if t["step"] == "prune"]
 check("删单折概率图：集成和每折评测都做完 → 排（box cpu 组，命令带五折）",
       steps(todo) == [("oof", "t14g"), ("prune", "t14g")] and pr_[0]["group"] == "cpu" and pr_[0]["label"] == "prune:t14g"
-      and pr_[0]["cmd"] == f"{PY} scripts/taskq/queue/testdata/bin/prune.py {T}/preds/{M14} --frags '0 1 2 3 4'")
+      and pr_[0]["cmd"] == f"{PY} {QR}/testdata/bin/prune.py {T}/preds/{M14} --frags '0 1 2 3 4'")
 todo, _ = A.plan(relay_fetch(snap(), 98, "dicc1", f"infer/{M14}/frag_1"))
 check("删单折概率图：第 1 份的推理结果还在从执行机拉回（relay_fetch）→ 不删", ("prune", "t14g") not in steps(todo))
 todo, _ = A.plan(relay_fetch(snap(), 98, "dicc1", f"eval/{M14}/frag_3"))
@@ -324,8 +325,8 @@ for c in ("a", "b"):
 
 # 7. 没有记录的任务按命令只认训练；拉回、归档由 relay.py 排，有它写的记录
 K4 = "D111_beta/V_save/4"
-check("认命令：拉回、归档的命令不认", A.C.from_command(f"bash scripts/taskq/queue/archive_task.sh box {K4}") is None
-      and A.C.from_command(f"python3 scripts/taskq/queue/relay.py fetch lab1 {K4}") is None)
+check("认命令：拉回、归档的命令不认", A.C.from_command(f"bash {QR}/archive_task.sh box {K4}") is None
+      and A.C.from_command(f"python3 {QR}/relay.py fetch lab1 {K4}") is None)
 check("认命令：不认识的命令 → None", A.C.from_command("pueue parallel 2 --group cpu") is None and A.C.from_command("echo 'unbalanced") is None)
 nr = [dict(machine="box", id=7, label="eval:t3g_f4", added=0, step="eval", key=K4)]
 check("有记录的按记录认（任务号和标签都对上）；任务号被别的任务重用（标签不同）→ 不认",
@@ -340,19 +341,19 @@ for p_ in (f"{T}/preds/D116_gamma/V_save__{P}/frag_3/MANIFEST.json",):
     os.remove(p_)
 todo, _ = A.plan(snap())
 check("推理命令逐字和以前一样", [t["cmd"] for t in todo if t["step"] == "infer" and t["key"] == f"{T3}/3"]
-      == [f"bash scripts/taskq/queue/testdata/bin/step.sh --stage infer {M5} 3"])
+      == [f"bash {QR}/testdata/bin/step.sh --stage infer {M5} 3"])
 lab_task = [dict(id=0, status="Running", command="bash step.sh --other-form", label="infer:t3g_f3", group="gpu", end=None)]
 todo, _ = A.plan(dict(snap(), pueue={"box": dict(tasks=lab_task)}))
 check("按标签认得（命令写法不同）：不重复排", not [t for t in todo if t["step"] == "infer" and t["key"] == f"{T3}/3"])
 inferred("D116_gamma", "V_save", "3")
 by_cmd = legacy_index()[0]
 want_cmds = {
-    ("eval", f"{T3}/3"): f"bash scripts/taskq/queue/testdata/bin/step.sh --stage eval {M5} 3",
-    ("oof", "t3g"): f"{PY} scripts/taskq/queue/testdata/bin/oof.py {M5}",
-    ("paired", "t3g"): f"{PY} scripts/taskq/queue/testdata/bin/paired.py --ref {T}/demo/analysis/D101_alpha/V_save__{P}/frags_0-1-2-3-4 "
+    ("eval", f"{T3}/3"): f"bash {QR}/testdata/bin/step.sh --stage eval {M5} 3",
+    ("oof", "t3g"): f"{PY} {QR}/testdata/bin/oof.py {M5}",
+    ("paired", "t3g"): f"{PY} {QR}/testdata/bin/paired.py --ref {T}/demo/analysis/D101_alpha/V_save__{P}/frags_0-1-2-3-4 "
                          f"--cmp T3={T}/demo/analysis/D116_gamma/V_save__{P}/oof/eval --out {T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired",
-    ("ens", "t14g"): f"ENSEMBLE_ONLY=1 bash scripts/taskq/queue/testdata/bin/step.sh --stage all {T}/results/D121_alphagamma/V_save__{P} '0 1 2 3 4'",
-    ("compare_all", "all"): f"{PY} scripts/taskq/queue/testdata/bin/compare_all.py",
+    ("ens", "t14g"): f"ENSEMBLE_ONLY=1 bash {QR}/testdata/bin/step.sh --stage all {T}/results/D121_alphagamma/V_save__{P} '0 1 2 3 4'",
+    ("compare_all", "all"): f"{PY} {QR}/testdata/bin/compare_all.py",
 }
 inv = {v: k for k, v in by_cmd.items()}
 check("评测、oof、配对、集成、compare_all 的命令逐字和以前一样", all(inv.get(k) == v for k, v in want_cmds.items()))
@@ -436,7 +437,7 @@ A.M.RELAY["dicc1"].pop("cap", None)  # dicc1 的 cap 只在下面一项测，其
 x = tc(A.plan(snap())[0])
 check("queue:dicc1 → 进总队列只给 dicc1（档位 -100、{data} 留给那边换），box 不跑",
       len(x) == 1 and x[0].get("op") == "taskq" and x[0]["qnice"] == -100 and f"key={TCQ}" in x[0]["args"]
-      and 'machines=["dicc1"]' in x[0]["args"] and f"cmd=bash scripts/taskq/queue/testdata/bin/infer_task.sh {{data}}/{TCM} 2" in x[0]["args"]
+      and 'machines=["dicc1"]' in x[0]["args"] and f"cmd=bash {QR}/testdata/bin/infer_task.sh {{data}}/{TCM} 2" in x[0]["args"]
       and 'done=[".infer_done"]' in x[0]["args"])
 check("给执行机的任务单带上命令列出的输入（--stage needs:<阶段>，relay.py 按真名传过去）",
       any(y.startswith("inputs=") and f"{TCM}/frag_2/final.ckpt" in y for y in x[0]["args"]))
@@ -492,7 +493,7 @@ x = tc(A.plan(s_)[0])
 check("评测：dicc1 的 AUTO 关着 → box 的 cpu 组", [(t["step"], t["group"]) for t in x] == [("eval", "cpu")])
 A.P.AUTO = dict(A.P.AUTO, dicc1=True)
 os.remove(f"{T}/preds/D103_alpha_one/V_save__{P}/frag_2/MANIFEST.json")
-old_box = ("Stashed", f"bash scripts/taskq/queue/testdata/bin/step.sh --stage infer {T}/{TCM} 2", None)
+old_box = ("Stashed", f"bash {QR}/testdata/bin/step.sh --stage infer {T}/{TCM} 2", None)
 todo, stuck = A.plan(snap([old_box]))
 check("queue：box pueue 里已经有这一步 → 不加", not tc(todo))
 added = []
@@ -599,7 +600,7 @@ x = {t["step"]: t for t in todo if t["key"] == "t3b" and t["step"] in PSTEPS}
 check("probe：五折都在 box 上 → p1、p2 都进总队列给 dicc1（档位 -100、带输入），p2cmp 先不排",
       pr(todo) == [("p1", "taskq"), ("p2", "taskq")] and x["p2"]["qnice"] == -100
       and "key=probe/p2_t3b" in x["p2"]["args"] and 'machines=["dicc1"]' in x["p2"]["args"]
-      and f"cmd=MODEL={{data}}/{MENM} TAG=t3b bash scripts/taskq/queue/testdata/bin/p2_run.sh && touch {{data}}/demo/probe/p2_t3b/.probe_done"
+      and f"cmd=MODEL={{data}}/{MENM} TAG=t3b bash {QR}/testdata/bin/p2_run.sh && touch {{data}}/demo/probe/p2_t3b/.probe_done"
       in x["p2"]["args"] and "out=demo/probe/p2_t3b" in x["p2"]["args"]
       and any(a_.startswith("inputs=") and "demo/probe/p2/inputs" in a_ and f"{MENM}/frag_3/final.ckpt" in a_ for a_ in x["p2"]["args"]))
 s_ = snap()
@@ -610,7 +611,7 @@ touch(f"{T}/demo/probe/p2_t3b/.probe_done")
 todo, stuck = A.plan(s_)
 x = [t for t in todo if t["key"] == "t3b" and t["step"] in PSTEPS]
 check("probe：p2 拉回了 → box cpu 组排和 T0 的比较", [(t["step"], t["group"]) for t in x] == [("p2cmp", "cpu")]
-      and x[0]["cmd"] == f"{PY} scripts/taskq/queue/testdata/bin/p2_compare.py --tags t3b --out {T}/demo/probe/p2_compare_t3b"
+      and x[0]["cmd"] == f"{PY} {QR}/testdata/bin/p2_compare.py --tags t3b --out {T}/demo/probe/p2_compare_t3b"
       and x[0]["label"] == "p2cmp:t3b")
 touch(f"{T}/demo/probe/p2_compare_t3b/p2_compare.run.json", '{"status": "ok"}')
 touch(f"{T}/demo/probe/p1_t3b/.probe_done")
