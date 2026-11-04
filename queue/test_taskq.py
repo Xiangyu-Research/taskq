@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""taskq.py 的测试（2026-10-17，10/18 改成任务说明）：临时目录里的假队列、假训练结果，不连任何机器。  python3 scripts/taskq/queue/test_taskq.py"""
+"""taskq.py 的测试（2026-10-17，10/18 改成任务说明）：临时目录里的假队列、假训练结果，不连任何机器。  python3 queue/test_taskq.py"""
 import glob
 import json
 import os

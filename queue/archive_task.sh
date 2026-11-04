@@ -1,8 +1,8 @@
 #!/bin/bash
-# box 上训完拉回的一个任务（scripts/taskq/queue/relay.py 拉回、改名后排的 relay_archive）备份到备份机器（表里角色 backup 的，
+# box 上训完拉回的一个任务（queue/relay.py 拉回、改名后排的 relay_archive）备份到备份机器（表里角色 backup 的，
 # 11/3 起是 dicc1 的 backup 目录，在 DICC 的 /scr 上），再核对（2026-10-18）。
 #   archive_task.sh <hub 的名字> <key> [--dry-run]
-# 结果文件夹、一起备份的文件按任务的输出（scripts/taskq/queue/spec.py outputs <key>）：outs、上一级里的 extra、分段日志。
+# 结果文件夹、一起备份的文件按任务的输出（queue/spec.py outputs <key>）：outs、上一级里的 extra、分段日志。
 # 步骤：
 #   1. box → 备份机器：outs、上一级里的 extra、分段日志（<数据目录>/logs/tasks/<key 的文件名>__*；以前放在别处的按说明的 oldlogs）。
 #      备份机器上和 box 不同的文件按 box 的覆盖（11/3：如 11/2 稀疏化过的概率图），不删备份机器上多出的文件。

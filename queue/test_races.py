@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """并发和中途失败（11/3）：锁的抢占、box 的 pueue 读不到时 relay 只续约、GC 和 stage 抢 pin。
-跑法：python3 scripts/taskq/queue/test_races.py [lock|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
+跑法：python3 queue/test_races.py [lock|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
 全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
 import json
 import os

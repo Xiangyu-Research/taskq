@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测试用的"怎么跑"（2026-11-03）：形状同真的 policy.py（字段说明见 scripts/taskq/queue/README.md 的"开关和配置"），值取自
+"""测试用的"怎么跑"（2026-11-03）：形状同真的 policy.py（字段说明见 queue/README.md 的"开关和配置"），值取自
 11/3 的真表，去掉了和日期有关的部分（OFFLINE_UNTIL 为空，SHIFT 不限日期）。
 """
 import os

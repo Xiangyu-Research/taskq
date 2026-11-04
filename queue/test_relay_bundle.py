@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑 test_dicc_worker*.sh 的几个情况。
 包从工作区建（commit=None），根目录换成临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 只有 scripts）。
-    python3 scripts/taskq/queue/test_relay_bundle.py
+    python3 queue/test_relay_bundle.py
 """
 import ast
 import json
@@ -33,8 +33,8 @@ import relay_bundle as B  # noqa: E402
 NAME = "dicc2"
 STEP = f"{BQ}/testdata/bin/step.sh"  # 包里的
 FIX_PLUGINS = f"{BQ}/testdata/plugins"  # 包里的测试用插件（相对包）
-# 旧位置的转交，和 PhD 里原来的那两个文件逐字相同（11/4 起由核心生成）
-FWD = ('#!/bin/bash\n# split_apply.py 生成的旧路径转交：scripts/taskq/queue/{0}（scripts/queue/SPLIT.md）\n'
+# 旧位置的转交（11/4 起由核心生成，切换前交的 Slurm 作业用）
+FWD = ('#!/bin/bash\n# taskq 生成的旧路径转交（切换前交的作业用）：scripts/taskq/queue/{0}\n'
        '_new="$(dirname "$(readlink -f "${{BASH_SOURCE[0]}}")")/../taskq/queue/{0}"\n'
        '[[ ${{BASH_SOURCE[0]}} != "$0" ]] && {{ source "$_new" "$@"; return; }}\nexec bash "$_new" "$@"\n')
 

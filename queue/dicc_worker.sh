@@ -1,6 +1,6 @@
 #!/bin/bash
-# DICC 训练作业的任务队列 worker（2026-10-17；10/18 起不认识具体模型）：从 scripts/taskq/queue/taskq.py 的队列里按顺序领任务，
-# 每个任务交给 scripts/taskq/queue/run_task.sh 跑（环境、命令、怎么算训完都在任务说明里，见 scripts/taskq/queue/recipes.py）。
+# DICC 训练作业的任务队列 worker（2026-10-17；10/18 起不认识具体模型）：从 queue/taskq.py 的队列里按顺序领任务，
+# 每个任务交给 queue/run_task.sh 跑（环境、命令、怎么算训完都在任务说明里，见 queue/recipes.py）。
 # 只领本机有环境的任务（envs/machines.py 的 envs）。
 # 一张卡训几个看实际情况：先训 1 个；最近一个训练开始 15 分钟以后，如果近 10 分钟 GPU 平均使用率低于 90%（10/18 前 80%）、
 # 还空着一半显存，再领 1 个（最多 2 个，并且作业要有 ≥ 24 个 CPU、≥ 56G 内存）。
@@ -8,8 +8,8 @@
 # 离时限不到 1 小时不再领新的；没有在训的、也领不到新的，空着等（有了就领），等满 40 分钟还没有就退出
 # （11/2 起：排了几天的作业开始时队列里刚好没有能领的、数据还在传，不再几秒就结束）。作业到时限被停掉时，没训完的任务交还队列，
 # 下一个领到的从存档接着训。
-#   bash dicc_worker.sh                     （scripts/taskq/queue/worker.sbatch → worker_start.sh）
-# WORKER_DEVICE=cpu（scripts/taskq/queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
+#   bash dicc_worker.sh                     （queue/worker.sbatch → worker_start.sh）
+# WORKER_DEVICE=cpu（queue/cpu_worker.sbatch，2026-10-24）：CPU 分区的作业，只领 device=cpu 的任务（如评测），一次 1 个，
 # 不等排在前面的、不看 GPU；没有能领的就结束（由 box 上的 relay.py 在有这类任务时才交）。
 # 出问题时不让排队的作业空跑掉：
 #   - 任务卡住（10/23 起）：开始 30 分钟以后，任务的日志和结果文件夹都 30 分钟没有变化，就停掉它、交还（不算失败），

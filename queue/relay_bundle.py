@@ -258,7 +258,7 @@ def machine_entry(name, e, root, entry=None):
              data=f"{root}/{proto.ROOT['data']}", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
     m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars", "task_unset") if k in e})
-    m["env_root"] = M.env_root(e)  # 按描述建的环境（scripts/taskq/sites/envs.py）在根目录下
+    m["env_root"] = M.env_root(e)  # 按描述建的环境（sites/envs.py）在根目录下
     m.update(entry or {})
     return m
 
@@ -442,7 +442,7 @@ def forwarder(old, target):
     """旧位置 old 的转交脚本：source 时 source 新的，否则 exec（target 相对核心，包里在 BC/ 下）。"""
     new = os.path.relpath(f"{BC}/{target}", os.path.dirname(old))
     return ("#!/bin/bash\n"
-            f"# split_apply.py 生成的旧路径转交：{BC}/{target}（scripts/queue/SPLIT.md）\n"
+            f"# taskq 生成的旧路径转交（切换前交的作业用）：{BC}/{target}\n"
             f'_new="$(dirname "$(readlink -f "${{BASH_SOURCE[0]}}")")/{new}"\n'
             '[[ ${BASH_SOURCE[0]} != "$0" ]] && { source "$_new" "$@"; return; }\n'
             'exec bash "$_new" "$@"\n')

@@ -5,7 +5,7 @@
 这里是每次检查的计划和命令行；和那边说话、发过去跑的小程序在 relay_remote.py（那边根目录的布局也在那里），box 上的记账和那边的清理
 在 relay_store.py，传数据、拉回、删那边的任务在 relay_transfer.py。
 
-每次健康检查（scripts/taskq/monitor/health.py，每 30 分钟）经 scripts/taskq/queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
+每次健康检查（monitor/health.py，每 30 分钟）经 queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
   1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
   2. 总队列里 worker 是它的每个任务：
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（补传缺的数据、建软链接、加进那边的队列；要放的路径和那边没做完的
@@ -23,17 +23,18 @@
      refill.TRAIN_OUT_GB，cap 里留不出来就不领。blobs 可以是指到别的盘的链接（DICC：/scr，11/4），输出和队列在根目录）；
   4. 那边排着和在跑的 worker 作业不够、又有要卡的任务（备好的或在训的）时排满（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
-按时段的执行机（envs/policy.py 的 SHIFT，scripts/taskq/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
+按时段的执行机（envs/policy.py 的 SHIFT，queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
 每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的任务，那边的队列里删掉任务
 （结果留着，接手的那台收编存档，见 machines.py 的 adopt），总队列里训完了再删结果。
 连不上它时只续总队列的领取；领着任务、连不上 2 小时以上报出来。
 
-    python3 scripts/taskq/queue/relay.py                         看现在会做什么（不改任何东西）
-    python3 scripts/taskq/queue/relay.py stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
-    python3 scripts/taskq/queue/relay.py fetch <名字> <key>      拉回做完的任务、核对，放进 box 的数据目录
-    python3 scripts/taskq/queue/relay.py bundle <名字> [--commit C]   打包、推过去、切换 current
-    python3 scripts/taskq/queue/relay.py status <名字>           那边的队列
-    python3 scripts/taskq/queue/relay.py resend <名字>           传过去的任务按现在的做法重新解析，换掉那边队列里的说明（11/4）
+    python3 queue/relay.py                         看现在会做什么（不改任何东西；taskq plan 连同按时段开关、训完以后一起看）
+    taskq internal stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
+    taskq internal fetch <名字> <key>              拉回做完的任务、核对，放进 box 的数据目录
+    taskq site bundle <名字> [--commit C]          打包、推过去、切换 current
+    taskq site status <名字>                       那边的队列
+    taskq site resend <名字>                       传过去的任务按现在的做法重新解析，换掉那边队列里的说明（11/4）
+（原来的 python3 queue/relay.py stage|fetch|bundle|status|resend … 照旧能用。）
 """
 import argparse
 import hashlib
@@ -88,7 +89,7 @@ PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记�
 
 def relayable(i):
     """refill.info 的结果 → 能不能领给它：做法能翻译（按本机的 recipes.py 算，总队列那边的代码可能还没更新），插件接受这个任务
-    （scripts/taskq/sites/names.py 的 accepts，如 nnU-Net 的训练器不读仓库里的病例子集）。"""
+    （sites/names.py 的 accepts，如 nnU-Net 的训练器不读仓库里的病例子集）。"""
     sp = i["spec"]
     rec, params = i["recipe"] or sp.get("recipe"), i["params"] or sp.get("params") or {}
     try:
@@ -123,7 +124,7 @@ def current_bundle(name):
 
 def parse_sched(name, rs):
     """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：各种 worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
-    一次 ssh 读完、在 box 上用适配器解析（scripts/taskq/sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
+    一次 ssh 读完、在 box 上用适配器解析（sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
     raw, c = rs.pop("sched_raw", None), RM.conf(name)
     rs["jobs"] = rs["squeue"] = None
     if raw is not None and c["scheduler"] == "pueue":
@@ -563,7 +564,7 @@ def execute(name, acts, s, run_add=None):
 
 
 def submit(name, subs):
-    """照 topup 算好的开 worker（scripts/taskq/sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
+    """照 topup 算好的开 worker（sites/pueue.py、slurm.py）→ (说明, 出错的 {问题编号: 说明})。"""
     L, msgs, stuck = RM.conf(name)["label"], [], {}
 
     def run(c):
@@ -623,7 +624,7 @@ def run_all(s, dry=False):
         try:
             ev, st_ = run_one(s, name, dry)
         except Exception as e:  # noqa: BLE001
-            ev, st_ = [], {alert_id("relay", name): f"scripts/taskq/queue/relay.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
+            ev, st_ = [], {alert_id("relay", name): f"queue/relay.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
     return events, stuck
@@ -733,6 +734,9 @@ def main(argv):
     p = sub.add_parser("resend", help="传过去的任务按现在的做法重新解析，换掉那边队列里的说明")
     p.add_argument("name")
     a = ap.parse_args(argv)
+    if a.cmd and a.name not in M.RELAY:
+        print(f"{ap.prog} {a.cmd}：没有执行机 {a.name}（有：{'、'.join(M.RELAY) or '无'}）", file=sys.stderr)
+        return 2
     if a.cmd in ("stage", "fetch"):
         if a.cmd == "stage" and a.nice is None and not a.no_add:
             ap.error("要给 --nice（或 --no-add）")

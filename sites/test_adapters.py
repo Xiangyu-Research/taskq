@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/taskq/sites/pueue.py、slurm.py、remote.py 的测试：假的输出，核对解析和开 / 补 worker 的命令。"""
+"""sites/pueue.py、slurm.py、remote.py 的测试：假的输出，核对解析和开 / 补 worker 的命令。"""
 import json
 import os
 import re

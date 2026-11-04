@@ -3,7 +3,7 @@
 建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理。
 完全隔离：执行机根目录、box 的数据目录、总队列都在临时目录里；pueue 是自己起的 pueued（自己的配置和 socket），结束时只停它；
 ssh 换成本机的 bash -c，不连任何机器；不改机器表（条目在进程里替换）。
-跑法：python3 scripts/taskq/sites/test_e2e.py（box 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
+跑法：python3 sites/test_e2e.py（box 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
 import glob
 import json
 import os
@@ -65,7 +65,7 @@ os.makedirs(os.environ["TASKQ_DIR"])
 open(os.path.join(os.environ["TASKQ_DIR"], "ENABLED"), "w").close()
 
 cfg.use_config()
-for d in (cfg.rel("queue"), "scripts/sync", "scripts/monitor", cfg.rel("sites")):
+for d in (cfg.rel("queue"), cfg.rel("sync"), cfg.rel("monitor"), cfg.rel("sites")):
     sys.path.insert(0, os.path.join(REPO, d))
 import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
@@ -333,7 +333,7 @@ def step_env_gate():
          [(t["key"], t["state"], t["worker"]) for t in bt.values()])
     rc, out = E.build(NAME, "toy", run=run_local)
     okf = os.path.join(RROOT, "state/envs/toy.ok")
-    step("site.py env 的建法（envs.build）：建好、检查过、写 .ok（= 描述的哈希）",
+    step("taskq site env 的建法（envs.build）：建好、检查过、写 .ok（= 描述的哈希）",
          rc == 0 and open(okf).read().strip() == M.spec_hash("toy"), out)
     a = M.activate(NAME, "toy")
     r = subprocess.run(["bash", "-c", a + "\npython -c 'import numpy,sys; print(sys.prefix)'"], capture_output=True, text=True)
@@ -608,7 +608,7 @@ def main():
         step_finish()
         step_gc()
         step_shift()
-        print("真的训练做法的小任务：跳过（换名、拉回见 scripts/taskq/queue/test_relay.py）")
+        print("真的训练做法的小任务：跳过（换名、拉回见 queue/test_relay.py）")
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:
             print(f"失败：{type(e).__name__}: {e}")

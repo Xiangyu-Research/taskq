@@ -5,7 +5,6 @@
 TASKQ_REPO、TASKQ_CONFIG。子命令在进程内调用各模块的 main(argv)；bash 脚本用 exec。
 """
 import importlib
-import importlib.util
 import inspect
 import os
 import subprocess
@@ -38,15 +37,8 @@ def paths():
 
 
 def load(mod):
-    """核心的模块；和标准库重名的（sites/site.py）按文件加载。没有这个模块 → None。"""
+    """核心的模块。没有这个模块 → None。"""
     paths()
-    if mod == "site":
-        p = os.path.join(CORE, "sites", "site.py")
-        s = importlib.util.spec_from_file_location("taskq_site", p)
-        m = importlib.util.module_from_spec(s)
-        sys.modules["taskq_site"] = m
-        s.loader.exec_module(m)
-        return m
     try:
         return importlib.import_module(mod)
     except ModuleNotFoundError as e:
@@ -181,7 +173,7 @@ def cmd_exp(sub):
     def fn(argv, prog):
         E = load("experiments")
         if hasattr(E, "main"):
-            return call("experiments", [sub, *argv], prog)
+            return call("experiments", [sub, *argv], prog.rsplit(" ", 1)[0])  # 子命令由 experiments.py 的 argparse 接上
         if sub == "env-of" and len(argv) == 1:
             return run(lambda: print(E.env_of(argv[0])), prog, argv)
         if sub == "name-of" and len(argv) >= 2:
@@ -275,8 +267,8 @@ TREE = {
         "status": Cmd("那边的队列", py("relay", "status", prog="taskq site"), own_help=True),
         "bundle": Cmd("打包、推过去、切换 current", py("relay", "bundle", prog="taskq site"), own_help=True),
         "resend": Cmd("传过去的任务按现在的做法重新解析、换掉那边的说明", py("relay", "resend", prog="taskq site"), own_help=True),
-        "env": Cmd("在那台上建环境、跑检查", py("site", "env", prog="taskq site"), own_help=True),
-        "envs": Cmd("只看：那台每个环境的状态", py("site", "envs", prog="taskq site"), own_help=True),
+        "env": Cmd("在那台上建环境、跑检查", py("envs_cli", "env", prog="taskq site"), own_help=True),
+        "envs": Cmd("只看：那台每个环境的状态", py("envs_cli", "envs", prog="taskq site"), own_help=True),
         "setup": Cmd("pueue 常驻进程、组、crontab（不给名字：本机）", sh("queue/setup.sh"), "[名字]",
                      "在本机，或在 hub 上经 ssh 替别的 pueue 机器做；重复运行没关系"),
     }),
@@ -295,9 +287,14 @@ TREE = {
                     "清单每行一个相对源目录的路径"),
         "pull": Cmd("那边 → box", py("tunnel", "pull", prog="taskq tunnel"), "<机器> <那边的源目录> <box 上的目标目录> <清单>",
                     "清单每行“相对路径<TAB>字节数”"),
+        "push-dirs": Cmd("box → 那边，整个子目录，传完核对", sh("sync/tunnel_push.sh"),
+                         "<机器> <box 上的源目录> <那边的目标目录（相对 home）> <子目录>…",
+                         "经 tunnel push 传；传之前在那边每个子目录放一个未完成标记，最后两边各算 MD5 逐个文件核对，一致才删标记。\n"
+                         "那边已有、大小和修改时间相同的文件跳过，中断后重新运行接着传。会跑几十分钟，放在后台或 tmux 里"),
     }),
     "pueue-add": Cmd("往本机 pueue 的一个组加一次性任务（工作目录是代码副本）", sh("queue/q"),
                      "<组> [pueue add 的选项] -- '<命令>'", "按机器表设好卡和组的环境变量；有 code 的机器先更新代码副本"),
+    "pueue-status": Cmd("各 pueue 机器的队列（只看）", lambda argv, prog: script("queue/qs", argv, prog), own_help=True),
     "snapshot": Cmd("按提交号的代码副本（拉取、建副本、切 current、删旧的）", sh("sync/snapshot.sh"), "<克隆>"),
     "check": Cmd("核对整个项目（配置、插件、实验表、所有任务）", py("check", prog="taskq check"), own_help=True),
     "path": Cmd("核心的位置：lib / api（queue/）、core（根）", cmd_path, "lib|api|core", project=False),
@@ -326,7 +323,7 @@ TREE = {
 SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
             ("调度", ["tick", "plan", "boot"]),
             ("执行机和实验", ["site", "exp"]),
-            ("其他", ["tunnel", "pueue-add", "snapshot", "check", "path", "machines", "self"])]
+            ("其他", ["tunnel", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
 
 
 def top_help():
@@ -351,7 +348,7 @@ def unknown(name, choices, prog):
 
 
 def use_project(explicit):
-    """找到项目就导出 TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS；找不到时照旧（核心嵌在 <仓库>/scripts/taskq 里的老布局）。"""
+    """找到项目就导出 TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS；找不到时照旧（代码包里核心在 <包>/scripts/taskq，cfg.py 按这个布局认仓库）。"""
     sys.path.insert(0, os.path.join(CORE, "queue"))
     import project
     root = project.find(explicit)

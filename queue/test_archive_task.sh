@@ -1,6 +1,6 @@
 #!/bin/bash
 # archive_task.sh 的测试（2026-11-03）：box、备份机都是临时目录，假 ssh 在本机跑，机器表里不走隧道，不连网。
-#   bash scripts/taskq/queue/test_archive_task.sh
+#   bash queue/test_archive_task.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"

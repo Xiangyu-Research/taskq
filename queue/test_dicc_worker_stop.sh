@@ -1,6 +1,6 @@
 #!/bin/bash
 # dicc_worker.sh 的模拟测试（同 test_dicc_worker.sh）：停止信号、停止某个任务、CPU worker、开始不久就失败
-#   bash scripts/taskq/queue/test_dicc_worker_stop.sh        WORKER_TEST_ONLY="3 4b" 只跑这几个情况
+#   bash queue/test_dicc_worker_stop.sh        WORKER_TEST_ONLY="3 4b" 只跑这几个情况
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"

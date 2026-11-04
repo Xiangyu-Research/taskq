@@ -1,5 +1,5 @@
 """测试用的实验表（2026-11-02）：形状同真的实验表（每份做的步骤、所有份做完以后的几串步骤、档位、跳过的外部集、折外划分、
-看板名称），做法是 toy（testdata/plugins/recipes.py），步骤的命令是 testdata/bin/ 下的假脚本。字段说明见 scripts/taskq/queue/experiments.py。
+看板名称），做法是 toy（testdata/plugins/recipes.py），步骤的命令是 testdata/bin/ 下的假脚本。字段说明见 queue/experiments.py。
 
 每个实验（_x 的参数）：id、exp、label、model、ds、variant、env、frags（训哪几份）、steps（训完以后的步骤，STEPS 的名字）、
 nice、board、skip_ext、only_ext、splits、probe、hours、vars、plan。

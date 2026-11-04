@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由 envs/policy.py 的 PLACE 定）：box 上的健康检查
-（scripts/taskq/monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的任务提前排（见下）。
-步骤和判断都从实验表（research/*/experiments.py，经 scripts/taskq/queue/experiments.py 读）和任务说明（scripts/taskq/queue/spec.py）来，
+（monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的任务提前排（见下）。
+步骤和判断都从实验表（research/*/experiments.py，经 queue/experiments.py 读）和任务说明（queue/spec.py）来，
 这里不认识具体模型。
 
 每个任务（实验表里的，加上队列里不属于任何实验的）：box 上训完（说明里的 done）以后，实验表里每个任务的步骤（如推理 → 评测），
@@ -27,12 +27,12 @@
 box 上排的任务做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
 失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排。
-在不在跑：box 的 pueue 任务按任务记录认（~/.cache/phd/tasks.json，scripts/taskq/queue/common.py 的 identify；这里加的任务都先记下），
+在不在跑：box 的 pueue 任务按任务记录认（~/.cache/phd/tasks.json，queue/common.py 的 identify；这里加的任务都先记下），
   没有记录的（手动加的）只认训练的命令。这一步的结果还在往 box 上拷（relay.py 的拉回在跑）时不算做完。
 envs/policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/advance.log，不真排；HOLD 对上的步骤在 box 上加成暂停的
   （pueue add --stashed），进任务队列的先不加。
 
-    python3 scripts/taskq/queue/advance.py           看现在会排什么（不改任何东西）
+    python3 queue/advance.py           看现在会排什么（不改任何东西；taskq plan 连同送任务一起看）
 """
 import itertools
 import os

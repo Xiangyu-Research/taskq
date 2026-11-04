@@ -215,7 +215,7 @@ def text(o):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="overview.py", description="总队列、各机器、每个任务的状态汇总（只读）")
+    ap = argparse.ArgumentParser(description="总队列、各机器、每个任务的状态汇总（只读）")
     ap.add_argument("--json", action="store_true", help="一行 JSON（字段见 proto.OVERVIEW_*）")
     ap.add_argument("--no-remote", action="store_true", help="只看本机，不连别的机器")
     a = ap.parse_args(argv)

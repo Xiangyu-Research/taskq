@@ -2,7 +2,7 @@
 """测 refill.py（2026-10-18）：挑任务（candidates、progress、data_gb）和 Slurm 补作业的规则（topup_plan、cpu_plan、slurm_plan），
 用假的队列状态，不连任何机器。
 
-    python3 scripts/taskq/queue/test_refill.py
+    python3 queue/test_refill.py
 """
 import copy
 import os
@@ -90,7 +90,7 @@ ok("留 1 个、已有 4 个（2 个在排）：再交 5 个", p == [("long", "3
 p, why = R.topup_plan(snap(queue=[tq(K_T14, 0, 1, "done")])["taskq"]["box"], {"long": (10, 0, 0)}, {"long": ("3-00:00:00", 0)})
 ok("没有要卡的任务：不交", p == [] and "没有要卡的任务" in why)
 ok("slurm.parse：5 段才算，少一段当读不到", R.SL.parse("QOS|long|10|3|1\nQOS|normal|10|2\n")["counts"] == {"long": (10, 3, 1)})
-ok("refill 里和 scripts/taskq/sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
+ok("refill 里和 sites/slurm.py 重复的都删了", not any(hasattr(R, f) for f in ("topup_probe", "parse_qos")))
 
 # 纯 CPU 任务（device=cpu，10/24）：GPU worker 不为它们补，有这类任务时才交 CPU worker
 K_EV = "eval/D101_alpha/x/frag_0"

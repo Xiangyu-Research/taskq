@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""测任务说明的解析（2026-10-18；11/2 起用 testdata/ 的配置和实验表）：scripts/taskq/queue/spec.py、recipes.py、experiments.py。不连机器。
+"""测任务说明的解析（2026-10-18；11/2 起用 testdata/ 的配置和实验表）：queue/spec.py、recipes.py、experiments.py。不连机器。
 
-    python3 scripts/taskq/queue/test_spec.py
+    python3 queue/test_spec.py
 """
 import itertools
 import json

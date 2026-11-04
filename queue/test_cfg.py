@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """cfg.py 的测试（2026-11-02）：TASKQ_CONFIG / TASKQ_PLUGINS / TASKQ_STATE 没设、空、不存在、相对路径；state()、outputs()、env() 和旧名、
 cfg.py get / state / log；插件合并（extend）的重名。临时文件，不连机器。
-    python3 scripts/taskq/queue/test_cfg.py
+    python3 queue/test_cfg.py
 """
 import os
 import subprocess
