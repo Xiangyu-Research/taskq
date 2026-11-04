@@ -1,4 +1,5 @@
 #!/bin/bash
+# 要真卡：显存填充在本机 0 号卡上的实际行为（taskq self test --gpu 才跑；没有 nvidia-smi 或 torch 时自己跳过）
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 CORE=$(dirname "$HERE")

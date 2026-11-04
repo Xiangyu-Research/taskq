@@ -578,7 +578,22 @@ def cleanup():
         shutil.rmtree(T, ignore_errors=True)
 
 
+def missing():
+    """跑不了的原因（缺 pueue、带 numpy 的 Python）→ 说明；都有 → None。"""
+    lack = [b for b in (PUEUE, PUEUED) if not os.access(b, os.X_OK)]
+    if lack:
+        return "本机没有 " + "、".join(map(os.path.basename, lack)) + "（queue/install_pueue.sh）"
+    if not numpy_python():
+        return "本机没有带 numpy 的 Python（RB.check_python、miniforge 的环境）"
+    return None
+
+
 def main():
+    why = missing()
+    if why:
+        cleanup()
+        print(f"跳过：{why}")
+        return 77  # run_tests.py：跳过
     try:
         setup()
         step_env_gate()

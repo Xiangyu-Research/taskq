@@ -305,6 +305,8 @@ TREE = {
     "self": Group("taskq 本身", {
         "update": Cmd("拉 origin/main（失败重试 5 次，拉不到就留在原来的版本）", cmd_update, project=False),
         "version": Cmd("版本", cmd_version, project=False),
+        "test": Cmd("跑核心的全部测试（各自的临时 HOME，同时跑几个，结果表）", py("run_tests", prog="taskq self test"),
+                    own_help=True, project=False),
     }),
     # 底层（不在首页）
     "worker": Group("worker 用的（参数、退出码冻结）", {
