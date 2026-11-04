@@ -454,9 +454,12 @@ def lookup(key):
     return json_in(r.stdout) if r.returncode == 0 else None
 
 
+SHELL_FIELDS = ("key", "env", "cmd", "out", "data", "res", "vars")
+
+
 def shell_lines(s, data, repo=REPO):
-    """run_task.sh 用：把说明变成 shell 变量（按本机的数据目录、仓库展开）。"""
-    e = expand(s, data, repo)
+    """run_task.sh 用：把说明变成 shell 变量（按本机的数据目录、仓库展开）。只展开用到的字段：params 里是原样的参数，可能带别的 {名字}。"""
+    e = expand({k: s[k] for k in SHELL_FIELDS if k in s}, data, repo)
     lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote((envs_of(e) or [''])[0])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
              f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
              f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
