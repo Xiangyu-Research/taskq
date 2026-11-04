@@ -840,5 +840,67 @@ try:
 finally:
     taskq.TQ = tq_orig
 
+# ---------------- 11/4：执行机的队列存 box 解析好的说明（add --spec-stdin、next 给 --spec） ----------------
+TQS = os.path.join(T, "taskq_spec")
+ENVS_ = dict(ENV, TASKQ_DIR=TQS)
+os.makedirs(TQS)
+open(os.path.join(TQS, "tasks.jsonl"), "w").close()
+
+
+def tqs(*args, stdin=None, env=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=env or ENVS_, capture_output=True, text=True, input=stdin)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+sp_a = S.sendable(S.resolve("command", S.parse_kv(["key=sp/a", "cmd=python3 -c 1", "env=stats", "out=sp/a", 'done=["DONE|ALT"]'])))
+sp_b = S.sendable(S.resolve("toy", dict(ds="D101_alpha", frag="2")))
+rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps([sp_a, sp_b]))
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("add --spec-stdin：记下说明，做法和参数也留着（还在用旧包的 worker 照旧能领）",
+      rc == 0 and set(ts) == {"sp/a", sp_b["key"]} and ts["sp/a"]["spec"]["cmd"] == "python3 -c 1"
+      and ts["sp/a"]["recipe"] == "command" and ts["sp/a"]["params"]["key"] == "sp/a")
+check("sendable：去掉只在 box 上有意义的字段", not set(S.SENT_DROP) & set(sp_a))
+nop = dict(ENVS_, TASKQ_PLUGINS=os.path.join(T, "no_plugins"))  # 那边没有做法、实验表的插件
+os.makedirs(nop["TASKQ_PLUGINS"], exist_ok=True)
+rc, out, err = tqs("next", "--worker", "s1", "--envs", "stats", env=nop)
+lines = out.splitlines()
+check("next：带说明的给 run_task.sh --spec <JSON>，不用查做法", rc == 0 and lines[0] == "sp/a" and lines[1].startswith("--spec ")
+      and json.loads(__import__("shlex").split(lines[1])[1])["key"] == "sp/a")
+rc, sh, err = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", json.dumps(sp_a)], env=nop,
+                             capture_output=True, text=True).returncode, None, None
+r1 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", json.dumps(sp_b)], env=nop, capture_output=True, text=True)
+r2 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", *S.kv_args("toy", dict(ds="D101_alpha", frag="2"))], env=ENVS_,
+                    capture_output=True, text=True)
+check("spec.py shell --spec 和 <做法> k=v 给出同样的 shell 语句（没有插件也行）", rc == 0 and r1.returncode == 0 and r1.stdout == r2.stdout)
+os.makedirs(os.path.join(DATA, "sp/a"), exist_ok=True)
+r3 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "done", "--spec", json.dumps(sp_a)], env=nop)
+open(os.path.join(DATA, "sp/a", "ALT"), "w").close()
+r4 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "done", "--spec", json.dumps(sp_a)], env=nop)
+check("spec.py done --spec：按说明的 done 判断（a|b 有一个就行）", r3.returncode == 1 and r4.returncode == 0)
+r5 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", '{"key": "x"}'], env=nop, capture_output=True, text=True)
+check("spec.py shell --spec：缺字段退出码 2", r5.returncode == 2 and "缺字段" in r5.stderr)
+tqs("set-nice", "--nice", "9", "sp/a")
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("set-nice 以后说明还在", ts["sp/a"]["nice"] == 9 and ts["sp/a"]["spec"] == sp_a)
+sp_a2 = dict(sp_a, cmd="python3 -c 2")
+rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps(sp_a2))
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("add --spec-stdin 已有的：换成新说明，档位、顺序不变", rc == 0 and "换了说明" in out and ts["sp/a"]["spec"]["cmd"] == "python3 -c 2"
+      and ts["sp/a"]["nice"] == 9)
+open(os.path.join(TQS, "tasks.jsonl"), "a").write(json.dumps(dict(order=99, nice=1, key="old/c", exp=None, recipe="command",
+                                                                    params=dict(key="old/c", cmd="true", env="stats", out="old/c", done="D"))) + "\n")
+rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps(S.sendable(S.resolve("command", dict(key="old/c", cmd="true", env="stats", out="old/c", done="D")))))
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("add --spec-stdin：已有的老记录（没有说明）补上说明", rc == 0 and ts["old/c"].get("spec", {}).get("key") == "old/c" and ts["old/c"]["nice"] == 1)
+rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", "--update-only",
+                stdin=json.dumps([dict(sp_a, cmd="python3 -c 3"), S.sendable(S.resolve("command", dict(key="gone/x", cmd="true", env="stats", out="gone/x", done="D")))]))
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("add --update-only：只换已有的说明，不在队列里的不加", rc == 0 and "gone/x" not in ts and ts["sp/a"]["spec"]["cmd"] == "python3 -c 3")
+rc, out, _ = tqs("set", sp_b["key"], "variant=W")
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("set 改参数：说明作废，回到按做法解析", "spec" not in ts.get(sp_b["key"], {}) or rc != 0)
+rc, out, _ = tqs("show", "sp/a")
+check("show：带说明的显示 run_task.sh --spec", rc == 0 and "run_task.sh --spec" in out)
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

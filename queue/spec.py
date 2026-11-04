@@ -6,6 +6,8 @@
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
                                      再加本机 envs/machines.py 的 task_vars 里还没设的）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
+  spec.py shell|done --spec <JSON>   同上，用已经解析好的说明（box 的 relay 送任务时解析好，执行机上不再查做法，11/4）
+  spec.py resolve <做法> k=v…        解析好的说明（JSON，一行）
   spec.py lookup <key>               按 key 找任务（先查实验表（experiments.py），再查训练队列），打印说明（JSON）
   spec.py outputs <key> [--sh]       这个任务的输出（outputs()，JSON）；--sh：给 archive_task.sh 的 shell 语句
 k=v 的值以 [ 或 { 开头时按 JSON 读（如 done='["a","b|c"]'），其他都是字符串。
@@ -130,8 +132,9 @@ def resolve(recipe, params, exp=None):
 RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
 
 
-def _check(s):
-    """任务单的通用字段：data（= inputs）、resume、res、progress 统一格式并检查（2026-10-31）。"""
+def _check(s, progress=True):
+    """任务单的通用字段：data（= inputs）、resume、res、progress 统一格式并检查（2026-10-31）。
+    progress=False：不查进度解析方法（box 送来的说明已经查过；跑任务用不到，读进度的地方自己会报）。"""
     for k in ("data", "resume"):
         v = s.get(k)
         if isinstance(v, str):
@@ -162,7 +165,7 @@ def _check(s):
     if (res.get("gpus") or 0) > 1:
         raise SpecError(f"res.gpus 最多 1（worker 每个任务只给一张卡，11/1）：{res['gpus']!r}")
     s["res"] = res
-    if s.get("progress") not in PROGRESS:
+    if progress and s.get("progress") not in PROGRESS:
         raise SpecError(f"不认识的进度解析方法 {s.get('progress')}（有：{', '.join(k for k in PROGRESS if k)}）")
 
 
@@ -466,6 +469,29 @@ def remote_collect(ssh, specs, root, timeout=600):
 
 
 # ---------------- 查任务 ----------------
+SENT_DROP = ("machines", "after", "names", "exp")  # 只在 box 上有意义的字段：分给谁、接在谁后面、解析用的名字、实验 id
+
+
+def sendable(s):
+    """解析好的说明 → 送给执行机的版本（去掉 SENT_DROP；{data}、{repo} 留给那边展开）。"""
+    return {k: v for k, v in s.items() if k not in SENT_DROP}
+
+
+def from_sent(text):
+    """送来的说明（JSON）→ 说明；格式不对 → SpecError。"""
+    try:
+        s = json.loads(text) if isinstance(text, str) else dict(text)
+    except ValueError as e:
+        raise SpecError(f"说明不是 JSON：{e}")
+    miss = [k for k in ("key", "cmd", "out", "done", "data", "res", "vars") if k not in s]
+    if miss:
+        raise SpecError(f"说明缺字段 {', '.join(miss)}")
+    if isinstance(s["done"], str):
+        s["done"] = [s["done"]]
+    _check(s, progress=False)
+    return s
+
+
 def lookup(key):
     """key → 说明：先查实验表，再查训练队列（taskq.py show，box 上会转到 DICC）。找不到 → None。"""
     import experiments as E
@@ -505,7 +531,9 @@ def main(argv):
         return 2
     cmd, args = argv[0], argv[1:]
     try:
-        if cmd in ("shell", "done"):
+        if cmd in ("shell", "done") and args[:1] == ["--spec"] and len(args) == 2:
+            s = from_sent(args[1])
+        elif cmd in ("shell", "done", "resolve"):
             s = resolve(args[0], parse_kv(args[1:]))
         elif cmd in ("lookup", "outputs"):
             s = lookup(args[0])
@@ -535,6 +563,8 @@ def main(argv):
         print("\n".join([f"OUTS=({' '.join(shlex.quote(x) for x in o['outs'])})", f"EXTRA=({' '.join(shlex.quote(x) for x in o['extra'])})",
                          f"TEST={shlex.quote(test or 'true')}", f"ARCHIVE={int(o['archive'])}", f"LOGS={shlex.quote(o['logs'] or '')}",
                          f"OLDDIR={shlex.quote(old.get('dir', ''))}", f"OLDSEG={shlex.quote(old.get('prefix', ''))}"]))
+    elif cmd == "resolve":
+        print(json.dumps(s, ensure_ascii=False, separators=(",", ":")))
     elif cmd == "shell":
         print("\n".join([shell_lines(s, data)] + machine_vars()))
     elif cmd == "done":

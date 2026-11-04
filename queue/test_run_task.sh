@@ -32,6 +32,11 @@ $R command key=toy/d 'cmd=true' env=nosuchenv out=toy/d 'done=["DONE"]' > /dev/n
 check "这台机器没有的环境：退出码 2" "(( rc == 2 ))"
 $R toy ds=D101_alpha frag=0 variantt=x > /dev/null 2>&1; rc=$?
 check "参数写错：退出码 2" "(( rc == 2 ))"
+SP=$(python3 "$HERE/spec.py" resolve command key=toy/s 'cmd=touch {data}/toy/s/DONE' env=base out=toy/s 'done=["DONE"]')
+TASKQ_PLUGINS=$T/noplug $R --spec "$SP" > /dev/null; rc=$?
+check "--spec：按 box 解析好的说明跑，执行机上没有做法插件也行（11/4）" "(( rc == 0 )) && [[ -e $T/toy/s/DONE ]] && head -1 $T/logs/tasks/toy__s__test-1_part1.log | grep -q '任务=toy/s'"
+$R --spec '{"key": "x"}' > /dev/null 2>&1; rc=$?
+check "--spec 说明缺字段：退出码 2" "(( rc == 2 ))"
 # desc：某个进程的所有后代；started：等后代里出现命令行正好是 $2 的进程（最多 60 秒），打印后代里命令行含 $2 的
 desc() { local c; for c in $(pgrep -P "$1"); do echo "$c"; desc "$c"; done; }
 started() {

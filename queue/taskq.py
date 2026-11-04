@@ -38,6 +38,8 @@ box 上（总队列；在没有队列的机器上跑这些命令时退出码 2�
                                        --only 只加 each 里这个参数取这些值的任务，如 --only fold=1,2）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py add [--nice <档位>] --file <任务单.json>               按任务单加（别人的训练、测试；不给 --nice 用单子里的）
+    taskq.py add --nice <档位> --spec-stdin [--update-only] < 说明.json   加解析好的说明（执行机的队列，relay.py 送；已有的换成新说明，
+                                       --update-only 只换已有的，11/4）
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
@@ -114,7 +116,10 @@ def write_tasks(tasks, path=None):
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
-            f.write(json.dumps({k: t.get(k) for k in ("order", "nice", "key", "exp", "recipe", "params")}, ensure_ascii=False) + "\n")
+            rec = {k: t.get(k) for k in ("order", "nice", "key", "exp", "recipe", "params")}
+            if t.get("spec"):
+                rec["spec"] = t["spec"]  # 执行机的队列：box 解析好的说明（11/4）
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
 
 
@@ -196,12 +201,15 @@ _specs = {}
 
 
 def spec_of(t):
-    """任务 → 说明；解析不了时 → None（错误记在 t["bad"]）。"""
-    k = json.dumps([t.get("recipe"), t.get("params"), t.get("exp")], sort_keys=True)
+    """任务 → 说明；解析不了时 → None（错误记在 t["bad"]）。带 spec 的（执行机的队列，box 解析好的）直接用，不查做法。"""
+    k = json.dumps([t.get("spec")] if t.get("spec") else [t.get("recipe"), t.get("params"), t.get("exp")], sort_keys=True)
     if k not in _specs:
-        import experiments as E
         try:
-            _specs[k] = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
+            if t.get("spec"):
+                _specs[k] = S.from_sent(t["spec"])
+            else:
+                import experiments as E
+                _specs[k] = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
         except (S.SpecError, KeyError) as e:
             _specs[k] = None
             t["bad"] = str(e)
@@ -411,6 +419,13 @@ def _claim(a, pick):
     return NOTHING, None
 
 
+def run_args(t):
+    """run_task.sh 的参数：带 spec 的给 --spec <JSON>，否则 <做法> k=v…。"""
+    if t.get("spec"):
+        return ["--spec", json.dumps(t["spec"], ensure_ascii=False, separators=(",", ":"))]
+    return S.kv_args(t["recipe"], t["params"])
+
+
 def cmd_next(a):
     envs = set(e for e in a.envs.split(",") if e)
     me = here()
@@ -421,7 +436,7 @@ def cmd_next(a):
             return None
         if not S.fits(s.get("res"), a.cpus, a.mem_mb, a.gpu_mem)[0]:
             return None
-        return t["key"] + "\n" + " ".join(shlex.quote(x) for x in S.kv_args(t["recipe"], t["params"]))
+        return t["key"] + "\n" + " ".join(shlex.quote(x) for x in run_args(t))
     rc, out = _claim(a, pick)
     if rc == 0:
         print(out + "\n" + a.token)  # 第三行：这次领取的 token（11/1 加，只读两行的老 worker 不受影响）
@@ -554,22 +569,34 @@ def same_file(keys, have):
     return bad
 
 
-def _insert(new, nice):
-    """把新任务（dict(key, exp, recipe, params)）加进队列，已有的跳过。先解析一遍，写错参数的不加。"""
+def _resolve_new(t):
+    if t.get("spec"):
+        return S.from_sent(t["spec"])
     import experiments as E
+    return E.resolve_task(t["recipe"], t["params"], t.get("exp"))
+
+
+def _insert(new, nice, update_only=False):
+    """把新任务（dict(key, exp, recipe, params[, spec])）加进队列，已有的跳过（带 spec 的换成新的说明）。先解析一遍，写错参数的不加。"""
     with Lock():
         tasks = read_tasks()
         have = {t["key"] for t in tasks}
         order = max([t["order"] for t in tasks] or [0])
-        keys = [E.resolve_task(t["recipe"], t["params"], t.get("exp"))["key"] for t in new]
-        bad = same_file(keys, have)
+        if update_only:
+            new = [t for t in new if _resolve_new(t)["key"] in have]
+        specs = [_resolve_new(t) for t in new]
+        bad = same_file([s["key"] for s, t in zip(specs, new) if not (t.get("spec") and s["key"] in have)], have)
         if bad:
             print("加不进去：" + "；".join(bad))
             return 2
-        for t in new:
-            s = E.resolve_task(t["recipe"], t["params"], t.get("exp"))
+        for t, s in zip(new, specs):
             if s["key"] in have:
-                print(f"已有，跳过：{s['key']}")
+                old = next(x for x in tasks if x["key"] == s["key"])
+                if t.get("spec") and old.get("spec") != t["spec"]:
+                    old.update(spec=t["spec"], recipe=t["recipe"], params=t["params"])
+                    print(f"换了说明：{s['key']}")
+                else:
+                    print(f"已有，跳过：{s['key']}")
                 continue
             order += 1
             tasks.append(dict(t, key=s["key"], order=order, nice=nice))
@@ -623,6 +650,9 @@ def cmd_add(a):
                 if a.nice is None:
                     sys.exit(f"实验表里 {a.exp} 没有 nice，要给 --nice")
                 print(f"档位用实验表里的 {a.nice}")
+        elif a.spec_stdin:
+            got = json.loads(sys.stdin.read())
+            new = [dict(exp=None, recipe=x.get("recipe"), params=x.get("params") or {}, spec=x) for x in (got if isinstance(got, list) else [got])]
         elif a.recipe:
             new = [dict(exp=None, recipe=a.recipe, params=S.parse_kv(a.args))]
         elif a.file:
@@ -630,10 +660,10 @@ def cmd_add(a):
             if a.nice is None:
                 a.nice = nice
         else:
-            sys.exit("要给 --exp、--recipe 或 --file")
+            sys.exit("要给 --exp、--recipe、--file 或 --spec-stdin")
         if a.nice is None:
             sys.exit("要给 --nice")
-        return _insert(new, a.nice)
+        return _insert(new, a.nice, update_only=a.update_only)
     except S.SpecError as e:
         print(f"加不进去：{e}")
         return 2
@@ -663,6 +693,7 @@ def cmd_set(a):
             return 2
         print(f"{t['key']}：{json.dumps(t['params'], ensure_ascii=False)} → {json.dumps(p, ensure_ascii=False)}")
         t["params"] = p
+        t.pop("spec", None)  # 解析好的说明作废，按新参数重新解析
         write_tasks(tasks)
     return 0
 
@@ -767,7 +798,7 @@ def cmd_show(a):
         return 0
     st, note = state(t, data_root())
     print(f"{t['key']}：档位 {t['nice']}，{st} {note}；实验 {t.get('exp') or '（不在实验表里）'}")
-    print(f"  run_task.sh {' '.join(shlex.quote(x) for x in S.kv_args(t['recipe'], t['params']))}")
+    print(f"  run_task.sh {' '.join(shlex.quote(x) for x in run_args(t))}")
     if s:
         for k in ("env", "cmd", "out", "done", "data"):
             print(f"  {k:5} {s[k]}")
@@ -930,6 +961,8 @@ def main(argv):
     p.add_argument("--only", action="append", default=[], metavar="参数=取值[,取值…]")
     p.add_argument("--recipe")
     p.add_argument("--file", help="任务单（JSON），不写 recipe 时是 command 做法")
+    p.add_argument("--spec-stdin", action="store_true", help="从标准输入读解析好的说明（一个或列表，spec.py resolve 的格式；box 的 relay 送任务用）")
+    p.add_argument("--update-only", action="store_true", help="只换已有任务的说明，不加新的（relay.py resend）")
     p.add_argument("args", nargs="*", help="--recipe 的 k=v")
     p = sub.add_parser("set")
     p.add_argument("key")
