@@ -31,7 +31,7 @@ s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 ENV = dict(os.environ, HOME=HOME, TUNNEL_SSH=FAKE, RSYNC_RSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}",
-           TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1", TUNNEL_CHUNK=str(1 << 20),
+           TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="0.1", TUNNEL_CHUNK=str(1 << 20),
            TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", PATH=os.environ["PATH"], PYTHONPATH=T)
 FAILS = []
 

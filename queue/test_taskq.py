@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 fixture.use()
 ENV.update(TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS)
-os.environ.update(TASKQ_DIR=TQ)
+os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # 本进程里等锁的重试间隔（try_lock 预期拿不到的几项）
 import taskq  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
@@ -155,7 +155,9 @@ tq("release", "--worker", "120", key2)
 rc, out = tq("next", "--worker", "121", "--envs", ALL)
 check("刚交还、日志 15 分钟内更新过，也马上能领", rc == 0 and out.startswith(key2))
 tq("release", "--worker", "121", key2)
-time.sleep(6)
+rel = os.path.join(TQ, "released", taskq.safe(key2))
+check("交还时记下了时间（released/<key>）", taskq.released_at(key2) is not None)
+open(rel, "w").write(f"{time.time() - 10} 121\n")  # 交还记在 10 秒前，日志在那之后更新
 open(os.path.join(part("D121_x", "V_save", "2"), "train_log_y.txt"), "w").write("y2")
 rc, out = tq("next", "--worker", "122", "--envs", ALL)
 check("交还之后日志又更新了（队列外在训）：不领", rc == 10)

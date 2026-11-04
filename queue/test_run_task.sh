@@ -32,16 +32,29 @@ $R command key=toy/d 'cmd=true' env=nosuchenv out=toy/d 'done=["DONE"]' > /dev/n
 check "这台机器没有的环境：退出码 2" "(( rc == 2 ))"
 $R toy ds=D101_alpha frag=0 variantt=x > /dev/null 2>&1; rc=$?
 check "参数写错：退出码 2" "(( rc == 2 ))"
+# desc：某个进程的所有后代；started：等后代里出现命令行正好是 $2 的进程（最多 60 秒），打印后代里命令行含 $2 的
+desc() { local c; for c in $(pgrep -P "$1"); do echo "$c"; desc "$c"; done; }
+started() {
+    local p n
+    for (( n = 0; n < 600; n++ )); do
+        for p in $(desc "$1"); do
+            if [[ $(ps -o args= -p "$p" 2> /dev/null) == "$2" ]]; then
+                for p in $(desc "$1"); do ps -o args= -p "$p" 2> /dev/null | grep -qF "$2" && echo "$p"; done
+                return 0
+            fi
+        done
+        sleep 0.1
+    done
+    return 1
+}
 $R command key=toy/e 'cmd=sleep 300' env=base out=toy/e 'done=["DONE"]' > /dev/null & rp=$!
-sleep 3
-child=$(pgrep -f "sleep 300" -P "$(pgrep -P $rp | head -1)" 2> /dev/null; pgrep -P "$(pgrep -P "$(pgrep -P $rp | head -1)" | head -1)" 2> /dev/null)
+child=$(started $rp "sleep 300" | tr '\n' ' ')
 kill -TERM $rp; wait $rp; rc=$?
-sleep 1
-check "SIGTERM：退出码 143、训练进程一起停" "(( rc == 143 )) && ! pgrep -P $rp > /dev/null && ! ps -o args= -p ${child:-0} 2> /dev/null | grep -q 'sleep 300'"
+for _ in $(seq 10); do ps -o args= -p ${child// /,}0 2> /dev/null | grep -q 'sleep 300' || break; sleep 0.1; done
+check "SIGTERM：退出码 143、训练进程一起停" "(( rc == 143 )) && [[ -n '$child' ]] && ! pgrep -P $rp > /dev/null && ! ps -o args= -p ${child// /,}0 2> /dev/null | grep -q 'sleep 300'"
 # 训练不理 SIGTERM（11/1）：run_task.sh 等 RUN_TASK_STOP_WAIT 秒后 SIGKILL 整个进程组，退出时训练已经不在
 RUN_TASK_STOP_WAIT=2 $R command key=toy/i "cmd=trap '' TERM; sleep 307 & wait; sleep 307" env=base out=toy/i 'done=["DONE"]' > /dev/null & rp=$!
-sleep 3
-kids=$(pgrep -f "sleep 307" | tr '\n' ' ')
+kids=$(started $rp "sleep 307" | tr '\n' ' ')
 kill -TERM $rp; wait $rp; rc=$?
 check "训练不理 SIGTERM：强制停，run_task.sh 退出时训练进程都不在了" "(( rc == 143 )) && [[ -n '$kids' ]] && ! ps -o pid= -p ${kids// /,}0 2> /dev/null | grep -q . && grep -q 强制停 $T/logs/tasks/toy__i__test-1_part1.log"
 # 等卡（res.wait_gpu，10/31）：假 nvidia-smi，前 $T/gpu/busy 次查进程时报 $T/gpu/apps 里的进程，之后报空；OTHER 是别的用户的一个进程

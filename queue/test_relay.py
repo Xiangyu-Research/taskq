@@ -49,7 +49,7 @@ s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}",
-                  TUNNEL_POLL="1", TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"),
+                  TUNNEL_POLL="0.1", TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"),
                   PHD_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
                   PATH=BIN + ":" + os.environ["PATH"])
 
@@ -986,6 +986,12 @@ def test_drop_refused():
     ok("那边拒绝删任务或连不上时不删结果、不交还；任务已经删掉的照常删结果；删路径时出错也不交还")
 
 
+def blocked_on_lock(pid):
+    """/proc/locks 里有这个进程在等的锁（"->" 开头的行）。"""
+    with open("/proc/locks") as f:
+        return any(ln.split()[1] == "->" and ln.split()[5] == str(pid) for ln in f if len(ln.split()) > 5)
+
+
 def test_view_lock():
     """建视图在那边一次只跑一个（11/2：同一个数据集的两折同时建视图，互相删了 .incomplete）。"""
     import fcntl
@@ -998,8 +1004,10 @@ def test_view_lock():
     p = subprocess.Popen([sys.executable, "-c", relay.VIEW_PY, root], cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     p.stdin.write(data)
     p.stdin.close()
-    time.sleep(1.5)
-    waited = p.poll() is None
+    t0 = time.time()
+    while p.poll() is None and time.time() - t0 < 30 and not blocked_on_lock(p.pid):
+        time.sleep(0.05)
+    waited = p.poll() is None and blocked_on_lock(p.pid)
     fcntl.flock(lk, fcntl.LOCK_UN)
     lk.close()
     p.wait(timeout=30)

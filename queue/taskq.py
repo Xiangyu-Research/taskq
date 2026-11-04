@@ -77,6 +77,7 @@ TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", cfg.state("taskq", expand=Fa
 TASKS = "tasks.jsonl"
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", 20 * 60))  # 心跳超过这么久算过期（环境变量只给测试用）
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", 15 * 60))    # 训练日志这么久内更新过算有人在训
+LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", 0.5))  # 等锁时每次重试的间隔（秒，环境变量只给测试用）
 HALF_CLAIM = 5 * 60  # 领取只建了目录、没写 info，过这么久算过期
 MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
@@ -156,7 +157,7 @@ class Lock:
                             continue
                 except OSError:
                     pass
-                time.sleep(0.5)
+                time.sleep(LOCK_WAIT)
                 continue
             me = f"{socket.gethostname()}\t{os.getpid()}\t{os.urandom(6).hex()}\n"
             try:

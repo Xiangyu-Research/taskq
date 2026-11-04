@@ -19,6 +19,7 @@ TMP = tempfile.mkdtemp(prefix="test_review_conc_")
 os.environ["HOME"] = os.path.join(TMP, "home")
 os.makedirs(os.environ["HOME"])
 os.environ["TASKQ_DIR"] = os.path.join(TMP, "tq")
+os.environ["TASKQ_LOCK_WAIT"] = "0.05"  # 等锁的重试间隔
 sys.path.insert(0, HERE)
 import test_relay as TR  # noqa: E402  （fixture.use()、临时 TASKQ_STATE、假 ssh；只跑模块级的准备，不跑测试）
 import common as C  # noqa: E402
