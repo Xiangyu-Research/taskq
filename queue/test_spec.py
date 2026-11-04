@@ -158,6 +158,19 @@ os.stat = real_stat
 args = S.kv_args("command", {"key": "a", "done": ["x", "y|z"]})
 ok("kv_args → parse_kv 来回一致（列表用 JSON）", S.parse_kv(args[1:]) == {"key": "a", "done": ["x", "y|z"]})
 
+# ---------------- 输出（outputs，只在这一处解释 out、done、fetch、archive） ----------------
+o = S.outputs(dict(key="a/b/0", out="/res/a//b/", done="x|y", fetch=dict(also=["pred/a/"], exclude=["big.pth"], extra=["*.json"]),
+                   archive=dict(drop=["*"]), oldlogs=dict(dir="old", prefix="p_")))
+ok("outputs：out 和 also 规整成相对路径、字符串 done 变成一项、| 分开成备选、archive 是开关、分段日志前缀",
+   o == dict(outs=["res/a/b", "pred/a"], done=[["x", "y"]], exclude=["big.pth"], extra=["*.json"], archive=True,
+             logs="logs/tasks/a__b__0__", oldlogs=dict(dir="old", prefix="p_")))
+o2 = S.outputs(dict(out="r", done=[], archive=None))
+ok("outputs：没有 fetch、done 空、不归档、没有 key", o2 == dict(outs=["r"], done=[], exclude=[], extra=[], archive=False, logs=None, oldlogs=None))
+o3 = S.outputs(dict(out="r", done=["a", "b|c"]))
+ok("done_with：每一项都要有、一项里有一个备选就行", S.done_with(o3, {"a", "c"}.__contains__) and not S.done_with(o3, {"b", "c"}.__contains__))
+ok("done_missing：列出缺的项（原来的写法）", S.done_missing(o3, {"a"}.__contains__) == ["b|c"])
+ok("done_with：done 是空的 → 按调用方给的 empty", S.done_with(o2, lambda a: False) and not S.done_with(o2, lambda a: False, empty=False))
+
 # ---------------- 实验表 ----------------
 ts = E.tasks()
 exps = E.load()[0]

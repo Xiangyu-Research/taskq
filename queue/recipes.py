@@ -30,7 +30,7 @@
                开训前 run_task.sh 查一遍（scripts/taskq/queue/inputs.py），不全就不开训（退出码 4，worker 记"缺输入"，11/1）
     fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）、
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
-    archive    训练机上训完、拉回、备份核对以后删的文件（drop），删完写 out/ARCHIVED；None = 不归档
+    archive    拉回 box 后备份到备份机、核对（scripts/taskq/queue/archive_task.sh）：True；None = 不归档
     relay      交给执行机（envs/machines.py 的 RELAY）时按哪个插件列输入、核对结果：path = 输入就是 inputs / data 里的文件、文件夹、
                glob（任何任务都能用，scripts/taskq/sites/names.py）；nnunet（训练）、nnunet_infer（推理）= 按 nnU-Net 的参数列要的文件，
                拉回后核对（research/common/taskq_plugins/relay_plugins.py）；None = 不交

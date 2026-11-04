@@ -23,7 +23,7 @@ RECIPES = {
         checkpoint="final.ckpt",
         data=["prepared/{ds}"],
         fetch=dict(exclude=["latest.ckpt"], extra=["*.json"]),
-        archive=dict(drop=["*.ckpt", "check/**"], keep=["check/summary.json"]),
+        archive=True,
         machines=None,
         device="gpu",
         after=[],

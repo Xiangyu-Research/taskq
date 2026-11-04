@@ -37,8 +37,8 @@ def plugin_of(spec):
 
 
 def outs(spec):
-    """要拉回的文件夹（相对数据目录）：out，加上 fetch.also。"""
-    return [os.path.normpath(o.strip("/")) for o in [spec["out"]] + list((spec.get("fetch") or {}).get("also") or [])]
+    """要拉回的文件夹（相对数据目录）：spec.outputs 的 outs（out，加上 fetch.also）。"""
+    return S.outputs(spec)["outs"]
 
 
 def _inside(a, b):
@@ -146,10 +146,9 @@ def export(spec, root):
 
 
 def import_(spec, src, dst, root):
-    os_, out = outs(spec), os.path.normpath(spec["out"].strip("/"))
+    o = S.outputs(spec)
+    os_, out, extra, logs = o["outs"], o["outs"][0], o["extra"], o["logs"]
     par = os.path.dirname(out)
-    extra = (spec.get("fetch") or {}).get("extra") or []
-    logs = f"logs/tasks/{S.safe(spec['key'])}__"
     got, odd = [], []
     for rel in RN.walk(src):
         if any(_inside(rel, o) for o in os_) or rel.startswith(logs) or (
@@ -160,7 +159,7 @@ def import_(spec, src, dst, root):
     if odd:
         raise RelayError(f"{spec['key']} 拉回的文件里有认不出的：{odd[:5]}")
     have = set(got)
-    miss = [d for d in spec["done"] if not any(f"{out}/{alt}" in have for alt in d.split("|"))]
+    miss = S.done_missing(o, lambda a: f"{out}/{a}" in have)
     if miss:
         raise RelayError(f"{spec['key']} 拉回的结果不全：没有 {miss}")
     check = _pair(spec)[1]

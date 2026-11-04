@@ -11,7 +11,7 @@
 | [`recipes.py`](recipes.py) | 做法：一种训练怎么跑（参数和默认值、`key`、`env`、`cmd`、`out`、`done`、`data`、`fetch`、`archive` 等，字段说明在文件开头）。核心只有 `command`（全部由任务自己给）；`nnunet`（`research/common/nnunet/train.sh`）在 `research/common/taskq_plugins/recipes.py`，按 `TASKQ_PLUGINS` 加载时合进来 |
 | `research/<RQ>/experiments.py` | 实验表：做法和参数、按哪些参数展开成一组任务（`each`，如 `{"fold": ["0", "1"]}`；box pueue 标签 `<id>_f0`）、每个任务训完后的步骤（`after`）、一个实验的任务都训完后的（`group_after`）、最后一起做的（`FINAL`）、默认档位（`nice`）、分析脚本要的声明（`names`）、看板名称（`board`）。`scripts/taskq/queue/experiments.py` 读所有 RQ 的表；分析脚本按模型文件夹查（`experiments.py name-of <模型文件夹> <名字>…`），查不到就报错 |
 
-`spec.py` 是唯一的解析器：做法 + 参数 → 任务说明（`spec.py lookup <key>` 打印某个任务的说明）。
+`spec.py` 是唯一的解析器：做法 + 参数 → 任务说明（`spec.py lookup <key>` 打印某个任务的说明）。任务的输出（`out`、`done`、`fetch`、`archive`、分段日志）只由 `spec.outputs` 解释，拉回、放好、判断做完、归档都用它（`spec.py outputs <key>` 打印，11/4）。
 
 ## 结构
 
@@ -170,7 +170,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `feed.py` | 送任务的唯一入口：转给 `relay.py`（见上面）；`python3 scripts/taskq/queue/feed.py --dry` 只看会做什么 |
 | `refill.py` | `relay.py` 用的挑任务（`candidates`、`next_pick`）和补交 Slurm 作业（`slurm_plan`）的规则 |
 | `advance.py` | 训完以后的步骤（见上面）；`python3 scripts/taskq/queue/advance.py` 只看会排什么 |
-| `archive_task.sh box <key> [--dry-run]` | 执行机上训完、拉回 box 以后：备份到备份机（`envs/machines.py` 的 `backup`），核对一致后留 `ARCHIVED`；rsync 经 `scripts/taskq/sync/tunnel.py rsync`（`envs/machines.py` 的 `tunnel` 里有的方向经隧道传，`scripts/sync/README.md`） |
+| `archive_task.sh box <key> [--dry-run]` | 执行机上训完、拉回 box 以后：备份 `spec.py outputs` 的 `outs`、上一级的 `extra` 和分段日志到备份机（`envs/machines.py` 的 `backup`），核对一致；rsync 经 `scripts/taskq/sync/tunnel.py rsync`（`envs/machines.py` 的 `tunnel` 里有的方向经隧道传，`scripts/sync/README.md`） |
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（nnU-Net 从存档接着训，推理跳过已做好的病例），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 的克隆；每天 04:20 的 `auto_refresh.sh backup`） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |

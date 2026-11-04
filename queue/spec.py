@@ -7,9 +7,9 @@
                                      再加本机 envs/machines.py 的 task_vars 里还没设的）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
   spec.py lookup <key>               按 key 找任务（先查实验表（experiments.py），再查训练队列），打印说明（JSON）
+  spec.py outputs <key> [--sh]       这个任务的输出（outputs()，JSON）；--sh：给 archive_task.sh 的 shell 语句
 k=v 的值以 [ 或 { 开头时按 JSON 读（如 done='["a","b|c"]'），其他都是字符串。
 """
-import fnmatch
 import glob
 import json
 import os
@@ -214,12 +214,41 @@ def out_dir(s, root):
     return os.path.join(root, s["out"])
 
 
+def outputs(s):
+    """任务的输出，out、done、fetch、archive、分段日志只在这里解释（拉回、放好、判断做完、归档都用它）：
+      outs     要拉回、备份的文件夹（相对数据目录）：out，加上 fetch.also
+      done     做完的标志（相对 out）：每一项都要有，一项是备选的列表（done 里 | 分开的），有一个就行
+      exclude  不拉回的文件（文件名）
+      extra    out 的上一级里一起拉回、备份的文件（通配，如 *.json）
+      archive  拉回 box 后要不要备份到备份机（archive_task.sh）
+      logs     分段日志的文件名前缀（相对数据目录）；oldlogs：以前放在别处的分段日志（dir、prefix），没有时 None"""
+    f = s.get("fetch") or {}
+    done = s.get("done") or []
+    if isinstance(done, str):
+        done = [done]
+    old = s.get("oldlogs") or {}
+    return dict(outs=[os.path.normpath(o.strip("/")) for o in [s["out"]] + list(f.get("also") or [])],
+                done=[d.split("|") for d in done], exclude=list(f.get("exclude") or []), extra=list(f.get("extra") or []),
+                archive=bool(s.get("archive")), logs=f"logs/tasks/{safe(s['key'])}{SAFE}" if s.get("key") else None,
+                oldlogs=old if old.get("dir") and old.get("prefix") else None)
+
+
+def done_missing(o, exists):
+    """outputs 的 done 里还缺的项（"a|b" 的写法）；exists(相对 out 的路径) 由调用方给（本机的文件、拉回的文件……）。"""
+    return ["|".join(item) for item in o["done"] if not any(exists(a) for a in item)]
+
+
+def done_with(o, exists, empty=True):
+    """做完了：done 的每一项都有。done 是空的时候 → empty（判断训完时算做完，收编别处的存档时不算）。"""
+    return empty if not o["done"] else not done_missing(o, exists)
+
+
 def is_done(s, root):
     """训完了：done 的每一项在 out 下都有（一项里 | 分开的有一个就行）。
     文件不存在 → 没训完；其他读不了的情况（盘断开等）抛 OSError，不当成没训完。"""
     fd = out_dir(s, root)
     os.stat(root)
-    return all(any(_exists(os.path.join(fd, alt)) for alt in item.split("|")) for item in s["done"])
+    return done_with(outputs(s), lambda a: _exists(os.path.join(fd, a)))
 
 
 def _exists(p):
@@ -436,13 +465,6 @@ def remote_collect(ssh, specs, root, timeout=600):
         return None
 
 
-def drop_list(s, files):
-    """归档时要删的文件：out 下的相对路径列表 files 里，匹配 archive.drop、不匹配 archive.keep 的。"""
-    a = s.get("archive") or {}
-    return sorted(f for f in files if any(fnmatch.fnmatch(f, p) for p in a.get("drop", []))
-                  and not any(fnmatch.fnmatch(f, p) for p in a.get("keep", [])))
-
-
 # ---------------- 查任务 ----------------
 def lookup(key):
     """key → 说明：先查实验表，再查训练队列（taskq.py show，box 上会转到 DICC）。找不到 → None。"""
@@ -485,7 +507,7 @@ def main(argv):
     try:
         if cmd in ("shell", "done"):
             s = resolve(args[0], parse_kv(args[1:]))
-        elif cmd == "lookup":
+        elif cmd in ("lookup", "outputs"):
             s = lookup(args[0])
             if s is None:
                 print(f"实验表和训练队列里都没有 {args[0]}", file=sys.stderr)
@@ -503,6 +525,16 @@ def main(argv):
         data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
     if cmd == "lookup":
         print(json.dumps(s, ensure_ascii=False, indent=1))
+    elif cmd == "outputs":
+        o = outputs(s)
+        if "--sh" not in args[1:]:
+            print(json.dumps(o, ensure_ascii=False, indent=1))
+            return 0
+        test = " && ".join("{ " + " || ".join("test -e " + shlex.quote(a) for a in item) + "; }" for item in o["done"])
+        old = o["oldlogs"] or {}
+        print("\n".join([f"OUTS=({' '.join(shlex.quote(x) for x in o['outs'])})", f"EXTRA=({' '.join(shlex.quote(x) for x in o['extra'])})",
+                         f"TEST={shlex.quote(test or 'true')}", f"ARCHIVE={int(o['archive'])}", f"LOGS={shlex.quote(o['logs'] or '')}",
+                         f"OLDDIR={shlex.quote(old.get('dir', ''))}", f"OLDSEG={shlex.quote(old.get('prefix', ''))}"]))
     elif cmd == "shell":
         print("\n".join([shell_lines(s, data)] + machine_vars()))
     elif cmd == "done":

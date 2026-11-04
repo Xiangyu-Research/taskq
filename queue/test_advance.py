@@ -462,6 +462,22 @@ check("queue：队列里已经有 → 不再加", not tc(todo) and f"advance:inf
 touch(f"{T}/preds/D103_alpha_one/V_save__{P}/frag_2/.infer_done")
 todo, stuck = A.plan(s_)
 check("queue：拉回了但 box 上核对不过 → 报出来", not tc(todo) and "核对还是没做完" in stuck.get(f"advance:infer:{TC}/2", ""))
+IQ = [st["queue"] for e in A.E.load()[0] for st in e.get("after", []) if st["name"] == "infer" and st.get("queue")]
+old_done = [q["done"] for q in IQ]
+for q in IQ:
+    q["done"] = ".none|.infer_done"
+todo, stuck = A.plan(s_)
+check("queue：done 是字符串、| 分开的备选有一个就算做完（spec.outputs，11/4）", "核对还是没做完" in stuck.get(f"advance:infer:{TC}/2", ""))
+for q in IQ:
+    q["done"] = ".none|.nope"
+todo, stuck = A.plan(s_)
+check("queue：备选一个都没有 → 还没拉回，不报", f"advance:infer:{TC}/2" not in stuck)
+for q in IQ:
+    q["done"] = []
+todo, stuck = A.plan(s_)
+check("queue：done 是空的 → 看不出拉回了没有，不报", f"advance:infer:{TC}/2" not in stuck)
+for q, d in zip(IQ, old_done):
+    q["done"] = d
 os.remove(f"{T}/preds/D103_alpha_one/V_save__{P}/frag_2/.infer_done")
 inferred("D103_alpha_one", "V_save", "2")
 todo, stuck = A.plan(relay_fetch(dict(s_), 98, "dicc1", TCQ))
