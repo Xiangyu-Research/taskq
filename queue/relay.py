@@ -26,7 +26,8 @@
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
      - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
   3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一个任务（只领插件接受的做法，
-     数据传过去后那边至少还剩 HARD_GB）；
+     数据传过去后放 blobs 的盘至少还剩 budget 的第二项（没有 budget 时 HARD_GB）；有 cap 的执行机，那边每个任务的输出另留
+     refill.TRAIN_OUT_GB，cap 里留不出来就不领。blobs 可以是指到别的盘的链接（DICC：/scr，11/4），输出和队列在根目录）；
   4. 那边排着和在跑的 worker 作业不够、又有要卡的任务（备好的或在训的）时排满（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
 开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
 按时段的执行机（envs/policy.py 的 SHIFT，scripts/queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
@@ -246,9 +247,11 @@ except Exception:
 ed=os.path.join(R,'state','envs')
 oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
 free=shutil.disk_usage(R).free
+out_used=None
 if A.get('cap'):
-    used,seen=0,set()
+    used,seen,out_used=0,set(),0
     for dp,dns,fns in os.walk(R):
+        top=os.path.relpath(dp,R).split(os.sep)[0]
         for f in fns:
             x=os.lstat(os.path.join(dp,f))
             if x.st_nlink>1:
@@ -257,8 +260,13 @@ if A.get('cap'):
                 seen.add((x.st_dev,x.st_ino))
             if not os.path.islink(os.path.join(dp,f)):
                 used+=x.st_blocks*512
+                if top not in ('blobs','code'):
+                    out_used+=x.st_blocks*512
     free=min(free,max(0,int(A['cap']*1e9)-used))
-spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,
+B=os.path.realpath(os.path.join(R,'blobs'))
+bdev=os.stat(B).st_dev if os.path.isdir(B) else os.stat(R).st_dev
+spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,out_used=out_used,
+                   blob_dev=bdev,blob_free=free if bdev==os.stat(R).st_dev else shutil.disk_usage(B).free,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
 
@@ -918,9 +926,15 @@ def fill(s, name, rs, st, acts):
              if relayable(refill.info(mtq, t["key"]))]
     urgent = [t for t in cands if t["nice"] < 0]  # 第 ⓪ 档（训完后的推理等）不受 READY 限制（11/1）
     room = {k: want - have[k] for k in kinds}
-    disk = (conf(name)["ssh"], rs.get("dev"))
-    free = rs.get("free", 0) / 1e9 - PLANNED.get(disk, 0)
+    same = rs.get("blob_dev", rs.get("dev")) == rs.get("dev")
+    disk = (conf(name)["ssh"], rs.get("blob_dev", rs.get("dev")))
+    free = rs.get("blob_free", rs.get("free", 0)) / 1e9 - PLANNED.get(disk, 0)
     hard = (conf(name).get("budget") or (None, HARD_GB))[1]
+    # 有 cap 的（home）：那边每个任务（排着、在训、训完没拉回的，加这次领的）的输出各留 TRAIN_OUT_GB（11/4）
+    spare = None
+    if conf(name).get("cap") and rs.get("out_used") is not None:
+        n = len(rt) + sum(1 for t in held if remote(t) is None)
+        spare = (rs.get("free", 0) + rs["out_used"]) / 1e9 - n * refill.TRAIN_OUT_GB - (PLANNED.get(disk, 0) if same else 0)
     out, took = [], set()
     for k in kinds:  # 备满了、总队列里有更优先的：每次检查把一个最靠后、备好没人领的交还，换它进来（11/2）
         idle_k = sorted((t for t in held if kind(t) == k and idle(t)), key=lambda t: (-t["nice"], -t["order"]))
@@ -930,13 +944,17 @@ def fill(s, name, rs, st, acts):
             out += [dict(op="drop", key=w["key"], rkey=rkey(w["key"], keys[w["key"]])),
                     dict(op="release", key=w["key"], why=f"让给更优先的 {better[0]['key']}（档位 {better[0]['nice']} < {w['nice']}）")]
             room[k] = 1
+            if spare is not None:
+                spare += refill.TRAIN_OUT_GB
     if all(n <= 0 for n in room.values()) and not urgent:
         return [], f"那边排着 {sum(have.values())} 个"
     for pool, n in [(urgent, len(urgent))] + [([t for t in cands if kind(t) == k], room[k]) for k in kinds]:
         for _ in range(n):
             t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
-            if t is None:
+            if t is None or spare is not None and spare - refill.TRAIN_OUT_GB - (gb if same else 0) < 0:
                 break
+            if spare is not None:
+                spare -= refill.TRAIN_OUT_GB + (gb if same else 0)
             free -= gb
             PLANNED[disk] = PLANNED.get(disk, 0) + gb
             took.add(t["key"])
@@ -944,7 +962,10 @@ def fill(s, name, rs, st, acts):
     if out:
         return out, ""
     open_ = urgent or any(room[k] > 0 and kind(t) == k for t in cands for k in kinds)
-    return out, ("队列里没有能领的任务" if not cands else f"放不下（那边剩 {rs.get('free', 0) / 1e9:.0f} GB）" if open_
+    if cands and open_ and spare is not None and spare < refill.TRAIN_OUT_GB:
+        return out, (f"放不下（那边 {len(rt)} 个任务的输出各留 {refill.TRAIN_OUT_GB} GB 后，"
+                     f"cap 里只剩 {max(spare, 0):.0f} GB）")
+    return out, ("队列里没有能领的任务" if not cands else f"放不下（那边剩 {free + PLANNED.get(disk, 0):.0f} GB）" if open_
                  else f"那边排着 {sum(have.values())} 个")
 
 

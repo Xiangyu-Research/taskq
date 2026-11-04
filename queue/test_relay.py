@@ -469,6 +469,32 @@ def test_plan():
     relay.PLANNED.clear()
     ok("同一个盘上的几台（lab0、lab1）：这次检查里已经计划传的算进去")
 
+    relay.PLANNED.clear()
+    OUT = relay.refill.TRAIN_OUT_GB
+    cap0 = relay.conf(NAME).get("cap")
+    relay.conf(NAME)["cap"] = 90
+    try:
+        three = RS(rtask(A, "claimed", "1"), rtask("Dataset9_h/tr/0", "done"), rtask("Dataset9_h/tr/1", "claimed", "2"))
+        sep = dict(three, free=(3 * OUT + 5) * 1e9, out_used=12e9, dev=1, blob_dev=2, blob_free=500e9)
+        more, why = relay.fill(S0([mtask(K)] + cands), NAME, sep, st, [])
+        assert [a["key"] for a in more] == [K2], (more, why)  # 剩 3×OUT+5+12，3 个任务各留 OUT 后够 1 个
+        more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(sep, out_used=0), st, [])
+        assert more == [] and "各留" in why, (more, why)
+        relay.PLANNED.clear()
+        more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(sep, blob_free=(HARD0 + 5) * 1e9), st, [])
+        assert more == [] and "放不下" in why and "各留" not in why, (more, why)  # 输入按放 blobs 的盘查
+        relay.PLANNED.clear()
+        same = dict(three, free=(3 * OUT + 25) * 1e9, out_used=0, dev=1, blob_dev=1, blob_free=500e9)
+        more, why = relay.fill(S0([mtask(K)] + cands), NAME, same, st, [])
+        assert [a["key"] for a in more] == [K2], (more, why)  # 同一个盘：输入 10 GB 也从 cap 里扣
+        relay.PLANNED.clear()
+        more, why = relay.fill(S0([mtask(K)] + cands), NAME, dict(same, free=(3 * OUT + 15) * 1e9), st, [])
+        assert more == [], (more, why)
+    finally:
+        relay.conf(NAME)["cap"] = cap0
+        relay.PLANNED.clear()
+    ok("有 cap 的执行机：那边每个任务（含训完没拉回的、这次领的）的输出各留 TRAIN_OUT_GB；输入按放 blobs 的盘查（11/4）")
+
     rule0, allowed0 = relay.shift.rule, relay.shift.allowed
     relay.shift.allowed = lambda n, now=None: False
     try:
