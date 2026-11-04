@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "testdata"))
@@ -60,6 +61,22 @@ ok("env-of 不认识的 → 1", rc == 1)
 rc, out, err = run("bogus")
 ok("不认识的命令 → 2", rc == 2)
 ok("main(argv) 能直接调用", E.main(["list"]) == 0)
+
+# 实验表会把自己的插件文件夹插到 sys.path[0]（research/RQ1/experiments.py），里面有同名的 recipes.py；
+# check_fields 必须用核心的那份（11/4：剥离后 core 在仓库外，第一次 import 晚于插件，box 任务全挂）
+shadow = tempfile.mkdtemp()
+with open(os.path.join(shadow, "recipes.py"), "w", encoding="utf-8") as f:
+    f.write("RECIPES = {'shadow': {}}\nHOOKS = {}\n")
+code = f"""
+import sys, types
+sys.path.insert(0, {HERE!r})
+import experiments
+sys.path.insert(0, {shadow!r})
+experiments.check_fields('x', types.SimpleNamespace(EXPERIMENTS=[], FINAL=[]))
+print('ok')
+"""
+r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=os.environ.copy())
+ok("实验表插进插件文件夹后，check_fields 仍用核心的 recipes", r.returncode == 0 and "ok" in r.stdout)
 
 print("全部通过" if not fails else f"{fails} 项失败")
 sys.exit(1 if fails else 0)
