@@ -1,17 +1,16 @@
 #!/bin/bash
 # 往 pueue 队列里加一个任务（2026-10-16）：按组设好用哪张卡，工作目录是仓库根目录。
-#   q <组> [pueue add 的选项，如 --label 名字] -- '<命令>'
+#   taskq pueue-add <组> [pueue add 的选项，如 --label 名字] -- '<命令>'（即 queue/q）
 # 各机器有哪些组、每组用哪张卡、带哪些环境变量，写在 envs/machines.py（setup.sh 按它建组）；
 # 没有卡的组 CUDA_VISIBLE_DEVICES 设为空（看不到卡）。每个任务都带上 envs/policy.py 的 OUTPUTS["env_script"] 设的数据路径。
-# 表里这台机器有 code（box）时，任务的工作目录是按提交号的代码副本（先用 scripts/taskq/sync/snapshot.sh 更新到 GitHub 上的 main），
+# 表里这台机器有 code（box）时，任务的工作目录是按提交号的代码副本（先用 sync/snapshot.sh 更新到 GitHub 上的 main），
 # 只跑已经推送的代码，以后的代码更新不改到这个任务；没有 code 时是表里的 repo。
-# 例：q gpu1 --label demo -- 'bash scripts/taskq/queue/run_task.sh command key=demo/a "cmd=python3 train.py" env=<环境> out=demo/a done=DONE'
+# 例：taskq pueue-add gpu1 --label demo -- 'python3 train.py'
 set -euo pipefail
 G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 HERE=$REPO
-SUB=${CORE#"$REPO"}  # 仓库里调度代码的位置（嵌着时 /scripts/taskq，单独的检出时空）
 SRC=$(python3 "$CORE/sites/mtab.py" get . repo) CODE=$(python3 "$CORE/sites/mtab.py" get . code)
 if [[ -n $CODE ]]; then
     bash "$CORE/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
@@ -24,6 +23,9 @@ echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）
 ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-ES=$(python3 "$REPO$SUB/queue/cfg.py" get env_script)
+export PATH="$CORE/bin:$PATH"  # 环境脚本和任务的命令里能用 taskq（cron 的 PATH 里没有 ~/.local/bin；同 run_task.sh）
+# 核心在仓库里（代码包）时用工作目录里的那份 cfg.py，装在仓库外时用这份
+if [[ $CORE == "$HERE"/* ]]; then CFG=$REPO${CORE#"$HERE"}/queue/cfg.py; else CFG=$CORE/queue/cfg.py; fi
+ES=$(TASKQ_REPO=$REPO python3 "$CFG" get env_script)
 [[ -z $ES ]] || source "$REPO/$ES"
 exec ~/.local/bin/pueue add -g "$G" -w "$REPO" "$@"
