@@ -122,6 +122,10 @@ STATES = dict(
     bad="说明解析不了",
     done="训完",
 )
+S_FREE, S_CLAIMED, S_BUSY, S_STALE, S_WAITING, S_BLOCKED = "free", "claimed", "busy", "stale", "waiting", "blocked"
+S_FAILED, S_INPUT, S_STOPPED, S_BAD, S_DONE = "failed", "input", "stopped", "bad", "done"
+assert {S_FREE, S_CLAIMED, S_BUSY, S_STALE, S_WAITING, S_BLOCKED, S_FAILED, S_INPUT, S_STOPPED, S_BAD, S_DONE} == set(STATES)
+UNCLAIMED = (S_FREE, S_STALE)  # 没人领着、可以领的
 
 # ---------------- 退出码 ----------------
 EXIT = dict(

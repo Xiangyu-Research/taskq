@@ -38,6 +38,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
+import proto  # noqa: E402
+from proto import alert_id  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 TQS = cfg.state("taskq", expand=False)
@@ -46,10 +48,10 @@ import machines as M  # noqa: E402
 import policy  # noqa: E402
 
 OUT = getattr(policy, "OUTPUTS", {})
-HDIR = os.path.expanduser(OUT.get("health", "~/.cache/taskq-health"))
+HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
 NAME = OUT.get("name", "taskq")
 STATE = os.path.join(HDIR, "state.json")
-CODE_HEADS = os.path.expanduser(OUT.get("heads", "~/.cache/taskq/code/heads.tsv"))  # scripts/monitor/auto_refresh.sh 写
+CODE_HEADS = os.path.expanduser(OUT.get("heads") or cfg.state("code", "heads.tsv", expand=False))  # 快进别的机器的代码后写（PhD：auto_refresh.sh）
 LOG = os.path.join(HDIR, "health.log")
 TOPIC = os.path.expanduser(OUT.get("topic", "~/.config/taskq-health/ntfy_topic"))
 H_PENDING = os.path.join(HDIR, "board_pending.txt")  # scripts/dashboard/publish.py --auto 写
@@ -210,13 +212,21 @@ def task_info(s, key):
 
 
 # ---------------- 检查 ----------------
+def problem(msg, level="normal", kind="state", after=0, data=None):
+    """一个问题：msg 是给人看的说明（登记表），data 是结构化的事实（plain.py 据此说白话）。"""
+    p = dict(msg=msg, level=level, kind=kind, after=after)
+    if data:
+        p["data"] = data
+    return p
+
+
 def check(s):
-    """→ {问题编号: dict(msg, level=urgent|normal|info, kind=event|state, after=持续多少分钟才算)}。"""
+    """→ {问题编号: dict(msg, level=urgent|normal|info, kind=event|state, after=持续多少分钟才算, data=结构化的事实（可选）)}。"""
     now, P = s["now"], {}
     L = lambda n: M.MACHINES[n]["label"]  # noqa: E731
 
-    def add(pid, msg, level="normal", kind="state", after=0):
-        P[pid] = dict(msg=msg, level=level, kind=kind, after=after)
+    def add(pid, msg, level="normal", kind="state", after=0, data=None):
+        P[pid] = problem(msg, level, kind, after, data)
 
     claims = {}  # key → {"机器:组": [描述]}（排队或在训）
     busy = {}  # key → {机器（同上）}：在训，或段间等待（有进度、下一段在排队）
@@ -226,39 +236,40 @@ def check(s):
 
     for name, ok in s["ok"].items():
         if not ok and name not in policy.OFFLINE:
-            add(f"down:{name}", f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(M.MACHINES[name]['ssh'])}）",
+            add(alert_id("down", name), f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(M.MACHINES[name]['ssh'])}）",
                 after=30)
     for name, d in (s.get("src") or {}).items():  # 存储挂住、读不动的任务（spec.collect 的 stuck，11/1）
         if d.get("stuck"):
-            add(f"unread:{name}", f"{L(name)} 上 {len(d['stuck'])} 个任务的文件读不动（多半是存储挂住），先不分、不交还："
-                                 f"{'、'.join(d['stuck'][:5])}{' …' if len(d['stuck']) > 5 else ''}", after=60)
+            add(alert_id("unread", name), f"{L(name)} 上 {len(d['stuck'])} 个任务的文件读不动（多半是存储挂住），先不分、不交还："
+                f"{'、'.join(d['stuck'][:5])}{' …' if len(d['stuck']) > 5 else ''}", after=60, data=dict(n=len(d["stuck"]), keys=d["stuck"]))
         if d.get("errors"):
             er = sorted(d["errors"].items())
-            add(f"readerr:{name}", f"{L(name)} 上 {len(er)} 个任务读状态出错，先不分、不交还："
-                                  f"{'；'.join(f'{k}（{v}）' for k, v in er[:3])}{' …' if len(er) > 3 else ''}", after=60)
+            add(alert_id("readerr", name), f"{L(name)} 上 {len(er)} 个任务读状态出错，先不分、不交还："
+                f"{'；'.join(f'{k}（{v}）' for k, v in er[:3])}{' …' if len(er) > 3 else ''}", after=60, data=dict(n=len(er)))
     code = s.get("code") or {}
-    for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了
-        if head and code.get("main") and head != code["main"] and name in M.MACHINES and name not in policy.OFFLINE:
-            add(f"code:{name}", f"{L(name)} 的代码停在 {head[:7]}，GitHub 上是 {code['main'][:7]}"
+    for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了；只查有 git 克隆（repo）的机器
+        if head and code.get("main") and head != code["main"] and (M.MACHINES.get(name) or {}).get("repo") \
+                and name not in policy.OFFLINE:
+            add(alert_id("code", name), f"{L(name)} 的代码停在 {head[:7]}，GitHub 上是 {code['main'][:7]}"
                 f"（{M.MACHINES[name].get('repo')} 快进不了？auto_refresh.sh 每 30 分钟快进一次）", after=120)
     # --- 总队列（box，10/31）---
     hub = M.hub()
     ctq = s.get("taskq", {}).get(hub)
     if hub in s.get("taskq", {}) and ctq is None:
-        add(f"taskq:{hub}", f"{L(hub)} 读不到总队列（{TQS}/）")
+        add(alert_id("taskq", hub), f"{L(hub)} 读不到总队列（{TQS}/）")
     elif ctq and not ctq.get("enabled"):
-        add(f"tqoff:{hub}", f"{L(hub)} 的总队列关着（{TQS}/ENABLED 不在），不会往执行机送任务", after=60)
+        add(alert_id("tqoff", hub), f"{L(hub)} 的总队列关着（{TQS}/{proto.QUEUE['enabled']} 不在），不会往执行机送任务", after=60)
     elif ctq:
         for t in ctq["tasks"]:
-            if t["state"] == "blocked" and not t.get("assigned"):
-                add(f"tqblocked:{t['key']}", f"总队列任务 {t['key']} {t['note']}，不会开始")
+            if t["state"] == proto.S_BLOCKED and not t.get("assigned"):
+                add(alert_id("tqblocked", t["key"]), f"总队列任务 {t['key']} {t['note']}，不会开始", data=dict(key=t["key"]))
     # --- pueue ---
     for name in M.names("pueue"):
         if not s["ok"].get(name):
             continue
         d = s["pueue"].get(name) or {"error": "没有结果"}
         if "error" in d:
-            add(f"pueued:{name}", f"{L(name)} 的 pueue 没有响应：{d['error'][:120]}")
+            add(alert_id("pueued", name), f"{L(name)} 的 pueue 没有响应：{d['error'][:120]}")
             continue
         for t in d["tasks"]:
             r = C.identify(name, t, s.get("records") or [])
@@ -274,21 +285,22 @@ def check(s):
                     start = C.local_time(t["start"])
                     if start and now - start > timedelta(minutes=60) and \
                             (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
-                        add(f"stuck:{name}:{t['id']}", f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）")
+                        add(alert_id("stuck", name, t["id"]), f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）",
+                            data=dict(key=key, label=tname))
             if st in LIVE or st == "Success":
                 continue
             end = C.local_time(t["end"])
             if end and now - end > timedelta(hours=24):
                 continue
-            add(f"pueue:{name}:{t['id']}:{t['end']}", f"{L(name)} 任务 {t['id']} {tname} {st}",
-                level="info" if stopped(t) else "normal", kind="event")
+            add(alert_id("pueue", name, t["id"], str(t["end"])), f"{L(name)} 任务 {t['id']} {tname} {st}",
+                level="info" if stopped(t) else "normal", kind="event", data=dict(label=tname, status=st))
 
     # --- 同一个任务两处 ---
     for key in sorted(k for k, v in claims.items() if len(v) >= 2):
         both = len(busy.get(key, ())) >= 2
-        add(f"dup:{key}", f"同一个任务在两处：{key}，" + "；".join(f"{L(n.split(':')[0])}{' ' + n.split(':')[1] if ':' in n else ''} {'、'.join(v)}" for n, v in claims[key].items())
+        add(alert_id("dup", key), f"同一个任务在两处：{key}，" + "；".join(f"{L(n.split(':')[0])}{' ' + n.split(':')[1] if ':' in n else ''} {'、'.join(v)}" for n, v in claims[key].items())
             + ("（两边都在训或有进度，同步时会互相覆盖存档）" if both else "（还没同时开训，取消一边前要确认作业号）"),
-            level="urgent" if both else "normal")
+            level="urgent" if both else "normal", data=dict(key=key, both=both, where=sorted(claims[key])))
 
     # --- 盘、GPU 记录、代码同步、重启 ---
     for name, pr in s["probe"].items():
@@ -296,7 +308,8 @@ def check(s):
         if m["disk"] and pr.get("DISK", "").strip().isdigit():
             free, warn, urgent = int(pr["DISK"]) / 1e9, m["disk"][1], m["disk"][2]
             if free < warn:
-                add(f"disk:{name}", f"{L(name)} {m['disk'][0]} 只剩 {free:.0f} GB", level="urgent" if urgent and free < urgent else "normal")
+                add(alert_id("disk", name), f"{L(name)} {m['disk'][0]} 只剩 {free:.0f} GB", level="urgent" if urgent and free < urgent else "normal",
+                    data=dict(path=m["disk"][0], free_gb=free))
         if m["gpu_log"]:
             last = pr.get("GPULOG", "")
             try:
@@ -304,16 +317,18 @@ def check(s):
             except ValueError:
                 age = None
             if age is None or age > timedelta(minutes=10):
-                add(f"gpulog:{name}", f"{L(name)} GPU 使用记录停了（最后一条 {last or '没有'}）")
+                add(alert_id("gpulog", name), f"{L(name)} GPU 使用记录停了（最后一条 {last or '没有'}）")
         boot, _, line = pr.get("BOOT", "").partition("|")
         try:
             t = datetime.strptime(boot, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
         if now - t < timedelta(hours=24):
-            add(f"boot:{name}:{boot}", f"{L(name)} {t:%m-%d %H:%M} 重启过：{line[20:] or '没有开机记录（on_boot.sh 没跑？）'}", kind="event")
+            add(alert_id("boot", name, boot), f"{L(name)} {t:%m-%d %H:%M} 重启过：{line[20:] or '没有开机记录（on_boot.sh 没跑？）'}",
+                kind="event", data=dict(time=boot))
     if s.get("board_pending"):
-        add("board", f"看板有新结果等确认后发布（{len(s['board_pending'])} 个文件：{'、'.join(s['board_pending'][:4])}）")
+        add(alert_id("board"), f"看板有新结果等确认后发布（{len(s['board_pending'])} 个文件：{'、'.join(s['board_pending'][:4])}）",
+            data=dict(n=len(s["board_pending"])))
 
     return P
 
@@ -367,6 +382,13 @@ def update(P, now, dry=False):
     return [p for _, p in msgs], sent_ok
 
 
+def from_step(v):
+    """shift / feed（relay）/ advance 报的卡住：说明（str），或 dict(msg, data) → 问题。"""
+    if isinstance(v, dict):
+        return problem(v["msg"], data=v.get("data"))
+    return problem(v)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -403,8 +425,8 @@ def main():
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"scripts/taskq/queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
-    for pid, msg in {**stuck, **stuck2}.items():
-        P[pid] = dict(msg=msg, level="normal", kind="state", after=0)
+    for pid, v in {**stuck, **stuck2}.items():
+        P[pid] = from_step(v)
     update(P, s["now"], dry=a.dry_run)
     if a.dry_run:
         for pid, p in sorted(P.items()):
