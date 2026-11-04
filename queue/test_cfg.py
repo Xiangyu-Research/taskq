@@ -73,8 +73,9 @@ lay = {}
 for name, sub in (("embed", "scripts/taskq/queue"), ("alone", "queue")):
     d = os.path.join(T, "layout", name, sub)
     os.makedirs(d)
-    with open(os.path.join(HERE, "cfg.py")) as src, open(os.path.join(d, "cfg.py"), "w") as dst:
-        dst.write(src.read())
+    for n in ("cfg.py", "project.py"):
+        with open(os.path.join(HERE, n)) as src, open(os.path.join(d, n), "w") as dst:
+            dst.write(src.read())
     lay[name] = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import cfg; "
                                 "print(cfg.CORE_REL, cfg.rel('queue', 'taskq.py'), cfg.rel('queue'))", d],
                                capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "TASKQ_REPO"}).stdout.split()
@@ -255,6 +256,102 @@ r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.ar
                    capture_output=True, text=True, env=dict(os.environ))
 ok("测试插件：做法、钩子、中继插件合进来，插件里的函数不进核心模块，RelayError 是 taskq_api 的同一个",
    r.stdout.split() == ["['command',", "'toy']", "['model_of']", "['toy',", "'toy_infer']", "False", "False", "True"])
+
+# 找项目（project.py，11/4）：--project > TASKQ_PROJECT > 从当前目录往上找 .taskq.toml；cfg 的仓库根：TASKQ_REPO > 嵌着 > 找到的项目 > CORE
+import project  # noqa: E402
+PJ = os.path.join(T, "proj")
+write(os.path.join(PJ, ".taskq.toml"), """
+    # 测试项目
+    config = "conf"
+    plugins = ["p1", "p/two"]  # 两个
+""")
+os.makedirs(os.path.join(PJ, "a", "b"))
+setenv(TASKQ_PROJECT=None, TASKQ_REPO=None, TASKQ_CONFIG=None, TASKQ_PLUGINS=None)
+ok("project.find：从子文件夹往上找到 .taskq.toml", project.find(start=os.path.join(PJ, "a", "b")) == PJ)
+ok("project.find：往上没有 → None", project.find(start=os.path.join(T, "layout")) is None)
+ok("project.find：明确给的优先（不要求有 .taskq.toml）", project.find(os.path.join(T, "other"), start=PJ) == os.path.join(T, "other"))
+setenv(TASKQ_PROJECT="~/pj")
+ok("project.find：TASKQ_PROJECT 比往上找优先，~ 展开", project.find(start=PJ) == os.path.join(HOME, "pj"))
+ok("project.find：明确给的比 TASKQ_PROJECT 优先", project.find(PJ) == PJ)
+setenv(TASKQ_PROJECT=None)
+ok("project.load：读 config、plugins", project.load(PJ) == {"config": "conf", "plugins": ["p1", "p/two"]})
+ok("project.load：没有 .taskq.toml → {}", project.load(T) == {})
+ok("project.parse（没有 tomllib 时）：字符串、列表、空列表、注释、空行",
+   project.parse('# c\n\nconfig = "envs"  # 注释\nplugins = ["a", "b/c"]\nx = []\ny = ["#不是注释"]\n')
+   == {"config": "envs", "plugins": ["a", "b/c"], "x": [], "y": ["#不是注释"]})
+try:
+    project.parse("[table]\n")
+    ok("project.parse：看不懂的行报错", False)
+except ValueError as e:
+    ok("project.parse：看不懂的行报错（说明第几行）", "第 1 行" in str(e))
+ok("project.env_of：TASKQ_REPO、TASKQ_CONFIG、TASKQ_PLUGINS（: 隔开）",
+   project.env_of(PJ) == {"TASKQ_REPO": PJ, "TASKQ_CONFIG": os.path.join(PJ, "conf"),
+                          "TASKQ_PLUGINS": os.path.join(PJ, "p1") + ":" + os.path.join(PJ, "p/two")})
+write(os.path.join(T, "proj_s", ".taskq.toml"), 'plugins = "one"\n')
+ok("project.env_of：plugins 写成一个字符串也行，没写 config 就不设 TASKQ_CONFIG",
+   project.env_of(os.path.join(T, "proj_s")) == {"TASKQ_REPO": os.path.join(T, "proj_s"), "TASKQ_PLUGINS": os.path.join(T, "proj_s", "one")})
+setenv(TASKQ_CONFIG="/keep")
+new = project.export(PJ)
+ok("project.export：已经设了的不改，其余设上", os.environ["TASKQ_CONFIG"] == "/keep" and os.environ["TASKQ_REPO"] == PJ
+   and "TASKQ_CONFIG" not in new and "TASKQ_PLUGINS" in new)
+setenv(TASKQ_CONFIG=None, TASKQ_REPO=None, TASKQ_PLUGINS=None)
+
+
+def proj_sh(cwd, *args, **env):
+    e = {k: v for k, v in os.environ.items() if not k.startswith("TASKQ_")}
+    e.update(env)
+    return subprocess.run([sys.executable, os.path.join(HERE, "project.py"), "sh", *args], cwd=cwd, env=e, capture_output=True, text=True)
+
+
+r = proj_sh(os.path.join(PJ, "a"))
+ok("project.py sh：往上找到项目，打印 export", r.returncode == 0 and f"export TASKQ_REPO={PJ}\n" in r.stdout
+   and f"export TASKQ_CONFIG={PJ}/conf\n" in r.stdout and r.stdout.count("export ") == 3)
+r = proj_sh(os.path.join(PJ, "a"), TASKQ_CONFIG="/x")
+ok("project.py sh：已经设了的不输出", r.returncode == 0 and "TASKQ_CONFIG" not in r.stdout and "TASKQ_REPO" in r.stdout)
+r = proj_sh(T)
+ok("project.py sh：找不到 → 什么也不输出，退出码 1", r.returncode == 1 and r.stdout == "" and ".taskq.toml" in r.stderr)
+r = proj_sh(T, "--project", PJ)
+ok("project.py sh --project", r.returncode == 0 and f"export TASKQ_REPO={PJ}\n" in r.stdout)
+r = subprocess.run([sys.executable, os.path.join(HERE, "project.py")], capture_output=True, text=True)
+ok("project.py：参数不对 → 用法，退出码 2", r.returncode == 2 and "project.py sh" in r.stderr)
+
+
+def cfg_in(cwd, code, layout="alone", **env):
+    """在复制的核心（alone：单独的检出；embed：<仓库>/scripts/taskq）里 import cfg，跑 code。"""
+    d = os.path.join(T, "disc_" + layout, "scripts/taskq/queue" if layout == "embed" else "queue")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+        for n in ("cfg.py", "project.py"):
+            with open(os.path.join(HERE, n)) as src, open(os.path.join(d, n), "w") as dst:
+                dst.write(src.read())
+    e = {k: v for k, v in os.environ.items() if not k.startswith("TASKQ_")}
+    e.update(env)
+    r = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {d!r}); import cfg; print(repr({code}))"],
+                       cwd=cwd, env=e, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else "ERR " + r.stderr
+
+
+ALONE = os.path.join(T, "disc_alone")
+ok("cfg：单独的检出、当前目录往上有 .taskq.toml → 那个项目，配置和插件按它",
+   cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir(), cfg.plugin_dirs())")
+   == repr((PJ, os.path.join(PJ, "conf"), [os.path.join(PJ, "p1"), os.path.join(PJ, "p/two")])))
+ok("cfg：TASKQ_PROJECT 也认", cfg_in(T, "cfg.REPO", TASKQ_PROJECT=PJ) == repr(PJ))
+ok("cfg：TASKQ_REPO 比往上找优先", cfg_in(os.path.join(PJ, "a"), "cfg.REPO", TASKQ_REPO=T) == repr(T))
+ok("cfg：TASKQ_CONFIG、TASKQ_PLUGINS 比 .taskq.toml 优先",
+   cfg_in(PJ, "(cfg.config_dir(), cfg.plugin_dirs())", TASKQ_CONFIG="/c", TASKQ_PLUGINS="/p") == repr(("/c", ["/p"])))
+ok("cfg：找不到项目 → 核心自己，没有 .taskq.toml 时用默认的 envs/、插件文件夹",
+   cfg_in(T, "(cfg.REPO, cfg.config_dir(), cfg.plugin_dirs())")
+   == repr((ALONE, os.path.join(ALONE, "envs"), [os.path.join(ALONE, "research", "common", "taskq_plugins")])))
+write(os.path.join(T, "proj_e", ".taskq.toml"), "")
+ok("cfg：.taskq.toml 没写 config、plugins → 项目根、没有插件",
+   cfg_in(os.path.join(T, "proj_e"), "(cfg.config_dir(), cfg.plugin_dirs())") == repr((os.path.join(T, "proj_e"), [])))
+EMB = os.path.join(T, "disc_embed")
+write(os.path.join(EMB, ".taskq.toml"), 'config = "cfgdir"\n')
+ok("cfg：嵌在 <仓库>/scripts/taskq 里时就是那个仓库（不往上找），仓库根的 .taskq.toml 照样读",
+   cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "cfgdir"))))
+os.remove(os.path.join(EMB, ".taskq.toml"))
+ok("cfg：嵌着、仓库根没有 .taskq.toml → <仓库>/envs（同以前）",
+   cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "envs"))))
 
 setenv(TASKQ_PLUGINS=None, TASKQ_CONFIG=None)
 print(f"\n{'全部通过' if not fails else f'{fails} 项失败'}")

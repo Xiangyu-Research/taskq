@@ -1,7 +1,7 @@
 """配置、插件、状态在哪（2026-11-02）：TASKQ_CONFIG（machines.py、policy.py 所在的文件夹）、TASKQ_PLUGINS（做法、中继插件、
 进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）。说明见 scripts/taskq/queue/README.md 的"开关和配置"。
 
-    import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import machines、policy
+    import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import policy；机器表用 cfg.mtab()（sites/mtab.py）
     cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连，元组的元组每项一行；没有时为空）
     cfg.py state [名字…]             本机的状态文件夹（或其中的路径，~ 展开）
     cfg.py log <名字>                日志文件 <名字>.log 的位置（~ 展开）
@@ -24,14 +24,26 @@ CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 调度代�
 _EMBED = os.path.join("scripts", "taskq")
 
 
+def _project():
+    """同一文件夹里的 project.py（按文件加载，不靠 sys.path，名字不和使用者的模块撞）。"""
+    m = sys.modules.get("taskq_project")
+    if m is None:
+        s = importlib.util.spec_from_file_location("taskq_project", os.path.join(os.path.dirname(os.path.abspath(__file__)), "project.py"))
+        m = importlib.util.module_from_spec(s)
+        s.loader.exec_module(m)
+        sys.modules["taskq_project"] = m
+    return m
+
+
 def _user_repo():
-    """使用者的仓库根：TASKQ_REPO；没设时，嵌在 <仓库>/scripts/taskq 里就是那个仓库，否则（单独的检出）是 CORE。"""
+    """使用者的仓库根：TASKQ_REPO；没设时，嵌在 <仓库>/scripts/taskq 里就是那个仓库；否则 TASKQ_PROJECT 或从当前目录往上找到的
+    .taskq.toml 所在的文件夹（project.py）；都没有时是 CORE。"""
     v = os.environ.get("TASKQ_REPO")
     if v:
         return os.path.abspath(os.path.expanduser(v))
     if CORE.endswith(os.sep + _EMBED):
         return CORE[:-len(_EMBED) - 1]
-    return CORE
+    return _project().find() or CORE
 
 
 REPO = _user_repo()
@@ -49,8 +61,35 @@ STATE_HOME = "~/.cache/taskq/"
 STATE_PLACES = {"taskq": "~/.cache/taskq/taskq", "gpu_pad/DISABLED": "~/.cache/taskq/gpu_pad/DISABLED"}
 
 
+_PROJECT = []
+
+
+def project_conf():
+    """使用者仓库根的 .taskq.toml（project.py）→ dict；没有这个文件 → None。"""
+    if not _PROJECT:
+        pj = _project()
+        _PROJECT.append(pj.load(REPO) if os.path.isfile(os.path.join(REPO, pj.NAME)) else None)
+    return _PROJECT[0]
+
+
 def config_dir():
-    return os.path.expanduser(os.environ.get("TASKQ_CONFIG") or os.path.join(REPO, "envs"))
+    """配置文件夹：TASKQ_CONFIG > 仓库根 .taskq.toml 的 config > 没有 .taskq.toml 时 <仓库>/envs。"""
+    v = os.environ.get("TASKQ_CONFIG")
+    if v:
+        return os.path.expanduser(v)
+    conf = project_conf()
+    if conf is None:
+        return os.path.join(REPO, "envs")
+    return os.path.normpath(os.path.join(REPO, conf.get("config", ".")))
+
+
+def mtab():
+    """机器表（核心的 sites/mtab.py，数据取配置文件夹里的 machines.py）。"""
+    d = os.path.join(CORE, "sites")
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    import mtab as m
+    return m
 
 
 def use_config():
@@ -99,9 +138,14 @@ def env(name, default=None):
 
 
 def plugin_dirs():
+    """插件文件夹：TASKQ_PLUGINS（设了就算空的也用）> 仓库根 .taskq.toml 的 plugins > 没有 .taskq.toml 时仓库里默认的那个。"""
     v = os.environ.get("TASKQ_PLUGINS")
     if v is None:
-        return [os.path.join(REPO, "research", "common", "taskq_plugins")]
+        conf = project_conf()
+        if conf is None:
+            return [os.path.join(REPO, "research", "common", "taskq_plugins")]
+        p = conf.get("plugins") or []
+        return [os.path.join(REPO, d) for d in ([p] if isinstance(p, str) else p)]
     return [os.path.expanduser(d) for d in v.split(os.pathsep) if d]
 
 
