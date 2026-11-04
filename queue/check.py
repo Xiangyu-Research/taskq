@@ -116,6 +116,64 @@ def check_machines(r):
     dup = sorted({x for x in names if names.count(x) > 1})
     if dup:
         r.note(g, f"几台 Slurm 执行机的作业名用同一套（job_names {dup}），squeue 里分不开是哪台的")
+    for n, m in {**M.MACHINES, **sites}.items():
+        quick = m.get("quick")
+        if quick is None:
+            continue
+        if not (_is_tuple(quick, 2) and all(isinstance(x, str) and x for x in quick)):
+            r.bad(g, f"{n} 的 quick 要写成 (cloudflared 镜像, 认临时地址的正则)，现在 {quick!r}")
+            continue
+        try:
+            re.compile(quick[1])
+        except re.error as e:
+            r.bad(g, f"{n} 的 quick 第二项不是正则：{e}")
+    check_specs(r, M)
+
+
+PLACEHOLDERS = {"torch_mm", "abi", "cp"}  # 环境描述的 pip 包里能写的占位（sites/envs.py 的 pip_lines）
+
+
+def check_specs(r, M):
+    """<配置文件夹>/specs/*.yml：读得了、有能编译的 <名>.check.py、pip 里只有认得的占位，每个 torch 变体在一台假的执行机上
+    都生成得出建环境的脚本（base 也要有描述）。算在 machines 一组。"""
+    g = "machines"
+    try:
+        import envs as EV
+    except ImportError as e:
+        r.note(g, f"读不了环境描述（{e}），没查 specs/")
+        return
+    names = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(M.SPECS, "*.yml")))
+    fake = "_check_specs"
+    sites = getattr(M, "SITES", None)
+    if sites is None or fake in sites:
+        return
+    for n in names:
+        r.checked(g)
+        try:
+            sp = EV.load(n)
+            p = EV.check_file(n)
+            compile(open(p, encoding="utf-8").read(), p, "exec")
+        except ImportError as e:
+            r.note(g, f"读不了环境描述（{e}），没查 specs/")
+            return
+        except Exception as e:  # noqa: BLE001  EnvError、SyntaxError、yaml 的错
+            r.bad(g, f"环境描述 {n}：{type(e).__name__}: {e}")
+            continue
+        odd = sorted({x for pkg in (sp.get("pip") or []) + (sp.get("pip_no_deps") or []) for x in re.findall(r"\{(\w+)\}", str(pkg))}
+                     - PLACEHOLDERS)
+        if odd:
+            r.bad(g, f"环境描述 {n}.yml 的 pip 里有不认识的占位 {odd}（能写：{sorted(PLACEHOLDERS)}）")
+        for v in list(sp.get("torch") or {}) or ["default"]:
+            envs = {x: "spec" for x in names}
+            envs[n] = ("spec", v)
+            sites[fake] = dict(label=fake, hostname=r"(?!)", scheduler="pueue", root="/check/root", conda=("/check/conda", "base"),
+                               envs=envs, roles=())
+            try:
+                EV.build_script(fake, n)
+            except Exception as e:  # noqa: BLE001
+                r.bad(g, f"环境描述 {n}（torch 变体 {v}）生成不出建环境的脚本：{type(e).__name__}: {e}")
+            finally:
+                sites.pop(fake, None)
 
 
 # ---------------- policy ----------------

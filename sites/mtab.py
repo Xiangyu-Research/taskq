@@ -11,6 +11,7 @@
   mtab.py q-env <组>             本机这个组的环境变量（export 语句，queue/q 用）；没有这个组时退出码 2
   mtab.py groups [名|.]          这台（默认本机）的 pueue 组，每行"组名:同时跑几个"（queue/setup.sh 用）
   mtab.py activate <环境> [名|.] 激活这个环境的 shell 语句（eval "$(...)"）；这台机器没有这个环境时退出码 3
+  （taskq machines show [名…]：核心按机器表算出来的值，一行 JSON，在 queue/cli_json.py）
 """
 import os
 import re

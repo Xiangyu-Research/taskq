@@ -169,6 +169,19 @@ LOG_HEAD_CODE = r"代码 (\S+?)，"  # 分段日志第一行（run_task.sh 写�
 EXP_LIST_TOP = ("version", "experiments", "final")      # experiments：实验表的条目（experiments.EXP_FIELDS 的字段）；final：FINAL 的步骤
 EXP_TASKS_TOP = ("version", "tasks")
 EXP_TASK_FIELDS = ("key", "exp", "recipe", "params", "each", "short", "label", "names", "spec")  # label：box pueue 标签里的任务名
+# cli_json.py（taskq exp steps，11/4）：每个任务的步骤（task）、实验一级的（group）、FINAL（final），命令按 names 填好
+EXP_STEPS_TOP = ("version", "data", "python", "steps")
+EXP_STEP_FIELDS = ("level", "exp", "key", "name", "group", "cmd", "names", "done", "needs", "error")  # done、needs：没要时 null
+
+# cli_json.py（taskq machines show，11/4）：核心按机器表算出来的值
+MSHOW_TOP = ("version", "hub", "machines", "specs")
+MSHOW_MACHINE = ("name", "table", "label", "scheduler", "roles", "relay", "kinds", "workers", "worker_cmds", "root", "root_q",
+                 "ready_envs", "activate", "adopt", "task_sh")  # ready_envs：不看建好的标志就能用的环境；task_sh：spec shell 在这台加的语句
+MSHOW_SPEC = ("hash", "base", "torch", "error")  # torch：{变体: index_url}；error：描述读不了时的原因，没问题时 null
+
+# cli_json.py（taskq spec export / import，11/4）：中继插件送出、拉回核对
+RELAY_EXPORT_TOP = ("version", "plugin", "params", "files", "texts", "views", "outs", "cleanup", "logs")  # logs：分段日志的文件名前缀
+RELAY_IMPORT_TOP = ("version", "written")
 
 # overview.py --json（11/4）：登记表这类汇总要的全部状态，一行 JSON
 OVERVIEW_TOP = ("version", "now", "hub", "data", "queue", "sources", "machines", "tasks", "health", "code")

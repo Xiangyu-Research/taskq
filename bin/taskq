@@ -188,6 +188,12 @@ def cmd_exp(sub):
 EXP_USAGE = {"env-of": "<模型文件夹>", "name-of": "<模型文件夹> <名字>…"}
 
 
+def cmd_machines(argv, prog):
+    if argv[:1] == ["show"]:
+        return call("cli_json", ["machines-show", *argv[1:]], f"{prog} show")
+    return call("mtab", argv, prog)
+
+
 def cmd_path(argv, prog):
     if len(argv) != 1 or argv[0] not in ("lib", "api", "core"):
         say(f"用法：{prog} lib|api|core")
@@ -245,6 +251,8 @@ SPEC_DOC = {
     "collect": ("--json < 输入.json", "本机的训练状态（跨版本读用）：输出 @@JSON 一行"),
 }
 
+RELAY_DOC = {"export": "中继插件送出：要传的文件、视图、拉回的文件夹（JSON）", "import": "中继插件拉回核对，放进 --dst（JSON）"}
+
 TREE = {
     # 队列
     "add": Cmd("加任务：实验表（--exp）、做法（--recipe）或任务单（--file）", py("taskq", "add"), own_help=True),
@@ -278,6 +286,8 @@ TREE = {
         "tasks": Cmd("展开后的任务（--json）", cmd_exp("tasks"), own_help=True),
         "env-of": Cmd("模型文件夹 → 训它用的环境", cmd_exp("env-of"), EXP_USAGE["env-of"]),
         "name-of": Cmd("模型文件夹 → 它所属实验的 names 里这几项（每行一个）", cmd_exp("name-of"), EXP_USAGE["name-of"]),
+        "steps": Cmd("步骤，命令按 names 填好（--done 判断做完没有，--needs 列输入；JSON）", py("cli_json", "exp-steps", prog="taskq exp"),
+                     own_help=True),
     }),
     # 其他
     "tunnel": Group("经隧道传大批文件", {
@@ -298,7 +308,7 @@ TREE = {
     "snapshot": Cmd("按提交号的代码副本（拉取、建副本、切 current、删旧的）", sh("sync/snapshot.sh"), "<克隆>"),
     "check": Cmd("核对整个项目（配置、插件、实验表、所有任务）", py("check", prog="taskq check"), own_help=True),
     "path": Cmd("核心的位置：lib / api（queue/）、core（根）", cmd_path, "lib|api|core", project=False),
-    "machines": Cmd("机器表（get、names、activate…）", py("mtab", prog="taskq machines"), own_help=True),
+    "machines": Cmd("机器表（get、names、activate、show…）", cmd_machines, own_help=True),
     "self": Group("taskq 本身", {
         "update": Cmd("拉 origin/main（失败重试 5 次，拉不到就留在原来的版本）", cmd_update, project=False),
         "version": Cmd("版本", cmd_version, project=False),
@@ -312,7 +322,8 @@ TREE = {
         "release": Cmd("交还", py("taskq", "release", prog="taskq worker"), own_help=True),
         "missing": Cmd("缺输入，交还", py("taskq", "missing", prog="taskq worker"), own_help=True),
     }, hidden=True),
-    "spec": Group("任务说明（冻结）", {k: Cmd(d, py("spec", k, prog="taskq spec"), u) for k, (u, d) in SPEC_DOC.items()},
+    "spec": Group("任务说明（冻结）", {**{k: Cmd(d, py("spec", k, prog="taskq spec"), u) for k, (u, d) in SPEC_DOC.items()},
+                                     **{k: Cmd(d, py("cli_json", f"spec-{k}", prog="taskq spec"), own_help=True) for k, d in RELAY_DOC.items()}},
                   hidden=True),
     "internal": Group("调度自己排的步骤", {
         "stage": Cmd("传数据、加进执行机的队列（排不上退出码 75）", py("relay", "stage", prog="taskq internal"), own_help=True),

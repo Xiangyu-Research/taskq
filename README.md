@@ -45,6 +45,7 @@ plugins = ["research/common/taskq_plugins"]  # 插件文件夹
 | `taskq site setup [名字]` | pueue 常驻进程、组、crontab | `queue/setup.sh` |
 | **实验** | | |
 | `taskq exp list`、`taskq exp tasks [--json]` | 实验、展开后的任务 | — |
+| `taskq exp steps [--exp ID…] [--key KEY…] [--level …] [--data 目录] [--done] [--needs]` | 实验表的步骤，命令按 `names` 填好；做完没有、`--stage needs` 列的输入（一行 JSON） | — |
 | `taskq exp env-of <模型文件夹>`、`taskq exp name-of <模型文件夹> <名字>…` | 训它用的环境；实验的 `names` | `experiments.py env-of\|name-of` |
 | **其他** | | |
 | `taskq tunnel rsync\|push\|pull …` | 经隧道传大批文件 | `sync/tunnel.py` |
@@ -55,6 +56,8 @@ plugins = ["research/common/taskq_plugins"]  # 插件文件夹
 | `taskq check` | 核对整个项目 | — |
 | `taskq path lib\|api\|core` | 核心的 `queue/`（插件 `import taskq_api` 用）、核心的根 | — |
 | `taskq machines …` | 机器表 | `envs/machines.py` 的命令行 |
+| `taskq machines show [机器…]` | 核心按机器表算出来的值：种类、worker、开 worker 的命令、根目录的写法、能用的环境、激活语句、收编来源、给任务加的语句，环境描述的哈希和变体（一行 JSON） | — |
+| `taskq spec export\|import --spec <JSON\|-> --root 目录 [--src 目录 --dst 目录]` | 中继插件送出的文件和视图；拉回核对、放进 `--dst`（一行 JSON） | `names.export\|import_` |
 | `taskq self update\|version`、`taskq --version` | 更新、版本（`VERSION` 文件，没有时 `git describe`） | — |
 | `taskq self test [-j N] [--out 目录] [--gpu] [文件或模式…]` | 跑核心的全部测试（见下面的"测试"） | — |
 | **底层**（不在 `taskq --help` 的首页，参数和退出码冻结） | | |

@@ -547,13 +547,14 @@ def shell_lines(s, data, repo=REPO):
     return "\n".join(lines)
 
 
-def machine_vars():
-    """本机 envs/machines.py 的 task_unset、task_vars → shell 语句：先去掉 task_unset 里的（worker 的环境里按整个作业设的，
+def machine_vars(m=None):
+    """本机（m：给定的机器表条目）envs/machines.py 的 task_unset、task_vars → shell 语句：先去掉 task_unset 里的（worker 的环境里按整个作业设的，
     任务要自己算的，11/4），再设 task_vars 里还没设（非空）的。"""
-    import cfg
-    M = cfg.mtab()
-    me = M.whoami()
-    m = (M.MACHINES.get(me) or {}) if me else {}
+    if m is None:
+        import cfg
+        M = cfg.mtab()
+        me = M.whoami()
+        m = (M.MACHINES.get(me) or {}) if me else {}
     tv = m.get("task_vars") or {}
     return ([f"unset {k}" for k in (m.get("task_unset") or ()) if re.fullmatch(r"[A-Za-z_]\w*", k)]
             + [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items()])
