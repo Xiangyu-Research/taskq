@@ -434,8 +434,14 @@ def test_plan():
     assert more == [], more
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "waiting"), rtask(K5, "free", "9")), st2, [])
     assert more == [], more
+    rs5 = dict(RS(rtask(A, "free"), rtask(K5, "free")), tasks={K5: dict(runs=[dict(epochs_done=300)], resumable=True, final=False)})
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, rs5, st2, [])
+    assert not any(a["key"] == K5 for a in more), more
+    rs5["tasks"] = {K5: dict(runs=[], resumable=True)}
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, rs5, st2, [])
+    assert not any(a["key"] == K5 for a in more), more
     relay.PLANNED.clear()
-    ok("备满了、总队列里有更优先的：交还一个备好没人领的（先删那边、再交还）换它进来；在训的、有人领的、同档的不换，放不下不换")
+    ok("备满了、总队列里有更优先的：交还一个备好没人领的（先删那边、再交还）换它进来；在训的、有人领的、同档的不换，放不下不换，有进度的（作业到时限交还的半截）不换（11/4）")
 
     def ctask(key, state="free", worker=None, nice=3):
         t = mtask(key, state, worker, nice=nice)
