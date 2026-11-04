@@ -82,6 +82,7 @@ def plan_with_records(s, *a, **kw):
 A.plan = plan_with_records
 
 A.taskq_add = lambda nice, args: (0, "")  # 不真的加进总队列
+A.taskq_remove = lambda ks: (0, "")  # 不真的从总队列删
 REAL_PLACE = dict(A.P.PLACE, eval=["queue:dicc1", "box:cpu"], ens=["queue:dicc1", "box:cpu"])  # 夹具的 PLACE，评测、集成也先进总队列
 A.P.PLACE = {}  # 前面几节：每一步都在 box 上（实验表里写的组）；第 9 节起测别的地方
 A.P.AUTO = dict(A.P.AUTO, advance=False)
