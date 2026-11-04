@@ -28,6 +28,7 @@ ROOT = dict(
 )
 # 代码包里调度核心的位置（相对包的根，11/4）：排着的 Slurm 作业、lab 的 worker 命令、旧包的转交都按这个位置找，不改
 BUNDLE_CORE = "scripts/taskq"
+WORKER_LABEL = "worker:"  # pueue 执行机上 worker 任务的标签前缀：worker:<id>（sites/pueue.py）
 MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/logs/workers")  # relay.py 第一次建根目录时建的
 
 

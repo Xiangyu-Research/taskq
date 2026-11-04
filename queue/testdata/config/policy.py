@@ -62,7 +62,6 @@ OUTPUTS = dict(
     health="~/.cache/phd-health",
     topic="~/.config/phd-health/ntfy_topic",
     name="Demo",
-    heads="~/.cache/phd/code/heads.tsv",
     registry=dict(cmd=QR + "/testdata/bin/registry.py", dir=QR + "/testdata/exps/demo",
                   files=("registry.csv", "registry.md")),
 )
