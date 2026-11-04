@@ -4,7 +4,7 @@
 # 开机由 queue/on_boot.sh --gpu-log 启动（2026-10-16 起不放在 tmux 里；11/4 搬进调度核心）；手动启动：
 #   setsid -f bash <调度代码>/monitor/gpu_log.sh > /dev/null 2>&1 < /dev/null
 # 记录停了（10 分钟没有新的一行）box 上的健康检查会提醒。哪些机器跑它见机器表的 gpu_log。
-# 输出 proto.py 的 GPU_LOG_DIR/GPU_LOG_FILE（~/gpu_usage/gpu_<年-月>.csv，环境变量 GPU_LOG_DIR 可以改）：
+# 输出 proto.py 的 GPU_LOG_DIR/GPU_LOG_FILE；同一个文件夹里的 GPU_LOG_PID 锁着时（已经有一个在跑）直接退出（~/gpu_usage/gpu_<年-月>.csv，环境变量 GPU_LOG_DIR 可以改）：
 #   time,gpu,util_pct,mem_used_mib,mem_total_mib,user,pid,proc_mem_mib,program
 set -u
 [[ ${1:-} == -h || ${1:-} == --help ]] && { sed -n '2,8p' "$0"; exit 0; }
@@ -13,6 +13,10 @@ eval "$(python3 "$CORE/queue/proto.py" sh)" || exit 1
 OUT=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}}
 INTERVAL=${GPU_LOG_INTERVAL:-60}
 mkdir -p "$OUT"
+# 每个账号只跑一个：跑着时一直锁着 $OUT/gpu_log.pid（proto.py 的 GPU_LOG_PID），已经有一个在跑就退出（11/4）
+exec 9>> "$OUT/$TQ_GPU_LOG_PID"
+flock -n 9 || exit 0
+echo $$ > "$OUT/$TQ_GPU_LOG_PID"
 while true; do
     ts=$(date '+%F %T')
     f=$OUT/$(date +"$TQ_GPU_LOG_FILE")
@@ -36,5 +40,5 @@ while true; do
         [[ -n ${SEEN[$i]:-} ]] || echo "$ts,$i,${UTIL[$i]},${MU[$i]},${MT[$i]},,,," >> "$f"
     done
     unset IDX UTIL MU MT SEEN
-    sleep "$INTERVAL"
+    sleep "$INTERVAL" 9>&-
 done

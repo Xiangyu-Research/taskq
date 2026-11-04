@@ -226,7 +226,7 @@ def fetch(name, key, say=print):
                                         outs=k.get("outs") or o["outs"], key=key))
     if not res["done"]:
         raise RN.RelayError(f"{RM.conf(name)['label']} 上 {key} 还没做完")
-    inbox = os.path.join(D, ".relay_in", proto.safe(key))
+    inbox = os.path.join(D, proto.RELAY_INBOX, proto.safe(key))
     out = inbox + ".real"
     shutil.rmtree(out, ignore_errors=True)
     # 上次拉到一半的（11/2）：清单里有、大小和修改时间都对上的留着（隧道核对过 MD5 才放进来），只拉其余的；别的删掉

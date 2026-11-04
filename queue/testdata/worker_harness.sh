@@ -10,12 +10,14 @@ cat > "$T/fake_train.sh" << 'EOT'
 # 假训练：参数 任务名；记下开始、结束时刻、环境，睡 ${FAKE_SECS:-1} 秒后写训完的文件
 out=$TASKQ_DATA/runs/$1
 mkdir -p "$out"
-echo "start $(date +%s.%N) $1 ${DEMO_ACTIVE_VENV:-无} ${CONDA_DEFAULT_ENV:-无} cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
-trap 'echo "term $1" >> "$FAKE_LOG"; exit 143' TERM
+# 先装好收停止信号的处理，再记开始（测试看到 start 就可能马上发停止）
 if [[ ${FAKE_IGNORE:-} == "$1" ]]; then  # 不理停止信号
     trap 'echo "term $1" >> "$FAKE_LOG"' TERM
-    while :; do sleep 1; done
+else
+    trap 'echo "term $1" >> "$FAKE_LOG"; exit 143' TERM
 fi
+echo "start $(date +%s.%N) $1 ${DEMO_ACTIVE_VENV:-无} ${CONDA_DEFAULT_ENV:-无} cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
+[[ ${FAKE_IGNORE:-} == "$1" ]] && while :; do sleep 1; done
 if [[ ${FAKE_ESCAPE:-} == "$1" ]]; then  # 留下一个停不下来的进程：同一个会话、另一个进程组、不理 SIGTERM，FAKE_ESCAPE_SECS 秒后自己退出
     python3 -c 'import os, signal, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)

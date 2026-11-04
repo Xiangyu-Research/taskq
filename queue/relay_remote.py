@@ -65,7 +65,7 @@ def prefix(name):
 
 def rtq(name, args, timeout=180, input=None):
     """那边的 taskq.py <args>（input：标准输入）→ (退出码, 输出)；连不上 → None。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} {cfg.rel('queue', 'taskq.py')} {args}", input=input, timeout=timeout)
+    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} {cfg.bundle_rel('queue', 'taskq.py')} {args}", input=input, timeout=timeout)
     return None if rc in (proto.EXIT["timeout"], 255) else (rc, (out + err).strip())
 
 
@@ -94,10 +94,10 @@ def src(fn):
     return ast.unparse(tree) + "\n"
 
 
-# 小程序用的协议常数（proto.py）：R_<根目录下的>、Q_<队列目录下的>；CODEQ：代码包里的调度代码（代码包和仓库同一布局）
+# 小程序用的协议常数（proto.py）：R_<根目录下的>、Q_<队列目录下的>；CODEQ：代码包里的调度代码（proto.BUNDLE_CORE）
 CONST = dict(MARK=proto.JSON_MARK, VERSION=proto.VERSION, SAFE=proto.SAFE, INCOMPLETE=proto.INCOMPLETE, TASK_LOGS=proto.TASK_LOGS,
              CLAIM_INFO=proto.CLAIM_INFO, HALF_CLAIM=proto.HALF_CLAIM, STALE_BEAT=proto.STALE_BEAT, FRESH_LOG=proto.FRESH_LOG,
-             COLLECT_FIELDS=proto.COLLECT_FIELDS, CODEQ=cfg.rel("queue"),
+             COLLECT_FIELDS=proto.COLLECT_FIELDS, CODEQ=cfg.bundle_rel("queue"),
              **{"R_" + k.upper(): v for k, v in proto.ROOT.items()}, **{"Q_" + k.upper(): v for k, v in proto.QUEUE.items()})
 PRE = ("import json,os,sys\n" + "".join(f"{k}={v!r}\n" for k, v in CONST.items())
        + "".join(src(f) for f in (proto.blob, proto.safe, proto.claim_alive))

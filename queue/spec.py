@@ -4,7 +4,7 @@
 
 命令行：
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
-                                     再加本机 envs/machines.py 的 task_vars 里还没设的）
+                                     再去掉本机 envs/machines.py 的 task_unset、加 task_vars 里还没设的）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
   spec.py shell|done --spec <JSON>   同上，用已经解析好的说明（box 的 relay 送任务时解析好，执行机上不再查做法，11/4）
   spec.py resolve <做法> k=v…        解析好的说明（JSON，一行）
@@ -548,12 +548,15 @@ def shell_lines(s, data, repo=REPO):
 
 
 def machine_vars():
-    """本机 envs/machines.py 的 task_vars → shell 语句：已经设了（非空）的不改。"""
+    """本机 envs/machines.py 的 task_unset、task_vars → shell 语句：先去掉 task_unset 里的（worker 的环境里按整个作业设的，
+    任务要自己算的，11/4），再设 task_vars 里还没设（非空）的。"""
     import cfg
     M = cfg.mtab()
     me = M.whoami()
-    tv = ((M.MACHINES.get(me) or {}).get("task_vars") or {}) if me else {}
-    return [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items()]
+    m = (M.MACHINES.get(me) or {}) if me else {}
+    tv = m.get("task_vars") or {}
+    return ([f"unset {k}" for k in (m.get("task_unset") or ()) if re.fullmatch(r"[A-Za-z_]\w*", k)]
+            + [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items()])
 
 
 def main(argv):

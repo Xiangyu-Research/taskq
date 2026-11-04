@@ -151,7 +151,8 @@ export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
     wait_gpu || exit "$TQ_EXIT_RUN_FAILED"
-    ( eval "$ACT" && cd "$REPO" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &  # 自己一个进程组，停的时候整组停
+    # 自己一个进程组，停的时候整组停；任务的命令用核心的库（TASKQ_LIB）和命令（bin/ 在 PATH 最前面，11/4）
+    ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
     pid=$!
     wait "$pid"; rc=$?; pid=
     done_ "$@"; drc=$?

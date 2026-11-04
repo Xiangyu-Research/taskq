@@ -22,6 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
 QR = _cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
+BQ = _cfg.bundle_rel("queue")  # 代码包里调度代码的 queue/（总是 scripts/taskq/queue，11/4）
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
@@ -35,7 +36,7 @@ T = TN.TMP
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
     f.write(f'#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\n[[ $1 == -O ]] && {{ [[ -e {T}/master_down ]] && exit 255; exit 0; }}\n'
-            f'shift\ncd / && exec env -u TASKQ_CONFIG -u TASKQ_STATE TASKQ_PLUGINS={T}/remote/code/current/{QR}/testdata/plugins bash -c "$*"\n')
+            f'shift\ncd / && exec env -u TASKQ_CONFIG -u TASKQ_STATE TASKQ_PLUGINS={T}/remote/code/current/{BQ}/testdata/plugins bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
 BIN = os.path.join(T, "bin")
 os.makedirs(BIN)
@@ -59,6 +60,7 @@ import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import mtab as M  # noqa: E402
+import proto  # noqa: E402
 import spec as S  # noqa: E402
 import relay  # noqa: E402
 import relay_remote as RM  # noqa: E402
@@ -704,7 +706,7 @@ def test_e2e():
     TN.wj(os.path.join(os.path.dirname(rout), "plans.json"), {})
     TN.wb(os.path.join(RROOT, "data", "logs", "tasks", S.safe(sp["key"]) + "__12345_seg1.log"), b"log")
     out = os.path.join(TN.ROOT, sp["out"])
-    inbox = os.path.join(TN.ROOT, ".relay_in", S.safe(sp["key"]))
+    inbox = os.path.join(TN.ROOT, proto.RELAY_INBOX, S.safe(sp["key"]))
     os.environ["TUNNEL_TEST_BADMD5"] = sp["out"] + "/final.ckpt"
     try:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -731,7 +733,7 @@ def test_e2e():
     assert not os.path.exists(os.path.join(out, "latest.ckpt"))
     assert os.path.exists(os.path.join(out, "final.ckpt"))
     assert os.path.exists(os.path.join(os.path.dirname(out), "plans.json"))
-    assert not os.listdir(os.path.join(TN.ROOT, ".relay_in"))
+    assert not os.listdir(os.path.join(TN.ROOT, proto.RELAY_INBOX))
     logs = os.listdir(os.path.join(TN.ROOT, "logs", "tasks"))
     assert logs == [S.safe(sp["key"]) + "__12345_seg1.log"], logs
     ok("拉回：同样的相对路径、不拉 latest.ckpt、上一级的 json 和分段日志、临时目录删掉")
@@ -823,8 +825,8 @@ def test_tilde_root():
     finally:
         M.RELAY[NAME] = c0
     files = relay_bundle.contents(NAME, commit="HEAD", root="~/st/t123")
-    sb = next(t for p, (t, _) in files.items() if p.endswith("worker.sbatch"))
-    up = "/".join([".."] * (2 + len(QR.split("/"))))  # 在 <根>/code/current/<QR> 交，往上到根目录
+    sb = files[f"{BQ}/worker.sbatch"][0]
+    up = "/".join([".."] * (2 + len(BQ.split("/"))))  # 在 <根>/code/current/<BQ> 交，往上到根目录
     assert f"#SBATCH --output={up}/data/logs/workers/%x_%j.out" in sb and "\nR=~/st/t123\n" in sb, sb
     assert "worker_start.sh" in sb  # 显存填充那条路（worker.sbatch → worker_start.sh）不绕开
     txt = "\n".join(t for t, _ in files.values())
@@ -850,7 +852,7 @@ def test_adapters_in_relay():
     try:
         msgs, stuck = relay.submit(NAME, [("long", "1:00:00", 2, "worker.sbatch")])
         assert not stuck and len(seen) == 2 and all(re.search(r"sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=1:00:00 worker.sbatch", c) for _, c in seen)
-        assert seen[0][1].startswith(f"cd {relay.R.q(RM.root(NAME))}/code/current/{QR} && ")
+        assert seen[0][1].startswith(f"cd {relay.R.q(RM.root(NAME))}/code/current/{BQ} && ")
         seen.clear()
         msgs, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
         assert not stuck and len(seen) == 1 and seen[0][1].endswith("--qos=normal --time=08:00:00 cpu_worker.sbatch") and "CPU worker" in msgs[0], (seen, msgs)
@@ -894,7 +896,8 @@ def test_fresh_site():
             seq = [{"bundle": "b0", "jobs": [], "squeue": None}] if old else [None, {"bundle": "b1", "jobs": [], "squeue": None}]
             relay.remote_status = lambda n: seq.pop(0) if seq else None
             relay.current_bundle = lambda n: calls.append(("cur",)) or cur
-            def bld(n, c):
+            def bld(n, c, core=None):
+                assert core, "打包时带上核心的提交"
                 if fail == "build":
                     raise RuntimeError("打包出错")
                 return "b1", "/nonexistent"
@@ -1105,7 +1108,7 @@ def test_deploy_keeps_busy():
             r = tempfile.mkdtemp(dir=T, prefix="dk_")
             M.RELAY[NAME] = dict(c0, root=r, scheduler=sched)
             for i, d in enumerate("abcd"):
-                os.makedirs(os.path.join(r, "code", d, QR))
+                os.makedirs(os.path.join(r, "code", d, BQ))
                 t = old if d in "ab" else time.time() - 3600 * (4 - i)
                 os.utime(os.path.join(r, "code", d), (t, t))
             for d, t in (("a.tmp.1", old), ("a.tmp.1.tar", old), ("a.tmp.2", time.time())):  # 被打断的部署留下的
@@ -1113,7 +1116,7 @@ def test_deploy_keeps_busy():
                 os.utime(os.path.join(r, "code", d), (t, t))
             want = want | {"a.tmp.2"}
             with open(sq, "w") as f:
-                f.write(f"#!/bin/bash\necho {r}/code/a/{QR}\n" if squeue == "busy" else "#!/bin/bash\nexit 1\n")
+                f.write(f"#!/bin/bash\necho {r}/code/a/{BQ}\n" if squeue == "busy" else "#!/bin/bash\nexit 1\n")
             os.chmod(sq, 0o755)
             relay.deploy(NAME, "n", src)
             got = set(os.listdir(os.path.join(r, "code"))) - {"current"}
@@ -1300,7 +1303,7 @@ def test_cross_version():
     bad = ('    if "--json" in argv:\n'
            '        print("ok")\n'
            '        return 0\n')
-    q = os.path.join(*cfg.rel("queue").split("/"))
+    q = os.path.join(*cfg.bundle_rel("queue").split("/"))
 
     def variant(tag, tq, sp):
         d = os.path.join(T, "xv_" + tag)
