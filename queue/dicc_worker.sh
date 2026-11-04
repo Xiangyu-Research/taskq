@@ -77,7 +77,6 @@ STALL_FAILS=2                           # 一周内第几次卡住起记失败
 GIVEUP=${TASKQ_GIVEUP:-180}             # 停了这么久还没停下：空出位置（三分之一时 SIGKILL）
 BEAT=${TASKQ_BEAT:-$TQ_BEAT}                 # 心跳间隔
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
-unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
 LOGDIR=$DATA/$TQ_WORKER_LOGS
 mkdir -p "$LOGDIR"
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then

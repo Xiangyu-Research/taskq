@@ -130,8 +130,9 @@ gpu 0 "" 0; glrow 10 0 someoneelse
 $G GPU_LOG_DIR=$T/gl $R command key=toy/q5 'cmd=touch $TASKQ_DATA/toy/q5/DONE' env=base out=toy/q5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "没设 TASK_GPU_IDLE：不看记录" "(( rc == 0 ))"
 
-# 机器表的 task_vars（11/2）：只在定义它的机器上导出给任务，已经设了（非空）的不改。as_machine：本机当成 <名字> 的测试用机器表副本；
-# 带第二个参数时给这台加上 WS_TASK_VARS（同 relay_bundle.py 把执行机的 task_vars 拷进代码包里的机器表）
+# 机器表的 task_vars（11/2）：只在定义它的机器上导出给任务，已经设了（非空）的不改；task_unset（11/4）：任务的环境里去掉。
+# as_machine：本机当成 <名字> 的测试用机器表副本；带第二个参数时给这台加上 WS_TASK_VARS 和 task_unset=("DEMO_UNSET",)
+# （同 relay_bundle.py 把执行机的 task_vars、task_unset 拷进代码包里的机器表）
 as_machine() {
     mkdir -p "$T/cfg_$1"; cp -r "$TASKQ_CONFIG/." "$T/cfg_$1/"
     python3 - "$T/cfg_$1/machines.py" "$1" "$(hostname -s)" "$(dirname "$TASKQ_CONFIG")" "${2:-}" << 'PY'
@@ -140,22 +141,28 @@ p, name, host, fx, tv = sys.argv[1:]
 s = open(p).read()
 s = re.sub(r"^FAKE = .*$", "FAKE = " + repr(fx), s, count=1, flags=re.M)
 mark = "# ---------------- LOGIC ----------------"
-s = s.replace(mark, f"for _n, _m in MACHINES.items():\n    _m['hostname'] = {re.escape(host)!r} if _n == {name!r} else r'(?!)'\n" + (f"MACHINES[{name!r}]['task_vars'] = WS_TASK_VARS\n" if tv else "") + mark, 1)
+s = s.replace(mark, f"for _n, _m in MACHINES.items():\n    _m['hostname'] = {re.escape(host)!r} if _n == {name!r} else r'(?!)'\n" + (f"MACHINES[{name!r}]['task_vars'] = WS_TASK_VARS\nMACHINES[{name!r}]['task_unset'] = ('DEMO_UNSET',)\n" if tv else "") + mark, 1)
 open(p, "w").write(s)
 PY
     [[ $(TASKQ_CONFIG=$T/cfg_$1 python3 "$T/cfg_$1/machines.py" whoami) == "$1" ]]
 }
-VC='cmd=echo "${DEMO_FAST:-无}/${DEMO_FAST_LOADER:-无}" > $TASKQ_DATA/toy/v.vars; touch $TASKQ_DATA/toy/v/DONE'
-tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER TASKQ_CONFIG=$T/cfg_$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }
+VC='cmd=echo "${DEMO_FAST:-无}/${DEMO_FAST_LOADER:-无}" > $TASKQ_DATA/toy/v.vars; echo "${DEMO_UNSET:-无}" > $TASKQ_DATA/toy/v.unset; touch $TASKQ_DATA/toy/v/DONE'
+tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER DEMO_UNSET=job TASKQ_CONFIG=$T/cfg_$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }
 check "测试用的机器表副本：本机认成 lab / box / dicc" "as_machine lab tv && as_machine box && as_machine dicc"
 tvrun lab; rc=$?
 check "lab（代码包里有 task_vars）：导出给任务" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 1/1 ]]"
+check "lab（代码包里有 task_unset）：worker 环境里设的，任务里去掉" "[[ \$(cat $T/toy/v.unset) == 无 ]]"
 tvrun lab DEMO_FAST=0; rc=$?
 check "lab：已经设了的不改，没设的照样导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 0/1 ]]"
 tvrun box; rc=$?
 check "box（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+check "box（没有 task_unset）：照样传给任务" "[[ \$(cat $T/toy/v.unset) == job ]]"
 tvrun dicc; rc=$?
 check "dicc（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+
+# 任务的命令看得到核心（11/4）：TASKQ_LIB = 核心的 queue/，核心的 bin/ 在 PATH 最前面
+$R command key=toy/lib 'cmd=echo "$TASKQ_LIB|${PATH%%:*}" > $TASKQ_DATA/toy/lib.txt; touch $TASKQ_DATA/toy/lib/DONE' env=base out=toy/lib 'done=["DONE"]' > /dev/null; rc=$?
+check "任务的环境：TASKQ_LIB、PATH 前面是核心的 bin/" "(( rc == 0 )) && [[ \$(cat $T/toy/lib.txt) == \"$(cd "$HERE" && pwd)|$(cd "$HERE/.." && pwd)/bin\" ]]"
 
 TASK_PART=2 $R command key=toy/o2 'cmd=touch $TASKQ_DATA/toy/o2/DONE' env=base out=toy/o2 'done=["DONE"]' > /dev/null; rc=$?
 check "新 worker：TASK_PART=2 → 日志 _part2.log，第一行记第 2 段" "(( rc == 0 )) && head -1 $T/logs/tasks/toy__o2__test-1_part2.log | grep -q '第 2 段'"
