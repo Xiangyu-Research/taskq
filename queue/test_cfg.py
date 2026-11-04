@@ -195,11 +195,9 @@ ok("extend：两个插件文件夹合进来不报错", isinstance(ns, dict))
 if isinstance(ns, dict):
     ok("extend：字典插件的在前，核心的在后，都在", list(ns["TABLE"]) == ["pa", "pb", "core"])
     ok("extend：列表接在后面、不重复", ns["LIST"] == ["a", "b", "c"])
-    ok("extend：核心没有的名字放进来", ns["helper"]() == "a" and ns["other"]() == "b" and isinstance(ns["Thing"], type))
-    ok("extend：_ 开头的同名不报错，先加载的生效", ns["_private"]() == "a")
-    ok("extend：同一个对象（都 from os.path import join）、同名模块（都 import json）不报错",
-       ns["join"] is os.path.join and ns["json"].__name__ == "json")
-    ok("extend：核心已有的常量不被插件改", ns["CONST"] == 1 and ns["core_fn"] is core_fn)
+    ok("extend：只合约定的表，插件的其他名字（函数、类、import 的模块、常量）不进来（11/4）",
+       not {"helper", "other", "Thing", "_private", "json", "join"} & set(ns))
+    ok("extend：核心已有的常量、函数不被插件改", ns["CONST"] == 1 and ns["core_fn"] is core_fn)
 
 pc = plugdir("c", """
     TABLE = {"pa": 9}
@@ -215,20 +213,24 @@ pe = plugdir("e", """
     def helper():
         return "e"
 """)
-e = merged(pa, pe)
-ok("extend：两个插件定义同名的函数 → 报错（不然后加载的不生效）", isinstance(e, ValueError) and "helper" in str(e) and "plug_a" in str(e))
+e = merged(pe)
+ok("extend：插件一张约定的表也没导出 → 报错（多半是文件放错或表名拼错）", isinstance(e, ValueError) and "没有导出" in str(e))
 pf = plugdir("f", """
-    def core_fn():
-        return "f"
+    TABLE = [1]
 """)
 e = merged(pf)
-ok("extend：插件的函数和核心的同名 → 报错", isinstance(e, ValueError) and "core_fn" in str(e) and "核心" in str(e))
-pg = plugdir("g", """
-    class Thing:
-        pass
-""")
-e = merged(pa, pg)
-ok("extend：两个插件定义同名的类 → 报错", isinstance(e, ValueError) and "Thing" in str(e))
+ok("extend：表的类型不对 → 报错", isinstance(e, ValueError) and "TABLE" in str(e) and "字典" in str(e))
+# 每类插件导出的名字：cfg.KINDS，核心的模块和测试插件对得上
+ok("KINDS：recipes 导出 RECIPES、HOOKS，relay_plugins 导出 PLUGINS、ACCEPTS、VIEW_ROOTS",
+   cfg.KINDS == {"recipes": ("RECIPES", "HOOKS"), "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS")})
+setenv(TASKQ_PLUGINS=fixture.PLUGINS)
+r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import recipes, relay_plugins; "
+                    "print(sorted(recipes.RECIPES), sorted(recipes.HOOKS), sorted(relay_plugins.PLUGINS), "
+                    "hasattr(recipes, 'model_of'), hasattr(relay_plugins, 'infer_inputs'), "
+                    "relay_plugins.RelayError is __import__('taskq_api').RelayError)", HERE],
+                   capture_output=True, text=True, env=dict(os.environ))
+ok("测试插件：做法、钩子、中继插件合进来，插件里的函数不进核心模块，RelayError 是 taskq_api 的同一个",
+   r.stdout.split() == ["['command',", "'toy']", "['model_of']", "['toy',", "'toy_infer']", "False", "False", "True"])
 
 setenv(TASKQ_PLUGINS=None, TASKQ_CONFIG=None)
 print(f"\n{'全部通过' if not fails else f'{fails} 项失败'}")

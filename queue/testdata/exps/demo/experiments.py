@@ -10,7 +10,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HERE)))))
-from steps import runlog, check, exists  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "plugins"))
+from taskq_api import check, exists  # noqa: E402
+from step_checks import record  # noqa: E402
 import cfg  # noqa: E402
 QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 
@@ -54,22 +56,23 @@ INFER = dict(name="infer", group="gpu", cmd=PE + " --stage infer {data}/results/
              queue=dict(nice=-100, key="infer/{model}/frag_{frag}", env="base",
                         cmd="bash " + QR + "/testdata/bin/infer_task.sh {data}/results/{model} {frag}",
                         out="preds/{model}/frag_{frag}", done=[".infer_done"], relay="toy_infer", disk=75,
+                        inputs_cmd=PE + " --stage needs:infer {data}/results/{model} {frag}",
                         res=dict(wait_gpu=120)))
 EVAL = dict(name="eval", group="cpu", cmd=PE + " --stage eval {data}/results/{model} {frag}",
-            done=runlog(AN + "/frag_{frag}/report/report.run.json", "report.md"),
+            done=record(AN + "/frag_{frag}/report/report.rec.json", "report.md"),
             queue=dict(nice=-100, key="eval/{model}/frag_{frag}", env=["base", "stats"], device="cpu", relay="path",
                        cmd=PE + " --stage eval {data}/results/{model} {frag} && touch {data}/" + AN + "/frag_{frag}/.eval_done",
                        out=AN + "/frag_{frag}", done=[".eval_done"],
                        inputs=["preds/{model}/frag_{frag}/.infer_done", "results/{model}/frag_{frag}/check"]))
 OOF = dict(name="oof", group="cpu", cmd="{python} " + QR + "/testdata/bin/oof.py {data}/results/{model}",
-           done=runlog(AN + "/oof/oof.run.json", "check.txt"))
+           done=record(AN + "/oof/oof.rec.json", "check.txt"))
 PAIRED = dict(name="paired", group="cpu",
               cmd="{python} " + QR + "/testdata/bin/paired.py --ref {data}/demo/analysis/" + T0_ENS
                   + " --cmp {exp}={data}/demo/analysis/{model}/oof/eval --out {data}/demo/analysis/{model}/oof/paired",
-              done=runlog(AN + "/oof/paired/paired.run.json", "paired.csv"))
+              done=record(AN + "/oof/paired/paired.rec.json", "paired.csv"))
 ENS_CMD = "ENSEMBLE_ONLY=1 " + PE + " --stage all {data}/results/{model} {frag_list_q}"
 ENS = dict(name="ens", group="cpu", needs="infer", cmd=ENS_CMD,
-           done=runlog(AN + "/frags_0-1-2-3-4/report/report.run.json", "report.md"),
+           done=record(AN + "/frags_0-1-2-3-4/report/report.rec.json", "report.md"),
            queue=dict(nice=-100, key="ens/{model}", env=["base", "stats"], device="cpu", relay="path",
                       cmd=ENS_CMD + " && touch {data}/" + AN + "/frags_0-1-2-3-4/.ens_done",
                       out=AN + "/frags_0-1-2-3-4", done=[".ens_done"], disk=90,
@@ -77,7 +80,7 @@ ENS = dict(name="ens", group="cpu", needs="infer", cmd=ENS_CMD,
                       inputs=["preds/{model}/frag_{frag}/.infer_done"]))
 LPROB_CMD = QR + "/testdata/bin/lprob.py {data}/results/{model} {frag} --workers 12"
 LPROB = dict(name="lprob", group="cpu", cmd="{python} " + LPROB_CMD,
-             done=runlog(AN + "/frag_{frag}/lprob/lprob.run.json"),
+             done=record(AN + "/frag_{frag}/lprob/lprob.rec.json"),
              queue=dict(nice=-100, key="lprob/{model}/frag_{frag}", env="base", device="cpu", relay="path",
                         cmd="python " + LPROB_CMD + " && touch {data}/" + AN + "/frag_{frag}/lprob/.lprob_done",
                         out=AN + "/frag_{frag}/lprob", done=[".lprob_done"],
@@ -106,7 +109,7 @@ PRUNE = dict(name="prune", group="cpu", needs=["infer", "eval"],
              cmd="{python} " + QR + "/testdata/bin/prune.py {data}/preds/{model} --frags {frag_list_q}",
              done=check("preds/{model}", _pruned))
 FINAL = [dict(name="compare_all", group="cpu", cmd="{python} " + QR + "/testdata/bin/compare_all.py",
-              done=runlog("demo/analysis/compare/all/compare_all.run.json"), rerun_if_newer=["paired", "ens"])]
+              done=record("demo/analysis/compare/all/compare_all.rec.json"), rerun_if_newer=["paired", "ens"])]
 
 
 def _probe(p, inputs):
@@ -121,9 +124,9 @@ def _probe(p, inputs):
 P1 = _probe("p1", ["demo/probe/p1/inputs", "demo/probe/p1/targets.csv"])
 P2 = _probe("p2", ["demo/probe/p2/inputs", "demo/probe/p2/items"])
 P2CMP = dict(name="p2cmp", group="cpu", cmd="{python} " + QR + "/testdata/bin/p2_compare.py --tags {probe} --out {data}/demo/probe/p2_compare_{probe}",
-             done=runlog("demo/probe/p2_compare_{probe}/p2_compare.run.json"))
+             done=record("demo/probe/p2_compare_{probe}/p2_compare.rec.json"))
 T18CMP = dict(name="t18cmp", group="cpu", cmd="{python} " + QR + "/testdata/bin/cmp18.py --out {data}/demo/analysis/followups/T18",
-              done=runlog("demo/analysis/followups/T18/cmp18.run.json"))
+              done=record("demo/analysis/followups/T18/cmp18.rec.json"))
 
 STEPS = {s["name"]: s for s in [INFER, EVAL, LPROB, OOF, PAIRED, ENS, PRUNE, P1, P2, P2CMP, T18CMP]}
 FRAG_STEPS = ("infer", "eval", "lprob")

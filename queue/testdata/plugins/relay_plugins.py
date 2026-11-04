@@ -1,17 +1,15 @@
 """测试用的中继插件（2026-11-02）：形状同真的领域插件。
   toy        训练：prepared/<ds>/ 里这次要用的文件，视图是整个文件夹；拉回核对验证集（check/）
-  toy_infer  推理：testdata/bin/step.sh --stage needs 列出的模型文件和测试集的输入；拉回核对 MANIFEST"""
+  toy_infer  推理：任务参数 inputs_cmd（testdata/bin/step.sh --stage needs:infer）列出的模型文件和测试集的输入；拉回核对 MANIFEST"""
 import json
 import os
 import re
 import shlex
 import subprocess
 
-import cfg
-from relay_plugins import RelayError, expand, sha256
+from taskq_api import REPO, RelayError, expand, sha256  # REPO：任务命令里的路径相对它
 
 FIX = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO = cfg.REPO  # 任务命令里的路径相对它
 
 
 def _jload(p):
@@ -87,21 +85,19 @@ def check_toy(spec, src, root):
 
 # ---------------- 推理（testdata/bin/infer_task.sh） ----------------
 def infer_inputs(spec, root):
-    """推理要的输入（相对数据目录）：任务命令里的脚本所在目录的 step.sh --stage needs（带任务的 vars）。"""
-    toks = shlex.split(spec["cmd"])
-    i = next((j for j, t in enumerate(toks) if t.endswith(".sh")), None)
-    if i is None or len(toks) < i + 3:
-        raise RelayError(f"推理命令里没有脚本、模型和第几份：{spec['cmd']}")
-    model, frag = toks[i + 1].replace("{data}", root), toks[i + 2]
-    pe = os.path.join(REPO, os.path.dirname(toks[i]), "step.sh")
+    """推理要的输入（相对数据目录）：跑任务参数 inputs_cmd（实验表里 infer 步骤的 queue 给的，在仓库根目录、带任务的 vars，
+    {data} = root）打印的路径。"""
+    cmd = (spec.get("names") or {}).get("inputs_cmd")
+    if not cmd:
+        raise RelayError(f"{spec['key']}：推理任务没有 inputs_cmd")
+    toks = [t.replace("{data}", root) for t in shlex.split(cmd)]
     env = dict(os.environ, **{k: str(v).replace("{data}", root) for k, v in (spec.get("vars") or {}).items()}, TASKQ_DATA=root)
-    r = subprocess.run(["bash", pe, "--stage", "needs", model, frag], cwd=REPO, capture_output=True,
-                       text=True, timeout=300, env=env)
+    r = subprocess.run(toks, cwd=REPO, capture_output=True, text=True, timeout=300, env=env)
     if r.returncode:
-        raise RelayError(f"--stage needs 出错：{(r.stderr.strip().splitlines() or ['?'])[-1]}")
+        raise RelayError(f"列输入出错（{cmd}）：{(r.stderr.strip().splitlines() or ['?'])[-1]}")
     out = [ln.strip().rstrip("/") for ln in r.stdout.splitlines() if ln.strip()]
     if not out:
-        raise RelayError(f"{spec['key']}：--stage needs 什么都没列")
+        raise RelayError(f"{spec['key']}：列输入的命令什么都没列")
     return out
 
 

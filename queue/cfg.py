@@ -3,6 +3,16 @@
 
     import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import machines、policy
     cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连起来，没有时为空）
+
+插件（11/4）：TASKQ_PLUGINS 的每个文件夹里按文件名找，每类插件只取下面这些名字（KINDS），别的名字（辅助函数、import 进来的）
+不进核心；一个也没导出时报错。插件里要用核心的东西只 import taskq_api（taskq_api.py），不 import 核心的其他模块。
+  recipes.py         RECIPES  {做法名: 做法}（字段见 recipes.py 开头）
+                     HOOKS    {钩子名: 函数}（可省；有哪些钩子见 recipes.py 的 HOOKS）
+  relay_plugins.py   PLUGINS  {插件名: (export, check)}（见 relay_plugins.py 开头）
+                     ACCEPTS  {插件名: 函数(参数) → 能不能送}（可省）
+                     VIEW_ROOTS  [建视图的文件夹]（可省）
+  readers/*.py       PROGRESS、INFO、TRAINED（spec.py 读；只用标准库，经 ssh 送到别的机器上跑）
+各表合并时键重复报错。
 """
 import importlib.util
 import os
@@ -78,6 +88,12 @@ def plugin_dirs():
     return [os.path.expanduser(d) for d in v.split(os.pathsep) if d]
 
 
+KINDS = {
+    "recipes": ("RECIPES", "HOOKS"),
+    "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
+}
+
+
 def plugins(name):
     mods = []
     for i, d in enumerate(plugin_dirs()):
@@ -93,29 +109,26 @@ def plugins(name):
     return mods
 
 
-def extend(ns, name, tables):
-    """插件的 tables 合进 ns（字典：插件的在前，键重复报错；列表：接在后面），其余核心没有的名字原样放进 ns；
-    不以 _ 开头的函数、类和核心或先加载的插件里的同名（不是同一个）时报错（不然后加载的不生效）。"""
+def extend(ns, name, tables=None):
+    """插件导出的表合进 ns 里的同名表（tables 默认 KINDS[name]）：字典插件的在前，键重复报错；列表接在后面、不重复。
+    只合这些表，插件的其他名字不进 ns；插件一张表也没导出、或表的类型不对时报错。"""
+    tables = tuple(tables or KINDS[name])
     add = {t: ({} if isinstance(ns[t], dict) else []) for t in tables}
-    owner = {}
     for m in plugins(name):
-        for k, v in vars(m).items():
-            if k.startswith("__"):
-                continue
-            if k in add:
-                if isinstance(add[k], dict):
-                    dup = sorted(set(add[k]) & set(v) | set(ns[k]) & set(v))
-                    if dup:
-                        raise ValueError(f"插件 {m.__file__} 的 {k} 里 {', '.join(map(str, dup))} 重名")
-                    add[k].update(v)
-                else:
-                    add[k] += [x for x in v if x not in add[k] and x not in ns[k]]
-            elif k not in ns:
-                ns[k] = v
-                owner[k] = m
-            elif ns[k] is not v and callable(v) and not k.startswith("_") and not isinstance(v, type(sys)):
-                who = f"插件 {owner[k].__file__}" if k in owner else "核心"
-                raise ValueError(f"插件 {m.__file__} 的 {k} 和{who}的同名，后加载的不会生效")
+        got = [t for t in tables if t in vars(m)]
+        if not got:
+            raise ValueError(f"插件 {m.__file__} 没有导出 {'、'.join(tables)} 里的任何一个")
+        for k in got:
+            v = vars(m)[k]
+            if not isinstance(v, type(add[k])):
+                raise ValueError(f"插件 {m.__file__} 的 {k} 要是{'字典' if isinstance(add[k], dict) else '列表'}")
+            if isinstance(add[k], dict):
+                dup = sorted(set(add[k]) & set(v) | set(ns[k]) & set(v))
+                if dup:
+                    raise ValueError(f"插件 {m.__file__} 的 {k} 里 {', '.join(map(str, dup))} 重名")
+                add[k].update(v)
+            else:
+                add[k] += [x for x in v if x not in add[k] and x not in ns[k]]
     for t, v in add.items():
         ns[t] = {**v, **ns[t]} if isinstance(v, dict) else ns[t] + v
 

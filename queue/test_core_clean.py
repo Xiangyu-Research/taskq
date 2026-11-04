@@ -19,12 +19,14 @@ CLEAN = [
     "queue/archive_task.sh", "queue/gpu_pad.py",
     "queue/gpu_pad_start.sh", "queue/relay_plugins.py", "queue/relay_bundle.py",
     "queue/experiments.py", "queue/spec.py", "queue/q", "sync/snapshot.sh",
+    "queue/steps.py", "queue/recipes.py", "queue/taskq_api.py",
     "queue/test_feed.py", "queue/test_common.py", "queue/test_shift.py", "sites/test_adapters.py",
     "sites/test_e2e.py", "sites/test_envs.py", "sync/test_tunnel.py", "queue/test_archive_task.sh",
     "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py", "queue/test_relay_store.py",
 ]
-WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b",
-                   re.I)
+# 后两组（11/4）：使用者的运行记录格式（runlog 的 .run.json）、nnU-Net 结果文件夹的布局（<训练器>__<plans>__<配置>）
+WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b"
+                   r"|\brunlog\b|\.run\.json|__<?\{?plans\}?>?__", re.I)
 
 # 测试用的固定配置（testdata/）整个查；PLACE 的地方 "trainer"（训练所在的执行机）是核心的写法
 FIXTURE = "queue/testdata"
@@ -33,7 +35,7 @@ FIXED = sorted(os.path.relpath(os.path.join(d, f), ROOT) for d, ds, fs in os.wal
 if not FIXED:
     sys.exit(f"{FIXTURE} 下没有文件")
 CLEAN += FIXED
-ALLOW = {f"{FIXTURE}/config/policy.py": '"trainer"'}
+ALLOW = {f"{FIXTURE}/config/policy.py": '"trainer"', "sync/snapshot.sh": "、runlog 照常能用"}  # 后者只是说明 git 副本的用处
 
 bad = []
 for f in CLEAN:

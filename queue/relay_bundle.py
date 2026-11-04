@@ -44,7 +44,7 @@ SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # 不进包的�
 # 其余（box 上的计划、传数据、健康检查、同步）不进包
 RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), "queue", f)) for f in (
     "worker_start.sh", "dicc_worker.sh", "run_task.sh", "gpu_pad_start.sh", "gpu_pad.py", "taskq.py", "spec.py", "common.py",
-    "cfg.py", "recipes.py", "experiments.py", "steps.py", "inputs.py", "worker.sbatch", "cpu_worker.sbatch"))
+    "cfg.py", "taskq_api.py", "recipes.py", "experiments.py", "steps.py", "inputs.py", "worker.sbatch", "cpu_worker.sbatch"))
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
