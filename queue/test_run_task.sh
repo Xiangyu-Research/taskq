@@ -6,7 +6,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 export TASKQ_DATA=$T RUN_TASK_POLL=1 TASK_JOBTAG=test-1
-unset BRAIN_TUMOR TASK_PART TASK_SEG
+unset TASK_PART
 unset CUDA_VISIBLE_DEVICES SLURM_JOB_ID
 ok=1
 check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; ok=0; fi; }
@@ -138,9 +138,6 @@ check "box（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy
 tvrun dicc; rc=$?
 check "dicc（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
 
-# 旧名（10/31 前）：只设 BRAIN_TUMOR 的调用方、传 TASK_SEG 的旧 worker（它按 _seg<段>.log 找日志）
-env -u TASKQ_DATA BRAIN_TUMOR=$T TASK_SEG=1 $R command key=toy/o1 'cmd=touch $TASKQ_DATA/toy/o1/DONE; touch $BRAIN_TUMOR/toy/o1/B' env=base out=toy/o1 'done=["DONE"]' > /dev/null; rc=$?
-check "旧调用方：只给 BRAIN_TUMOR、TASK_SEG=1 → 照常跑，两个变量都设，日志叫 _seg1.log" "(( rc == 0 )) && [[ -e $T/toy/o1/B && -f $T/logs/tasks/toy__o1__test-1_seg1.log ]]"
 TASK_PART=2 $R command key=toy/o2 'cmd=touch $TASKQ_DATA/toy/o2/DONE' env=base out=toy/o2 'done=["DONE"]' > /dev/null; rc=$?
 check "新 worker：TASK_PART=2 → 日志 _part2.log，第一行记第 2 段" "(( rc == 0 )) && head -1 $T/logs/tasks/toy__o2__test-1_part2.log | grep -q '第 2 段'"
 rm -rf "$T"

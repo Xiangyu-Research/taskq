@@ -44,10 +44,10 @@ source_it() {
         source "$ENV_SCRIPT"
     )
 }
-source_it_twice() {  # 旧名字（RQ1_GPU_PAD_*、BRAIN_TUMOR）照样认
+source_it_twice() {
     (
-        export PATH=$T/bin BRAIN_TUMOR=$T/bt RQ1_GPU_PAD_SCRIPT=$T/fake_pad.py \
-               RQ1_GPU_PAD_SWITCH=$T/switch RQ1_GPU_PAD_RETRY_DELAY=0.1 \
+        export PATH=$T/bin TASKQ_DATA=$T/bt TASKQ_GPU_PAD_SCRIPT=$T/fake_pad.py \
+               TASKQ_GPU_PAD_SWITCH=$T/switch TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
                FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed \
                SLURM_JOB_ID=2001 CUDA_VISIBLE_DEVICES=0
         source "$ENV_SCRIPT"
@@ -87,16 +87,10 @@ reset; source_it "$T/bin" SLURM_JOB_ID=1004 CUDA_VISIBLE_DEVICES=0 SLURM_STEP_ID
 sleep 0.3; check "srun step：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 TASKQ_TEST_FAKEBIN=1
 sleep 0.3; check "测试环境 TASKQ_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 RQ1_TEST_FAKEBIN=1
-sleep 0.3; check "测试环境旧名 RQ1_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/bin" SLURM_JOB_ID=1006 CUDA_VISIBLE_DEVICES=0 QUEUE_TEST_DIR=$T
 sleep 0.3; check "测试环境 QUEUE_TEST_DIR：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/bin" SLURM_JOB_ID=1007 CUDA_VISIBLE_DEVICES=0 TASKQ_GPU_PAD=0
 sleep 0.3; check "TASKQ_GPU_PAD=0：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1011 CUDA_VISIBLE_DEVICES=0 RQ1_GPU_PAD=0
-sleep 0.3; check "旧名 RQ1_GPU_PAD=0：不启动" test "$(lines)" -eq 0
-reset; source_it "$T/bin" SLURM_JOB_ID=1012 CUDA_VISIBLE_DEVICES=0 RQ1_GPU_PAD_STARTED=1
-sleep 0.3; check "旧版启动器已经开过（RQ1_GPU_PAD_STARTED）：不再开" test "$(lines)" -eq 0
 reset; touch "$T/switch"
 source_it "$T/bin" SLURM_JOB_ID=1008 CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "DISABLED 开关：不启动" test "$(lines)" -eq 0

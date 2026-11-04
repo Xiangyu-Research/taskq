@@ -50,11 +50,10 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | box `~/.cache/phd/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `relay.py` 什么都不分 |
 | 执行机 `R/queue/ENABLED` | 文件 | 那边队列的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`）；`relay.py` 建队列时放上 |
 | DICC `~/.cache/phd/gpu_pad/DISABLED` | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
-| `TASKQ_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"）；`gpu_pad*` 的参数 `TASKQ_GPU_PAD_*`（10/31 改名，旧名 `RQ1_GPU_PAD*` 照样认） |
-| `TASKQ_DATA` | 环境变量 | 本机的数据目录（`run_task.sh`、`dicc_worker.sh`、`taskq.py` 先读它，没有再读旧名 `BRAIN_TUMOR`，再查 `envs/machines.py`；`envs/nnunet_paths.sh` 两个都设，10/31） |
-| 旧名 | `cfg.py` 的 `LEGACY`、`legacy_names.sh` | 10/31 改名前的环境变量名只列在这两处（11/2）：Python 用 `cfg.env(<新名>)`（新名没设时读旧名，`TASKQ_GPU_PAD_*` 对 `RQ1_GPU_PAD_*`）；bash 先 `source legacy_names.sh map`（新名没设时取旧名的值，不 export），设好 `TASKQ_DATA` 后 `source legacy_names.sh export` 同时 export 成 `BRAIN_TUMOR` |
+| `TASKQ_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不填显存（名单见下面"显存填充"）；`gpu_pad*` 的参数 `TASKQ_GPU_PAD_*` |
+| `TASKQ_DATA` | 环境变量 | 本机的数据目录（`run_task.sh`、`dicc_worker.sh`、`taskq.py` 先读它，没有再查 `envs/machines.py`；`envs/nnunet_paths.sh` 也是这样设） |
 | `TASKQ_STATE` | 环境变量 | 本机的状态文件夹（11/2）：设了时任务队列、`relay/`、`last/`、`tasks.json`、`envs/`、隧道、显存填充的开关、`code/`（`snapshot.sh`）都在它下面（`<它>/taskq`、`<它>/gpu_pad/DISABLED`…）；没设时照旧在 `~/.cache/phd/`（`cfg.py` 的 `STATE_HOME`、`STATE_PLACES`，Python 经 `cfg.state()`）。`TASKQ_DIR`、`TASKQ_GPU_PAD_SWITCH` 等单项的变量优先。执行机的代码包把这些默认写法换成根目录下的 `queue/`、`state/` |
-| `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它（旧名 `RQ1_WAIT_GPU`） |
+| `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它 |
 | `TASKQ_*` | 环境变量 | `dicc_worker.sh` 的阈值，默认值写在脚本开头：`SLOTS`（一个作业最多同时几个，GPU 2、CPU 1）、`ADD_AFTER`（900 秒）、`UTIL_MAX`（90%）、`MIN_LEFT`（3600 秒）、`PATIENCE`（1200 秒）、`ERR_MAX`（600 秒）、`IDLE_MAX`（2400 秒）、`EARLY_FAIL`（600 秒）、`FAIL_WINDOW`（3600 秒）、`STALL_MAX`（1800 秒）；`TASKQ_DIR`、`TASKQ_SSH`、`TASKQ_MACHINE`、`TASKQ_LOCK_WAIT`（`taskq.py` 等锁时每次重试的间隔，默认 0.5 秒）只给测试用 |
 | `TASKQ_CONFIG` | 环境变量 | `machines.py`、`policy.py` 所在的文件夹，默认 `<仓库>/envs`（11/2）。Python 脚本经 `scripts/taskq/queue/cfg.py` 的 `use_config()` 找，bash 脚本用 `${TASKQ_CONFIG:-$REPO/envs}`；`relay_bundle.py` 在它在仓库里时取提交里的 `machines.py`，在仓库外时读文件；执行机的代码包里生成的两个文件照旧在 `envs/` |
 | `TASKQ_PLUGINS` | 环境变量 | 领域专用的插件文件夹（`:` 隔开几个，空串 = 没有），默认 `<仓库>/research/common/taskq_plugins`（11/2）。每个文件夹里可以有 `recipes.py`（`RECIPES`）、`relay_plugins.py`（`PLUGINS`、`ACCEPTS`、`VIEW_ROOTS`）、`readers/<名>.py`（`PROGRESS`、`INFO`、`TRAINED`，只用标准库）；核心的同名模块加载时合进来（字典里重名报错），插件里别的名字也挂在核心模块上 |
@@ -130,7 +129,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 ### 执行机（dicc1、DICC2、lab1、lab0，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
 
-`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：DICC 的 dicc1、DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径（11/1 起不换名）。流程细节写在 `relay.py` 开头。
+`envs/machines.py` 的 `SITES` 里 `relay=True` 的执行机（`RELAY`：DICC 的 dicc1、DICC2，ssh `dicc2`；lab 的 1 号卡 lab1、0 号卡 lab0）领同一个总队列里的任务：GPU 任务，以及有 CPU worker 的执行机领纯 CPU 任务（11/1，`envs/machines.py` 的 `kinds()`：Slurm 类看 `jobs` 里有没有 `cpu`，pueue 类看 `cpu_worker`；lab1 的 `cpu` 组）。它们和别的机器不直接通信，一切经 box；那边只有按提交打的代码包，没有 git 克隆、钥匙；数据和结果在那边的数据目录里用和 box 一样的相对路径。流程细节写在 `relay.py` 开头。
 
 - **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/taskq/sites/slurm.py`、`scripts/taskq/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
 - **根目录**写成 `~/…`（如 dicc1、DICC2 的 `~/q`）时，命令里开头的 `~` 留给那边展开（`scripts/taskq/sites/remote.py` 的 `q()`）；代码包里 `worker.sbatch` 的日志用相对路径（Slurm 不展开 `~`）。
@@ -176,8 +175,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 的克隆；每天 04:20 的 `auto_refresh.sh backup`） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
 | `relay.py`、`relay_bundle.py`、`relay_plugins.py`、`relay_gc.py`、`shift.py` | 执行机（见上面）：接力、代码包、中继插件的加载、清理根目录、按时段开停 |
-| `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）、插件文件夹（`TASKQ_PLUGINS`）、状态文件夹（`TASKQ_STATE`），把插件合进核心的表；`OUTPUTS` 的读法（`get <键>` 给 bash）、旧名（`LEGACY`） |
-| `legacy_names.sh` | bash 脚本的旧名兼容（见"开关和配置"的"旧名"） |
+| `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）、插件文件夹（`TASKQ_PLUGINS`）、状态文件夹（`TASKQ_STATE`），把插件合进核心的表；`OUTPUTS` 的读法（`get <键>` 给 bash） |
 | `scripts/taskq/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`relay.py` 用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口（停止、失败在 `test_dicc_worker_stop.sh`，不在 Slurm 里的和代码包在 `test_dicc_worker_code.sh`，共用 `testdata/worker_harness.sh`；`WORKER_TEST_ONLY` 只跑几个情况）。核心的测试不读 `envs/`、`research/`，用 `testdata/` 的固定配置（11/2）；关于真的实验表、nnU-Net 插件、机器表和环境描述的检查在 `research/common/taskq_plugins/tests/` |
 | `testdata/` | 测试用的固定配置：`config/`（机器表、`policy.py`、环境描述，机器名同真的）、`plugins/`（`toy` 做法、中继插件、进度读法）、`exps/demo/experiments.py`（小实验表，步骤的写法同真的）、`bin/`（假的训练和步骤脚本）、假的 conda 和 venv；`fixture.py` / `fixture.sh` 设 `TASKQ_CONFIG`、`TASKQ_PLUGINS` |
@@ -201,7 +199,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/taskq/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`needs`。`relay.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
-- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_part<段>.log`（段号 `TASK_PART`；10/31 前叫 `_seg<段>.log`、`TASK_SEG`，旧版 worker 传 `TASK_SEG` 时照旧用旧名，读日志的地方两种都认），第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前的按任务说明的 `oldlogs`：`dir` 下以 `prefix` 开头的，登记表、归档两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
+- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_part<段>.log`（段号 `TASK_PART`；10/31 前的叫 `_seg<段>.log`，读日志的地方两种都认），第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前的按任务说明的 `oldlogs`：`dir` 下以 `prefix` 开头的，登记表、归档两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
 
 ## 常用命令
 

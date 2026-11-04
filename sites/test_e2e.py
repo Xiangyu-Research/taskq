@@ -27,9 +27,6 @@ sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 
-LEGACY_UNSET = "".join(f" -u {v}" for v in cfg.LEGACY.values())
-for _v in cfg.LEGACY.values():
-    os.environ.pop(_v, None)
 PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
 PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
 
@@ -47,7 +44,7 @@ for d in (BD, PQ, BIN):
     os.makedirs(d)
 with open(FAKE, "w") as f:  # 假的 ssh：跳过 -o 和机器名，在本机跑；box 这边的变量不带过去
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nshift\n'
-            f'cd / && exec env{LEGACY_UNSET} -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
+            f'cd / && exec env -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
 with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # 不碰真的卡
     f.write("#!/bin/bash\nexit 0\n")
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):
@@ -351,9 +348,9 @@ def step_stage():
                                         for p, t in vf.items()), (len(blobs), vf))
     k1 = keys()[SLOW]
     rs = relay.remote_status(NAME)
-    step("和 box 一样的路径：视图是输入的文件夹、结果在 out 原样、那边的 key 就是总队列的 key（11/1 起不换名）",
+    step("和 box 一样的路径：视图是输入的文件夹、结果在 out 原样、那边的 key 就是总队列的 key",
          k1["views"] == ["guest/e2e/code", "guest/e2e/d1"] and k1["params"]["out"] == "guest/e2e/r/t1" and k1["outs"] == ["guest/e2e/r/t1"]
-         and "alias" not in k1 and sorted(t["key"] for t in rs["taskq"]["tasks"]) == KEYS, k1)
+         and sorted(t["key"] for t in rs["taskq"]["tasks"]) == KEYS, k1)
     step("那边还没开 worker（这次检查开始时还没有备好的任务）", pueue_tasks() == {}, pueue_tasks())
     # 两个任务的视图同时在：一个重新传数据只清自己的视图
     k2 = keys()[KEYS[1]]
@@ -391,15 +388,14 @@ def progress_of(key):
 def step_stop():
     wait(lambda: progress_of(SLOW) == 2, 120, "t1 做完第 2 轮", every=0.2)
     central(f"stop --why 测试 {SLOW}")
-    alias = SLOW
 
     def released():
         t = box_tasks()[SLOW]
         return t["state"] == "stopped" and not t["worker"]
     wait(released, 90, "总队列里停了 t1 后，那边停下、box 交还", every=2, act=check)
     rs = relay.remote_status(NAME)
-    a = next(t for t in rs["taskq"]["tasks"] if t["key"] == alias)
-    f = (rs.get("tasks") or {}).get(alias)
+    a = next(t for t in rs["taskq"]["tasks"] if t["key"] == SLOW)
+    f = (rs.get("tasks") or {}).get(SLOW)
     t = box_tasks()[SLOW]
     skips = os.path.join(os.environ["TASKQ_DIR"], "skips")
     step("停下后：那边是 stopped、没人领，按存档算有进度（resumable），box 交还时不带 skip",

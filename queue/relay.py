@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay 执行机（envs/machines.py 的 RELAY：lab1、lab0、dicc1、dicc2）的接力：由 box 替它在总队列（box 上的任务队列，10/31 起）
 领任务（GPU 或 CPU，按它有的 worker 种类和环境）、把输入放到和 box 一样的相对路径、放进它自己的任务队列，做完拉回、归档。
-执行机和 box 用同样的名字和路径（11/1 起不换名）；执行机之间不直接通信，一切经 box。
+执行机和 box 用同样的名字和路径；执行机之间不直接通信，一切经 box。
 
 那边（根目录 R，machines.py 的 root）：
   R/code/<包名>、R/code/current   scripts/taskq/queue/relay_bundle.py 打的代码包（origin/main 变了就重打、切换 current；旧包留最新 3 个，
@@ -16,7 +16,6 @@
   2. 总队列里 worker 是它的每个任务：
      - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（补传缺的数据、建软链接、加进那边的队列；要放的路径和那边没做完的
        任务的产出重叠时不传、报出来）；
-     - 记录上有 redo（做法或输入变了、11/1 迁移）→ 那边没人领着时删掉那边的任务和它独占的路径，下次检查重新传；
      - 在那边排着、在训 → 续上（beat）；
      - 那边做完 → box 的 wait 组排 relay.py fetch（拉回、核对）；
      - 总队列显示训完（box 上有了）→ 删掉那边的任务和结果（11/3 定：执行机的盘只用来中转）；要归档的，备份机能用时 box 的 wait 组
@@ -141,13 +140,8 @@ def load_state():
 
 def keys_of(st, name):
     """key → dict(recipe, params, data, staged, views, inputs, outs, cleanup)。inputs：放过去的文件、视图里的除外（相对 R/data）；
-    outs：产出的文件夹。redo：下次检查先删掉那边的任务和这些路径，再重新传（11/1 迁移时给换名的老记录打上，老记录的 alias 是那边的 key）。"""
+    outs：产出的文件夹。"""
     return (st.get("keys") or {}).get(name) or {}
-
-
-def rkey(key, k):
-    """那边队列里的 key：就是 key（11/1 起不换名）；11/1 前的老记录是别名，只用来删它们。"""
-    return (k or {}).get("alias") or key
 
 
 def paths_of(k):
@@ -175,8 +169,8 @@ def droppable(keys, key, paths):
 
 
 def views_of(k):
-    """一个任务的视图文件夹（旧记录只有 view 一项）。"""
-    return list(k.get("views") or ([k["view"]] if k.get("view") else []))
+    """一个任务的视图文件夹。"""
+    return list(k.get("views") or [])
 
 
 def safe_rel(rel):
@@ -267,7 +261,7 @@ if A.get('cap'):
     free=min(free,max(0,int(A['cap']*1e9)-used))
 B=os.path.realpath(os.path.join(R,'blobs'))
 bdev=os.stat(B).st_dev if os.path.isdir(B) else os.stat(R).st_dev
-spec.json_out(dict(taskq=st,tasks=col.get('tasks',col.get('folds')),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,out_used=out_used,
+spec.json_out(dict(taskq=st,tasks=col.get('tasks'),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,out_used=out_used,
                    blob_dev=bdev,blob_free=free if bdev==os.stat(R).st_dev else shutil.disk_usage(B).free,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,'code','current')))))
 """
@@ -581,18 +575,18 @@ def stage(name, key, nice=None, add=True, say=print):
 def check_overlap(name, key, paths):
     """这个任务要放的路径和同一台上别的没做完的任务的产出重叠（相同、上级或下级）→ RelayError，不传。"""
     keys = keys_of(load_state(), name)
-    hit = {}
+    hit = []
     for r, k in keys.items():
         if r == key:
             continue
         outs = set(k.get("outs") or [])
         anc = ancestors(outs)
         if any(overlaps(p, outs, anc) for p in paths):
-            hit[rkey(r, k)] = r
+            hit.append(r)
     if not hit:
         return
     states = rpy(name, STATES_PY, None)
-    busy = [r for rk_, r in hit.items() if states.get(rk_) not in (None, "done")]
+    busy = [r for r in hit if states.get(r) not in (None, "done")]
     if busy:
         raise RN.RelayError(f"{key} 要放的输入和 {conf(name)['label']} 上还没做完的 {', '.join(busy)} 的产出重叠，先不传")
 
@@ -706,7 +700,7 @@ def fetch(name, key, say=print):
     k = keys_of(load_state(), name).get(key)
     if not k:
         raise RN.RelayError(f"{key} 没有传给 {conf(name)['label']} 的记录")
-    res = rpy(name, LIST_PY, dict(spec=real, outs=k.get("outs") or N.outs(real), key=rkey(key, k)))
+    res = rpy(name, LIST_PY, dict(spec=real, outs=k.get("outs") or N.outs(real), key=key))
     if not res["done"]:
         raise RN.RelayError(f"{conf(name)['label']} 上 {key} 还没做完")
     inbox = os.path.join(D, ".relay_in", S.safe(key))
@@ -753,7 +747,7 @@ def progress(f):
 
 def plan(s, name, rs, st, now=None):
     """→ (动作, 卡住的 {问题编号: 说明})。rs：那边的状态（None = 连不上）；st：load_state()。
-    动作 dict(op=beat|release|stage|restage|redo|fetch|drop|unq|rstop|rresume|rnice|archive, key, …)；rkey：那边队列里的 key。"""
+    动作 dict(op=beat|release|stage|restage|fetch|drop|unq|rstop|rresume|rnice|archive, key, …)；rkey：那边队列里的 key。"""
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = conf(name)["label"], keys_of(st, name)
@@ -776,15 +770,9 @@ def plan(s, name, rs, st, now=None):
     for t in mine:
         key = t["key"]
         k = keys.get(key)
-        a = rt.get(rkey(key, k)) if k else None
+        a = rt.get(key) if k else None
         if a:
             owned.add(a["key"])
-        if k and k.get("redo") and t["state"] != "done":  # 删掉那边的任务和路径，下次检查按现在的做法重新传；那边领着时先停
-            busy = bool(a and a.get("worker"))
-            acts += [dict(op="beat", key=key), dict(op="redo", key=key, rkey=rkey(key, k), busy=busy)]
-            if busy and a["state"] != "stopped":
-                acts.append(dict(op="rstop", key=key, rkey=a["key"]))
-            continue
         if t["state"] == "done":
             ft = box_task(s, "relay_fetch", key, t.get("since") or 0)
             at = box_task(s, "relay_archive", key, t.get("since") or 0)
@@ -799,7 +787,7 @@ def plan(s, name, rs, st, now=None):
                                               f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）")
                 continue
             if k:  # box 上有了就删那边的任务和结果，不等归档（11/3 定：执行机的盘只用来中转）
-                acts.append(dict(op="drop", key=key, rkey=rkey(key, k)))
+                acts.append(dict(op="drop", key=key, rkey=key))
             try:
                 want = ft is not None and bool(lookup(key).get("archive"))
             except (RN.RelayError, S.SpecError):
@@ -875,21 +863,12 @@ def plan(s, name, rs, st, now=None):
                 acts.append(dict(op="drop", key=key, rkey=a["key"]))
         elif ast in ("bad", "blocked"):
             stuck[f"site:{name}:fail:{key}"] = f"{L} 队列里的 {a['key']}（{key}）{ast}：{a.get('note')}"
-    rev = {rkey(k, v): k for k, v in keys.items()}
     mt = {t["key"]: t for t in (mtq or {}).get("tasks", [])}
     mk = {t["key"] for t in mine}
-    for real, k in keys.items():  # 不归它了、要重新传的旧记录：那边没人领着就删掉（任务、独占的路径、记录）
-        a = rt.get(rkey(real, k))
-        if k.get("redo") and real not in mk:
-            owned.add(rkey(real, k))
-            if not (a and a.get("worker")):
-                acts.append(dict(op="drop", key=real, rkey=rkey(real, k), gone=a is None))
-            elif a["state"] != "stopped":
-                acts.append(dict(op="rstop", key=real, rkey=a["key"]))
     for a in rs["taskq"]["tasks"]:
         if a["key"] in owned:
             continue
-        real = rev.get(a["key"])
+        real = a["key"] if a["key"] in keys else None
         m = mt.get(real) if real else None
         if real is None:
             stuck[f"site:{name}:orphan:{a['key']}"] = f"{L} 队列里的 {a['key']} 认不出是哪个任务（{DIR}/state.json 里没有）"
@@ -903,8 +882,8 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="rstop", key=real, rkey=a["key"]))
     for real, k in keys.items():  # 那边队列里已经删了（unq）、只剩结果的任务：总队列里训完了再删结果
         m = mt.get(real)
-        if not k.get("redo") and real not in mk and rkey(real, k) not in rt and k.get("unq") and (m is None or m["state"] == "done"):
-            acts.append(dict(op="drop", key=real, rkey=rkey(real, k), gone=True))
+        if real not in mk and real not in rt and k.get("unq") and (m is None or m["state"] == "done"):
+            acts.append(dict(op="drop", key=real, rkey=real, gone=True))
     if rs["taskq"].get("paused"):
         stuck[f"site:{name}:fail"] = f"{L} 的任务队列 3 小时内失败 {rs['taskq'].get('recent_failures')} 次，暂停领任务"
     return acts, stuck
@@ -925,7 +904,7 @@ def fill(s, name, rs, st, acts):
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
 
     def remote(t):
-        return rt.get(rkey(t["key"], keys[t["key"]])) if t["key"] in keys else None
+        return rt.get(t["key"]) if t["key"] in keys else None
 
     def waiting(t):  # 领着、还没开训：在传数据，在那边排着，或那边停着、这次检查要撤销停止的（11/2）
         a = remote(t)
@@ -962,7 +941,7 @@ def fill(s, name, rs, st, acts):
         better = [t for t in cands if kind(t) == k and t["nice"] >= 0 and idle_k and t["nice"] < idle_k[0]["nice"]]
         if room[k] <= 0 and better and refill.next_pick(mtq, better, ready, free, hard, took)[0] is not None:
             w = idle_k[0]
-            out += [dict(op="drop", key=w["key"], rkey=rkey(w["key"], keys[w["key"]])),
+            out += [dict(op="drop", key=w["key"], rkey=w["key"]),
                     dict(op="release", key=w["key"], why=f"让给更优先的 {better[0]['key']}（档位 {better[0]['nice']} < {w['nice']}）")]
             room[k] = 1
             if spare is not None:
@@ -1102,16 +1081,13 @@ def execute(name, acts, s, run_add=None):
                     msgs.append(f"{L} 的队列里删了 {k}（总队列里分给了 {a['to']}，结果留着给它收编）")
                 else:
                     msgs.append(f"{L} 的队列里删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
-            elif a["op"] in ("drop", "redo"):
-                if a["op"] == "redo" and a.get("busy"):
-                    msgs.append(f"{L} 上 {k} 正被领着，等它停下再重新传")
-                    continue
+            elif a["op"] == "drop":
                 err = drop_remote(name, k, a["rkey"], gone=a.get("gone"))
                 if err:
                     msgs.append(f"{L} 上删 {k} 出错（{err}）")
                     kept.add(k)
                 else:
-                    msgs.append(f"{L} 上删了 {k} 的任务和结果" if a["op"] == "drop" else f"{L} 上删了 {k} 的旧任务和路径，下次检查重新传")
+                    msgs.append(f"{L} 上删了 {k} 的任务和结果")
             elif a["op"] == "rnice":
                 r = rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
                 msgs.append(f"{L} 上 {k} 改到档位 {a['nice']}" if r and r[0] == 0 else f"{L} 上 {k} 改档位出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
@@ -1121,7 +1097,7 @@ def execute(name, acts, s, run_add=None):
                 msgs.append(f"{L} 上{what} {k}" if r and r[0] == 0 else f"{L} 上{what} {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
         except Exception as e:  # noqa: BLE001
             msgs.append(f"{L} {a['op']} {k} 出错：{e}")
-            if a["op"] in ("drop", "redo"):
+            if a["op"] == "drop":
                 kept.add(k)
     return msgs
 
@@ -1169,9 +1145,9 @@ def write_status(name, rs, st):
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     out = {}
     for real, k in keys.items():
-        a = rt.get(rkey(real, k))
+        a = rt.get(real)
         if a:
-            f = (rs.get("tasks") or {}).get(rkey(real, k)) or {}
+            f = (rs.get("tasks") or {}).get(real) or {}
             out[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
                                debug=f.get("debug") or {})
     try:
@@ -1259,7 +1235,7 @@ def run_one(s, name, dry):
             notes.append(f"{L} 清理出错：{e}")
     acts, stuck = plan(s, name, rs, st)
     if not live:  # 开关关着：不传、不重传、不让那边接着训；训完的照常拉回、交还
-        acts = [a for a in acts if a["op"] not in ("stage", "restage", "redo", "rresume")]
+        acts = [a for a in acts if a["op"] not in ("stage", "restage", "rresume")]
     more, why = (fill(s, name, rs, st, acts) if rs is not None else ([], "连不上"))
     subs, swhy = (topup(name, rs) if rs is not None else ([], "连不上"))
     for part in swhy.split("；"):

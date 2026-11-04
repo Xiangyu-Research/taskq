@@ -271,16 +271,13 @@ ok("默认：floor 42000、target 55000、high 62000 MiB，settle 120 秒、star
    (a.floor_mib, a.target_mib, a.high_mib) == (42000, 55000, 62000)
    and a.settle == 120 and a.start_hold == 900 and a.interval == 10 and a.min_train_mib == 2000)
 os.environ["SLURM_JOB_ID"] = "4242"
-os.environ.pop("RQ1_GPU_PAD_BASE", None)
 os.environ.pop("TASKQ_GPU_PAD_BASE", None)
 ok("默认 base 是 /tmp/gpu_pad_<作业号>", G.parse_args([]).base == "/tmp/gpu_pad_4242")
 ok("总开关默认在 TASKQ_STATE/gpu_pad/DISABLED", G.default_switch() == os.path.join(os.environ["TASKQ_STATE"], "gpu_pad", "DISABLED"))
-os.environ["RQ1_GPU_PAD_FLOOR_MIB"] = "41000"
-f_old = G.parse_args([]).floor_mib
 os.environ["TASKQ_GPU_PAD_FLOOR_MIB"] = "43000"
 f_new = G.parse_args([]).floor_mib
-os.environ.pop("RQ1_GPU_PAD_FLOOR_MIB"), os.environ.pop("TASKQ_GPU_PAD_FLOOR_MIB")
-ok("环境变量：TASKQ_GPU_PAD_* 优先，旧名 RQ1_GPU_PAD_* 兜底", (f_old, f_new) == (41000, 43000))
+os.environ.pop("TASKQ_GPU_PAD_FLOOR_MIB")
+ok("环境变量 TASKQ_GPU_PAD_FLOOR_MIB 改默认值", f_new == 43000)
 try:
     with contextlib.redirect_stderr(io.StringIO()):
         G.parse_args(["--target-mib", "70000", "--high-mib", "60000"])

@@ -90,7 +90,7 @@ def _plan_with_box_error(mt, rt):
     relay.lookup = lambda k: dict(archive=True)
     C.backup_down = lambda ok=None: None
     try:
-        return K, relay.plan(S, TR.NAME, RS, TR.keymap((K, K)))
+        return K, relay.plan(S, TR.NAME, RS, TR.keymap(K))
     finally:
         relay.lookup, C.backup_down = old_lookup, old_down
 

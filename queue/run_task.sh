@@ -2,8 +2,7 @@
 # 跑一个训练任务（2026-10-18）：所有机器共用（DICC 的 dicc_worker.sh、lab 的 pueue 任务、手动跑）。
 #   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
 # 按任务说明（scripts/taskq/queue/spec.py，做法在 scripts/taskq/queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
-# 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART；10/31 前的 worker
-# 传 TASK_SEG，日志照旧叫 _seg<段>.log，它按这个名字看日志），第一行记作业、机器、
+# 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART），第一行记作业、机器、
 # 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
 # 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；
@@ -18,11 +17,9 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v…" >&2; exit 2; }
-source "$HERE/legacy_names.sh" map
 DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
 [[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit 2; }
 export TASKQ_DATA=$DATA
-source "$HERE/legacy_names.sh" export
 SH=$(python3 "$HERE/spec.py" shell "$@") || exit 2
 eval "$SH"
 ts() { date '+%F %T'; }
@@ -30,11 +27,9 @@ done_() { python3 "$HERE/spec.py" done "$@"; }
 if done_ "$@"; then echo "$(ts) 已经训完：$TASK_KEY"; exit 0; fi
 ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { echo "这台机器没有环境 $TASK_ENV（envs/machines.py）" >&2; exit 2; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
-if [[ -n ${TASK_PART:-} ]]; then PART=$TASK_PART PSUF=part
-elif [[ -n ${TASK_SEG:-} ]]; then PART=$TASK_SEG PSUF=seg
-else PART=1 PSUF=part; fi
+PART=${TASK_PART:-1}
 mkdir -p "$DATA/logs/tasks" "$TASK_OUT"
-LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_${PSUF}${PART}.log
+LOG=$DATA/logs/tasks/${TASK_SAFE}__${JOBTAG}_part${PART}.log
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)

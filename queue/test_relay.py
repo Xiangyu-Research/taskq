@@ -4,7 +4,7 @@
   2. 拉回时挪进数据目录的顺序：中途出错时训完的标志不在（不会被当成训完）；
   3. 真跑一遍：本机模拟"那边"（假的 ssh、srun 在本地跑，服务开在 127.0.0.1），推代码包、传数据（stage）、
      那边的队列、拉回（fetch），和 box 一样的真名路径；
-  4. 删任务时按引用计数只删别的任务不用的路径；redo（重新传）。
+  4. 删任务时按引用计数只删别的任务不用的路径。
 跑法：python3 scripts/taskq/queue/test_relay.py（配置用测试用的 testdata/；包里的 Python 文件用本机 bundle_check 那个环境核对，没有时用当前的 Python）"""
 import contextlib
 import io
@@ -162,9 +162,8 @@ def S0(mt, box=(), recs=()):
                 ok={M.hub(): True}, src={n: dict(tasks={}) for n in M.names("train")})
 
 
-def keymap(*pairs):
-    """(key, 那边的 key)：两个一样 = 11/1 起的真名记录；不一样 = 之前换名的老记录（alias）。"""
-    return dict(keys={NAME: {k: record(k, **(dict(alias=a) if a != k else {})) for k, a in pairs}})
+def keymap(*keys):
+    return dict(keys={NAME: {k: record(k) for k in keys}})
 
 
 def ops(acts):
@@ -210,7 +209,7 @@ def test_adopt_out():
 
 def test_plan():
     K = A = "D1_x/tr/0"
-    st = keymap((K, A))
+    st = keymap(K)
     RS = lambda *ts, **kw: dict(taskq=dict(tasks=list(ts), paused=kw.get("paused", False)), tasks=kw.get("tasks", {}), free=500e9)  # noqa: E731
 
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "claimed", "123")), st)
@@ -380,28 +379,6 @@ def test_plan():
     assert ops(acts) == [("drop", K)] and acts[0].get("gone"), acts
     ok("总队列里改分给了别的执行机（换卡；那边停着的也算）→ 那边队列里删掉（unq）、结果留着给它收编；总队列训完了再删结果（不再删队列）")
 
-    old = keymap((K, "D901_ab/tr/0"))
-    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask("D901_ab/tr/0", "claimed", "123")), old)
-    assert ops(acts) == [("beat", K)] and not stuck, (acts, stuck)
-    acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask("D901_ab/tr/0", "done")), old)
-    assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "drop"][0]["rkey"] == "D901_ab/tr/0", acts
-    ok("11/1 前换名的老记录：那边的 key 是别名，照样续、删")
-
-    red = dict(keys={NAME: {K: record(K, alias="D901_ab/tr/0", redo=1.0)}})
-    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("D901_ab/tr/0", "free")), red)
-    assert ops(acts) == [("beat", K), ("redo", K)] and not acts[1]["busy"] and acts[1]["rkey"] == "D901_ab/tr/0", acts
-    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask("D901_ab/tr/0", "claimed", "123")), red)
-    assert ops(acts) == [("beat", K), ("redo", K), ("rstop", K)] and acts[1]["busy"], acts
-    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), red)
-    assert ops(acts) == [("beat", K), ("redo", K)], acts
-    acts, _ = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("D901_ab/tr/0", "free")), red)
-    assert ops(acts) == [("drop", K)] and not acts[0]["gone"], acts
-    acts, _ = relay.plan(S0([]), NAME, RS(), red)
-    assert ops(acts) == [("drop", K)] and acts[0]["gone"], acts
-    acts, stuck = relay.plan(S0([mtask(K, "free", None)]), NAME, RS(rtask("D901_ab/tr/0", "claimed", "1")), red)
-    assert ops(acts) == [("rstop", K)], acts
-    ok("redo：领着的 → 那边没人领着时删掉、下次重新传，在训的先停；不归它的 → 删掉（那边在训的先停）")
-
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 3 * 3600}))
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:down" in stuck, stuck
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 600}))
@@ -436,7 +413,7 @@ def test_plan():
     ok("第 ⓪ 档（nice < 0，训完后的推理）不受 READY 限制：排满了也领，先领它")
 
     K5 = "D5_d/tr/0"
-    st2 = keymap((K, A), (K5, K5))
+    st2 = keymap(K, K5)
     late = [mtask(K2, "free", None, nice=6), mtask(K3, "free", None, nice=7)]
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + late), NAME, RS(rtask(A, "stopped"), rtask(K5, "free")), st2, [])
     assert more == [] and "排着 2" in why, (more, why)
@@ -717,7 +694,7 @@ def test_e2e_path(pre):
     D = os.path.join(RROOT, "data")
     assert rk == sp["key"] and k["views"] == ["proj/inputs/cohortA"], k
     assert set(k["outs"]) == {sp["out"], "proj/analysis/thing/shared"}, k
-    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.dat" in k["inputs"] and not any("t1" in x for x in k["inputs"]), k
+    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.dat" in k["inputs"] and not any("t1" in os.path.basename(x) for x in k["inputs"]), k
     assert open(os.path.join(D, "proj/inputs/cohortA", "y_0000.dat"), "rb").read() == b"yy"
     assert open(os.path.join(D, "proj/inputs/cohortA", "a", "x_0000.dat"), "rb").read() == b"xa"
     assert open(os.path.join(D, "raw/Set/c2/c2-seg.dat"), "rb").read() == b"sc2"
@@ -766,8 +743,7 @@ def test_e2e_path(pre):
             raise AssertionError(bad)
         except relay.RN.RelayError:
             pass
-    assert relay.views_of(dict(view="prepared/D1")) == ["prepared/D1"]
-    ok("要删的、要建的路径在数据目录里、至少两层；旧记录的 view 也认")
+    ok("要删的、要建的路径在数据目录里、至少两层")
 
 
 def test_tilde_root():
@@ -903,7 +879,7 @@ def test_auto_off():
         relay.write_status = lambda n, rs, st: None
         relay.update_state = lambda fn: None
         relay.load_state = lambda: {}
-        relay.plan = lambda s, n, rs, st: ([dict(op=o, key=o) for o in ("beat", "stage", "restage", "redo", "rresume", "fetch")], {})
+        relay.plan = lambda s, n, rs, st: ([dict(op=o, key=o) for o in ("beat", "stage", "restage", "rresume", "fetch")], {})
         relay.fill = lambda *a: ([dict(op="take", key="t")], "")
         relay.topup = lambda *a: ([("long", "x", 1, "worker.sbatch")], "")
         relay.log = lambda lines: None
@@ -947,14 +923,9 @@ def test_refcount():
     try:
         msgs = relay.execute(NAME, [dict(op="drop", key="inf", rkey="inf")], S0([]))
         assert seen and seen[-1][0] == relay.DROP_PY and seen[-1][1] == dict(paths=["raw/A/img/a.dat", "res/X/tr/dataset.json"], logs="inf"), (seen, msgs)
-        seen.clear()
-        msgs = relay.execute(NAME, [dict(op="redo", key="ev", rkey="ev", busy=True)], S0([]))
-        assert not seen and "等它停下" in msgs[0], msgs
-        msgs = relay.execute(NAME, [dict(op="redo", key="ev", rkey="ev", busy=False)], S0([]))
-        assert seen[-1][1]["paths"] == ["an/X/frag_0/eval", "raw/A/lab/a.dat"] and "重新传" in msgs[0], msgs
     finally:
         relay.rpy, relay.rtq, relay.load_state, relay.update_state = rpy0, rtq0, st0, up0
-    ok("drop / redo 只删算出来能删的路径和自己的日志；redo 时那边还领着就等")
+    ok("drop 只删算出来能删的路径和自己的日志")
 
 
 def test_drop_refused():

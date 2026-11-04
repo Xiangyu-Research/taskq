@@ -213,7 +213,7 @@ def spec_of(t):
 
 
 def data_root():
-    """本机的数据目录：TASKQ_DATA（旧名见 cfg.py 的 LEGACY）> envs/machines.py。"""
+    """本机的数据目录：TASKQ_DATA > envs/machines.py。"""
     if cfg.env("TASKQ_DATA"):
         return cfg.env("TASKQ_DATA")
     import machines as M
@@ -831,8 +831,7 @@ def remote(host, args, timeout=120, env="", input=None):
     import machines as M
     m = M.MACHINES[host]
     ssh = os.environ.get("TASKQ_SSH", "ssh").split() + C.SSH[1:]  # TASKQ_SSH 只给测试用
-    data = " ".join(f"{k}={m['data']}" for k in ("TASKQ_DATA", cfg.LEGACY["TASKQ_DATA"]))
-    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}{data} python3 scripts/taskq/queue/taskq.py {args}"
+    cmd = f"cd {m['repo']} && {env + ' ' if env else ''}TASKQ_DATA={m['data']} python3 scripts/taskq/queue/taskq.py {args}"
     rc, out, err = C.run(cmd, m["ssh"], timeout, ssh=ssh, input=input)
     return None if rc in (124, 255) else (rc, out, err)  # 124：超时、ssh 起不来
 

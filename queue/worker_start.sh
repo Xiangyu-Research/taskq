@@ -11,6 +11,5 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
 TASKQ_DATA=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)
 export TASKQ_DATA
-source "$HERE/legacy_names.sh" export
 source "$HERE/gpu_pad_start.sh"
 exec bash "$HERE/dicc_worker.sh"

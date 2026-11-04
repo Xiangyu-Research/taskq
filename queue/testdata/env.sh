@@ -1,6 +1,5 @@
 # 测试用的环境脚本（policy.py 的 OUTPUTS["env_script"]）：数据目录按机器表找，source 显存填充的启动器
 _fx=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-source "$_fx/../legacy_names.sh" map
 TASKQ_DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$_fx/config}/machines.py" get . data 2> /dev/null)}
 export TASKQ_DATA
 export DEMO_PREPARED=$TASKQ_DATA/prepared DEMO_RESULTS=$TASKQ_DATA/results

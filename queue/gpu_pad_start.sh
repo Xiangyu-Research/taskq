@@ -1,5 +1,4 @@
 _padhere=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-source "$_padhere/legacy_names.sh" map
 if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${TASKQ_TEST_FAKEBIN:-} && -z ${QUEUE_TEST_DIR:-} \
       && ${TASKQ_GPU_PAD:-1} != 0 && -n ${CUDA_VISIBLE_DEVICES:-} ]] \
    && command -v nvidia-smi > /dev/null 2>&1; then

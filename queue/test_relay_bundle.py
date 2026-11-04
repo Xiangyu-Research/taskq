@@ -38,7 +38,7 @@ def ok(msg):
 def run(cmd, env=None, **kw):
     """包里的命令：不带本机的配置（TASKQ_CONFIG），用包里生成的 envs/。"""
     e = {k: v for k, v in os.environ.items()
-         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS", *cfg.LEGACY.values())}
+         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS")}
     e.update(env or {})
     return subprocess.run(cmd, capture_output=True, text=True, env=e, **kw)
 
@@ -234,7 +234,7 @@ def test_dicc_worker_in_bundle(T):
     os.makedirs(os.path.join(R, "data"))
     fx = 'source "$HERE/testdata/fixture.sh"'
     e = {k: v for k, v in os.environ.items()
-         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS", *cfg.LEGACY.values())}
+         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS")}
     procs = {}
     for name, ids in SMOKE.items():
         test = open(os.path.join(HERE, name)).read()
