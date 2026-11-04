@@ -76,7 +76,7 @@ if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
     git -C "$REPO" diff --quiet HEAD -- ${CODE_DIRS:-scripts/queue} 2> /dev/null || COMMIT="$COMMIT+改动"
 else
-    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名 <提交号>-<内容哈希>
+    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名是内容哈希（16 位）
 fi
 head_now() {
     if [[ -n ${TASKQ_HEAD_CMD:-} ]]; then eval "$TASKQ_HEAD_CMD"

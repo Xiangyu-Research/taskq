@@ -3,6 +3,7 @@
 包从工作区建（commit=None），根目录换成临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 只有 scripts）。
     python3 scripts/taskq/queue/test_relay_bundle.py
 """
+import ast
 import json
 import os
 import re
@@ -77,11 +78,11 @@ def test_secrets():
 def test_bundle(T):
     R = os.path.join(T, "R")
     bid, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R)
-    assert path == os.path.join(R, "code", bid) and bid.startswith("worktree-") and len(bid) == len("worktree-") + 8, bid
+    assert path == os.path.join(R, "code", bid) and re.fullmatch(r"[0-9a-f]{16}", bid), bid
     bid2, path2 = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R)
     assert (bid2, path2) == (bid, path)
     assert not [n for n in os.listdir(os.path.join(R, "code")) if n.startswith(".")]
-    ok("建包：包名 worktree-<内容哈希>，同样的内容再建一次用原来的包、不留临时目录")
+    ok("建包：包名是 16 位内容哈希，同样的内容再建一次用原来的包、不留临时目录")
 
     files = sorted(os.path.relpath(os.path.join(d, f), path) for d, _, fs in os.walk(path) for f in fs)
     src = B.source_files(None)
@@ -167,6 +168,49 @@ def test_bundle(T):
     ok("包里的 taskq.py：add → --json-status → next（0；再领 10）→ beat → stop → release → resume → remove；"
        "不设 TASKQ_DIR 也用根目录下的 queue/")
     return path
+
+
+def test_scope_and_id(T):
+    """11/4 起：包里只有执行机要用的调度文件（RUNTIME）加 OUTPUTS["bundle"] 减 bundle_skip；包名只按内容。
+    这里把 bundle 换成 testdata（当 research 用），bundle_skip 换成 */bin/*、*/test_* 和 RUNTIME 里的 run_task.sh。"""
+    saved = B.TOPS, B.SKIP
+    B.TOPS, B.SKIP = ("scripts/taskq/queue/testdata",), ("*/test_*", "*/bin/*", "*/run_task.sh")
+    try:
+        src = B.source_files(None)
+        files = B.contents(NAME, None, root=os.path.join(T, "S"))
+        bid = B.bundle_id(files)
+    finally:
+        B.TOPS, B.SKIP = saved
+    for f in B.RUNTIME:
+        if os.path.isfile(os.path.join(REPO, f)) and not f.endswith(".sbatch"):
+            assert f in src, f
+    assert "scripts/taskq/queue/run_task.sh" in src, "RUNTIME 里的不受 bundle_skip 影响"
+    for f in ("scripts/taskq/queue/relay.py", "scripts/taskq/queue/advance.py", "scripts/taskq/queue/README.md",
+              "scripts/taskq/queue/test_relay_bundle.py", STEP, "scripts/taskq/queue/testdata/bin/toy_train.sh"):
+        assert f not in src, f
+    assert not [f for f in src if f.startswith("scripts/taskq/") and not f.startswith("scripts/taskq/queue/testdata/") and f not in B.RUNTIME], src
+    assert "scripts/taskq/queue/testdata/exps/demo/experiments.py" in src
+    ok("包里的文件：RUNTIME 全在（bundle_skip 不管它们），box 才用的（relay.py、advance.py）、说明、测试、bundle_skip 匹配的不在")
+
+    def id_with(change):
+        f = dict(files)
+        change(f)
+        return B.bundle_id(f)
+
+    def edit(path):
+        return lambda f: f.__setitem__(path, (f[path][0] + "\n# x\n", f[path][1]))
+    assert id_with(lambda f: None) == bid
+    assert id_with(edit("scripts/taskq/queue/run_task.sh")) != bid
+    assert id_with(edit("scripts/taskq/queue/testdata/exps/demo/experiments.py")) != bid
+    assert id_with(lambda f: f.__setitem__("scripts/taskq/queue/run_task.sh", (f["scripts/taskq/queue/run_task.sh"][0], False))) != bid
+    src_m = B.read_machines(None)
+    first = ast.get_docstring(ast.parse(src_m))
+    m = B.machine_entry(NAME, B.relay_entry(None, NAME), os.path.join(T, "S"), None)
+    a = B.gen_machines(src_m, NAME, m)
+    b = B.gen_machines(src_m.replace(first, first + "\n多一行说明", 1).replace("\n\n", "\n\n# 新加的整行注释\n", 1), NAME, m)
+    assert a == b and first not in a, a[:300]
+    ok("包名：只按内容（16 位），改执行机用的 run_task.sh、改 research 里的文件、改可执行位都换；"
+       "机器表开头的说明、整行注释改了不换")
 
 
 def test_cpu_sbatch(T):
@@ -261,6 +305,7 @@ def main():
         test_source_files_from_commit()
         test_secrets()
         test_bundle(T)
+        test_scope_and_id(T)
         test_cpu_sbatch(T)
         test_pueue_site(T)
         test_dicc_worker_in_bundle(T)
