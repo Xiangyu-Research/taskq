@@ -320,7 +320,7 @@ def plan(s, root=None):
         qk = S.fill(qd["key"], names, keep=()) if qd else None
         if qk in qkeys:  # 已经在任务队列里：那边做完由拉回接着
             out = os.path.join(root, S.fill(qd["out"], names, keep=()))
-            if all(os.path.exists(os.path.join(out, d)) for d in qd["done"]):
+            if all(any(os.path.exists(os.path.join(out, x)) for x in d.split("|")) for d in qd["done"]):  # 同 spec.is_done：| 分开的有一个就行
                 stuck[f"advance:{st['name']}:{key}"] = f"{label}：任务队列的 {qk} 做完、拉回了，但 box 上核对还是没做完（{out}）"
             return
         if sk in done:  # box 上做过：失败的、成功了结果还不对的报出来
