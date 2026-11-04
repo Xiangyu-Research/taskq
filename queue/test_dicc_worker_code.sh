@@ -100,7 +100,7 @@ table << EOF
 t/k base
 EOF
 mkdir -p "$T/code/a" "$T/code/b/scripts/taskq/queue"
-cp -r "$REPO/scripts" "$T/code/a/"   # 配置、插件经 TASKQ_CONFIG、TASKQ_PLUGINS 找（testdata）
+mkdir -p "$T/code/a/scripts/taskq" && cp -r "$CORE/." "$T/code/a/scripts/taskq/"   # 配置、插件经 TASKQ_CONFIG、TASKQ_PLUGINS 找（testdata）
 printf '#!/bin/bash
 echo "新包的 start $WORKER_ID"
 ' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
