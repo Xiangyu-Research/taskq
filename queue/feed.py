@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(CORE, "monitor"))
 import machines as M  # noqa: E402
 from proto import alert, alert_id, alert_msg  # noqa: E402
 
-LOG = os.path.expanduser(os.environ.get("FEED_LOG", "~/feed.log"))  # 环境变量只给测试用
+LOG = cfg.log("feed")
 
 
 def log(lines):

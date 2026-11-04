@@ -61,7 +61,7 @@ import shift  # noqa: E402
 import common as C  # noqa: E402
 import taskq  # noqa: E402
 
-LOG = os.path.expanduser(os.environ.get("ADVANCE_LOG", "~/advance.log"))  # 环境变量只给测试用
+LOG = cfg.log("advance")
 LIVE_ST = refill.LIVE
 NO_NICE = 10 ** 6
 NOTES = []  # 这次检查里"为什么没排"的说明（写进 ~/advance.log，不报成问题）

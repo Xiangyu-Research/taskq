@@ -74,7 +74,7 @@ import shift  # noqa: E402
 from common import write_json  # noqa: E402
 
 STATUS = os.path.join(ST.DIR, "status.json")
-LOG = os.path.expanduser(os.environ.get("RELAY_LOG", "~/relay.log"))
+LOG = cfg.log("relay")
 HARD_GB = 100  # 领之前：传过去以后那边至少还剩这么多
 DOWN_S = 2 * 3600  # 领着任务、连不上这么久就报
 LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就报

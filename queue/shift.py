@@ -23,7 +23,7 @@ import machines as M  # noqa: E402
 import policy as P  # noqa: E402
 
 STATE = cfg.state("shift.json")
-LOG = os.path.expanduser("~/refill.log")
+LOG = cfg.log("refill")
 PUEUE = "~/.local/bin/pueue"
 TZ = dt.timezone(dt.timedelta(hours=8))
 
