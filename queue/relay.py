@@ -353,7 +353,7 @@ def fill(s, name, rs, st, acts):
         a = remote(t)
         return a is None or a["state"] in ("free", "stale", "waiting", "stopped", "input")
 
-    def idle(t):  # 那边备好了、没人领、没有进度：可以让给更优先的任务（11/2；有存档的不让，11/4）
+    def idle(t):  # 那边备好了、没人领、没有进度：可以让给更优先的任务（11/2；有进度的不让，11/4）
         a = remote(t)
         return a is not None and a["state"] == "free" and not a.get("worker") and not progress((rs.get("tasks") or {}).get(t["key"]))
 
