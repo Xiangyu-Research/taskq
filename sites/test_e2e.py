@@ -120,6 +120,12 @@ def pueue_tasks():
     return json.loads(out)["tasks"] if rc == 0 else None
 
 
+def bundle_key(name, commit):
+    """relay.py 记 bundle_for 用的键（执行机:使用者的提交:核心的提交），记上测试自己打的包，relay 就不按 origin/main 重打。"""
+    core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
+    return f"{name}:{commit}:{core}"
+
+
 def run_local(cmd, host, timeout, input=None):
     return C.run(cmd, host, timeout, input=input, ssh=[FAKE])
 
@@ -219,7 +225,7 @@ def setup():
     relay.deploy(NAME, bid, path)
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
     relay.BUNDLE_REF = commit  # 测试中途别处推送 main 也不重打包（11/4）
-    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME}:{commit}": bid}))
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({bundle_key(NAME, commit): bid}))
     rs = relay.remote_status(NAME)
     step(f"准备：代码包 {bid} 推过去，那边的队列开着、是空的，自己的 pueued 起来了",
          rs is not None and rs["bundle"] == bid and rs["taskq"]["enabled"] and rs["taskq"]["tasks"] == [] and rs["jobs"] == [], rs)
@@ -494,7 +500,7 @@ def step_shift():
     bid, path = RB.build(NAME0, None, os.path.join(T, "bundles0"), root=RLINK0, entry=e0)
     relay.deploy(NAME0, bid, path)
     commit = relay.BUNDLE_REF
-    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{NAME0}:{commit}": bid}))
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({bundle_key(NAME0, commit): bid}))
     rc, out = E.build(NAME0, "toy", run=run_local)
     assert rc == 0, out
     sheet = dict(key=K6, owner="alice", env="toy", inputs=["guest/e2e/code", "guest/e2e/d1"],

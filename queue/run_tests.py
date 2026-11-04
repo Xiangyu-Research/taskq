@@ -157,8 +157,7 @@ def table(rows):
     def width(s):  # 中文字符占两格
         return sum(2 if ord(c) > 0x2e7f else 1 for c in s)
     w = [max(width(r[k]) for r in cells) for k in range(4)]
-    return "\n".join("  ".join(r[k] + " " * (w[k] - width(r[k])) for k in range(4)) + ("  " + r[4] if r[4] else "")
-                     for r in cells).rstrip()
+    return "\n".join(("  ".join(r[k] + " " * (w[k] - width(r[k])) for k in range(4)) + "  " + r[4]).rstrip() for r in cells)
 
 
 def main(argv=None):
