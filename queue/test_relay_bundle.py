@@ -68,8 +68,8 @@ def test_source_files_submodule(T):
         subprocess.run(["git", "-c", "protocol.file.allow=always", *a], cwd=cwd, env=env, check=True, capture_output=True)
 
     def fill(d):
-        for f, body, exe in (("core/q/a.sh", "echo a\n", True), ("core/q/b.py", "B = 1\n", False), ("core/big.json", "x" * 10, False),
-                             ("cfg/m.py", "M = 2\n", False), ("other/c.py", "", False)):
+        for f, body, exe in (("x/core/q/a.sh", "echo a\n", True), ("x/core/q/b.py", "B = 1\n", False), ("x/core/big.json", "x" * 10, False),
+                             ("x/y.py", "Y = 3\n", False), ("cfg/m.py", "M = 2\n", False), ("other/c.py", "", False)):
             os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
             with open(os.path.join(d, f), "w") as fh:
                 fh.write(body)
@@ -83,32 +83,36 @@ def test_source_files_submodule(T):
     g("add", "-A", cwd=flat)
     g("commit", "-qm", "f", cwd=flat)
     fill(core)
-    shutil.rmtree(os.path.join(core, "cfg"))
-    shutil.rmtree(os.path.join(core, "other"))
-    for f in os.listdir(os.path.join(core, "core")):
-        os.rename(os.path.join(core, "core", f), os.path.join(core, f))
-    os.rmdir(os.path.join(core, "core"))
+    for f in os.listdir(os.path.join(core, "x", "core")):
+        os.rename(os.path.join(core, "x", "core", f), os.path.join(core, f))
+    for d in ("cfg", "other", "x"):
+        shutil.rmtree(os.path.join(core, d))
     g("add", "-A", cwd=core)
     g("commit", "-qm", "c", cwd=core)
     fill(sup)
-    shutil.rmtree(os.path.join(sup, "core"))
-    g("submodule", "add", "-q", core, "core", cwd=sup)
+    shutil.rmtree(os.path.join(sup, "x", "core"))
+    g("submodule", "add", "-q", core, "x/core", cwd=sup)
     g("add", "-A", cwd=sup)
     g("commit", "-qm", "s", cwd=sup)
     saved = B.REPO, B.TOPS, B.RUNTIME
     try:
-        B.TOPS, B.RUNTIME = ("cfg",), ("core/q/a.sh", "core/q/b.py", "core/big.json")
         got = {}
-        for repo in (flat, sup):
-            B.REPO = repo
-            got[repo] = (B.source_files("HEAD"), B.source_files(None), B.read("HEAD", "core/q/b.py"))
+        ways = ((("cfg",), ("x/core/q/a.sh", "x/core/q/b.py", "x/core/big.json", "x/y.py")),  # 一个个文件
+                (("cfg", "x"), ()),  # 上级目录（测试配置的 scripts 就是这样）
+                (("cfg", "x/core"), ("x/y.py",)))  # 子模块本身
+        for tops, runtime in ways:
+            B.TOPS, B.RUNTIME = tops, runtime
+            for repo in (flat, sup):
+                B.REPO = repo
+                got[tops, repo] = (B.source_files("HEAD"), B.source_files(None), B.read("HEAD", "x/core/q/b.py"))
     finally:
         B.REPO, B.TOPS, B.RUNTIME = saved
-    files = got[flat][0]
-    assert sorted(files) == ["cfg/m.py", "core/big.json", "core/q/a.sh", "core/q/b.py"], sorted(files)
-    assert files["core/q/a.sh"] == (b"echo a\n", True) and files["core/q/b.py"] == (b"B = 1\n", False)
-    assert got[sup] == got[flat], (got[sup], got[flat])
-    ok("核心是子模块：从提交（取它钉的提交）、从工作区取到的文件、可执行位和普通目录时相同")
+    for tops, _ in ways:
+        files = got[tops, flat][0]
+        assert sorted(files) == ["cfg/m.py", "x/core/big.json", "x/core/q/a.sh", "x/core/q/b.py", "x/y.py"], (tops, sorted(files))
+        assert files["x/core/q/a.sh"] == (b"echo a\n", True) and files["x/core/q/b.py"] == (b"B = 1\n", False)
+        assert got[tops, sup] == got[tops, flat], (tops, got[tops, sup], got[tops, flat])
+    ok("核心是子模块：按文件、按上级目录、按子模块本身取，从提交（取它钉的提交）、从工作区取到的文件和可执行位都和普通目录时相同")
 
 
 def test_secrets():

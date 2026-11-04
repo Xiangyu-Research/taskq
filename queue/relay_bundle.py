@@ -87,8 +87,14 @@ def _wanted(path, size):
 
 
 def _inside(specs, sub):
-    """路径里落在子模块 sub 下的 → 相对子模块的路径。"""
-    return [p[len(sub) + 1:] if p != sub else "." for p in specs if p == sub or p.startswith(sub + "/")]
+    """路径里落在子模块 sub 下的 → 相对子模块的路径；sub 本身或它的上级目录 → 整个子模块。"""
+    out = []
+    for p in (x.rstrip("/") for x in specs):
+        if p in ("", ".") or p == sub or sub.startswith(p + "/"):
+            out.append(".")
+        elif p.startswith(sub + "/"):
+            out.append(p[len(sub) + 1:])
+    return out
 
 
 def _entries(commit, specs, repo, prefix=""):
