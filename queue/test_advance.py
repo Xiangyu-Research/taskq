@@ -122,7 +122,7 @@ def inferred(ds, tr, f):
 
 
 def evaluated(ds, tr, tag):
-    touch(f"{T}/demo/analysis/{ds}/{tr}__{P}/{tag}/report/report.run.json", '{"status": "ok"}')
+    touch(f"{T}/demo/analysis/{ds}/{tr}__{P}/{tag}/report/report.rec.json", '{"status": "ok"}')
 
 
 def pruned(ds, tr):
@@ -181,7 +181,7 @@ touch(f"{T}/demo/analysis/D116_gamma/V_save__{P}/frag_2/report/report.md")
 trained("D116_gamma", "V_save", "2")
 inferred("D116_gamma", "V_save", "2")
 todo, _ = A.plan(snap())
-check("10/16 前的评测（没有 run.json、有 report.md）算做完", todo == [])
+check("10/16 前的评测（没有 rec.json、有 report.md）算做完", todo == [])
 
 # 5. 失败过的不重排，报出来；成功跑完却没结果的也不重排
 trained("D116_gamma", "V_save", "3")
@@ -211,14 +211,14 @@ oof_ = [t for t in todo if t["step"] == "oof"]
 check("T3 五折到齐：排 oof 和集成，不排删单折概率图", steps(todo) == [("ens", "t3g"), ("oof", "t3g")]
       and oof_[0]["group"] == "cpu" and "oof.py" in oof_[0]["cmd"])
 evaluated("D116_gamma", "V_save", "frags_0-1-2-3-4")
-_er = f"{T}/demo/analysis/D116_gamma/V_save__{P}/frags_0-1-2-3-4/report/report.run.json"
+_er = f"{T}/demo/analysis/D116_gamma/V_save__{P}/frags_0-1-2-3-4/report/report.rec.json"
 os.utime(_er, (os.path.getmtime(_er) - 3600,) * 2)  # 集成比下面的 compare_all 早做完
-touch(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/oof.run.json", '{"status": "ok"}')
+touch(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/oof.rec.json", '{"status": "ok"}')
 todo, _ = A.plan(snap())
 pa = [t for t in todo if t["step"] == "paired"]
 check("oof、集成做完：排配对（--cmp T3=…/oof/eval）和删单折概率图", steps(todo) == [("paired", "t3g"), ("prune", "t3g")]
       and "--cmp T3=" in pa[0]["cmd"] and pa[0]["cmd"].endswith("oof/paired"))
-touch(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.run.json", '{"status": "ok"}')
+touch(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.rec.json", '{"status": "ok"}')
 todo, _ = A.plan(snap())
 check("配对做完、compare_all 比它旧：排 compare_all，删单折概率图在排不挡它", steps(todo) == [("compare_all", "all"), ("prune", "t3g")])
 todo, _ = A.plan(snap([("Queued", [t for t in todo if t["step"] == "prune"][0]["cmd"], None)]))
@@ -226,16 +226,16 @@ check("删单折概率图排着（HOLD 暂停的也算）：认得出来、不�
 pruned("D116_gamma", "V_save")
 todo, _ = A.plan(snap())
 check("单折概率图删完：只剩 compare_all", steps(todo) == [("compare_all", "all")])
-cp = f"{T}/demo/analysis/compare/all/compare_all.run.json"
+cp = f"{T}/demo/analysis/compare/all/compare_all.rec.json"
 touch(cp, json.dumps({"status": "ok", "start": (datetime.now() - timedelta(minutes=10)).astimezone().isoformat(timespec="seconds")}))
-os.utime(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.run.json",
+os.utime(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.rec.json",
          (os.path.getmtime(cp) - 60,) * 2)  # 配对在 compare_all 跑的过程中（开始之后、结束之前）做完
 todo, _ = A.plan(snap())
 check("配对在 compare_all 跑的过程中做完：按 compare_all 开始的时刻比，还要再排", steps(todo) == [("compare_all", "all")])
 touch(cp, json.dumps({"status": "ok", "start": datetime.now().astimezone().isoformat(timespec="seconds")}))
 todo, _ = A.plan(snap())
 check("compare_all 比所有实验结果新：没有要排的", todo == [])
-os.utime(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.run.json")
+os.utime(f"{T}/demo/analysis/D116_gamma/V_save__{P}/oof/paired/paired.rec.json")
 os.utime(cp, (os.path.getmtime(cp) - 120,) * 2)
 touch(cp, json.dumps({"status": "ok", "start": (datetime.now() - timedelta(minutes=5)).astimezone().isoformat(timespec="seconds")}))
 todo, stuck = A.plan(snap([("Success", f"/py {QR}/testdata/bin/compare_all.py", None)]))
@@ -254,7 +254,7 @@ check("集成任务在跑：认得出来，不重复", steps(todo) == [("oof", "
 # 删单折概率图（10/25）：集成做完、每折都评测完、没有在往 box 上拷的才排
 M14 = f"D121_alphagamma/V_save__{P}"
 evaluated("D121_alphagamma", "V_save", "frags_0-1-2-3-4")
-os.remove(f"{T}/demo/analysis/{M14}/frag_2/report/report.run.json")
+os.remove(f"{T}/demo/analysis/{M14}/frag_2/report/report.rec.json")
 todo, _ = A.plan(snap())
 check("删单折概率图：集成做完、但第 2 份还没评测完 → 不删（先评测）", ("prune", "t14g") not in steps(todo) and ("eval", f"{MET}/2") in steps(todo))
 evaluated("D121_alphagamma", "V_save", "frag_2")
@@ -613,7 +613,7 @@ x = [t for t in todo if t["key"] == "t3b" and t["step"] in PSTEPS]
 check("probe：p2 拉回了 → box cpu 组排和 T0 的比较", [(t["step"], t["group"]) for t in x] == [("p2cmp", "cpu")]
       and x[0]["cmd"] == f"{PY} {QR}/testdata/bin/p2_compare.py --tags t3b --out {T}/demo/probe/p2_compare_t3b"
       and x[0]["label"] == "p2cmp:t3b")
-touch(f"{T}/demo/probe/p2_compare_t3b/p2_compare.run.json", '{"status": "ok"}')
+touch(f"{T}/demo/probe/p2_compare_t3b/p2_compare.rec.json", '{"status": "ok"}')
 touch(f"{T}/demo/probe/p1_t3b/.probe_done")
 todo, stuck = A.plan(s_)
 check("probe：p1、p2、p2cmp 都做完 → 没有要排的", pr(todo) == [] and not [k for k in stuck if k.split(":")[1:2] and k.split(":")[1] in PSTEPS and k.endswith(":t3b")])
@@ -773,7 +773,7 @@ check("集成：还在从 dicc1 拉回（报告已经到了）→ 不算做完�
 todo, _ = A.plan(snap())
 check("集成：拉完 → 排删单折概率图（box）", [t["step"] for t in todo if t["key"] == "t18"] == ["prune"])
 
-os.remove(f"{T}/demo/analysis/{S18M}/frags_0-1-2-3-4/report/report.run.json")
+os.remove(f"{T}/demo/analysis/{S18M}/frags_0-1-2-3-4/report/report.rec.json")
 A.P.PLACE = dict(REAL_PLACE, ens=["box:cpu"])  # 12c 看 box 上排的集成
 refill = A.refill
 # 12c. box 的任务做完马上跑一次健康检查（refill.then_check，锁最多等 5 分钟）；包过的命令照样认得出是哪一步

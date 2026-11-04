@@ -2,10 +2,10 @@
 taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读；
 分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
 
-实验的字段：id、exp、label、model、hours、recipe、params、fields、each、after、group_after、names（见各实验表），
-另外 nice（taskq.py add --exp 不给 --nice 时的档位）、board（看板用，各 RQ 自己定）可选。
-each：{参数: [取值…]}，一个实验按这些参数的每种组合展开成一组任务（如 {"seed": ["0", "1"]}）；没有就是一个任务。
-表的模块里另外可以有 FINAL（所有实验做完后的步骤）。"""
+字段（11/4 起加载时核对，不认识的报错）：实验见 EXP_FIELDS，步骤（after、group_after、FINAL 里的）见 STEP_FIELDS，
+步骤的 queue 见 QUEUE_FIELDS（另外可以写 command 做法的字段，见 recipes.py 开头）。
+实验一级的步骤（group_after、FINAL）的模板里，each 的每个参数 <参数> 另有 <参数>_list（取值空格隔开）、<参数>_list_q（加了引号的），
+见 group_names。表的模块里另外可以有 FINAL（所有实验做完后的步骤）。"""
 import glob
 import importlib.util
 import itertools
@@ -22,6 +22,68 @@ import spec  # noqa: E402
 
 _cache = {}
 
+EXP_FIELDS = {
+    "id": "唯一的短名（box pueue 任务的标签、taskq.py add --exp）",
+    "exp": "实验编号（登记表、看板）",
+    "label": "一句话说明",
+    "model": "模型的名字（登记表分组）",
+    "hours": "每个任务折算的小时数（登记表的总进度）",
+    "recipe": "做法（recipes.py）",
+    "params": "做法的参数",
+    "fields": "任务说明里另外覆盖的字段（如 metrics、vars；worker 领任务时按现在的实验表合并）",
+    "each": "{参数: [取值…]}：按每种组合展开成一组任务；没有就是一个任务",
+    "after": "每个任务训完以后的步骤（STEP_FIELDS），按顺序做",
+    "group_after": "所有任务都训完以后的几串步骤（每串按顺序做）",
+    "names": "步骤模板里另外可用的名字（分析脚本也按 name-of 读）",
+    "nice": "taskq.py add --exp 不给 --nice 时的档位",
+    "board": "看板用（各表自己定）",
+    "design": "做了什么的中性说明（事实档案用）",
+    "rq": "实验表所在的文件夹名（加载时加上）",
+}
+STEP_FIELDS = {
+    "name": "步骤名（envs/policy.py 的 PLACE、HOLD 按它）",
+    "group": "在 box 上做时 pueue 的组",
+    "cmd": "在 box 上做的命令（模板）",
+    "done": "怎么算做完（steps.py 的 check、exists 那样的对象）",
+    "queue": "放进任务队列时的写法（QUEUE_FIELDS）；没有 = 只在 box 上做",
+    "needs": "实验一级的步骤：要每个任务都做完的步骤名（一个或列表）",
+    "rerun_if_newer": "FINAL 的步骤：这些步骤有比它开始时新的结果就重跑",
+    "rq": "FINAL 所在的实验表（加载时加上）",
+}
+QUEUE_FIELDS = {
+    "nice": "进任务队列的档位",
+    "inputs": "执行机要准备的输入（相对数据目录的模板；命令不支持 --stage needs 时用）",
+    "disk": "在执行机上要占多少 GB（输入加产出；超过执行机的 cap 就不放那里）",
+    "inputs_cmd": "打印要读的输入（相对数据目录，每行一个）的命令，中继插件按它准备输入（11/4）",
+}
+
+
+def _check_fields(where, d, allowed):
+    bad = sorted(set(d) - set(allowed))
+    if bad:
+        raise spec.SpecError(f"{where}：不认识的字段 {'、'.join(bad)}（允许：{'、'.join(allowed)}）")
+
+
+def check_fields(path, mod):
+    """实验表模块里每个实验、步骤、queue 的字段都认识；不认识的报 SpecError。"""
+    import recipes as R
+    cmd = R.RECIPES["command"]
+    qf = list(QUEUE_FIELDS) + [k for k in cmd if k not in ("params", "open")]
+    steps = [(f"FINAL 的步骤 {st.get('name')}", st) for st in getattr(mod, "FINAL", [])]
+    for e in mod.EXPERIMENTS:
+        where = f"{path} 的实验 {e.get('id')}"
+        _check_fields(where, e, EXP_FIELDS)
+        steps += [(f"{where} 的步骤 {st.get('name')}", st) for st in e.get("after") or []]
+        steps += [(f"{where} 的步骤 {st.get('name')}", st) for g in e.get("group_after") or [] for st in g]
+    seen = set()
+    for where, st in steps:
+        if id(st) in seen:
+            continue
+        seen.add(id(st))
+        _check_fields(where, st, STEP_FIELDS)
+        if st.get("queue"):
+            _check_fields(where + " 的 queue", st["queue"], qf)
+
 
 def load():
     """→ (实验列表, 结束步骤列表)。每个实验加上 rq（实验表所在的文件夹名）。id、任务名重复时报错。"""
@@ -34,6 +96,7 @@ def load():
         sp = importlib.util.spec_from_file_location(f"experiments_{rq}", path)
         mod = importlib.util.module_from_spec(sp)
         sp.loader.exec_module(mod)
+        check_fields(os.path.relpath(path, REPO), mod)
         for e in mod.EXPERIMENTS:
             exps.append(dict(e, rq=rq))
         final += [dict(f, rq=rq) for f in getattr(mod, "FINAL", [])]
@@ -123,9 +186,12 @@ def task_names(t, data, python):
 
 
 def _task_of(model_dir):
-    """模型文件夹（…/<数据集>/<训练器>__<plans>__<配置>，放在哪里都行）→ 实验表里训它的第一个任务；表里没有 → None。"""
-    rel = "/".join(os.path.normpath(model_dir).split(os.sep)[-2:])
-    return next((t for t in tasks().values() if t["spec"].get("names", {}).get("model") == rel), None)
+    """模型文件夹（放在哪里都行）→ 实验表里训它的第一个任务（做法插件的 model_of 钩子给出 model 参数）；表里没有 → None。"""
+    import recipes as R
+    if "model_of" not in R.HOOKS:
+        raise spec.SpecError("做法插件里没有 model_of 钩子（recipes.py 的 HOOKS），按模型文件夹查不了实验表")
+    m = R.HOOKS["model_of"](model_dir)
+    return next((t for t in tasks().values() if t["spec"].get("names", {}).get("model") == m), None)
 
 
 def env_of(model_dir):

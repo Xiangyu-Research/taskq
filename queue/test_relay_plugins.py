@@ -28,7 +28,8 @@ CASES = ["s101", "s101_b", "s102", "x-00582-000-syn"]
 ROOT = os.path.join(TMP, "root")
 PRE = os.path.join(ROOT, "prepared", DS)
 DI = "PlanM_full"
-REAL_INFER_INPUTS = RN.infer_inputs
+PM = sys.modules[RN.PLUGINS["toy_infer"][0].__module__]  # 插件模块（只有约定的表合进 relay_plugins，11/4）
+REAL_INFER_INPUTS = PM.infer_inputs
 
 
 def wj(p, obj):
@@ -164,7 +165,7 @@ def infer_setup():
                 os.makedirs(os.path.join(ROOT, d), exist_ok=True)
                 os.symlink(os.path.join(store, d, f), os.path.join(ROOT, d, f))
     needs = [f"{model}/dataset.json", f"{model}/plans.json", f"{model}/frag_0/final.ckpt", *sorted(INS)]
-    sys.modules[REAL_INFER_INPUTS.__module__].infer_inputs = lambda spec, root: needs
+    PM.infer_inputs = lambda spec, root: needs
     return S.resolve("command", dict(key=f"infer/{DS}/{TD}/frag_0", env="base",
                                      cmd=f"bash {INFER_SH} {{data}}/{model} 0",
                                      out=f"preds/{DS}/{TD}/frag_0", done=[".infer_done"], relay="toy_infer",
@@ -189,15 +190,17 @@ def fake_pred(src, sp):
 
 def test_infer_needs():
     """真跑一次 --stage needs（模型还不在 box 上也能列）。"""
-    sp = S.resolve("command", dict(key="infer/x", env="base", cmd=f"bash {INFER_SH} {{data}}/results/D9_X/T__P__c 0",
-                                   out="preds/D9_X/T__P__c/frag_0", done=[".infer_done"], relay="toy_infer",
-                                   vars=dict(SKIP_EXT="", ONLY_EXT="G-A")))
+    q = dict(key="infer/x", env="base", cmd=f"bash {INFER_SH} {{data}}/results/D9_X/T__P__c 0",
+             out="preds/D9_X/T__P__c/frag_0", done=[".infer_done"], relay="toy_infer", vars=dict(SKIP_EXT="", ONLY_EXT="G-A"))
+    sp = S.resolve("command", dict(q, inputs_cmd=f"bash {QR}/testdata/bin/step.sh --stage needs:infer {{data}}/results/D9_X/T__P__c 0"))
     os.makedirs(os.path.join(ROOT, "raw"), exist_ok=True)
     got = REAL_INFER_INPUTS(sp, ROOT)
     m = "results/D9_X/T__P__c"
     assert got[:3] == [f"{m}/dataset.json", f"{m}/plans.json", f"{m}/frag_0/final.ckpt"], got
     assert len(got) == 5 and all(g.startswith("raw/") and g.endswith("/inputs") for g in got[3:]), got
-    ok("推理：真跑 step.sh --stage needs，带任务的 vars，列出模型文件和输入文件夹")
+    ok("推理：真跑任务的 inputs_cmd（step.sh --stage needs:infer），带任务的 vars，列出模型文件和输入文件夹")
+    fails(REAL_INFER_INPUTS, S.resolve("command", q), ROOT, has="没有 inputs_cmd")
+    ok("推理：没有 inputs_cmd 的报错，不从命令里猜")
 
 
 def test_infer():

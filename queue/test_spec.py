@@ -254,6 +254,37 @@ spec_ = importlib.util.spec_from_file_location("demo_exps", os.path.join(fixture
 R = importlib.util.module_from_spec(spec_)
 spec_.loader.exec_module(R)
 x = R._x("toy", "T99", "玩具", "base", "D999_x", ("G", "en", "zh"), 0, steps=R.OOF5 + ["ens"] + R.PROBE, splits="s.json", probe="p")
+
+
+# 实验表的字段核对（11/4）：不认识的字段报错，说清哪个实验、哪个字段、允许哪些
+class _Mod:
+    def __init__(self, exps, final=()):
+        self.EXPERIMENTS, self.FINAL = exps, list(final)
+
+
+def _field_err(mod):
+    try:
+        E.check_fields("x/experiments.py", mod)
+    except S.SpecError as err:
+        return str(err)
+    return None
+
+
+_e = R._x("toy", "T99", "玩具", "base", "D999_x", ("G", "en", "zh"), 0)
+ok("字段核对：demo 表的实验都认识", _field_err(_Mod(R.EXPERIMENTS, R.FINAL)) is None and _field_err(_Mod([_e])) is None)
+_bad = dict(_e, nicee=1)
+_m = _field_err(_Mod([_bad]))
+ok("字段核对：实验里拼错的字段 → 报错，写明文件、实验、字段、允许的", bool(_m) and "x/experiments.py" in _m and "toy" in _m
+   and "nicee" in _m and "group_after" in _m)
+_inf = dict(R.INFER, queue=dict(R.INFER["queue"], dsik=75))
+_m = _field_err(_Mod([dict(_e, after=[_inf])]))
+ok("字段核对：步骤 queue 里拼错的 dsik → 报错（不再静默变成做法参数、跳过大小检查）",
+   bool(_m) and "dsik" in _m and "infer" in _m and "queue" in _m and "disk" in _m)
+_m = _field_err(_Mod([_e], [dict(R.FINAL[0], rerun_if_newr=["x"])]))
+ok("字段核对：FINAL 步骤里拼错的字段 → 报错", bool(_m) and "rerun_if_newr" in _m)
+ok("字段核对：queue 里可以写 command 做法的字段（res、fetch、device…）",
+   _field_err(_Mod([dict(_e, after=[dict(R.INFER, queue=dict(R.INFER["queue"], fetch={}, device="gpu", vars={}))])])) is None)
+
 ok("_x：steps 展开成每份的步骤和一串串实验级步骤（paired 接 oof、p2cmp 接 p2）",
    [s["name"] for s in x["after"]] == ["infer", "eval"]
    and [[s["name"] for s in c] for c in x["group_after"]] == [["oof", "paired"], ["ens"], ["p1"], ["p2", "p2cmp"]])

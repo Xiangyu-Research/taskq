@@ -1,6 +1,6 @@
 """训练的做法（2026-10-18）：一种训练怎么跑、要什么环境和数据、结果在哪、怎么算训完、怎么拉回和归档。
 调度（taskq.py、dicc_worker.sh、run_task.sh、refill.py、advance.py、make_registry.py）只按这里的字段办事，不认识具体模型。
-解析和使用见 scripts/taskq/queue/spec.py；实验表（research/*/experiments.py）和队列里的任务给出参数。
+解析和使用见 scripts/taskq/queue/spec.py；实验表（OUTPUTS["experiments"]，字段见 experiments.py 开头）和队列里的任务给出参数。
 
 每种做法：
   params     参数和默认值（REQUIRED = 必须给）。默认值里可以用 {别的参数}（如 model）。
@@ -14,7 +14,7 @@
     out        结果文件夹（相对数据目录）。拉回、归档、登记表都看这里
     done       训完的标志：out 下的文件，每一项都要有；一项里用 | 分开的有一个就行
     log        out 下的训练日志（glob）：多久没更新用来判断有没有人在训
-    progress   进度的解析方法（spec.py 的 PROGRESS，模型专用的在 research/common/taskq_plugins/readers/：nnunet_log = nnU-Net 的训练日志；progress_json = 任务自己写的
+    progress   进度的解析方法（spec.py 的 PROGRESS，模型专用的在 TASKQ_PLUGINS 各文件夹的 readers/ 里；progress_json = 任务自己写的
                out/PROGRESS.json，{"done": 已做完的轮数, "total": 总轮数}；None = 只看训完没、日志多久没更新）
     resume     out 下的存档（glob 列表）：有一个就算有进度，失败时留在那台机器上接着做，不交还跳过（2026-10-31）；None = 没有
     res        资源：gpus（卡数）、cpus、mem（如 "32G"）、gpu_mem（GB）；None 的项不限（2026-10-31）
@@ -28,26 +28,28 @@
     checkpoint 登记表算校验和的文件（out 下；None = 不算）
     data       训练机上要有的输入（相对数据目录的文件或文件夹；送到执行机前先传好）。任务里写 inputs=… 和 data=… 一样（2026-10-31）。
                开训前 run_task.sh 查一遍（scripts/taskq/queue/inputs.py），不全就不开训（退出码 4，worker 记"缺输入"，11/1）
-    fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 nnU-Net 的 plans.json）、
+    fetch      拉回 box：exclude（不拉的文件）、extra（out 的上一级里还要拉的文件，如 *.json）、
                also（另外要拉的文件夹，相对数据目录，先于 out 拉）
     archive    拉回 box 后备份到备份机、核对（scripts/taskq/queue/archive_task.sh）：True；None = 不归档
     relay      交给执行机（envs/machines.py 的 RELAY）时按哪个插件列输入、核对结果：path = 输入就是 inputs / data 里的文件、文件夹、
-               glob（任何任务都能用，scripts/taskq/sites/names.py）；nnunet（训练）、nnunet_infer（推理）= 按 nnU-Net 的参数列要的文件，
-               拉回后核对（research/common/taskq_plugins/relay_plugins.py）；None = 不交
+               glob（任何任务都能用，scripts/taskq/sites/names.py）；别的名字 = TASKQ_PLUGINS 里 relay_plugins.py 的插件
+               （按参数列要的文件，拉回后核对）；None = 不交
     machines   只在这几台机器上跑（envs/machines.py 的名字，如 ["dicc1"]）；None = 有环境的都行
     device     gpu = 要卡（DICC 的 GPU worker、lab 领）；cpu = 纯 CPU（只由 DICC 的 CPU worker 领，scripts/taskq/queue/cpu_worker.sbatch，
                2026-10-24）
     after      先要做完的任务（队列里的 key 列表）：没做完时这个任务是 waiting，谁都不领；前一个失败、不在队列里时是 blocked
                （2026-10-25，DICC 训的折提前排的推理、评测）
 
-领域专用的做法（如 nnunet）在 TASKQ_PLUGINS 各文件夹的 recipes.py 里（scripts/taskq/queue/cfg.py），加载时合进来。
+领域专用的做法在 TASKQ_PLUGINS 各文件夹的 recipes.py 里（导出 RECIPES、HOOKS，见 cfg.py 开头），加载时合进来。
+
+钩子（HOOKS，插件给；11/4）：
+  model_of   结果文件夹（放在哪里都行）→ 训它的任务的 model 参数（experiments.py 的 env-of、name-of 按它查实验表）
 """
 
-
-REQUIRED = object()
+from taskq_api import REQUIRED  # noqa: E402
 
 RECIPES = {
-    # 什么都由任务自己给（非 nnU-Net 的训练可以直接用，或者照着写一种新的做法）
+    # 什么都由任务自己给（可以直接用，或者照着写一种新的做法）
     "command": dict(
         params=dict(key=REQUIRED, cmd=REQUIRED, env=REQUIRED, out=REQUIRED, done=REQUIRED),
         open=True,
@@ -59,4 +61,6 @@ RECIPES = {
 
 import cfg  # noqa: E402
 
-cfg.extend(globals(), "recipes", ("RECIPES",))
+HOOKS = {}
+
+cfg.extend(globals(), "recipes")
