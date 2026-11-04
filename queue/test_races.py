@@ -25,7 +25,9 @@ import test_relay as TR  # noqa: E402  （fixture.use()、临时 TASKQ_STATE、�
 import common as C  # noqa: E402
 import machines as M  # noqa: E402
 import relay  # noqa: E402
-import relay_gc  # noqa: E402
+import relay_remote as RM  # noqa: E402
+import relay_store as ST  # noqa: E402
+import relay_transfer as RT  # noqa: E402
 import taskq  # noqa: E402
 
 assert taskq.TQ == os.environ["TASKQ_DIR"], taskq.TQ
@@ -86,13 +88,13 @@ def _plan_with_box_error(mt, rt):
     S = TR.S0([TR.mtask(K, mt)])
     S["pueue"] = {M.hub(): {"error": "pueue 没有响应"}}  # health.gather：qs --json 失败或 box 的 pueue 读不到时就是这样
     RS = dict(taskq=dict(tasks=[TR.rtask(K, rt)], paused=False), tasks={}, free=500e9)
-    old_lookup, old_down = relay.lookup, C.backup_down
-    relay.lookup = lambda k: dict(archive=True)
+    old_lookup, old_down = RT.lookup, C.backup_down
+    RT.lookup = lambda k: dict(archive=True)
     C.backup_down = lambda ok=None: None
     try:
         return K, relay.plan(S, TR.NAME, RS, TR.keymap(K))
     finally:
-        relay.lookup, C.backup_down = old_lookup, old_down
+        RT.lookup, C.backup_down = old_lookup, old_down
 
 
 def test_relay_err_release():
@@ -132,7 +134,7 @@ def test_gc_pin():
     code = hook + "exec(compile(open(__import__('sys').argv.pop(1)).read(),'GC_PY','exec'))"
     gc_file = os.path.join(TMP, "gc_py.py")
     with open(gc_file, "w") as f:
-        f.write(relay_gc.GC_PY)
+        f.write(RM.GC_PY)
     repo = _cfg.REPO
     r = subprocess.run([sys.executable, "-c", code, gc_file, R], cwd=repo, capture_output=True, text=True,
                        input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["views/v"])))

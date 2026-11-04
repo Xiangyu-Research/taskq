@@ -133,7 +133,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 - **调度器**只分 Slurm、pueue 两种，读写都经 `scripts/taskq/sites/slurm.py`、`scripts/taskq/sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 box 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
 - **根目录**写成 `~/…`（如 dicc1、DICC2 的 `~/q`）时，命令里开头的 `~` 留给那边展开（`scripts/taskq/sites/remote.py` 的 `q()`）；代码包里 `worker.sbatch` 的日志用相对路径（Slurm 不展开 `~`）。
-- **DICC 的两个执行机根目录在 home**（11/2 定）：`/scr` 11/2 卡住过（读不了队列、hash 文件报 "Communication error on send"），home 每个账号 100 GB。`cap`（`envs/machines.py`）是根目录最多占多少 GB，剩余按 cap 减去根目录已占的算（`relay.py` 的 `STATUS_PY`，硬链接只算一次、软链接不算），清理（`relay_gc.py`）、领任务（`fill`）都用它。数据都从 box 传，不收编 `/scr` 上的老数据（跨盘不能硬链接）。实验表 `queue` 的 `disk`（这一步大约要占多少 GB）加上 `budget` 的第二项超过 cap 的步骤，`advance.py` 不放这台，用 `PLACE` 的下一项：推理（输入约 60 GB、输出约 14 GB）放不下，DICC 训的折拉回 box 后由 lab1 推理；评测（约 15 GB）照旧在 dicc1。
+- **DICC 的两个执行机根目录在 home**（11/2 定）：`/scr` 11/2 卡住过（读不了队列、hash 文件报 "Communication error on send"），home 每个账号 100 GB。`cap`（`envs/machines.py`）是根目录最多占多少 GB，剩余按 cap 减去根目录已占的算（`relay_remote.py` 的 `STATUS_PY`，硬链接只算一次、软链接不算），清理（`relay_store.py` 的 `gc`）、领任务（`fill`）都用它。数据都从 box 传，不收编 `/scr` 上的老数据（跨盘不能硬链接）。实验表 `queue` 的 `disk`（这一步大约要占多少 GB）加上 `budget` 的第二项超过 cap 的步骤，`advance.py` 不放这台，用 `PLACE` 的下一项：推理（输入约 60 GB、输出约 14 GB）放不下，DICC 训的折拉回 box 后由 lab1 推理；评测（约 15 GB）照旧在 dicc1。
 - **AUTO 关着 = 这台整个停下**（11/2）：不领新的、不传、不重传、不让那边接着训、不交作业，只续已有的领取、把训完的拉回、交还；`advance.py` 也不往它排步骤。
 - **传数据排不上 CPU 作业**（收编在 CPU 节点上做的执行机）：`relay.py stage` 退出码 75，box 上显示 Failed，下次定时检查再传、不报；领了 3 小时以上还排不上才报 `site:<名>:stage`。
 - **Slurm worker 开始时没有任务**：和等着的一样空等到 `IDLE_MAX`（40 分钟），这期间有任务进来就领；一直没有才结束（11/2；之前马上退出，排了几天的作业白白退出）。纯 CPU 的 worker 照旧领不到就结束。
@@ -153,7 +153,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据目录里是指向 blob 的软链接，路径和 box 一样，文件内容不改；要哪些文件由做法的 `relay` 插件列（`scripts/taskq/sites/names.py`、`relay_plugins.py`；nnU-Net 的在 `research/common/taskq_plugins/relay_plugins.py`）。拉回时插件核对（训练：`validation/` 的病例和这个任务的划分一致；推理：各测试集病例齐、checkpoint 的 sha256 和 box 上的一样），对不上不收、报出来。
 - **传输**：都经隧道（`scripts/taskq/sync/tunnel.py`），在哪里收发和 DICC 一样（10/30 定）：往那边传 1 GB 以上的先交 CPU 作业，10 分钟排不上就在登录节点下载；拉回在登录节点上传。地址用每次新开的临时 trycloudflare 地址（box 上的 cloudflared 容器，`envs/machines.py` hub 的 `quick`、`RELAY` 的 `quick_tunnel`），不用 box 的固定地址（10/30 定）。
 - **个数**：`envs/policy.py` 的 `READY[名字]`（那边每种 worker 备好、等领的任务数）、`SLURM["dicc2"]`（`gpu`：QOS 和时限）。
-- **盘**：有 `budget` 的（lab1、lab0，同一个盘）剩不到软线时由 `relay_gc.py` 清理：先删总队列不再要的视图，再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。
+- **盘**：有 `budget` 的（lab1、lab0，同一个盘）剩不到软线时由 `relay_store.py` 的 `gc` 清理：先删总队列不再要的视图，再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。
 - **状态**：box `~/.cache/phd/relay/state.json`（领着的任务）、`status.json`（那边各任务进度，登记表显示成 DICC2）、日志 `~/relay.log`。
 - **手动**：`python3 scripts/taskq/queue/relay.py stage dicc2 <key> --nice N --no-add`（只传数据，不领）；`relay.py status dicc2`；`relay.py bundle dicc2`。
 
@@ -174,7 +174,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（nnU-Net 从存档接着训，推理跳过已做好的病例），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh`，从表里的 `code` 跑；hub 的 `scripts/monitor/auto_refresh.sh`，它也负责更新 box 的代码副本、快进 lab 的克隆；每天 04:20 的 `auto_refresh.sh backup`） |
 | `gpu_pad.py`、`gpu_pad_start.sh` | 显存填充（见上面） |
-| `relay.py`、`relay_bundle.py`、`relay_plugins.py`、`relay_gc.py`、`shift.py` | 执行机（见上面）：接力、代码包、中继插件的加载、清理根目录、按时段开停 |
+| `relay.py`、`relay_remote.py`、`relay_store.py`、`relay_transfer.py`、`relay_bundle.py`、`relay_plugins.py`、`shift.py` | 执行机（见上面）：每次检查的计划和命令行（`relay.py`）、经 ssh 在那边跑的命令和发过去的小程序（`relay_remote.py`）、box 上的记账和清理根目录（`relay_store.py`）、传数据和拉回（`relay_transfer.py`）、代码包、中继插件的加载、按时段开停 |
 | `cfg.py` | 找配置文件夹（`TASKQ_CONFIG`）、插件文件夹（`TASKQ_PLUGINS`）、状态文件夹（`TASKQ_STATE`），把插件合进核心的表；`OUTPUTS` 的读法（`get <键>` 给 bash） |
 | `scripts/taskq/sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`relay.py` 用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口（停止、失败在 `test_dicc_worker_stop.sh`，不在 Slurm 里的和代码包在 `test_dicc_worker_code.sh`，共用 `testdata/worker_harness.sh`；`WORKER_TEST_ONLY` 只跑几个情况）。核心的测试不读 `envs/`、`research/`，用 `testdata/` 的固定配置（11/2）；关于真的实验表、nnU-Net 插件、机器表和环境描述的检查在 `research/common/taskq_plugins/tests/` |
