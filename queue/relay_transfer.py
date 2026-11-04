@@ -1,6 +1,7 @@
 """relay：box 上的数据传到执行机（stage）、做完的结果拉回 box（fetch）、删那边的任务和结果（drop_remote）。
 那边的路径和 box 的数据目录一样；数据按 sha256 存成 blob（relay_remote.py 的说明）。"""
 import base64
+import json
 import os
 import shlex
 import shutil
@@ -117,7 +118,7 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
     if add and srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
         dirs = [f"{x['path']}/data/{real['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
         try:
-            r = RM.rpy(name, RM.ADOPT_OUT_PY, dict(srcs=dirs, out=real["out"], resume=real["resume"], done=real.get("done") or []), job=job)
+            r = RM.rpy(name, RM.ADOPT_OUT_PY, dict(srcs=dirs, out=real["out"], resume=real["resume"], done=S.outputs(real)["done"]), job=job)
         except RM.NoSlot as e:
             say(f"{e}；这次不加进队列，下次检查再来")
             return None
@@ -130,7 +131,7 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
             inputs=inputs, outs=outs, cleanup=cleanup)
     ST.update_state(rec)
     if add:
-        r = RM.rtq(name, f"add --nice {int(nice)} --recipe " + " ".join(shlex.quote(x) for x in S.kv_args(real["recipe"], ex["params"])))
+        r = RM.rtq(name, f"add --nice {int(nice)} --spec-stdin", input=json.dumps([S.sendable(S.resolve(real["recipe"], ex["params"]))]))
         if r is None or r[0]:
             raise RuntimeError(f"加进 {RM.conf(name)['label']} 的队列出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
         say(r[1])
@@ -142,17 +143,31 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
     return key
 
 
+def resend(name, say=print):
+    """把传给这台的任务按现在的做法重新解析，换掉那边队列里的说明（只换那边已有的，不加新的）。"""
+    keys = ST.keys_of(ST.load_state(), name)
+    specs = [S.sendable(S.resolve(k["recipe"], k["params"])) for k in keys.values()]
+    if not specs:
+        say("没有传过去的任务")
+        return
+    r = RM.rtq(name, "add --nice 0 --spec-stdin --update-only", input=json.dumps(specs))
+    if r is None or r[0]:
+        raise RuntimeError(f"{RM.conf(name)['label']} 换说明出错：{(r or [0, 'ssh 不通'])[1][-300:]}")
+    say(r[1] or "没有要换的")
+
+
 # ---------------- 拉回（box 的 wait 组里跑） ----------------
 def place(src, D, written, real):
     """核对过的结果（src 下，和数据目录一样的相对路径）挪进数据目录：普通文件 → out 上一级里 fetch.extra 的文件（已有的不动）→
     MANIFEST.json → 做完的标志（按 done 倒着放，第一项最后放）。"""
     import fnmatch
-    rout = real["out"].strip("/")
+    o = S.outputs(real)
+    rout = o["outs"][0]
     par = os.path.dirname(rout)
-    extra = (real.get("fetch") or {}).get("extra") or []
+    extra = o["extra"]
     rank = {}
-    for n, item in enumerate(real["done"]):
-        for alt in item.split("|"):
+    for n, item in enumerate(o["done"]):
+        for alt in item:
             rank[f"{rout}/{alt}"] = n
     done = sorted((w for w in written if w in rank), key=lambda w: -rank[w])
     parent = [w for w in written if w not in rank and os.path.dirname(w) == par
@@ -180,7 +195,9 @@ def fetch(name, key, say=print):
     k = ST.keys_of(ST.load_state(), name).get(key)
     if not k:
         raise RN.RelayError(f"{key} 没有传给 {RM.conf(name)['label']} 的记录")
-    res = RM.rpy(name, RM.LIST_PY, dict(spec=real, outs=k.get("outs") or N.outs(real), key=key))
+    o = S.outputs(real)
+    res = RM.rpy(name, RM.LIST_PY, dict(out=real["out"], done=o["done"], exclude=o["exclude"], extra=o["extra"],
+                                        outs=k.get("outs") or o["outs"], key=key))
     if not res["done"]:
         raise RN.RelayError(f"{RM.conf(name)['label']} 上 {key} 还没做完")
     inbox = os.path.join(D, ".relay_in", S.safe(key))

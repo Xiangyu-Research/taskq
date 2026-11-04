@@ -184,7 +184,7 @@ def test_adopt_out():
     dirs = [ssrc, src]
     run = lambda: S.json_in(subprocess.run(
         [sys.executable, "-c", RM.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/frag_3", resume=["latest.ckpt", "final.ckpt"],
-                                                                         done=["check/summary.json", "final.ckpt|ARCHIVED"])),
+                                                                         done=[["check/summary.json"], ["final.ckpt", "ARCHIVED"]])),
         capture_output=True, text=True, cwd=_cfg.REPO, check=True).stdout)
     r = run()
     assert r["n"] == 3 and r["src"] == src, r
@@ -226,7 +226,7 @@ def test_plan():
     assert "rnice" not in [a["op"] for a in acts], acts
     calls = []
     old_rtq = RM.rtq
-    RM.rtq = lambda name, args, timeout=180: calls.append(args) or (0, "")
+    RM.rtq = lambda name, args, timeout=180, input=None: calls.append(args) or (0, "")
     try:
         msgs = relay.execute(NAME, [dict(op="rnice", key=K, rkey=A, nice=-101)], S0([mtask(K)]))
     finally:
@@ -633,6 +633,20 @@ def test_e2e():
     assert k["views"] == [f"prepared/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
     ok(f"传数据：{blobs} 个文件按内容存、软链接放在和 box 一样的路径，key 和参数原样，加进那边的队列")
 
+    rq = os.path.join(RROOT, "queue", "tasks.jsonl")
+    recs = [json.loads(x) for x in open(rq) if x.strip()]
+    want = S.sendable(S.resolve(sp["recipe"], sp["params"]))
+    assert len(recs) == 1 and recs[0]["spec"] == want and recs[0]["recipe"] == sp["recipe"] and recs[0]["params"] == sp["params"], recs
+    assert not {"machines", "after", "names", "exp"} & set(recs[0]["spec"]), recs[0]["spec"]
+    ok("那边队列的记录带 box 解析好的说明（去掉 machines/after/names/exp），做法和参数也留着（旧包的 worker 照旧能领）")
+
+    with open(rq, "w") as f:
+        f.write(json.dumps({k: v for k, v in recs[0].items() if k != "spec"}, ensure_ascii=False) + "\n")
+    RT.resend(NAME, say=lambda m: None)
+    recs = [json.loads(x) for x in open(rq) if x.strip()]
+    assert len(recs) == 1 and recs[0]["spec"] == want, recs
+    ok("resend：那边没有说明的旧记录补上说明，不加新任务")
+
     rkey2 = RT.stage(NAME, sp["key"], nice=5, say=lambda m: None)
     assert rkey2 == sp["key"] and sum(len(fs) for _, _, fs in os.walk(os.path.join(RROOT, "blobs"))) == blobs
     ok("再传一次：不重传、不重复加")
@@ -1007,11 +1021,17 @@ def test_list_unreadable():
     open(os.path.join(out, "part", "a"), "w").close()
     spec = dict(key="k", out="out/k", done=["check/DONE"])
     repo = _cfg.REPO
-    run = lambda outs: subprocess.run([sys.executable, "-c", RM.LIST_PY, root], input=json.dumps(dict(spec=spec, outs=outs, key="k")),
-                                      cwd=repo, capture_output=True, text=True)
+    def run(outs, s=spec):
+        o = S.outputs(s)
+        return subprocess.run([sys.executable, "-c", RM.LIST_PY, root], cwd=repo, capture_output=True, text=True,
+                              input=json.dumps(dict(out=s["out"], done=o["done"], exclude=o["exclude"], extra=o["extra"], outs=outs, key="k")))
     r = run(["out/k", "out/none"])
     res = S.json_in(r.stdout)
     assert r.returncode == 0 and res["done"] and sorted(i[0] for i in res["items"]) == ["out/k/check/DONE", "out/k/part/a"], (r, res)
+    for done, want in (("check/DONE", True), (["x|check/DONE"], True), (["check/DONE", "x"], False), ([], True)):
+        res = S.json_in(run(["out/k"], dict(spec, done=done)).stdout)
+        assert res["done"] is want, (done, res)
+    ok("拉回前列结果：做完的判断和 spec.is_done 一样（字符串、a|b、缺一项、空 done）")
     os.chmod(os.path.join(out, "part"), 0)
     try:
         r = run(["out/k"])

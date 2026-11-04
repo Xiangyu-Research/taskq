@@ -59,9 +59,9 @@ def prefix(name):
     return f"cd {r}/code/current && TASKQ_DIR={r}/queue TASKQ_DATA={r}/data"
 
 
-def rtq(name, args, timeout=180):
-    """那边的 taskq.py <args> → (退出码, 输出)；连不上 → None。"""
-    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} scripts/taskq/queue/taskq.py {args}", timeout=timeout)
+def rtq(name, args, timeout=180, input=None):
+    """那边的 taskq.py <args>（input：标准输入）→ (退出码, 输出)；连不上 → None。"""
+    rc, out, err = rsh(name, f"{prefix(name)} {py(name)} scripts/taskq/queue/taskq.py {args}", input=input, timeout=timeout)
     return None if rc in (124, 255) else (rc, (out + err).strip())
 
 
@@ -226,8 +226,7 @@ spec.json_out(len(want)-len(incs))
 LIST_PY = HEAD + """import fnmatch,glob
 D=os.path.join(R,'data')
 B=os.path.realpath(os.path.join(R,'blobs'))+'/'
-T=A['spec']
-ex=(T.get('fetch') or {}).get('exclude') or []
+ex=A['exclude']
 items=[]
 def add(p):
     if os.path.isfile(p) and not os.path.realpath(p).startswith(B):
@@ -242,12 +241,19 @@ for o in A['outs']:
         for f in fs:
             if not any(fnmatch.fnmatch(f,x) for x in ex):
                 add(os.path.join(dp,f))
-for x in (T.get('fetch') or {}).get('extra') or []:
+for x in A['extra']:
     for p in glob.glob(os.path.join(os.path.dirname(os.path.join(D,A['outs'][0])),x)):
         add(p)
 for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(spec.safe(A['key']))+'__*')):
     add(p)
-spec.json_out(dict(done=spec.is_done(T,D),items=items))
+def have(p):
+    try:
+        os.stat(p)
+        return True
+    except (FileNotFoundError,NotADirectoryError):
+        return False
+os.stat(D)
+spec.json_out(dict(done=all(any(have(os.path.join(D,A['out'],a)) for a in it) for it in A['done']),items=items))
 """
 
 DROP_PY = HEAD + """import glob,shutil
@@ -286,7 +292,7 @@ def mt(d):
     ts=[os.path.getmtime(p) for g in A['resume'] for p in glob.glob(os.path.join(glob.escape(d),g)) if os.path.isfile(p)]
     return max(ts) if ts else None
 best,bt=None,mt(new)
-if A['done'] and all(any(os.path.exists(os.path.join(new,x)) for x in it.split('|')) for it in A['done']):
+if A['done'] and all(any(os.path.exists(os.path.join(new,x)) for x in it) for it in A['done']):
     bt=float('inf')
 for d in A['srcs']:
     d=os.path.expanduser(d)

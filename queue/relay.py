@@ -33,6 +33,7 @@
     python3 scripts/taskq/queue/relay.py fetch <名字> <key>      拉回做完的任务、核对，放进 box 的数据目录
     python3 scripts/taskq/queue/relay.py bundle <名字> [--commit C]   打包、推过去、切换 current
     python3 scripts/taskq/queue/relay.py status <名字>           那边的队列
+    python3 scripts/taskq/queue/relay.py resend <名字>           传过去的任务按现在的做法重新解析，换掉那边队列里的说明（11/4）
 """
 import argparse
 import hashlib
@@ -697,6 +698,8 @@ def main(argv):
     p.add_argument("--commit", default="origin/main")
     p = sub.add_parser("status")
     p.add_argument("name")
+    p = sub.add_parser("resend")
+    p.add_argument("name")
     a = ap.parse_args(argv)
     if a.cmd == "stage":
         if a.nice is None and not a.no_add:
@@ -708,6 +711,8 @@ def main(argv):
     elif a.cmd == "bundle":
         rs = remote_status(a.name)
         print(bundle(a.name, a.commit, (rs or {}).get("bundle")) or "没变")
+    elif a.cmd == "resend":
+        RT.resend(a.name)
     elif a.cmd == "status":
         rs = remote_status(a.name)
         if rs is None:
