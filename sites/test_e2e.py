@@ -58,7 +58,7 @@ PORT = s_.getsockname()[1]
 s_.close()
 os.environ.update(
     RELAY_DIR=os.path.join(T, "relay"), TASKQ_DIR=os.path.join(T, "boxq"), TASKQ_DATA=BD,
-    RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="1",
+    RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="0.1",
     TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"),
     RELAY_LOG=os.path.join(T, "relay.log"), PATH=BIN + ":" + os.environ["PATH"],
     # worker（dicc_worker.sh）、run_task.sh 的测试用开关：等得短一些
@@ -97,6 +97,8 @@ DAEMON = None
 
 
 def step(msg, cond, why=""):
+    if not cond and callable(why):  # 贵的说明只在失败时算
+        why = why()
     print(("通过：" if cond else "失败：") + msg + ("" if cond else f"（{why}）"), flush=True)
     if not cond:
         FAILS.append(msg)
@@ -340,7 +342,7 @@ def step_stage():
     step("有了 .ok：5 个都领给 lab1、传过去、加进那边的队列",
          all(t["state"] == "claimed" and t["worker"] == NAME for t in bt.values())
          and sorted(t["state"] for t in rs["taskq"]["tasks"]) == ["free"] * 5,
-         ([(t["key"], t["state"]) for t in rs["taskq"]["tasks"]], relay.run_one(snapshot(), NAME, True)[0]))
+         lambda: ([(t["key"], t["state"]) for t in rs["taskq"]["tasks"]], relay.run_one(snapshot(), NAME, True)[0]))
     blobs = [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs]
     vf = view_files()
     D = os.path.join(RROOT, "data")
@@ -387,7 +389,7 @@ def progress_of(key):
 
 
 def step_stop():
-    wait(lambda: progress_of(SLOW) == 2, 120, "t1 做完第 2 轮")
+    wait(lambda: progress_of(SLOW) == 2, 120, "t1 做完第 2 轮", every=0.2)
     central(f"stop --why 测试 {SLOW}")
     alias = SLOW
 
@@ -522,13 +524,13 @@ def step_shift():
     check(NAME0)
     jobs = [t for t in pueue_tasks().values() if t["group"] == "gpu0"]
     step("下一次检查：lab0 开了 worker", len(jobs) == 1 and jobs[0]["label"] == "worker:wtest0", jobs)
-    wait(lambda: os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), 120, "t6 在 lab0 上做完第 2 轮")
+    wait(lambda: os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), 120, "t6 在 lab0 上做完第 2 轮", every=0.2)
     check(NAME0)  # 读一次状态（status.json：在训）
     msgs = shift.run(now=now + dt.timedelta(hours=3))
     t6 = box_tasks()[K6]
     step("时段结束：停 lab0 的 worker，有进度的 t6 改分给 lab1", t6["worker"] == NAME and t6["state"] == "claimed", (t6, msgs))
     step("时段结束后 lab0 不再领任务", not shift.allowed(NAME0))
-    wait(lambda: all(t["status"] != "Running" for t in pueue_tasks().values() if t["group"] == "gpu0"), 60, "lab0 的 worker 停下")
+    wait(lambda: all(t["status"] != "Running" for t in pueue_tasks().values() if t["group"] == "gpu0"), 60, "lab0 的 worker 停下", every=0.2)
     check(NAME0)
     a0 = keys0().get(K6) or {}
     remote_q0 = relay.remote_status(NAME0)["taskq"]["tasks"]

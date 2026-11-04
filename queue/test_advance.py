@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -882,17 +883,20 @@ with tempfile.TemporaryDirectory() as R:
     os.makedirs(f"{R}/raw")
     old_bt = {k: os.environ.get(k) for k in ("TASKQ_DATA",)}
     os.environ.update(TASKQ_DATA=R)
-    seen, bad = set(), []
+    seen, bad, todo = set(), [], []
     for t in A.candidates(R, sys.executable, [])[0]:
         for st in (t["e"] or {}).get("after", []):
             cmd = A.S.fill(st["cmd"], t["names"], keep=())
             if "--stage" not in cmd or (t["exp"], st["name"]) in seen:
                 continue
             seen.add((t["exp"], st["name"]))
-            got = REAL_STEP_NEEDS(cmd)
-            want = "/final.ckpt" if "--stage infer" in cmd else "/dataset.json"
-            if not got or not any(x.endswith(want) for x in got):
-                bad.append(f"{t['lab']} {st['name']}：{A.no_needs(cmd)}")
+            todo.append((t, st, cmd))
+    with ThreadPoolExecutor(8) as ex:
+        res = list(ex.map(lambda x: REAL_STEP_NEEDS(x[2]), todo))
+    for (t, st, cmd), got in zip(todo, res):
+        want = "/final.ckpt" if "--stage infer" in cmd else "/dataset.json"
+        if not got or not any(x.endswith(want) for x in got):
+            bad.append(f"{t['lab']} {st['name']}：{A.no_needs(cmd)}")
     for k, v in old_bt.items():
         if v is None:
             os.environ.pop(k)
