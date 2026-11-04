@@ -13,7 +13,10 @@
 # 不等排在前面的、不看 GPU；没有能领的就结束（由 box 上的 relay.py 在有这类任务时才交）。
 # 出问题时不让排队的作业空跑掉：
 #   - 任务卡住（10/23 起）：开始 30 分钟以后，任务的日志和结果文件夹都 30 分钟没有变化，就停掉它、交还（不算失败），
-#     马上领下一个；本作业不再领它。停不下来的（卡在读写上）3 分钟后不再等它。读不了日志或结果文件夹时不判断；
+#     马上领下一个；本作业不再领它。读不了日志或结果文件夹时不判断。一周内第 2 次卡住起记一次失败（11/4）。
+#     停不下来的（卡在读写上，run_task.sh 退出了训练还在）3 分钟后空出位置，接着给它心跳、真停下了才交还（11/4）；
+#   - 心跳时领取已经不是自己的（过期后被别人接管、已经没了）：停掉这个训练，不交还（11/4）；
+#   - 读不了盘、判断不了训完没有（run_task.sh 退出码 5）：交还，不算失败，本作业 10 分钟后再领（11/4）；
 #   - 本作业有 2 个任务开始 10 分钟内就失败（多半是节点或环境的问题），就不再领新的；跑了一段时间才失败的
 #     只记在任务上（10/23 起），作业照常领下一个。本作业不重领自己失败过的；
 #   - 整个队列 3 小时内失败 3 次，taskq.py 暂停领任务：作业先空着等（健康检查提醒）；
@@ -24,8 +27,10 @@
 # 不管什么原因，手上没有在训的连续 40 分钟就结束作业、把卡还回去：DICC gpu-a100 分区 GPU 使用率连续 1 小时低于 40%
 # 会被自动取消（10/17 的新规定）。
 # 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当 worker 名（envs/machines.py 的 worker），同时训几个看本机的 slots；
-# 没有时限、不查 squeue、没有显存填充；没有在训的、领不到的、队列出错、本 worker 失败太多次都不退出，每 60 秒再看；
-# 代码变了（仓库的提交号，或代码包的 current 换了）就不再领新的，手上的做完后退出（退出码 0），由 box 用新代码重开（11/1）。
+# 没有时限、不查 squeue、没有显存填充；领不到的、队列出错、本 worker 失败太多次都不马上退出，每 60 秒再看；
+# 手上没有在训的连续 30 分钟就退出（退出码 0），有备好的任务时由 box 下次检查再开（10/31）；还有停不下来的训练时不退出。
+# 代码变了（仓库的提交号，或代码包的 current 换了）就不再领新的，手上的做完后换新代码包接着跑（同一个进程，停不下来的
+# 训练接着跟，11/1、11/4）；不是代码包的，退出由 box 用新代码重开（还有停不下来的训练时先等它）。
 # GPU 记录只看 CUDA_VISIBLE_DEVICES 那张卡（lab 另一张卡别人在用）。
 # TASKQ_* 环境变量只给测试用（scripts/taskq/queue/test_dicc_worker.sh）。
 set -uo pipefail
@@ -67,6 +72,9 @@ MAX_OWN_FAIL=2
 EARLY_FAIL=${TASKQ_EARLY_FAIL:-600}     # 开始后这么久内就失败的才算本作业（节点、环境）的问题
 FAIL_WINDOW=${TASKQ_FAIL_WINDOW:-3600}  # 只数这么久以内的（10/24：隔很久的零星失败不让作业提前结束）
 STALL_MAX=${TASKQ_STALL_MAX:-1800}      # 任务的日志和结果文件夹都这么久没变化，算卡住
+STALL_FAILS=2                           # 一周内第几次卡住起记失败
+GIVEUP=${TASKQ_GIVEUP:-180}             # 停了这么久还没停下：空出位置（三分之一时 SIGKILL）
+BEAT=${TASKQ_BEAT:-300}                 # 心跳间隔
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
 unset nnUNet_n_proc_DA                  # nnunet_paths.sh 在 Slurm 里按整个作业设的，不管一张卡训几个；改由训练命令按 TASK_CPUS 算
 LOGDIR=$DATA/logs/workers
@@ -78,6 +86,12 @@ if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f
 else
     COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名是内容哈希（16 位）
 fi
+new_start() {  # 代码包换了：新包里的 worker_start.sh
+    local new
+    [[ -L $(dirname "$REPO")/current ]] || return 0
+    new=$(readlink -f "$(dirname "$REPO")/current" 2> /dev/null)${CORE#"$REPO"}/queue/worker_start.sh
+    [[ -f $new ]] && echo "$new"
+}
 head_now() {
     if [[ -n ${TASKQ_HEAD_CMD:-} ]]; then eval "$TASKQ_HEAD_CMD"
     elif [[ -L $(dirname "$REPO")/current ]]; then readlink -f "$(dirname "$REPO")/current"
@@ -132,15 +146,32 @@ declare -A SAFE=()        # pid → key 转成的文件名（spec.py 的 TASK_SA
 declare -A JTAG=()        # pid → 分段日志名里的作业名（run_task.sh 的 TASK_JOBTAG）
 declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
 declare -A TOK=()         # key → 这次领取的 token（taskq.py next 的第三行；交还、心跳时带上，11/1）
+declare -A WHY=()         # pid → 为什么在停：stall（卡住）、stop（taskq.py stop）、lost（领取已经不是自己的）
+declare -A SID=()         # pid → 训练所在的会话（run_task.sh 用 setsid 开的；run_task.sh 退出了，训练可能还在）
+declare -A ZOMB=()        # 停不下来、已经空出位置的：run_task.sh 的 pid → key（接着心跳，真停下了才交还，11/4）
+declare -A LATER=()       # key → 本作业到这个时刻前不再领（读不了盘，11/4）
 tq() {  # tq <release|beat|missing> <key> [参数…]：带上这个 key 的 token
     local c=$1 k=$2; shift 2
     $TQPY "$c" --worker "$W" ${TOK[$k]:+--token "${TOK[$k]}"} "$k" "$@"
 }
-dead() { ! kill -0 "$1" 2> /dev/null; }
+sid_of() { [[ -n ${SID[$1]:-} ]] || SID[$1]=$(ps -o pid=,sid= --ppid "$1" 2> /dev/null | awk '$1 == $2 {print $1; exit}'); }
+alive() { kill -0 "$1" 2> /dev/null || { [[ -n ${SID[$1]:-} ]] && pgrep -s "${SID[$1]}" > /dev/null; }; }
+dead() { ! alive "$1"; }
+stop_tree() { sid_of "$1"; kill_tree "$1" "${2:-TERM}"; [[ -n ${SID[$1]:-} ]] && pkill -"${2:-TERM}" -s "${SID[$1]}" 2> /dev/null; return 0; }
+forget() { unset "KEY[$1]" "STARTED[$1]" "OUTDIR[$1]" "STALLED[$1]" "SAFE[$1]" "JTAG[$1]" "WHY[$1]"; }
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
 OWN_FAILS=0
 FAIL_AT=()                # 本作业开始不久就失败的时刻
+while read -r p sid k tok why safe; do  # 换代码包前停不下来的训练（上一份代码 exec 过来时传的）
+    [[ $p =~ ^[0-9]+$ ]] || continue
+    ZOMB[$p]=$k WHY[$p]=$why SAFE[$p]=$safe STALLED[$p]=$(date +%s)
+    [[ $sid != - ]] && SID[$p]=$sid
+    [[ $tok != - ]] && TOK[$k]=$tok
+    EXCL+=("$k")
+    echo "$(date '+%F %T') 接着跟停不下来的 $k（pid $p）"
+done <<< "${TASKQ_ZOMBIES:-}"
+unset TASKQ_ZOMBIES
 pad_make_room() {
     [[ -f $PADBASE.mib ]] || return 0
     rm -f "$PADBASE.ready"
@@ -195,10 +226,25 @@ own_fails() {  # OWN_FAILS = FAIL_WINDOW 以内的次数
     FAIL_AT=(${keep[@]+"${keep[@]}"})
     OWN_FAILS=${#FAIL_AT[@]}
 }
+task_log() { echo "$DATA/logs/tasks/${SAFE[$1]}__${JTAG[$1]:-$W}_part1.log"; }
+stalls() {  # key 的文件名 → 一周内的分段日志里记了几次卡住
+    local n
+    n=$(find "$DATA/logs/tasks" -maxdepth 1 -name "$1__*" -newermt "@$(( $(date +%s) - 7 * 86400 ))" -exec grep -h -s '^当作卡住' {} + 2> /dev/null | wc -l)
+    echo "${n:-0}"
+}
+release_stalled() {  # key 卡住的次数 跑了多少秒：一周内第 STALL_FAILS 次起记失败（健康检查报），之前的只交还
+    if (( $2 >= STALL_FAILS )); then
+        echo "$(ts) $1 一周内第 $2 次卡住，记一次失败"
+        fail "$1" "卡住（一周内第 $2 次）" "$3"
+    else
+        tq release "$1"
+        EXCL+=("$1")
+    fi
+}
 quiet_since() {  # pid → 任务的日志和结果文件夹多少秒没有变化；读不了时输出空
     local p=$1 now log m
     now=$(date +%s)
-    log=$DATA/logs/tasks/${SAFE[$p]}__${JTAG[$p]:-$W}_part1.log
+    log=$(task_log "$p")
     m=$(timeout 20 stat -c %Y "$log" 2> /dev/null) || return 0
     (( now - m < STALL_MAX )) && { echo $(( now - m )); return 0; }
     [[ -n ${OUTDIR[$p]:-} && -d ${OUTDIR[$p]} ]] || { echo $(( now - m )); return 0; }
@@ -214,7 +260,7 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     pad_make_room
     local jt
     jt=$( (( INSLURM )) && echo "$W" || echo "$(hostname -s)-$(date +%Y%m%d%H%M)")
-    TASK_JOBTAG=$jt TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
+    TASK_KEY=$key TASK_JOBTAG=$jt TASK_PART=1 TASK_CPUS=$TASK_CPUS bash "$HERE/run_task.sh" "${targs[@]}" &
     local pid=$! sh TASK_OUT= TASK_SAFE=
     KEY[$pid]=$key
     JTAG[$pid]=$jt
@@ -227,21 +273,27 @@ start() {  # taskq.py next 的输出：第一行 key，第二行 run_task.sh 的
     echo "$(ts) 开训 $key（pid $pid：run_task.sh $args）"
 }
 kill_tree() { [[ -n $1 ]] || return 0; local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
-any_alive() { local p; for p in "${!KEY[@]}"; do dead "$p" || return 0; done; return 1; }
+any_alive() { local p; for p in "${!KEY[@]}" "${!ZOMB[@]}"; do dead "$p" || return 0; done; return 1; }
+let_go() {  # 作业结束时：停下了的交还（锁最多等 5 秒），还在的不交还
+    local p k
+    for p in "${!KEY[@]}" "${!ZOMB[@]}"; do
+        k=${KEY[$p]:-${ZOMB[$p]:-}}
+        if [[ ${WHY[$p]:-} == lost ]]; then continue
+        elif dead "$p"; then tq release "$k" --lock-wait 5 || echo "$(ts) $k 没交还成（拿不到队列的锁），领取过期后别人能领"
+        else echo "$(ts) $k 强制停之后还在，不交还（领取过期后才能被别人领）"; fi
+    done
+}
 on_term() {  # run_task.sh 自己 8 秒后强制停训练；15 秒还没退出的整棵树 SIGKILL。确认停下的才交还（11/1），30 秒内做完
     echo "$(ts) 收到停止信号（$( (( INSLURM )) && echo 多半是到时限 || echo pueue kill)），停训练、交还任务"
     local p
-    for p in "${!KEY[@]}"; do kill_tree "$p"; done
+    for p in "${!KEY[@]}" "${!ZOMB[@]}"; do stop_tree "$p"; done
     for _ in $(seq "$TERM_WAIT"); do any_alive || break; sleep 1; done
     if any_alive; then
         echo "$(ts) $TERM_WAIT 秒没停下，强制停"
-        for p in "${!KEY[@]}"; do dead "$p" || kill_tree "$p" KILL; done
+        for p in "${!KEY[@]}" "${!ZOMB[@]}"; do dead "$p" || stop_tree "$p" KILL; done
         for _ in 1 2 3; do any_alive || break; sleep 1; done
     fi
-    for p in "${!KEY[@]}"; do
-        if dead "$p"; then tq release "${KEY[$p]}"
-        else echo "$(ts) ${KEY[$p]} 强制停之后还在，不交还（领取过期后才能被别人领）"; fi
-    done
+    let_go
     kill_tree "$GPUMON"
     rm -f "$ERRF"
     rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"
@@ -263,21 +315,21 @@ check_stops() {
         [[ -n ${STALLED[$p]:-} ]] && continue  # 已经在按卡住停
         [[ -e $QDIR/stopped/${k//\//$SAFECH} ]] || continue
         echo "$(ts) $k 被停止（taskq.py stop），停训练、交还"
-        kill_tree "$p"
-        for (( i = 0; i < STOP_WAIT; i++ )); do kill -0 "$p" 2> /dev/null || break; sleep 1; done
-        if kill -0 "$p" 2> /dev/null; then
+        stop_tree "$p"
+        for (( i = 0; i < STOP_WAIT; i++ )); do alive "$p" || break; sleep 1; done
+        if alive "$p"; then
             echo "$(ts) $k $STOP_WAIT 秒没停下，强制停"
-            kill_tree "$p" KILL
+            stop_tree "$p" KILL
             sleep 1
         fi
         if dead "$p"; then
             wait "$p" 2> /dev/null
             tq release "$k"
-            unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "JTAG[$p]"
+            forget "$p"
             n=1
         else  # 交给卡住的那一路：停不下就不交还
-            echo "$(ts) $k 强制停之后还在，按卡住处理"
-            STALLED[$p]=${STALLED[$p]:-$(date +%s)}
+            echo "$(ts) $k 强制停之后还在，按停不下来处理"
+            STALLED[$p]=${STALLED[$p]:-$(date +%s)} WHY[$p]=stop
         fi
     done
     (( n ))
@@ -299,45 +351,64 @@ ERRF=$(mktemp)
 err_since=0   # 队列从什么时候开始连续出错
 idle_since=$T0  # 从什么时候开始手上没有在训的（0 = 有在训的）
 while true; do
-    # 收训完的（run_task.sh 的退出码：0 训完，3 命令正常结束但没训完，4 缺输入，其他 = 出错）
+    # 收训完的（run_task.sh 的退出码：0 训完，3 命令正常结束但没训完，4 缺输入，5 读不了盘，其他 = 出错）
     for p in "${!KEY[@]}"; do
-        if ! kill -0 "$p" 2> /dev/null; then
-            wait "$p"; rc=$?
-            key=${KEY[$p]}; unset "KEY[$p]"
-            ran=$(( $(date +%s) - ${STARTED[$p]:-0} ))
-            stalled=${STALLED[$p]:-}
-            unset "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "JTAG[$p]"
-            if [[ -n $stalled ]]; then
-                echo "$(ts) 卡住的 $key 已停下，交还（不算失败），本作业不再领它"
-                tq release "$key"
-                EXCL+=("$key")
-            elif (( rc == 0 )); then
+        kill -0 "$p" 2> /dev/null && continue
+        [[ -n ${STALLED[$p]:-} ]] && alive "$p" && continue  # run_task.sh 退出了，训练还在
+        wait "$p"; rc=$?
+        key=${KEY[$p]} why=${WHY[$p]:-} log=$(task_log "$p") safe=${SAFE[$p]}
+        ran=$(( $(date +%s) - ${STARTED[$p]:-0} ))
+        stalled=${STALLED[$p]:-}
+        forget "$p"
+        if [[ $why == lost ]]; then
+            echo "$(ts) $key 已停下（领取已经不是本作业的，不交还）"
+        elif [[ $why == stall ]]; then
+            echo "$(ts) 卡住的 $key 已停下，交还，本作业不再领它"
+            release_stalled "$key" "$(stalls "$safe")" "$ran"
+        elif [[ -n $stalled ]]; then
+            echo "$(ts) $key 已停下，交还"
+            tq release "$key"
+        elif (( rc == 0 )); then
                 echo "$(ts) 训完 $key"
                 tq release "$key"
             elif (( rc == 4 )); then
                 echo "$(ts) $key 缺输入，没开训，交还，记为缺输入（不算失败，补齐前不再领）"
                 tq missing "$key" --why "作业 $W 开训前查到" || tq release "$key"
                 EXCL+=("$key")
-            elif (( rc == 3 )); then
-                echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
-                fail "$key" "退出码 0 但没训完" "$ran"
-            else
-                echo "$(ts) $key 训练失败（run_task.sh 退出码 $rc），交还并记一次失败"
-                fail "$key" "退出码 $rc" "$ran"
-            fi
+        elif (( rc == 5 )); then
+            echo "$(ts) $key 读不了盘、判断不了训完没有，交还（不算失败），本作业 10 分钟后再领"
+            tq release "$key"
+            LATER[$key]=$(( $(date +%s) + 600 ))
+        elif (( rc == 3 )); then
+            echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
+            fail "$key" "退出码 0 但没训完" "$ran"
+        else
+            echo "$(ts) $key 训练失败（run_task.sh 退出码 $rc），交还并记一次失败"
+            fail "$key" "退出码 $rc$( (( rc == 2 )) && tail -n 1 "$log" 2> /dev/null | sed 's/^[-0-9: ]*/：/' | cut -c 1-300)" "$ran"
         fi
+    done
+    # 停不下来的：真停下了才交还
+    for p in "${!ZOMB[@]}"; do
+        alive "$p" && continue
+        wait "$p" 2> /dev/null
+        key=${ZOMB[$p]}
+        if [[ ${WHY[$p]:-} == lost ]]; then echo "$(ts) 停不下来的 $key 终于停下了（领取已经不是本作业的，不交还）"
+        elif [[ ${WHY[$p]:-} == stall ]]; then echo "$(ts) 停不下来的 $key 终于停下了，交还"; release_stalled "$key" "$(stalls "${SAFE[$p]}")" 0
+        else echo "$(ts) 停不下来的 $key 终于停下了，交还"; tq release "$key"; fi
+        unset "ZOMB[$p]" "SID[$p]"; forget "$p"
     done
     now=$(date +%s)
     # 卡住的任务：停掉、交还，空出位置领下一个
     for p in "${!KEY[@]}"; do
         if [[ -n ${STALLED[$p]:-} ]]; then
-            if (( now - STALLED[$p] >= 180 )); then
-                # 还活着就不交还（11/1）：不再心跳，领取过期后别人才能领；空出位置领下一个
-                echo "$(ts) ${KEY[$p]} 停了 3 分钟还没停下（多半卡在读写上），不再等它，不交还（领取过期后别人才能领）"
+            if (( now - STALLED[$p] >= GIVEUP )); then
+                # 还活着就不交还（11/1）：空出位置领下一个，接着心跳，真停下了才交还（11/4）
+                echo "$(ts) ${KEY[$p]} 停了 $GIVEUP 秒还没停下（多半卡在读写上），先领别的；接着心跳，停下了再交还"
                 EXCL+=("${KEY[$p]}")
-                unset "KEY[$p]" "STARTED[$p]" "OUTDIR[$p]" "STALLED[$p]" "SAFE[$p]" "JTAG[$p]" "TOK[${KEY[$p]}]"
-            elif (( now - STALLED[$p] >= 60 )); then
-                kill_tree "$p" KILL
+                ZOMB[$p]=${KEY[$p]}
+                unset "KEY[$p]"
+            elif (( now - STALLED[$p] >= GIVEUP / 3 )); then
+                stop_tree "$p" KILL
             fi
             continue
         fi
@@ -345,12 +416,24 @@ while true; do
         q=$(quiet_since "$p")
         [[ -n $q ]] && (( q >= STALL_MAX )) || continue
         echo "$(ts) ${KEY[$p]} 的日志和结果文件夹 $(( q / 60 )) 分钟没有变化，当作卡住：停掉、交还，领下一个"
-        STALLED[$p]=$now
-        kill_tree "$p"
+        echo "当作卡住 $(ts)：日志和结果文件夹 $(( q / 60 )) 分钟没有变化，作业 $W 停掉它" >> "$(task_log "$p")" 2> /dev/null
+        STALLED[$p]=$now WHY[$p]=stall
+        stop_tree "$p"
     done
     (( END )) || get_end
-    if (( now - last_beat >= 300 )); then
-        for p in "${!KEY[@]}"; do tq beat "${KEY[$p]}"; done
+    if (( now - last_beat >= BEAT )); then
+        for p in "${!KEY[@]}" "${!ZOMB[@]}"; do
+            [[ ${WHY[$p]:-} == lost ]] && continue
+            k=${KEY[$p]:-${ZOMB[$p]:-}}
+            tq beat "$k" --strict > /dev/null
+            (( $? == 13 )) || continue
+            echo "$(ts) $k 的领取已经不是本作业的（过期后被别人接管，或者已经没了），停掉这个训练，不交还"
+            WHY[$p]=lost
+            EXCL+=("$k")
+            [[ -n ${ZOMB[$p]:-} || -n ${STALLED[$p]:-} ]] && continue
+            STALLED[$p]=$now
+            stop_tree "$p"
+        done
         # 代码包：更新时间戳，清理旧包时不删还有 worker 在用的（只删 4 天没动过的，11/1）
         [[ -L $(dirname "$REPO")/current ]] && touch "$REPO" 2> /dev/null
         last_beat=$now
@@ -360,9 +443,11 @@ while true; do
     own_fails
     while (( $(left) > MIN_LEFT && OWN_FAILS < MAX_OWN_FAIL )) && ! code_changed && can_add; do
         tried=1
+        later=()
+        for k in "${!LATER[@]}"; do (( LATER[$k] > now )) && later+=("$k") || unset "LATER[$k]"; done
         # 一次只开始 1 个（第二个要等 15 分钟、看 GPU），所以只按 1 个空位给排在前面刚停下的任务留位置
         t=$($TQPY next --worker "$W" --envs "$ENVS" --device "$DEVICE" "${RESARGS[@]}" --free-slots 1 \
-                       --patience-until $(( T0 + PATIENCE )) --exclude ${EXCL[@]+"${EXCL[@]}"} 2> "$ERRF")
+                       --patience-until $(( T0 + PATIENCE )) --exclude ${EXCL[@]+"${EXCL[@]}"} ${later[@]+"${later[@]}"} 2> "$ERRF")
         rc=$?
         case $rc in
             0)  err_since=0; start "$t" ;;
@@ -377,20 +462,22 @@ while true; do
     if [[ -n $why_not && $why_not != "${last_why:-}" ]]; then echo "$(ts) 先不再加训练：$why_not"; fi
     last_why=$why_not
     if (( ${#KEY[@]} > 0 )); then
-        idle_since=0 said_idle= said_nothing=
+        idle_since=0 said_idle= said_nothing= said_paused= said_wait=
     else
         (( idle_since )) || idle_since=$now
         if (( ! INSLURM )); then
-            if code_changed; then
+            if code_changed && { (( ${#ZOMB[@]} == 0 )) || [[ -n $(new_start) ]]; }; then
                 echo "$(ts) 代码更新了"; RESTART=1; break
             fi
             msg=$why
             (( OWN_FAILS >= MAX_OWN_FAIL )) && msg=own
-            if [[ $msg != own ]] && (( now - idle_since >= IDLE_EXIT )); then
+            (( ${#ZOMB[@]} )) && msg=zomb
+            if [[ $msg != own && $msg != zomb ]] && (( now - idle_since >= IDLE_EXIT )); then
                 echo "$(ts) 手上没有在训的已经 $(( (now - idle_since) / 60 )) 分钟，退出（有备好的任务时下次检查再开）"; break
             fi
             if [[ $msg != "${said_idle:-}" ]]; then
                 case $msg in
+                    zomb) echo "$(ts) 还有停不下来的训练（${ZOMB[*]}），等它停下（接着心跳），先不退出" ;;
                     own) echo "$(ts) 本 worker $(( FAIL_WINDOW / 60 )) 分钟内有 $OWN_FAILS 个任务开始不久就失败，先不领，过了时间窗再领" ;;
                     nothing|error) echo "$(ts) 没有能领的任务，每 $IDLE_POLL 秒再看" ;;
                     paused) echo "$(ts) 队列暂停领任务（3 小时内失败太多次），空着等" ;;
@@ -425,12 +512,14 @@ done
 kill_tree "$GPUMON"
 rm -f "$ERRF"
 rm -rf "${TMPDIR:-/tmp}/phd_stage_${SLURM_JOB_ID:-none}"  # run_task.sh 建的本地副本（inputs.py）
-# 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；不是代码包的退出，由 relay.py 重开
-NEW=$(readlink -f "$(dirname "$REPO")/current" 2> /dev/null)
-START=$NEW${CORE#"$REPO"}/queue/worker_start.sh
-if [[ -n $RESTART && -L $(dirname "$REPO")/current && -f $START ]]; then
-    echo "$(ts) 换成新代码 $(basename "$NEW") 接着跑"
-    exec bash "$START"
+# 代码包换了：直接用新包接着跑（同一个 pueue 任务，不等下次检查重开，11/1）；停不下来的训练交给新代码接着跟（11/4）；
+# 不是代码包的退出，由 relay.py 重开
+START=$(new_start)
+if [[ -n $RESTART && -n $START ]]; then
+    echo "$(ts) 换成新代码 $(basename "$(readlink -f "$(dirname "$REPO")/current")") 接着跑"
+    TASKQ_ZOMBIES=$(for p in "${!ZOMB[@]}"; do echo "$p ${SID[$p]:--} ${ZOMB[$p]} ${TOK[${ZOMB[$p]}]:--} ${WHY[$p]:-stall} ${SAFE[$p]}"; done) \
+        exec bash "$START"
 fi
+let_go
 [[ -n $RESTART ]] && echo "$(ts) 退出，由 relay.py 用新代码重开"
 exit 0

@@ -147,7 +147,6 @@ class Pad:
         self.changed = {d: self.start for d in self.devices}
         self.seen_start = self._start_mtime()
         self.wait_new = {}
-        self.seen_train = set()
         self.stopped = False
         self._steps = 0
         self.initial_ppid = os.getppid()
@@ -227,12 +226,9 @@ class Pad:
         margin = FALLBACK_TARGET_MARGIN_MIB if fallback else 0
         floor, target = self.c.floor_mib + margin, self.c.target_mib + margin
         if train < self.c.min_train_mib:
-            if dev not in self.seen_train:
-                return f"没有训练（train={train}MiB）", used
             if used < floor:
                 used = self._allocate(dev, floor, used, total)
             return f"没有在训的（train={train}MiB），保持 floor", used
-        self.seen_train.add(dev)
         state = f"train={train}MiB"
         waiting = False
         if dev in self.wait_new:

@@ -87,6 +87,7 @@ MAX_FAIL = 2
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # 整个队列这么久内失败这么多次就暂停领任务
 NOTHING, WAIT, PAUSED = 10, 11, 12   # 领任务的退出码
 REFUSED, GONE = 3, 4  # remove 的退出码：不删（有人领着、分出去了、别的任务等它）、队列里没有（11/4）
+LOST = 13  # beat --strict：有的领取已经不是自己的（11/4）
 safe = S.safe
 
 
@@ -468,6 +469,7 @@ def owns(ci, a):
 
 
 def cmd_beat(a):
+    lost = []
     with Lock():  # 和领取用同一把锁：读到自己的记录、写回之间不会被别人接管
         for key in a.keys:
             p = os.path.join(TQ, "claims", safe(key), "info")
@@ -475,11 +477,23 @@ def cmd_beat(a):
             if owns(ci, a):
                 ci["beat"] = time.time()
                 write_json(p, ci, indent=None)
+            elif ci is not None or _no_claim(key):  # 读不了的不算丢
+                lost.append(key)
+    if a.strict and lost:
+        print("\n".join(lost))
+        return LOST
     return 0
 
 
+def _no_claim(key):
+    try:
+        return safe(key) not in os.listdir(os.path.join(TQ, "claims"))
+    except OSError:
+        return False
+
+
 def cmd_release(a):
-    with Lock():
+    with Lock(**({"tries": max(1, int(a.lock_wait / LOCK_WAIT))} if a.lock_wait else {})):
         for key in a.keys:
             _release(a, key)
     return 0
@@ -983,10 +997,12 @@ def main(argv):
     p.add_argument("--worker", required=True)
     p.add_argument("--token", help=tok)
     p.add_argument("keys", nargs="+")
+    p.add_argument("--strict", action="store_true", help=f"有的领取已经不是自己的：打印这些 key、退出码 {LOST}（11/4）")
     p = sub.add_parser("release")
     p.add_argument("--worker", required=True)
     p.add_argument("--token", help=tok)
     p.add_argument("keys", nargs="+")
+    p.add_argument("--lock-wait", type=float, help="等锁最多这么多秒（默认同别的命令；worker 被停时用短的，11/4）")
     p.add_argument("--failed")
     p.add_argument("--skip", help="这台机器训不了、以后不再领它（记在 skips/，不算失败）")
     p = sub.add_parser("missing")

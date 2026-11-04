@@ -100,4 +100,24 @@ SLURM_JOB_ID=900208 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4c.out" 2>&1
 check "GPU worker：只训要卡的" 'grep -q "^end .* t/g" $T/train.log && [[ $(grep -c "^start .* t/c" $T/train.log) == 2 ]]'
 fi
 
+# 5 / 2r. run_task.sh 退出码 5（读不了盘）：交还、不记失败、本作业不马上再领；退出码 2：失败原因带上分段日志的最后一行（11/4）
+#   代码副本里的 spec.py：FAKE_DONE5 这个文件在时 done 退出 5，FAKE_SHELL2 在时 shell 报错退出 2
+if want 5; then
+mkdir -p "$T/core"; rm -rf "$T/core/queue"; cp -r "$HERE" "$T/core/queue"
+sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)\nif __name__ == "__main__" and sys.argv[1:2] == ["shell"] and os.path.exists(os.environ.get("FAKE_SHELL2", "/nonexistent")): sys.exit("spec.py：不认识的 {trainer}")' "$T/core/queue/spec.py"
+reset
+table << EOF
+t/u base
+EOF
+touch "$T/unreadable"
+FAKE_DONE5=$T/unreadable SLURM_JOB_ID=900209 TASKQ_SLOTS=1 timeout 60 bash "$T/core/queue/dicc_worker.sh" > "$T/w5.out" 2>&1
+check "退出码 5：交还、不记失败，本作业不马上再领" '[[ $(grep -c "读不了盘、判断不了训完没有" $T/w5.out) == 1 && -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__u ]] && ! grep -q t/u $T/train.log'
+rm -f "$T/unreadable"
+reset
+touch "$T/badspec"
+FAKE_SHELL2=$T/badspec SLURM_JOB_ID=900210 TASKQ_SLOTS=1 timeout 60 bash "$T/core/queue/dicc_worker.sh" > "$T/w2r.out" 2>&1
+check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退出码 2：没开训：任务说明有问题：spec.py：不认识的 {trainer}" $TASKQ_DIR/failures/t__u'
+rm -f "$T/badspec"
+fi
+
 (( fails == 0 )) && { echo "全部通过"; rm -rf "$T"; } || { echo "$fails 项失败（文件在 $T）"; exit 1; }

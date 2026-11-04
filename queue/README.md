@@ -92,8 +92,11 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - 先跑 1 个；最近一个开始 15 分钟后，近 10 分钟 GPU 平均使用率低于 90%、除去显存填充还空着一半显存，再领 1 个（最多 2 个）。nnU-Net 这类 CPU 跟不上的自然变成 2 个，GPU 跑满的只跑 1 个。CPU 少于 24 个或内存少于 56G 的作业只跑 1 个。
 - 跑完一个领下一个；离时限不到 1 小时不再领；到时限时把没做完的交还，下一个领到的从存档接着训。
 - 只领本机队列里的（`relay.py` 送来的）。不领：已做完的、别处在做的（领取在有效期内续过：20 分钟；或训练日志 15 分钟内更新过）、失败过 2 次的、依赖记录（只给 `after` 看的）。作业开始时排在前面的任务刚停下，先等它最多 20 分钟。
-- 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败）；整个队列 3 小时内失败 3 次就暂停领任务；停止的任务（`taskq.py stop`）每 5 秒看一次，先发 SIGTERM，20 秒没停就 SIGKILL，交还（不算失败），30 秒内做完（存档是原子写的）；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
-- 每个训练 14 个数据增强进程（作业 32 个 CPU）。
+- 出问题时不让排队的作业空跑掉：1 小时内有 2 个任务开始 10 分钟内就失败，这个作业不再领；任务开始满 30 分钟后日志和结果文件夹都 30 分钟没变化，当作卡住，停掉、交还（不算失败），并在它的分段日志里记一行"当作卡住"，一周内第 2 次起每次记一次失败（11/4 定：CPU 任务这类长时间不出声的也会被误判，按次数累计成失败，健康检查才报得出来，不会被一个个作业反复领、反复停）；整个队列 3 小时内失败 3 次就暂停领任务；停止的任务（`taskq.py stop`）每 5 秒看一次，先发 SIGTERM，20 秒没停就 SIGKILL，交还（不算失败），30 秒内做完（存档是原子写的）；手上没有在跑的连续 40 分钟就结束（gpu-a100 使用率连续 1 小时低于 40% 会被取消）；队列读写出错 10 分钟就结束。
+- 每个训练 14 个数据增强进程（作业 32 个 CPU）。每个训练分到的 CPU 在作业开始时按最多同时几个定下（`TASK_CPUS` = CPU 数 / 最多几个），只训 1 个时也只用一半：数据增强的进程数在训练开始时定、之后改不了，按全部 CPU 开的话第二个加进来时就超卖（11/4 定，不改）。
+- 停不下来的（11/4）：`run_task.sh` 用 `setsid` 让训练自成一个会话，停的时候 `run_task.sh` 等 8 秒强制停后自己退出，训练卡在读写上时可能还在。worker 按会话认（`pgrep -s`）：停了 3 分钟还没停下的空出位置领别的，但接着给它的领取心跳，真停下了才交还；不在 Slurm 里的 worker 有这种训练时不因空闲退出，代码包换了时把它交给新代码（`TASKQ_ZOMBIES`）接着跟，不是代码包的等它停下再退出。
+- 心跳用 `taskq.py beat --strict`（11/4）：领取已经不是自己的（过期后被别人接管、已经没了）时退出码 13，worker 停掉这个训练、不交还，本作业不再领它，免得两处训同一折。作业被停时交还用 `release --lock-wait 5`，锁拿不到就算了（领取 20 分钟后过期），不耽误 Slurm 的 KillWait。
+- `run_task.sh` 退出码 5（读不了盘，判断不了训完没有）：交还、不算失败，本作业 10 分钟后再领；退出码 2（任务说明、环境有问题）记失败时带上分段日志里的原因。
 - 开训前 `run_task.sh` 查任务的输入（`inputs.py prepare`：文件都在、链接指得到文件、没有建到一半的 `.incomplete`）；缺了退出码 4，worker 用 `taskq.py missing` 交还、记进 `inputs/<key>`（状态 `input`，不算失败，补齐前没人领），`relay.py` 补传缺的数据块后 `input-ok` 放回（11/1）。
 - 输入拷到节点本地盘（`envs/policy.py` 的 `STAGE_TMP` 开着、任务 `res.local_inputs` 时，11/1 起代替 `stage_tmp.sh` 开训前的整份拷贝）：在 `$TMPDIR/phd_stage_<作业号>/views/<任务>/` 建这个任务私有的链接树，先都指向共享盘，马上开训；后台 `inputs.py copy` 一个个拷到 `blobs/`、核对（sha256 名的按内容）后原子换掉链接，同一作业、本节点别的作业已有的直接用或硬链接；拷完要剩 `STAGE_KEEP_GB`（默认 300）GB，不够就不拷。命令从 `$TASK_INPUTS_ROOT` 读；作业结束时删自己的目录，下一个作业开始时清掉本节点上已结束作业留下的。
 - CPU worker（`cpu_worker.sbatch`，`WORKER_DEVICE=cpu`）只领 `device=cpu` 的任务，一次 1 个，领不到就结束。
@@ -121,11 +124,11 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 ### 显存填充（DICC，`gpu_pad.py`）
 
-`gpu-a100` 要求作业显存占用 >= 40 GB（10/17 收到）。`gpu_pad.py` 只占显存、不计算，按 nvidia-smi 的 `memory.used`：作业开始后第一次有训练起，任何时候不低于 **42000 MiB**（floor）；训练占的显存 120 秒内变化不超过 1 GiB 后补到 **55000 MiB**（target）；超过 **62000 MiB** 放掉多出的。每次补、放 1 GB，给训练留至少 8 GB；总显存不到 60 GB 时不填。训练占的显存不到 2000 MiB 算没有训练。开始新训练时 `dicc_worker.sh` 删掉 `/tmp/gpu_pad_<作业号>.ready`、touch `.start`，pad 放到 floor 后写 `.ready`，worker 看到再开训（最多等 30 秒），新训练稳定后再补到 target（最多等 900 秒）。
+`gpu-a100` 要求作业显存占用 >= 40 GB（10/17 收到）。`gpu_pad.py` 只占显存、不计算，按 nvidia-smi 的 `memory.used`：作业开始起（11/4 前是第一次有训练起），任何时候不低于 **42000 MiB**（floor），第一个训练开训前也一样先放到 floor；训练占的显存 120 秒内变化不超过 1 GiB 后补到 **55000 MiB**（target）；超过 **62000 MiB** 放掉多出的。每次补、放 1 GB，给训练留至少 8 GB；总显存不到 60 GB 时不填。训练占的显存不到 2000 MiB 算没有训练。开始新训练时 `dicc_worker.sh` 删掉 `/tmp/gpu_pad_<作业号>.ready`、touch `.start`，pad 放到 floor 后写 `.ready`，worker 看到再开训（最多等 30 秒），新训练稳定后再补到 target（最多等 900 秒）。
 
 - 默认开启：`gpu_pad_start.sh`（`worker_start.sh` 直接调用，其他作业经 `envs/nnunet_paths.sh`）在所有 Slurm GPU 作业里启动它。日志 `<数据目录>/logs/workers/gpu_pad_<作业号>.log`。
-- `TASKQ_GPU_PAD=0` 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/common/nnunet/smoke/epoch_bench.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`、`research/RQ1/probe/p1_predict_model.sh`、`research/RQ1/probe/p2_predict_model.sh`、`research/RQ1/analysis/validation_predict_eval.sh`、`research/RQ1/analysis/validation_prep.sh`、`research/RQ1/analysis/edema_intervention.sh`、`research/RQ1/analysis/edema_ring_probe.sh`、`research/RQ1/analysis/j1_rebuild.sh`。CPU 分区的作业本来就不启动。
-- pad 异常退出时最多重启 3 次；父进程退出、收到 SIGTERM、`DISABLED` 出现时放掉显存退出。退出码：0 正常 / 开关 / 父进程退出，1 没有 GPU 或初始化失败，2 参数错误；启动失败只记日志，不影响训练。
+- `TASKQ_GPU_PAD=0` 的脚本：启动前要求卡是空的 `research/common/nnunet/smoke/run_gpu_smoke.sh`、`research/common/nnunet/smoke/epoch_bench.sh`、`research/RQ1/nnunet/predict.sh`、`research/RQ1/analysis/run_predict_eval.sh`；自己做推理或分析的 `research/RQ1/probe/p1_predict.sh`、`research/RQ1/probe/run_p2.sh`、`research/RQ2/quickcheck/run_p4.sh`、`research/RQ1/analysis/run_sensitivity.sh`、`research/RQ1/external/run_t19.sh`、`research/RQ1/external/t19_eval.sh`、`research/RQ1/probe/p1_predict_model.sh`、`research/RQ1/probe/p2_predict_model.sh`、`research/RQ1/analysis/validation_predict_eval.sh`、`research/RQ1/analysis/validation_prep.sh`、`research/RQ1/analysis/edema_intervention.sh`、`research/RQ1/analysis/edema_ring_probe.sh`。CPU 分区的作业本来就不启动。
+- pad 异常退出时重启，整个作业期间都会（间隔 30 秒的 1、2、4… 倍，最多 16 倍）；连续 5 次跑不到 10 分钟就退出的不再重启，`!!` 开头的一行写进 worker 日志（11/4）；父进程退出、收到 SIGTERM、`DISABLED` 出现时放掉显存退出。退出码：0 正常 / 开关 / 父进程退出，1 没有 GPU 或初始化失败，2 参数错误；启动失败只记日志，不影响训练。
 
 ### 执行机（dicc1、DICC2、lab1、lab0，`relay.py`，10/30；10/31 起由 `feed.py` 调用）
 
@@ -167,7 +170,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `recipes.py`、`spec.py`、`experiments.py`、`steps.py` | 做法、解析器、读实验表、步骤的"做完没"判断 |
 | `inputs.py` | 开训前查输入（缺了退出码 4）、节点本地盘上的私有视图和后台拷贝（见上面） |
 | `run_task.sh <做法> k=v…` | 所有机器共用的运行器：激活环境、设变量、跑命令、写分段日志；已经训完就直接退出；Slurm 外设了 `CUDA_VISIBLE_DEVICES` 时卡被别人占着就等（每分钟看一次，最多 `res.wait_gpu` 分钟；组的环境变量设了 `TASK_GPU_IDLE` 时，还要 GPU 使用记录里这张卡最近这么多分钟没有别人，11/2），出错隔 5 分钟重来、最多 3 次；SIGTERM 先停训练再退出 |
-| `worker.sbatch`、`worker_start.sh`、`cpu_worker.sbatch`、`dicc_worker.sh` | DICC 作业：`worker.sbatch`（long、3 天）只有资源申请和转交到 `worker_start.sh` 的一行；`worker_start.sh` 查 `ENABLED`、激活 conda、启动显存填充，交给 `dicc_worker.sh`。`cpu_worker.sbatch`：`cpu-epyc-genoa`、normal、32 核、64G、8 小时（`cpu-epyc` 的节点系统太旧） |
+| `worker.sbatch`、`worker_start.sh`、`cpu_worker.sbatch`、`dicc_worker.sh` | DICC 作业：`worker.sbatch`（long、3 天）只有资源申请和转交到 `worker_start.sh` 的一行；`worker_start.sh` 查 `ENABLED`、激活 conda（失败时日志里写一行 `!!`，照样往下走：任务各自激活环境，11/4）、启动显存填充，交给 `dicc_worker.sh`。`cpu_worker.sbatch`：`cpu-epyc-genoa`、normal、32 核、64G、8 小时（`cpu-epyc` 的节点系统太旧） |
 | `feed.py` | 送任务的唯一入口：转给 `relay.py`（见上面）；`python3 scripts/taskq/queue/feed.py --dry` 只看会做什么 |
 | `refill.py` | `relay.py` 用的挑任务（`candidates`、`next_pick`）和补交 Slurm 作业（`slurm_plan`）的规则 |
 | `advance.py` | 训完以后的步骤（见上面）；`python3 scripts/taskq/queue/advance.py` 只看会排什么 |
@@ -184,7 +187,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 ## 约定
 
 - **DICC 作业提交时定下的**只有 `worker.sbatch`；其余脚本在作业开始时或每次调用时从仓库读。排着的作业依赖的只有 `ENABLED` 和 `worker_start.sh` 这个路径；在跑的作业（最长 3 天）一直用开始时读到的 `dicc_worker.sh`，它调用的 `taskq.py next / beat / release` 和 `run_task.sh` 的参数、退出码不改，只加新命令。
-- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，4 缺输入（开训前查到，没跑命令；11/1），2 任务说明或环境有问题，1 训练命令出错（命令自己的退出码 1–127 记在分段日志），128 以上是被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀如 137 原样传出；worker 据此区分"训不了"和"被杀"）（10/25 定）。`qs --json` 每个任务的 `status` 给人看（如 `Failed (1)`），程序读 `result`（`Success` / `Failed` / `Killed` / …，没结束是空）和 `code`（退出码）。`taskq.py next` 0 领到（三行：key、`run_task.sh` 的参数、token），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`take` 0 领到，10 领不到；`remove` 0 删了，3 不删（有活着的领取、分出去了、别的任务的 `after` 等它），4 队列里没有（什么都没删；`relay_transfer.drop_remote` 当作上次已经删了），按退出码判断，不看输出的文字（11/4 定）。`spec.py done` 0 训完，1 没训完，2 任务说明有问题，5 读不了数据目录（盘断开等，稍后再查；11/4 定）；`spec.py shell` 说明有问题时退出码 2，只打一句话。不在 box、本机又没有队列时，改队列的命令退出码 2（"总队列在 box"）。
+- **退出码**：`run_task.sh` 0 训完，3 命令正常结束但没训完，4 缺输入（开训前查到，没跑命令；11/1），5 读不了盘、判断不了训完没有（`spec.py done` 退出 5；11/4），2 任务说明或环境有问题（原因也写进分段日志），1 训练命令出错（命令自己的退出码 1–127 记在分段日志），128 以上是被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀如 137 原样传出；worker 据此区分"训不了"和"被杀"）（10/25 定）。`qs --json` 每个任务的 `status` 给人看（如 `Failed (1)`），程序读 `result`（`Success` / `Failed` / `Killed` / …，没结束是空）和 `code`（退出码）。`taskq.py next` 0 领到（三行：key、`run_task.sh` 的参数、token），10 没有能领的，11 等排在前面刚停下的，12 队列暂停；`beat --strict` 13 有的领取已经不是自己的（打印这些 key；11/4）；`take` 0 领到，10 领不到；`remove` 0 删了，3 不删（有活着的领取、分出去了、别的任务的 `after` 等它），4 队列里没有（什么都没删；`relay_transfer.drop_remote` 当作上次已经删了），按退出码判断，不看输出的文字（11/4 定）。`spec.py done` 0 训完，1 没训完，2 任务说明有问题，5 读不了数据目录（盘断开等，稍后再查；11/4 定）；`spec.py shell` 说明有问题时退出码 2，只打一句话。不在 box、本机又没有队列时，改队列的命令退出码 2（"总队列在 box"）。
 - **经 ssh 读回的 JSON**：`taskq.py --json-status`、`taskq.py show --json`、`spec.py` 的 `remote_collect` 把 JSON 写在单独一行、以 `@@JSON ` 开头，读的一方只认这一行（`spec.py` 的 `json_out` / `json_in`），前后别的输出不影响（10/25 定）。
 - **各机器的状态只取一次**：`scripts/taskq/monitor/health.py` 的 `gather()`：pueue（`qs --json`）、每台 pueue 机器一次 ssh 的探查（开机、盘、GPU 使用记录、各卡和卡上的进程）、总队列、box 上各任务的训练状态（`spec.collect`）；执行机的状态由 `relay.py` 每次检查读一次（`relay.py status <名字>`）。健康检查、`relay.py`、`advance.py` 和登记表 `make_registry.py` 都用它的结果，不另外去取（10/25 定）。
 - **队列所在的机器**：`envs/machines.py` 的 hub（box，`taskq.queue_host()`，10/31 起）；不在 box、本机又没有队列时 `taskq.py add / set / set-nice / take / show / remove / stop / resume / status` 退出码 2（不转发）；执行机的队列由 box 的 `relay.py` 经 ssh 调用那边代码包里的 `taskq.py`（`relay_remote.rtq`）。worker 用的 `next / beat / release` 不转发，没有 `tasks.jsonl` 就退出 2（10/25 定）。

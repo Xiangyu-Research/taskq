@@ -116,6 +116,40 @@ check "代码包：worker、任务日志记的代码版本是包名（不是"未
 check "代码包：worker 在用的包更新了时间戳（清理只删 4 天没动过的）" '[[ -n $(find "$T/code/a" -maxdepth 0 -mtime -1) ]]'
 fi
 
+# 6z. 代码包换了时还有停不下来的训练（11/4）：exec 新包时把它交过去，新代码接着心跳，停下了再交还
+if want 6z; then
+reset
+table << EOF
+t/z base
+EOF
+rm -rf "$T/code"; mkdir -p "$T/code/a/scripts/taskq" "$T/code/b/scripts/taskq" "$T/binz"
+cp -r "$CORE/." "$T/code/a/scripts/taskq/"; cp -r "$CORE/." "$T/code/b/scripts/taskq/"
+printf '#!/bin/bash\necho "新包的 start"\nexec bash "$(dirname "$0")/dicc_worker.sh"\n' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
+printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"
+ln -sfn a "$T/code/current"
+(WORKER_ID=lab-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
+  FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/w6z.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q "还有停不下来的训练" $T/w6z.out'
+ln -sfn b "$T/code/current"
+waitfor 20 'grep -q "接着跟停不下来的 t/z" $T/w6z.out'
+check "代码包换了、还有停不下来的：exec 新包，把它交过去" 'grep -q "换成新代码 b 接着跑" $T/w6z.out && grep -q "新包的 start" $T/w6z.out && grep -q "接着跟停不下来的 t/z" $T/w6z.out && [[ -e $TASKQ_DIR/claims/t__z ]]'
+waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "新代码接着跟：停下了才交还、再退出" '[[ $rc == 0 ]] && grep -q "停不下来的 t/z 终于停下了，交还" $T/w6z.out && [[ ! -e $TASKQ_DIR/claims/t__z ]]'
+[[ -s $FAKE_LOG.escape ]] && kill "$(cat "$FAKE_LOG.escape")" 2> /dev/null
+fi
+
+# worker_start.sh：conda activate 失败时日志里写清楚，照样开 worker（11/4）
+if want ws; then
+mkdir -p "$T/ws" "$T/wscfg" "$T/wsconda/etc/profile.d"
+cp "$HERE/worker_start.sh" "$HERE/gpu_pad_start.sh" "$T/ws/"
+printf '#!/bin/bash\necho "worker 开始"\n' > "$T/ws/dicc_worker.sh"
+printf 'import sys\nprint({"conda": "%s env0", "data": "%s"}[sys.argv[3]])\n' "$T/wsconda" "$TASKQ_DATA" > "$T/wscfg/machines.py"
+printf 'conda() { return 1; }\n' > "$T/wsconda/etc/profile.d/conda.sh"
+TASKQ_CONFIG=$T/wscfg bash "$T/ws/worker_start.sh" > "$T/ws.out" 2>&1; rc=$?
+check "worker_start：conda activate 失败，日志里写 !!，照样开 worker" '[[ $rc == 0 ]] && grep -q "!! conda activate env0 失败" $T/ws.out && grep -q "worker 开始" $T/ws.out'
+fi
+
 # gpu_stats / pad_now 读真的文件（假 nvidia-smi）：只取 dicc_worker.sh 里这两个函数
 if want gpu; then
 sed -n '/^gpu_stats() {/,/^can_add() {/p' "$HERE/dicc_worker.sh" | sed '$d' > "$T/fns.sh"

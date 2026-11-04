@@ -14,7 +14,7 @@ check() {
 }
 
 mkdir -p "$T/bin" "$T/nobin" "$T/bt"
-for c in bash sh python3 dirname mkdir date nohup nice sleep cat tr env; do
+for c in bash sh python3 dirname mkdir date nohup nice sleep cat tr env wc; do
     src=$(command -v "$c" 2> /dev/null) || continue
     ln -s "$src" "$T/bin/$c"
     ln -s "$src" "$T/nobin/$c"
@@ -29,6 +29,8 @@ with open(os.environ["FAKE_PAD_ARGS"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + f" pid={os.getpid()} ppid={os.getppid()}\n")
 if os.environ.get("FAKE_PAD_FAIL_ONCE") == "1" and not os.path.exists(os.environ["FAKE_PAD_FAILED"]):
     open(os.environ["FAKE_PAD_FAILED"], "w").close()
+    sys.exit(1)
+if os.environ.get("FAKE_PAD_FAIL") == "1":
     sys.exit(1)
 time.sleep(60)
 EOF
@@ -61,11 +63,12 @@ stop_pads() {
     sleep 0.1
 }
 lines() { if [[ -f $T/args ]]; then wc -l < "$T/args"; else echo 0; fi; }
+waitfor() { local i; for (( i = 0; i < $1 * 10; i++ )); do eval "$2" && return 0; sleep 0.1; done; return 1; }  # 秒数 条件
 reset() { stop_pads; rm -f "$T/args" "$T/failed" "$T/switch"; }
 
 reset
 source_it "$T/bin" SLURM_JOB_ID=1001 CUDA_VISIBLE_DEVICES=0
-sleep 0.5
+waitfor 20 '(( $(lines) >= 1 ))'; sleep 0.3
 check "正常启动一个 pad" test "$(lines)" -eq 1
 check "只传 parent-pid 和 supervisor-pid（pad 不分模型）" grep -Eq '^--parent-pid [0-9]+ --supervisor-pid [0-9]+ pid=' "$T/args"
 
@@ -75,7 +78,7 @@ printf '#!/bin/bash\necho bad >> "%s/badpy"\nexit 1\n' "$T" > "$T/badbin/python3
 chmod +x "$T/badbin/python3"
 printf 'PATH=%s/badbin:$PATH\n' "$T" > "$T/bashenv"
 source_it "$T/bin" SLURM_JOB_ID=1003 CUDA_VISIBLE_DEVICES=0 BASH_ENV="$T/bashenv"
-sleep 0.5
+waitfor 20 '(( $(lines) >= 1 ))'
 check "子 bash 换了 PATH 也用启动时的 python3" bash -c "test \$(wc -l < '$T/args') -eq 1 && test ! -e '$T/badpy'"
 unset BASH_ENV
 
@@ -101,13 +104,26 @@ sleep 0.3; check "找不到 pad 脚本：不启动，作业日志里写一行" b
 
 reset
 source_it_twice
-sleep 0.5
+waitfor 20 '(( $(lines) >= 1 ))'; sleep 0.3
 check "重复 source 只启动一次" test "$(lines)" -eq 1
 
 reset
-source_it "$T/bin" SLURM_JOB_ID=1010 CUDA_VISIBLE_DEVICES=0 FAKE_PAD_FAIL_ONCE=1
-sleep 1
+source_it "$T/bin" SLURM_JOB_ID=1010 CUDA_VISIBLE_DEVICES=0 FAKE_PAD_FAIL_ONCE=1 > "$T/wlog"
+waitfor 20 '(( $(lines) >= 2 ))'; sleep 0.3
 check "pad 失败一次后 supervisor 重启" test "$(lines)" -eq 2
+check "重启写进作业日志（作业日志是文件时）" grep -q '显存填充退出（退出码 1），1 倍 0.1 秒后重启' "$T/wlog"
+
+reset
+source_it "$T/bin" SLURM_JOB_ID=1011 CUDA_VISIBLE_DEVICES=0 FAKE_PAD_FAIL=1 TASKQ_GPU_PAD_MAX_FAILS=3 > "$T/wlog"
+waitfor 20 'grep -q 不再重启 "$T/wlog"'; sleep 0.5
+check "一直起不来：连续 3 次后放弃，作业日志里写明没有显存填充" \
+      bash -c "test \$(wc -l < '$T/args') -eq 3 && grep -q '!! 显存填充连续 3 次起不来（退出码 1），不再重启，这个作业没有显存填充' '$T/wlog'"
+check "重启间隔加倍" grep -q '2 倍 0.1 秒后重启' "$T/wlog"
+
+reset
+source_it "$T/bin" SLURM_JOB_ID=1012 CUDA_VISIBLE_DEVICES=0 FAKE_PAD_FAIL=1 TASKQ_GPU_PAD_MAX_FAILS=2 TASKQ_GPU_PAD_RESET_AFTER=0 > "$T/wlog"
+waitfor 20 '(( $(lines) >= 5 ))'
+check "跑过一阵（RESET_AFTER 以上）才退出的：一直重启、不放弃" bash -c "test \$(wc -l < '$T/args') -ge 5 && ! grep -q 不再重启 '$T/wlog'"
 
 reset
 if (( fails == 0 )); then echo "全部通过"; else echo "$fails 项失败"; exit 1; fi

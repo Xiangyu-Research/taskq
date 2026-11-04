@@ -98,7 +98,7 @@ sleep 4
 check "pad 启动且只启动一个" test -f "$PADLOG"
 check "日志里有 target=8000、settle=4s" bash -c "grep -q 'target=8000' '$PADLOG' && grep -q 'settle=4s' '$PADLOG'"
 aborted
-check "没有训练时不占显存（现在 $(used)MiB，开始时 ${BASE}MiB）" test "$(used)" -le $(( BASE + 800 ))
+check "还没有训练时先填到 floor 5000（现在 $(used)MiB）" test "$(used)" -ge 5000 -a "$(used)" -le 5600
 start_train
 sleep 4
 U=$(used)

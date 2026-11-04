@@ -16,7 +16,16 @@ if [[ ${FAKE_IGNORE:-} == "$1" ]]; then  # 不理停止信号
     trap 'echo "term $1" >> "$FAKE_LOG"' TERM
     while :; do sleep 1; done
 fi
-if [[ ${FAKE_BUSY:-} == "$1" ]]; then  # 一直在写结果文件夹、不写日志（像概率图稀疏化）
+if [[ ${FAKE_ESCAPE:-} == "$1" ]]; then  # 留下一个停不下来的进程：同一个会话、另一个进程组、不理 SIGTERM，FAKE_ESCAPE_SECS 秒后自己退出
+    python3 -c 'import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if os.fork():
+    os._exit(0)
+os.setpgid(0, 0)
+open(sys.argv[1], "w").write(str(os.getpid()))
+time.sleep(float(sys.argv[2]))' "$FAKE_LOG.escape" "${FAKE_ESCAPE_SECS:-20}"
+    sleep 120 & wait $!
+elif [[ ${FAKE_BUSY:-} == "$1" ]]; then  # 一直在写结果文件夹、不写日志（像概率图稀疏化）
     for _ in $(seq "${FAKE_BUSY_SECS:-10}"); do touch "$out/progress"; sleep 1; done
 elif [[ ${FAKE_HANG:-} == "$1" ]]; then
     sleep 120 & wait $!

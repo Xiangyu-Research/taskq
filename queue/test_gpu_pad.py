@@ -120,7 +120,7 @@ ok("训练自己超过 high 时 pad 不动", b.live[0] == 0)
 b = FakeBackend(training=0)
 p, logs = pad_of(b)
 p.step()
-ok("没有训练：不填", b.live[0] == 0 and any("没有训练" in x for x in logs))
+ok("作业开始、还没有训练：先填到 floor（11/4）", at_floor(b.used()) and any("没有在训的" in x for x in logs))
 b.training[0] = 9000
 p.step()
 ok("训练来了：补到 55GB", filled(b.used()))
@@ -256,7 +256,7 @@ b = FakeBackend(devices=2)
 b.training[0] = 0
 p, _ = pad_of(b)
 p.step()
-ok("多卡分别处理", b.live[0] == 0 and filled(b.used(1)))
+ok("多卡分别处理", at_floor(b.used(0)) and filled(b.used(1)))
 
 b = FakeBackend()
 p, _ = pad_of(b, iterations=2)
