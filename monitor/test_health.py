@@ -19,6 +19,9 @@ os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不�
 os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "queue"))
 import health as H  # noqa: E402
+import shift  # noqa: E402
+_sd = tempfile.mkdtemp()
+shift.LOG, shift.STATE = f"{_sd}/refill.log", f"{_sd}/shift.json"  # 不写真的 ~/refill.log、状态文件夹
 
 H.policy.OFFLINE = {}  # 不受配置里的暂停检查影响
 
