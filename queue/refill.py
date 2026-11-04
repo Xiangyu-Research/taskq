@@ -30,7 +30,8 @@ import spec as S  # noqa: E402
 import common as C  # noqa: E402
 
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（存档、验证结果）留的空间
-KICK = M.MACHINES[M.hub()]["repo"] + "/scripts/monitor/auto_refresh.sh"  # 健康检查（在 hub 上 cron 用的克隆里跑，和定时的共用一把锁；kick 最多等 5 分钟）
+_ENTRY = cfg.outputs("entry")  # 主循环的入口（相对 hub 的 repo；envs/policy.py 的 OUTPUTS，11/4）
+KICK = _ENTRY and (_ENTRY if _ENTRY.startswith(("/", "~")) else M.MACHINES[M.hub()]["repo"] + "/" + _ENTRY)  # kick 和定时的共用一把锁，最多等 5 分钟
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 
@@ -141,8 +142,8 @@ def add(name, label, step, key, args, run=sh, **rec):
 
 def then_check(cmd, label):
     """box 任务的命令 → 做完（成功）后马上跑一次健康检查（不等 30 分钟，和定时的共用一把锁）；这一次里这个任务算做完
-    （health.py 看 PHD_TASK_DONE）。检查出错不算这个任务失败。"""
-    return f"{cmd}{KICK_SEP}{shlex.quote(label)} bash {KICK} kick || true; }}"
+    （health.py 看 PHD_TASK_DONE）。检查出错不算这个任务失败。没有入口（OUTPUTS["entry"]）时原样。"""
+    return f"{cmd}{KICK_SEP}{shlex.quote(label)} bash {KICK} kick || true; }}" if KICK else cmd
 
 
 KICK_SEP = " && { PHD_TASK_DONE="

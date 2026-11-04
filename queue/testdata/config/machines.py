@@ -13,9 +13,11 @@ import sys
 FAKE = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) if "__file__" in globals() else "/nonexistent"
 FAKE_CONDA = FAKE + "/conda"
 WS_TASK_VARS = {"DEMO_FAST": "1", "DEMO_FAST_LOADER": "1"}
+LOCAL = re.escape(socket.gethostname().split(".")[0])  # 测试在哪台跑，哪台就是 hub（11/4）
+WS1_ROOT = "/mnt/disk1/datasets/ee09fdd2"
 
 MACHINES = {
-    "box": dict(label="box", hostname=r"hub-host", ssh=None, scheduler="pueue", repo="~/auto/demo",
+    "box": dict(label="box", hostname=r"hub-host|" + LOCAL, ssh=None, scheduler="pueue", repo="~/auto/demo",
                 code="~/.cache/phd/code/current",
                 data="/data/others/DEMO_DATA", conda=(FAKE_CONDA, "base0"),
                 envs={"base": ("conda", "base0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
@@ -25,7 +27,7 @@ MACHINES = {
                 roles=("hub",), disk=("/data/others/DEMO_DATA", 100, None), gpu_log=False,
                 transfer=("https://transfer.example.org", "172.18.0.1:18090"),
                 quick=("cloudflare/cloudflared:2026.10.4", r"https://[a-z0-9-]+\.trycloudflare\.com")),
-    "lab": dict(label="lab", hostname=r"lab-host", ssh="lab", scheduler="pueue", repo="~/demo", code=None,
+    "lab": dict(label="lab", hostname=r"gpu-host", ssh="lab", scheduler="pueue", repo=None, code=WS1_ROOT + "/code/current",
                 conda=(FAKE_CONDA, "w0"),
                 envs={"base": ("conda", "w0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                       "alt2": ("venv", FAKE + "/venv/alt2", "base")},
@@ -46,9 +48,10 @@ MACHINES = {
 SITES = {
     "dicc2": dict(label="DICC2", hostname=r"(login|gpu|cpu)\d+", ssh="dicc2", scheduler="slurm", root="~/q", cap=90, budget=(15, 30),
                    conda=(FAKE_CONDA, "pt"), envs={"base": ("conda", "pt")}, roles=("train",),
-                   jobs=("gpu",), ssh_master=True, sbatch=dict(gpu=dict(cpus=30, mem="60G")), tunnel=("push", "pull"), quick_tunnel=True,
+                   jobs=("gpu",), ssh_master=True, sbatch=dict(gpu=dict(partition="gpu-a", gres="gpu:a:1", cpus=30, mem="60G")),
+                   tunnel=("push", "pull"), quick_tunnel=True,
                    transfer_job="-p cpu-part --qos=normal -c 4 --mem=4G", relay=True),
-    "lab1": dict(label="lab 1 号卡", hostname=r"(?!)", ssh="lab", scheduler="pueue", root="/mnt/disk1/datasets/ee09fdd2",
+    "lab1": dict(label="lab 1 号卡", hostname=r"(?!)", ssh="lab", scheduler="pueue", root=WS1_ROOT,
                  conda=(FAKE_CONDA, "w0"), envs={"base": ("conda", "w0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                        "alt2": ("venv", FAKE + "/venv/alt2", "base")}, roles=("train",),
                  groups={"gpu1": (1, "1", {}), "cpu": (1, None, {})}, worker=dict(group="gpu1", id="w7e2837"), slots=1,
@@ -60,7 +63,7 @@ SITES = {
                   envs={"base": ("conda", "base0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                         "alt2": ("venv", FAKE + "/venv/alt2", "base"), "x3": ("venv", FAKE + "/venv/x3", "base"),
                         "x1": ("venv", FAKE + "/venv/x1", "base"), "stats": ("conda", "stats0")}, roles=("train",),
-                  jobs=("gpu", "cpu"),
+                  jobs=("gpu", "cpu"), sbatch=dict(gpu=dict(partition="gpu-a", gres="gpu:a:1"), cpu=dict(partition="cpu-b")),
                   ssh_master=True, tunnel=("push", "pull"),
                   transfer_job="-p cpu-part --qos=normal -c 2 --mem=2G", relay=True),
     "lab0": dict(label="lab 0 号卡", hostname=r"(?!)", ssh="lab", scheduler="pueue", root="/mnt/disk1/datasets/d0eab39f",
@@ -255,7 +258,8 @@ def main(argv):
             return 3
         print(a)
     elif cmd == "groups":
-        for g, (n, _, _) in (MACHINES[me]["groups"] if me else {}).items():
+        name = me if not args or args[0] == "." else args[0]
+        for g, (n, _, _) in ((machine(name).get("groups") or {}) if name else {}).items():
             print(f"{g}:{n}")
     else:
         print(f"machines.py：不认识的命令 {cmd}", file=sys.stderr)

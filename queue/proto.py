@@ -52,9 +52,8 @@ CLAIM_INFO = "info"
 CLAIM_FIELDS = ("worker", "host", "since", "beat", "token")
 ASSIGN_FIELDS = ("worker", "host", "since", "beat", "assigned")
 
-# ---------------- 状态目录（cfg.py 的 STATE_PLACES；relay_bundle.py 在代码包里改写到根目录下） ----------------
-STATE_HOME = "~/.cache/phd/"
-STATE_PLACES = {"taskq": "~/.cache/phd/taskq", "gpu_pad/DISABLED": "~/.cache/phd/gpu_pad/DISABLED"}
+# ---------------- 状态目录在执行机根目录里的位置（家目录下的默认位置见 cfg.py 的 STATE_HOME、STATE_PLACES，键相同；
+# relay_bundle.py 在代码包里改写到根目录下） ----------------
 STATE_IN_ROOT = {"taskq": ROOT["queue"], "gpu_pad/DISABLED": ROOT["queue"] + "/" + QUEUE["gpu_pad_off"]}  # 其余 → state/
 
 # ---------------- 标志文件 ----------------
@@ -72,6 +71,10 @@ WORKER_LOGS = "logs/workers"   # worker、显存填充、Slurm 的 %x_%j.out
 LOG_PARTS = ("part", "seg")
 DONE_LINE = "训完"             # 分段日志里以它开头的行 = 训完（run_task.sh 写，spec.py 认）
 STALL_LINE = "当作卡住"        # 分段日志里以它开头的行 = 被 worker 当作卡住停掉（dicc_worker.sh 写、数）
+
+# ---------------- GPU 使用记录（monitor/gpu_log.sh 写；run_task.sh 的 TASK_GPU_IDLE、健康检查读） ----------------
+GPU_LOG_DIR = "~/gpu_usage"      # 环境变量 GPU_LOG_DIR 可以改
+GPU_LOG_FILE = "gpu_%Y-%m.csv"   # 每月一个（strftime）
 
 # ---------------- key → 文件名 ----------------
 SAFE = "__"
@@ -222,7 +225,8 @@ for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "
 def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_PREFIX": STAGE_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
            "TQ_WORKER_LOGS": WORKER_LOGS, "TQ_STALL_LINE": STALL_LINE, "TQ_DONE_LINE": DONE_LINE, "TQ_JSON_MARK": JSON_MARK,
-           "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT}
+           "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT,
+           "TQ_GPU_LOG_DIR": GPU_LOG_DIR, "TQ_GPU_LOG_FILE": GPU_LOG_FILE}
     out.update({f"TQ_ROOT_{k.upper()}": v for k, v in ROOT.items()})
     out.update({f"TQ_Q_{k.upper()}": v for k, v in QUEUE.items()})
     out.update({f"TQ_EXIT_{k.upper()}": v for k, v in EXIT.items()})

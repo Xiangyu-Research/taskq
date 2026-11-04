@@ -1,14 +1,13 @@
 #!/bin/bash
 # 按提交号的代码副本（2026-10-25）：任务从这里跑，代码更新不会改到正在跑的任务。
 #   snapshot.sh <克隆>
-# 1. 克隆 fetch 一次，取 origin/main；~/.cache/phd/code/<提交号> 没有就用 git worktree 建一份（git rev-parse、runlog 照常能用）
-# 2. ~/.cache/phd/code/current 指到它（一步换过去）
+# 1. 克隆 fetch 一次，取 origin/main；状态文件夹的 code/<提交号>（cfg.py state code）没有就用 git worktree 建一份（git rev-parse、runlog 照常能用）
+# 2. code/current 指到它（一步换过去）
 # 3. 删旧副本：不是 current、没有 pueue 任务的工作目录在里面（排着、失败的也算：restart --in-place 要用）、建了 7 天以上
 # fetch 失败（GitHub 连不上）时照样用克隆里已有的 origin/main，退出码 1。
 set -u
 SRC=${1:?用法：snapshot.sh <克隆>}
-C=${TASKQ_STATE:+$TASKQ_STATE/code}
-C=${C:-~/.cache/phd/code}
+C=$(python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../queue/cfg.py" state code) || exit 1
 mkdir -p "$C"
 exec 8> "$C/.lock"
 flock -w 300 8 || { echo "snapshot.sh：等锁超时"; exit 1; }

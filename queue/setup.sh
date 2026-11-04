@@ -1,15 +1,22 @@
 #!/bin/bash
 # 在 pueue 机器（envs/machines.py 里 scheduler=pueue 的）上启动 pueue 的常驻进程、建组、写 crontab（2026-10-16），重复运行没关系。
-#   bash scripts/taskq/queue/setup.sh
-# 组按 envs/machines.py 建；表里没有、也没有任务的组删掉。
+#   bash scripts/taskq/queue/setup.sh           在这台上
+#   bash scripts/taskq/queue/setup.sh <名字>    在 hub 上替别的机器做：按完整的表算好组、gpu_log，ssh 过去跑那边代码目录里的 setup.sh（11/4）
+# 组按 envs/machines.py 建；表里没有、也没有任务的组删掉（只有执行机自己那份的代码包里不删）。
 # crontab（lab 没开 linger 用不了 systemd 用户服务，都用 cron）：
-#   所有 pueue 机器：@reboot scripts/taskq/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务），从表里的 code（没有就 repo）跑
-#   角色 hub（box）：每 30 分钟健康检查；08:30–20:30 每 2 小时更新登记表和看板、推送进度（scripts/monitor/auto_refresh.sh）
+#   所有 pueue 机器：@reboot scripts/taskq/queue/on_boot.sh（启动 pueued、放回重启时被打断的任务；gpu_log 的加 --gpu-log），从表里的 code（没有就 repo）跑
+#   角色 hub：克隆 policy.py 的 OUTPUTS["origin"] 到这台的 repo，按 OUTPUTS["cron"] 写 cron 调 OUTPUTS["entry"]
 set -euo pipefail
 P=~/.local/bin/pueue
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
+C="python3 $CORE/queue/cfg.py"
+if [[ -n ${1:-} && $1 != "$($M whoami 2> /dev/null)" ]]; then
+    ssh=$($M get "$1" ssh) code=$($M get "$1" code); [[ -n $code ]] || code=$($M get "$1" repo)
+    [[ -n $ssh && -n $code ]] || { echo "$1：表里没有 ssh 或代码目录" >&2; exit 1; }
+    exec ssh "$ssh" "SETUP_GROUPS='$($M groups "$1" | tr '\n' ' ')' SETUP_GPU_LOG='$($M get "$1" gpu_log)' bash $code${CORE#"$REPO"}/queue/setup.sh"
+fi
 me=$($M whoami) || { echo "envs/machines.py 里没有这台机器（$(hostname -s)）" >&2; exit 1; }
 [[ $($M get . scheduler) == pueue ]] || { echo "$me 不用 pueue" >&2; exit 1; }
 [[ -x $P ]] || bash "$CORE/queue/install_pueue.sh"
@@ -22,13 +29,14 @@ if ! $P status > /dev/null 2>&1; then
     rm -f "$D/pueue_$(whoami).socket"  # 上次留下的
     setsid -f ~/.local/bin/pueued -d > /dev/null 2>&1 < /dev/null; sleep 2
 fi
-groups=$($M groups)
+groups=${SETUP_GROUPS-$($M groups)}
 have=$($P group --json | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')
 for gp in $groups; do
     g=${gp%:*} n=${gp#*:}
     [[ " $have " == *" $g "* ]] || $P group add "$g"
     $P parallel -g "$g" "$n"
 done
+[[ -n ${SETUP_GROUPS+x} || -n $($M names hub) ]] || have=  # 代码包里的表只有一台执行机，别的组不算多余
 for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并提醒
     [[ $g == default || " $(echo $groups | sed 's/:[0-9]*//g') " == *" $g "* ]] && continue
     if $P status --json | python3 -c 'import json,sys; sys.exit(any(t["group"] == sys.argv[1] for t in json.load(sys.stdin)["tasks"].values()))' "$g"; then
@@ -39,13 +47,16 @@ for g in $have; do  # 表里没有的组：空的删掉，有任务的留着并�
 done
 cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
 CODE=$($M get . code); [[ -n $CODE ]] || CODE=$($M get . repo)
+[[ -n ${SETUP_GPU_LOG-$($M get . gpu_log)} ]] && GL=" --gpu-log" || GL=
 crontab -l 2> /dev/null | grep -q "on_boot.sh" && { crontab -l | { grep -v "on_boot.sh" || true; } | crontab -; }
-cron "bash $CODE${CORE#"$REPO"}/queue/on_boot.sh >> $HOME/on_boot.log 2>&1" "@reboot"
+cron "bash $CODE${CORE#"$REPO"}/queue/on_boot.sh$GL >> $($C log on_boot) 2>&1" "@reboot"
 crontab -l 2> /dev/null | grep -q "git_pull_cron.sh" && { crontab -l | { grep -v "git_pull_cron.sh" || true; } | crontab -; }  # 10/25 起由 box 快进
-roles=" $($M get . roles) "
-if [[ $roles == *" hub "* ]]; then  # 健康检查；登记表和看板。从只给 cron 用的克隆 ~/auto/PhD 运行（只跑已提交的代码）
-    [[ -d ~/auto/PhD/.git ]] || git clone -q git@github.com:Xiangyu-Research/PhD.git ~/auto/PhD
-    cron "bash $HOME/auto/PhD/scripts/monitor/auto_refresh.sh health" "5,35 * * * *"
-    cron "bash $HOME/auto/PhD/scripts/monitor/auto_refresh.sh registry" "30 8-20/2 * * *"
+roles=" $($M get . roles) " entry=$($C get entry)
+if [[ $roles == *" hub "* && -n $entry ]]; then  # 从只给 cron 用的克隆（这台的 repo）运行，只跑已提交的代码
+    H=$($M get . repo)
+    [[ -d $H/.git ]] || git clone -q "$($C get origin)" "$H"
+    while read -r line; do
+        [[ -n $line ]] && cron "bash $H/$entry ${line##* }" "${line% *}"
+    done <<< "$($C get cron)"
 fi
 $P status
