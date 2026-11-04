@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑原来的测试。
+"""relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑 test_dicc_worker*.sh 的几个情况。
 包从工作区建（commit=None），根目录换成临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 只有 scripts）。
     python3 scripts/taskq/queue/test_relay_bundle.py
 """
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -213,23 +214,45 @@ def test_pueue_site(T):
     ok("生成的 machines.py 带上 RELAY 里写的 task_vars（lab1），STAGE_TMP 按 stage_tmp")
 
 
+SMOKE = {"test_dicc_worker.sh": "1", "test_dicc_worker_stop.sh": "3 4b", "test_dicc_worker_code.sh": "6e"}
+
+
+def checks_in(text, ids):
+    """测试文件里 want <情况> 那几段的 check 个数。"""
+    blocks = dict(re.findall(r"^if want (\S+); then\n(.*?)^fi$", text, re.M | re.S))
+    assert set(ids.split()) <= set(blocks), ids
+    return sum(len(re.findall(r"^check ", blocks[i], re.M)) for i in ids.split())
+
+
 def test_dicc_worker_in_bundle(T):
-    """包里的 dicc_worker.sh、run_task.sh、taskq.py 跑原来的 test_dicc_worker.sh（环境换成本机的，好真激活）。"""
+    """包里的 dicc_worker.sh、run_task.sh、taskq.py 跑 test_dicc_worker*.sh 的几个情况（环境换成本机的，好真激活）：
+    两个位置领、训、交还（1），停止信号交还（3），CPU worker（4b），代码包换新（6e），够看出包里生成的 envs/、改过的路径、
+    taskq.py 的调用和代码包都能用；别的情况测的是 worker 本身的逻辑，和打不打包无关，单独跑那几个文件。三个文件同时跑。"""
     R = os.path.join(T, "R2")
     me = M.MACHINES[M.whoami()]
     _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=dict(conda=me["conda"], envs=me["envs"]))
     os.makedirs(os.path.join(R, "data"))
-    test = open(os.path.join(HERE, "test_dicc_worker.sh")).read()
-    assert "TASKQ_MACHINE=dicc " in test
-    dst = os.path.join(path, "scripts", "taskq", "queue", "test_in_bundle.sh")
     fx = 'source "$HERE/testdata/fixture.sh"'
-    assert fx in test
-    test = test.replace(fx, f'export TASKQ_CONFIG={shlex.quote(os.path.join(path, "envs"))} TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 envs/
-    with open(dst, "w") as f:
-        f.write(test.replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
-    r = run(["bash", dst], timeout=1800)
-    assert r.returncode == 0 and "全部通过" in r.stdout and not [ln for ln in r.stdout.splitlines() if ln.startswith("失败：")], r.stdout[-3000:] + r.stderr[-2000:]
-    ok(f"包里的 dicc_worker.sh 跑原来的 test_dicc_worker.sh：{r.stdout.count('通过：')} 项全部通过")
+    e = {k: v for k, v in os.environ.items()
+         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS", *cfg.LEGACY.values())}
+    procs = {}
+    for name, ids in SMOKE.items():
+        test = open(os.path.join(HERE, name)).read()
+        assert "TASKQ_MACHINE=dicc " in test and fx in test, name
+        test = test.replace(fx, f'export TASKQ_CONFIG={shlex.quote(os.path.join(path, "envs"))} TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 envs/
+        dst = os.path.join(path, "scripts", "taskq", "queue", "in_bundle_" + name)
+        with open(dst, "w") as f:
+            f.write(test.replace("TASKQ_MACHINE=dicc ", f"TASKQ_MACHINE={NAME} "))
+        p = subprocess.Popen(["bash", dst], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(e, WORKER_TEST_ONLY=ids))
+        procs[name] = (checks_in(test, ids), p)
+    total = 0
+    for name, (want, p) in procs.items():
+        out, err = p.communicate(timeout=900)
+        got = out.count("通过：")
+        assert p.returncode == 0 and "全部通过" in out and not [ln for ln in out.splitlines() if ln.startswith("失败：")] and got == want, \
+            f"{name}：{got}/{want}\n" + out[-3000:] + err[-2000:]
+        total += got
+    ok(f"包里的 dicc_worker.sh 跑 test_dicc_worker*.sh 的几个情况（{'，'.join(f'{n} {i}' for n, i in SMOKE.items())}）：{total} 项全部通过")
 
 
 def main():
