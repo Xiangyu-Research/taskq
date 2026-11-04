@@ -24,6 +24,7 @@ CLEAN = [
     "sites/test_e2e.py", "sites/test_envs.py", "sync/test_tunnel.py", "queue/test_archive_task.sh",
     "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py", "queue/test_relay_store.py",
     "monitor/overview.py", "monitor/test_overview.py", "queue/test_experiments_cli.py", "queue/check.py", "queue/test_check.py",
+    "queue/run_tests.py", "queue/test_example.py",
 ]
 # 后两组（11/4）：使用者的运行记录格式（runlog 的 .run.json）、nnU-Net 结果文件夹的布局（<训练器>__<plans>__<配置>）
 WORDS = re.compile(r"nnunet|nnU-?Net|BRAIN_TUMOR|\bfold|RQ[0-9]|Dataset[0-9]|trainer|research/|segment|lesion|tumou?r|\bMRI\b"
@@ -36,6 +37,9 @@ FIXED = sorted(os.path.relpath(os.path.join(d, f), ROOT) for d, ds, fs in os.wal
 if not FIXED:
     sys.exit(f"{FIXTURE} 下没有文件")
 CLEAN += FIXED
+# 示例项目（example/）整个查（11/4）
+CLEAN += sorted(os.path.relpath(os.path.join(d, f), ROOT) for d, ds, fs in os.walk(os.path.join(ROOT, "example"))
+                if "__pycache__" not in d for f in fs if not f.endswith(".pyc"))
 ALLOW = {f"{FIXTURE}/config/policy.py": '"trainer"', "sync/snapshot.sh": "、runlog 照常能用"}  # 后者只是说明 git 副本的用处
 
 bad = []
