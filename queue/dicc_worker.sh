@@ -32,7 +32,7 @@
 # 代码变了（仓库的提交号，或代码包的 current 换了）就不再领新的，手上的做完后换新代码包接着跑（同一个进程，停不下来的
 # 训练接着跟，11/1、11/4）；不是代码包的，退出由 box 用新代码重开（还有停不下来的训练时先等它）。
 # GPU 记录只看 CUDA_VISIBLE_DEVICES 那张卡（lab 另一张卡别人在用）。
-# TASKQ_* 环境变量只给测试用（scripts/taskq/queue/test_dicc_worker.sh）。
+# TASKQ_* 环境变量：proto.py 的 ENV（哪些是运行时用的、哪些只给测试）。
 set -uo pipefail
 unset _envs
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

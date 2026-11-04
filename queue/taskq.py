@@ -1056,7 +1056,7 @@ def main(argv):
     p.add_argument("--json", action="store_true")
     p.add_argument("key")
     p = sub.add_parser("status")
-    p.add_argument("--json", action="store_true", help="@@JSON 一行：{version, enabled, tasks, …}（proto.STATUS_TOP、STATUS_FIELDS；跨版本用，11/4）")
+    p.add_argument("--json", action="store_true", help="一行 JSON（前缀 proto.JSON_MARK）：{version, enabled, tasks, …}（proto.STATUS_TOP、STATUS_FIELDS；跨版本用，11/4）")
     a = ap.parse_args(argv)
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,

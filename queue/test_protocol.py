@@ -68,8 +68,9 @@ LITERALS = {
     ".infer_done": r"\.infer_done",
     "ARCHIVED": r"""['"]ARCHIVED['"]""",
     "code/current": r"code/current",
-    "stopped/": r"""stopped/|['"]stopped['"]""",
-    "claims/": r"""claims/|['"]claims['"]""",
+    # 目录名：拼路径时手写的（Q["claims"] 这种查表、任务状态的取值 "stopped" 不算）
+    "stopped/": r"""stopped/|/stopped\b|join\([^)]*(?<!\[)['"]stopped['"]""",
+    "claims/": r"""claims/|/claims\b|join\([^)]*(?<!\[)['"]claims['"]""",
 }
 # 迁移还没做完的地方：(文件相对 CORE, 名字)。只减不加
 KNOWN = set()

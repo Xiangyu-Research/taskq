@@ -14,7 +14,7 @@
   - 同一个任务两处：同一个任务在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
   - 执行机（relay.py 管的）的问题由 relay.py 报（经 feed.run_all）。
   - 盘：表里 disk 一项（lab /mnt/disk1 剩不到 40 GB 提醒、15 GB 紧急；box 数据盘剩不到 100 GB）。
-  - GPU 使用记录（表里 gpu_log 的机器，scripts/monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
+  - GPU 使用记录（表里 gpu_log 的机器，monitor/gpu_log.sh）10 分钟没有新记录；别的机器上的代码 2 小时没快进到 main（auto_refresh.sh 写的 heads.tsv）。
   - pueue 机器 24 小时内重启过（scripts/taskq/queue/on_boot.sh 放回了哪些任务）；看板有结果等确认后发布（publish.py --auto 留下的）。
 提醒（10/21 起）：每个问题推送一次，用 scripts/taskq/monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，看每 2 小时的进度推送（report.py）。
@@ -130,7 +130,7 @@ def probe_script(m):
     if m["disk"]:
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
-        lines.append('echo "GPULOG|$(tail -1 ~/gpu_usage/gpu_$(date +%Y-%m).csv 2>/dev/null | cut -d, -f1)"')
+        lines.append(f'echo "GPULOG|$(tail -1 {proto.GPU_LOG_DIR}/$(date +{proto.GPU_LOG_FILE}) 2>/dev/null | cut -d, -f1)"')
     return "\n".join(lines) + "\n"
 
 
