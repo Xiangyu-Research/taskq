@@ -54,12 +54,29 @@ plugins = ["research/common/taskq_plugins"]  # 插件文件夹
 | `taskq path lib\|api\|core` | 核心的 `queue/`（插件 `import taskq_api` 用）、核心的根 | — |
 | `taskq machines …` | 机器表 | `envs/machines.py` 的命令行 |
 | `taskq self update\|version`、`taskq --version` | 更新、版本（`VERSION` 文件，没有时 `git describe`） | — |
+| `taskq self test [-j N] [--out 目录] [--gpu] [文件或模式…]` | 跑核心的全部测试（见下面的"测试"） | — |
 | **底层**（不在 `taskq --help` 的首页，参数和退出码冻结） | | |
 | `taskq worker next\|beat\|release\|missing …` | worker 领任务、心跳、交还、缺输入 | `taskq.py next\|beat\|release\|missing` |
 | `taskq spec shell\|done\|resolve\|lookup\|outputs\|collect …` | 任务说明 | `spec.py` |
 | `taskq internal stage\|fetch <名字> <key>` | 调度自己排的传数据、拉回 | `relay.py stage\|fetch` |
 
 `taskq help <命令>` 同 `taskq <命令> --help`。原来的脚本路径和参数照旧能用（在跑的作业、旧代码包还在调用）。
+
+## 测试
+
+```bash
+taskq self test -j 4              # 全部：每个文件有自己的临时 HOME 和 TMPDIR，同时跑 4 个，上次慢的先跑
+taskq self test relay e2e         # 只跑路径里有这些字的（也可以写文件名、通配）
+taskq self test -l                # 只列出会跑哪些
+```
+
+跑的是 `queue/`、`sites/`、`sync/`、`monitor/` 下的 `test_*.py`、`test_*.sh`（`queue/run_tests.py`），用测试自己的固定配置（`queue/testdata/`），不读项目。结果表打在标准输出，同时写 `~/.cache/taskq/test/report.tsv`（`--out` 改位置），每个文件的输出在同一个文件夹的 `log_*.txt`；都通过（或跳过）退出码 0，否则 1。开头写了 `# 要真卡` 的（`test_gpu_pad_integration.sh`）只在 `--gpu` 时跑；测试缺东西时自己退出 77、打一行"跳过：原因"（`sites/test_e2e.py` 要 pueue 和带 numpy 的 Python），算跳过。每个文件最多跑 900 秒（`--timeout`）。
+
+GitHub 上每次推送跑 `.github/workflows/test.yml`：Python 3.12、装 numpy、pyyaml 和 pueue（`queue/install_pueue.sh`），跑 `taskq self test`，再核对示例项目。
+
+## 示例项目
+
+[`example/`](example/)：一个最小的项目（机器表、`policy.py`、一个插件、实验表），执行机的主机名是假的。`taskq --project example check`、`status`、`plan` 等不用连别的机器，说明见 [`example/README.md`](example/README.md)。
 
 ## 约定
 

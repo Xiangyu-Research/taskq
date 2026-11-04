@@ -1,0 +1,35 @@
+# 核心的全部测试（taskq self test，要真卡的跳过）和示例项目的核对（taskq --project example check）
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 依赖
+        run: |
+          python -m pip install numpy pyyaml
+          bash queue/install_pueue.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+      - name: 测试
+        run: python3 bin/taskq self test -j 4 --out "$RUNNER_TEMP/taskq-test"
+      - name: 示例项目
+        run: |
+          mkdir -p ~/taskq-example/data
+          python3 bin/taskq --project example check
+      - name: 测试日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskq-test-logs
+          path: ${{ runner.temp }}/taskq-test
