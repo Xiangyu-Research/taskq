@@ -185,8 +185,16 @@ def test_adopt_out():
     dirs = [ssrc, src]
     run = lambda: S.json_in(subprocess.run(
         [sys.executable, "-c", RM.ADOPT_OUT_PY, R], input=json.dumps(dict(srcs=dirs, out="a/frag_3", resume=["latest.ckpt", "final.ckpt"],
-                                                                         done=[["check/summary.json"], ["final.ckpt", "ARCHIVED"]])),
+                                                                         done=[["check/summary.json"], ["final.ckpt", "ARCHIVED"]],
+                                                                         claims=[ci, os.path.join(sib, "nope", "info")])),
         capture_output=True, text=True, cwd=_cfg.REPO, check=True).stdout)
+    ci = os.path.join(sib, "queue", "claims", "a__frag_3", "info")
+    os.makedirs(os.path.dirname(ci))
+    json.dump(dict(beat=time.time()), open(ci, "w"))
+    r = run()
+    assert r["busy"] == os.path.dirname(ci) and not r["n"] and not os.path.exists(os.path.join(R, "data", "a")), r
+    json.dump(dict(beat=time.time() - 120, ttl=60), open(ci, "w"))
+    ok("来源那台还领着（心跳没过期）→ 不拷，下次再来")
     r = run()
     assert r["n"] == 3 and r["src"] == src, r
     new = os.path.join(R, "data", "a", "frag_3")
@@ -426,9 +434,15 @@ def test_plan():
     assert [(a["op"], a["key"]) for a in more] == [("drop", K5), ("release", K5), ("take", K2)] and more[0]["rkey"] == K5, more
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "claimed", "1"), rtask(K5, "free")), st2, [])
     assert [(a["op"], a["key"]) for a in more] == [("take", K2)], more
+    for f in (dict(runs=[dict(epochs_done=300)]), dict(resumable=True, runs=[])):  # 作业到时限、worker 交还的训到一半的（11/4）
+        more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "free"), rtask(K5, "free"), tasks={K5: f}), st2, [])
+        assert [(a["op"], a["key"]) for a in more] == [("drop", K), ("release", K), ("take", K2)], more  # 换没有进度的那个
     relay.P.READY[NAME] = 1
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "claimed", "1"), rtask(K5, "free")), st2, [])
     assert [(a["op"], a["key"]) for a in more] == [("drop", K5), ("release", K5), ("take", K2)], more
+    more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME,
+                           RS(rtask(A, "claimed", "1"), rtask(K5, "free"), tasks={K5: dict(runs=[dict(epochs_done=300)])}), st2, [])
+    assert more == [], more
     relay.P.READY[NAME] = 2
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + late), NAME, RS(rtask(A, "free"), rtask(K5, "free")), st2, [])
     assert more == [] and "排着 2" in why, (more, why)
@@ -439,7 +453,7 @@ def test_plan():
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "waiting"), rtask(K5, "free", "9")), st2, [])
     assert more == [], more
     relay.PLANNED.clear()
-    ok("备满了、总队列里有更优先的：交还一个备好没人领的（先删那边、再交还）换它进来；在训的、有人领的、同档的不换，放不下不换")
+    ok("备满了、总队列里有更优先的：交还一个备好没人领的（先删那边、再交还）换它进来；在训的、有人领的、有进度的、同档的不换，放不下不换")
 
     def ctask(key, state="free", worker=None, nice=3):
         t = mtask(key, state, worker, nice=nice)
@@ -841,15 +855,17 @@ def test_adapters_in_relay():
 def test_fresh_site():
     """新机器第一次：连得上、根目录里还没有代码包（读状态失败）→ 先部署、再读状态；部署失败时这次当连不上。
     已有旧代码包、换新包失败（11/3：切换当天新路径对着旧包；推的时候出错、超时，或打包出错）→ 这次也当连不上，只续约。"""
-    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "deploy", "write_status", "plan", "fill", "topup", "log")}
+    keep = {k: getattr(relay, k) for k in ("remote_status", "current_bundle", "deploy", "write_status", "plan", "fill", "topup", "log")}
     keep_st = {k: getattr(ST, k) for k in ("update_state", "load_state")}
     build, auto = relay.RB.build, dict(relay.P.AUTO)
     try:
-        for fail, old in ((None, False), ("rt", False), ("rt", True), ("timeout", True), ("build", True)):
+        # cur：读不到状态时那边的 code/current（"" = 没有；"b0" = 旧包跑不了新的状态程序，11/4；"b1" = 已是新包；None = 连不上）
+        for fail, old, cur in ((None, False, ""), ("rt", False, ""), ("rt", True, ""), ("timeout", True, ""), ("build", True, ""),
+                               (None, False, "b0"), ("rt", False, "b0"), ("same", False, "b1"), ("down", False, None)):
             calls = []
             seq = [{"bundle": "b0", "jobs": [], "squeue": None}] if old else [None, {"bundle": "b1", "jobs": [], "squeue": None}]
             relay.remote_status = lambda n: seq.pop(0) if seq else None
-            relay.undeployed = lambda n: not old
+            relay.current_bundle = lambda n: calls.append(("cur",)) or cur
             def bld(n, c):
                 if fail == "build":
                     raise RuntimeError("打包出错")
@@ -875,8 +891,11 @@ def test_fresh_site():
                 relay.run_one(s, "lab0", False)
             except Exception:  # noqa: BLE001  后面的步骤不在这里测
                 pass
+            assert (("cur",) in calls) == (not old), calls
+            calls = [c for c in calls if c != ("cur",)]
             if fail:
                 assert ("plan", None) in calls and not any(c[0] == "status" for c in calls), (old, calls)
+                assert not any(c[0] == "deploy" for c in calls), calls
             else:
                 assert calls[:3] == [("deploy", "lab0", "b1"), ("status", "b1"), ("plan", "b1")], calls
     finally:
@@ -887,18 +906,19 @@ def test_fresh_site():
         relay.RB.build = build
         relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
     print("通过：新机器还没有代码包时先部署再读状态；部署失败（新机器或换新包）这次当连不上")
+    print("通过：读不到状态、那边是旧包（旧包跑不了新的状态程序）→ 试一次换包再读；已是新包、连不上 → 不部署，这次当连不上")
 
 
 def test_auto_off():
     """AUTO 关着（11/2）：不传、不重传、不让那边接着训、不领新的、不交作业；训完的照常拉回。"""
-    keep = {k: getattr(relay, k) for k in ("remote_status", "undeployed", "write_status", "plan", "fill", "topup", "log", "execute",
+    keep = {k: getattr(relay, k) for k in ("remote_status", "current_bundle", "write_status", "plan", "fill", "topup", "log", "execute",
                                            "submit")}
     keep_st = {k: getattr(ST, k) for k in ("update_state", "load_state")}
     auto = dict(relay.P.AUTO)
     try:
         ran = []
         relay.remote_status = lambda n: {"bundle": None, "free": 1e12}
-        relay.undeployed = lambda n: False
+        relay.current_bundle = lambda n: None
         relay.write_status = lambda n, rs, st: None
         ST.update_state = lambda fn: None
         ST.load_state = lambda: {}
@@ -1060,6 +1080,10 @@ def test_deploy_keeps_busy():
                 os.makedirs(os.path.join(r, "code", d, QR))
                 t = old if d in "ab" else time.time() - 3600 * (4 - i)
                 os.utime(os.path.join(r, "code", d), (t, t))
+            for d, t in (("a.tmp.1", old), ("a.tmp.1.tar", old), ("a.tmp.2", time.time())):  # 被打断的部署留下的
+                os.makedirs(os.path.join(r, "code", d)) if not d.endswith(".tar") else open(os.path.join(r, "code", d), "w").close()
+                os.utime(os.path.join(r, "code", d), (t, t))
+            want = want | {"a.tmp.2"}
             with open(sq, "w") as f:
                 f.write(f"#!/bin/bash\necho {r}/code/a/{QR}\n" if squeue == "busy" else "#!/bin/bash\nexit 1\n")
             os.chmod(sq, 0o755)
@@ -1069,7 +1093,7 @@ def test_deploy_keeps_busy():
     finally:
         M.RELAY[NAME] = c0
         os.path.exists(sq) and os.remove(sq)
-    ok("清理旧包：排着的作业的工作目录所在的包留着；squeue 读不到时不删；pueue 照旧")
+    ok("清理旧包：排着的作业的工作目录所在的包留着；squeue 读不到时不删；pueue 照旧；被打断的部署留下的临时文件 1 天后删")
 
 
 def test_deploy_safety():
@@ -1134,6 +1158,100 @@ def test_deploy_safety():
         os.environ["RELAY_SSH"] = FAKE
 
 
+def run_snip(code, root, data):
+    r = subprocess.run([sys.executable, "-c", code, root], input=json.dumps(data), capture_output=True, text=True, cwd=_cfg.REPO)
+    return r.returncode, S.json_in(r.stdout), r.stderr
+
+
+def test_adopt_cross_dev():
+    """收编：来源和块目录不在同一个盘（DICC：blobs 指到 /scr，数据在 home）→ 不读、不算 sha256，直接跳过（11/4）。"""
+    import hashlib
+    shm = "/dev/shm"
+    for blobs_elsewhere in (False, True):
+        R = tempfile.mkdtemp(dir=T, prefix="adx_")
+        if blobs_elsewhere:
+            if not os.path.isdir(shm) or os.stat(shm).st_dev == os.stat(R).st_dev:
+                print("跳过：没有另一个盘可用（/dev/shm）")
+                return
+            other = tempfile.mkdtemp(dir=shm, prefix="adx_")
+            os.symlink(other, os.path.join(R, "blobs"))
+        src = os.path.join(R, "data", "res", "ck.pth")
+        os.makedirs(os.path.dirname(src))
+        body = os.urandom(5000)
+        open(src, "wb").write(body)
+        h = hashlib.sha256(body).hexdigest()
+        if blobs_elsewhere:
+            os.chmod(src, 0)  # 读它就出错
+        try:
+            rc, got, err = run_snip(RM.ADOPT_PY, R, dict(srcs=[dict(path=os.path.join(R, "data"), site=False)], files={h: ["res/ck.pth", 5000]}))
+        finally:
+            os.chmod(src, 0o644)
+            if blobs_elsewhere:
+                shutil.rmtree(other)
+        assert rc == 0 and got == ([] if blobs_elsewhere else [h]), (blobs_elsewhere, rc, got, err)
+    ok("收编：同一个盘上的来源照常硬链接；块目录在别的盘时来源不读、不算 sha256，直接跳过")
+
+
+def test_view_missing_blob():
+    """建视图时缺块：什么都不放就退出，不留下 .incomplete，原来的视图不动（11/4）。"""
+    R = tempfile.mkdtemp(dir=T, prefix="vm_")
+    h = "ab" + "0" * 62
+    os.makedirs(os.path.join(R, "blobs", "ab"))
+    open(os.path.join(R, "blobs", "ab", h), "w").close()
+    links = {"prepared/D1/a.dat": h}
+    rc, n, err = run_snip(RM.VIEW_PY, R, dict(views=["prepared/D1"], links=links, texts={}))
+    assert rc == 0 and n == 1, (rc, n, err)
+    rc, n, err = run_snip(RM.VIEW_PY, R, dict(views=["prepared/D1"], links=dict(links, **{"prepared/D1/b.dat": "cd" + "0" * 62}),
+                                              texts={"prepared/D1/x.json": "e30="}))
+    d = os.path.join(R, "data", "prepared", "D1")
+    assert rc != 0 and "missing" in err, (rc, err)
+    assert sorted(os.listdir(d)) == ["a.dat"], os.listdir(d)
+    ok("建视图缺块：不放 .incomplete、不改原来的视图就退出（下次传数据重建）")
+
+
+def test_logs_exact():
+    """拉回、删任务时只认这个任务自己的分段日志：key a/b 不带上 a/b/c 的（11/4）。"""
+    R = tempfile.mkdtemp(dir=T, prefix="lg_")
+    L = os.path.join(R, "data", "logs", "tasks")
+    os.makedirs(L)
+    mine = ["X__tr__123_part1.log", "X__tr__w7e2837_part2.log", "X__tr__lab-202611041200_seg1.log"]
+    other = ["X__tr__0__123_part1.log", "X__tr__0__w7e2837_part1.log", "X__trx__1_part1.log"]
+    for f in mine + other:
+        open(os.path.join(L, f), "w").close()
+    os.makedirs(os.path.join(R, "data", "out", "X"))
+    rc, res, err = run_snip(RM.LIST_PY, R, dict(out="out/X", done=[], exclude=[], extra=[], outs=["out/X"], key="X/tr"))
+    assert rc == 0 and sorted(os.path.basename(i[0]) for i in res["items"]) == sorted(mine), (rc, res, err)
+    rc, n, err = run_snip(RM.DROP_PY, R, dict(paths=[], logs=S.safe("X/tr")))
+    assert rc == 0 and sorted(os.listdir(L)) == sorted(other), (rc, err, os.listdir(L))
+    ok("分段日志按 <key>__<作业>_part<段>.log 认：前缀相同、多一段的 key（a/b 和 a/b/c）的日志不拉、不删")
+
+
+def test_pin_refresh():
+    """传数据期间定时重写钉子（那边的清理只认 12 小时内的），传完撤掉（11/4）。"""
+    import threading
+    pins, rpy0, every0 = [], RM.rpy, RT.PIN_EVERY
+    keep = {k: getattr(RT, k) for k in ("lookup", "_stage")}
+    exp0, sha0 = RT.N.export, RT.ST.sha256s
+    done = threading.Event()
+    try:
+        RT.PIN_EVERY = 0.05
+        RM.rpy = lambda name, code, data=None, **kw: pins.append(data["hashes"]) if code == RM.PIN_PY else None
+        RT.lookup = lambda key: {}
+        RT.N.export = lambda real, D: dict(files=[("a/b.dat", "/x/b.dat")])
+        RT.ST.sha256s = lambda paths: {"/x/b.dat": "h1"}
+        RT._stage = lambda *a: (time.sleep(0.4), done.set(), "k")[2]
+        assert RT.stage(NAME, "k", 0) == "k"
+    finally:
+        RM.rpy, RT.PIN_EVERY, RT.N.export, RT.ST.sha256s = rpy0, every0, exp0, sha0
+        for k, v in keep.items():
+            setattr(RT, k, v)
+    assert done.is_set() and len(pins) >= 4 and all(p == ["h1"] for p in pins[:-1]) and pins[-1] is None, pins
+    n = len(pins)
+    time.sleep(0.2)
+    assert len(pins) == n, "传完以后不再写"
+    ok("传数据期间钉子定时重写，传完撤掉、不再写")
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_refcount()
@@ -1151,6 +1269,10 @@ if __name__ == "__main__":
     test_list_unreadable()
     test_deploy_keeps_busy()
     test_deploy_safety()
+    test_adopt_cross_dev()
+    test_view_missing_blob()
+    test_logs_exact()
+    test_pin_refresh()
     shutil.rmtree(T)
     shutil.rmtree(STATE_DIR)
     print("全部通过")

@@ -37,7 +37,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 在哪 | 是什么 | 作用 |
 |---|---|---|
 | `envs/policy.py` `AUTO["advance"]` | True / False | 训完以后的步骤真的排；False 时只把"会排什么"写进 box `~/advance.log` |
-| `envs/policy.py` `READY` | 执行机 → 个数 | 备几个没人领的训练（`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领的一个交还换它（每次检查一个，11/2） |
+| `envs/policy.py` `READY` | 执行机 → 个数 | 备几个没人领的训练（`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领、没有进度的一个交还换它（每次检查一个，11/2；有存档的不换，11/4） |
 | `envs/policy.py` `AUTO["dicc2"]`、`AUTO["lab1"]`、`AUTO["lab0"]`、`AUTO["dicc1"]` | True / False | relay 执行机（DICC2、lab 的两张卡、我的 DICC 账号）：领新的任务、补交作业 / 开 worker；False 时只记进 box `~/relay.log`，已领的任务照常推进（见下面"执行机"） |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
 | `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
@@ -149,12 +149,12 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 - **路径的引用计数**（11/1）：`state.json` 每个任务记下它放的视图、输入和产出（`outs`）。删一个任务时只删别的记录不用的路径（`relay.droppable`），如 lab1 训完的模型正被推理引用就留着；一个任务的输入和同一台上没做完的任务的产出重叠时不传（`check_overlap`）。记录带 `redo` 的，下次检查先删掉那边的任务和路径（那边在跑就先停），再按现在的做法重新传。
 
-- **代码包**（`relay_bundle.py`，11/4 起只装执行机要用的、只按内容命名）：origin/main 里执行机要用的调度文件（`relay_bundle.py` 的 `RUNTIME`：worker、`run_task.sh`、`taskq.py`、`spec.py`、做法和实验表的读法等）加 `envs/policy.py` 的 `OUTPUTS["bundle"]`（`envs/`、`research/`、旧路径的两个转交）下的代码，减去 `OUTPUTS["bundle_skip"]`（测试、`testdata/`、box 才用的 `make_registry.py`、`relay_plugins.py`）（`.py .sh .R .sbatch`，1 MB 以内的 `.json .csv .txt .yaml .yml`），生成只有这一台机器的 `envs/machines.py`、`envs/policy.py`，Slurm 类按 `jobs` 生成 `worker.sbatch`（gpu）、`cpu_worker.sbatch`（cpu）；所有 `.py` 用两个 Python 编译、`.sh` 过 `bash -n`，有像钥匙的内容（私钥、常见 token）就不发。资源（30 核、60G，`envs/machines.py` 的 `sbatch`）和 DICC 的分开（10/30 DICC 管理员要求）；sbatch 里不写作业名。包名 = 内容哈希前 16 位（不带提交号；哪个提交建的记在 box 上 relay 状态的 `bundle_for`），其余文件内容原样（11/1 起不改名），只有生成的 `machines.py` 去掉开头的说明和整行注释；只改 box 的脚本、说明、测试时四台不换包。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
+- **代码包**（`relay_bundle.py`，11/4 起只装执行机要用的、只按内容命名）：origin/main 里执行机要用的调度文件（`relay_bundle.py` 的 `RUNTIME`：worker、`run_task.sh`、`taskq.py`、`spec.py`、做法和实验表的读法等）加 `envs/policy.py` 的 `OUTPUTS["bundle"]`（`envs/`、`research/`、旧路径的两个转交）下的代码，减去 `OUTPUTS["bundle_skip"]`（测试、`testdata/`、box 才用的 `make_registry.py`、`relay_plugins.py`）（`.py .sh .R .sbatch`，1 MB 以内的 `.json .csv .txt .yaml .yml`），生成只有这一台机器的 `envs/machines.py`、`envs/policy.py`，Slurm 类按 `jobs` 生成 `worker.sbatch`（gpu）、`cpu_worker.sbatch`（cpu）；所有 `.py` 用两个 Python 编译、`.sh` 过 `bash -n`，有像钥匙的内容（私钥、常见 token）就不发。资源（30 核、60G，`envs/machines.py` 的 `sbatch`）和 DICC 的分开（10/30 DICC 管理员要求）；sbatch 里不写作业名。包名 = 内容哈希前 16 位（不带提交号；哪个提交建的记在 box 上 relay 状态的 `bundle_for`），其余文件内容原样（11/1 起不改名），只有生成的 `machines.py` 去掉开头的说明和整行注释；只改 box 的脚本、说明、测试时四台不换包。读不到状态、但那边的 `code/current` 和这边要推的包不同时也推一次再读（改了状态程序后旧包可能跑不了它，11/4）；部署被打断留下的 `<包名>.tmp.*` 1 天后由下次部署删。要读仓库里病例子集的训练器（`SPLITS_DIR`：`n470`、`frac`）不领给它。
 - **任务说明在 box 上解析好**（11/4）：`relay_transfer._stage` 把 `spec.resolve` 的结果（去掉 `machines`、`after`、`names`、`exp`，`{data}`、`{repo}` 留给那边展开）经 `taskq.py add --spec-stdin` 放进那边的队列；记录里 `recipe`、`params` 也留着（还在跑旧包的 Slurm worker 照旧能领）。那边 `next` 对带说明的记录给 `run_task.sh --spec <JSON>`，`spec.py` 不再查做法和插件。做法改了以后 `relay.py resend <名字>` 把传过去的任务按现在的做法重新解析、换掉那边的说明（`--update-only`，不加新任务）。拉回、收编存档用的输出（`done`、`exclude`、`extra`）也由 box 按 `spec.outputs` 算好发过去。
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据目录里是指向 blob 的软链接，路径和 box 一样，文件内容不改；要哪些文件由做法的 `relay` 插件列（`scripts/taskq/sites/names.py`、`relay_plugins.py`；nnU-Net 的在 `research/common/taskq_plugins/relay_plugins.py`）。拉回时插件核对（训练：`validation/` 的病例和这个任务的划分一致；推理：各测试集病例齐、checkpoint 的 sha256 和 box 上的一样），对不上不收、报出来。
 - **传输**：都经隧道（`scripts/taskq/sync/tunnel.py`），在哪里收发和 DICC 一样（10/30 定）：往那边传 1 GB 以上的先交 CPU 作业，10 分钟排不上就在登录节点下载；拉回在登录节点上传。地址用每次新开的临时 trycloudflare 地址（box 上的 cloudflared 容器，`envs/machines.py` hub 的 `quick`、`RELAY` 的 `quick_tunnel`），不用 box 的固定地址（10/30 定）。
 - **个数**：`envs/policy.py` 的 `READY[名字]`（那边每种 worker 备好、等领的任务数）、`SLURM["dicc2"]`（`gpu`：QOS 和时限）。
-- **盘**：有 `budget` 的（lab1、lab0，同一个盘）剩不到软线时由 `relay_store.py` 的 `gc` 清理：先删总队列不再要的视图，再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。
+- **盘**：有 `budget` 的剩不到软线时由 `relay_store.py` 的 `gc` 清理：先删总队列不再要的视图（和建视图拿同一把锁 `R/state/view.lock`），再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。`R/blobs` 是指到别的盘的软链接时（DICC 的 `/scr`，11/4）照样清理，只删 `blobs/<前两位>/` 下的块文件，不跟随别的链接。传数据期间钉住要传的块（`R/state/pins/`），每小时重写一次，传完撤掉；清理只认 12 小时内写过的。收编只认和块目录同一个盘的文件（跨盘不能硬链接，不读、不算 sha256）。别的执行机里训到一半的存档，那台的队列里还领着这个任务（心跳没过期）时不拷，下次检查再来（存档可能写到一半，11/4）。
 - **状态**：box `~/.cache/phd/relay/state.json`（领着的任务）、`status.json`（那边各任务进度，登记表显示成 DICC2）、日志 `~/relay.log`。
 - **手动**：`python3 scripts/taskq/queue/relay.py stage dicc2 <key> --nice N --no-add`（只传数据，不领）；`relay.py status dicc2`；`relay.py bundle dicc2`。
 
@@ -200,7 +200,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **任务记录**（10/25）：box、lab 的 pueue 任务是哪一步、哪个 key 只看 box 的 `~/.cache/phd/tasks.json`（`scripts/taskq/queue/common.py`）。每条 `{machine, id, label, added, step, key}`，按步骤另有 `group`、`needs`。`relay.py`、`advance.py` 加任务前先写记录（`id` 为空）、加上后补任务号；没拿到任务号的，健康检查按"同一台机器、同标签、创建时间不早于记录"找回，一小时找不到就作废。任务号和标签都对上才算同一个任务（任务号会被重用）；任务删掉后记录跟着删；读不到的机器的记录不动。没有记录的（手动加的）只按命令认训练（`run_task.sh`）。
 - **能放到别处的步骤**：命令里有 `--stage <步骤>`，换成 `--stage needs` 时只打印要用的输入（相对数据目录，每行一个），或者步骤的 `queue` 里写了 `inputs`；结果在 `done` 判断的文件所在的文件夹里。
 - **key** 由做法给，nnU-Net 是 `<数据集>/<训练器>/<fold>`（如 `Dataset111_MENrq1/nnUNetTrainer_save10_n470/0`）。**训完** = 任务说明的 `done` 都在（nnU-Net：`validation/summary.json`，和 `checkpoint_final.pth` 或归档后的 `ARCHIVED`）。
-- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_part<段>.log`（段号 `TASK_PART`；10/31 前的叫 `_seg<段>.log`，读日志的地方两种都认），第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前的按任务说明的 `oldlogs`：`dir` 下以 `prefix` 开头的，登记表、归档两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
+- **分段日志**：`<数据目录>/logs/tasks/<key 的文件名>__<作业>_part<段>.log`（段号 `TASK_PART`；10/31 前的叫 `_seg<段>.log`，读日志的地方两种都认；执行机拉回、删任务时只认 `<key 的文件名>__` 后面不再有 `__` 的，key `a/b` 不带上 `a/b/c` 的，11/4），第一行 `作业 <作业>_<段> @ <机器>，任务=<key>，第 <段> 段，环境 <环境>，代码 <版本>，<时间>`（10/18 前的按任务说明的 `oldlogs`：`dir` 下以 `prefix` 开头的，登记表、归档两种都认）。worker 自己的日志在 `<数据目录>/logs/workers/`。
 
 ## 常用命令
 

@@ -145,14 +145,19 @@ def sha(p):
         for b in iter(lambda:f.read(1<<22),b''):
             x.update(b)
     return x.hexdigest()
+B=os.path.join(R,'blobs')
+bdev=os.stat(B if os.path.isdir(B) else R).st_dev
 got=[]
 for h,(rel,size) in A['files'].items():
-    t=os.path.join(R,'blobs',h[:2],h)
+    t=os.path.join(B,h[:2],h)
     for s in A['srcs']:
         base=os.path.expanduser(s['path'])
         p=os.path.join(base,'blobs',h[:2],h) if s.get('site') else (os.path.join(base,rel) if rel else None)
         try:
-            if not p or os.path.getsize(p)!=size:
+            if not p:
+                continue
+            x=os.stat(p)
+            if x.st_size!=size or x.st_dev!=bdev:
                 continue
         except OSError:
             continue
@@ -182,6 +187,9 @@ def rel_ok(r):
 views=[rel_ok(v) for v in A['views']]
 if any(len(v.split('/'))<2 for v in views):
     sys.exit('bad views '+repr(views))
+for h in A['links'].values():
+    if not os.path.isfile(os.path.join(R,'blobs',h[:2],h)):
+        sys.exit('missing '+h)
 incs=[]
 for v in views:
     d=os.path.join(D,v)
@@ -245,8 +253,10 @@ for o in A['outs']:
 for x in A['extra']:
     for p in glob.glob(os.path.join(os.path.dirname(os.path.join(D,A['outs'][0])),x)):
         add(p)
-for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(spec.safe(A['key']))+'__*')):
-    add(p)
+pre=spec.safe(A['key'])+spec.SAFE
+for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(pre)+'*')):
+    if spec.SAFE not in os.path.basename(p)[len(pre):]:
+        add(p)
 def have(p):
     try:
         os.stat(p)
@@ -279,15 +289,25 @@ for rel in A['paths']:
         except OSError:
             break
         d=os.path.dirname(d)
-for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(A['logs'])+'__*')):
-    os.remove(p)
+pre=A['logs']+spec.SAFE
+for p in glob.glob(os.path.join(D,'logs','tasks',glob.escape(pre)+'*')):
+    if spec.SAFE not in os.path.basename(p)[len(pre):]:
+        os.remove(p)
 spec.json_out(n)
 """
 
 STATES_PY = HEAD + "import taskq\nspec.json_out({t['key']:t['state'] for t in taskq.local_status()['tasks']})\n"
 
 
-ADOPT_OUT_PY = HEAD + """import glob,shutil
+ADOPT_OUT_PY = HEAD + """import glob,shutil,time
+for c in A.get('claims') or []:
+    try:
+        ci=json.load(open(os.path.expanduser(c)))
+    except (OSError,ValueError):
+        continue
+    if time.time()-(ci.get('beat') or 0)<(ci.get('ttl') or 1200):
+        spec.json_out(dict(n=0,src=None,busy=os.path.dirname(c)))
+        sys.exit()
 new=os.path.join(R,'data',A['out'])
 def mt(d):
     ts=[os.path.getmtime(p) for g in A['resume'] for p in glob.glob(os.path.join(glob.escape(d),g)) if os.path.isfile(p)]
@@ -321,16 +341,20 @@ def adopt_srcs(name):
 
 
 # 清理（relay_store.gc 发过去跑）
-GC_PY = """import json,os,shutil,stat,sys
+GC_PY = """import fcntl,json,os,shutil,stat,sys
 """ + PATHS + """import spec
 R=os.path.realpath(sys.argv[1])
 A=json.load(sys.stdin)
 soft=int(A['soft_gb']*1e9)
 D=os.path.join(R,'data')
 B=os.path.join(R,'blobs')
+BR=os.path.realpath(B)
 def inside(p,base):
     p=os.path.realpath(p)
     return p==base or p.startswith(base.rstrip('/')+'/')
+def blob(dp,f):
+    return len(f)>2 and os.path.normpath(dp)==os.path.join(B,f[:2])
+blobs_ok=os.path.isdir(B) and (inside(B,R) or os.path.islink(B) and not inside(R,BR))
 free0=A['free'] if A.get('free') is not None else shutil.disk_usage(R).free
 out=dict(freed=0,removed_views=[],removed_blobs=0,free=free0)
 def free():
@@ -356,6 +380,9 @@ def rmtree(d):
                 os.rmdir(p)
     os.rmdir(d)
 if free()<soft:
+    os.makedirs(os.path.join(R,'state'),exist_ok=True)
+    L=open(os.path.join(R,'state','view.lock'),'w')
+    fcntl.flock(L,fcntl.LOCK_EX)
     keep={os.path.normpath(k) for k in A.get('keep') or []}
     cand=set()
     for v in A.get('views') or []:
@@ -377,6 +404,7 @@ if free()<soft:
             continue
         rmtree(d)
         out['removed_views'].append(rel)
+    L.close()
 import time
 PD=os.path.join(R,'state','pins')
 def pins():
@@ -399,7 +427,7 @@ def skip(p,f):
         except OSError:
             return True
     return False
-if free()<soft and os.path.isdir(B) and inside(B,R):
+if free()<soft and blobs_ok:
     used=set()
     for dp,dns,fns in os.walk(D):
         for f in fns+dns:
@@ -410,7 +438,7 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
     for dp,_,fns in os.walk(B):
         for f in fns:
             p=os.path.normpath(os.path.join(dp,f))
-            if os.path.realpath(p) in used or os.path.islink(p) or skip(p,f):
+            if not blob(dp,f) or os.path.realpath(p) in used or os.path.islink(p) or skip(p,f):
                 continue
             try:
                 st=os.lstat(p)
@@ -422,7 +450,7 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
     for _,p,sz in sorted(cand):
         if free()>=soft:
             break
-        if not inside(p,B) or os.path.basename(p) in pins():
+        if not inside(p,BR) or os.path.basename(p) in pins():
             continue
         try:
             os.remove(p)
@@ -430,12 +458,12 @@ if free()<soft and os.path.isdir(B) and inside(B,R):
             continue
         out['freed']+=sz
         out['removed_blobs']+=1
-if free()<soft and os.path.isdir(B) and inside(B,R):
+if free()<soft and blobs_ok:
     sib=[os.path.join(os.path.realpath(os.path.expanduser(x)),'blobs') for x in A.get('siblings') or []]
     for dp,_,fns in os.walk(B):
         for f in fns:
             p=os.path.normpath(os.path.join(dp,f))
-            if os.path.realpath(p) in used or os.path.islink(p) or not inside(p,B) or skip(p,f):
+            if not blob(dp,f) or os.path.realpath(p) in used or os.path.islink(p) or not inside(p,BR) or skip(p,f):
                 continue
             try:
                 st=os.lstat(p)

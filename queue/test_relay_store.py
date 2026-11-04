@@ -195,6 +195,46 @@ def main():
         assert os.path.isdir(os.path.join(D, "prepared/ds_keep")), r
         ok("keep 是视图下面一层或上面一层：那个视图也不删")
 
+        # DICC（11/4）：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
+        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        scr = tempfile.mkdtemp(dir=tmp)
+        os.rmdir(scr)
+        os.rename(os.path.join(R, "blobs"), scr)
+        os.symlink(scr, os.path.join(R, "blobs"))
+        os.makedirs(os.path.join(R, "state", "pins"))
+        with open(os.path.join(R, "state", "pins", "t__a.json"), "w") as f:
+            json.dump(["ee1"], f)
+        os.remove(os.path.join(R, "data", "results", "ds_keep", "frag_0", "uses_ee1"))
+        stray = [os.path.join(scr, "notes.txt"), os.path.join(scr, "dd", "x1"), os.path.join(scr, "dd", "sub", "dd2")]
+        for p_ in stray:
+            os.makedirs(os.path.dirname(p_), exist_ok=True)
+            open(p_, "wb").write(b"z" * 100)
+            os.utime(p_, (1, 1))
+        os.symlink(outside, os.path.join(scr, "dd", "dd9"))
+        r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
+        assert not exists(R, "dd1") and not exists(R, "bb1") and r["removed_blobs"] == 2, r
+        assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1"), r
+        assert all(os.path.exists(p_) for p_ in stray) and os.path.getsize(outside) == 500, r
+        ok("块目录是指到别的盘的软链接：照常删没人用、没钉住的块；在用的、钉住的、硬链接的、不按哈希放的、链接的目标不碰")
+
+        # 删视图和建视图（VIEW_PY）拿同一把锁（11/4）
+        import fcntl
+        import time
+        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        os.makedirs(os.path.join(R, "state"))
+        lk = open(os.path.join(R, "state", "view.lock"), "w")
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        p = subprocess.Popen([sys.executable, "-c", G.RM.GC_PY, R], cwd=REPO, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        p.stdin.write(json.dumps(dict(soft_gb=1e-6, keep=keep, free=0, views=[], scan=["prepared"], siblings=[])))
+        p.stdin.close()
+        time.sleep(1)
+        held = p.poll() is None and os.path.isdir(os.path.join(R, "data", "prepared", "ds_old"))
+        fcntl.flock(lk, fcntl.LOCK_UN)
+        lk.close()
+        p.wait(timeout=60)
+        assert held and p.returncode == 0 and not os.path.exists(os.path.join(R, "data", "prepared", "ds_old")), held
+        ok("清理删视图时等建视图的锁（view.lock）")
+
         b0, G.budget = G.budget, lambda n: None
         try:
             assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None

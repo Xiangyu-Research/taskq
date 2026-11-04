@@ -79,7 +79,7 @@ LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就�
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传完、还没加进队列或刚交还）
 STATUS_S = 90  # 读状态的超时：那边的存储挂住时跳过这台，不等
-NOSLOT_RC = 75  # relay.py stage 这次排不上 CPU 作业的退出码：下次检查再传，不报
+NOSLOT_RC = 75  # relay.py stage 这次排不上 CPU 作业（或存档的来源那边还领着）的退出码：下次检查再传，不报
 NOSLOT_ALERT_S = 3 * 3600  # 领了这么久还一直排不上就报
 PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记：同一个盘上的几台合起来算
 
@@ -109,12 +109,14 @@ def remote_status(name):
     return parse_sched(name, rs)
 
 
-def undeployed(name):
-    """连得上、但根目录里还没有代码包（新机器第一次）→ True：先部署，再读状态。"""
+def current_bundle(name):
+    """读不到状态时看那边的 code/current → 包名；还没有代码包（新机器第一次）→ ""；连不上 → None。"""
     c = RM.conf(name)
     if c.get("ssh_master") and subprocess.run(RM.ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
-        return False
-    return RM.rsh(name, f"test -e {R.q(RM.root(name))}/code/current", timeout=30)[0] == 1
+        return None
+    cur = f"{R.q(RM.root(name))}/code/current"
+    rc, out, _ = RM.rsh(name, f'if [ -e {cur} ]; then basename "$(readlink -f {cur})"; fi', timeout=30)
+    return out.strip() if rc == 0 else None
 
 
 def parse_sched(name, rs):
@@ -133,7 +135,7 @@ def parse_sched(name, rs):
 def deploy(name, bid, path):
     """把包推过去、切换 current（原子的 mv -T）；第一次时建目录、开队列。
     整份收下、sha256 对上才解开（ssh 断在两个文件之间时 tar 不报错）；同一台同时只推一个（flock），临时目录各用各的。
-    清理旧包时留下刚切过去的、排着和在跑的作业还在用的（适配器的 busy_cmd），读不到就不清理。"""
+    清理旧包时留下刚切过去的、排着和在跑的作业还在用的（适配器的 busy_cmd），读不到就不清理；被打断的部署留下的临时文件 1 天后删。"""
     r = R.q(RM.root(name))
     b = shlex.quote(bid)
     tar = subprocess.run(["tar", "-C", path, "-cf", "-", "."], capture_output=True, check=True).stdout
@@ -142,6 +144,7 @@ def deploy(name, bid, path):
     cmd = (f"set -e; R={r}; mkdir -p $R/code $R/queue $R/blobs $R/tmp $R/state $R/data/logs/tasks $R/data/logs/workers; "
            f"[ -e $R/queue/tasks.jsonl ] || {{ : > $R/queue/tasks.jsonl; touch $R/queue/ENABLED; }}; cd $R/code; "
            "exec 9> $R/state/deploy.lock; flock -w 300 9; "
+           "find . -maxdepth 1 -name '*.tmp.*' -mtime +0 -exec rm -rf {} + || true; "  # 以前被打断的部署留下的（锁里没有别的在推）
            f"t={b}.tmp.$$; rm -rf $t $t.tar; cat > $t.tar; "
            f"if [ \"$(sha256sum < $t.tar | cut -d' ' -f1)\" != {sha} ]; then rm -f $t.tar; echo '代码包没传完整' >&2; exit 3; fi; "
            f"if [ ! -d {b} ]; then mkdir $t; tar -xf $t.tar -C $t; mv -T $t {b}; fi; rm -f $t.tar; "
@@ -262,7 +265,7 @@ def plan(s, name, rs, st, now=None):
             if sg is None or sg["status"] == "Success" or noslot:
                 acts.append(dict(op="stage", key=key, nice=t["nice"]))
                 if noslot and now - since > NOSLOT_ALERT_S:
-                    stuck[f"site:{name}:stage"] = (f"{L} 的 CPU 作业 {(now - since) / 3600:.0f} 小时都排不上，{key} 的数据传不过去"
+                    stuck[f"site:{name}:stage"] = (f"{L} 的 {key} {(now - since) / 3600:.0f} 小时都没传过去（CPU 作业排不上，或存档的来源那边还领着）"
                                                    f"（box 任务 {sg['id']}，每次检查再试）")
             elif sg["status"] not in LIVE:
                 stuck[f"relaystage:{key}"] = (f"给 {L} 传 {key} 的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
@@ -350,9 +353,9 @@ def fill(s, name, rs, st, acts):
         a = remote(t)
         return a is None or a["state"] in ("free", "stale", "waiting", "stopped", "input")
 
-    def idle(t):  # 那边备好了、没人领：可以让给更优先的任务（11/2）
+    def idle(t):  # 那边备好了、没人领、没有进度：可以让给更优先的任务（11/2；有存档的不让，11/4）
         a = remote(t)
-        return a is not None and a["state"] == "free" and not a.get("worker")
+        return a is not None and a["state"] == "free" and not a.get("worker") and not progress((rs.get("tasks") or {}).get(t["key"]))
 
     def kind(t):
         return refill.info(mtq, t["key"])["spec"].get("device", "gpu")
@@ -620,13 +623,15 @@ def run_one(s, name, dry):
         return [], {}
     rs = remote_status(name)
     notes = []
-    fresh = rs is None and not dry and (live or mine) and undeployed(name)
-    if fresh:
-        rs = {"bundle": None}
+    # 读不到状态、但连得上：还没有代码包（新机器），或那边的旧包跑不了这边新改的状态程序（11/4）→ 包不同时先部署，再读一次
+    cur = current_bundle(name) if rs is None and not dry and (live or mine) else None
+    ph = {"bundle": cur or None} if cur is not None else None
+    if ph is not None:
+        rs = ph
     if not dry and (live or mine) and rs is not None:
         try:
             commit = subprocess.run(["git", "-C", REPO, "rev-parse", BUNDLE_REF], capture_output=True, text=True).stdout.strip()
-            if fresh or rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
+            if cur == "" or rs.get("bundle") != st.get("bundle_for", {}).get(f"{name}:{commit}"):  # 每台的包不同（机器条目、开关）
                 bid, path = RB.build(name, commit or "origin/main")
                 ST.update_state(lambda x: x.setdefault("bundle_for", {}).update({f"{name}:{commit}": bid}))
                 if rs.get("bundle") != bid:
@@ -640,7 +645,7 @@ def run_one(s, name, dry):
         except Exception as e:  # noqa: BLE001
             notes.append(f"{L} 打包或推代码包出错：{e}")
             rs = None  # 同上：超时、打包出错时那边也还是旧包
-    if fresh and rs == {"bundle": None}:
+    if ph is not None and rs is ph:  # 没有部署（包相同）或部署后仍读不到
         rs = None
     if rs is not None and not dry:
         ST.update_state(lambda x: x.setdefault("last_ok", {}).update({name: time.time()}))

@@ -7,6 +7,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,8 @@ import relay_plugins as RN  # noqa: E402
 import names as N  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
+
+PIN_EVERY = 3600  # 传数据期间每隔这么久重写一次钉子（那边的清理只认 12 小时内的）
 
 
 def box_data():
@@ -43,10 +46,23 @@ def stage(name, key, nice=None, add=True, say=print):
     hs = ST.sha256s(sorted({p for _, p in ex["files"]}))
     links = {rel: hs[p] for rel, p in ex["files"]}
     pin = S.safe(key)
-    RM.rpy(name, RM.PIN_PY, dict(key=pin, hashes=sorted(set(links.values()))))  # 视图建好前那边的清理不删这些块（11/1）
+    want = dict(key=pin, hashes=sorted(set(links.values())))
+    RM.rpy(name, RM.PIN_PY, want)  # 视图建好前那边的清理不删这些块（11/1）；传得久时定时重写，钉子不过期（11/4）
+    stop = threading.Event()
+
+    def refresh():
+        while not stop.wait(PIN_EVERY):
+            try:
+                RM.rpy(name, RM.PIN_PY, want)
+            except Exception:  # noqa: BLE001
+                pass
+    th = threading.Thread(target=refresh, daemon=True)
+    th.start()
     try:
         return _stage(name, key, nice, add, say, real, D, ex, hs, links)
     finally:
+        stop.set()
+        th.join()
         try:
             RM.rpy(name, RM.PIN_PY, dict(key=pin, hashes=None))
         except RuntimeError as e:
@@ -117,10 +133,15 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
     say(f"那边的输入放好了（{n} 个文件，视图 {'、'.join(views) or '无'}）")
     if add and srcs and real.get("out") and real.get("resume"):  # 老数据目录、别的执行机里训到一半的存档（任务说明的 resume，最新的那份）拷过来，接着训
         dirs = [f"{x['path']}/data/{real['out']}" if x["site"] else f"{x['path']}/{real['out']}" for x in srcs]
+        claims = [f"{x['path']}/queue/claims/{S.safe(key)}/info" for x in srcs if x["site"]]  # 那台还领着（心跳没过期）：存档可能写到一半
         try:
-            r = RM.rpy(name, RM.ADOPT_OUT_PY, dict(srcs=dirs, out=real["out"], resume=real["resume"], done=S.outputs(real)["done"]), job=job)
+            r = RM.rpy(name, RM.ADOPT_OUT_PY, dict(srcs=dirs, out=real["out"], resume=real["resume"], done=S.outputs(real)["done"],
+                                                   claims=claims), job=job)
         except RM.NoSlot as e:
             say(f"{e}；这次不加进队列，下次检查再来")
+            return None
+        if r.get("busy"):
+            say(f"{r['busy']}：那边还领着 {key}，存档可能还在写；这次不加进队列，下次检查再来")
             return None
         if r["n"]:
             say(f"{r['src']} 的存档拷过来了（{r['n']} 个文件），接着训")
