@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+from proto import S_FREE, S_CLAIMED, UNCLAIMED  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
 sys.path.insert(0, HERE)
@@ -75,7 +76,7 @@ def candidates(s, name, tq, ready, oks=None, kinds=("gpu",)):
 
     def env_ok(sp):
         return bool(S.envs_of(sp)) and set(S.envs_of(sp)) <= envs
-    cands = [t for t in tq["tasks"] if t["state"] == "free" and not t.get("bad") and env_ok(info(tq, t["key"])["spec"])
+    cands = [t for t in tq["tasks"] if t["state"] == S_FREE and not t.get("bad") and env_ok(info(tq, t["key"])["spec"])
              and M.serves(name, info(tq, t["key"])["spec"].get("machines"))
              and info(tq, t["key"])["spec"].get("device", "gpu") in kinds
              and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
@@ -153,12 +154,12 @@ GPU_FILE, CPU_FILE = SL.FILES["gpu"], SL.FILES["cpu"]
 
 def unclaimed(tq, device):
     """队列里没人领（free / stale）、device 是这个的任务数。"""
-    return sum(1 for t in tq["tasks"] if t["state"] in ("free", "stale") and info(tq, t["key"])["spec"].get("device", "gpu") == device)
+    return sum(1 for t in tq["tasks"] if t["state"] in UNCLAIMED and info(tq, t["key"])["spec"].get("device", "gpu") == device)
 
 
 def training(tq):
     """队列里有人领着（在训）、要卡的任务数。"""
-    return sum(1 for t in tq["tasks"] if t["state"] == "claimed" and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu")
+    return sum(1 for t in tq["tasks"] if t["state"] == S_CLAIMED and info(tq, t["key"])["spec"].get("device", "gpu") == "gpu")
 
 
 def topup_plan(tq, counts, qos):

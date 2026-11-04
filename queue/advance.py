@@ -12,7 +12,8 @@
 
 在哪里做（每个任务的步骤、group_after 的步骤）：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有）就接着那边的；
 否则按 PLACE[步骤] 的顺序用第一个现在能用的（写法见 envs/policy.py），都用不了时写进 ~/advance.log。没写的步骤在 box 上：
-  box:<组>       box pueue 里排（标签 <步骤>:<实验 id>_f<fold>，实验一级的 <步骤>:<实验 id>）
+  box:<组>       hub（总队列所在的机器，不管它在机器表里叫什么；也可以写 hub:<组>）的 pueue 里排（标签 <步骤>:<实验 id>_f<fold>，
+                 实验一级的 <步骤>:<实验 id>）
   queue:<机器>   加进总队列（taskq.py add --recipe command，参数是步骤 queue 里的，machines = 这台，nice = queue 的 nice）。
                  执行机（envs/machines.py 的 RELAY）由 relay.py 领到后连同输入送过去，做完由 relay.py 拉回
   trainer        训这个任务的执行机：总队列里这个任务分给的那台（训完还没交还的也算），就当成 queue:<那台>（10/31）。
@@ -45,6 +46,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+import proto  # noqa: E402
+from proto import alert_id, S_CLAIMED, S_DONE, S_WAITING, S_FREE  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
@@ -74,10 +77,13 @@ def python(name=None):
 
 
 # ---------------- 在哪里做（envs/policy.py 的 PLACE） ----------------
+HUB_PLACES = ("box", "hub")  # PLACE 里 box:<组>（或 hub:<组>）= 总队列所在的机器（M.hub()，不管它叫什么）的 pueue 组（11/4）
+
+
 def targets(step, group):
-    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group)]；没写 → box 的这个组。写错了 → ValueError。"""
+    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group)]；没写 → hub 的这个组。写错了 → ValueError。"""
     out = []
-    for text in P.PLACE.get(step) or [f"{M.hub()}:{group}"]:
+    for text in P.PLACE.get(step) or [f"box:{group}"]:
         w = text.split()
         if len(w) != 1:
             raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的条件 {w[1:]}")
@@ -87,10 +93,10 @@ def targets(step, group):
             d["kind"] = "trainer"
         elif a == "queue" and (b == M.hub() or b in M.RELAY):
             d.update(kind="queue", machine=b)
-        elif a == M.hub() and b in M.MACHINES[a]["groups"]:
-            d.update(kind="box", machine=a, group=b)
+        elif (a in HUB_PLACES or a == M.hub()) and b in M.MACHINES[M.hub()]["groups"]:
+            d.update(kind="box", machine=M.hub(), group=b)
         else:
-            raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的地方（{M.hub()}:<组>、trainer、queue:<机器>）")
+            raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的地方（box:<组>、trainer、queue:<机器>）")
         out.append(d)
     return out
 
@@ -144,7 +150,7 @@ def plan(s, root=None):
     try:
         check_policy({st["name"] for e in E.load()[0] for st in e.get("after", []) + [x for c in e.get("group_after", []) for x in c]})
     except ValueError as e:
-        return [], {"advance:policy": f"{e}，这次什么都不排"}
+        return [], {alert_id("advance", "policy"): f"{e}，这次什么都不排"}
 
     live, done = set(), {}
     for t in ptasks:
@@ -171,7 +177,7 @@ def plan(s, root=None):
         if bad or ok_empty:
             t = bad[-1] if bad else prev[last_ok]
             why = f"任务 {t['id']} {t['status']}" if bad else f"任务 {t['id']} 成功跑完，但结果还是不全"
-            stuck[f"advance:{step}:{key}"] = (f"{step} {key}：{why}，不再自动重排（看 pueue log {t['id']}；处理好以后 "
+            stuck[alert_id("advance", step, key)] = (f"{step} {key}：{why}，不再自动重排（看 pueue log {t['id']}；处理好以后 "
                                               f"pueue remove {t['id']}，下一次检查会重排）")
             return
         todo.append(dict(step=step, key=key, group=group, label=label, cmd=cmd, nice=n))
@@ -219,7 +225,7 @@ def plan(s, root=None):
         return True
 
     tq_tasks = {x["key"]: x for x in queue_tasks}
-    relay_sites = {n for n in M.RELAY if n in P.READY}  # relay.py 替它领任务的执行机
+    relay_sites = set(M.RELAY)  # relay.py 替它领任务的执行机：RELAY 全部（READY 缺项按 1，和 relay.py 同一规则，11/4）
 
     def site_of(h):
         """训这个任务的机器 → 放后续步骤的执行机：不按时段的执行机就是它；按时段的（lab0，envs/policy.py 的 SHIFT）→ 同一台主机上
@@ -232,7 +238,7 @@ def plan(s, root=None):
     def assigned_to(key):
         """总队列里这个任务分给的机器；没分出去 → None。"""
         x = tq_tasks.get(key) or {}
-        if x.get("state") != "claimed":
+        if x.get("state") != S_CLAIMED:
             return None
         return x.get("assigned") or None
 
@@ -278,14 +284,14 @@ def plan(s, root=None):
         # 一起撤掉，分出去时按新的那台重排（11/2）。训练做完了（done）不撤：后续步骤正等着那边的 worker 领
         tx = tq_tasks.get(t["key"]) or {}
         gone, cut = [], False
-        for st in after if tx.get("state") != "done" else ():
+        for st in after if tx.get("state") != S_DONE else ():
             qk = S.fill(st["queue"]["key"], t["names"], keep=()) if st.get("queue") else None
             x = tq_tasks.get(qk) if qk else None
             if not cut and h:
                 tg = next((w for w in (where(t, y, True, st) for y in targets(st["name"], st["group"])) if not isinstance(w, str)), None)
                 cut = not tg or tg["kind"] != "queue" or tg["machine"] != h
             ms = ((x or {}).get("spec") or {}).get("machines") or []
-            if x and x.get("state") in ("waiting", "free") and not x.get("worker") and ms and (cut or not h or ms != [h]):
+            if x and x.get("state") in (S_WAITING, S_FREE) and not x.get("worker") and ms and (cut or not h or ms != [h]):
                 gone.append(qk)
         if gone:
             ms_ = " ".join(sorted({m for k in gone for m in ((tq_tasks[k].get("spec") or {}).get("machines") or [])}))
@@ -323,7 +329,7 @@ def plan(s, root=None):
             o = S.outputs(S.fill({k: qd.get(k) for k in ("out", "done", "fetch")}, names, keep=()))
             out = os.path.join(root, o["outs"][0])
             if S.done_with(o, lambda a: os.path.exists(os.path.join(out, a)), empty=False):
-                stuck[f"advance:{st['name']}:{key}"] = f"{label}：任务队列的 {qk} 做完、拉回了，但 box 上核对还是没做完（{out}）"
+                stuck[alert_id("advance", st["name"], key)] = f"{label}：任务队列的 {qk} 做完、拉回了，但 box 上核对还是没做完（{out}）"
             return
         if sk in done:  # box 上做过：失败的、成功了结果还不对的报出来
             want(st["name"], key, label, cmd, st["group"], n)
@@ -479,10 +485,10 @@ def run(s, dry=False, q=None, tq=None, rm=None):
             what = f"{t['label']}：{t['why']}：{' '.join(t['qks'])}"
             if live_mode:
                 rc, out = (rm or taskq_remove)(t["qks"])
-                if rc in (0, taskq.GONE):  # GONE：都已经不在队列里
+                if rc in (0, proto.EXIT["gone"]):  # 都已经不在队列里
                     lines.append(f"撤了 {what}")
                 else:
-                    stuck[f"advance:unqueue:{t['key']}"] = f"{t['label']}：从任务队列撤掉出错（{out[-200:]}）"
+                    stuck[alert_id("advance", "unqueue", t["key"])] = f"{t['label']}：从任务队列撤掉出错（{out[-200:]}）"
             else:
                 lines.append(f"会撤 {what}")
             continue
@@ -498,7 +504,7 @@ def run(s, dry=False, q=None, tq=None, rm=None):
                     lines.append(f"排了 {what}")
                 else:
                     lines.append(f"出错 {t['label']}：{out[-200:]}")
-                    stuck[f"advance:{t['step']}:{t['key']}"] = f"{t['step']} {t['key']}：加进任务队列出错（{out[-200:]}）"
+                    stuck[alert_id("advance", t["step"], t["key"])] = f"{t['step']} {t['key']}：加进任务队列出错（{out[-200:]}）"
             else:
                 done.append(f"会排 任务队列 {t['label']}")
                 lines.append(f"会排 {what}")
@@ -515,7 +521,7 @@ def run(s, dry=False, q=None, tq=None, rm=None):
                 lines.append(f"排了 {t['label']}（{t['group']} 组，任务 {tid}{note}）：{t['cmd']}")
             except Exception as e:  # noqa: BLE001
                 lines.append(f"出错 {t['label']}：{e}")
-                stuck[f"advance:{t['step']}:{t['key']}"] = f"{t['step']} {t['key']}：加任务出错（{e}）"
+                stuck[alert_id("advance", t["step"], t["key"])] = f"{t['step']} {t['key']}：加任务出错（{e}）"
         else:
             done.append(f"会排 {t['label']}{note}")
             lines.append(f"会排 {t['label']}（{t['group']} 组{note}）：{t['cmd']}")

@@ -231,7 +231,7 @@ ok("看板有结果等确认 → 报", "board" in P)
 
 # ---------------- 第四台机器：只在表里加一项 ----------------
 H.M.MACHINES["fake"] = dict(label="fake", hostname=r"fake-host", ssh="fake", scheduler="pueue", data="~/BT", conda=("~/c", "e"),
-                            groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False)
+                            groups={"gpu0": (1, "0", {})}, roles=("train",), disk=("/data", 50, 10), gpu_log=False, repo="~/R")
 fk = task(3, "gpu0", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "t15b_f0_fake")
 s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks": [lab_train]}, "fake": {"groups": {}, "tasks": [fk]}},
          src={"box": {"tasks": {}}, "fake": {"tasks": {}},
@@ -242,6 +242,8 @@ s["code"] = dict(main="a" * 40, heads={"fake": "b" * 40})
 P = H.check(s)
 ok("第四台机器：同一折和 lab 两边都在训 → 紧急", P.get(f"dup:{MEN0}", {}).get("level") == "urgent")
 ok("第四台机器：盘、代码按表里的字段查", P["disk:fake"]["level"] == "urgent" and "code:fake" in P and "gpulog:fake" not in P)
+H.M.MACHINES["fake"].pop("repo")
+ok("没有 git 克隆（repo）的机器不查代码（代码由代码包管）", "code:fake" not in H.check(s))
 s["ok"]["fake"] = False
 ok("第四台机器连不上：报", "down:fake" in ids(s))
 del H.M.MACHINES["fake"]
@@ -316,6 +318,56 @@ ok("白话：每个任务的步骤的标签 → (实验名, 步骤, 简称)；�
    PL.label(f"eval:{EX.label(_e, _t)}") == (_n, PL.STEP["eval"], EX.short(_t)) and PL.label(f"eval:{_e['id']}") == (_n, PL.STEP["eval"], None))
 ok("白话：认不出的标签 → 其他", PL.label("eval:nope_f1") == ("其他", "eval:nope_f1", None))
 ok("白话：推送里的一句话带简称", PL.task(f"infer:{EX.label(_e, _t)}") == f"{_n} {EX.short(_t)} 的{PL.STEP['infer']}")
+
+# 白话从结构化的 data 说（11/4，不再从说明里抠数字）：每种问题的推送文字和改之前逐字相同
+_ki = "infer/" + _k
+_lt0 = task(7, "gpu1", "Running", f"bash {QR}/run_task.sh toy ds=D111_beta variant=V_save_n470 frag=0", "train:" + MEN0)
+_inf = task(1, "gpu", "Failed (1)", "bash x", f"infer:{EX.label(_e, _t)}", end=NOW - timedelta(hours=1))
+s = snap(pueue={"box": {"groups": {}, "tasks": [_inf, task(2, "cpu", "Failed (1)", "bash y", "", end=NOW - timedelta(hours=1))]},
+                "lab": {"groups": {}, "tasks": [_lt0]}},
+         src={"box": {"tasks": {}}, "lab": {"tasks": {MEN0: prog(end=NOW - timedelta(hours=2))}, "stuck": ["a/b/0", "c/d/1"]}},
+         taskq={"box": dict(enabled=True, tasks=[dict(tqrow(_ki, "blocked"), note="等的 x 失败 2 次")])},
+         board_pending=["a.json", "b.json", "c.json"])
+s["probe"]["lab"]["DISK"] = str(int(10e9))
+s["probe"]["box"]["BOOT"] = ts(NOW - timedelta(hours=2)) + "|2026-10-16 10:01:00 开机：放回队列 3 4"
+P = H.check(s)
+s = snap(pueue={"box": {"groups": {}, "tasks": [task(9, "gpu", "Running", _lt0["command"], "y")]},
+                "lab": {"groups": {}, "tasks": [task(8, "gpu1", "Queued", _lt0["command"], "x")]}})
+_dup = f"dup:{MEN0}"
+_once = H.check(s)[_dup]
+s["pueue"]["lab"]["tasks"][0]["status"] = "Running"
+s["src"]["lab"]["tasks"] = {MEN0: prog(end=NOW - timedelta(minutes=5))}
+_both = H.check(s)[_dup]
+_rl = {f"site:lab1:fail:{MEN0}": dict(msg="…训练失败 2 次，有进度…", data=dict(progress=True, failures=2)),
+       f"site:lab1:fail:{_ki}": dict(msg="…failed…", data=dict(progress=False)),
+       "site:lab1:orphan:zz": dict(msg="…认不出…", data=dict(unknown=True)),
+       f"site:lab1:orphan:{MEN0}": dict(msg="…不是它领着…", data=dict(unknown=False))}
+P.update({k: H.from_step(v) for k, v in _rl.items()})
+_f, _l1, _pe = PL.fold(MEN0), H.M.machine("lab1")["label"], sorted(k for k in P if k.startswith("pueue:box:"))
+want = {"unread:lab": "lab 上 2 个任务的文件读不动（多半是那边的存储挂住），这些任务先不分出去，别的照常。",
+        "stuck:lab:7": f"lab 上 {_f} 90 分钟没有进展，可能卡住了，GPU 白占着。",
+        _pe[0]: f"box 上 {_n} {EX.short(_t)} 的推理出错停了。",
+        _pe[1]: "box 上 其他 的#2出错停了。",
+        f"tqblocked:{_ki}": f"{PL.fold(_ki)} 的推理在等的前一步失败了（或不在队列里），不会自己开始。",
+        "disk:lab": "lab /mnt/disk1 只剩 10 GB，盘满了训练和存档会失败。",
+        "boot:box:" + ts(NOW - timedelta(hours=2)): "box 10-16 10:00 重启过，被打断的任务已自动放回队列，要确认训练接上了。",
+        "board": "看板有新结果，要确认后才发布（3 个文件）。",
+        f"site:lab1:fail:{MEN0}": f"{_l1} 上 {_f} 训练失败了，有进度，要决定接着训还是放弃。",
+        f"site:lab1:fail:{_ki}": f"{_l1} 上 {PL.fold(_ki)} 的任务出了问题，不会开始训练。",
+        "site:lab1:orphan:zz": f"{_l1} 的队列里有一个认不出来的任务。",
+        f"site:lab1:orphan:{MEN0}": f"{_l1} 在训 {_f}，但总队列里没分给它，可能重复训练。"}
+got_ = {k: PL.problem(k, P[k]) for k in want if k in P}
+ok("白话：每种问题从 data 说，文字和以前一样", got_ == want and all("data" in P[k] for k in want))
+if got_ != want:
+    print("\n".join(f"  {k}\n    要 {want[k]}\n    得 {got_.get(k)}" for k in want if got_.get(k) != want[k]))
+ok("白话：两处排着 / 两处都在训", PL.problem(_dup, _once) == f"{_f} 在两处排着，要取消一边，不然会重复训练。"
+   and PL.problem(_dup, _both) == f"{_f} 同时在两处训练，存档会互相覆盖，要尽快停掉一边。")
+ok("白话：没有 data 的（旧状态文件里的）退回原来的说明",
+   PL.problem("unread:lab", dict(msg="原来的说明")) == "原来的说明" and PL.problem(f"site:lab1:fail:{MEN0}", dict(msg="m")) == "m")
+ok("执行机报的卡住可以是说明或 dict(msg, data)", H.from_step("m") == dict(msg="m", level="normal", kind="state", after=0)
+   and H.from_step(dict(msg="m", data=dict(n=1)))["data"] == dict(n=1))
+ok("白话：实验表里的步骤都有中文名（STEP 表或步骤的 zh）",
+   all(PL.step_name(n) != n for n in PL.table_steps()) and PL.step_name("nope") == "nope")
 
 # 插件、实验表加载出错：health 在 import 时就停，要推送一次（同样的错不重复推，夜里不推），修好后清掉记录
 import shutil  # noqa: E402

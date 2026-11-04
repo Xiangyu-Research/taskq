@@ -416,6 +416,18 @@ check("PLACE 写错了（没有的组、不认识的条件、没有的步骤、�
       not bad_)
 A.P.PLACE = {"infer": ["lab:gpu0"]}
 check("PLACE 写 lab:gpu0：报不认识的地方", "不认识的地方" in A.plan(osnap())[1].get("advance:policy", ""))
+A.P.PLACE = {"infer": ["box:gpu", "hub:gpu"]}
+_tg = A.targets("infer", None)
+_hub, _hm = A.M.hub, dict(A.M.MACHINES)
+A.M.hub = lambda: "central"
+A.M.MACHINES["central"] = A.M.MACHINES.pop("box")
+_tg2 = A.targets("infer", None)
+A.M.hub = _hub
+A.M.MACHINES.clear()
+A.M.MACHINES.update(_hm)
+check("PLACE 的 box:<组>、hub:<组> 都指总队列所在的机器（hub），不按它在机器表里的名字（11/4）",
+      [(t["kind"], t["machine"], t["group"]) for t in _tg] == [("box", "box", "gpu")] * 2
+      and [(t["kind"], t["machine"], t["group"]) for t in _tg2] == [("box", "central", "gpu")] * 2)
 
 # 10. 进总队列（PLACE 写 queue:<执行机>）：relay.py 连同输入送过去，box 不跑
 BASE = {k: v for k, v in REAL_PLACE.items() if k not in ("p1", "p2")}  # P1 / P2 第 11 节再测
@@ -541,6 +553,11 @@ check("trainer：分给 lab1 的折 → 推理现在就进总队列，只给 lab
       [(t["step"], t.get("op")) for t in x] == [("infer", "taskq")] and 'machines=["lab1"]' in x[0]["args"]
       and "after=" + json.dumps([K3]) in x[0]["args"] and x[0]["qnice"] == -100 and f"key={Q3}" in x[0]["args"])
 INF3 = x[0]
+_ready = A.P.READY
+A.P.READY = {k: v for k, v in _ready.items() if k != "lab1"}
+check("READY 里没写 lab1：照样是执行机（缺项按 1，和 relay.py 一样，11/4），推理照样提前排给它",
+      [t.get("args") for t in t3(A.plan(lsnap("lab1"))[0])] == [INF3["args"]])
+A.P.READY = _ready
 A.P.AUTO = dict(A.P.AUTO, lab1=False)
 check("trainer：lab1 关着 → lab0 训的折不提前排", not t3(A.plan(lsnap("lab0"))[0]))
 A.P.AUTO = dict(A.P.AUTO, lab1=True, lab0=True)

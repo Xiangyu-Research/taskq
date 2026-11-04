@@ -10,6 +10,7 @@
 """
 import argparse
 import csv
+import importlib.util
 import json
 import os
 import subprocess
@@ -31,8 +32,21 @@ LAST = os.path.join(H.HDIR, "report.json")
 HOURS = 2  # 没有上一次的记录时，"上次以来"按这么多小时算
 
 
+def registry():
+    """生成登记表的脚本（OUTPUTS["registry"]["cmd"]）：CSV 的列名 COL、状态取值 ST_DONE、ST_RUNNING 从它取。"""
+    p = os.path.join(REPO, H.OUT.get("registry", {}).get("cmd", ""))
+    sp = importlib.util.spec_from_file_location("taskq_registry", p)
+    m = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(m)
+    return m
+
+
+R = registry()
+K = R.COL
+
+
 def short(r):
-    return f"{r['实验']} {r['说明']} {r['模型'] if r['模型'] != 'nnU-Net' else ''} f{r['fold']}".replace("  ", " ")
+    return f"{r[K['exp']]} {r[K['desc']]} {r[K['model']] if r[K['model']] != 'nnU-Net' else ''} f{r[K['fold']]}".replace("  ", " ")
 
 
 def hm(ts):
@@ -51,16 +65,16 @@ def build(now):
     delta = f"（{span} +{p - last['folds_done']}）" if "folds_done" in last and p > last["folds_done"] else ""
     lines = [f"已训完 {p} 个任务{delta}" + (f"，还剩约 {st['days_left']:.0f} 天" if st.get("days_left") else "")]
 
-    run = [r for r in rows if r["状态"] == "训练中" and r["实验"]]  # 临时任务（推理等）不算
+    run = [r for r in rows if r[K["state"]] == R.ST_RUNNING and r[K["exp"]]]  # 临时任务（推理等）不算
     lines.append(f"正在训 {len(run)} 个任务" + ("：" if run else ""))
     for r in run:
-        pct = 100 * int(r["epoch"] or 0) / int(r["num_epochs"] or 1000)
-        eta = f"，约 {hm(r['预计训完'])} 训完" if r["预计训完"] else ""
-        lines.append(f"- {short(r)}（{r['最新副本']}，{pct:.0f}%{eta}）")
+        pct = 100 * int(r[K["epoch"]] or 0) / int(r[K["nep"]] or 1000)
+        eta = f"，约 {hm(r[K['eta']])} 训完" if r[K["eta"]] else ""
+        lines.append(f"- {short(r)}（{r[K['where']]}，{pct:.0f}%{eta}）")
     fin = {}
     for r in rows:
-        if r["状态"] == "训完" and r["最后更新"] and datetime.strptime(r["最后更新"], "%Y-%m-%d %H:%M:%S") >= cut:
-            fin.setdefault(short(r).rsplit(" f", 1)[0], []).append(f"f{r['fold']}")
+        if r[K["state"]] == R.ST_DONE and r[K["last"]] and datetime.strptime(r[K["last"]], "%Y-%m-%d %H:%M:%S") >= cut:
+            fin.setdefault(short(r).rsplit(" f", 1)[0], []).append(f"f{r[K['fold']]}")
     if fin:
         lines.append(f"{span}内训完：" + "；".join(f"{k} {'、'.join(v)}" for k, v in fin.items()))
     res, other = {}, set()

@@ -16,6 +16,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+from proto import S_CLAIMED, S_BUSY, S_DONE, S_STOPPED  # noqa: E402
 cfg.use_config()
 import common as C  # noqa: E402
 import machines as M  # noqa: E402
@@ -155,7 +156,7 @@ def central_mine(name):
     """总队列里分给 name、没训完、没停的任务 → [key]。"""
     import taskq
     st = taskq.local_status() or {}
-    return [t["key"] for t in st.get("tasks", []) if t.get("worker") == name and t["state"] not in ("done", "stopped")]
+    return [t["key"] for t in st.get("tasks", []) if t.get("worker") == name and t["state"] not in (S_DONE, S_STOPPED)]
 
 
 def site_tasks(name):
@@ -169,7 +170,7 @@ def site_tasks(name):
 
 
 def has_progress(f):
-    return bool(f) and (f.get("state") in ("claimed", "busy") or bool(f.get("final"))
+    return bool(f) and (f.get("state") in (S_CLAIMED, S_BUSY) or bool(f.get("final"))
                         or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
 
 
