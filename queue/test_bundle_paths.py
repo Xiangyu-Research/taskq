@@ -67,6 +67,10 @@ def child():
     assert up == "/".join([".."] * (2 + len(f"{BC}/queue".split("/")))), up
     for what, text in remote.items():
         assert ".." not in text, (what, text)
+    import ast
+    stub = B.gen_machines('MACHINES = {}\n', "lab1", B.machine_entry("lab1", B.relay_entry(None, "lab1"), "/abs/root"))
+    mt = [n.value for n in ast.walk(ast.parse(stub)) if isinstance(n, ast.Constant) and str(n.value).endswith("mtab.py")]
+    assert mt == [f"../{BC}/sites/mtab.py"], mt  # 生成的 envs/machines.py 的命令行转交：包里的核心（envs/ 的上一级）
 
     box = []
     acts = [dict(op="stage", key="k/1", nice=0), dict(op="fetch", key="k/2"), dict(op="archive", key="k/3")]

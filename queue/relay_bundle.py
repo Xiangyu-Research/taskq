@@ -280,12 +280,12 @@ def gen_machines(src, name, m):
         if k in spans:
             repl[spans[k]] = f"{k} = {{}}"
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。\n\n命令行：见 {cfg.rel("sites", "mtab.py")}。\n"""'
+        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。\n\n命令行：见 {cfg.bundle_rel("sites", "mtab.py")}。\n"""'
     for (r0, r1), text in sorted(repl.items(), reverse=True):
         lines[r0:r1 + 1] = [] if text is None else text.split("\n")
     out = drop_comment_lines("\n".join(lines))
     if not any(isinstance(n, ast.If) and "__main__" in ast.unparse(n.test) for n in body):
-        out = out.rstrip("\n") + "\n\n\n" + MTAB_STUB.format(mtab=os.path.join("..", cfg.rel("sites", "mtab.py")))
+        out = out.rstrip("\n") + "\n\n\n" + MTAB_STUB.format(mtab=os.path.join("..", cfg.bundle_rel("sites", "mtab.py")))
     return out
 
 

@@ -197,12 +197,12 @@ def test_bundle(T):
     assert f"conda activate {e['envs']['base'][1]}" in act and e["conda"][0] in act
     pol = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import mtab as M, policy; "
                "print(int(bool(policy.STAGE_TMP.get(M.whoami()))), int(bool(M.MACHINES[M.whoami()].get('task_vars'))))",
-               os.path.join(cur, cfg.rel("sites"))], env=dict(TASKQ_CONFIG=os.path.join(cur, "envs"))).stdout.split()
+               os.path.join(cur, cfg.bundle_rel("sites"))], env=dict(TASKQ_CONFIG=os.path.join(cur, "envs"))).stdout.split()
     assert pol == ["1", "0"], pol
     ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、没有 task_vars")
     other = next(n for n in M.RELAY if n != NAME)
     got = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import mtab as M\ntry:\n    M.machine(sys.argv[2])\n"
-               "except KeyError:\n    print('KeyError')", os.path.join(cur, cfg.rel("sites")), other], env=dict(TASKQ_CONFIG=os.path.join(cur, "envs")))
+               "except KeyError:\n    print('KeyError')", os.path.join(cur, cfg.bundle_rel("sites")), other], env=dict(TASKQ_CONFIG=os.path.join(cur, "envs")))
     assert got.stdout.strip() == "KeyError", got
     got = run(["python3", mp])
     assert got.returncode == 2 and "Traceback" not in got.stderr and "命令行" in open(mp).read(), got
