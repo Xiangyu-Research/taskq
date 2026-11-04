@@ -9,8 +9,8 @@
 set -euo pipefail
 P=~/.local/bin/pueue
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
-M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
+if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
+M="python3 $CORE/sites/mtab.py"
 C="python3 $CORE/queue/cfg.py"
 if [[ -n ${1:-} && $1 != "$($M whoami 2> /dev/null)" ]]; then
     ssh=$($M get "$1" ssh) code=$($M get "$1" code); [[ -n $code ]] || code=$($M get "$1" repo)

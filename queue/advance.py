@@ -52,7 +52,8 @@ REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, HERE)
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(CORE, "sites"))
+import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402

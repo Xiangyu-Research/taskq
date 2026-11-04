@@ -18,9 +18,9 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不了 $HERE/proto.py" >&2; exit 2; }  # 共用的名字和退出码 TQ_*
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
+if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v… 或 run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
-DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
+DATA=${TASKQ_DATA:-$(python3 "$CORE/sites/mtab.py" get . data)}
 [[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 export TASKQ_DATA=$DATA
 ts() { date '+%F %T'; }
@@ -53,7 +53,7 @@ done_() { python3 "$HERE/spec.py" done "$@"; }
 done_ "$@"; rc=$?
 (( rc == TQ_EXIT_DONE_YES )) && { echo "$(ts) 已经训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"; }
 (( rc == TQ_EXIT_DONE_UNREADABLE )) && { early "读不了盘，判断不了训完没有"; exit "$TQ_EXIT_RUN_UNREADABLE"; }
-ACT=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（envs/machines.py）"; exit "$TQ_EXIT_RUN_BAD"; }
+ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（envs/machines.py）"; exit "$TQ_EXIT_RUN_BAD"; }
 mkdir -p "$DATA/$TQ_TASK_LOGS" "$TASK_OUT"
 LOG=$DATA/$TQ_TASK_LOGS/${TASK_SAFE}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log
 TRIES=3
@@ -129,7 +129,7 @@ TASK_INPUTS_ROOT=$DATA CPID=
 if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
     if [[ ${TASK_LOCAL:-0} == 1 && -n ${SLURM_JOB_ID:-} ]]; then
-        ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; cfg.use_config(); import machines, policy; print(int(bool(policy.STAGE_TMP.get(machines.whoami()))))" 2> /dev/null || echo 0)}
+        ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; M = cfg.mtab(); import policy; print(int(bool(policy.STAGE_TMP.get(M.whoami()))))" 2> /dev/null || echo 0)}
         [[ $ST == 1 ]] && LROOT=${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX$SLURM_JOB_ID
     fi
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?

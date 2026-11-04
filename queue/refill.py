@@ -23,7 +23,7 @@ cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))  # health.py（这里的函数里才 import，避免互相 import）
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(CORE, "sites"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import slurm as SL  # noqa: E402
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402

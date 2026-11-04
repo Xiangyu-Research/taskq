@@ -27,7 +27,8 @@ os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # 本进程里等锁的
 import taskq  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
+import mtab as M  # noqa: E402
 
 ok = True
 

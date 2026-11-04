@@ -44,7 +44,7 @@ REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 TQS = cfg.state("taskq", expand=False)
 sys.path.insert(0, os.path.join(CORE, "sites"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import policy  # noqa: E402
 
 OUT = getattr(policy, "OUTPUTS", {})

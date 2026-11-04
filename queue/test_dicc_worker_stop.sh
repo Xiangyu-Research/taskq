@@ -103,7 +103,7 @@ fi
 # 5 / 2r. run_task.sh 退出码 5（读不了盘）：交还、不记失败、本作业不马上再领；退出码 2：失败原因带上分段日志的最后一行（11/4）
 #   代码副本里的 spec.py：FAKE_DONE5 这个文件在时 done 退出 5，FAKE_SHELL2 在时 shell 报错退出 2
 if want 5; then
-mkdir -p "$T/core"; rm -rf "$T/core/queue"; cp -r "$HERE" "$T/core/queue"
+mkdir -p "$T/core"; rm -rf "$T/core/queue" "$T/core/sites"; cp -r "$HERE" "$T/core/queue"; cp -r "$HERE/../sites" "$T/core/sites"
 sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)\nif __name__ == "__main__" and sys.argv[1:2] == ["shell"] and os.path.exists(os.environ.get("FAKE_SHELL2", "/nonexistent")): sys.exit("spec.py：不认识的 {trainer}")' "$T/core/queue/spec.py"
 reset
 table << EOF

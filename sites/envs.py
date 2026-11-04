@@ -26,7 +26,7 @@ REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 from proto import ROOT  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "monitor"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'
 STALE_S = 6 * 3600  # .building 这么久没动就当已经停了

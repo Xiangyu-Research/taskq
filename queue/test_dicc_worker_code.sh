@@ -141,12 +141,13 @@ fi
 
 # worker_start.sh：conda activate 失败时日志里写清楚，照样开 worker（11/4）
 if want ws; then
-mkdir -p "$T/ws" "$T/wscfg" "$T/wsconda/etc/profile.d"
-cp "$HERE/worker_start.sh" "$HERE/gpu_pad_start.sh" "$HERE/proto.py" "$T/ws/"
-printf '#!/bin/bash\necho "worker 开始"\n' > "$T/ws/dicc_worker.sh"
-printf 'import sys\nprint({"conda": "%s env0", "data": "%s"}[sys.argv[3]])\n' "$T/wsconda" "$TASKQ_DATA" > "$T/wscfg/machines.py"
+mkdir -p "$T/ws/queue" "$T/ws/sites" "$T/wscfg" "$T/wsconda/etc/profile.d"
+cp "$HERE/worker_start.sh" "$HERE/gpu_pad_start.sh" "$HERE/proto.py" "$HERE/cfg.py" "$HERE/project.py" "$T/ws/queue/"
+cp "$HERE/../sites/mtab.py" "$T/ws/sites/"
+printf '#!/bin/bash\necho "worker 开始"\n' > "$T/ws/queue/dicc_worker.sh"
+printf 'MACHINES = {"ws": dict(hostname=r".*", conda=("%s", "env0"), data="%s", roles=())}\n' "$T/wsconda" "$TASKQ_DATA" > "$T/wscfg/machines.py"
 printf 'conda() { return 1; }\n' > "$T/wsconda/etc/profile.d/conda.sh"
-TASKQ_CONFIG=$T/wscfg bash "$T/ws/worker_start.sh" > "$T/ws.out" 2>&1; rc=$?
+TASKQ_CONFIG=$T/wscfg bash "$T/ws/queue/worker_start.sh" > "$T/ws.out" 2>&1; rc=$?
 check "worker_start：conda activate 失败，日志里写 !!，照样开 worker" '[[ $rc == 0 ]] && grep -q "!! conda activate env0 失败" $T/ws.out && grep -q "worker 开始" $T/ws.out'
 fi
 

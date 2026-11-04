@@ -17,7 +17,7 @@ fixture.use()
 import remote as R  # noqa: E402
 import pueue as PQ  # noqa: E402
 import slurm as SL  # noqa: E402
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 import cfg  # noqa: E402
 QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）

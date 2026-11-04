@@ -12,8 +12,8 @@ set -euo pipefail
 HOST=${1:?用法：archive_task.sh <机器> <key> [--dry-run]} KEY=${2:?用法：archive_task.sh <机器> <key> [--dry-run]}
 DRY=${3:-}
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
-M="python3 ${TASKQ_CONFIG:-$REPO/envs}/machines.py"
+if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
+M="python3 $CORE/sites/mtab.py"
 [[ $HOST == "$($M names hub | head -1)" ]] || { echo "只归档 box 上的任务（$HOST 不是 hub）" >&2; exit 2; }
 BK=$($M backups | grep -vx "$HOST" | head -1)
 [[ -n $BK ]] || { echo "envs/machines.py 里没有 $HOST 以外的备份机器（角色 backup）" >&2; exit 2; }

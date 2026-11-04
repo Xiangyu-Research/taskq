@@ -25,7 +25,7 @@ import cfg  # noqa: E402
 cfg.use_config()
 import proto  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "sites"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
 import remote as R  # noqa: E402

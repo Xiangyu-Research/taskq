@@ -38,14 +38,14 @@ unset _envs
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不了 $HERE/proto.py" >&2; exit 1; }  # 共用的名字和退出码 TQ_*
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
+if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 TQPY="python3 $HERE/taskq.py"
 if [[ -n ${SLURM_JOB_ID:-} ]]; then INSLURM=1; else INSLURM=0; fi
 W=${SLURM_JOB_ID:-${WORKER_ID:?不在 Slurm 作业里时要设 WORKER_ID（envs/machines.py 的 worker）}}
 DEVICE=${WORKER_DEVICE:-gpu}
-DATA=${TASKQ_DATA:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)}
+DATA=${TASKQ_DATA:-$(python3 "$CORE/sites/mtab.py" get . data)}
 export TASKQ_DATA=$DATA
-ENVS=${TASKQ_ENVS:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . envs | tr ' ' ,)}
+ENVS=${TASKQ_ENVS:-$(python3 "$CORE/sites/mtab.py" get . envs | tr ' ' ,)}
 NCPU=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))" 2> /dev/null || nproc)
 # Slurm 外（pueue 的常驻 worker）：最多用 TASKQ_CPUS 个核（envs/machines.py 的 cpu_worker 的 cpus），和别人共用这台机器
 if (( ! INSLURM )) && [[ ${TASKQ_CPUS:-} =~ ^[0-9]+$ ]] && (( TASKQ_CPUS > 0 && TASKQ_CPUS < NCPU )); then NCPU=$TASKQ_CPUS; fi
@@ -53,7 +53,7 @@ MEMMB=${SLURM_MEM_PER_NODE:-$(( ${SLURM_MEM_PER_CPU:-0} * NCPU ))}
 if [[ $DEVICE == cpu ]]; then
     SLOTS=1
 elif (( ! INSLURM )); then
-    SLOTS=${TASKQ_SLOTS:-$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . slots 2> /dev/null || true)}
+    SLOTS=${TASKQ_SLOTS:-$(python3 "$CORE/sites/mtab.py" get . slots 2> /dev/null || true)}
     [[ $SLOTS =~ ^[0-9]+$ ]] || SLOTS=1
 elif (( NCPU >= 24 )) && (( MEMMB == 0 || MEMMB >= 56 * 1024 )); then
     SLOTS=${TASKQ_SLOTS:-2}   # 最多同时训几个

@@ -44,7 +44,7 @@ if [[ -n $F ]]; then
     echo "GPU 上有别的 CUDA 进程（PID $(echo $F)，可能在推理）；跳过集成测试"
     exit 0
 fi
-read -r CONDA_BASE CONDA_ENV < <(python3 "$REPO/envs/machines.py" get . conda 2> /dev/null) || true
+read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda 2> /dev/null) || true
 if [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
     source "$CONDA_BASE/etc/profile.d/conda.sh"
     conda activate "$CONDA_ENV" || { echo "conda 环境 $CONDA_ENV 激活失败，跳过"; exit 0; }

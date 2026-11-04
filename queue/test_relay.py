@@ -57,7 +57,8 @@ os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1
 import cfg  # noqa: E402
 
 cfg.use_config()
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
+import mtab as M  # noqa: E402
 import spec as S  # noqa: E402
 import relay  # noqa: E402
 import relay_remote as RM  # noqa: E402

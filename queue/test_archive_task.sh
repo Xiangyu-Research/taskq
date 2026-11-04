@@ -21,9 +21,7 @@ import socket
 MACHINES["box"].update(hostname=re.escape(socket.gethostname().split(".")[0]), data={t + '/box'!r})
 MACHINES["dicc"].update(ssh="t-backup", data={t + '/bk'!r}, tunnel=())
 """
-mark = 'if __name__ == "__main__":'
-assert mark in s
-open(p, "w").write(s.replace(mark, inj + "\n" + mark))
+open(p, "w").write(s + inj)
 EOF
 cat > "$T/bin/ssh" << 'EOF'
 #!/bin/bash

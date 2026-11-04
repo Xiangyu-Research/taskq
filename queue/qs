@@ -16,7 +16,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import cfg  # noqa: E402
 cfg.use_config()
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "sites"))
+import mtab as M  # noqa: E402
 import common as C  # noqa: E402  scripts/taskq/queue/common.py
 
 PUEUE = os.path.expanduser("~/.local/bin/pueue")

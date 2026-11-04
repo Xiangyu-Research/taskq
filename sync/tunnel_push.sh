@@ -19,9 +19,9 @@ SRC=${2:?用法：tunnel_push.sh <机器> <源目录> <目标目录> <子目录>
 DEST=${3:?用法：tunnel_push.sh <机器> <源目录> <目标目录> <子目录>...}
 shift 3
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
+if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 eval "$(python3 "$CORE/queue/proto.py" sh)"  # TQ_INCOMPLETE
-H=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get "$HOST" ssh)
+H=$(python3 "$CORE/sites/mtab.py" get "$HOST" ssh)
 [[ -n $H ]] || { echo "envs/machines.py 里没有可以传过去的机器 $HOST" >&2; exit 2; }
 (( $# > 0 )) || { echo "至少给一个子目录" >&2; exit 2; }
 SUBS=("$@")

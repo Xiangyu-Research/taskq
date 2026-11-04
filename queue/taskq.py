@@ -238,7 +238,7 @@ def data_root():
     """本机的数据目录：TASKQ_DATA > envs/machines.py。"""
     if cfg.env("TASKQ_DATA"):
         return cfg.env("TASKQ_DATA")
-    import machines as M
+    M = cfg.mtab()
     me = M.whoami()
     if not me or not M.MACHINES[me].get("data"):
         sys.exit("认不出本机或本机没有数据目录（envs/machines.py），先设 TASKQ_DATA")
@@ -952,7 +952,7 @@ def central(args, timeout=420):  # 比锁的最长等待（300 秒）长：等�
 
 def queue_host():
     """总队列所在的机器：envs/machines.py 的 hub（box）；没有 hub 时（中转执行机上的代码包）是本机。"""
-    import machines as M
+    M = cfg.mtab()
     try:
         return M.hub()
     except StopIteration:
@@ -960,7 +960,7 @@ def queue_host():
 
 
 def here():
-    import machines as M
+    M = cfg.mtab()
     return os.environ.get("TASKQ_MACHINE") or M.whoami()  # TASKQ_MACHINE 只给测试用
 
 

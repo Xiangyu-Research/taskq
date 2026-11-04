@@ -40,7 +40,7 @@ check "--spec 说明缺字段：退出码 2" "(( rc == 2 ))"
 check "说明有问题：原因写进这个任务的分段日志（第一行照常）" "head -1 $T/logs/tasks/x__test-1_part1.log | grep -q '任务=x，' && grep -q '没开训：任务说明有问题：.' $T/logs/tasks/x__test-1_part1.log"
 check "环境没有：原因写进分段日志" "grep -q '没开训：这台机器没有环境 nosuchenv' $T/logs/tasks/toy__d__test-1_part1.log"
 # 读不了盘（spec.py done 退出 5）：代码副本里的 spec.py 在 FAKE_DONE5 这个文件在时 done 退出 5
-mkdir -p "$T/core"; cp -r "$HERE" "$T/core/queue"
+mkdir -p "$T/core"; cp -r "$HERE" "$T/core/queue"; cp -r "$HERE/../sites" "$T/core/sites"
 sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)' "$T/core/queue/spec.py"
 R5="env FAKE_DONE5=$T/unreadable bash $T/core/queue/run_task.sh"
 touch "$T/unreadable"
@@ -139,11 +139,10 @@ import re, sys
 p, name, host, fx, tv = sys.argv[1:]
 s = open(p).read()
 s = re.sub(r"^FAKE = .*$", "FAKE = " + repr(fx), s, count=1, flags=re.M)
-mark = "# ---------------- LOGIC ----------------"
-s = s.replace(mark, f"for _n, _m in MACHINES.items():\n    _m['hostname'] = {re.escape(host)!r} if _n == {name!r} else r'(?!)'\n" + (f"MACHINES[{name!r}]['task_vars'] = WS_TASK_VARS\n" if tv else "") + mark, 1)
+s += f"for _n, _m in MACHINES.items():\n    _m['hostname'] = {re.escape(host)!r} if _n == {name!r} else r'(?!)'\n" + (f"MACHINES[{name!r}]['task_vars'] = WS_TASK_VARS\n" if tv else "")
 open(p, "w").write(s)
 PY
-    [[ $(TASKQ_CONFIG=$T/cfg_$1 python3 "$T/cfg_$1/machines.py" whoami) == "$1" ]]
+    [[ $(TASKQ_CONFIG=$T/cfg_$1 python3 "$HERE/../sites/mtab.py" whoami) == "$1" ]]
 }
 VC='cmd=echo "${DEMO_FAST:-无}/${DEMO_FAST_LOADER:-无}" > $TASKQ_DATA/toy/v.vars; touch $TASKQ_DATA/toy/v/DONE'
 tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER TASKQ_CONFIG=$T/cfg_$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }

@@ -23,7 +23,8 @@ os.environ["TASKQ_LOCK_WAIT"] = "0.05"  # 等锁的重试间隔
 sys.path.insert(0, HERE)
 import test_relay as TR  # noqa: E402  （fixture.use()、临时 TASKQ_STATE、假 ssh；只跑模块级的准备，不跑测试）
 import common as C  # noqa: E402
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
+import mtab as M  # noqa: E402
 import relay  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402

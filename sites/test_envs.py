@@ -145,7 +145,8 @@ ok("代码包的条目带 env_root，那边的激活语句指到根目录下", e
 src = RB.gen_machines(open(os.path.join(fixture.CONFIG, "machines.py"), encoding="utf-8").read(), "tsite", e)
 ns = {"__name__": "x", "__file__": os.path.join(fixture.CONFIG, "machines.py")}
 exec(compile(src, "machines.py", "exec"), ns)
-ok("生成的 machines.py 能用，spec 环境的激活语句对", "source /r/x1/envs/alt/.activate" in ns["activate"]("tsite", "alt"))
+M.MACHINES.update(ns["MACHINES"])
+ok("生成的 machines.py 的条目能用，spec 环境的激活语句对", "source /r/x1/envs/alt/.activate" in M.activate("tsite", "alt"))
 M.MACHINES.clear(); M.MACHINES.update(SAVE_M)
 M.RELAY.clear(); M.RELAY.update(SAVE_R)
 M.SITES.clear(); M.SITES.update(SAVE_S)

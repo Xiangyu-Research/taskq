@@ -19,7 +19,7 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import relay_remote as RM  # noqa: E402
 from common import write_json  # noqa: E402

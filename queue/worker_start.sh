@@ -3,14 +3,14 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不了 $HERE/proto.py" >&2; exit 1; }
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
+if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 QD=${TASKQ_DIR:-${TASKQ_STATE:+$TASKQ_STATE/taskq}}
 [[ -f ${QD:-$HOME/.cache/phd/taskq}/$TQ_Q_ENABLED ]] || { echo "$(date '+%F %T') 任务队列的总开关不在，结束"; exit 0; }
-read -r CONDA_BASE CONDA_ENV < <(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . conda) || true
+read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda) || true
 [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]] || { echo "envs/machines.py 里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2; exit 1; }
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV" || echo "$(date '+%F %T') !! conda activate $CONDA_ENV 失败（$CONDA_BASE）：任务照常各自激活环境，显存填充多半起不来"
-TASKQ_DATA=$(python3 "${TASKQ_CONFIG:-$REPO/envs}/machines.py" get . data)
+TASKQ_DATA=$(python3 "$CORE/sites/mtab.py" get . data)
 export TASKQ_DATA
 source "$HERE/gpu_pad_start.sh"
 exec bash "$HERE/dicc_worker.sh"

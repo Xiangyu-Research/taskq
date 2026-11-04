@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(CORE, "sites"))
+import mtab as M  # noqa: E402
 import experiments as E  # noqa: E402
 
 # 步骤的中文名：实验表的步骤定义里有 zh 时用它（step_name），没有时查这张表，再没有用步骤名本身

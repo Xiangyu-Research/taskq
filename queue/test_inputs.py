@@ -211,7 +211,7 @@ def rtask(inputs, local, **e):
     return subprocess.run(["bash", RT] + args, capture_output=True, text=True, env=envx)
 
 
-envs_ok = subprocess.run([sys.executable, os.path.join(fixture.CONFIG, "machines.py"), "activate", "stats"], capture_output=True).returncode == 0
+envs_ok = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "sites", "mtab.py"), "activate", "stats"], capture_output=True).returncode == 0
 if envs_ok:
     with open(os.path.join(BIN, "squeue"), "w") as f:
         f.write("#!/bin/sh\necho 7\n")

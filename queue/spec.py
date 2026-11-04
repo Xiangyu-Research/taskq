@@ -549,7 +549,8 @@ def shell_lines(s, data, repo=REPO):
 
 def machine_vars():
     """本机 envs/machines.py 的 task_vars → shell 语句：已经设了（非空）的不改。"""
-    import machines as M
+    import cfg
+    M = cfg.mtab()
     me = M.whoami()
     tv = ((M.MACHINES.get(me) or {}).get("task_vars") or {}) if me else {}
     return [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items()]
@@ -625,7 +626,7 @@ def local_data():
     import cfg
     data = cfg.env("TASKQ_DATA")
     if not data:
-        import machines as M
+        M = cfg.mtab()
         me = M.whoami()
         data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
     return data

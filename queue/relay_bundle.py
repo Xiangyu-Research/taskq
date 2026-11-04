@@ -34,7 +34,7 @@ import proto  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 import remote as RM  # noqa: E402
 
@@ -47,7 +47,8 @@ RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), f)) f
     "queue/worker_start.sh", "queue/dicc_worker.sh", "queue/run_task.sh", "queue/gpu_pad_start.sh", "queue/gpu_pad.py",
     "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
     "queue/steps.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
-    "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "monitor/gpu_log.sh"))
+    "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "queue/project.py", "sites/mtab.py",
+    "monitor/gpu_log.sh"))
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
@@ -191,7 +192,8 @@ def machine_entry(name, e, root, entry=None):
 
 def gen_machines(src, name, m):
     """把 envs/machines.py 的 MACHINES 换成只有这一项，SITES、RELAY 换成空的（查别的机器是 KeyError，11/4），
-    开头的说明换成一句、删掉整行注释（改说明时包名不变）。"""
+    开头的说明换成一句、删掉整行注释（改说明时包名不变）。只有数据（没有 if __name__ == "__main__"）时末尾加上命令行的转交：
+    python3 envs/machines.py <命令> 照旧能用，由包里的 sites/mtab.py 做（11/4）。"""
     lines = src.split("\n")
     spans = {}
     body = ast.parse(src).body
@@ -205,10 +207,19 @@ def gen_machines(src, name, m):
         if k in spans:
             repl[spans[k]] = f"{k} = {{}}"
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。\n\n命令行：见仓库里的 envs/machines.py。\n"""'
+        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。\n\n命令行：见 {cfg.rel("sites", "mtab.py")}。\n"""'
     for (r0, r1), text in sorted(repl.items(), reverse=True):
         lines[r0:r1 + 1] = [] if text is None else text.split("\n")
-    return drop_comment_lines("\n".join(lines))
+    out = drop_comment_lines("\n".join(lines))
+    if not any(isinstance(n, ast.If) and "__main__" in ast.unparse(n.test) for n in body):
+        out = out.rstrip("\n") + "\n\n\n" + MTAB_STUB.format(mtab=os.path.join("..", cfg.rel("sites", "mtab.py")))
+    return out
+
+
+MTAB_STUB = """if __name__ == "__main__":
+    import os, runpy; os.environ["TASKQ_CONFIG"] = os.path.dirname(os.path.abspath(__file__))
+    runpy.run_path(os.path.join(os.environ["TASKQ_CONFIG"], {mtab!r}), run_name="__main__")
+"""
 
 
 def drop_comment_lines(src):

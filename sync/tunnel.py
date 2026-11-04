@@ -50,8 +50,7 @@ def machines():
     sys.path.insert(0, os.path.join(CORE, "queue"))
     import cfg
     cfg.use_config()
-    import machines as M
-    return M
+    return cfg.mtab()
 
 
 def state(*parts, **kw):

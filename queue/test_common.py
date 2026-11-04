@@ -108,7 +108,8 @@ import fixture  # noqa: E402
 fixture.use()
 import cfg  # noqa: E402
 cfg.use_config()
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sites"))
+import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 bk = next(b for b in M.backups() if b != M.hub())
 P.OFFLINE = {bk: "停机"}

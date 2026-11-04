@@ -19,7 +19,8 @@ import cfg  # noqa: E402
 from proto import S_CLAIMED, S_BUSY, S_DONE, S_STOPPED  # noqa: E402
 cfg.use_config()
 import common as C  # noqa: E402
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
+import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 
 STATE = cfg.state("shift.json")

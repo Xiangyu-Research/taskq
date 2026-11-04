@@ -15,7 +15,8 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(CORE, "sites"))
+import mtab as M  # noqa: E402
 from proto import alert, alert_id, alert_msg  # noqa: E402
 
 LOG = cfg.log("feed")

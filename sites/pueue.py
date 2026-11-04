@@ -11,7 +11,7 @@ import remote as R
 sys.path.insert(0, os.path.join(R.CORE, "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 from proto import ROOT  # noqa: E402
 
 

@@ -6,7 +6,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| [`envs/machines.py`](../../../envs/machines.py) | 每台机器：数据目录、conda、环境名 → 怎么激活（`envs`）、pueue 的组、角色、要查的盘。没有某个环境的机器不领用它的任务 |
+| [`envs/machines.py`](../../../envs/machines.py) | 每台机器：数据目录、conda、环境名 → 怎么激活（`envs`）、pueue 的组、角色、要查的盘。没有某个环境的机器不领用它的任务。只放数据（`MACHINES`、`SITES`，可以有 `RELAY`）；怎么用这些数据（`whoami`、`activate`、`kinds` 等）和命令行（`whoami`、`get`、`names`、`backups`、`q-env`、`groups`、`activate`）在核心的 [`sites/mtab.py`](../sites/mtab.py)（11/4），核心里 `import mtab as M`，bash 调 `python3 $CORE/sites/mtab.py <命令>` |
 | [`envs/policy.py`](../../../envs/policy.py) | 怎么跑：每个步骤在哪里做（`PLACE`）、自动的部分开不开（`AUTO`）、暂缓哪些步骤（`HOLD`）、按时段开的执行机（`SHIFT`）、执行机备几个任务（`READY`）、Slurm 补交几个作业（`SLURM`） |
 | [`recipes.py`](recipes.py) | 做法：一种训练怎么跑（参数和默认值、`key`、`env`、`cmd`、`out`、`done`、`data`、`fetch`、`archive` 等，字段说明在文件开头）。核心只有 `command`（全部由任务自己给）；`nnunet`（`research/common/nnunet/train.sh`）在 `research/common/taskq_plugins/recipes.py`，按 `TASKQ_PLUGINS` 加载时合进来 |
 | `research/<RQ>/experiments.py` | 实验表：做法和参数、按哪些参数展开成一组任务（`each`，如 `{"fold": ["0", "1"]}`；box pueue 标签 `<id>_f0`）、每个任务训完后的步骤（`after`）、一个实验的任务都训完后的（`group_after`）、最后一起做的（`FINAL`）、默认档位（`nice`）、分析脚本要的声明（`names`）、看板名称（`board`）。`scripts/taskq/queue/experiments.py` 读所有 RQ 的表；分析脚本按模型文件夹查（`experiments.py name-of <模型文件夹> <名字>…`），查不到就报错 |
@@ -55,7 +55,8 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `TASKQ_STATE` | 环境变量 | 本机的状态文件夹（11/2）：设了时任务队列、`relay/`、`last/`、`tasks.json`、`envs/`、隧道、显存填充的开关、`code/`（`snapshot.sh`）都在它下面（`<它>/taskq`、`<它>/gpu_pad/DISABLED`…）；没设时在 `OUTPUTS["state"]`，再没有就是核心的默认 `~/.cache/taskq/`（`cfg.py` 的 `STATE_HOME`、`STATE_PLACES`，Python 经 `cfg.state()`，bash 经 `cfg.py state <名字>`）。`TASKQ_DIR`、`TASKQ_GPU_PAD_SWITCH` 等单项的变量优先。执行机的代码包把这些默认写法换成根目录下的 `queue/`、`state/` |
 | `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `envs/machines.py` 的 `groups`（box `gpu` 组 600），手动加的推理（`predict.sh`）也读它 |
 | `TASKQ_*` | 环境变量 | 全部登记在 `proto.py` 的 `ENV`：谁设、什么意思、`run`（生产里会设，如 `TASKQ_DIR`、`TASKQ_DATA`、`TASKQ_CPUS`、`TASKQ_GPU_PAD_SWITCH`、`TASKQ_ZOMBIES`）/ `tune`（阈值，默认值在 `dicc_worker.sh` 开头或 `gpu_pad.py` 的命令行）/ `test`（只给测试）；`test_protocol.py` 核对代码里出现的都登记了 |
-| `TASKQ_CONFIG` | 环境变量 | `machines.py`、`policy.py` 所在的文件夹，默认 `<仓库>/envs`（11/2）。Python 脚本经 `scripts/taskq/queue/cfg.py` 的 `use_config()` 找，bash 脚本用 `${TASKQ_CONFIG:-$REPO/envs}`；`relay_bundle.py` 在它在仓库里时取提交里的 `machines.py`，在仓库外时读文件；执行机的代码包里生成的两个文件照旧在 `envs/` |
+| `.taskq.toml` | 项目根目录的文件 | 找项目（11/4，`project.py`）：`--project` > `TASKQ_PROJECT` > 从当前目录往上找 `.taskq.toml`；里面写 `config = "envs"`、`plugins = ["research/common/taskq_plugins"]`（相对项目根）。核心的仓库根 `REPO`：`TASKQ_REPO` > 嵌在 `<仓库>/scripts/taskq` 里时那个仓库 > 找到的项目 > 核心本身（`cfg.py`；bash 脚本不嵌着、没设 `TASKQ_REPO` 时 `eval "$(python3 $CORE/queue/project.py sh)"`）。仓库根有 `.taskq.toml` 时配置和插件按它，没有时用下面两行的默认 |
+| `TASKQ_CONFIG` | 环境变量 | `machines.py`、`policy.py` 所在的文件夹，默认 `<仓库>/envs`（11/2）。Python 脚本经 `scripts/taskq/queue/cfg.py` 的 `use_config()` 找，机器表经 `sites/mtab.py`；`relay_bundle.py` 在它在仓库里时取提交里的 `machines.py`，在仓库外时读文件；执行机的代码包里生成的两个文件照旧在 `envs/` |
 | `TASKQ_PLUGINS` | 环境变量 | 领域专用的插件文件夹（`:` 隔开几个，空串 = 没有），默认 `<仓库>/research/common/taskq_plugins`（11/2）。每个文件夹里可以有 `recipes.py`（`RECIPES`、`HOOKS`）、`relay_plugins.py`（`PLUGINS`、`ACCEPTS`、`VIEW_ROOTS`）、`readers/<名>.py`（`PROGRESS`、`INFO`、`TRAINED`，只用标准库）。每类只取这些名字（`cfg.py` 的 `KINDS`，11/4），合进核心的同名表（键重复报错），插件的别的名字不进核心；插件要用核心的东西只 import `taskq_api.py`（`REQUIRED`、`RelayError`…见它开头），不 import 核心的其他模块。钩子：`HOOKS["model_of"]`（模型文件夹 → 训它的任务的 `model` 参数，`experiments.py` 的 `name-of`、`env-of` 用它，核心不认 nnU-Net 的文件夹布局） |
 
 `envs/policy.py` 由 box 的健康检查每次读，在 `~/auto/PhD`（只给 cron 用的克隆，跟着 origin/main）里生效，所以改了要提交推送。写错了（不认识的地方、条件、步骤）时 `advance.py` 这次什么都不排，报到健康检查里。

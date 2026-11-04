@@ -26,7 +26,8 @@ QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/
 CR = "" if cfg.CORE_REL == "." else cfg.CORE_REL + "/"  # 调度代码的文件在包里的前缀
 
 cfg.use_config()
-import machines as M  # noqa: E402
+sys.path.insert(0, os.path.join(CORE, "sites"))
+import mtab as M  # noqa: E402
 import relay_bundle as B  # noqa: E402
 
 NAME = "dicc2"
@@ -173,18 +174,21 @@ def test_bundle(T):
     assert run(["python3", mp, "get", ".", "conda"]).stdout.split() == list(e["conda"])
     act = run(["python3", mp, "activate", "base"]).stdout
     assert f"conda activate {e['envs']['base'][1]}" in act and e["conda"][0] in act
-    pol = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import machines, policy; "
-               "print(int(bool(policy.STAGE_TMP.get(machines.whoami()))), int(bool(machines.MACHINES[machines.whoami()].get('task_vars'))))",
-               os.path.join(cur, "envs")]).stdout.split()
+    pol = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import mtab as M, policy; "
+               "print(int(bool(policy.STAGE_TMP.get(M.whoami()))), int(bool(M.MACHINES[M.whoami()].get('task_vars'))))",
+               os.path.join(cur, cfg.rel("sites"))], env=dict(TASKQ_CONFIG=os.path.join(cur, "envs"))).stdout.split()
     assert pol == ["1", "0"], pol
     ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、没有 task_vars")
     other = next(n for n in M.RELAY if n != NAME)
-    got = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import machines\ntry:\n    machines.machine(sys.argv[2])\n"
-               "except KeyError:\n    print('KeyError')", os.path.join(cur, "envs"), other])
+    got = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import mtab as M\ntry:\n    M.machine(sys.argv[2])\n"
+               "except KeyError:\n    print('KeyError')", os.path.join(cur, cfg.rel("sites")), other], env=dict(TASKQ_CONFIG=os.path.join(cur, "envs")))
     assert got.stdout.strip() == "KeyError", got
     got = run(["python3", mp])
     assert got.returncode == 2 and "Traceback" not in got.stderr and "命令行" in open(mp).read(), got
-    ok("生成的 machines.py：查别的机器是 KeyError（不是 NameError），不带参数运行打印用法、退出码 2")
+    got = run(["python3", mp, "get", ".", "no_such_field"])
+    assert got.returncode == 1 and "Traceback" not in got.stderr and "no_such_field" in got.stderr and NAME in got.stderr, got
+    ok("生成的 machines.py（只有数据，末尾转交给包里的 sites/mtab.py）：查别的机器是 KeyError（不是 NameError），"
+       "不带参数运行打印用法、退出码 2；没有的字段说清机器和字段、退出码 1")
 
     tq, cf = open(os.path.join(cur, QR, "taskq.py")).read(), open(os.path.join(cur, QR, "cfg.py")).read()
     assert tq.split("\n")[:10] == src[f"{QR}/taskq.py"][0].decode().split("\n")[:10] and "~/.cache/phd" in "\n".join(tq.split("\n")[:10])

@@ -208,7 +208,7 @@ def from_command(cmd):
 def backup_down(ok=None):
     """备份机（machines.py 里角色 backup 的）暂停检查（policy.py 的 OFFLINE），或这次检查连不上（ok：快照的 s["ok"]）
     → 说明；能用 → None。连不上时先不排归档，免得排上去的归档都失败、停住（11/1）。"""
-    import machines as M
+    M = _cfg().mtab()
     import policy as P
     for b in M.backups():
         if b == M.hub():

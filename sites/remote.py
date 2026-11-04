@@ -8,7 +8,7 @@ CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 
 

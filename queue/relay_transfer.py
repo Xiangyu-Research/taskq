@@ -19,7 +19,7 @@ import proto  # noqa: E402
 from proto import ROOT  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "sync"))
 sys.path.insert(0, os.path.join(CORE, "sites"))
-import machines as M  # noqa: E402
+import mtab as M  # noqa: E402
 import spec as S  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import names as N  # noqa: E402
