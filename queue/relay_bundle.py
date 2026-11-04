@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/1 起就是这个提交的代码，不改名、不去注释）：
-提交里跟踪的 envs/policy.py 的 OUTPUTS["bundle"] 这几个顶层文件夹下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），
-另外生成只有这一台的 envs/machines.py、envs/policy.py（OUTPUTS 只留 experiments），Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，
-cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的状态文件夹（cfg.py 的 STATE_HOME）换成那边根目录下的 queue/、state/。
-核对：本机和 OUTPUTS["bundle_check"] 那个环境的两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。包名 = <提交号前 10 位>-<内容哈希前 8 位>，
-同样的内容只建一次。
+"""执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/4 起只装执行机要用的、只按内容命名）：
+调度核心里执行机要用的文件（RUNTIME：worker、run_task.sh、队列、任务说明），加上提交里跟踪的 envs/policy.py 的 OUTPUTS["bundle"]
+（使用者的文件夹或文件）下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），去掉 OUTPUTS["bundle_skip"] 的通配
+（测试、只在 box 上用的）；另外生成只有这一台的 envs/machines.py（去掉说明和整行注释）、envs/policy.py（OUTPUTS 只留 experiments），
+Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的状态文件夹
+（cfg.py 的 STATE_HOME）换成那边根目录下的 queue/、state/。
+核对：本机和 OUTPUTS["bundle_check"] 那个环境的两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。
+包名 = 内容哈希的前 16 位，不带提交号：只改 box 上的代码或文档时包名不变，执行机不换包；同样的内容只建一次。
+哪个提交建的包记在 relay.py 的状态 bundle_for（<名字>:<提交> → 包名）。
 
     relay_bundle.py build <名字> [--commit 提交] [--out 目录]   → 打印"包名 路径"
     （--commit 默认 origin/main；--commit '' = 工作区，只给测试用）
 """
 import argparse
 import ast
+import fnmatch
 import hashlib
+import io
 import os
 import pprint
 import re
@@ -19,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
@@ -32,7 +38,13 @@ import policy as P  # noqa: E402
 import remote as RM  # noqa: E402
 
 OUT = cfg.state("relay", "bundles", expand=False)
-TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("scripts", "envs")))  # envs/policy.py 的 OUTPUTS
+TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("envs",)))  # envs/policy.py 的 OUTPUTS：使用者的文件夹或文件
+SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # 不进包的通配（fnmatch，* 跨目录）
+# 调度核心里执行机要用的：worker 的入口和循环、跑任务、队列、任务说明、实验表、显存填充、输入的本地副本；
+# 其余（box 上的计划、传数据、健康检查、同步）不进包
+RUNTIME = tuple(os.path.normpath(os.path.join(os.path.relpath(CORE, REPO), "queue", f)) for f in (
+    "worker_start.sh", "dicc_worker.sh", "run_task.sh", "gpu_pad_start.sh", "gpu_pad.py", "taskq.py", "spec.py", "common.py",
+    "cfg.py", "recipes.py", "experiments.py", "steps.py", "inputs.py", "worker.sbatch", "cpu_worker.sbatch"))
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
@@ -66,14 +78,16 @@ def git(*args, binary=False, input=None):
 
 
 def _wanted(path, size):
-    return (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX) and "__pycache__" not in path
+    if "__pycache__" in path or not (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX):
+        return False
+    return path in RUNTIME or not any(fnmatch.fnmatchcase(path, x) for x in SKIP)
 
 
 def source_files(commit):
     """{相对路径: (内容 bytes, 可执行)}；commit 为 None 时读工作区（git 跟踪的文件）。"""
     out = {}
     if commit is None:
-        for ent in git("ls-files", "-z", "-s", "--", *TOPS).split("\0"):
+        for ent in git("ls-files", "-z", "-s", "--", *TOPS, *RUNTIME).split("\0"):
             if not ent:
                 continue
             meta, path = ent.split("\t", 1)
@@ -82,7 +96,7 @@ def source_files(commit):
                 out[path] = (open(p, "rb").read(), os.access(p, os.X_OK))
         return out
     objs = []
-    for ent in git("ls-tree", "-r", "-l", "-z", commit, "--", *TOPS).split("\0"):
+    for ent in git("ls-tree", "-r", "-l", "-z", commit, "--", *TOPS, *RUNTIME).split("\0"):
         if not ent:
             continue
         meta, path = ent.split("\t", 1)
@@ -132,10 +146,11 @@ def machine_entry(name, e, root, entry=None):
 
 
 def gen_machines(src, name, m):
-    """把 envs/machines.py 的 MACHINES 换成只有这一项，删掉 SITES、RELAY。"""
+    """把 envs/machines.py 的 MACHINES 换成只有这一项，删掉 SITES、RELAY、开头的说明和整行注释（改说明时包名不变）。"""
     lines = src.split("\n")
     spans = {}
-    for node in ast.parse(src).body:
+    body = ast.parse(src).body
+    for node in body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             spans[node.targets[0].id] = (node.lineno - 1, node.end_lineno - 1)
     if "MACHINES" not in spans:
@@ -144,9 +159,23 @@ def gen_machines(src, name, m):
     for k in ("SITES", "RELAY"):
         if k in spans:
             repl[spans[k]] = None
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。"""'
     for (r0, r1), text in sorted(repl.items(), reverse=True):
         lines[r0:r1 + 1] = [] if text is None else text.split("\n")
-    return "\n".join(lines)
+    return drop_comment_lines("\n".join(lines))
+
+
+def drop_comment_lines(src):
+    """去掉只有注释的行（第一行 #! 留着）。"""
+    comment, code = set(), set()
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            comment.add(tok.start[0])
+        elif tok.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER):
+            code.update(range(tok.start[0], tok.end[0] + 1))
+    drop = {n for n in comment - code if n > 1}
+    return "\n".join(ln for n, ln in enumerate(src.split("\n"), 1) if n not in drop)
 
 
 def gen_policy(name, stage_tmp=True):
@@ -262,21 +291,20 @@ def contents(name, commit="origin/main", root=None, entry=None):
     return out
 
 
-def bundle_id(files, commit=None):
+def bundle_id(files):
     h = hashlib.sha256()
     for path in sorted(files):
         data = files[path][0].encode()
         h.update(f"{path}\0{len(data)}\0{int(bool(files[path][1]))}\0".encode() + data)
     for path, target in sorted(LINKS.items()):
         h.update(f"{path}\0->{target}\0".encode())
-    head = git("rev-parse", "--short=10", commit).strip() if commit else "worktree"
-    return f"{head}-{h.hexdigest()[:8]}"
+    return h.hexdigest()[:16]
 
 
 def build(name, commit="origin/main", out=None, root=None, entry=None):
     """建包 → (包名, 路径)。commit=None：读工作区（只给测试用）。已经有同名的包时直接用。"""
     files = contents(name, commit, root, entry)
-    bid = bundle_id(files, commit)
+    bid = bundle_id(files)
     out = os.path.expanduser(out or OUT)
     path = os.path.join(out, bid)
     if os.path.isdir(path):

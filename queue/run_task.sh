@@ -35,7 +35,7 @@ if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
     git -C "$REPO" diff --quiet HEAD -- ${CODE_DIRS:-scripts/queue} 2> /dev/null || COMMIT="$COMMIT+改动"
 else
-    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名 <提交号>-<内容哈希>
+    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名是内容哈希（16 位）
 fi
 TRIES=3
 [[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
