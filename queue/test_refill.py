@@ -143,6 +143,8 @@ ok("refill 的 sbatch 文件名和 slurm.FILES 一致", {"gpu": R.GPU_FILE, "cpu
 st = {"src": {"dicc1": {"tasks": {}, "stuck": ["k/1"]}, "box": {"tasks": {}}}}
 ok("progress：读不动的任务当成有进度（看所有机器、看那台）；别的机器、别的任务照常",
    R.progress(st, "k/1") and R.progress(st, "k/1", "dicc1") and not R.progress(st, "k/1", "box") and not R.progress(st, "k/2"))
+st = {"src": {"dicc1": {"tasks": {}, "errors": {"k/1": "OSError: x"}}, "box": {"tasks": {}}}}
+ok("progress：读出错的任务（spec.collect 的 errors，11/4）同样当成有进度", R.progress(st, "k/1", "dicc1") and not R.progress(st, "k/1", "box"))
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

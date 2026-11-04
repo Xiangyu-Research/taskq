@@ -119,6 +119,26 @@ ok("collect：一个任务读不动 → 记进 stuck、不等它，别的任务�
 ok("collect：都读得动 → 没有 stuck", "stuck" not in S.collect([gs], gr, wait=5))
 hang.set()
 del S.PROGRESS["hang"]
+# 读的时候出错（11/4）：记进 errors（带原因），不算卡住；不带 wait 时也不让整个 collect 失败
+S.INFO["boom"] = lambda fd: 1 / 0
+bs = dict(gs, key="guest/boom", out="guest/x", info="boom")
+for w in (None, 5):
+    rb = S.collect([bs, gs], gr, wait=w)
+    ok(f"collect（wait={w}）：一个任务读出错 → errors 里带原因，不进 stuck，别的照常",
+       "ZeroDivisionError" in rb.get("errors", {}).get("guest/boom", "") and "stuck" not in rb and "guest/x" in rb["tasks"]
+       and "guest/boom" not in rb["tasks"])
+del S.INFO["boom"]
+# spec.py 命令行的错误（11/4）：说明有问题 → 一句话、退出码 2；done 读不了数据目录 → 退出码 5
+SP = [sys.executable, os.path.join(HERE, "spec.py")]
+bad = dict(S.sendable(S.resolve("command", G)), cmd="run {nope}")
+r = subprocess.run(SP + ["shell", "--spec", __import__("json").dumps(bad)], capture_output=True, text=True)
+ok("spec.py shell：说明里有不认识的 {名字} → 一句话、退出码 2", r.returncode == 2 and "nope" in r.stderr and "Traceback" not in r.stderr)
+r = subprocess.run(SP + ["shell"], capture_output=True, text=True)
+ok("spec.py shell 不带参数 → 退出码 2，不是回溯", r.returncode == 2 and "Traceback" not in r.stderr)
+gone = os.path.join(gr, "not_mounted")
+r = subprocess.run(SP + ["done", "--spec", __import__("json").dumps(S.sendable(S.resolve("command", G)))], capture_output=True, text=True,
+                   env=dict(os.environ, TASKQ_DATA=gone))
+ok("spec.py done：数据目录读不了 → 一句话、退出码 5（稍后再查）", r.returncode == 5 and "Traceback" not in r.stderr and r.stderr.strip())
 import relay as RL  # noqa: E402
 import refill as RF  # noqa: E402
 ok("relay.progress：只有存档（没有轮数）也算有进度", RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))

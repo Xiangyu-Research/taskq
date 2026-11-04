@@ -93,7 +93,7 @@ def test_bundle(T):
         assert f in files, f
     assert f"{QR}/cpu_worker.sbatch" not in files, "这台没有 jobs.cpu"
     for f in (STEP, f"{QR}/testdata/bin/infer_task.sh", f"{QR}/taskq.py"):
-        assert open(os.path.join(path, f), encoding="utf-8").read() == B.home_paths(src[f][0].decode(), R), f"{f} 和提交的不一样"
+        assert open(os.path.join(path, f), encoding="utf-8").read() == B.home_paths(src[f][0].decode(), R, f), f"{f} 和提交的不一样"
         assert os.access(os.path.join(path, f), os.X_OK) == (src[f][1] or f.endswith(".sh")), f
     assert open(os.path.join(path, STEP), "rb").read() == src[STEP][0]
     for ln, tgt in B.LINKS.items():
@@ -123,6 +123,20 @@ def test_bundle(T):
                os.path.join(cur, "envs")]).stdout.split()
     assert pol == ["1", "0"], pol
     ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、没有 task_vars")
+    other = next(n for n in M.RELAY if n != NAME)
+    got = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import machines\ntry:\n    machines.machine(sys.argv[2])\n"
+               "except KeyError:\n    print('KeyError')", os.path.join(cur, "envs"), other])
+    assert got.stdout.strip() == "KeyError", got
+    got = run(["python3", mp])
+    assert got.returncode == 2 and "Traceback" not in got.stderr and "命令行" in open(mp).read(), got
+    ok("生成的 machines.py：查别的机器是 KeyError（不是 NameError），不带参数运行打印用法、退出码 2")
+
+    tq, cf = open(os.path.join(cur, QR, "taskq.py")).read(), open(os.path.join(cur, QR, "cfg.py")).read()
+    assert tq.split("\n")[:10] == src[f"{QR}/taskq.py"][0].decode().split("\n")[:10] and "~/.cache/phd" in "\n".join(tq.split("\n")[:10])
+    assert "~/.cache/phd" not in "\n".join(ln for ln in cf.split("\n") if ln.startswith("STATE_")) and f'STATE_HOME = "{R}/state/"' in cf, cf
+    sh = B.home_paths("#!/bin/bash\n# 队列在 ~/.cache/phd/taskq\nQ=${Q:-$HOME/.cache/phd/taskq}\n", R, "x.sh").split("\n")
+    assert sh[1] == "# 队列在 ~/.cache/phd/taskq" and sh[2] == f"Q=${{Q:-{R}/queue}}", sh
+    ok("换家目录下的路径只换代码：taskq.py 开头的说明、shell 的注释行不换，cfg.py 的 STATE_HOME 等照常换")
 
     sb = open(os.path.join(cur, f"{QR}/worker.sbatch")).read().split("\n")
     real = open(os.path.join(REPO, f"{QR}/worker.sbatch")).read()

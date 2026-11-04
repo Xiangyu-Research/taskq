@@ -146,7 +146,8 @@ def machine_entry(name, e, root, entry=None):
 
 
 def gen_machines(src, name, m):
-    """把 envs/machines.py 的 MACHINES 换成只有这一项，删掉 SITES、RELAY、开头的说明和整行注释（改说明时包名不变）。"""
+    """把 envs/machines.py 的 MACHINES 换成只有这一项，SITES、RELAY 换成空的（查别的机器是 KeyError，11/4），
+    开头的说明换成一句、删掉整行注释（改说明时包名不变）。"""
     lines = src.split("\n")
     spans = {}
     body = ast.parse(src).body
@@ -158,9 +159,9 @@ def gen_machines(src, name, m):
     repl = {spans["MACHINES"]: "MACHINES = " + pprint.pformat({name: m}, sort_dicts=False, width=120)}
     for k in ("SITES", "RELAY"):
         if k in spans:
-            repl[spans[k]] = None
+            repl[spans[k]] = f"{k} = {{}}"
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。"""'
+        repl[(body[0].lineno - 1, body[0].end_lineno - 1)] = f'"""{name} 的机器表（relay_bundle.py 生成）。\n\n命令行：见仓库里的 envs/machines.py。\n"""'
     for (r0, r1), text in sorted(repl.items(), reverse=True):
         lines[r0:r1 + 1] = [] if text is None else text.split("\n")
     return drop_comment_lines("\n".join(lines))
@@ -218,16 +219,49 @@ def gen_sbatch(real, m, root, kind="gpu"):
 HOME_MAP = {"taskq": "queue", "gpu_pad/DISABLED": "queue/gpu_pad_DISABLED"}  # cfg.py 的 STATE_PLACES → 根目录下的位置；其余 → state/
 
 
-def home_paths(text, root):
+def home_paths(text, root, path=""):
     """家目录下的状态文件夹（cfg.py 的 STATE_HOME 的默认写法）换成根目录下的：任务队列 → queue/，显存填充的开关 →
-    queue/gpu_pad_DISABLED，其余 → state/。"""
+    queue/gpu_pad_DISABLED，其余 → state/。只换代码（.py 的注释、文档字符串和别的文件里 # 开头的行不换，11/4）。"""
     h = cfg.STATE_HOME[2:]
-    for pre in ("$HOME/", "~/"):
-        r = pre + root[2:] if root.startswith("~/") else root  # 根目录在家目录下时沿用原来的写法（双引号里的 ~ 不展开）
-        for k, v in HOME_MAP.items():
-            text = text.replace(pre + h + k, f"{r}/{v}")
-        text = text.replace(pre + h, f"{r}/state/")
-    return text
+
+    def sub(s):
+        for pre in ("$HOME/", "~/"):
+            r = pre + root[2:] if root.startswith("~/") else root  # 根目录在家目录下时沿用原来的写法（双引号里的 ~ 不展开）
+            for k, v in HOME_MAP.items():
+                s = s.replace(pre + h + k, f"{r}/{v}")
+            s = s.replace(pre + h, f"{r}/state/")
+        return s
+    keep = _prose(text) if path.endswith(".py") else None
+    if keep is None:
+        return "\n".join(ln if ln.lstrip().startswith("#") and not ln.startswith("#!") else sub(ln) for ln in text.split("\n"))
+    out, pos = [], 0
+    for a, b in keep:
+        out += [sub(text[pos:a]), text[a:b]]
+        pos = b
+    return "".join(out + [sub(text[pos:])])
+
+
+def _prose(src):
+    """Python 源码里注释和文档字符串的位置 [(起, 止)]（字符偏移）；解析不了 → None。"""
+    starts = [0]
+    for ln in io.StringIO(src).readlines():
+        starts.append(starts[-1] + len(ln))
+    off = lambda rc: starts[rc[0] - 1] + rc[1]  # noqa: E731
+    spans = []
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    prev = tokenize.NEWLINE
+    for i, tok in enumerate(toks):
+        if tok.type == tokenize.COMMENT:
+            spans.append((off(tok.start), off(tok.end)))
+        elif tok.type == tokenize.STRING and prev in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT) \
+                and toks[i + 1].type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+            spans.append((off(tok.start), off(tok.end)))
+        if tok.type not in (tokenize.NL, tokenize.COMMENT):
+            prev = tok.type
+    return spans
 
 
 # ---------------- 核对 ----------------
@@ -277,8 +311,8 @@ def contents(name, commit="origin/main", root=None, entry=None):
             text = raw.decode()
         except UnicodeDecodeError as err:
             raise BundleError(f"{path} 不是 UTF-8：{err}") from None
-        out[path] = (home_paths(text, root), exe or path.endswith(".sh"))
-    out["envs/machines.py"] = (home_paths(gen_machines(read_machines(commit), name, m), root), True)
+        out[path] = (home_paths(text, root, path), exe or path.endswith(".sh"))
+    out["envs/machines.py"] = (home_paths(gen_machines(read_machines(commit), name, m), root, "envs/machines.py"), True)
     out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True)), False)
     for tpl in SBATCH.values():
         out.pop(tpl, None)

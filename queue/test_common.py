@@ -117,5 +117,15 @@ P.OFFLINE = {}
 ok("backup_down：这次连不上 → 说明；能用 → None", C.backup_down({bk: False}) == f"{bk} 这次连不上"
    and C.backup_down({bk: True}) is None and C.backup_down() is None)
 
+# from_command 认 run_task.sh --spec <JSON>（执行机队列里 box 送来的说明，11/4）
+import shlex  # noqa: E402
+sp = dict(key="ds/tr/0", cmd="python3 -c 'print(1)'", out="r/0", done=["D"], data=[], res={}, vars={})
+js = json.dumps(sp, ensure_ascii=False, separators=(",", ":"))
+ok("from_command：run_task.sh --spec <JSON> 认成训练（JSON 里有空格也行）",
+   C.from_command(f"bash /x/run_task.sh --spec {shlex.quote(js)}") == dict(step="train", key="ds/tr/0")
+   and C.from_command(shlex.quote(f"bash /x/run_task.sh --spec {shlex.quote(js)}")) == dict(step="train", key="ds/tr/0"))
+ok("from_command：--spec 后面不是说明 → None", C.from_command("bash /x/run_task.sh --spec '{\"key\": 1'") is None
+   and C.from_command("bash /x/run_task.sh --spec") is None)
+
 print("\n全部通过" if not fails else f"\n{fails} 项失败")
 sys.exit(1 if fails else 0)

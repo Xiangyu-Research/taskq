@@ -131,6 +131,39 @@ ino = lambda p: os.stat(p).st_ino  # noqa: E731
 ok("别的作业：本节点已有的硬链接过来，不重拷", rc == 0 and "硬链接 6 个" in out and "新拷 1 个" in out
    and ino(os.path.join(L8, "views", "k3", "in", "ds1", "sub/c2.b2nd")) == ino(os.path.join(L7, "views", "k1", "in", "ds1", "sub/c2.b2nd")))
 
+# 剩余空间：本节点别的作业有的（能硬链接）不算要拷的量；本节点的拷贝排队（锁），两个同时查不会各算各的（11/4）
+sys.path.insert(0, HERE)
+import inputs as I  # noqa: E402
+import fcntl  # noqa: E402
+L10 = os.path.join(TMP, "phd_stage_10")
+run("prepare", DATA, "k10", L10, V, env=env)
+_du, _keep = I.shutil.disk_usage, I.KEEP_GB
+I.shutil.disk_usage = lambda p: shutil._ntuple_diskusage(0, 0, 1024 ** 3 + 10)
+I.KEEP_GB = 1
+try:
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        I.copy(L10, "k10")
+finally:
+    I.shutil.disk_usage, I.KEEP_GB = _du, _keep
+ok("剩余空间：本节点别的作业已有的（硬链接）不算进要拷的量", "硬链接 7 个" in buf.getvalue() and "不拷" not in buf.getvalue())
+L11 = os.path.join(TMP, "phd_stage_11")
+run("prepare", DATA, "k11", L11, V, env=env)
+lk = open(os.path.join(TMP, f".phd_stage_{os.getuid()}.lock"), "a")
+fcntl.flock(lk, fcntl.LOCK_EX)
+p11 = subprocess.Popen(PY + ["copy", L11, "k11"], stdout=subprocess.PIPE, text=True, env=dict(os.environ, **env))
+try:
+    p11.wait(timeout=2)
+except subprocess.TimeoutExpired:
+    pass
+waited = p11.poll() is None
+fcntl.flock(lk, fcntl.LOCK_UN)
+lk.close()
+out11 = p11.communicate(timeout=60)[0]
+ok("本节点的拷贝排队：别的拷贝拿着锁时等着，放开后照常拷", waited and p11.returncode == 0 and "硬链接 7 个" in out11)
+
 # 作业数组：squeue 的 %i 是 <数组号>_<序号>，本地目录用的是每个子任务自己的作业号（%A）；别的作业不能删它
 with open(os.path.join(BIN, "squeue"), "w") as f:
     f.write('#!/bin/sh\ncase "$*" in *%A*) echo "7 7"; echo "8 3_0";; *) echo 7; echo 3_0;; esac\n')

@@ -105,6 +105,8 @@ s = snap(pueue={"box": {"groups": {}, "tasks": []}, "lab": {"groups": {}, "tasks
 ok("lab 训练 90 分钟没有新 epoch → 卡住", "stuck:lab:7" in ids(s))
 s["src"]["lab"]["tasks"][MEN0] = prog(end=NOW - timedelta(minutes=5))
 ok("lab 训练正常时不报", "stuck:lab:7" not in ids(s))
+s["src"]["lab"]["errors"] = {MEN0: "OSError: [Errno 5] Input/output error"}
+ok("读任务状态出错（spec.collect 的 errors，11/4）→ 单独报，不算读不动", "readerr:lab" in ids(s) and "unread:lab" not in ids(s))
 
 
 # ---------------- 总队列分给执行机（10/31）----------------

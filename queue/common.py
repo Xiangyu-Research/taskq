@@ -180,9 +180,9 @@ def from_command(cmd):
     except ValueError:
         return None
     flat = []
-    for x in tok:  # 整条命令被引号包成一个参数时（q 加的任务）再拆一层
+    for x in tok:  # 整条命令被引号包成一个参数时（q 加的任务）再拆一层；--spec 后面的 JSON 不拆
         try:
-            flat += shlex.split(x) if " " in x else [x]
+            flat += shlex.split(x) if " " in x and x[:1] not in "{[" else [x]
         except ValueError:
             flat.append(x)
     for i, x in enumerate(flat):
@@ -190,6 +190,8 @@ def from_command(cmd):
         if b == "run_task.sh" and rest:
             try:
                 import spec
+                if rest[0] == "--spec":
+                    return dict(step="train", key=spec.from_sent(rest[1])["key"])
                 return dict(step="train", key=spec.resolve(rest[0], spec.parse_kv([r for r in rest[1:] if "=" in r]))["key"])
             except Exception:  # noqa: BLE001
                 return None

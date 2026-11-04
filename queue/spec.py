@@ -385,29 +385,41 @@ def task_specs(queue=()):
 
 
 def collect(specs, root, wait=None):
-    """这台机器上每个任务的情况（健康检查、登记表用）：{"tasks": {key: …}, "seglogs": […]}，有读不动的再加 "stuck": [key…]。
+    """这台机器上每个任务的情况（健康检查、登记表用）：{"tasks": {key: …}, "seglogs": […]}，有读不动的再加 "stuck": [key…]，
+    读的时候出错的再加 "errors": {key: 原因}（不算卡住，别的任务照常，11/4）。
     specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。
     分段日志在 logs/tasks/，加上说明里 oldlogs 的 dir（以前放在别处的）。
     wait：给了就每个任务一个线程同时读，wait 秒后还没读完的（文件卡在存储里）记进 stuck、不再等（11/1），
     卡住的线程留着，进程结束时一起结束（remote_collect 读完后 os._exit）。"""
+    errors = {}
+
+    def run(k, fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            errors[k] = f"{type(e).__name__}: {e}"[:300]
+            return None
+
     jobs = [(s["key"], lambda s=s: one_task(s, root)) for s in specs] + [("@seglogs", lambda: seg_logs(specs, root))]
     if wait is None:
-        res = {k: fn() for k, fn in jobs}
+        res = {k: run(k, fn) for k, fn in jobs}
     else:
         import threading
         res, ths = {}, []
         for k, fn in jobs:
-            th = threading.Thread(target=lambda k=k, fn=fn: res.__setitem__(k, fn()), daemon=True)
+            th = threading.Thread(target=lambda k=k, fn=fn: res.__setitem__(k, run(k, fn)), daemon=True)
             th.start()
             ths.append(th)
         end = time.time() + wait
         for th in ths:
             th.join(max(0, end - time.time()))
-        res = dict(res)
+        res, errors = dict(res), dict(errors)
     out = {"tasks": {s["key"]: res[s["key"]] for s in specs if res.get(s["key"]) is not None}, "seglogs": res.get("@seglogs") or []}
-    stuck = [k for k, _ in jobs if k not in res]
+    stuck = [k for k, _ in jobs if k not in res and k not in errors]
     if stuck:
         out["stuck"] = stuck
+    if errors:
+        out["errors"] = errors
     return out
 
 
@@ -534,26 +546,43 @@ def main(argv):
         return 2
     cmd, args = argv[0], argv[1:]
     try:
-        if cmd in ("shell", "done") and args[:1] == ["--spec"] and len(args) == 2:
-            s = from_sent(args[1])
-        elif cmd in ("shell", "done", "resolve"):
-            s = resolve(args[0], parse_kv(args[1:]))
-        elif cmd in ("lookup", "outputs"):
-            s = lookup(args[0])
-            if s is None:
-                print(f"实验表和训练队列里都没有 {args[0]}", file=sys.stderr)
-                return 1
-        else:
-            print(f"spec.py：不认识的命令 {cmd}", file=sys.stderr)
-            return 2
+        return _main(cmd, args)
     except SpecError as e:
         print(f"spec.py：{e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        if cmd != "done":
+            raise
+        print(f"spec.py：读不了数据目录：{e}", file=sys.stderr)
+        return DISK_RC
+
+
+DISK_RC = 5  # spec.py done 读不了盘（scripts/taskq/queue/README.md 的"约定"）
+
+
+def _main(cmd, args):
+    import cfg
+    if cmd in ("shell", "done", "resolve", "lookup", "outputs") and not args:
+        raise SpecError(f"{cmd} 缺参数")
+    if cmd in ("shell", "done") and args[:1] == ["--spec"] and len(args) == 2:
+        s = from_sent(args[1])
+    elif cmd in ("shell", "done", "resolve"):
+        s = resolve(args[0], parse_kv(args[1:]))
+    elif cmd in ("lookup", "outputs"):
+        s = lookup(args[0])
+        if s is None:
+            print(f"实验表和训练队列里都没有 {args[0]}", file=sys.stderr)
+            return 1
+    else:
+        print(f"spec.py：不认识的命令 {cmd}", file=sys.stderr)
         return 2
     data = cfg.env("TASKQ_DATA")
     if not data:
         import machines as M
         me = M.whoami()
         data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
+    if cmd == "done" and not data:
+        raise SpecError("不知道本机的数据目录（TASKQ_DATA 或 envs/machines.py 的 data）")
     if cmd == "lookup":
         print(json.dumps(s, ensure_ascii=False, indent=1))
     elif cmd == "outputs":

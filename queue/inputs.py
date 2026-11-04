@@ -8,8 +8,8 @@
       先删本节点上自己的、作业已经结束的 phd_stage_<作业号>。
   inputs.py copy <本地根目录> <任务文件名>
       照清单把文件拷到 <根>/blobs/（本节点别的作业已有的硬链接过来），拷完核对（文件名是 sha256 的按内容，其他按大小），
-      再替换视图里对应的链接（新建链接再 rename 盖过去）：换之前读原处，换之后读本地。拷完至少还剩 STAGE_KEEP_GB（默认 300）GB，
-      不够就不拷。核对不上、拷不了的留着读原处。
+      再替换视图里对应的链接（新建链接再 rename 盖过去）：换之前读原处，换之后读本地。拷完至少还剩 STAGE_KEEP_GB（默认 300）GB
+      （能从本节点别的作业硬链接来的不算），不够就不拷。本节点的拷贝排队（一把锁），一个查完拷完下一个再查。核对不上、拷不了的留着读原处。
 退出码：0 好了；4 缺输入；其他 = 出错（run_task.sh 照旧读原处）。
 """
 import fcntl
@@ -203,12 +203,26 @@ def copy(root, key):
     by = {}
     for rel, real, size, bid in todo:
         by.setdefault(bid, [real, size, []])[2].append(rel)
-    need = sum(size for bid, (_, size, _) in by.items() if not os.path.isfile(os.path.join(blobs, bid)))
-    free = shutil.disk_usage(root).free
-    if free - need < KEEP_GB * 1024 ** 3:
-        print(f"本地盘剩 {free / 1024 ** 3:.0f} GB，拷 {need / 1024 ** 3:.0f} GB 后不到 {KEEP_GB:.0f} GB，不拷，读原处")
-        return 0
     others = [d for d in glob.glob(os.path.join(os.path.dirname(root), PREFIX + "*", "blobs")) if d != blobs]
+    with open(os.path.join(os.path.dirname(root), f".{PREFIX}{os.getuid()}.lock"), "a") as lk:  # 本节点的拷贝一个一个来（11/4）
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        need = sum(size for bid, (_, size, _) in by.items()
+                   if not os.path.isfile(os.path.join(blobs, bid)) and not any(_size(os.path.join(o, bid)) == size for o in others))
+        free = shutil.disk_usage(root).free
+        if free - need < KEEP_GB * 1024 ** 3:
+            print(f"本地盘剩 {free / 1024 ** 3:.0f} GB，拷 {need / 1024 ** 3:.0f} GB 后不到 {KEEP_GB:.0f} GB，不拷，读原处")
+            return 0
+        return _copy(view, blobs, by, others, t0)
+
+
+def _size(p):
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return None
+
+
+def _copy(view, blobs, by, others, t0):
     n = dict(copied=0, linked=0, had=0, bytes=0)
     bad = []
 

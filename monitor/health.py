@@ -232,6 +232,10 @@ def check(s):
         if d.get("stuck"):
             add(f"unread:{name}", f"{L(name)} 上 {len(d['stuck'])} 个任务的文件读不动（多半是存储挂住），先不分、不交还："
                                  f"{'、'.join(d['stuck'][:5])}{' …' if len(d['stuck']) > 5 else ''}", after=60)
+        if d.get("errors"):
+            er = sorted(d["errors"].items())
+            add(f"readerr:{name}", f"{L(name)} 上 {len(er)} 个任务读状态出错，先不分、不交还："
+                                  f"{'；'.join(f'{k}（{v}）' for k, v in er[:3])}{' …' if len(er) > 3 else ''}", after=60)
     code = s.get("code") or {}
     for name, head in (code.get("heads") or {}).items():  # 连不上的（提交号空着）上面已经报了
         if head and code.get("main") and head != code["main"] and name in M.MACHINES and name not in policy.OFFLINE:

@@ -357,6 +357,11 @@ check("add --recipe：写错参数名报错、不加", rc == 2 and "variantt" in
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy__a", "cmd=python3 -c 1", "env=stats", "out=toy/a2", 'done=["DONE"]')
 check("add：转成文件名和已有任务重名（toy/a 与 toy__a）→ 报错、不加", rc == 2 and "文件名" in out
       and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
+rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=stats", "out=toy/a", 'done=["DONE"]')
+rc2, out2, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 2", "env=stats", "out=toy/a", 'done=["DONE"]')
+check("add --recipe 同名：说明一样 → 跳过；说明不一样 → 报出来、退出码 2、不改原来的",
+      rc == 0 and "已有，跳过" in out and rc2 == 2 and "说明不一样" in out2
+      and next(x for x in taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl")) if x["key"] == "toy/a")["params"]["cmd"] == "python3 -c 1")
 check("same_file：同一批里两个 key 转成同一个文件名也拦", taskq.same_file(["x/y", "x__y"], set()) and not taskq.same_file(["x/y"], {"x/y"}))
 rc, out, _ = tq3("next", "--worker", "700", "--envs", "base,alt")
 lines = out.splitlines()

@@ -589,12 +589,16 @@ def _insert(new, nice, update_only=False):
         if bad:
             print("加不进去：" + "；".join(bad))
             return 2
+        clash = 0
         for t, s in zip(new, specs):
             if s["key"] in have:
                 old = next(x for x in tasks if x["key"] == s["key"])
                 if t.get("spec") and old.get("spec") != t["spec"]:
                     old.update(spec=t["spec"], recipe=t["recipe"], params=t["params"])
                     print(f"换了说明：{s['key']}")
+                elif not t.get("spec") and not t.get("exp") and _differs(spec_of(old), s):  # --recipe、--file 加的撞名（11/4）
+                    print(f"已有同名、说明不一样的任务，没加：{s['key']}（已有 {old.get('recipe')} {json.dumps(old.get('params'), ensure_ascii=False)}）")
+                    clash += 1
                 else:
                     print(f"已有，跳过：{s['key']}")
                 continue
@@ -603,7 +607,12 @@ def _insert(new, nice, update_only=False):
             have.add(s["key"])
             print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {','.join(S.envs_of(s))}）")
         write_tasks(tasks)
-    return 0
+    return 2 if clash else 0
+
+
+def _differs(a, b):
+    drop = ("exp", "params", "names", "recipe")
+    return a is None or {k: v for k, v in a.items() if k not in drop} != {k: v for k, v in b.items() if k not in drop}
 
 
 def read_sheets(path):
