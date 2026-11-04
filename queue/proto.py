@@ -164,6 +164,41 @@ def alert_id(kind, *args):
     return ":".join([kind] + [str(a) for a in args if a not in (None, "")])
 
 
+# ---------------- 环境变量（TASKQ_*）：谁设、什么意思；kind = run（生产里会设）/ tune（阈值，生产不设、用默认）/ test（只给测试） ----------------
+ENV = dict(
+    TASKQ_DATA=("run", "数据目录；dicc_worker.sh 按 machines.py 的 data 设，执行机是 R/data（relay_remote.prefix）"),
+    TASKQ_DIR=("run", "队列目录；执行机是 R/queue（worker.sbatch、pueue 的 worker 命令、relay_remote.prefix 设），没设时用状态目录的 taskq"),
+    TASKQ_CONFIG=("run", "配置文件夹（machines.py、policy.py）；没设时用使用者仓库的 envs/（cfg.py）"),
+    TASKQ_PLUGINS=("run", "插件文件夹；没设时用 policy.py 写的（cfg.py）"),
+    TASKQ_STATE=("run", "状态文件夹的根；没设时用配置里的（cfg.py）"),
+    TASKQ_REPO=("run", "使用者的仓库根；没设时：核心嵌在 <仓库>/scripts/taskq 里就是 <仓库>，否则是核心本身"),
+    TASKQ_CPUS=("run", "Slurm 外的 worker 最多用几个核（pueue 的 worker 命令按 machines.py 的 cpus 设）"),
+    TASKQ_GPU_PAD_SWITCH=("run", "显存填充的总开关文件（worker.sbatch 设成 R/queue/gpu_pad_DISABLED）"),
+    TASKQ_GPU_PAD=("run", "0 = 这个作业不开显存填充（自己推理、分析的脚本设）"),
+    TASKQ_GPU_PAD_STARTED=("run", "显存填充已经开了（gpu_pad_start.sh 设，免得重复开）"),
+    TASKQ_ZOMBIES=("run", "旧 worker 换新代码包时交给新进程的停不下来的训练，每行 pid sid key token why safe（dicc_worker.sh）"),
+    TASKQ_STAGE_TMP=("run", "1/0：开训后把输入拷到节点本地盘；没设时看 machines.py 的 stage_tmp"),
+    TASKQ_ENVS=("run", "worker 能领的环境（逗号分隔）；没设时看 machines.py 的 envs"),
+    TASKQ_SLOTS=("tune", "一个 worker 最多同时训几个；Slurm 里按核数和内存（2 或 1），Slurm 外看 machines.py 的 slots"),
+    TASKQ_MACHINE=("test", "当作哪台机器"),
+    TASKQ_HEAD_CMD=("test", "代替读代码版本的命令"),
+    TASKQ_GPU_PAD_SCRIPT=("test", "代替 gpu_pad.py"),
+    TASKQ_GPU_PAD_BASE=("test", "代替 /tmp/gpu_pad_<作业号>"),
+    TASKQ_TEST_FAKEBIN=("test", "假命令所在的文件夹"),
+    TASKQ_LOCK_WAIT=("test", "等锁时每次重试的间隔（秒，默认 0.5）"),
+    TASKQ_STALE_BEAT=("test", "代替 STALE_BEAT"),
+    TASKQ_FRESH_LOG=("test", "代替 FRESH_LOG"),
+)
+# dicc_worker.sh 的阈值（tune），默认值写在脚本开头
+for _k in ("ADD_AFTER", "UTIL_MAX", "MIN_LEFT", "PATIENCE", "ERR_MAX", "IDLE_MAX", "IDLE_POLL", "IDLE_EXIT", "EARLY_FAIL",
+           "FAIL_WINDOW", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
+    ENV["TASKQ_" + _k] = ("tune", "dicc_worker.sh 的阈值，默认值在脚本开头")
+# gpu_pad.py 的参数（tune），默认值在 gpu_pad.py 的命令行
+for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
+           "SETTLE", "START_HOLD", "RETRY_DELAY", "MAX_FAILS", "RESET_AFTER"):
+    ENV["TASKQ_GPU_PAD_" + _k] = ("tune", "gpu_pad.py 的参数，默认值在它的命令行")
+
+
 # ---------------- 给 bash ----------------
 def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_PREFIX": STAGE_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
