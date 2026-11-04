@@ -38,7 +38,8 @@ box 上（总队列；在没有队列的机器上跑这些命令时退出码 2�
                                        --only 只加 each 里这个参数取这些值的任务，如 --only fold=1,2）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py add [--nice <档位>] --file <任务单.json>               按任务单加（别人的训练、测试；不给 --nice 用单子里的）
-    taskq.py add --nice <档位> --spec-stdin < 说明.json             加解析好的说明（执行机的队列，relay.py 送；已有的换成新说明，11/4）
+    taskq.py add --nice <档位> --spec-stdin [--update-only] < 说明.json   加解析好的说明（执行机的队列，relay.py 送；已有的换成新说明，
+                                       --update-only 只换已有的，11/4）
     taskq.py set <key> k=v…           改一个任务的参数（如 env=umamba；k= 空值 = 删掉这个参数，回到默认）
     taskq.py set-nice --nice <档位> <key>...
     taskq.py show [--json] <key>      任务的完整说明和状态（--json：说明写在 @@JSON 开头的一行里）
@@ -575,12 +576,14 @@ def _resolve_new(t):
     return E.resolve_task(t["recipe"], t["params"], t.get("exp"))
 
 
-def _insert(new, nice):
+def _insert(new, nice, update_only=False):
     """把新任务（dict(key, exp, recipe, params[, spec])）加进队列，已有的跳过（带 spec 的换成新的说明）。先解析一遍，写错参数的不加。"""
     with Lock():
         tasks = read_tasks()
         have = {t["key"] for t in tasks}
         order = max([t["order"] for t in tasks] or [0])
+        if update_only:
+            new = [t for t in new if _resolve_new(t)["key"] in have]
         specs = [_resolve_new(t) for t in new]
         bad = same_file([s["key"] for s, t in zip(specs, new) if not (t.get("spec") and s["key"] in have)], have)
         if bad:
@@ -660,7 +663,7 @@ def cmd_add(a):
             sys.exit("要给 --exp、--recipe、--file 或 --spec-stdin")
         if a.nice is None:
             sys.exit("要给 --nice")
-        return _insert(new, a.nice)
+        return _insert(new, a.nice, update_only=a.update_only)
     except S.SpecError as e:
         print(f"加不进去：{e}")
         return 2
@@ -959,6 +962,7 @@ def main(argv):
     p.add_argument("--recipe")
     p.add_argument("--file", help="任务单（JSON），不写 recipe 时是 command 做法")
     p.add_argument("--spec-stdin", action="store_true", help="从标准输入读解析好的说明（一个或列表，spec.py resolve 的格式；box 的 relay 送任务用）")
+    p.add_argument("--update-only", action="store_true", help="只换已有任务的说明，不加新的（relay.py resend）")
     p.add_argument("args", nargs="*", help="--recipe 的 k=v")
     p = sub.add_parser("set")
     p.add_argument("key")

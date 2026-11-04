@@ -892,6 +892,10 @@ open(os.path.join(TQS, "tasks.jsonl"), "a").write(json.dumps(dict(order=99, nice
 rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps(S.sendable(S.resolve("command", dict(key="old/c", cmd="true", env="stats", out="old/c", done="D")))))
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
 check("add --spec-stdin：已有的老记录（没有说明）补上说明", rc == 0 and ts["old/c"].get("spec", {}).get("key") == "old/c" and ts["old/c"]["nice"] == 1)
+rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", "--update-only",
+                stdin=json.dumps([dict(sp_a, cmd="python3 -c 3"), S.sendable(S.resolve("command", dict(key="gone/x", cmd="true", env="stats", out="gone/x", done="D")))]))
+ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
+check("add --update-only：只换已有的说明，不在队列里的不加", rc == 0 and "gone/x" not in ts and ts["sp/a"]["spec"]["cmd"] == "python3 -c 3")
 rc, out, _ = tqs("set", sp_b["key"], "variant=W")
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
 check("set 改参数：说明作废，回到按做法解析", "spec" not in ts.get(sp_b["key"], {}) or rc != 0)
