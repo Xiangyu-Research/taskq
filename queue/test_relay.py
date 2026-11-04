@@ -694,7 +694,7 @@ def test_e2e_path(pre):
     D = os.path.join(RROOT, "data")
     assert rk == sp["key"] and k["views"] == ["proj/inputs/cohortA"], k
     assert set(k["outs"]) == {sp["out"], "proj/analysis/thing/shared"}, k
-    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.dat" in k["inputs"] and not any("t1" in x for x in k["inputs"]), k
+    assert "proj/lists/cases.txt" in k["inputs"] and "raw/Set/c1/c1-seg.dat" in k["inputs"] and not any("t1" in os.path.basename(x) for x in k["inputs"]), k
     assert open(os.path.join(D, "proj/inputs/cohortA", "y_0000.dat"), "rb").read() == b"yy"
     assert open(os.path.join(D, "proj/inputs/cohortA", "a", "x_0000.dat"), "rb").read() == b"xa"
     assert open(os.path.join(D, "raw/Set/c2/c2-seg.dat"), "rb").read() == b"sc2"
