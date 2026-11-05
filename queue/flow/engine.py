@@ -1,6 +1,6 @@
 """按流程（flow/compile.py 编出的实例和先后）算下一步（2026-11-05，P2）：和 advance.plan 的输出一样（op、step、key、label、cmd、
 nice、排队参数、after），由配置文件夹里 policy.py 的 ENGINE 决定用哪个：
-  advance（默认）只用 advance.plan；shadow 两个都算、照 advance 的排，差别写进 <状态文件夹>/shadow/engine-<日期>.jsonl；dag 用这里的。
+  advance（默认）只用 advance.plan；shadow 两个都算、照 advance 的排，差别写进事件日志（source flow，kind engine_diff）；dag 用这里的。
 放在哪里（PLACE、源头任务所在的执行机、queue:<机器>、放不下）、提前排、撤掉提前排的，照 advance.py 原样搬过来；不同的只有"该做哪个"：
   实例的先后都做完了、自己没做完、没在拷回 → 排它；源头没做完 → 提前排它后面的；on_change=rerun 的看上游有没有更新的产出。"""
 import json
@@ -312,19 +312,17 @@ def norm(todo, stuck, notes=()):
     return out
 
 
-def shadow(s, a_todo, a_stuck, day=None, budget=60):
-    """ENGINE=shadow：同一份状态再用这里算一遍，和 advance 的比；不一样的写进 shadow/engine-<日期>.jsonl → (一样的个数, 不一样的个数)。"""
+def shadow(s, a_todo, a_stuck, budget=60):
+    """ENGINE=shadow：同一份状态再用这里算一遍，和 advance 的比；differences go into the event log (source flow, kind engine_diff) → (same, different)。"""
     t0 = datetime.now()
     a = norm(a_todo, a_stuck, A.NOTES)
     b = norm(*plan(s), NOTES)
     diff = sorted(a ^ b)
     if diff:
-        d = cfg.state(proto.LEDGER_SHADOW)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, f"engine-{day or datetime.now():%Y%m%d}.jsonl"), "a") as f:
-            for x in diff:
-                f.write(json.dumps(dict(t=f"{datetime.now():%F %T}", only="advance" if x in a else "engine", item=x),
-                                   ensure_ascii=False) + "\n")
+        import events
+        events.add_many(events._row("flow", f"only {'advance' if x in a else 'engine'}: {x}", kind="engine_diff",
+                                    data=dict(only="advance" if x in a else "engine", item=x))
+                        for x in diff)
     if (datetime.now() - t0).total_seconds() > budget:
         NOTES.append(f"引擎的影子对比用了 {(datetime.now() - t0).total_seconds():.0f} 秒")
     return len(a & b), len(diff)

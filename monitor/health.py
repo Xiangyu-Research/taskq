@@ -53,11 +53,7 @@ import notice as NT  # noqa: E402
 OUT = getattr(policy, "OUTPUTS", {})
 HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
 NAME = OUT.get("name", "taskq")
-STATE = os.path.join(HDIR, "state.json")
-LOG = os.path.join(HDIR, "health.log")
 TOPIC = os.path.expanduser(OUT.get("topic", "~/.config/taskq-health/ntfy_topic"))
-H_NOTICES = os.path.join(HDIR, proto.NOTICES)  # taskq notice（monitor/notice.py）
-H_LOADERR = os.path.join(HDIR, "load_error.txt")
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
 
 
@@ -74,11 +70,12 @@ def load_failed(e, dry=False):
     print(msg, file=sys.stderr)
     if dry or not NIGHT[1] <= datetime.now().hour < NIGHT[0]:
         return
-    old = open(H_LOADERR).read() if os.path.exists(H_LOADERR) else None
-    if old != msg:
+    db = NT.open_db()
+    if db is None or not NT.D.writable(db) or NT.D.get_meta(db, "load_error") != msg:
         push(msg, priority="high", tags="warning")
-        os.makedirs(HDIR, exist_ok=True)
-        open(H_LOADERR, "w").write(msg)
+        if db is not None and NT.D.writable(db):
+            with NT.D.tx(db):
+                NT.D.set_meta(db, "load_error", msg)
 
 
 try:
@@ -87,7 +84,6 @@ try:
     import taskq  # noqa: E402  queue/taskq.py：总队列（hub，10/31）
     import plain as PL  # noqa: E402  monitor/plain.py：推送的白话说法
     import common as C  # noqa: E402  queue/common.py
-    from common import write_json  # noqa: E402
 except Exception as _e:
     if __name__ != "__main__":
         raise
@@ -183,7 +179,8 @@ def gather(remote=True):
             elif m["ssh"] is not None:  # 收集超时（多半是那边的存储挂住，10/31）：这次检查后面的步骤都当它连不上，不再去连
                 s["ok"][name] = False
                 s["why"][name] = "收集训练状态超时或出错（多半是那边的存储挂住）"
-    s["notices"] = {n: v["text"] for n, v in NT.read(H_NOTICES).items()}
+    db = NT.open_db(write=False)
+    s["notices"] = {n: v["text"] for n, v in NT.notices(db).items()} if db else {}
     return s
 
 
@@ -317,25 +314,19 @@ def check(s):
 
 
 # ---------------- 推送和状态 ----------------
-def drop_acked(P, dry=False):
-    """taskq notice ack 确认过的"发生过的事"不再列出；确认记录里已经不在 P 里的删掉（11/5）。"""
-    d = NT.acked()
-    if not d:
-        return P
-    keep = {k: v for k, v in d.items() if k in P}
-    if keep != d and not dry:
-        NT.save_acked(keep)
-    return {k: p for k, p in P.items() if not (k in keep and p.get("kind") == "event")}
+def drop_acked(P, db):
+    """Acked "something happened" problems (taskq notice ack) are left out; acks of gone problems are dropped on save."""
+    d = NT.acked(db) if db else {}
+    return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
 def night(now):
     return now.hour >= NIGHT[0] or now.hour < NIGHT[1]
 
 
-def update(P, now, dry=False):
+def update(P, now, db, dry=False):
     """和上次的状态比：新出现、持续够久的推送（白话，plain.py；同一次查到几件并成一条）；夜里只推紧急的，其余早上第一次检查时推。"""
-    st = json.load(open(STATE)) if os.path.exists(STATE) else {}
-    old = st.get("problems", {})
+    old = NT.problems(db)[0] if db else {}
     msgs, log = [], []
     cur = {}
     for pid, p in P.items():
@@ -366,13 +357,10 @@ def update(P, now, dry=False):
         except Exception as e:  # noqa: BLE001  推送失败：下次再推
             sent_ok = False
             log.append(f"推送失败：{e}")
-        for k in ("digest", "digest_prune_pos", "resolved_overnight"):
-            st.pop(k, None)
-        st.update(problems=cur, checked=now.strftime("%Y-%m-%d %H:%M"))
-        write_json(STATE, st)
-        if log:
-            with open(LOG, "a") as f:
-                f.writelines(f"{now:%F %T} {x}\n" for x in log)
+        if db is not None and NT.D.writable(db):
+            NT.save_problems(db, cur, now.strftime("%Y-%m-%d %H:%M"))
+        import events
+        events.lines("health", log, db=db)
     return [p for _, p in msgs], sent_ok
 
 
@@ -415,11 +403,20 @@ def ledger_shadow(s):
         n = LG.shadow(flow, Graph(flow), root, db, s=s, seen=advance.SEEN, hub=M.hub(), identify=C.identify)
     finally:
         db.close()
-    line = (f"{datetime.now():%F %T} 一致 {n['agree']}、新做完 {n['new']}、重跑 {n['rerun']}、改过 {n['changed']}、"
+    line = (f"一致 {n['agree']}、新做完 {n['new']}、重跑 {n['rerun']}、改过 {n['changed']}、"
             f"做完又不算了 {n['regressed']}、这轮没查 {n['skipped']}；新出的说不清的 {len(n['unexplained'])}（{n['seconds']} 秒）")
-    with open(cfg.log("ledger"), "a") as f:
-        f.write(line + "\n")
+    import events
+    events.add("ledger", line, kind="shadow", data={k: v for k, v in n.items() if k != "unexplained"})
     return n
+
+
+def progress_snapshot(s, db):
+    """Each task's state, progress and where its best copy is → the progress table (only what changed)."""
+    import events
+    import overview
+    tasks = [dict(key=t["key"], state=(t["queue"] or {}).get("state"), progress=t["progress"], site=(t["copy"] or {}).get("where"),
+                  data=dict(epochs=(t["copy"] or {}).get("epochs"), total=t["total"])) for t in overview.build(s)["tasks"]]
+    return events.snapshot(db, tasks)
 
 
 def from_step(v):
@@ -437,8 +434,14 @@ def main(argv=None):
     if LOAD_ERROR is not None:
         load_failed(LOAD_ERROR, dry=a.dry_run)
         return 1
-    if not a.dry_run and os.path.exists(H_LOADERR):
-        os.remove(H_LOADERR)
+    import events
+    db = NT.open_db(write=not a.dry_run)
+    if not a.dry_run and db is not None and NT.D.writable(db):
+        NT.D.set_meta(db, "load_error", None)
+        try:
+            events.flush(db)
+        except Exception as e:  # noqa: BLE001
+            print(f"event spool not imported: {e}", file=sys.stderr)
     if a.test:
         push("测试：健康检查的推送能收到", tags="tada")
         print("已推送测试消息")
@@ -485,8 +488,16 @@ def main(argv=None):
         stuck2[alert_id("stall", "error")] = f"卡住检测出错：{type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
-    P = drop_acked(P, dry=a.dry_run)
-    update(P, s["now"], dry=a.dry_run)
+    if not a.dry_run and (db is None or not NT.D.writable(db)):
+        P[alert_id("db", M.hub())] = problem(f"hub database {NT.D.path()} cannot be written (network filesystem, or made by a newer "
+                                             "taskq): problems are pushed again every check", level="urgent")
+    P = drop_acked(P, db)
+    update(P, s["now"], db, dry=a.dry_run)
+    if not a.dry_run and db is not None and NT.D.writable(db):
+        try:
+            progress_snapshot(s, db)
+        except Exception as e:  # noqa: BLE001
+            print(f"progress snapshot failed: {type(e).__name__}: {e}", file=sys.stderr)
     if a.dry_run:
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""

@@ -26,7 +26,6 @@ import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 
 STATE = cfg.state("shift.json")
-LOG = cfg.log("refill")
 PUEUE = "~/.local/bin/pueue"
 TZ = dt.timezone(dt.timedelta(hours=8))
 
@@ -262,8 +261,8 @@ def run(s=None, dry=False, now=None):
     if not dry:
         save(st)
         if msgs:
-            with open(LOG, "a") as f:
-                f.writelines(f"{now:%F %T} {m}\n" for m in msgs)
+            import events
+            events.lines("shift", msgs)
     return msgs
 
 

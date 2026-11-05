@@ -78,7 +78,6 @@ import shift  # noqa: E402
 from common import write_json  # noqa: E402
 
 STATUS = os.path.join(ST.DIR, "status.json")
-LOG = cfg.log("relay")
 HARD_GB = 100  # 领之前：传过去以后那边至少还剩这么多
 DOWN_S = 2 * 3600  # 领着任务、连不上这么久就报
 LATE_S = 3600  # 拉回、归档成功这么久了 hub 上还不算训完，就报
@@ -765,9 +764,8 @@ def write_status(name, rs, st):
 
 
 def log(lines):
-    if lines:
-        with open(LOG, "a") as fo:
-            fo.writelines(f"{time.strftime('%F %T')} {x}\n" for x in lines)
+    import events
+    events.lines("relay", lines)
 
 
 def envs_switch(name):

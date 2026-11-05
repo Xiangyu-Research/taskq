@@ -1,4 +1,4 @@
-"""relay 在 hub 上的记账（RELAY_DIR 下的 state.json：每台各任务放过去的路径、视图、代码包；hashes.json：sha256 缓存）
+"""relay 在 hub 上的记账（RELAY_DIR 下的 state.json：每台各任务放过去的路径、视图、代码包；sha256 缓存在 hub 的数据库里）
 和执行机根目录的清理。
 
 清理（2026-10-31）：剩余低于软线时，先删总队列不再要的
@@ -92,24 +92,41 @@ def safe_rel(rel):
 
 
 def sha256s(paths):
-    """真实路径 → sha256，按（路径、大小、修改时间）缓存在 HASHES。"""
+    """Real path → sha256, cached by (path, size, mtime) in the hub database (table hash; without one, not cached)."""
+    import db as D
+    db = D.connect()
+    if db is not None and not (D.has(db, "hash") and D.writable(db)):
+        db.close()
+        db = None
+    if db is not None and os.path.exists(HASHES):  # the old JSON cache, taken over once
+        try:
+            old = json.load(open(HASHES))
+            with D.tx(db):
+                db.executemany("INSERT OR IGNORE INTO hash(k, sha) VALUES(?, ?)", old.items())
+        except ValueError:
+            pass
+        os.replace(HASHES, HASHES + ".migrated")
+    out, new = {}, []
     try:
-        cache = json.load(open(HASHES))
-    except (OSError, ValueError):
-        cache = {}
-    out, new = {}, False
-    for p in paths:
-        st = os.stat(p)
-        k = f"{p}|{st.st_size}|{st.st_mtime_ns}"
-        if k not in cache:
+        for p in paths:
+            st = os.stat(p)
+            k = f"{p}|{st.st_size}|{st.st_mtime_ns}"
+            r = db.execute("SELECT sha FROM hash WHERE k=?", (k,)).fetchone() if db else None
+            if r:
+                out[p] = r[0]
+                continue
             h = hashlib.sha256()
             with open(p, "rb") as f:
                 for blk in iter(lambda: f.read(1 << 22), b""):
                     h.update(blk)
-            cache[k], new = h.hexdigest(), True
-        out[p] = cache[k]
-    if new:
-        write_json(HASHES, cache, indent=None)
+            out[p] = h.hexdigest()
+            new.append((k, out[p]))
+        if db and new:
+            with D.tx(db):
+                db.executemany("INSERT OR REPLACE INTO hash(k, sha) VALUES(?, ?)", new)
+    finally:
+        if db:
+            db.close()
     return out
 
 

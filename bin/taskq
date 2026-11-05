@@ -286,6 +286,11 @@ TREE = {
         "lock": Cmd("把环境描述解成锁 <名>.<变体>.lock.json，文件下到 wheelhouse（不装进任何环境）", py("envlock", "lock", prog="taskq env"),
                     own_help=True),
     }),
+    "events": Cmd("the event log: what happened (--since --key --site --source --kind --grep, -f, --json)",
+                  py("events", "events", prog="taskq"), own_help=True),
+    "note": Cmd("write a note into the event log (what went wrong, what was done)", py("events", "note", prog="taskq"), own_help=True),
+    "progress": Cmd("task progress over time ([--key K] [--since T] [--json])", py("events", "progress", prog="taskq"), own_help=True),
+    "problems": Cmd("what the last health check found ([--all] [--json])", py("notice", "problems", prog="taskq"), own_help=True),
     "notice": Group("挂在健康检查上的提醒（进\"需要处理\"、推送一次，撤掉后消失）", {
         "set": Cmd("挂上或改文字（<名字> [文字…]；不给文字时读标准输入）", py("notice", "set", prog="taskq notice"), own_help=True),
         "clear": Cmd("撤掉（<名字>…）", py("notice", "clear", prog="taskq notice"), own_help=True),
@@ -340,6 +345,11 @@ TREE = {
     "accept": Cmd("台账：有意改过的产出按现在的样子重新记下", py("flow.cli", "accept", prog="taskq"), own_help=True),
     "publish": Cmd("处理被冲突挡住的发布、接着做断了的发布", py("flow.cli", "publish", prog="taskq"), own_help=True),
     "check": Cmd("核对整个项目（配置、插件、实验表、所有任务）", py("check", prog="taskq check"), own_help=True),
+    "db": Group("the hub database", {
+        "migrate": Cmd("create it or apply pending migrations (hub only)", py("db", "migrate", prog="taskq db"), own_help=True),
+        "path": Cmd("where it is", py("db", "path", prog="taskq db"), own_help=True),
+        "version": Cmd("schema version on disk and in this code", py("db", "version", prog="taskq db"), own_help=True),
+    }),
     "path": Cmd("核心的位置：lib / api（queue/）、core（根）", cmd_path, "lib|api|core", project=False),
     "machines": Cmd("机器表（get、names、activate、show…）", cmd_machines, own_help=True),
     "self": Group("taskq 本身", {
@@ -361,15 +371,17 @@ TREE = {
     "internal": Group("调度自己排的步骤", {
         "stage": Cmd("传数据、加进执行机的队列（排不上退出码 75）", py("relay", "stage", prog="taskq internal"), own_help=True),
         "fetch": Cmd("拉回做完的任务", py("relay", "fetch", prog="taskq internal"), own_help=True),
+        "import-logs": Cmd("import the old text logs into the event log (re-running adds nothing)", py("events", "import", prog="taskq internal"),
+                           own_help=True),
         "engine-replay": Cmd("反事实回放：advance 和 flow 引擎各算一遍比较", py("flow.cli", "replay", prog="taskq internal"), own_help=True),
     }, hidden=True),
 }
 
 SECTIONS = [("队列", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "rm"]),
-            ("调度", ["tick", "plan", "boot", "notice"]),
+            ("调度", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress"]),
             ("执行机和实验", ["site", "env", "smoke", "exp"]),
             ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
-            ("其他", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
+            ("其他", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "snapshot", "check", "db", "path", "machines", "self"])]
 
 
 def top_help():

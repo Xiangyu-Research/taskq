@@ -22,6 +22,9 @@ import advance as A  # noqa: E402
 import policy as P  # noqa: E402
 import mtab as M  # noqa: E402
 from flow import engine as G  # noqa: E402
+import db as D  # noqa: E402
+import events as EV  # noqa: E402
+EVDB = D.connect(create=True)
 
 fails = []
 
@@ -54,11 +57,8 @@ try:
         G.plan = lambda s_, **k: ([dict(step="x", key="k", group="cpu", label="x:k", cmd="true", nice=0)], {})
         A.run(s, q=lambda *a: 1, tq=lambda *a: (0, ""), rm=lambda *a: (0, ""))
         G.plan = real
-        files = os.listdir(os.path.join(T, "shadow")) if os.path.isdir(os.path.join(T, "shadow")) else []
-        ok(any(f.startswith("engine-") for f in files), f"影子不一样时没写 shadow/engine-*.jsonl：{files}")
-        if files:
-            rows = [json.loads(x) for x in open(os.path.join(T, "shadow", files[0]))]
-            ok(any(r["only"] == "engine" for r in rows), f"影子记录不对：{rows}")
+        rows = [json.loads(r["data"]) for r in EV.query(EVDB, kind="engine_diff")]
+        ok(any(r["only"] == "engine" for r in rows), f"shadow differences go into the event log (kind engine_diff): {rows}")
         ok(A.SHADOW and A.SHADOW[1] >= 1, f"SHADOW 没记不一样的个数：{A.SHADOW}")
         P.ENGINE = "dag"
         seen = []

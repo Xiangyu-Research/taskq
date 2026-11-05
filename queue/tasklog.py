@@ -117,7 +117,17 @@ def attempts(key, data, now=None):
 
 
 def events(key):
-    """hub 上调度日志里提到这个 key 的行（key 后面紧跟字母、数字、/ 的不算，那是别的任务）。"""
+    """Event log rows about this key (hub database; without one, the old text logs). A key followed by a letter, digit or /
+    is another task."""
+    try:
+        import db as D
+        import events as EV
+        db = D.connect(ro=True)
+    except Exception:  # noqa: BLE001
+        db = None
+    if db is not None and D.has(db, "log"):
+        return [dict(log=proto.LEGACY_LOGS.get(r["source"], r["source"]), time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["t"])),
+                     text=r["msg"]) for r in EV.query(db, key=key)]
     pat = re.compile(re.escape(key) + r"(?![\w/])")
     out = []
     for name in proto.SCHED_LOGS:

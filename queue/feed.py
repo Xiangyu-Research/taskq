@@ -19,13 +19,11 @@ sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
 from proto import alert, alert_id, alert_msg  # noqa: E402
 
-LOG = cfg.log("feed")
 
 
 def log(lines):
-    if lines:
-        with open(LOG, "a") as f:
-            f.writelines(f"{time.strftime('%F %T')} {x}\n" for x in lines)
+    import events
+    events.lines("feed", lines)
 
 
 def nobody(ctq):

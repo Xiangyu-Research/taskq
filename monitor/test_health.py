@@ -213,9 +213,9 @@ ok("gather(remote=False)：只探查本机，qs 只问本机",
    and set(g["ok"]) == {"hub"} and set(g["taskq"]) == {"hub"} and set(g["pueue"]) == {"hub"})
 H.sh, H.run_on, H.spec.remote_collect, H.spec.collect, H.taskq.local_status = saved
 
-# ---------------- 提醒（taskq notice，monitor/notice.py）：存在健康检查的状态文件夹下，gather 读进来 ----------------
+# ---------------- notices, acks, problems: the hub database (monitor/notice.py) ----------------
 import notice as NT  # noqa: E402
-_nh = fixture.tmpdir()  # 命令行用的 HOME（不碰真的状态文件夹）
+_nh = fixture.tmpdir()
 _nenv = dict(os.environ, HOME=_nh)
 TQ = os.path.join(os.path.dirname(HERE), "bin", "taskq")
 
@@ -225,54 +225,69 @@ def tqn(*a, inp=None):
 
 
 r1 = tqn("set", "board", "看板有新结果", "等确认")
-r2 = tqn("set", "b-2_x", inp="从标准输入\n")
+r2 = tqn("set", "b-2_x", inp="from stdin\n")
 r3 = tqn("list", "--json")
 _nl = json.loads(r3.stdout)
-_nd = os.path.join(_nh, ".cache", "taskq-health", "notices")
-ok("notice set：参数或标准输入的文字存进健康检查的状态文件夹下 notices/<名字>.txt；list --json 列出（名字排好）",
-   r1.returncode == r2.returncode == r3.returncode == 0 and open(os.path.join(_nd, "board.txt")).read() == "看板有新结果 等确认\n"
+_db = NT.open_db(write=False)
+ok("notice set: text from arguments or stdin goes into the database; list --json lists them by name",
+   r1.returncode == r2.returncode == r3.returncode == 0 and NT.notices(_db)["board"]["text"] == "看板有新结果 等确认"
    and tuple(_nl) == H.proto.NOTICE_TOP and [x["name"] for x in _nl["notices"]] == ["b-2_x", "board"]
-   and _nl["notices"][0]["text"] == "从标准输入" and all(tuple(x) == H.proto.NOTICE_FIELDS for x in _nl["notices"]))
+   and _nl["notices"][0]["text"] == "from stdin" and all(tuple(x) == H.proto.NOTICE_FIELDS for x in _nl["notices"]))
 r4 = tqn("set", "a/b", "x")
 r5 = tqn("set", "x y", "x")
 r6 = tqn("set", "empty", inp="")
-ok("notice set：名字只能用字母、数字、_、-，没有文字 → 用法错，不写", r4.returncode == r5.returncode == r6.returncode == 2
-   and sorted(os.listdir(_nd)) == ["b-2_x.txt", "board.txt"])
+ok("notice set: bad name or no text → usage error, nothing written", r4.returncode == r5.returncode == r6.returncode == 2
+   and sorted(NT.notices(_db)) == ["b-2_x", "board"])
 r7 = tqn("clear", "b-2_x", "nope")
 r8 = tqn("list")
-ok("notice clear：撤掉，没挂着的不算错；list 文字", r7.returncode == 0 and "没有挂着 nope" in r7.stdout
-   and r8.stdout.startswith("board（") and "看板有新结果 等确认" in r8.stdout and "b-2_x" not in r8.stdout)
-ok("notice --help 由命令行给", tqn("--help").returncode == 0 and "set" in tqn("--help").stdout)
-_keep = H.H_NOTICES
-H.H_NOTICES = _nd
+ok("notice clear: missing ones are not an error; list as text", r7.returncode == 0 and "no notice nope" in r7.stdout
+   and r8.stdout.startswith("board (") and "看板有新结果 等确认" in r8.stdout and "b-2_x" not in r8.stdout)
+ok("notice --help", tqn("--help").returncode == 0 and "set" in tqn("--help").stdout)
+r9 = tqn("set", "later", "--at", "3d", "do it later")
+ok("notice set --at: listed with its time, not reported before then",
+   r9.returncode == 0 and NT.notices(_db, due_only=False)["later"]["at"] > NT.time.strftime(NT.TF) and "later" not in NT.notices(_db))
+tqn("clear", "later")
 saved = H.sh, H.run_on, H.spec.remote_collect, H.spec.collect
 H.sh, H.run_on = fake_sh, fake_run_on
 H.spec.remote_collect = lambda ssh, specs, root: {"tasks": {}, "seglogs": []}
 H.spec.collect = lambda specs, root: {"tasks": {}, "seglogs": []}
-open(os.path.join(_nd, "junk.json"), "w").write("{}")
 g = H.gather(remote=False)
-ok("gather：挂着的提醒（只认 <名字>.txt）→ s['notices']", g["notices"] == {"board": "看板有新结果 等确认"})
+ok("gather: notices → s['notices']", g["notices"] == {"board": "看板有新结果 等确认"})
 tqn("clear", "board")
-ok("gather：撤掉以后没有了", H.gather(remote=False)["notices"] == {})
+ok("gather: gone once cleared", H.gather(remote=False)["notices"] == {})
 H.sh, H.run_on, H.spec.remote_collect, H.spec.collect = saved
-H.H_NOTICES = _keep
 
-# taskq notice ack（11/5）：只确认 kind=event 的问题；确认过的不再列出；问题消失后确认记录跟着删
-_hd = os.path.dirname(_nd)
-json.dump({"problems": {"boot:hub:2026-11-05 13:52:30": {"msg": "x", "kind": "event"}, "disk:hub": {"msg": "y", "kind": "state"}}},
+# old files are taken over once
+_hd = fixture.tmpdir()
+os.makedirs(os.path.join(_hd, H.proto.NOTICES), exist_ok=True)
+json.dump({"checked": "2026-11-05 13:00", "problems": {"boot:hub:2026-11-05 13:52:30": {"msg": "x", "kind": "event"},
+                                                        "disk:hub": {"msg": "y", "kind": "state"}}},
           open(os.path.join(_hd, "state.json"), "w"))
+json.dump({"gone:1": "2026-11-05 10:00:00"}, open(os.path.join(_hd, H.proto.ACKED), "w"))
+open(os.path.join(_hd, H.proto.NOTICES, "old.txt"), "w").write("old notice\n")
+_wdb = NT.open_db()
+NT.adopt_files(_wdb, _hd)
+ok("old state.json / acked.json / notices → database, files renamed *.migrated",
+   sorted(NT.problems(_wdb)[0]) == ["boot:hub:2026-11-05 13:52:30", "disk:hub"] and NT.problems(_wdb)[1] == "2026-11-05 13:00"
+   and NT.acked(_wdb) == {"gone:1": "2026-11-05 10:00:00"} and NT.notices(_wdb)["old"]["text"] == "old notice"
+   and os.path.exists(os.path.join(_hd, "state.json.migrated")) and not os.path.exists(os.path.join(_hd, "state.json")))
+NT.drop(_wdb, "old")
+
+# taskq notice ack: only kind=event; acked ones are left out; acks of gone problems are dropped
 ra, rb, rc_ = tqn("ack", "boot:hub"), tqn("ack", "disk:hub"), tqn("ack", "nosuch")
-_ak = json.load(open(os.path.join(_hd, H.proto.ACKED)))
-ok("notice ack：前缀认出发生过的事并记下；一直存在的问题、没有的问题不确认（退出码 1）",
-   ra.returncode == 0 and list(_ak) == ["boot:hub:2026-11-05 13:52:30"] and rb.returncode == 1 and "不是" in rb.stderr
-   and rc_.returncode == 1 and "没有这个问题" in rc_.stderr)
-_kp = NT.acked_path
-NT.acked_path = lambda: os.path.join(_hd, H.proto.ACKED)
+ok("notice ack: prefix finds the event; ongoing or unknown problems are not acked (exit 1)",
+   ra.returncode == 0 and "boot:hub:2026-11-05 13:52:30" in NT.acked(_wdb) and rb.returncode == 1 and "ongoing" in rb.stderr
+   and rc_.returncode == 1 and "no such problem" in rc_.stderr)
 _P = {"boot:hub:2026-11-05 13:52:30": H.problem("x", kind="event"), "disk:hub": H.problem("y")}
-ok("drop_acked：确认过的发生过的事去掉，别的照常", list(H.drop_acked(dict(_P))) == ["disk:hub"])
-H.drop_acked({"disk:hub": H.problem("y")})
-ok("drop_acked：问题消失后确认记录删掉", json.load(open(NT.acked_path())) == {})
-NT.acked_path = _kp
+ok("drop_acked: acked events left out, others kept", list(H.drop_acked(dict(_P), _wdb)) == ["disk:hub"])
+NT.save_problems(_wdb, {"disk:hub": H.problem("y")}, "2026-11-05 14:00")
+ok("save_problems: acks of gone problems dropped", NT.acked(_wdb) == {})
+rp = subprocess.run([sys.executable, TQ, "problems", "--json", "--all"], capture_output=True, text=True, env=_nenv, timeout=60)
+_pj = json.loads(rp.stdout)
+ok("taskq problems --json: proto.PROBLEMS_TOP, each problem proto.OVERVIEW_PROBLEM",
+   tuple(_pj) == H.proto.PROBLEMS_TOP and [p["id"] for p in _pj["problems"]] == ["disk:hub"]
+   and all(tuple(p) == H.proto.OVERVIEW_PROBLEM for p in _pj["problems"]))
+NT.save_problems(_wdb, {}, None)
 
 s = snap()
 s["probe"]["pueue-host"]["DISK"] = str(int(10e9))
@@ -309,15 +324,14 @@ ok("第四台机器连不上：报", "down:fake" in ids(s))
 del H.M.MACHINES["fake"]
 
 # ---------------- 推送规则（10/21：白话、并成一条、不推已恢复和汇总）----------------
-d = fixture.tmpdir()
-H.STATE, H.LOG = f"{d}/state.json", f"{d}/health.log"
+_wdb = NT.open_db()
 sent = []
 H.push = lambda msg, **kw: sent.append((kw.get("title", ""), msg))
 
 
 def run(P, now):
     sent.clear()
-    H.update({k: dict(v) for k, v in P.items()}, now)
+    H.update({k: dict(v) for k, v in P.items()}, now, _wdb)
     return list(sent)
 
 
@@ -347,7 +361,7 @@ ok("info 级不推送", run(I, datetime(2026, 10, 17, 11, 0)) == [])
 # ---------------- feed / advance 出错不让健康检查停掉 ----------------
 import types  # noqa: E402
 got = {}
-H.gather, H.update = (lambda: snap()), (lambda P, now, dry=False: got.update(P))
+H.gather, H.update = (lambda: snap()), (lambda P, now, db, dry=False: got.update(P))
 fd = types.ModuleType("feed")
 feed_calls = []
 fd.run_all = lambda s, dry=False: (feed_calls.append(dry), ([], {"x:y": "z"}))[1]
@@ -502,9 +516,9 @@ rc1, p1 = _health(_bad, 12)
 rc2, p2 = _health(_bad, 12)
 ok("插件写错：health 退出码非零，推送一次（带出错的文件），同样的错下次不再推",
    rc1 != 0 and len(p1) == 1 and "zz_broken" in p1[0] and rc2 != 0 and len(p2) == 1)
-_mark = os.path.join(_lt, "home", ".cache", "taskq-health", "load_error.txt")
-rc3, _ = _health(os.environ["TASKQ_PLUGINS"], 12, "--test")  # 不推真的（urlopen 换掉了）；--help 不做事，不清记录
-ok("插件修好后：正常 import，清掉出错记录", rc3 == 0 and not os.path.exists(_mark))
+rc3, _ = _health(os.environ["TASKQ_PLUGINS"], 12, "--test")  # 不推真的（urlopen 换掉了）
+ok("plugins fixed: imports again, the load error mark is cleared",
+   rc3 == 0 and NT.D.get_meta(NT.open_db(write=False), "load_error") is None)
 shutil.rmtree(os.path.join(_lt, "home"))
 if os.path.exists(os.path.join(_lt, "pushed.log")):
     os.remove(os.path.join(_lt, "pushed.log"))

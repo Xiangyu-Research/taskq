@@ -85,9 +85,7 @@ ok("给人看的表里有每个任务", all(k in O.text(o) for k in keys))
 
 # 健康检查记下的问题、relay 的 status.json
 import health as H  # noqa: E402
-os.makedirs(os.path.dirname(H.STATE), exist_ok=True)
-json.dump({"checked": "x", "problems": {"p:1": dict(msg="m", level="normal", kind="k", first=1, active=True, notified=None, data={})}},
-          open(H.STATE, "w"))
+H.NT.save_problems(H.NT.open_db(), {"p:1": dict(msg="m", level="normal", kind="k", first=1, active=True, notified=None, data={})}, "x")
 json.dump({"site-pueue": dict(time=NOW.timestamp() - 60, label="L1", tasks={C: prog(epochs=5)}),
            "site-pueue2": dict(time=NOW.timestamp() - 3 * 3600, label="L0", tasks={C: prog(epochs=9)})},
           open(os.path.join(os.environ["RELAY_DIR"], "status.json"), "w"))

@@ -6,7 +6,7 @@ P1 只做影子：每轮健康检查拿现在的做完判断（advance.py 算过
   旧的判断说做完、台账没有 → 记一次 legacy 尝试；
   两边都说做完、标志变了 → 这期间调度跑过它（或改它产出的实例）就记成新的一次，否则记一笔"有人改过"（只记一次）；
   台账说做完、旧的判断说没做完 → 记一笔（标志不见了是 error）。
-说不清原因的写进 <状态文件夹>/shadow/ledger-<日期>.jsonl，一行一件。"""
+说不清原因的写进事件日志（source flow，kind ledger_unexplained），一行一件。"""
 import json
 import os
 import sqlite3
@@ -262,7 +262,7 @@ def activity(s, hub, identify):
     return out
 
 
-def shadow(flow, graph, root, db, s=None, seen=None, hub=None, identify=None, budget=60, day=None):
+def shadow(flow, graph, root, db, s=None, seen=None, hub=None, identify=None, budget=60):
     """一轮影子对比（见开头）。seen：advance.py 这一轮算过的 {(步骤, key) 或 key: 做完没有}。→ dict(各类的个数, unexplained=[…])。"""
     t0 = time.time()
     seen = seen or {}
@@ -322,11 +322,9 @@ def shadow(flow, graph, root, db, s=None, seen=None, hub=None, identify=None, bu
         else:
             n["agree"] += 1
     if bad:
-        d = cfg.state(PR.LEDGER_SHADOW)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, f"ledger-{day or datetime.now():%Y%m%d}.jsonl"), "a") as f:
-            for b in bad:
-                f.write(json.dumps(dict(t=f"{datetime.now():%F %T}", **b), ensure_ascii=False) + "\n")
+        import events
+        events.add_many(events._row("flow", f"{b['kind']} {b['id']}: {b.get('path')} ({b.get('what')})", kind="ledger_unexplained",
+                                    level=b.get("level"), data=b) for b in bad)
     n["unexplained"] = bad
     n["seconds"] = round(time.time() - t0, 1)
     return n

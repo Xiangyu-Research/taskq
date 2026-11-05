@@ -98,6 +98,20 @@ ok("path 是完整路径", os.path.isfile(A[0]["path"]) and A[0]["file"] == os.p
 ev = [(e["log"], e["time"]) for e in r["events"]]
 ok("调度日志里提到它的行（key 后面接着别的的不算，按时刻排）",
    ev == [("advance", None), ("advance", "2026-10-31 08:00:00"), ("relay", "2026-11-01 09:00:00")], ev)
+
+# with the hub database: imported old logs and notes about the key, same fields
+import db as DB  # noqa: E402
+import events as EV  # noqa: E402
+_db = DB.connect(create=True)
+EV.import_file(_db, "relay", os.environ["RELAY_LOG"])
+EV.import_file(_db, "advance", os.environ["ADVANCE_LOG"])
+EV.add("note", "looked at it", key=KEY, kind="fix", t=time.mktime((2026, 11, 2, 9, 0, 0, 0, 0, -1)))
+EV.add("note", "other task", key=KEY + "/x")
+ev = [(e["log"], e["time"]) for e in L.collect(KEY, D)["events"]]
+ok("database: rows about the key (imported lines by text, notes by key), oldest first",
+   ev == [("advance", "2026-10-31 08:00:00"), ("relay", "2026-11-01 09:00:00"), ("note", "2026-11-02 09:00:00")], ev)
+ok("database: event fields unchanged", all(tuple(e) == proto.TASKLOG_EVENT for e in L.collect(KEY, D)["events"]))
+os.remove(DB.path())
 ok("调度日志的文字去掉时刻", r["events"][1]["text"] == f"排了 fetch：{KEY}", r["events"][1])
 ok("任务记录只有这个 key 的，原样", [x["id"] for x in r["records"]] == [5] and r["records"][0]["src"] == "site-pueue", r["records"])
 ok("顶层字段", tuple(r) == proto.TASKLOG_TOP, list(r))

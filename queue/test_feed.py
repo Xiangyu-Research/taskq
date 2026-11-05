@@ -46,10 +46,10 @@ hub = F.M.hub()
 ev, st = F.run_all(dict(taskq={hub: q_}, ok={}), dry=False)
 ok("转给 relay.run_all，说明和问题并进来，加上 feed:nobody，feed.log 里有一行指向 ~/relay.log",
    rcalls == [False] and ev == ["site-pueue 领了 a/x/0"] and set(st) == {"site:site-pueue:x", "feed:nobody:pueue-host"}
-   and "见 ~/relay.log" in open(F.LOG).read())
-n0 = len(open(F.LOG).read())
+   and "见 ~/relay.log" in open(os.environ["FEED_LOG"]).read())
+n0 = len(open(os.environ["FEED_LOG"]).read())
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)
-ok("dry：照样问 relay（带 dry），不写 feed.log", rcalls == [False, True] and len(open(F.LOG).read()) == n0)
+ok("dry：照样问 relay（带 dry），不写 feed.log", rcalls == [False, True] and len(open(os.environ["FEED_LOG"]).read()) == n0)
 rl.run_all = lambda s, dry=False: 1 / 0
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)
 ok("relay.py 出错：报 relay:error", list(st) == ["relay:error"] and "ZeroDivisionError" in st["relay:error"])

@@ -47,6 +47,11 @@ def use():
     os.environ["TASKQ_CONFIG"] = CONFIG
     os.environ["TASKQ_PLUGINS"] = PLUGINS
     os.environ["PATH"] = guard_path(os.environ.get("PATH", ""))
+    if not os.environ.get("TASKQ_DB"):  # hub database and old text logs: never the real ones
+        d = tmpdir(prefix="taskq-logs-")
+        os.environ["TASKQ_DB"] = os.path.join(d, "taskq.db")
+        for n in ("relay", "feed", "advance", "refill", "ledger", "health"):
+            os.environ.setdefault(n.upper() + "_LOG", os.path.join(d, n + ".log"))
     return CONFIG, PLUGINS
 
 

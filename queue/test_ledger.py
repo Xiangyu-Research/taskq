@@ -21,6 +21,9 @@ import spec as S  # noqa: E402
 from flow import ledger as LG  # noqa: E402
 from flow.compile import compile_legacy  # noqa: E402
 from flow.graph import Graph  # noqa: E402
+import db as D  # noqa: E402
+import events as EV  # noqa: E402
+EVDB = D.connect(create=True)
 
 fails = []
 
@@ -100,9 +103,8 @@ try:
     ok(n["changed"] == 1 and len(n["unexplained"]) == 1 and n["unexplained"][0]["level"] == "warn", f"改过：报一次（{n}）")
     n = LG.shadow(F, G, ROOT, db, s=s, hub="hub", identify=ident)
     ok(n["changed"] == 1 and not n["unexplained"], "同样的改动不重复报")
-    shadow_dir = os.path.join(T, "state", "shadow")
-    lines = [ln for f in os.listdir(shadow_dir) for ln in open(os.path.join(shadow_dir, f))]
-    ok(len(lines) == 1, f"说不清的写进 shadow/ledger-日期.jsonl 一行（{len(lines)}）")
+    lines = EV.query(EVDB, kind="ledger_unexplained")
+    ok(len(lines) == 1, f"unexplained changes go into the event log, one row ({len(lines)})")
     # 调度这期间跑过它：记成新的一次
     s2 = dict(pueue={"hub": {"tasks": [dict(id=7, status="Success", end="2099-01-01T00:00:00+08:00")]}},
               records=[dict(id=7, step="eval", key=ev1.key)])

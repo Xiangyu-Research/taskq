@@ -126,21 +126,10 @@ def about(label):
     return list(r) if r else None
 
 
-def plain_problem(pid, p):
-    try:
-        return PL.problem(pid, p)
-    except Exception:  # noqa: BLE001
-        return p.get("msg")
-
-
 def health_view():
-    try:
-        h = json.load(open(H.STATE))
-    except (OSError, ValueError):
-        return dict(checked=None, problems=[])
-    ps = [dict(id=pid, **{k: p.get(k) for k in proto.OVERVIEW_PROBLEM if k not in ("id", "plain")}, plain=plain_problem(pid, p))
-          for pid, p in (h.get("problems") or {}).items()]
-    return dict(checked=h.get("checked"), problems=ps)
+    db = H.NT.open_db(write=False)
+    probs, checked = H.NT.problems(db) if db else ({}, None)
+    return dict(checked=checked, problems=H.NT.problem_rows(probs, everything=True))
 
 
 def build(s, relay=None):

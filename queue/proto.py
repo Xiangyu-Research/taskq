@@ -276,6 +276,7 @@ ENV["TASKQ_HANDOFF"] = ("run", "换代码包时旧的消费者交给新的：手
 ENV["TASKQ_SITE"] = ("run", "执行机的名字（sites/pueue.py 的 worker 命令设）；消费者的 window 插件按它查时段，没设时按 WORKER_ID 在机器表里反查")
 ENV["TASKQ_ADMITTED"] = ("run", "1 = 消费者领之前已经查过卡空不空（gpu_idle 插件），run_task.sh 不再等卡")
 ENV["TASKQ_STAGE_ROOT"] = ("run", "节点本地的暂存目录（消费者的 slurm 插件设）；run_task.sh 有它才把输入拷到本地，没有时看 SLURM_JOB_ID")
+ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state>/taskq.db")
 ENV["TASKQ_TEST_NOW"] = ("test", "放着一个时刻（epoch 秒）的文件：window 插件当作现在")
 # gpu_pad.py 的参数（tune），默认值在 gpu_pad.py 的命令行
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
@@ -304,7 +305,7 @@ ALERTS["publish"] = ("inst",)  # 发布被冲突挡住（taskq publish 处理）
 NOTICES = "notices"
 NOTICE_NAME = r"[A-Za-z0-9_-]+"
 NOTICE_TOP = ("version", "notices")  # taskq notice list --json
-NOTICE_FIELDS = ("name", "text", "since")  # since：最后一次挂上的时间（%Y-%m-%d %H:%M:%S）
+NOTICE_FIELDS = ("name", "text", "since", "at")  # since：最后一次挂上的时间（%Y-%m-%d %H:%M:%S）
 ALERTS["notice"] = ("name",)
 ACKED = "acked.json"  # taskq notice ack（11/5）：健康检查的状态文件夹下，{问题编号: 确认的时间}；只认 kind=event 的问题，问题消失后这一项跟着删
 AUTO_SWITCHES = ("advance", "ledger", "run", "smoke", "envs")  # policy.AUTO 里机器名以外的开关：advance 排下游、台账的影子对比、taskq run 包 hub 的步骤、冒烟闸门、
@@ -365,6 +366,16 @@ GPU_USAGE_TOP = ("version", "dir", "me", "days", "from", "to", "hours", "spans",
 GPU_USAGE_HOUR = ("gpu", "hour", "n", "other", "me", "idle")  # n：这个钟点的记录数；other、me、idle：其中别人在用、只有自己、空着的个数
 GPU_USAGE_SPAN = ("gpu", "user", "start", "end", "hours", "max_mem_mib", "programs")  # 别人的每段使用
 GPU_USAGE_TOTAL = ("gpu", "user", "hours")
+
+
+# ---------------- hub database and event log (queue/db.py, queue/events.py) ----------------
+DB = "taskq.db"  # under the state dir
+EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one object per line
+# source → old text log name (cfg.log, or "health" = health.log); these still get their lines appended until retired
+LEGACY_LOGS = {"relay": "relay", "feed": "feed", "advance": "advance", "shift": "refill", "ledger": "ledger", "health": "health"}
+PROGRESS_TOP = ("version", "rows")  # taskq progress --json
+PROGRESS_FIELDS = ("time", "t", "key", "state", "progress", "site", "data")  # one row per change of state, progress or site
+PROBLEMS_TOP = ("version", "checked", "problems")  # taskq problems --json; each problem: OVERVIEW_PROBLEM
 
 
 # ---------------- 给 bash ----------------

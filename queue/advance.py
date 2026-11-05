@@ -62,7 +62,6 @@ import shift  # noqa: E402
 import common as C  # noqa: E402
 import taskq  # noqa: E402
 
-LOG = cfg.log("advance")
 LIVE_ST = refill.LIVE
 NO_NICE = 10 ** 6
 NOTES = []  # 这次检查里"为什么没排"的说明（写进 ~/advance.log，不报成问题）
@@ -581,9 +580,8 @@ def log(lines, stuck, live_mode):
         if not out:
             out = ["没有要排的"]
     if out:
-        with open(LOG, "a") as f:
-            mode = "" if live_mode else "（只算不排）"
-            f.writelines(f"{datetime.now():%F %T}{mode} {ln}\n" for ln in out)
+        import events
+        events.lines("advance", out, kind=None if live_mode else "dry")
 
 
 def describe(todo, stuck):
