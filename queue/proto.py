@@ -286,6 +286,7 @@ PUBLISH_OLD = ".taskq/old"          # 发布时归档的旧文件：<数据目�
 ALERTS["stall"] = ("inst",)  # hub 上 taskq run 包着的步骤卡住
 ALERTS["undeclared"] = ("inst",)  # 步骤写到了声明的产出以外
 ALERTS["publish"] = ("inst",)  # 发布被冲突挡住（taskq publish 处理）
+AUTO_SWITCHES = ("advance", "ledger", "run")  # policy.AUTO 里机器名以外的开关：advance 排下游、台账的影子对比、taskq run 包 hub 的步骤
 ENV["TASKQ_STALL_IDLE"] = ("test", "代替 STALL_IDLE")
 ENV["TASKQ_RUN_BEAT"] = ("test", "代替 RUN_BEAT")
 ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")

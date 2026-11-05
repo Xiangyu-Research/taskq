@@ -28,6 +28,7 @@ for d in ("sites", "monitor", "sync"):
     sys.path.insert(0, os.path.join(CORE, d))
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+import proto as PR  # noqa: E402
 cfg.use_config()
 
 GROUPS = ("machines", "policy", "plugins", "experiments", "tasks", "steps", "needs", "bundle")
@@ -193,9 +194,9 @@ def check_policy(r):
         elif not isinstance(v, typ):
             r.bad(g, f"policy.py 的 {name} 要是{'字典' if typ is dict else '列表'}")
     auto = getattr(P, "AUTO", {}) or {}
-    bad = sorted(set(auto) - every - {"advance"})
+    bad = sorted(set(auto) - every - set(PR.AUTO_SWITCHES))
     if bad:
-        r.bad(g, f"AUTO 里有不认识的机器 {bad}（能写：advance 和机器名）")
+        r.bad(g, f"AUTO 里有不认识的机器 {bad}（能写：{'、'.join(PR.AUTO_SWITCHES)} 和机器名）")
     nb = sorted(k for k, v in auto.items() if not isinstance(v, bool))
     if nb:
         r.bad(g, f"AUTO 的 {nb} 要写 True / False")
