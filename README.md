@@ -13,7 +13,7 @@ taskq self update        # 拉 origin/main，失败重试 5 次，拉不到就�
 
 ## 项目
 
-`taskq` 先找项目：`--project 目录` > `TASKQ_PROJECT` > 从当前目录往上找 `.taskq.toml`：
+`taskq` 先找项目：`--project 目录` > `TASKQ_PROJECT` > 从当前目录往上找 `.taskq.toml` > 本机的默认项目 `~/.config/taskq/project`（一行，项目根目录；只在前面都找不到时用，不会像环境变量那样传给子进程）：
 
 ```toml
 config = "config"      # machines.py、policy.py 所在的文件夹（相对这个文件）

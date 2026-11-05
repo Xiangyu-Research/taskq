@@ -4,7 +4,8 @@
     config = "config"
     plugins = ["plugins"]
 
-找的顺序：明确给的文件夹（--project）> 环境变量 TASKQ_PROJECT > 从当前目录往上找 .taskq.toml。只用标准库，不 import 核心的模块。
+找的顺序：明确给的文件夹（--project）> 环境变量 TASKQ_PROJECT > 从当前目录往上找 .taskq.toml > 本机的默认项目
+（~/.config/taskq/project 里写的文件夹，11/5；只在前面都找不到时用，不像环境变量那样会传给子进程）。只用标准库，不 import 核心的模块。
 
     python3 project.py sh [--project 文件夹]   给 bash 的 export 语句（TASKQ_REPO、TASKQ_CONFIG、TASKQ_PLUGINS，已经设了的不输出）；
                                                找不到项目时什么也不输出、退出码 1
@@ -15,6 +16,7 @@ import shlex
 import sys
 
 NAME = ".taskq.toml"
+DEFAULT = "~/.config/taskq/project"  # 本机的默认项目：一行，项目根目录
 
 
 def find(explicit=None, start=None):
@@ -28,8 +30,18 @@ def find(explicit=None, start=None):
             return d
         up = os.path.dirname(d)
         if up == d:
-            return None
+            return default()
         d = up
+
+
+def default():
+    """~/.config/taskq/project 里写的项目根目录（要有 .taskq.toml）；没有 → None。"""
+    try:
+        v = open(os.path.expanduser(DEFAULT), encoding="utf-8").read().strip()
+    except OSError:
+        return None
+    d = os.path.abspath(os.path.expanduser(v)) if v else None
+    return d if d and os.path.isfile(os.path.join(d, NAME)) else None
 
 
 _STR = r'"((?:[^"\\]|\\.)*)"'

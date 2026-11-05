@@ -310,7 +310,7 @@ r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.ar
 ok("测试插件：做法、钩子、中继插件合进来，插件里的函数不进核心模块，RelayError 是 taskq_api 的同一个",
    r.stdout.split() == ["['command',", "'toy']", "['model_of']", "['toy',", "'toy_infer']", "False", "False", "True"])
 
-# 找项目（project.py，11/4）：--project > TASKQ_PROJECT > 从当前目录往上找 .taskq.toml；cfg 的仓库根：TASKQ_REPO > 嵌着 > 找到的项目 > CORE
+# 找项目（project.py，11/4）：--project > TASKQ_PROJECT > 从当前目录往上找 .taskq.toml > ~/.config/taskq/project（11/5）；cfg 的仓库根：TASKQ_REPO > 嵌着 > 找到的项目 > CORE
 import project  # noqa: E402
 PJ = os.path.join(T, "proj")
 write(os.path.join(PJ, ".taskq.toml"), """
@@ -327,6 +327,15 @@ setenv(TASKQ_PROJECT="~/pj")
 ok("project.find：TASKQ_PROJECT 比往上找优先，~ 展开", project.find(start=PJ) == os.path.join(HOME, "pj"))
 ok("project.find：明确给的比 TASKQ_PROJECT 优先", project.find(PJ) == PJ)
 setenv(TASKQ_PROJECT=None)
+_dp = os.path.expanduser(project.DEFAULT)
+write(_dp, PJ + "\n")
+ok("project.find：往上没有时用 ~/.config/taskq/project 写的（11/5）", project.find(start=os.path.join(T, "layout")) == PJ)
+PJ2 = os.path.join(T, "proj2")
+write(os.path.join(PJ2, ".taskq.toml"), 'config = "c"\n')
+ok("project.find：往上找到的比默认项目优先", project.find(start=PJ2) == PJ2)
+write(_dp, os.path.join(T, "layout") + "\n")
+ok("project.find：默认项目里没有 .taskq.toml → None", project.find(start=os.path.join(T, "layout")) is None)
+os.remove(_dp)
 ok("project.load：读 config、plugins", project.load(PJ) == {"config": "conf", "plugins": ["p1", "p/two"]})
 ok("project.load：没有 .taskq.toml → {}", project.load(T) == {})
 ok("project.parse（没有 tomllib 时）：字符串、列表、空列表、注释、空行",

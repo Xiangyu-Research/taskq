@@ -375,7 +375,7 @@ SECTIONS = [("队列", ["add", "set", "nice", "show", "log", "status", "stop", "
 def top_help():
     w = max(len(n) for _, ns in SECTIONS for n in ns) + 2
     lines = ["用法：taskq [--project 目录] <命令> [参数…]", "",
-             "任务队列和调度。项目：--project、TASKQ_PROJECT，或从当前目录往上找 .taskq.toml。", ""]
+             "任务队列和调度。项目：--project、TASKQ_PROJECT、从当前目录往上找 .taskq.toml，都没有时用 ~/.config/taskq/project 写的。", ""]
     for title, names in SECTIONS:
         lines.append(f"{title}：")
         lines += [f"  {n:{w}}{TREE[n].summary}" for n in names]
@@ -458,7 +458,8 @@ def main(argv):
         say(str(e))
         return USAGE
     if not has_config():
-        say("找不到项目：给 --project 目录、设 TASKQ_PROJECT，或在有 .taskq.toml 的目录（或它下面）运行")
+        say("找不到项目：给 --project 目录、设 TASKQ_PROJECT，或在有 .taskq.toml 的目录（或它下面）运行；"
+            "本机常用的项目可以写进 ~/.config/taskq/project（一行，项目根目录）")
         return USAGE
     try:
         return node.fn(rest, prog)
