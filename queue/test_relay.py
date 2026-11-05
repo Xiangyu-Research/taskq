@@ -380,6 +380,15 @@ def test_plan():
     assert added and "--no-add" in added[0][4] and "--nice" not in added[0][4] and "补传" in msgs[0], (added, msgs)
     ok("那边缺输入 → 排补传（stage --no-add：只补缺的、撤掉标记）；在补 → 等；补传出错 → 报；标记之前的旧任务不算")
 
+    def fail_add(*a, **k):
+        raise RuntimeError("box 上加任务失败：git fetch 出错")
+    st_ = {}
+    msgs = relay.execute(NAME, [dict(op="restage", key=K), dict(op="fetch", key=K)], S0([mtask(K)]), run_add=fail_add, stuck=st_)
+    assert set(st_) == {f"relayadd:{NAME}:relay_stage:{K}", f"relayadd:{NAME}:relay_fetch:{K}"} and len(msgs) == 2 and all("出错" in m for m in msgs), (st_, msgs)
+    import plain
+    assert "没排上" in plain.problem(next(iter(st_)), dict(msg=st_[next(iter(st_))]["msg"], data=st_[next(iter(st_))]["data"])), st_
+    ok("在 box 上排传数据、拉回出错 → 报 relayadd（下次检查重试），后面的动作照做")
+
     acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [("beat", K), ("rstop", K)], acts
     acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(rtask(A, "stopped", "123")), st)
@@ -957,7 +966,7 @@ def test_auto_off():
         relay.fill = lambda *a: ([dict(op="take", key="t")], "")
         relay.topup = lambda *a: ([("long", "x", 1, "worker.sbatch")], "")
         relay.log = lambda lines: None
-        relay.execute = lambda n, acts, s: ran.extend(a["op"] for a in acts) or []
+        relay.execute = lambda n, acts, s, **_: ran.extend(a["op"] for a in acts) or []
         relay.submit = lambda n, subs: ran.append("submit") or ([], {})
         relay.P.AUTO[NAME] = False
         s = {"ok": {relay.M.hub(): True}, "taskq": {relay.taskq.queue_host(): {"tasks": [dict(key="x", worker=NAME, state="claimed")]}}}

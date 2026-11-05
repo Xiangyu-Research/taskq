@@ -206,6 +206,8 @@ def problem(pid, p):
                 if d["unknown"]:
                     return f"{site} 的队列里有一个认不出来的任务。"
                 return f"{site} 在训 {fold(key)}，但总队列里没分给它，可能重复训练。"
+        if kind == "relayadd":
+            return f"box 上没排上 {fold(d.get('key', ''))} 的{dict(relay_stage='传数据', relay_fetch='拉回', relay_archive='归档').get(d.get('step'), '下一步')}，{L(part[1])} 那边会等着，下次检查重试。"
         if kind == "topup":
             return f"给 {L(part[1])} 补交作业出错，那边排队的作业会越来越少。"
         if kind == "advance":

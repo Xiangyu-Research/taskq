@@ -205,6 +205,7 @@ ALERTS = dict(
     idle=("machine", "group"), dup=("key",), disk=("machine",), gpulog=("machine",), boot=("machine", "time"), board=(),
     site=("machine", "sub", "key"), topup=("machine", "qos", "kind"), advance=("step", "who"),
     relaystage=("key",), relayfetch=("key",), relay=("machine",), feed=("sub", "machine"),
+    relayadd=("machine", "op", "key"),
 )
 
 
