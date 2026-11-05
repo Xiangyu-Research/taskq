@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
@@ -89,7 +88,7 @@ def exists(R, h):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="test_relay_store_")
+    tmp = fixture.tmpdir(prefix="test_relay_store_")
     try:
         R, outside = build(tmp)
         rpy = local_rpy(R)
@@ -109,7 +108,7 @@ def main():
         assert os.path.getsize(outside) == 500
         ok("低于软线先删不在 keep 里的视图（不跟着软链接删目标），够了就不删 blob")
 
-        R, outside = build(tempfile.mkdtemp(dir=tmp))
+        R, outside = build(fixture.tmpdir(dir=tmp))
         rpy = local_rpy(R)
         r = G.gc("x", keep, rpy, soft_gb=5000 / GB, free=0)
         assert r["removed_views"] == ["prepared/ds_old"], r
@@ -120,7 +119,7 @@ def main():
         assert r["freed"] == 2002 + 3000 and r["removed_blobs"] == 1, r
         ok("再删没人指的 blob，最旧的先删，在用的和硬链接收编的不碰，R 外面的不碰")
 
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        R, _ = build(fixture.tmpdir(dir=tmp))
         os.makedirs(os.path.join(R, "state", "pins"))
         with open(os.path.join(R, "state", "pins", "t__a.json"), "w") as f:
             json.dump(["dd1"], f)
@@ -133,13 +132,13 @@ def main():
         assert not exists(R, "dd1") and not os.path.exists(part), r
         ok("正在传的任务钉住的块、传到一半的临时文件不删；钉住记录过了 12 小时、临时文件放了一天以上就不再认")
 
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        R, _ = build(fixture.tmpdir(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1")
         assert not exists(R, "bb1") and not exists(R, "dd1") and r["removed_blobs"] == 2
         ok("释放不到软线时删光能删的就停，不碰在用的")
 
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        R, _ = build(fixture.tmpdir(dir=tmp))
         D = os.path.join(R, "data")
         for v in ("in/aaa", "in/bbb", "in/ccc", "models/a/td/frag_0"):
             os.makedirs(os.path.join(D, v))
@@ -154,7 +153,7 @@ def main():
         ok("登记过的任务视图也清理：keep 里的、正在建的（.incomplete）不删，那边已经没有的报出来让登记表去掉，越界的、只有一层的不认")
 
         # 根目录经软链接到达（视图里的软链接指向软链接的路径）：在用的 blob 照样认得出来
-        real = tempfile.mkdtemp(dir=tmp)
+        real = fixture.tmpdir(dir=tmp)
         R, _ = build(real)
         link = os.path.join(tmp, "Rlink")
         os.symlink(R, link)
@@ -166,8 +165,8 @@ def main():
         ok("根目录经软链接到达时，在用的 blob 也不删")
 
         # 同一个盘上的另一台执行机（lab0 / lab1）：两边的 blobs 互相硬链接收编
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
-        sib = tempfile.mkdtemp(dir=tmp)
+        R, _ = build(fixture.tmpdir(dir=tmp))
+        sib = fixture.tmpdir(dir=tmp)
         for h in ("gg1", "hh1", "ii1"):
             os.makedirs(os.path.join(sib, "blobs", h[:2]), exist_ok=True)
         g = blob(R, "gg1", 100)
@@ -183,7 +182,7 @@ def main():
         ok("还不够时：自己不用、另一个链接在同一个盘上别的执行机 blobs 里的，只删自己这个链接；老目录的硬链接、自己在用的不碰")
 
         # 变异审查（11/3）：keep 是视图里更深的一层（或更上的一层）时，包含它的视图 / 它下面的视图也不删
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        R, _ = build(fixture.tmpdir(dir=tmp))
         D = os.path.join(R, "data")
         os.makedirs(os.path.join(D, "in/up/sub"))
         os.symlink(blob(R, "up1", 10), os.path.join(D, "in/up/sub/f.dat"))
@@ -196,8 +195,8 @@ def main():
         ok("keep 是视图下面一层或上面一层：那个视图也不删")
 
         # DICC（11/4）：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
-        scr = tempfile.mkdtemp(dir=tmp)
+        R, _ = build(fixture.tmpdir(dir=tmp))
+        scr = fixture.tmpdir(dir=tmp)
         os.rmdir(scr)
         os.rename(os.path.join(R, "blobs"), scr)
         os.symlink(scr, os.path.join(R, "blobs"))
@@ -220,7 +219,7 @@ def main():
         # 删视图和建视图（VIEW_PY）拿同一把锁（11/4）
         import fcntl
         import time
-        R, _ = build(tempfile.mkdtemp(dir=tmp))
+        R, _ = build(fixture.tmpdir(dir=tmp))
         os.makedirs(os.path.join(R, "state"))
         lk = open(os.path.join(R, "state", "view.lock"), "w")
         fcntl.flock(lk, fcntl.LOCK_EX)

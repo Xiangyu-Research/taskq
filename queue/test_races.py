@@ -8,14 +8,15 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
-TMP = tempfile.mkdtemp(prefix="test_review_conc_")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+TMP = fixture.tmpdir(prefix="test_review_conc_")
 os.environ["HOME"] = os.path.join(TMP, "home")
 os.makedirs(os.environ["HOME"])
 os.environ["TASKQ_DIR"] = os.path.join(TMP, "tq")
@@ -39,7 +40,7 @@ def test_lock():
     tmpfs（/tmp）不复用 inode 号，ext4 会把刚删的号马上给新目录：两种盘都跑。"""
     _lock_race(taskq.TQ)
     if os.path.isdir("/var/tmp"):
-        disk = tempfile.mkdtemp(prefix="test_races_", dir="/var/tmp")
+        disk = fixture.tmpdir(prefix="test_races_", dir="/var/tmp")
         try:
             _lock_race(disk)
         finally:

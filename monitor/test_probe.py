@@ -3,13 +3,12 @@
 import os
 import subprocess
 import sys
-import tempfile
 
-T = tempfile.mkdtemp(prefix="probe_")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "queue", "testdata"))
+import fixture  # noqa: E402
+T = fixture.tmpdir(prefix="probe_")
 os.environ.update(HOME=T, TASKQ_STATE=os.path.join(T, "state"))
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
-import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)

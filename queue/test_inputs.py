@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "testdata"))
@@ -15,7 +14,7 @@ import fixture  # noqa: E402
 
 fixture.use()
 PY = [sys.executable, os.path.join(HERE, "inputs.py")]
-T = tempfile.mkdtemp()
+T = fixture.tmpdir()
 ok_all = True
 
 

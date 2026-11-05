@@ -7,7 +7,6 @@
 import copy
 import os
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "testdata"))
@@ -15,12 +14,12 @@ import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)
-os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
-os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
+os.environ["PHD_TASKS"] = os.path.join(fixture.tmpdir(), "tasks.json")  # 不碰真的任务记录
+os.environ["PHD_LAST"] = os.path.join(fixture.tmpdir(), "last")
 import refill as R  # noqa: E402
 
 fails = 0
-D = tempfile.mkdtemp()
+D = fixture.tmpdir()
 R.C.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("测试里不应该在真机器上跑命令"))
 GB = {"D103_alpha_one": 4.0, "D121_alphagamma": 62.0, "stuff": 1.0}
 _hub = R.M.MACHINES[R.M.hub()]

@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)
@@ -17,7 +16,7 @@ BIN = os.path.join(CORE, "bin", "taskq")
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
-T = tempfile.mkdtemp(prefix="test_cli_json_")
+T = fixture.tmpdir(prefix="test_cli_json_")
 HOME, PROJ, DATA = (os.path.join(T, x) for x in ("home", "proj", "data"))
 for d in (HOME, PROJ, DATA):
     os.makedirs(d)

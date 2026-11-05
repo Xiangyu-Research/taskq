@@ -5,6 +5,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
+trap 'rm -rf "${T:?}"' EXIT
 export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 source "$HERE/testdata/worker_harness.sh"
 
@@ -132,4 +133,4 @@ check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退�
 rm -f "$T/badspec"
 fi
 
-(( fails == 0 )) && { echo "全部通过"; rm -rf "$T"; } || { echo "$fails 项失败（文件在 $T）"; exit 1; }
+(( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; exit 1; }

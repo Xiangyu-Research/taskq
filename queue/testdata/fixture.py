@@ -6,8 +6,11 @@
 use() 在 import 读配置的模块（machines、policy、recipes、relay_plugins、spec、experiments…）之前调用：设 TASKQ_CONFIG、
 TASKQ_PLUGINS 指到这里（覆盖已经设了的），子进程跟着继承。bash 的测试 source fixture.sh。
 """
+import atexit
 import os
+import shutil
 import subprocess
+import tempfile
 
 FIX = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(FIX, "config")
@@ -20,6 +23,18 @@ def use():
     os.environ["TASKQ_CONFIG"] = CONFIG
     os.environ["TASKQ_PLUGINS"] = PLUGINS
     return CONFIG, PLUGINS
+
+
+def tmpdir(**kw):
+    """tempfile.mkdtemp(**kw)，建它的进程退出时（通过、失败、出错都算）删掉；测试改成读不了的先放开权限。"""
+    d, pid = tempfile.mkdtemp(**kw), os.getpid()
+
+    def rm():
+        if os.getpid() == pid:
+            subprocess.run(["chmod", "-R", "u+rwx", d], capture_output=True)
+            shutil.rmtree(d, ignore_errors=True)
+    atexit.register(rm)
+    return d
 
 
 def dead_pid():

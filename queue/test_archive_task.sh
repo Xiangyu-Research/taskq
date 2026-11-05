@@ -5,7 +5,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
-trap 'chmod -R u+w "$T" 2> /dev/null; rm -rf "$T"' EXIT
+trap 'chmod -R u+w "${T:?}" 2> /dev/null; rm -rf "${T:?}"' EXIT
 ok=1
 check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; ok=0; fi; }
 

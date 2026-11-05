@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "testdata"))
@@ -68,7 +67,7 @@ ok("main(argv) 能直接调用", E.main(["list"]) == 0)
 
 # 实验表会把自己的插件文件夹插到 sys.path[0]，里面有同名的 recipes.py；
 # check_fields 必须用核心的那份（11/4：剥离后 core 在仓库外，第一次 import 晚于插件，box 任务全挂）
-shadow = tempfile.mkdtemp()
+shadow = fixture.tmpdir()
 with open(os.path.join(shadow, "recipes.py"), "w", encoding="utf-8") as f:
     f.write("RECIPES = {'shadow': {}}\nHOOKS = {}\n")
 code = f"""

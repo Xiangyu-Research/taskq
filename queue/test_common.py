@@ -5,10 +5,11 @@
 import json
 import os
 import sys
-import tempfile
 import threading
 
-T = tempfile.mkdtemp()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+T = fixture.tmpdir()
 os.environ["PHD_TASKS"] = os.path.join(T, "tasks.json")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common as C  # noqa: E402
@@ -103,8 +104,6 @@ ok("run：给了 host → 那边用 timeout -k 包住、比本机早 15 秒，�
 ok("run：本机的不套", C.run("echo hi")[1] == "hi\n")
 
 # backup_down：备份机暂停检查或这次连不上 → 说明（relay.py 据此先不排归档，11/1）
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
-import fixture  # noqa: E402
 fixture.use()
 import cfg  # noqa: E402
 cfg.use_config()

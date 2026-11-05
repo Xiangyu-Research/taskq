@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +20,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 from proto import EXIT  # noqa: E402
 
-T = tempfile.mkdtemp()
+T = fixture.tmpdir()
 HOME, PROJ, TQ, DATA, TMP = (os.path.join(T, x) for x in ("home", "proj", "tq", "data", "tmp"))
 for d in (HOME, PROJ, TQ, DATA, TMP):
     os.makedirs(d)

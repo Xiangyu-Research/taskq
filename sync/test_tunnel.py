@@ -6,7 +6,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 
@@ -15,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
-T = tempfile.mkdtemp(prefix="test_tunnel_")
+T = fixture.tmpdir(prefix="test_tunnel_")
 HOME = os.path.join(T, "home")
 os.makedirs(HOME)
 FAKE = os.path.join(T, "fake_ssh")

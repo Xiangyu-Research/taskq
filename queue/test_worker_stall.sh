@@ -6,6 +6,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
+trap 'rm -rf "${T:?}"' EXIT
 export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 source "$HERE/testdata/worker_harness.sh"
 reset
@@ -57,5 +58,4 @@ python3 -c 'import json, sys; p = sys.argv[1]; c = json.load(open(p)); c["worker
 waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid
 check "领取被接管：停掉训练，不交还、不记失败" 'grep -q "t/l 的领取已经不是本作业的" $T/wl.out && grep -q "^term t/l" $T/train.log && grep -q "\"other\"" $TASKQ_DIR/claims/t__l/info && [[ ! -e $TASKQ_DIR/failures/t__l ]]'
 
-rm -rf "$T"
 (( fails == 0 )) && echo 全部通过 || { echo "失败 $fails 项"; exit 1; }

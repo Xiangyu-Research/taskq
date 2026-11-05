@@ -11,7 +11,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
@@ -406,7 +405,7 @@ def test_dicc_worker_in_bundle(T):
 
 
 def main():
-    T = tempfile.mkdtemp(prefix="test_relay_bundle.")
+    T = fixture.tmpdir(prefix="test_relay_bundle.")
     try:
         test_source_files_from_commit()
         test_secrets()

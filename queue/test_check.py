@@ -8,13 +8,12 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 fixture.use()
-os.environ["HOME"] = tempfile.mkdtemp()
+os.environ["HOME"] = fixture.tmpdir()
 sys.path.insert(0, HERE)
 
 fails = 0
@@ -40,7 +39,7 @@ rc, out, err = run("--only", "policy")
 ok("--only：只查那一组", rc == 0 and out.splitlines()[0].startswith("policy") and "machines" not in out)
 
 # 改坏的配置副本
-bad = tempfile.mkdtemp()
+bad = fixture.tmpdir()
 cfgdir = os.path.join(bad, "config")
 shutil.copytree(os.environ["TASKQ_CONFIG"], cfgdir, ignore=shutil.ignore_patterns("__pycache__"))
 

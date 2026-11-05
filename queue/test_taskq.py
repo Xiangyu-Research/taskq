@@ -7,20 +7,19 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
-T = tempfile.mkdtemp()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+T = fixture.tmpdir()
 TQ, DATA = os.path.join(T, "taskq"), os.path.join(T, "data")
 RES = os.path.join(DATA, "results")
 ENV = dict(os.environ, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MACHINE="dicc")  # 测试里本机当队列所在的机器
 ENV.pop("DEMO_RESULTS", None)
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, "testdata"))
-import fixture  # noqa: E402
 fixture.use()
 ENV.update(TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS)
 os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # 本进程里等锁的重试间隔（try_lock 预期拿不到的几项）

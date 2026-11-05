@@ -6,7 +6,6 @@
 import json
 import os
 import sys
-import tempfile
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -14,8 +13,8 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
 import fixture  # noqa: E402
 fixture.use()
-os.environ["HOME"] = tempfile.mkdtemp()  # 健康检查的状态、relay 的 status.json 都在临时 HOME 下
-os.environ["RELAY_DIR"] = tempfile.mkdtemp()
+os.environ["HOME"] = fixture.tmpdir()  # 健康检查的状态、relay 的 status.json 都在临时 HOME 下
+os.environ["RELAY_DIR"] = fixture.tmpdir()
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import overview as O  # noqa: E402
 import proto  # noqa: E402

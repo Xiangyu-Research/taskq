@@ -8,7 +8,7 @@ REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] 
 source "$HERE/testdata/fixture.sh"
 ENV_SCRIPT=$REPO/$(python3 "$HERE/cfg.py" get env_script)
 T=$(mktemp -d)
-trap 'stop_pads; rm -rf "$T"' EXIT
+trap 'stop_pads; rm -rf "${T:?}"' EXIT
 fails=0
 check() {
     if "${@:2}"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi

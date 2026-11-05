@@ -14,7 +14,6 @@ import re
 import shutil
 import socket
 import subprocess
-import tempfile
 import sys
 import time
 
@@ -27,7 +26,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
-STATE_DIR = tempfile.mkdtemp(prefix="test_relay_state_")
+STATE_DIR = fixture.tmpdir(prefix="test_relay_state_")
 os.environ["TASKQ_STATE"] = STATE_DIR  # 本机的状态（时段、队列…）放临时目录
 sys.path.insert(0, HERE)
 import test_relay_plugins as TN  # noqa: E402  （设了 RELAY_DIR、建了临时目录 TN.TMP）
@@ -1042,7 +1041,7 @@ def blocked_on_lock(pid):
 def test_view_lock():
     """建视图在那边一次只跑一个（11/2：同一个数据集的两折同时建视图，互相删了 .incomplete）。"""
     import fcntl
-    root = tempfile.mkdtemp()
+    root = fixture.tmpdir()
     os.makedirs(os.path.join(root, "state"))
     lk = open(os.path.join(root, "state", "view.lock"), "w")
     fcntl.flock(lk, fcntl.LOCK_EX)
@@ -1066,7 +1065,7 @@ def test_view_lock():
 
 def test_list_unreadable():
     """拉回前列结果：读不了的子目录不能静默跳过（11/3：只拉回一部分、box 上算训完，下一轮删掉那边的整份）。"""
-    root = tempfile.mkdtemp()
+    root = fixture.tmpdir()
     out = os.path.join(root, "data", "out", "k")
     os.makedirs(os.path.join(out, "check"))
     os.makedirs(os.path.join(out, "part"))
@@ -1105,7 +1104,7 @@ def test_deploy_keeps_busy():
     try:
         for sched, squeue, want in (("slurm", "busy", {"a", "n", "c", "d"}), ("slurm", "fail", {"a", "b", "n", "c", "d"}),
                                     ("pueue", "busy", {"n", "c", "d"})):
-            r = tempfile.mkdtemp(dir=T, prefix="dk_")
+            r = fixture.tmpdir(dir=T, prefix="dk_")
             M.RELAY[NAME] = dict(c0, root=r, scheduler=sched)
             for i, d in enumerate("abcd"):
                 os.makedirs(os.path.join(r, "code", d, BQ))
@@ -1144,7 +1143,7 @@ def test_deploy_safety():
         f.write(f"#!/bin/bash\nhead -c {at} | {FAKE} \"$@\"\n")
     os.chmod(cut, 0o755)
     try:
-        r = tempfile.mkdtemp(dir=T, prefix="ds_")
+        r = fixture.tmpdir(dir=T, prefix="ds_")
         M.RELAY[NAME] = dict(c0, root=r, scheduler="pueue")
         relay.deploy(NAME, "good", src)
         os.environ["RELAY_SSH"] = cut
@@ -1169,7 +1168,7 @@ def test_deploy_safety():
             os.listdir(os.path.join(r, "code"))
         ok("重推一个那边已有的旧包（回退）：切过去，不被同一次的清理删掉")
 
-        r = tempfile.mkdtemp(dir=T, prefix="ds_")
+        r = fixture.tmpdir(dir=T, prefix="ds_")
         M.RELAY[NAME] = dict(c0, root=r, scheduler="pueue")
         errs = []
         def go(b):
@@ -1199,12 +1198,12 @@ def test_adopt_cross_dev():
     import hashlib
     shm = "/dev/shm"
     for blobs_elsewhere in (False, True):
-        R = tempfile.mkdtemp(dir=T, prefix="adx_")
+        R = fixture.tmpdir(dir=T, prefix="adx_")
         if blobs_elsewhere:
             if not os.path.isdir(shm) or os.stat(shm).st_dev == os.stat(R).st_dev:
                 print("跳过：没有另一个盘可用（/dev/shm）")
                 return
-            other = tempfile.mkdtemp(dir=shm, prefix="adx_")
+            other = fixture.tmpdir(dir=shm, prefix="adx_")
             os.symlink(other, os.path.join(R, "blobs"))
         src = os.path.join(R, "data", "res", "ck.pth")
         os.makedirs(os.path.dirname(src))
@@ -1225,7 +1224,7 @@ def test_adopt_cross_dev():
 
 def test_view_missing_blob():
     """建视图时缺块：什么都不放就退出，不留下 .incomplete，原来的视图不动（11/4）。"""
-    R = tempfile.mkdtemp(dir=T, prefix="vm_")
+    R = fixture.tmpdir(dir=T, prefix="vm_")
     h = "ab" + "0" * 62
     os.makedirs(os.path.join(R, "blobs", "ab"))
     open(os.path.join(R, "blobs", "ab", h), "w").close()
@@ -1242,7 +1241,7 @@ def test_view_missing_blob():
 
 def test_logs_exact():
     """拉回、删任务时只认这个任务自己的分段日志：key a/b 不带上 a/b/c 的（11/4）。"""
-    R = tempfile.mkdtemp(dir=T, prefix="lg_")
+    R = fixture.tmpdir(dir=T, prefix="lg_")
     L = os.path.join(R, "data", "logs", "tasks")
     os.makedirs(L)
     mine = ["X__tr__123_part1.log", "X__tr__w7e2837_part2.log", "X__tr__lab-202611041200_seg1.log"]

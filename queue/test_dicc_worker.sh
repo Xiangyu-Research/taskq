@@ -7,6 +7,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
+trap 'rm -rf "${T:?}"' EXIT
 export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 source "$HERE/testdata/worker_harness.sh"
 
@@ -190,4 +191,4 @@ SLURM_JOB_ID=900113 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/dicc_worker.sh" V_s
 check "队列出错：报出来、过一会儿结束作业" '[[ $rc == 0 ]] && grep -q "队列出错" $T/w5.out && grep -q "队列连续出错" $T/w5.out'
 fi
 
-(( fails == 0 )) && { echo "全部通过"; rm -rf "$T"; } || { echo "$fails 项失败（文件在 $T）"; exit 1; }
+(( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; exit 1; }

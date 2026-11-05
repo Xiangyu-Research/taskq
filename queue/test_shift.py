@@ -3,7 +3,6 @@
 import datetime as dt
 import os
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -15,7 +14,7 @@ import shift  # noqa: E402
 
 TZ = shift.TZ
 real_stop_group = shift.stop_group
-_d = tempfile.mkdtemp()
+_d = fixture.tmpdir()
 shift.STATE, shift.LOG = os.path.join(_d, "shift.json"), os.path.join(_d, "refill.log")
 
 

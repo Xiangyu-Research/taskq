@@ -8,7 +8,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -91,7 +90,7 @@ ok("shell：TASK_INPUTS 是输入的绝对路径（数组），TASK_LOCAL 跟 re
    and "TASK_LOCAL=1" in sl and "TASK_LOCAL=0" in S.shell_lines(S.resolve("command", G), "/d").splitlines())
 raw = dict(S.resolve("command", G), params=dict(G, note="{trainer}_fold{fold}_"))
 ok("shell：params 里原样留着的 {名字} 不展开、不报错（10/31 起 oldlogs.prefix 这样写）", "TASK_LOCAL=0" in S.shell_lines(raw, "/d").splitlines())
-gr = tempfile.mkdtemp()
+gr = fixture.tmpdir()
 gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
 gd = os.path.join(gr, "guest/x")
 os.makedirs(gd)
@@ -149,7 +148,7 @@ src = {"src": {"lab": {"tasks": {"guest/x": dict(final=False, runs=[dict(epochs_
 ok("refill.progress：只有存档也算有进度，按机器分", RF.progress(src, "guest/x", "lab") and not RF.progress(src, "guest/x", "dicc"))
 
 # ---------------- 训完的判断 ----------------
-root = tempfile.mkdtemp()
+root = fixture.tmpdir()
 out = os.path.join(root, s["out"])
 os.makedirs(os.path.join(out, "check"))
 ok("什么都没有：没训完", not S.is_done(s, root))
@@ -306,7 +305,7 @@ ok("_x：写错步骤名、oof 没给 splits、paired 不跟在 oof 后面、P1 
 ok("readers：toy_log、toy_debug 加载进 PROGRESS、INFO，有训完一轮的字样",
    "toy_log" in S.PROGRESS and "toy_debug" in S.INFO and S.TRAINED)
 ok("readers：重名的报错", raises(lambda: S.load_readers({"a.py": "PROGRESS={'toy_log': None}"})))
-_dup = tempfile.mkdtemp()
+_dup = fixture.tmpdir()
 os.makedirs(os.path.join(_dup, "readers"))
 open(os.path.join(_dup, "readers", "toy.py"), "w").write("PROGRESS = {}\n")
 _pl = os.environ.get("TASKQ_PLUGINS")
@@ -317,7 +316,7 @@ finally:
     os.environ.pop("TASKQ_PLUGINS")
     if _pl is not None:
         os.environ["TASKQ_PLUGINS"] = _pl
-rr = tempfile.mkdtemp()
+rr = fixture.tmpdir()
 ns = S.resolve("toy", {"ds": "D1_x", "variant": "tr", "frag": "0"})
 od = os.path.join(rr, ns["out"])
 os.makedirs(od)
@@ -336,7 +335,7 @@ ok("remote_collect：经 stdin 跑时 readers 一起送过去（toy_log 读出�
    and [x["trained"] for x in rc["seglogs"] if x["name"].startswith(ns["oldlogs"]["prefix"])] == [True])
 
 # 11/4：送过去的程序前面拼着 proto.py，那边空目录里、不读本机任何文件也能跑；spec.py collect --json（跨版本读）
-_empty = tempfile.mkdtemp()
+_empty = fixture.tmpdir()
 _prog = S.remote_program() + (f"\njson_out(collect(json.loads({json.dumps(json.dumps([{k: ns.get(k) for k in S.COLLECT_FIELDS}]))}), "
                               f"{rr!r}, wait=30))\nos._exit(0)\n")
 _r = subprocess.run([sys.executable, "-I", "-"], input=_prog, capture_output=True, text=True, cwd=_empty, env={"PATH": os.environ.get("PATH", "")})

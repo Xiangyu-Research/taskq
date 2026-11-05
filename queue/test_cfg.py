@@ -6,7 +6,6 @@ cfg.py get / state / log；插件合并（extend）的重名。临时文件，�
 import os
 import subprocess
 import sys
-import tempfile
 import textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +17,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 import cfg  # noqa: E402
 
-T = tempfile.mkdtemp()
+T = fixture.tmpdir()
 HOME = os.path.expanduser("~")
 fails = 0
 
