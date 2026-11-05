@@ -55,7 +55,7 @@ print("\n".join(bad) if bad else f"{len(CLEAN)} 个文件都没有领域词")
 HOST = re.compile(r"scripts/monitor|Xiangyu-Research/PhD|\.cache/phd|/work/PhD")
 KNOWN = {
     "monitor/report.py": 1,
-    "queue/advance.py": 1, "queue/common.py": 1, "queue/gpu_pad.py": 1, "queue/relay.py": 1, "queue/shift.py": 2,
+    "queue/advance.py": 1, "queue/common.py": 1, "queue/gpu_pad.py": 1, "queue/relay.py": 1, "queue/shift.py": 1,
     "queue/taskq.py": 1, "queue/dicc_worker.sh": 1, "queue/worker_start.sh": 1, "queue/gpu_pad_start.sh": 1,
     "queue/README.md": 10, "queue/test_relay.py": 4, "queue/test_relay_bundle.py": 8, "sync/test_tunnel.py": 1,
 }

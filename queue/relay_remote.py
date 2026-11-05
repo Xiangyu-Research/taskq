@@ -479,15 +479,25 @@ if free()<soft:
     L.close()
 import time
 PD=os.path.join(R,R_PINS)
+_pc=[None,set()]
 def pins():
+    try:
+        st=os.stat(PD)
+    except OSError:
+        return set()
+    k=(st.st_ino,st.st_mtime_ns)
+    if _pc[0]==k and time.time()-st.st_mtime>2:
+        return _pc[1]
     s=set()
-    for f in (os.listdir(PD) if os.path.isdir(PD) else []):
+    for f in os.listdir(PD):
         try:
             p=os.path.join(PD,f)
             if f.endswith('.json') and time.time()-os.path.getmtime(p)<12*3600:
                 s|=set(json.load(open(p)))
         except (OSError,ValueError):
             continue
+    _pc[0]=k
+    _pc[1]=s
     return s
 pinned=pins()
 def skip(p,f):

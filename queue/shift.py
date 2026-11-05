@@ -139,10 +139,9 @@ def group_tasks(host, g, pueue=PUEUE):
 
 
 def hand_over(key, frm, to):
-    """总队列里把分给 frm 的 key 改分给 to（box 上，10/31）→ 是否成功。"""
+    """总队列里把分给 frm 的 key 改分给 to（box 上，10/31；11/5 起一步改分，中间不会被别的执行机领走）→ 是否成功。"""
     import taskq
-    taskq.central(["release", "--worker", frm, key])
-    rc, _, _ = taskq.central(["take", "--worker", to, "--assign", key])
+    rc, _, _ = taskq.central(["take", "--worker", to, "--assign", "--from", frm, key])
     return rc == 0
 
 
@@ -161,17 +160,16 @@ def central_mine(name):
 
 
 def site_tasks(name):
-    """relay.py 最近一次读到的这台的各任务（~/.cache/phd/relay/status.json）→ {真 key: dict(state, runs, final)}。"""
-    import relay_plugins as RN
-    try:
-        with open(os.path.join(RN.RELAY_DIR, "status.json")) as f:
-            return (json.load(f).get(name) or {}).get("tasks") or {}
-    except (OSError, ValueError):
-        return {}
+    """worker 停下后现读这台的各任务 → {真 key: dict(state, runs, final, resumable)}；读不到 → None（11/5：不用上次检查的 status.json，
+    那时刚开训的还没有进度）。"""
+    import relay
+    import relay_store as ST
+    rs = relay.remote_status(name)
+    return None if rs is None else relay.site_view(name, rs, ST.load_state())
 
 
 def has_progress(f):
-    return bool(f) and (f.get("state") in (S_CLAIMED, S_BUSY) or bool(f.get("final"))
+    return bool(f) and (f.get("state") in (S_CLAIMED, S_BUSY) or bool(f.get("final")) or bool(f.get("resumable"))
                         or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
 
 
@@ -209,7 +207,10 @@ def stop_site(name):
         tasks = None if tasks is None or t is None else {**tasks, **t}
     if tasks is None or any((tasks.get(i) or {}).get("state", "Done") != "Done" for i in run):
         return f"组没确认暂停或 worker 还没确认停下（pueue 任务 {run or '无或读不到'}），任务先不交出，下次检查再停", False
-    have, to = site_tasks(name), day_site(host, but=name)
+    to = day_site(host, but=name)
+    have = site_tasks(name) if to else {}
+    if have is None:
+        return "worker 停了，读不到那边的进度，任务先不交出，下次检查再交", False
     moved, gave, left = [], [], []
     for k in central_mine(name):
         if to and has_progress(have.get(k)) and hand_over(k, name, to):

@@ -1024,13 +1024,49 @@ def test_drop_refused():
         msgs = relay.execute(NAME, acts, S0([]))
         assert seen and central, (seen, central, msgs)
         central.clear()
+        ST.update_state(lambda st: st.setdefault("keys", {}).setdefault(NAME, {}).__setitem__(K, record(K)))
         RM.rtq = lambda name, cmd: (0, "")
-        RM.rpy = lambda name, code, data=None, **kw: (_ for _ in ()).throw(OSError("ssh 断了"))
+        RM.rpy = lambda name, code, data=None, **kw: (_ for _ in ()).throw(RuntimeError("ssh 断了"))
         msgs = relay.execute(NAME, acts, S0([]))
-        assert not central and any("先不交还" in m for m in msgs), (central, msgs)
+        assert central and any("下次检查再删" in m for m in msgs), (central, msgs)
+        st = ST.load_state()
+        assert st["keys"][NAME][K].get("dropped"), st
+        RS = dict(taskq=dict(tasks=[], paused=False), tasks={}, free=500e9)
+        acts2, _ = relay.plan(S0([]), NAME, RS, st)
+        assert [(a["op"], a["key"], a.get("gone")) for a in acts2] == [("drop", K, True)], acts2
+        RM.rpy = lambda name, code, data=None, **kw: (seen.append(data), 1)[1]
+        relay.execute(NAME, acts2, S0([]))
+        assert K not in ST.load_state()["keys"].get(NAME, {}), ST.load_state()
     finally:
         RM.rpy, RM.rtq, relay.taskq.central = rpy0, rtq0, cen0
-    ok("那边拒绝删任务（退出码 3）、别的错（含旧版的 1）或连不上时不删结果、不交还；任务已经删掉的（退出码 4）照常删结果；删路径时出错也不交还")
+        ST.update_state(lambda st: st.get("keys", {}).get(NAME, {}).pop(K, None))
+    ok("那边拒绝删任务（退出码 3）、别的错（含旧版的 1）或连不上时不删结果、不交还；任务已经删掉的（退出码 4）照常删结果；"
+       "任务删了、路径没删掉：照常交还，记 dropped，下一轮再删路径（11/5）")
+
+
+def test_beat_lost():
+    """总队列里的领取已经不是它的（beat --strict 退出码 13）：这些 key 这一轮不再动（不传、不拉回、不删、不交还），别的照常（11/5）。"""
+    K, K2 = "D1_x/tr/0", "D1_x/tr/1"
+    calls, removed = [], []
+    rtq0, cen0, dr0 = RM.rtq, relay.taskq.central, RT.drop_remote
+
+    def central(args, timeout=300):
+        calls.append(list(args) if not isinstance(args, str) else args.split())
+        if calls[-1][0] == "beat":
+            return relay.taskq.LOST, K + "\n", ""
+        return 0, "", ""
+    relay.taskq.central = central
+    RT.drop_remote = lambda name, k, rk, gone=False: removed.append(k)
+    acts = [dict(op="beat", key=K), dict(op="beat", key=K2), dict(op="drop", key=K, rkey=K), dict(op="release", key=K, why="x"),
+            dict(op="drop", key=K2, rkey=K2), dict(op="release", key=K2, why="x")]
+    try:
+        msgs = relay.execute(NAME, acts, S0([]))
+    finally:
+        relay.taskq.central, RT.drop_remote, RM.rtq = cen0, dr0, rtq0
+    assert calls[0][:2] == ["beat", "--strict"] and set(calls[0][-2:]) == {K, K2}, calls
+    assert removed == [K2] and [c for c in calls if c[0] == "release"] == [["release", "--worker", NAME, K2]], (removed, calls)
+    assert any("已经不是它的" in m and K in m for m in msgs), msgs
+    ok("relay 续约用 beat --strict：领取已经不是它的 key 这一轮不再动，别的照常")
 
 
 def blocked_on_lock(pid):
@@ -1352,6 +1388,7 @@ def test_programs_ascii():
 
 if __name__ == "__main__":
     test_drop_refused()
+    test_beat_lost()
     test_refcount()
     test_fresh_site()
     test_auto_off()
