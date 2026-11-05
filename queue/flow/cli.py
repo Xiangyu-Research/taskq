@@ -83,9 +83,11 @@ def dag(argv):
 
 
 def flow_for_ledger():
+    """台账、who、run、publish 用的流程：实验表加总队列里实验表以外的任务（总队列在本机时；和健康检查编的一样）。"""
     import advance
+    import taskq
     from flow import ledger as LG
-    flow = compile_legacy(python=advance.python())
+    flow = compile_legacy(queue_tasks=taskq.read_tasks(), python=advance.python())
     return flow, Graph(flow), data_root(), LG
 
 
