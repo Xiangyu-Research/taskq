@@ -8,7 +8,6 @@ taskq smoke retry 后重排；真任务训完记成过了；adopt 重复跑不�
 import os
 import shutil
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)
@@ -16,9 +15,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
-BASE = os.path.expanduser("~/.cache/taskq-test")
-os.makedirs(BASE, exist_ok=True)
-TMP = tempfile.mkdtemp(prefix="smoke_", dir=BASE)
+TMP = fixture.tmpdir(prefix="smoke_")
 os.environ["TASKQ_STATE"] = os.path.join(TMP, "state")
 os.environ["TASKQ_DATA"] = os.path.join(TMP, "data")
 os.environ["TASKQ_LAST"] = os.path.join(TMP, "last")

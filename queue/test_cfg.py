@@ -327,7 +327,8 @@ setenv(TASKQ_PROJECT="~/pj")
 ok("project.find：TASKQ_PROJECT 比往上找优先，~ 展开", project.find(start=PJ) == os.path.join(HOME, "pj"))
 ok("project.find：明确给的比 TASKQ_PROJECT 优先", project.find(PJ) == PJ)
 setenv(TASKQ_PROJECT=None)
-_dp = os.path.expanduser(project.DEFAULT)
+project.DEFAULT = os.path.join(T, "default_project")  # never the real ~/.config/taskq/project
+_dp = project.DEFAULT
 write(_dp, PJ + "\n")
 ok("project.find：往上没有时用 ~/.config/taskq/project 写的（11/5）", project.find(start=os.path.join(T, "layout")) == PJ)
 PJ2 = os.path.join(T, "proj2")

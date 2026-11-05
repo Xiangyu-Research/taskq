@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bundle_gate.py 的测试（11/5）：从工作区和旧提交建代码包，拿总队列现在会送的说明（testdata 的实验表、command 做法）过闸门：
 跑得了的放行，跑不了的挡下；hub 上没有那个包、不知道包时放行；超时放行、不记着；relay.plan / fill 挡下、记 held、报 bundlegate，
-包换了再送。临时目录在 ~/.cache/taskq-test/ 下，跑完删掉。浅克隆里没有旧提交时跳过旧包那几项。
+包换了再送。临时目录跑完删掉。浅克隆里没有旧提交时跳过旧包那几项。
     python3 queue/test_bundle_gate.py
 """
 import json
@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -18,9 +17,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
-BASE = os.path.expanduser("~/.cache/taskq-test")
-os.makedirs(BASE, exist_ok=True)
-TMP = tempfile.mkdtemp(prefix="bundle_gate_", dir=BASE)
+TMP = fixture.tmpdir(prefix="bundle_gate_")
 os.environ["TASKQ_STATE"] = os.path.join(TMP, "state")
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
@@ -275,7 +272,7 @@ def main():
         test_stage(new, old)
         print("全部通过")
     finally:
-        shutil.rmtree(TMP if TMP.startswith(BASE + "/") else "/nonexistent", ignore_errors=True)
+        shutil.rmtree(TMP, ignore_errors=True)
 
 
 if __name__ == "__main__":
