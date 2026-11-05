@@ -72,11 +72,67 @@ def dag(argv):
     return 0
 
 
+def flow_for_ledger():
+    import advance
+    from flow import ledger as LG
+    flow = compile_legacy(python=advance.python())
+    return flow, Graph(flow), data_root(), LG
+
+
+def adopt(argv):
+    ap = argparse.ArgumentParser(prog="taskq adopt", description="用现在判断做完的那些检查扫一遍，做完、台账里还没有的记成 adopted"
+                                 "（只 stat、不重跑，重复跑结果一样）")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="只数，不写台账")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    flow, _, root, LG = flow_for_ledger()
+    n = LG.adopt(flow, root, LG.connect(), dry=a.dry_run)
+    print(json.dumps(n) if a.json else f"{'会记' if a.dry_run else '记了'} {n['adopted']} 个，已经有 {n['already']} 个，没做完 {n['not_done']} 个")
+    return 0
+
+
+def verify(argv):
+    ap = argparse.ArgumentParser(prog="taskq verify", description="台账说做完的，产出现在还对不对（不见了 error、大小变了 warn、只有 mtime 变了 info）")
+    ap.add_argument("target", nargs="?", help="实例 id、规则名、实验 id 或 key；不给 = 全部")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    flow, g, root, LG = flow_for_ledger()
+    ids = None
+    if a.target:
+        ids = {i.id for i in flow.instances.values() if a.target in (i.id, i.rule, i.exp, i.key)}
+        if not ids:
+            print(f"taskq verify：没有 {a.target}", file=sys.stderr)
+            return NOT_FOUND
+    out = LG.verify(flow, root, LG.connect(), ids)
+    if a.json:
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        for r in out:
+            print(f"[{r['level']}] {r['id']}  {r['path']}  {r['what']}")
+        print(f"{len(out)} 处不一样" if out else "台账里做完的产出都对得上", file=sys.stderr)
+    return 1 if any(r["level"] != "info" for r in out) else 0
+
+
+def accept(argv):
+    ap = argparse.ArgumentParser(prog="taskq accept", description="有意改过的产出：按现在的样子重新记进台账，写明原因")
+    ap.add_argument("target", help="路径（绝对，或相对数据目录）或实例 id")
+    ap.add_argument("--reason", required=True)
+    a = ap.parse_args(argv)
+    flow, g, root, LG = flow_for_ledger()
+    ids = LG.accept(flow, g, root, LG.connect(), a.target, a.reason)
+    if not ids:
+        print(f"taskq accept：{a.target} 不是哪个实例的产出", file=sys.stderr)
+        return NOT_FOUND
+    print("重新记下：" + "、".join(ids))
+    return 0
+
+
+CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept)
+
+
 def main(argv):
     cmd, rest = (argv[0], argv[1:]) if argv else ("", [])
-    if cmd == "who":
-        return who(rest)
-    if cmd == "dag":
-        return dag(rest)
-    print("用法：taskq who <路径> | taskq dag [目标] [--dot|--check]", file=sys.stderr)
+    if cmd in CMDS:
+        return CMDS[cmd](rest)
+    print("用法：taskq who|dag|adopt|verify|accept …", file=sys.stderr)
     return 2

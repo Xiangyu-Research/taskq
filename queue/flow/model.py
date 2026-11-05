@@ -35,6 +35,7 @@ class Instance:
     inputs: list = field(default_factory=list)   # 声明的输入（只用来核对先后）
     marker: str = ""            # 做完的标志
     task: str = ""              # each：所属源头任务的 key
+    spec: dict = None           # 源头任务的说明（判断做完用）
 
 
 @dataclass

@@ -85,7 +85,7 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
         shared = [norm(os.path.join(os.path.dirname(outs[0]), x)) for x in o["extra"]]
         marker = norm(os.path.join(outs[0], o["done"][0][0])) if o["done"] else ""
         i = Instance(id=key, rule=recipe, key=key, exp=exp or "", names=dict(sp.get("names") or {}), outputs=outs,
-                     shared=shared, marker=marker)
+                     shared=shared, marker=marker, spec=sp)
         add(i)
         return i
 

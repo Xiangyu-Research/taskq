@@ -66,6 +66,7 @@ LOG = cfg.log("advance")
 LIVE_ST = refill.LIVE
 NO_NICE = 10 ** 6
 NOTES = []  # 这次检查里"为什么没排"的说明（写进 ~/advance.log，不报成问题）
+SEEN = {}  # 这次检查里算过的做完判断：{任务 key: 训完没有, (步骤, key): 做完没有}（台账的影子对比用，flow/ledger.py）
 
 
 def bt():
@@ -144,6 +145,7 @@ def plan(s, root=None):
     hub = M.hub()
     ptasks = (s["pueue"].get(hub) or {}).get("tasks")
     NOTES.clear()
+    SEEN.clear()
     if ptasks is None:
         return [], {}  # box 的 pueue 读不到：这次什么都不做
     queue_tasks = list(((s.get("taskq") or {}).get(hub) or {}).get("tasks", []))
@@ -360,7 +362,7 @@ def plan(s, root=None):
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
         after = (t["e"] or {}).get("after", [])
         here = S.is_done(sp, root)
-        trained[key] = here
+        trained[key] = SEEN[key] = here
         archiving = ("relay_fetch", key) in live
         if not here:
             prequeue(t, after)
@@ -371,6 +373,8 @@ def plan(s, root=None):
             busy = fetching(st, t["names"])
             ok = not busy and st["done"].ok(root, t["names"])
             after_ok[(key, st["name"])] = ok
+            if not busy:
+                SEEN[(st["name"], key)] = ok
             if not ok and not blocked:
                 if not busy:
                     place(t, st, label, n, archiving, True)
@@ -396,7 +400,10 @@ def plan(s, root=None):
                     break
                 label = f"{st['name']}:{e['id']}"
                 busy = fetching(st, names)
-                if busy or not st["done"].ok(root, names):
+                gok = not busy and st["done"].ok(root, names)
+                if not busy:
+                    SEEN[(st["name"], e["id"])] = gok
+                if not gok:
                     if not busy:
                         place(dict(key=e["id"], names=names, each=e.get("each") or {}), st, label, n, False, False)
                     break

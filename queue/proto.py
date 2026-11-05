@@ -264,6 +264,16 @@ for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "
     ENV["TASKQ_GPU_PAD_" + _k] = ("tune", "gpu_pad.py 的参数，默认值在它的命令行")
 
 
+# ---------------- 台账（flow/ledger.py，11/5） ----------------
+LEDGER_DB = "ledger.db"            # 在状态文件夹下
+LEDGER_SHADOW = "shadow"           # 影子对比的记录：<状态文件夹>/shadow/ledger-<日期>.jsonl
+A_QUEUED, A_RUNNING, A_OK, A_FAILED, A_STALLED, A_BLOCKED, A_LEGACY, A_ADOPTED = (
+    "queued", "running", "ok", "failed", "stalled", "publish_blocked", "legacy", "adopted")
+A_DONE = (A_OK, A_LEGACY, A_ADOPTED)  # 算做完的尝试
+O_LIVE, O_RETIRED, O_SUPERSEDED = "live", "retired", "superseded"
+ALERTS["ledger"] = ("sub",)  # 台账的影子对比出错
+ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")
+
 # ---------------- 给 bash ----------------
 def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_PREFIX": STAGE_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,

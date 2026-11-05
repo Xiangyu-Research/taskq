@@ -363,6 +363,26 @@ def update(P, now, dry=False):
     return [p for _, p in msgs], sent_ok
 
 
+def ledger_shadow(s):
+    """台账的影子对比（queue/flow/ledger.py）：和 advance.py 这一轮的判断比，结果一行写进 ~/ledger.log。"""
+    import advance
+    from flow.compile import compile_legacy
+    from flow.graph import Graph
+    from flow import ledger as LG
+    root = advance.bt()
+    flow = compile_legacy(queue_tasks=((s.get("taskq") or {}).get(M.hub()) or {}).get("tasks", []), python=advance.python())
+    db = LG.connect()
+    try:
+        n = LG.shadow(flow, Graph(flow), root, db, s=s, seen=advance.SEEN, hub=M.hub(), identify=C.identify)
+    finally:
+        db.close()
+    line = (f"{datetime.now():%F %T} 一致 {n['agree']}、新做完 {n['new']}、重跑 {n['rerun']}、改过 {n['changed']}、"
+            f"做完又不算了 {n['regressed']}、这轮没查 {n['skipped']}；新出的说不清的 {len(n['unexplained'])}（{n['seconds']} 秒）")
+    with open(cfg.log("ledger"), "a") as f:
+        f.write(line + "\n")
+    return n
+
+
 def from_step(v):
     """shift / feed（relay）/ advance 报的卡住：说明（str），或 dict(msg, data) → 问题。"""
     if isinstance(v, dict):
@@ -411,6 +431,11 @@ def main(argv=None):
         done, stuck2 = advance.run(s, dry=a.dry_run)
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
+    if policy.AUTO.get("ledger") and not a.dry_run:
+        try:
+            ledger_shadow(s)
+        except Exception as e:  # noqa: BLE001  影子对比出错不影响别的
+            stuck2[alert_id("ledger", "error")] = f"台账的影子对比出错：{type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
     update(P, s["now"], dry=a.dry_run)
