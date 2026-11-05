@@ -123,4 +123,32 @@ check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退�
 rm -f "$T/badspec"
 fi
 
+# 6. 只有 run_task.sh 被外部停掉（11/5）：SIGTERM → 训练停下、交还、不记失败；SIGKILL → 训练还在时接着领着、停掉它，停下了才交还，不记失败
+if want 6; then
+reset
+table << EOF
+t/a base
+EOF
+FAKE_SECS=60 SLURM_JOB_ID=900211 TASKQ_SLOTS=1 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w6a.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q ^start $T/train.log 2> /dev/null'
+kill -TERM "$(pgrep -P "$(pgrep -P $wpid)" -f run_task.sh)"
+wait $wpid
+check "run_task.sh 单独收到 SIGTERM：训练停下、交还、不记失败，本作业不再领" 'grep -q "^term t/a" $T/train.log && [[ -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "被外部停掉" $T/w6a.out && [[ $(grep -c ^start $T/train.log) == 1 ]]'
+reset
+FAKE_IGNORE=t/a SLURM_JOB_ID=900212 TASKQ_SLOTS=1 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w6b.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q ^start $T/train.log 2> /dev/null'
+sleep 3
+kill -KILL "$(pgrep -P "$(pgrep -P $wpid)" -f run_task.sh)"
+waitfor 20 'grep -q "训练还在" $T/w6b.out'
+sleep 2
+held=$([[ -e $TASKQ_DIR/claims/t__a ]] && grep -q "^term t/a" $T/train.log && echo 1)
+pkill -KILL -f "$T/fake_train.sh t/a"
+waitfor 20 '[[ -z $(ls $TASKQ_DIR/claims) ]]'
+kill -TERM "$(pgrep -P $wpid)"
+wait $wpid
+check "run_task.sh 被 SIGKILL、训练还在：停它、接着领着；训练停下后交还，不记失败" '[[ $held == 1 && -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "终于停下了，交还" $T/w6b.out'
+fi
+
 (( fails == 0 )) && { echo "全部通过"; rm -rf "$T"; } || { echo "$fails 项失败（文件在 $T）"; exit 1; }
