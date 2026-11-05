@@ -97,14 +97,14 @@ try:
     ok("exp steps：一行、顶层字段 = proto.EXP_STEPS_TOP、每步 = EXP_STEP_FIELDS",
        tuple(d) == proto.EXP_STEPS_TOP and d["version"] == proto.VERSION and d["data"] == DATA and d["python"] == py
        and all(tuple(s) == proto.EXP_STEP_FIELDS for s in st))
-    n_task = sum(len((E.experiment(t["exp"]) or {}).get("after") or []) for t in tasks.values())
+    n_task = sum(len(E.steps_of(t)) for t in tasks.values())
     n_group = sum(len(c) for e in exps for c in e.get("group_after") or [])
     ok(f"exp steps：每个任务、实验一级、FINAL 的步骤都列了（{n_task}、{n_group}、{len(final)}）",
        [s["level"] for s in st].count("task") == n_task and [s["level"] for s in st].count("group") == n_group
        and [s["level"] for s in st].count("final") == len(final))
     k0, t0 = next((k, t) for k, t in tasks.items() if (E.experiment(t["exp"]) or {}).get("after"))
     names0 = E.task_names(t0, DATA, py)
-    want = [S.fill(x["cmd"], names0, keep=()) for x in E.experiment(t0["exp"])["after"]]
+    want = [S.fill(x["cmd"], names0, keep=()) for x in E.steps_of(t0)]
     ok("exp steps：命令按 names 填好，没有留下 {data}、{python}",
        [s["cmd"] for s in st if s["key"] == k0] == want and all("{data}" not in (s["cmd"] or "") for s in st)
        and all(s["error"] is None for s in st))
@@ -116,7 +116,7 @@ try:
        and all(s["exp"] == e0["id"] and s["level"] == "group" for s in de))
     ok("exp steps 不给 --data：用本机的数据目录（TASKQ_DATA）", js("exp", "steps", "--key", k0, "--python", py)["data"] == DATA)
     dd = js("exp", "steps", "--key", k0, "--data", DATA, "--python", py, "--done")["steps"]
-    exp_done = [bool(x["done"].ok(DATA, names0)) for x in E.experiment(t0["exp"])["after"]]
+    exp_done = [bool(x["done"].ok(DATA, names0)) for x in E.steps_of(t0)]
     ok("exp steps --done：和 done.ok 一样（空的数据目录都没做完）", [s["done"] for s in dd] == exp_done and not any(exp_done))
     probe = next((s for s in st if (s["cmd"] or "").endswith("/.probe_done")), None)
     if probe:

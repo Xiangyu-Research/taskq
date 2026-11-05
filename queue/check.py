@@ -460,16 +460,16 @@ def check_smoke(r, k, sp, seen):
 
 # ---------------- 每个步骤 ----------------
 def _step_cases(root, py):
-    """每个步骤用得上的 names：每个任务的步骤 → 每个实验取第一个任务；实验一级的 → group_names；FINAL → data、python。"""
+    """每个步骤用得上的 names：每个任务的步骤 → 每个实验里这一步适用的第一个任务；实验一级的 → group_names；FINAL → data、python。"""
     import experiments as E
     exps, final = E.load()
-    first = {}
+    mine = {}
     for k, t in E.tasks().items():
-        first.setdefault(t["exp"], t)
+        mine.setdefault(t["exp"], []).append(t)
     for e in exps:
-        t = first.get(e["id"])
-        if t:
-            for st in e.get("after") or []:
+        for st in e.get("after") or []:
+            t = next((x for x in mine.get(e["id"], []) if E.applies(st, x)), None)
+            if t:
                 yield f"实验 {e['id']} 的步骤 {st['name']}", st, E.task_names(t, root, py), e, True
         if e.get("group_after"):
             names = E.group_names(e, root, py)

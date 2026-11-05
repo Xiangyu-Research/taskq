@@ -109,7 +109,7 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
             names = E.task_names(t, data, python)
             prev = [t["key"]]
             lab = E.label(e, t)
-            for st in e.get("after", []):
+            for st in E.steps_of(t, e):
                 add_rule(rule_of(st, EACH, e.get("rq", "")))
                 outs, marker, ins = step_paths(st, names)
                 qk = norm(fill(st["queue"]["key"], names)) if st.get("queue") else ""

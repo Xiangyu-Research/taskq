@@ -39,7 +39,7 @@ want = set(TASKS)
 for key, t in TASKS.items():
     e = E.experiment(t["exp"])
     names = E.task_names(t, "{data}", "{python}")
-    for st in e.get("after", []):
+    for st in E.steps_of(t, e):
         iid = f"{st['name']}:{E.label(e, t)}"
         want.add(iid)
         i = F.instances.get(iid)
@@ -53,6 +53,18 @@ for e in EXPS:
 want |= {f["name"] for f in FINAL}
 ok(set(F.instances) == want, f"实例多了 {sorted(set(F.instances) - want)[:5]}，少了 {sorted(want - set(F.instances))[:5]}")
 ok(all(F.by_key(i.rule, i.key) is i for i in F.instances.values()), "by_key 对不上")
+# only：arch_s 的 edit 只对 frag 0 做，别的份没有这个实例；advance 的候选也一样
+eds = sorted(i.id for i in F.instances.values() if i.rule == "edit")
+ok(eds == ["edit:arch_s_f0"], f"only={{frag: [0]}} 的步骤只该有 frag 0 的实例：{eds}")
+import advance as A  # noqa: E402
+cand = {t["lab"]: [st["name"] for st in t["after"]] for t in A.candidates("/d", "py", [])[0]}
+ok(cand.get("arch_s_f0", [])[-1:] == ["edit"] and "edit" not in cand.get("arch_s_f1", ["edit"]),
+   f"advance 的候选步骤没按 only 筛：{cand.get('arch_s_f0')} / {cand.get('arch_s_f1')}")
+try:
+    E.check_fields("x", type("M", (), dict(EXPERIMENTS=[dict(id="x", each=dict(frag=["0"]), after=[dict(EXPS[0]["after"][0], only=dict(seed=["1"]))])])))
+    ok(False, "only 写了 each 里没有的参数应该报错")
+except S.SpecError:
+    pass
 
 
 # ---- 2. 先后：随机的"做完了"集合，和照 advance.plan 写的对照比 ----
@@ -65,7 +77,7 @@ def oracle(done):
         if key not in done:
             continue
         blocked = False
-        for st in e.get("after", []):
+        for st in E.steps_of(t, e):
             iid = f"{st['name']}:{E.label(e, t)}"
             after_ok[(key, st["name"])] = iid in done
             if iid not in done and not blocked:

@@ -130,7 +130,7 @@ def exp_steps(argv):
                 if (a.exp and t["exp"] not in a.exp) or (a.key and k not in a.key):
                     continue
                 names = E.task_names(t, data, py)
-                for st in (E.experiment(t["exp"]) or {}).get("after") or []:
+                for st in E.steps_of(t):
                     rows.append((dict(level="task", exp=t["exp"], key=k, name=st["name"], group=st.get("group")), st, names))
         if "group" in levels:
             for e in exps:

@@ -128,8 +128,11 @@ P2CMP = dict(name="p2cmp", group="cpu", cmd="{python} " + QR + "/testdata/bin/p2
 T18CMP = dict(name="t18cmp", group="cpu", cmd="{python} " + QR + "/testdata/bin/cmp18.py --out {data}/demo/analysis/followups/T18",
               done=record("demo/analysis/followups/T18/cmp18.rec.json"))
 
-STEPS = {s["name"]: s for s in [INFER, EVAL, LPROB, OOF, PAIRED, ENS, PRUNE, P1, P2, P2CMP, T18CMP]}
-FRAG_STEPS = ("infer", "eval", "lprob")
+# 只对部分份做的、只在 hub 上做的每份步骤（实验的 step_only 给 only，11/5）；done 指整个结果目录，产出就是这个目录
+EDIT = dict(name="edit", group="gpu", cmd="{python} " + QR + "/testdata/bin/edit.py {data}/results/{model} {frag} --out {data}/demo/edit/{model}/frag_{frag}",
+            done=check("demo/edit/{model}/frag_{frag}", lambda d: os.path.exists(os.path.join(d, "edit.rec.json"))))
+STEPS = {s["name"]: s for s in [INFER, EVAL, LPROB, EDIT, OOF, PAIRED, ENS, PRUNE, P1, P2, P2CMP, T18CMP]}
+FRAG_STEPS = ("infer", "eval", "lprob", "edit")
 CHAIN = {"paired": "oof", "prune": "ens", "p2cmp": "p2", "t18cmp": "prune"}
 KEEP = ["infer", "eval", "ens"]
 FULL = KEEP + ["prune"]
@@ -145,7 +148,7 @@ OLDLOGS = {"D101_alpha": dict(prefix="{variant}_frag{frag}_")}
 
 
 def _x(id, exp, label, model, ds, board, nice, steps=FULL, variant="V_save", frags=F5, env=None,
-       skip_ext=(), only_ext=(), splits=None, probe=None, hours=None, design=None, vars=None, plan=None):
+       skip_ext=(), only_ext=(), splits=None, probe=None, hours=None, design=None, vars=None, plan=None, step_only=None):
     unknown = [s for s in steps if s not in STEPS]
     if unknown:
         raise ValueError(f"{id}：不认识的步骤 {unknown}（有：{', '.join(STEPS)}）")
@@ -156,7 +159,7 @@ def _x(id, exp, label, model, ds, board, nice, steps=FULL, variant="V_save", fra
     if "lprob" in steps and steps.index("lprob") < steps.index("eval"):
         raise ValueError(f"{id}：lprob 要在 eval 后面")
     params = dict(ds=ds, variant=variant, **({"env": env} if env else {}), **({"plan": plan} if plan else {}))
-    after = [STEPS[s] for s in steps if s in FRAG_STEPS]
+    after = [dict(STEPS[s], only=dict(frag=list(step_only[s]))) if s in (step_only or {}) else STEPS[s] for s in steps if s in FRAG_STEPS]
     prune = dict(PRUNE, needs=PRUNE["needs"] + ["lprob"]) if "lprob" in steps else PRUNE
     groups = []
     for s in steps:
@@ -182,7 +185,8 @@ OOF_T3 = dict(steps=OOF5E, splits="t3_splits.json")
 
 EXPERIMENTS = [
     _x("t0", "T0", "基线", "base", "D101_alpha", B0, 0, steps=KEEP_L),
-    _x("arch_s", "T0", "基线", "s", "D101_alpha", B1, 3000, steps=KEEP, variant="V_s", env="alt"),
+    _x("arch_s", "T0", "基线", "s", "D101_alpha", B1, 3000, steps=["infer", "eval", "edit", "ens"], variant="V_s", env="alt",
+       step_only={"edit": ["0"]}),
     _x("arch_m", "T0", "基线", "m", "D101_alpha", B1, 50, steps=KEEP + PROBE, variant="V_m", env="alt2", probe="arch_m"),
     _x("arch_st", "T0", "基线", "st", "D101_alpha", B1, 3000, steps=KEEP, variant="V_st"),
     _x("t0b", "T0b", "全部数据", "base", "D102_alpha_dev", B0, 1000, steps=FRAG_ALL, frags=["all"], vars=SNAP),

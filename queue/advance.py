@@ -120,14 +120,15 @@ def check_policy(steps):
 # ---------------- 候选步骤 ----------------
 def candidates(root, py, queue_tasks):
     """所有任务、所有步骤（不管现在该不该做）→ (任务列表, {实验: 实验一级的 names}, 最后的步骤)。
-    任务：dict(key, exp, e, spec, names, lab)；不属于实验的 e = None。"""
+    任务：dict(key, exp, e, spec, names, lab, after)；不属于实验的 e = None；after 是对它适用的步骤（experiments.steps_of）。"""
     exps, final = E.load()
     table = E.tasks()
     tasks = []
     for key, t in table.items():
         e = E.experiment(t["exp"])
         lab = E.label(e, t)
-        tasks.append(dict(key=key, exp=t["exp"], e=e, spec=t["spec"], names=E.task_names(t, root, py), lab=lab))
+        tasks.append(dict(key=key, exp=t["exp"], e=e, spec=t["spec"], names=E.task_names(t, root, py), lab=lab,
+                          after=E.steps_of(t, e)))
     for q in queue_tasks:
         if q["key"] in table or not q.get("recipe"):
             continue
@@ -135,7 +136,8 @@ def candidates(root, py, queue_tasks):
             s = q.get("spec") or E.resolve_task(q["recipe"], q.get("params") or {}, q.get("exp"))
         except S.SpecError:
             continue
-        tasks.append(dict(key=q["key"], exp=None, e=None, spec=s, names=dict(s["names"], data=root, python=py), lab=q["key"]))
+        tasks.append(dict(key=q["key"], exp=None, e=None, spec=s, names=dict(s["names"], data=root, python=py), lab=q["key"],
+                          after=[]))
     groups = {e["id"]: E.group_names(e, root, py) for e in exps if e.get("group_after")}
     return tasks, groups, final
 
@@ -362,7 +364,7 @@ def plan(s, root=None):
     trained, after_ok = {}, {}  # 任务 → box 上训完没；(任务, 步骤) → 做完没
     for t in tasks:
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
-        after = (t["e"] or {}).get("after", [])
+        after = t["after"]
         here = S.is_done(sp, root)
         trained[key] = SEEN[key] = here
         archiving = ("relay_fetch", key) in live
@@ -398,7 +400,8 @@ def plan(s, root=None):
                 continue
             for st in chain:
                 need = st.get("needs") or []
-                if not all(after_ok.get((t["key"], x)) for t in mine for x in ([need] if isinstance(need, str) else need)):
+                if not all(after_ok.get((t["key"], x)) for t in mine for x in ([need] if isinstance(need, str) else need)
+                           if any(y["name"] == x for y in t["after"])):  # only 不含这个任务的步骤不用等
                     break
                 label = f"{st['name']}:{e['id']}"
                 busy = fetching(st, names)

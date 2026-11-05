@@ -51,6 +51,7 @@ STEP_FIELDS = {
     "needs": "实验一级的步骤：要每个任务都做完的步骤名（一个或列表）",
     "rerun_if_newer": "FINAL 的步骤：这些步骤有比它开始时新的结果就重跑",
     "rq": "FINAL 所在的实验表（加载时加上）",
+    "only": "每个任务的步骤：只对 each 取这些值的任务做（{参数: [取值…]}，如 {\"fold\": [\"0\"]}）；别的任务没有这一步（11/5）",
 }
 QUEUE_FIELDS = {
     "nice": "进任务队列的档位",
@@ -74,6 +75,18 @@ def check_fields(path, mod):
     for e in mod.EXPERIMENTS:
         where = f"{path} 的实验 {e.get('id')}"
         _check_fields(where, e, EXP_FIELDS)
+        each = e.get("each") or {}
+        for st in e.get("after") or []:
+            only = st.get("only")
+            if only is None:
+                continue
+            bad = [k for k in (only if isinstance(only, dict) else ["?"]) if k not in each]
+            if bad or not all(isinstance(v, (list, tuple)) for v in only.values()):
+                raise spec.SpecError(f"{where} 的步骤 {st.get('name')}：only 要写成 {{each 的参数: [取值…]}}（each 里有：{'、'.join(each) or '没有'}）")
+        for c in e.get("group_after") or []:
+            for st in c:
+                if "only" in st:
+                    raise spec.SpecError(f"{where} 的步骤 {st.get('name')}：only 只用在每个任务的步骤（after）上")
         steps += [(f"{where} 的步骤 {st.get('name')}", st) for st in e.get("after") or []]
         steps += [(f"{where} 的步骤 {st.get('name')}", st) for g in e.get("group_after") or [] for st in g]
     seen = set()
@@ -132,6 +145,19 @@ def expand(e, only=None):
         s = resolve_task(e["recipe"], params, e["id"])
         out.append(dict(key=s["key"], exp=e["id"], recipe=e["recipe"], params=params, spec=s, each=pick))
     return out
+
+
+def applies(st, t):
+    """步骤 st 对任务 t 做不做：没有 only 都做；有的话 t 的 each 每个参数都要在 only 列的取值里。"""
+    only = st.get("only") or {}
+    each = t.get("each") or {}
+    return all(str(each.get(k)) in [str(v) for v in vs] for k, vs in only.items())
+
+
+def steps_of(t, e=None):
+    """任务 t 训完以后要做的步骤（实验的 after 里对它适用的，按顺序）；不属于实验的任务 → []。"""
+    e = e if e is not None else experiment(t.get("exp")) if t.get("exp") else None
+    return [st for st in (e or {}).get("after") or [] if applies(st, t)]
 
 
 def short(t):

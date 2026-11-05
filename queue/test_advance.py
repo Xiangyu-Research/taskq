@@ -33,7 +33,7 @@ def legacy_index():
     tasks, groups, final = A.candidates(T, PY, [])
     by_cmd, by_label = {}, {}
     for t in tasks:
-        for st in (t["e"] or {}).get("after", []):
+        for st in t["after"]:
             by_cmd[A.S.fill(st["cmd"], t["names"], keep=())] = (st["name"], t["key"])
             by_label[f"{st['name']}:{t['lab']}"] = (st["name"], t["key"])
     for e in A.E.load()[0]:
@@ -648,7 +648,7 @@ with tempfile.TemporaryDirectory() as R:
     os.environ.update(TASKQ_DATA=R)
     seen, bad, todo = set(), [], []
     for t in A.candidates(R, sys.executable, [])[0]:
-        for st in (t["e"] or {}).get("after", []):
+        for st in t["after"]:
             cmd = A.S.fill(st["cmd"], t["names"], keep=())
             if "--stage" not in cmd or (t["exp"], st["name"]) in seen:
                 continue
