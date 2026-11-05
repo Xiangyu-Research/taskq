@@ -112,8 +112,8 @@ check "停止：训练和子进程一起收到停止，不写训完的文件，�
 kill -TERM $wpid; wait $wpid 2> /dev/null
 fi
 
-# 3e. worker 被 SIGKILL（11/5）：TMPDIR 里不留临时文件；taskq.py next 的标准错误在日志目录里按 worker 固定名字，重开时覆盖；
-#     别的 worker 留下的、7 天没动过的删掉；记 GPU 的后台循环跟着退出
+# 3e. worker 被 SIGKILL（11/5）：TMPDIR 里不留临时文件；taskq.py next 的标准错误直接读进内存，不写文件（consume.py，11/5）；
+#     以前的 worker 留下的、7 天没动过的删掉；没有跟着 worker 不退出的后台进程
 if want 3e; then
 reset
 : > "$TASKQ_DIR/tasks.jsonl"
@@ -130,7 +130,7 @@ for n in 1 2; do
     kill -KILL $wpid; wait $wpid 2> /dev/null
     [[ -n $kids ]] && { waitfor 15 '! kill -0 $kids 2> /dev/null' || gone=0; kill -KILL $kids 2> /dev/null; }
 done
-check "SIGKILL：TMPDIR 里不留临时文件，标准错误的文件按 worker 固定名字只有一个" '[[ -z $(ls -A "$TMPDIR") && $(ls "$L" | grep -c "^worker_900214_next.err$") == 1 ]]'
+check "SIGKILL：TMPDIR 里不留临时文件，也不留标准错误的文件" '[[ -z $(ls -A "$TMPDIR") && ! -e $L/worker_900214_next.err ]]'
 check "别的 worker 留下的：7 天没动过的删掉，新的留着" '[[ ! -e $L/worker_1_next.err && -e $L/worker_2_next.err ]]'
 check "SIGKILL：worker 的后台进程跟着退出" '[[ $gone == 1 ]]'
 fi

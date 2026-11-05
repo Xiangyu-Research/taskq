@@ -1,14 +1,14 @@
 #!/bin/bash
-# 跑一个训练任务（2026-10-18）：所有机器共用（DICC 的 dicc_worker.sh、lab 的 pueue 任务、手动跑）。
+# 跑一个训练任务（2026-10-18）：所有机器共用（执行机的 worker consume.py、手动跑）。
 #   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
 #   run_task.sh --spec <JSON>        按解析好的说明跑（执行机的队列里 box 送来的，spec.py resolve 的格式；11/4）
 # 按任务说明（queue/spec.py，做法在 queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
 # 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART），第一行记作业、机器、
-# 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（dicc_worker.sh 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
+# 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（worker 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
-# 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；
+# 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；worker 设了 TASKQ_ADMITTED=1 时不等（它领之前已看过卡，11/5）；
 # 设了 TASK_GPU_IDLE（分钟，envs/machines.py 里组的环境变量）时，还要 GPU 使用记录（monitor/gpu_log.sh，位置见 proto.py 的 GPU_LOG_DIR）里最近这么久这张卡上没有别人（11/2）；
-# 训练出错隔 5 分钟重来，最多 3 次（dicc_worker.sh 跑的只跑 1 次，由它交还队列）。
+# 训练出错隔 5 分钟重来，最多 3 次（worker 跑的只跑 1 次，由它交还队列）。
 # 退出码（queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # 4 缺输入（data 里的文件不全，没开训，11/1）；5 读不了盘、判断不了训完没有（spec.py done 退出 5，11/4）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
@@ -57,7 +57,7 @@ ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "这台机�
 mkdir -p "$DATA/$TQ_TASK_LOGS" "$TASK_OUT"
 LOG=$DATA/$TQ_TASK_LOGS/${TASK_SAFE}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log
 TRIES=3
-[[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、dicc_worker.sh 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
+[[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、worker 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
 TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
 POLL=${RUN_TASK_POLL:-300}        # 只给测试用
 GPU_POLL=${RUN_TASK_GPU_POLL:-60} # 只给测试用
@@ -85,7 +85,7 @@ gpu_quiet() {  # GPU 使用记录里最近 TASK_GPU_IDLE 分钟这张卡上没�
         awk -F, -v s="$since" -v g="$CUDA_VISIBLE_DEVICES" -v me="$(id -un)" '$1 >= s && $2 == g && $6 != "" && $6 != me {t = $1} END {print t}')
     [[ -z $GPU_SEEN ]]
 }
-wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1。每次看都往任务日志写一行（dicc_worker.sh 按日志判断卡没卡住）
+wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1。每次看都往任务日志写一行（worker 按日志判断卡没卡住）
     local waited=0
     while GPU_SEEN=; ! { gpu_free && gpu_quiet; }; do
         if [[ -n ${TASK_WAIT_GPU:-} ]] && (( waited >= TASK_WAIT_GPU * 60 )); then
@@ -128,9 +128,9 @@ echo "$(ts) 开始：$TASK_KEY（环境 $TASK_ENV，日志 $LOG）"
 TASK_INPUTS_ROOT=$DATA CPID=
 if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
-    if [[ ${TASK_LOCAL:-0} == 1 && -n ${SLURM_JOB_ID:-} ]]; then
+    if [[ ${TASK_LOCAL:-0} == 1 && -n ${TASKQ_STAGE_ROOT:-}${SLURM_JOB_ID:-} ]]; then
         ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; M = cfg.mtab(); import policy; print(int(bool(policy.STAGE_TMP.get(M.whoami()))))" 2> /dev/null || echo 0)}
-        [[ $ST == 1 ]] && LROOT=${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX$SLURM_JOB_ID
+        [[ $ST == 1 ]] && LROOT=${TASKQ_STAGE_ROOT:-${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX${SLURM_JOB_ID:-}}  # 消费者的 slurm 插件给的；旧 worker 按作业号
     fi
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?
     if (( rc == TQ_EXIT_RUN_MISSING )); then
@@ -150,7 +150,7 @@ fi
 export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
-    wait_gpu || exit "$TQ_EXIT_RUN_FAILED"
+    [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # 消费者领之前已经看过卡
     # 自己一个进程组，停的时候整组停；任务的命令用核心的库（TASKQ_LIB）和命令（bin/ 在 PATH 最前面，11/4）
     ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
     pid=$!

@@ -168,7 +168,7 @@ def topup_plan(tq, counts, qos):
     """→ ([(QOS, 每段时限, 补几段)], 不补的原因)。counts：{QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}。
     这台有要卡的任务（备好没人领的，或在训的）时按各 QOS 的名额排满，让排着的作业一直攒排队时间（11/2 定；10/31–11/2 排着的
     不超过备好的任务数）。每人同时最多 2 张卡，多排的作业等在跑的结束才开始，那时那边已备到 READY 个；开始时没有任务的 worker
-    空等 IDLE_MAX 再结束（dicc_worker.sh）。两样都没有就不交。"""
+    空等 IDLE_MAX 再结束（consume.py 的 slurm 插件）。两样都没有就不交。"""
     if not tq:
         return [], "读不到任务队列"
     if not tq.get("enabled"):

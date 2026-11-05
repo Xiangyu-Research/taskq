@@ -1,5 +1,5 @@
 """训练的做法（2026-10-18）：一种训练怎么跑、要什么环境和数据、结果在哪、怎么算训完、怎么拉回和归档。
-调度（taskq.py、dicc_worker.sh、run_task.sh、refill.py、advance.py、make_registry.py）只按这里的字段办事，不认识具体模型。
+调度（taskq.py、consume.py、run_task.sh、refill.py、advance.py、make_registry.py）只按这里的字段办事，不认识具体模型。
 解析和使用见 queue/spec.py；实验表（OUTPUTS["experiments"]，字段见 experiments.py 开头）和队列里的任务给出参数。
 
 每种做法：

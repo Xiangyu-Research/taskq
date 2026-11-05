@@ -24,7 +24,9 @@ CLEAN = [
     "sites/test_e2e.py", "sites/test_envs.py", "sync/test_tunnel.py", "queue/test_archive_task.sh",
     "queue/test_races.py", "queue/test_worker_stall.sh", "monitor/test_probe.py", "queue/test_relay_store.py",
     "monitor/overview.py", "monitor/test_overview.py", "queue/test_experiments_cli.py", "queue/check.py", "queue/test_check.py",
-    "queue/run_tests.py", "queue/test_example.py",
+    "queue/run_tests.py", "queue/test_example.py", "queue/consume.py", "queue/dicc_worker.sh", "queue/test_consume.sh",
+    "queue/consumers/__init__.py", "queue/consumers/slurm.py", "queue/consumers/resident.py", "queue/consumers/gpu_pad.py",
+    "queue/consumers/gpu_share.py", "queue/consumers/gpu_idle.py", "queue/consumers/window.py",
     "queue/flow/__init__.py", "queue/flow/model.py", "queue/flow/compile.py", "queue/flow/graph.py", "queue/flow/cli.py",
     "queue/flow/ledger.py", "queue/flow/engine.py", "queue/flow/run.py", "queue/flow/stall.py", "queue/flow/publish.py", "queue/test_publish.py", "queue/test_run.py", "queue/test_flow_compile.py", "queue/test_ledger.py", "queue/test_engine.py",
 ]
@@ -58,7 +60,7 @@ HOST = re.compile(r"scripts/monitor|Xiangyu-Research/PhD|\.cache/phd|/work/PhD")
 KNOWN = {
     "monitor/report.py": 1,
     "queue/advance.py": 1, "queue/common.py": 1, "queue/gpu_pad.py": 1, "queue/relay.py": 1, "queue/shift.py": 1,
-    "queue/taskq.py": 1, "queue/dicc_worker.sh": 1, "queue/worker_start.sh": 1, "queue/gpu_pad_start.sh": 1,
+    "queue/taskq.py": 1, "queue/worker_start.sh": 1, "queue/gpu_pad_start.sh": 1,
     "queue/README.md": 10, "queue/test_relay.py": 4, "queue/test_relay_bundle.py": 8, "sync/test_tunnel.py": 1,
 }
 seen = {}

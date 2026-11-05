@@ -4,7 +4,7 @@
 总队列（box 的 ~/.cache/phd/taskq/）：所有训练和要进队列的步骤。只有 box 写它（实验表加任务、改档位、停止都在 box 上做）；
   分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（queue/relay.py 交还）。
 执行机上的队列（relay.py 在执行机根目录里建的 R/queue/）：relay.py 替它从总队列领来的任务，key 和总队列相同。
-  worker（queue/dicc_worker.sh）在那边领、心跳、交还，box 不在线时照常跑。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
+  worker（queue/consume.py）在那边领、心跳、交还，box 不在线时照常跑。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
 
 每个任务 = 做法 + 参数（queue/recipes.py，解析在 queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
 任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。

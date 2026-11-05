@@ -152,13 +152,17 @@ TASKQ_CONFIG=$T/wscfg bash "$T/ws/queue/worker_start.sh" > "$T/ws.out" 2>&1; rc=
 check "worker_start：conda activate 失败，日志里写 !!，照样开 worker" '[[ $rc == 0 ]] && grep -q "!! conda activate env0 失败" $T/ws.out && grep -q "worker 开始" $T/ws.out'
 fi
 
-# gpu_stats / pad_now 读真的文件（假 nvidia-smi）：只取 dicc_worker.sh 里这两个函数
+# gpu_stats / pad_now 读真的文件（假 nvidia-smi）：consume.py 的插件 consumers/gpu_share.py、gpu_pad.py 里的这两个函数（11/5 前取 dicc_worker.sh 里的 bash 函数）
 if want gpu; then
-sed -n '/^gpu_stats() {/,/^can_add() {/p' "$HERE/dicc_worker.sh" | sed '$d' > "$T/fns.sh"
 mkdir -p "$T/bin"; printf '#!/bin/bash\necho "30000, 81920"\n' > "$T/bin/nvidia-smi"; chmod +x "$T/bin/nvidia-smi"
 GPUCSV=$T/gpu.csv PADBASE=$T/pad
 for i in $(seq 12); do echo "2026/10/18 10:$i, 0, 30000 MiB, 81920 MiB, $(( i <= 2 ? 0 : 60 )) %"; done > "$GPUCSV"
-eval "$(python3 "$HERE/proto.py" sh)"; source "$T/fns.sh"; unset WORKER_TEST_GPU
+unset WORKER_TEST_GPU
+gpu_stats() { python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[1] + "/consumers"); import gpu_share
+print(*gpu_share.gpu_stats(sys.argv[2], sys.argv[3:]))' "$HERE" "$GPUCSV" ${NVSEL[@]+"${NVSEL[@]}"}; }
+pad_now() { python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[1] + "/consumers"); import gpu_pad
+print(gpu_pad.pad_now(sys.argv[2]))' "$HERE" "$PADBASE"; }
+NVSEL=()
 check "gpu_stats：只看最近 10 条使用率（前面的 0% 不算），显存读 nvidia-smi" '[[ $(PATH=$T/bin:$PATH gpu_stats) == "60 10 30000 81920" ]]'
 check "gpu_stats：没有记录时样本数 0" '[[ $(GPUCSV=$T/none PATH=$T/bin:$PATH gpu_stats) == "0 0 30000 81920" ]]'
 printf '#!/bin/bash\n[[ "$*" == "-i 1 "* ]] && echo "5000, 24576" || echo "30000, 81920"\n' > "$T/bin/nvidia-smi"

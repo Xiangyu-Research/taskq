@@ -266,8 +266,9 @@ pf = plugdir("f", """
 e = merged(pf)
 ok("extend：表的类型不对 → 报错", isinstance(e, ValueError) and "TABLE" in str(e) and "字典" in str(e))
 # 每类插件导出的名字：cfg.KINDS，核心的模块和测试插件对得上
-ok("KINDS：recipes 导出 RECIPES、HOOKS，relay_plugins 导出 PLUGINS、ACCEPTS、VIEW_ROOTS",
-   cfg.KINDS == {"recipes": ("RECIPES", "HOOKS"), "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS")})
+ok("KINDS：recipes 导出 RECIPES、HOOKS，relay_plugins 导出 PLUGINS、ACCEPTS、VIEW_ROOTS，consumers 导出 CONSUMERS",
+   cfg.KINDS == {"recipes": ("RECIPES", "HOOKS"), "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
+                 "consumers": ("CONSUMERS",)})
 setenv(TASKQ_PLUGINS=fixture.PLUGINS)
 r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import recipes, relay_plugins; "
                     "print(sorted(recipes.RECIPES), sorted(recipes.HOOKS), sorted(relay_plugins.PLUGINS), "

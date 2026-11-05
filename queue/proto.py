@@ -74,7 +74,7 @@ TASK_LOGS = "logs/tasks"       # 数据目录下：分段日志 <safe key>__<作
 WORKER_LOGS = "logs/workers"   # worker、显存填充、Slurm 的 %x_%j.out
 LOG_PARTS = ("part", "seg")
 DONE_LINE = "训完"             # 分段日志里以它开头的行 = 训完（run_task.sh 写，spec.py 认）
-STALL_LINE = "当作卡住"        # 分段日志里以它开头的行 = 被 worker 当作卡住停掉（dicc_worker.sh 写、数）
+STALL_LINE = "当作卡住"        # 分段日志里以它开头的行 = 被 worker 当作卡住停掉（consume.py 写、数）
 
 # ---------------- GPU 使用记录（monitor/gpu_log.sh 写；run_task.sh 的 TASK_GPU_IDLE、健康检查读） ----------------
 GPU_LOG_DIR = "~/gpu_usage"      # 环境变量 GPU_LOG_DIR 可以改
@@ -231,7 +231,7 @@ def alert_data(v):
 
 # ---------------- 环境变量（TASKQ_*）：谁设、什么意思；kind = run（生产里会设）/ tune（阈值，生产不设、用默认）/ test（只给测试） ----------------
 ENV = dict(
-    TASKQ_DATA=("run", "数据目录；dicc_worker.sh 按 machines.py 的 data 设，执行机是 R/data（relay_remote.prefix）"),
+    TASKQ_DATA=("run", "数据目录；消费者（consume.py）按 machines.py 的 data 设，执行机是 R/data（relay_remote.prefix）"),
     TASKQ_DIR=("run", "队列目录；执行机是 R/queue（worker.sbatch、pueue 的 worker 命令、relay_remote.prefix 设），没设时用状态目录的 taskq"),
     TASKQ_CONFIG=("run", "配置文件夹（machines.py、policy.py）；没设时用使用者仓库 .taskq.toml 的 config，没有 .taskq.toml 时用 envs/（cfg.py）"),
     TASKQ_PLUGINS=("run", "插件文件夹；没设时用使用者仓库 .taskq.toml 的 plugins（cfg.py）"),
@@ -244,7 +244,7 @@ ENV = dict(
     TASKQ_GPU_PAD_SWITCH=("run", "显存填充的总开关文件（worker.sbatch 设成 R/queue/gpu_pad_DISABLED）"),
     TASKQ_GPU_PAD=("run", "0 = 这个作业不开显存填充（自己推理、分析的脚本设）"),
     TASKQ_GPU_PAD_STARTED=("run", "显存填充已经开了（gpu_pad_start.sh 设，免得重复开）"),
-    TASKQ_ZOMBIES=("run", "旧 worker 换新代码包时交给新进程的停不下来的训练，每行 pid sid key token why safe（dicc_worker.sh）"),
+    TASKQ_ZOMBIES=("run", "旧 worker 换新代码包时交给新进程的停不下来的训练，每行 pid sid key token why safe（11/5 前的 dicc_worker.sh 写，consume.py 照样认）"),
     TASKQ_STAGE_TMP=("run", "1/0：开训后把输入拷到节点本地盘；没设时看 machines.py 的 stage_tmp"),
     TASKQ_LIB=("run", "调度核心的 queue/ 文件夹（run_task.sh 给任务的命令设，同时把核心的 bin/ 加在 PATH 前面）"),
     TASKQ_ENVS=("run", "worker 能领的环境（逗号分隔）；没设时看 machines.py 的 envs"),
@@ -259,10 +259,19 @@ ENV = dict(
     TASKQ_STALE_BEAT=("test", "代替 STALE_BEAT"),
     TASKQ_FRESH_LOG=("test", "代替 FRESH_LOG"),
 )
-# dicc_worker.sh 的阈值（tune），默认值写在脚本开头
+# 消费者（consume.py）的阈值（tune），默认值在 consume.py 的 Worker.__init__
 for _k in ("ADD_AFTER", "UTIL_MAX", "MIN_LEFT", "PATIENCE", "ERR_MAX", "IDLE_MAX", "IDLE_POLL", "IDLE_EXIT", "EARLY_FAIL",
            "FAIL_WINDOW", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
-    ENV["TASKQ_" + _k] = ("tune", "dicc_worker.sh 的阈值，默认值在脚本开头")
+    ENV["TASKQ_" + _k] = ("tune", "consume.py 的阈值，默认值在 Worker.__init__")
+# 消费者换代码包（11/5）：旧进程把手上的任务写成 JSON 放进 TASKQ_HANDOFF，exec 新包的 worker_start.sh，新进程接着管
+HANDOFF = 1                # 交接格式的版本；新进程只认同一版本，认不了的不接（领取过期后别人能领）
+HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks")
+HANDOFF_TASK = ("pid", "key", "token", "started", "outdir", "safe", "jtag", "stalled", "why", "sid", "zomb", "ended")
+ENV["TASKQ_HANDOFF"] = ("run", "换代码包时旧的消费者交给新的：手上的任务（JSON，字段见 HANDOFF_TOP / HANDOFF_TASK）；worker_start.sh 见到它不再查总开关")
+ENV["TASKQ_SITE"] = ("run", "执行机的名字（sites/pueue.py 的 worker 命令设）；消费者的 window 插件按它查时段，没设时按 WORKER_ID 在机器表里反查")
+ENV["TASKQ_ADMITTED"] = ("run", "1 = 消费者领之前已经查过卡空不空（gpu_idle 插件），run_task.sh 不再等卡")
+ENV["TASKQ_STAGE_ROOT"] = ("run", "节点本地的暂存目录（消费者的 slurm 插件设）；run_task.sh 有它才把输入拷到本地，没有时看 SLURM_JOB_ID")
+ENV["TASKQ_TEST_NOW"] = ("test", "放着一个时刻（epoch 秒）的文件：window 插件当作现在")
 # gpu_pad.py 的参数（tune），默认值在 gpu_pad.py 的命令行
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
            "SETTLE", "START_HOLD", "RETRY_DELAY", "MAX_FAILS", "RESET_AFTER"):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """旧代码包闸门（11/5）：把任务说明送给执行机之前，用那台在用的代码包（box 上 relay_bundle.OUT 下同名的那份）在本机跑一遍
 执行机对说明做的事（CMDS），跑不过就不送：任务记成 held（proto.HELD["bundle"]），报 bundlegate。
-在用的包：那边 code/current 指的，加上 Slurm 里在跑的 worker 的（它们一直用开始时的包、不换，dicc_worker.sh 的 code_changed；
+在用的包：那边 code/current 指的，加上 Slurm 里在跑的 worker 的（11/5 前的 worker 一直用开始时的包；consume.py 要领新任务时才换到 current，之前仍用旧包；
 worker 每次心跳 touch 自己的包，STALE_BEAT 内动过的算在用）。pueue 的 worker 代码变了就不再领新的，只看 current。
 不知道那台在用哪个包、box 上没有这个包、跑超时 → 放行。结果按 (包名, 说明的哈希) 在进程里记着。
 记录在 relay 的状态 held（<名字> → {key: dict(why, bundle, err, since)}），那台在用的包变了以后重新核对。

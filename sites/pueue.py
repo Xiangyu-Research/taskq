@@ -52,7 +52,7 @@ def worker_cmd(name, kind="gpu"):
     worker 还在停训练、交还任务（11/3）。"""
     c, w = R.conf(name), M.worker_of(name, kind)
     gpu = c["groups"][w["group"]][1]
-    env = f"WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
+    env = f"TASKQ_SITE={name} WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
     env += "".join(f" {k}={shlex.quote(str(v))}" for k, v in (c["groups"][w["group"]][2] or {}).items())  # 组的环境变量（如 TASK_GPU_IDLE）
     run = (f'R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/{ROOT["current"]}"); export TASKQ_DIR="$R/{ROOT["queue"]}" {env}; '
            f'exec bash "$REPO/{cfg.bundle_rel("queue", "worker_start.sh")}"')

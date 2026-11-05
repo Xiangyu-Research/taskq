@@ -13,6 +13,7 @@
   relay_plugins.py   PLUGINS  {插件名: (export, check)}（见 relay_plugins.py 开头）
                      ACCEPTS  {插件名: 函数(参数) → 能不能送}（可省）
                      VIEW_ROOTS  [建视图的文件夹]（可省）
+  consumers.py       CONSUMERS  {插件名: 消费者插件}（钩子见 consume.py、queue/README.md 的"消费者"）
   readers/*.py       PROGRESS、INFO、TRAINED（spec.py 读；只用标准库，经 ssh 送到别的机器上跑）
 各表合并时键重复报错。
 """
@@ -172,6 +173,7 @@ def plugin_dirs():
 KINDS = {
     "recipes": ("RECIPES", "HOOKS"),
     "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
+    "consumers": ("CONSUMERS",),
 }
 
 

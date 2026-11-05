@@ -50,7 +50,9 @@ CORE_REF = "HEAD"  # 核心文件取自核心自己的仓库的这个提交（�
 # 其余（box 上的计划、传数据、健康检查、同步）不进包
 RUNTIME = (
     "queue/worker_start.sh", "queue/dicc_worker.sh", "queue/run_task.sh", "queue/gpu_pad_start.sh", "queue/gpu_pad.py",
-    "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
+    "queue/consume.py", "queue/consumers/__init__.py", "queue/consumers/slurm.py", "queue/consumers/resident.py",
+    "queue/consumers/gpu_pad.py", "queue/consumers/gpu_share.py", "queue/consumers/gpu_idle.py", "queue/consumers/window.py",
+    "queue/shift.py", "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
     "queue/steps.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
     "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "queue/project.py", "sites/mtab.py",
     "monitor/gpu_log.sh", "bin/taskq")
@@ -311,7 +313,8 @@ def gen_policy(name, stage_tmp=True):
     out = {k: P.OUTPUTS[k] for k in ("experiments",) if k in getattr(P, "OUTPUTS", {})}
     return (f"AUTO = {{}}\nHOLD = []\nPLACE = {{}}\n"
             f"STAGE_TMP = {{{name!r}: {stage_tmp!r}}}\n"
-            "SLURM = {}\n" + (f"OUTPUTS = {out!r}\n" if out else ""))
+            "SLURM = {}\n" + (f"SHIFT = {{{name!r}: {P.SHIFT[name]!r}}}\n" if name in getattr(P, "SHIFT", {}) else "")
+            + (f"OUTPUTS = {out!r}\n" if out else ""))
 
 
 def sbatch_over(m, kind):
