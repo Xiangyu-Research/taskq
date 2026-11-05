@@ -282,6 +282,32 @@ def core_modules():
             for p in glob.glob(os.path.join(CORE, d, "*.py"))}
 
 
+def check_labels(r):
+    """labels 插件（推送、进度报告的白话）：表的类型、PLAN_TITLES() 跑得通、返回 {编号: 标题}。"""
+    g = "plugins"
+    ns = {"STEPS": {}, "QUIET": [], "PLAN_TITLES": None}
+    try:
+        cfg.extend(ns, "labels")
+    except Exception as e:  # noqa: BLE001
+        r.bad(g, f"核心合 labels 插件时出错：{e}")
+        return
+    r.checked(g)
+    bad = [k for k, v in ns["STEPS"].items() if not (isinstance(k, str) and isinstance(v, str) and v.strip())]
+    if bad:
+        r.bad(g, f"labels 插件的 STEPS 里 {bad} 的中文名不是非空字符串")
+    bad = [x for x in ns["QUIET"] if not isinstance(x, str)]
+    if bad:
+        r.bad(g, f"labels 插件的 QUIET 里 {bad} 不是步骤名（字符串）")
+    if ns["PLAN_TITLES"]:
+        try:
+            got = ns["PLAN_TITLES"]()
+        except Exception as e:  # noqa: BLE001
+            r.bad(g, f"labels 插件的 PLAN_TITLES() 出错：{type(e).__name__}: {e}")
+            return
+        if not isinstance(got, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in got.items()):
+            r.bad(g, f"labels 插件的 PLAN_TITLES() 要返回 {{编号: 标题}}（都是字符串），得到 {type(got).__name__}")
+
+
 def check_plugins(r):
     g = "plugins"
     core = core_modules() - {"taskq_api"}
@@ -292,6 +318,13 @@ def check_plugins(r):
         for k, v in recipes.HOOKS.items():
             if not callable(v):
                 r.bad(g, f"recipes 插件的 HOOKS[{k!r}] 不是函数")
+    except Exception as e:  # noqa: BLE001
+        r.bad(g, f"核心合插件时出错：{e}")
+    check_labels(r)
+    try:
+        cfg.extend({"CONSUMERS": {}}, "consumers")
+        cfg.extend({"SMOKE": {}}, "smoke")
+        r.checked(g, 2)
     except Exception as e:  # noqa: BLE001
         r.bad(g, f"核心合插件时出错：{e}")
     for d in cfg.plugin_dirs():

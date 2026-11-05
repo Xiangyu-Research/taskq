@@ -30,7 +30,7 @@ CLEAN = [
     "queue/tasklog.py", "queue/test_tasklog.py", "queue/test_pad_room.py", "monitor/gpu_log.sh", "monitor/gpu_usage.py",
     "monitor/test_gpu_usage.py",
     "queue/flow/__init__.py", "queue/flow/model.py", "queue/flow/compile.py", "queue/flow/graph.py", "queue/flow/cli.py",
-    "README.md", "bin/taskq", "monitor/plain.py", "queue/cfg.py", "queue/cli_json.py", "queue/project.py", "queue/proto.py",
+    "README.md", "CLAUDE.md", "bin/taskq", "monitor/plain.py", "queue/cfg.py", "queue/cli_json.py", "queue/project.py", "queue/proto.py",
     "queue/smoke_gate.py", "queue/taskq.py", "queue/relay.py", "queue/qs", "queue/setup.sh", "queue/on_boot.sh",
     "queue/install_pueue.sh", "queue/worker.sbatch", "queue/cpu_worker.sbatch", "sites/mtab.py", "sites/names.py",
     "sync/fetch.sh", "sync/tunnel_push.sh",

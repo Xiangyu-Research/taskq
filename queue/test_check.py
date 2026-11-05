@@ -69,6 +69,15 @@ ok("hub 的 quick 第二项不是正则", "hub 的 quick 第二项不是正则" 
 ok("环境描述的 pip 里有不认识的占位、check.py 编译不过（11/4）", "{'bogus'}" not in err and "['bogus']" in err and "环境描述 alt2：SyntaxError" in err)
 ok("问题在 stderr、每组的结果在 stdout", "个问题" in out and "错  " not in out)
 
+# 改坏的 labels 插件（11/5）：值的类型不对、PLAN_TITLES() 出错，--only plugins 都报出来
+lab = os.path.join(fixture.tmpdir(), "plugins")
+os.makedirs(lab)
+with open(os.path.join(lab, "labels.py"), "w", encoding="utf-8") as f:
+    f.write('STEPS = {"zz": 3}\nQUIET = [1]\n\n\ndef PLAN_TITLES():\n    return 1 / 0\n')
+rc, out, err = run("--only", "plugins", env={"TASKQ_PLUGINS": lab})
+ok("labels 插件写坏：STEPS 的中文名、QUIET、PLAN_TITLES() 出错都报", rc == 1 and "['zz']" in err and "[1]" in err
+   and "ZeroDivisionError" in err)
+
 # 改坏的实验表（在进程里改缓存的实验表）
 import check as K  # noqa: E402
 import experiments as E  # noqa: E402
