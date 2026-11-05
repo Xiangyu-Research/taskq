@@ -240,7 +240,7 @@ def check(s):
         add(alert_id("tqoff", hub), f"{L(hub)} 的总队列关着（{TQS}/{proto.QUEUE['enabled']} 不在），不会往执行机送任务", after=60)
     elif ctq:
         for t in ctq["tasks"]:
-            if t["state"] == proto.S_BLOCKED and not t.get("assigned"):
+            if t["state"] == proto.S_BLOCKED and not t.get("assigned") and not proto.is_smoke(t["key"]):
                 add(alert_id("tqblocked", t["key"]), f"总队列任务 {t['key']} {t['note']}，不会开始", data=dict(key=t["key"]))
     # --- pueue ---
     for name in M.names("pueue"):

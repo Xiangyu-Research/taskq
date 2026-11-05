@@ -281,6 +281,12 @@ TREE = {
         "setup": Cmd("pueue 常驻进程、组、crontab（不给名字：本机）", sh("queue/setup.sh"), "[名字]",
                      "在本机，或在 hub 上经 ssh 替别的 pueue 机器做；重复运行没关系"),
     }),
+    "smoke": Group("冒烟闸门：一种任务第一次送到一台执行机前先跑冒烟", {
+        "status": Cmd("各台的记录（[执行机] [--json]）", py("smoke_gate", "status", prog="taskq smoke"), own_help=True),
+        "retry": Cmd("没过的重新排（<执行机> [种类]）", py("smoke_gate", "retry", prog="taskq smoke"), own_help=True),
+        "adopt": Cmd("分给各台的、训完交还的任务的种类记成过了（[--dry-run]）", py("smoke_gate", "adopt", prog="taskq smoke"),
+                     own_help=True),
+    }),
     # 实验
     "exp": Group("实验表", {
         "list": Cmd("列出实验", cmd_exp("list"), own_help=True),
@@ -342,7 +348,7 @@ TREE = {
 
 SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
             ("调度", ["tick", "plan", "boot"]),
-            ("执行机和实验", ["site", "exp"]),
+            ("执行机和实验", ["site", "smoke", "exp"]),
             ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
             ("其他", ["tunnel", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
 

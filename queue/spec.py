@@ -382,7 +382,7 @@ def all_tasks(queue=()):
     out = [dict(key=k, spec=t["spec"], e=E.experiment(t["exp"])) for k, t in E.tasks().items()]
     have = {t["key"] for t in out}
     for t in queue:
-        if t["key"] not in have and t.get("spec"):
+        if t["key"] not in have and t.get("spec") and not P.is_smoke(t["key"]):
             out.append(dict(key=t["key"], spec=t["spec"], e=None))
             have.add(t["key"])
     return out

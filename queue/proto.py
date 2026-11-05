@@ -295,7 +295,19 @@ PUBLISH_OLD = ".taskq/old"          # 发布时归档的旧文件：<数据目�
 ALERTS["stall"] = ("inst",)  # hub 上 taskq run 包着的步骤卡住
 ALERTS["undeclared"] = ("inst",)  # 步骤写到了声明的产出以外
 ALERTS["publish"] = ("inst",)  # 发布被冲突挡住（taskq publish 处理）
-AUTO_SWITCHES = ("advance", "ledger", "run")  # policy.AUTO 里机器名以外的开关：advance 排下游、台账的影子对比、taskq run 包 hub 的步骤
+AUTO_SWITCHES = ("advance", "ledger", "run", "smoke")  # policy.AUTO 里机器名以外的开关：advance 排下游、台账的影子对比、taskq run 包 hub 的步骤、冒烟闸门
+
+# ---------------- 冒烟（smoke_gate.py，11/5） ----------------
+SMOKE_PREFIX = "_smoke/"   # 冒烟任务的 key：_smoke/<执行机>/<种类 id>-<时间>-<随机>（{smoke} = <执行机>-<种类 id>-<时间>-<随机>）
+SMOKE_DIR = "smoke"        # 总队列里：smoke/<执行机>.json，每种任务在那台机器上过没过
+SMOKE = ("ok", "failed", "queued")  # 记录的 state
+SMOKE_SRC = ("smoke", "real", "adopted")  # 记录的 src：冒烟任务、真任务训完、taskq smoke adopt
+SMOKE_NICE = -1000         # 冒烟任务的档位（排在最前）
+ALERTS["smoke"] = ("machine", "kind")  # 冒烟没过（kind = 种类 id）
+
+
+def is_smoke(key):
+    return str(key or "").startswith(SMOKE_PREFIX)
 ENV["TASKQ_STALL_IDLE"] = ("test", "代替 STALL_IDLE")
 ENV["TASKQ_RUN_BEAT"] = ("test", "代替 RUN_BEAT")
 ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")

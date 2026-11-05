@@ -1037,13 +1037,16 @@ def cmd_status(a):
         return 0
     print(f"总开关：{'开' if s['enabled'] else '关'}；任务 {len(s['tasks'])} 个"
           + (f"；{PAUSE_WINDOW // 3600} 小时内失败 {s.get('recent_failures')} 次，暂停领任务" if s.get("paused") else ""))
-    n = {}
+    n, smoke = {}, 0
     for t in s["tasks"]:
+        if proto.is_smoke(t["key"]):  # 冒烟任务（taskq smoke status 看）
+            smoke += 1
+            continue
         n[t["state"]] = n.get(t["state"], 0) + 1
         if t["state"] not in ("done",):
             env = ",".join(S.envs_of(t.get("spec"))) or "?"
             print(f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}")
-    print("；".join(f"{k} {v}" for k, v in sorted(n.items())))
+    print("；".join(f"{k} {v}" for k, v in sorted(n.items())) + (f"；冒烟 {smoke} 个（taskq smoke status）" if smoke else ""))
     return 0
 
 

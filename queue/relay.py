@@ -71,6 +71,7 @@ import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
 import relay_transfer as RT  # noqa: E402
 import bundle_gate as BG  # noqa: E402
+import smoke_gate as SG  # noqa: E402
 import names as N  # noqa: E402
 import shift  # noqa: E402
 from common import write_json  # noqa: E402
@@ -200,6 +201,33 @@ def progress(f):
                             or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
 
 
+def smoke_step(name, mtq, t, a, k, now):
+    """冒烟任务（proto.SMOKE_PREFIX）：那边做完 / 失败了，或者已经记了结果 → 记结果、删那边的、从总队列里去掉（不拉回、不归档）；
+    别的情况 → None（照常传、续约）。"""
+    key = t["key"]
+    over = SG.finished(name, key)
+    res = None
+    if a is not None:
+        held = a.get("worker") and (now - (a.get("beat") or 0) < proto.STALE_BEAT
+                                    or (a.get("task_log_age") is not None and a["task_log_age"] < proto.FRESH_LOG))
+        if a["state"] == "done" and not held:
+            res = (True, "")
+        elif a["state"] in ("failed", "bad", "blocked"):
+            res = (False, f"{a['state']}：{a.get('note') or ''}")
+    if res is None and t["state"] == "done":
+        res = (True, "")
+    if res is None and not over:
+        return None
+    ops = [dict(op="beat", key=key)]
+    if res is not None and not over:
+        ops.append(dict(op="smoke_rec", key=key, rkey=key, ok=res[0], why=res[1]))
+    if k:
+        sp = refill.info(mtq, key)["spec"]
+        ops.append(dict(op="drop", key=key, rkey=key, cleanup=SG.smoke_dirs(sp, SG.sid_of(key)) if sp else []))
+    ops.append(dict(op="smoke_end", key=key))
+    return ops
+
+
 def plan(s, name, rs, st, now=None):
     """→ (动作, 卡住的 {问题编号: 说明})。rs：那边的状态（None = 连不上）；st：load_state()。
     动作 dict(op=beat|release|stage|restage|fetch|drop|unq|rstop|rresume|rnice|archive|hold|unhold, key, …)；rkey：那边队列里的 key。"""
@@ -229,6 +257,11 @@ def plan(s, name, rs, st, now=None):
         a = rt.get(key) if k else None
         if a:
             owned.add(a["key"])
+        if proto.is_smoke(key):
+            sm = smoke_step(name, mtq, t, a, k, now)
+            if sm is not None:
+                acts += sm
+                continue
         if t["state"] == "done":
             ft = box_task(s, "relay_fetch", key, t.get("since") or 0)
             at = box_task(s, "relay_archive", key, t.get("since") or 0)
@@ -263,6 +296,12 @@ def plan(s, name, rs, st, now=None):
                         acts.append(dict(op="archive", key=key))
                     continue
             acts.append(dict(op="release", key=key, why="训完了，box 上有了" + ("、归档了" if archived else "（没有归档）")))
+            sp = refill.info(mtq, key)["spec"]
+            try:
+                if sp and sp.get("recipe") and SG.on():
+                    acts.append(dict(op="smoke_real", key=key, mark=SG.mark(name, sp, rs.get("envs_ok"))))
+            except ValueError:
+                pass
             continue
         acts.append(dict(op="beat", key=key))
         if t["state"] == "stopped" and not (a and a["state"] == "done"):
@@ -369,9 +408,9 @@ def plan(s, name, rs, st, now=None):
     return acts, stuck
 
 
-def fill(s, name, rs, st, acts):
+def fill(s, name, rs, st, acts, stuck=None, notes=None):
     """那边备好、没人领的任务不够 READY 个时领下一个任务（每种 worker 各备 READY 个，envs/machines.py 的 kinds）→ take 动作；
-    不领 → ([], 原因)。"""
+    不领 → ([], 原因)。冒烟闸门（smoke_gate.py）挡下的不领，要排的冒烟是 smoke_add 动作；报警记进 stuck，开关关着时的影子记进 notes。"""
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
@@ -404,6 +443,19 @@ def fill(s, name, rs, st, acts):
     ready = {p for k in keys.values() for p in k.get("data") or []}
     cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"), kinds=kinds)
              if relayable(refill.info(mtq, t["key"]))]
+    sg = SG.Gate(name, rs, mtq)
+    for t in cands:  # 冒烟闸门（smoke_gate.py）：每种没过的排冒烟、报警；领的时候再按这一轮已经领的核对一次（canary 一次只送一个）
+        sg.verdict(t["key"], refill.info(mtq, t["key"])["spec"])
+
+    def blocked(key):
+        return gate(name, rs, mtq, key) or sg.verdict(key, refill.info(mtq, key)["spec"])
+
+    def finish(out, why):
+        if stuck is not None:
+            stuck.update(sg.alerts)
+        if notes is not None:
+            notes.extend(sg.notes)
+        return out + sg.ops(), why
     urgent = [t for t in cands if t["nice"] < 0]  # 第 ⓪ 档（训完后的推理等）不受 READY 限制（11/1）
     room = {k: want - have[k] for k in kinds}
     same = rs.get("blob_dev", rs.get("dev")) == rs.get("dev")
@@ -420,7 +472,7 @@ def fill(s, name, rs, st, acts):
         idle_k = sorted((t for t in held if kind(t) == k and idle(t)), key=lambda t: (-t["nice"], -t["order"]))
         better = [t for t in cands if kind(t) == k and t["nice"] >= 0 and idle_k and t["nice"] < idle_k[0]["nice"]]
         pick = refill.next_pick(mtq, better, ready, free, hard, took)[0] if room[k] <= 0 and better else None
-        if pick is not None and not gate(name, rs, mtq, pick["key"]):
+        if pick is not None and not blocked(pick["key"]):
             w = idle_k[0]
             out += [dict(op="drop", key=w["key"], rkey=w["key"]),
                     dict(op="release", key=w["key"], why=f"让给更优先的 {better[0]['key']}（档位 {better[0]['nice']} < {w['nice']}）")]
@@ -428,14 +480,14 @@ def fill(s, name, rs, st, acts):
             if spare is not None:
                 spare += refill.TRAIN_OUT_GB
     if all(n <= 0 for n in room.values()) and not urgent:
-        return [], f"那边排着 {sum(have.values())} 个"
-    skip = set()  # 那边在用的代码包跑不了说明的：这次不领（queue/bundle_gate.py）
+        return finish(out, f"那边排着 {sum(have.values())} 个")
+    skip = set()  # 那边在用的代码包跑不了说明的、冒烟闸门挡下的：这次不领
     for pool, n in [(urgent, len(urgent))] + [([t for t in cands if kind(t) == k], room[k]) for k in kinds]:
         for _ in range(n):
             while True:
                 pool = [x for x in pool if x["key"] not in skip]
                 t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
-                if t is None or not gate(name, rs, mtq, t["key"]):
+                if t is None or not blocked(t["key"]):
                     break
                 skip.add(t["key"])
             if t is None or spare is not None and spare - refill.TRAIN_OUT_GB - (gb if same else 0) < 0:
@@ -445,17 +497,18 @@ def fill(s, name, rs, st, acts):
             free -= gb
             PLANNED[disk] = PLANNED.get(disk, 0) + gb
             took.add(t["key"])
+            sg.took(t["key"], refill.info(mtq, t["key"])["spec"])
             out.append(dict(op="take", key=t["key"], nice=t["nice"]))
     if out:
-        return out, ""
+        return finish(out, "")
     open_ = urgent or any(room[k] > 0 and kind(t) == k for t in cands for k in kinds)
     if cands and open_ and spare is not None and spare < refill.TRAIN_OUT_GB:
-        return out, (f"放不下（那边 {len(rt)} 个任务的输出各留 {refill.TRAIN_OUT_GB} GB 后，"
-                     f"cap 里只剩 {max(spare, 0):.0f} GB）")
+        return finish(out, (f"放不下（那边 {len(rt)} 个任务的输出各留 {refill.TRAIN_OUT_GB} GB 后，"
+                            f"cap 里只剩 {max(spare, 0):.0f} GB）"))
     if skip:
-        return out, f"那边在用的代码包跑不了 {len(skip)} 个任务的说明（{'、'.join(sorted(skip)[:3])}）"
-    return out, ("队列里没有能领的任务" if not cands else f"放不下（那边剩 {free + PLANNED.get(disk, 0):.0f} GB）" if open_
-                 else f"那边排着 {sum(have.values())} 个")
+        return finish(out, f"那边在用的代码包跑不了、或冒烟闸门挡下 {len(skip)} 个任务（{'、'.join(sorted(skip)[:3])}）")
+    return finish(out, ("队列里没有能领的任务" if not cands else f"放不下（那边剩 {free + PLANNED.get(disk, 0):.0f} GB）" if open_
+                        else f"那边排着 {sum(have.values())} 个"))
 
 
 def kname(kind):
@@ -512,6 +565,19 @@ def label(op, key):
     return f"{op}:{key}"
 
 
+def smoke_tail(name, rkey, n=20):
+    """冒烟任务失败的原因：那边失败记录的最后几行、最新一段日志的最后 n 行；读不到 → ""。"""
+    r, sk = R.q(RM.root(name)), shlex.quote(proto.safe(rkey))
+    cmd = (f"tail -n 3 {r}/{ROOT['queue']}/{proto.QUEUE['failures']}/{sk} 2>/dev/null; "
+           f"f=$(ls -t {r}/{ROOT['data']}/{proto.TASK_LOGS}/{sk}{proto.SAFE}* 2>/dev/null | head -1); "
+           f'[ -n "$f" ] && tail -n {n} "$f"')
+    try:
+        rc, out, _ = RM.rsh(name, cmd, timeout=60)
+    except Exception:  # noqa: BLE001
+        return ""
+    return out.strip()
+
+
 def execute(name, acts, s, run_add=None, stuck=None):
     """做动作 → [说明]。出错的那一步写进说明，后面的照做。在 box 上加任务（传数据、拉回、归档）出错的记进 stuck，
     下次检查照常重试，加上了报警就消失。"""
@@ -546,8 +612,29 @@ def execute(name, acts, s, run_add=None, stuck=None):
         if k in lost:
             continue
         try:
-            if a["op"] == "release" and k in kept:
+            if a["op"] == "smoke_add":  # 加进总队列，接着领过来（take → stage）
+                ok, m = SG.enqueue(name, a)
+                msgs.append(m)
+                if not ok:
+                    stuck[alert_id("smoke", name, a["mark"]["kid"])] = alert(m, machine=name, kind=a["mark"]["kind"], why=m, key=k)
+                    continue
+                a = dict(op="take", key=k, nice=proto.SMOKE_NICE)
+            if a["op"] in ("release", "smoke_end") and k in kept:
                 msgs.append(f"{L} 上 {k} 没删掉，先不交还")
+            elif a["op"] == "smoke_fail":
+                SG.record(name, a["mark"], state="failed", src="smoke", key=None, bundle=None, why=a["why"][-600:])
+                msgs.append(f"{L} 上 {a['mark']['kind']} 冒烟没过：{a['why'][-200:]}")
+            elif a["op"] == "smoke_rec":
+                why = a["why"] if a["ok"] else (a["why"] + "\n" + smoke_tail(name, a["rkey"])).strip()
+                SG.finish(name, k, a["ok"], why)
+                msgs.append(f"{L} 上冒烟 {k} {'过了' if a['ok'] else '没过：' + why[-200:]}")
+            elif a["op"] == "smoke_end":
+                master(f"release --worker {name} {shlex.quote(k)}")
+                r = master(f"remove {shlex.quote(k)}")
+                msgs.append(f"{L} 的冒烟 {k} 从总队列里去掉了" if r[0] in (0, proto.EXIT["gone"]) else f"{L} 的冒烟 {k} 去不掉：{r[1][-150:]}")
+            elif a["op"] == "smoke_real":
+                if SG.real_done(name, a["mark"]):
+                    msgs.append(f"{L} 上 {a['mark']['kind']} 的真任务 {k} 训完了，记成过了冒烟")
             elif a["op"] == "release":
                 r = master(f"release --worker {name} {shlex.quote(k)}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
                 msgs.append(f"{L} 交还 {k}：{a['why']}" if r and r[0] == 0 else f"{L} 交还 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
@@ -588,6 +675,9 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 else:
                     msgs.append(f"{L} 的队列里删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "drop":
+                if a.get("cleanup"):
+                    ST.update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(k) or {}).update(
+                        cleanup=sorted(set(((st.get("keys") or {}).get(name, {}).get(k) or {}).get("cleanup") or []) | set(a["cleanup"]))))
                 try:
                     err = RT.drop_remote(name, k, a["rkey"], gone=a.get("gone"))
                 except RT.PathsLeft as e:  # 任务已经删了，不会再训：照常交还，路径下一轮再删
@@ -664,7 +754,7 @@ def write_status(name, rs, st):
     except (OSError, ValueError):
         allst = {}
     allst[name] = dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, squeue=rs.get("squeue"), free=rs.get("free"),
-                       bundle=rs.get("bundle"), held=BG.held(st, name))
+                       bundle=rs.get("bundle"), held=BG.held(st, name), envs_ok=rs.get("envs_ok"))
     write_json(STATUS, allst)
 
 
@@ -749,7 +839,10 @@ def run_one(s, name, dry):
     acts, stuck = plan(s, name, rs, st)
     if not live:  # 开关关着：不传、不重传、不让那边接着训；训完的照常拉回、交还
         acts = [a for a in acts if a["op"] not in ("stage", "restage", "rresume")]
-    more, why = (fill(s, name, rs, st, acts) if rs is not None else ([], "连不上"))
+    snotes = []
+    more, why = (fill(s, name, rs, st, acts, stuck, snotes) if rs is not None else ([], "连不上"))
+    if snotes and not dry and C.changed(f"smoke_{name}", snotes):
+        log(snotes)
     subs, swhy = (topup(name, rs) if rs is not None else ([], "连不上"))
     for part in swhy.split("；"):
         k = next((k for k in M.kinds(name) if part.startswith(f"上一个 {wname(k)}（")), None)

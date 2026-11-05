@@ -37,6 +37,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | 在哪 | 是什么 | 作用 |
 |---|---|---|
 | `envs/policy.py` `AUTO["advance"]` | True / False | 训完以后的步骤真的排；False 时只把"会排什么"写进 box `~/advance.log` |
+| `envs/policy.py` `AUTO["smoke"]` | True / False | 冒烟闸门（下面"冒烟闸门"）：True 时一种任务在一台执行机上第一次送过去之前先跑冒烟，没过不送；False 时照常送，只把"会挡哪些"写进 `~/relay.log` |
 | `envs/policy.py` `READY` | 执行机 → 个数 | 备几个没人领的训练（`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领、没有进度的一个交还换它（每次检查一个，11/2；有存档的不换，11/4） |
 | `envs/policy.py` `AUTO["dicc2"]`、`AUTO["lab1"]`、`AUTO["lab0"]`、`AUTO["dicc1"]` | True / False | relay 执行机（DICC2、lab 的两张卡、我的 DICC 账号）：领新的任务、补交作业 / 开 worker；False 时只记进 box `~/relay.log`，已领的任务照常推进（见下面"执行机"） |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
@@ -182,6 +183,19 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **盘**：有 `budget` 的剩不到软线时由 `relay_store.py` 的 `gc` 清理：先删总队列不再要的视图（和建视图拿同一把锁 `R/state/view.lock`），再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。`R/blobs` 是指到别的盘的软链接时（DICC 的 `/scr`，11/4）照样清理，只删 `blobs/<前两位>/` 下的块文件，不跟随别的链接。传数据期间钉住要传的块（`R/state/pins/`），每小时重写一次，传完撤掉；清理只认 12 小时内写过的。收编只认和块目录同一个盘的文件（跨盘不能硬链接，不读、不算 sha256）。别的执行机里训到一半的存档，那台的队列里还领着这个任务（心跳没过期）时不拷，下次检查再来（存档可能写到一半，11/4）。
 - **状态**：box `~/.cache/phd/relay/state.json`（领着的任务）、`status.json`（那边各任务进度，登记表显示成 DICC2）、日志 `~/relay.log`。
 - **手动**：`taskq internal stage dicc2 <key> --nice N --no-add`（只传数据，不领）；`taskq site status dicc2`；`taskq site bundle dicc2`。
+
+### 冒烟闸门（`smoke_gate.py`，11/5）
+
+一种任务（做法 + 插件 `smoke.py` 的 `SMOKE` 里 `by` 列的参数值 + 用到的环境）在一台执行机上第一次送真任务之前，先在那台上跑一个很小的同种任务（冒烟），过了才送；环境（`status.json` 里那台的 `envs_ok`，没有时按说明算的哈希）、冒烟定义变了要重跑。开关 `AUTO["smoke"]`。
+
+- **插件**：`SMOKE = {做法名: dict(by=[参数名…], params={…}, vars={…})}`。冒烟任务 = 真任务的做法 + `by` 列的参数照抄真任务 + `params` 覆盖（可以覆盖做法的 `out`、`model` 等）+ `vars` 合进做法的环境变量，`machines=[这台]`，档位 `SMOKE_NICE`（-1000）。`params`、`vars` 也可以是函数 `f(真任务的参数, hub 的数据目录) -> dict`（如按真任务的数据集挑冒烟数据集），每次在 box 上算，算出的结果进定义的哈希；函数出错 = 这种冒烟没过（原因是异常），照常报。
+- **`{smoke}`**：`params`、`vars` 的字符串里换成这次冒烟的名字 `<执行机>-<种类哈希12位>-<时间>-<4位随机>`；`{data}`、`{repo}` 照旧留给那边展开。冒烟的产出要放在名字含 `{smoke}` 的文件夹下、至少第二层（`out`，或 `vars` 里以 `{data}/` 开头的路径），如 `{data}/smoke/{smoke}/results`；收尾时删的就是这些文件夹。冒烟用的环境要和真任务一样（不一样记没过），环境由参数决定时把那个参数写进 `by`。
+- **没有定义的做法**（金丝雀）：这种（做法 + 环境）在这台上还没成功过一次时，同时只送一个真任务；它做完就算过。
+- **记录**：box 总队列的 `smoke/<执行机>.json`，按种类一条：`state` 是 `queued`、`ok`、`failed`，`src` 是 `smoke`（冒烟）、`real`（真任务做完）、`adopted`（`taskq smoke adopt` 按已做完的任务补记），带环境、定义哈希、代码包、原因。
+- **流程**（`relay.fill` 每次检查）：过了的直接送；排着的等；没过的报 `smoke:<执行机>:<种类>`（白话见 `plain.py`），同一个代码包不重试，换了代码包、环境或定义自动再排；排着超过 6 小时也报。冒烟任务（key `_smoke/<执行机>/…`）在总队列里排、由 `relay.py` 像别的任务一样领过去，做完记结果（没过时带那边失败记录和日志的最后 20 行）、删那边的任务和冒烟文件夹、交还并从总队列删掉。
+- **看不见**：`taskq status` 的文字（只在最后数一句）、`spec.all_tasks`、`advance.py`、流程引擎、登记表的总览、健康检查的"排不上"都跳过冒烟任务；`taskq status --json` 照旧都有。
+- **交班**：`shift.py` 把有进度的折改分给另一台时，那一种在那台上没过冒烟的不改分、照旧交还。
+- **命令**：`taskq smoke status`、`taskq smoke retry <执行机> [种类]`（删没过的记录，下次检查重排）、`taskq smoke adopt [-n]`（按总队列里已做完的任务补记过了的）。打开开关前先跑一次 `adopt`，已经在那台做完过的种类不用再冒烟；开关关着时真任务做完不记。
 
 ## 文件
 

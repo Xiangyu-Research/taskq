@@ -43,7 +43,7 @@ def plan(s, root=None, flow=None):
     NOTES.clear()
     if ptasks is None:
         return [], {}
-    queue_tasks = list(((s.get("taskq") or {}).get(hub) or {}).get("tasks", []))
+    queue_tasks = [t for t in ((s.get("taskq") or {}).get(hub) or {}).get("tasks", []) if not proto.is_smoke(t["key"])]
     nice = {t["key"]: t["nice"] for t in queue_tasks}
     py = A.python()
     flow = flow or compile_legacy(queue_tasks=queue_tasks, data=root, python=py)
