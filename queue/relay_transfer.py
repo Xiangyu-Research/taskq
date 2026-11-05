@@ -25,6 +25,7 @@ import relay_plugins as RN  # noqa: E402
 import names as N  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
+import bundle_gate as BG  # noqa: E402
 
 PIN_EVERY = 3600  # 传数据期间每隔这么久重写一次钉子（那边的清理只认 12 小时内的）
 
@@ -45,6 +46,12 @@ def stage(name, key, nice=None, add=True, say=print):
     """box 上的数据 → 那边（和 box 一样的相对路径）；add 时再加进那边的队列。→ key。"""
     real, D = lookup(key), box_data()
     ex = N.export(real, D)
+    ids = in_use(name) if add else []
+    g = ids and BG.check_all(S.sendable(S.resolve(real["recipe"], ex["params"])), ids)
+    if g:  # 那边在用的代码包跑不了要送的说明：不传、不加，领取保留（queue/bundle_gate.py，11/5）
+        BG.hold(name, key, *g)
+        say(f"{RM.conf(name)['label']} 在用的代码包 {g[0]} 跑不了 {key} 的说明，先不送：{g[1]}")
+        return None
     hs = ST.sha256s(sorted({p for _, p in ex["files"]}))
     links = {rel: hs[p] for rel, p in ex["files"]}
     pin = proto.safe(key)
@@ -69,6 +76,12 @@ def stage(name, key, nice=None, add=True, say=print):
             RM.rpy(name, RM.PIN_PY, dict(key=pin, hashes=None))
         except RuntimeError as e:
             say(f"撤掉 {key} 的钉住记录没成（{e}），清理 12 小时后不再认它")
+
+
+def in_use(name):
+    """那边在用的代码包（queue/bundle_gate.py）；连不上 → []。"""
+    u = BG.current(name)
+    return BG.in_use(name, *u) if u else []
 
 
 def check_overlap(name, key, paths):
@@ -172,7 +185,14 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
 def resend(name, say=print):
     """把传给这台的任务按现在的做法重新解析，换掉那边队列里的说明（只换那边已有的，不加新的）。"""
     keys = ST.keys_of(ST.load_state(), name)
-    specs = [S.sendable(S.resolve(k["recipe"], k["params"])) for k in keys.values()]
+    specs, ids = [], in_use(name) if keys else []
+    for real, k in keys.items():
+        sp = S.sendable(S.resolve(k["recipe"], k["params"]))
+        g = BG.check_all(sp, ids)
+        if g:  # 那边在用的包跑不了新的说明：留着那边原来的
+            say(f"{real} 不换：在用的代码包 {g[0]} 跑不了新的说明（{g[1]}）")
+        else:
+            specs.append(sp)
     if not specs:
         say("没有传过去的任务")
         return

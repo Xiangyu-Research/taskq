@@ -70,6 +70,7 @@ import relay_bundle as RB  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
 import relay_transfer as RT  # noqa: E402
+import bundle_gate as BG  # noqa: E402
 import names as N  # noqa: E402
 import shift  # noqa: E402
 from common import write_json  # noqa: E402
@@ -97,6 +98,12 @@ def relayable(i):
     except S.SpecError:
         relay = N.plugin_of(sp)
     return N.accepts(relay, params)
+
+
+def gate(name, rs, mtq, key):
+    """这台在用的代码包跑不了 key 的说明 → (包名, 原因)；跑得了、不知道 → None（queue/bundle_gate.py；送的是 stage 时再核对一次）。"""
+    ids = BG.in_use(name, rs.get("bundle"), rs.get("live"))
+    return BG.check_all(S.sendable(refill.info(mtq, key)["spec"]), ids) if ids else None
 
 
 # ---------------- 那边的状态 ----------------
@@ -195,7 +202,7 @@ def progress(f):
 
 def plan(s, name, rs, st, now=None):
     """→ (动作, 卡住的 {问题编号: 说明})。rs：那边的状态（None = 连不上）；st：load_state()。
-    动作 dict(op=beat|release|stage|restage|fetch|drop|unq|rstop|rresume|rnice|archive, key, …)；rkey：那边队列里的 key。"""
+    动作 dict(op=beat|release|stage|restage|fetch|drop|unq|rstop|rresume|rnice|archive|hold|unhold, key, …)；rkey：那边队列里的 key。"""
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = RM.conf(name)["label"], ST.keys_of(st, name)
@@ -215,7 +222,7 @@ def plan(s, name, rs, st, now=None):
         return acts, stuck
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     tasks = rs.get("tasks") or {}
-    owned = set()
+    owned, holds, gated = set(), BG.held(st, name), set()
     for t in mine:
         key = t["key"]
         k = keys.get(key)
@@ -271,6 +278,17 @@ def plan(s, name, rs, st, now=None):
             sg = box_task(s, "relay_stage", key, since)
             noslot = sg is not None and sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC
             if sg is None or sg["status"] == "Success" or noslot:
+                g, h = gate(name, rs, mtq, key), holds.get(key) or {}
+                if not g and h.get("bundle") in BG.in_use(name, rs.get("bundle"), rs.get("live")):
+                    g = (h["bundle"], h.get("err"))  # stage 按要送的说明挡下的：同一个包还在用就不再排
+                if g:  # 那边在用的代码包跑不了这个说明：先不送，领取保留，那边换了包再核对（11/5）
+                    gated.add(key)
+                    if h.get("bundle") != g[0]:
+                        acts.append(dict(op="hold", key=key, bundle=g[0], err=g[1]))
+                    stuck[alert_id("bundlegate", name, key)] = alert(
+                        f"{L} 在用的代码包 {g[0]} 跑不了 {key} 的说明（{g[1]}），先不送、领取保留；那边换了包以后再送",
+                        machine=name, key=key, bundle=g[0], err=g[1])
+                    continue
                 acts.append(dict(op="stage", key=key, nice=t["nice"]))
                 if noslot and now - since > NOSLOT_ALERT_S:
                     stuck[alert_id("site", name, "stage")] = alert(
@@ -344,6 +362,7 @@ def plan(s, name, rs, st, now=None):
         m = mt.get(real)
         if real not in mk and real not in rt and k.get("unq") and (m is None or m["state"] == "done"):
             acts.append(dict(op="drop", key=real, rkey=real, gone=True))
+    acts += [dict(op="unhold", key=k) for k in holds if k not in gated]
     if rs["taskq"].get("paused"):
         stuck[alert_id("site", name, "fail")] = alert(f"{L} 的任务队列 3 小时内失败 {rs['taskq'].get('recent_failures')} 次，暂停领任务",
                                                       paused=True, failures=rs["taskq"].get("recent_failures"))
@@ -400,7 +419,8 @@ def fill(s, name, rs, st, acts):
     for k in kinds:  # 备满了、总队列里有更优先的：每次检查把一个最靠后、备好没人领的交还，换它进来（11/2）
         idle_k = sorted((t for t in held if kind(t) == k and idle(t)), key=lambda t: (-t["nice"], -t["order"]))
         better = [t for t in cands if kind(t) == k and t["nice"] >= 0 and idle_k and t["nice"] < idle_k[0]["nice"]]
-        if room[k] <= 0 and better and refill.next_pick(mtq, better, ready, free, hard, took)[0] is not None:
+        pick = refill.next_pick(mtq, better, ready, free, hard, took)[0] if room[k] <= 0 and better else None
+        if pick is not None and not gate(name, rs, mtq, pick["key"]):
             w = idle_k[0]
             out += [dict(op="drop", key=w["key"], rkey=w["key"]),
                     dict(op="release", key=w["key"], why=f"让给更优先的 {better[0]['key']}（档位 {better[0]['nice']} < {w['nice']}）")]
@@ -409,9 +429,15 @@ def fill(s, name, rs, st, acts):
                 spare += refill.TRAIN_OUT_GB
     if all(n <= 0 for n in room.values()) and not urgent:
         return [], f"那边排着 {sum(have.values())} 个"
+    skip = set()  # 那边在用的代码包跑不了说明的：这次不领（queue/bundle_gate.py）
     for pool, n in [(urgent, len(urgent))] + [([t for t in cands if kind(t) == k], room[k]) for k in kinds]:
         for _ in range(n):
-            t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
+            while True:
+                pool = [x for x in pool if x["key"] not in skip]
+                t, need, gb, _ = refill.next_pick(mtq, pool, ready, free, hard, took)
+                if t is None or not gate(name, rs, mtq, t["key"]):
+                    break
+                skip.add(t["key"])
             if t is None or spare is not None and spare - refill.TRAIN_OUT_GB - (gb if same else 0) < 0:
                 break
             if spare is not None:
@@ -426,6 +452,8 @@ def fill(s, name, rs, st, acts):
     if cands and open_ and spare is not None and spare < refill.TRAIN_OUT_GB:
         return out, (f"放不下（那边 {len(rt)} 个任务的输出各留 {refill.TRAIN_OUT_GB} GB 后，"
                      f"cap 里只剩 {max(spare, 0):.0f} GB）")
+    if skip:
+        return out, f"那边在用的代码包跑不了 {len(skip)} 个任务的说明（{'、'.join(sorted(skip)[:3])}）"
     return out, ("队列里没有能领的任务" if not cands else f"放不下（那边剩 {free + PLANNED.get(disk, 0):.0f} GB）" if open_
                  else f"那边排着 {sum(have.values())} 个")
 
@@ -549,6 +577,12 @@ def execute(name, acts, s, run_add=None):
                     kept.add(k)
                 else:
                     msgs.append(f"{L} 上删了 {k} 的任务和结果")
+            elif a["op"] == "hold":
+                BG.hold(name, k, a["bundle"], a["err"])
+                msgs.append(f"{L} 在用的代码包 {a['bundle']} 跑不了 {k} 的说明，先不送：{a['err']}")
+            elif a["op"] == "unhold":
+                BG.unhold(name, k)
+                msgs.append(f"{L} 的 {k} 不再挡着（代码包换了，或任务不再等着送）")
             elif a["op"] == "rnice":
                 r = RM.rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
                 msgs.append(f"{L} 上 {k} 改到档位 {a['nice']}" if r and r[0] == 0 else f"{L} 上 {k} 改档位出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
@@ -604,7 +638,7 @@ def write_status(name, rs, st):
     except (OSError, ValueError):
         allst = {}
     allst[name] = dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, squeue=rs.get("squeue"), free=rs.get("free"),
-                       bundle=rs.get("bundle"))
+                       bundle=rs.get("bundle"), held=BG.held(st, name))
     write_json(STATUS, allst)
 
 

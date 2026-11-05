@@ -143,7 +143,7 @@ def collect(tasks,new):
     return spec.collect(sp,os.environ['TASKQ_DATA'])
 """
 
-STATUS_PY = HEAD + QUERY + """import shutil
+STATUS_PY = HEAD + QUERY + """import shutil,time
 st,new=local_status()
 col=collect(st['tasks'],new)
 raw=None
@@ -174,11 +174,14 @@ if A.get('cap'):
                 if top not in (R_BLOBS,R_CODE):
                     out_used+=x.st_blocks*512
     free=min(free,max(0,int(A['cap']*1e9)-used))
+cdir=os.path.join(R,R_CODE)
+live=[d for d in (os.listdir(cdir) if os.path.isdir(cdir) else []) if '.tmp' not in d and os.path.isdir(os.path.join(cdir,d))
+      and time.time()-os.stat(os.path.join(cdir,d)).st_mtime<STALE_BEAT]
 B=os.path.realpath(os.path.join(R,R_BLOBS))
 bdev=os.stat(B).st_dev if os.path.isdir(B) else os.stat(R).st_dev
 json_out(dict(taskq=st,tasks=col.get('tasks'),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,out_used=out_used,
                    blob_dev=bdev,blob_free=free if bdev==os.stat(R).st_dev else shutil.disk_usage(B).free,
-                   bundle=os.path.basename(os.path.realpath(os.path.join(R,R_CURRENT)))))
+                   bundle=os.path.basename(os.path.realpath(os.path.join(R,R_CURRENT))),live=live))
 """
 
 MISSING_PY = HEAD + "json_out([i for i in A if not os.path.isfile(os.path.join(R,blob(i)))])\n"
