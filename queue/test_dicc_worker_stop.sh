@@ -97,6 +97,44 @@ waitfor 5 '! pgrep -f "$T/fake_train.sh t/d" > /dev/null'  # 强制停之后进�
 check "停止信号、训练不理：强制停、交还，作业退出时假训练已经不在" '[[ $rc == 143 ]] && [[ -z $(ls $TASKQ_DIR/claims) ]] && ! pgrep -f "$T/fake_train.sh t/d" > /dev/null'
 fi
 
+# 3d. 停止某个任务时整组一起停（11/5）：子进程一结束就写训完的文件的训练，也不因为子进程先停而算训完（不靠 3a 里假训练的处理）
+if want 3d; then
+reset
+table << EOF
+t/e base
+EOF
+FAKE_EAGER=t/e SLURM_JOB_ID=900213 TASKQ_SLOTS=1 TASKQ_IDLE_MAX=60 TASKQ_POLL=30 TASKQ_STOP_POLL=1 bash "$HERE/dicc_worker.sh" > "$T/w3d.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q "^start .* t/e" $T/train.log 2> /dev/null && [[ -e $T/chain.ready ]]'
+python3 "$HERE/taskq.py" stop t/e > /dev/null
+waitfor 40 '[[ ! -e $TASKQ_DIR/claims/t__e ]]'
+check "停止：训练和子进程一起收到停止，不写训完的文件，交还、不记失败" '[[ ! -e $TASKQ_DATA/runs/t/e/DONE && ! -e $TASKQ_DIR/claims/t__e && ! -e $TASKQ_DIR/failures/t__e ]] && grep -q "^term t/e" $T/train.log && ! grep -q "^end .* t/e" $T/train.log'
+kill -TERM $wpid; wait $wpid 2> /dev/null
+fi
+
+# 3e. worker 被 SIGKILL（11/5）：TMPDIR 里不留临时文件；taskq.py next 的标准错误在日志目录里按 worker 固定名字，重开时覆盖；
+#     别的 worker 留下的、7 天没动过的删掉；记 GPU 的后台循环跟着退出
+if want 3e; then
+reset
+: > "$TASKQ_DIR/tasks.jsonl"
+L=$TASKQ_DATA/logs/workers
+mkdir -p "$L"
+touch -d "10 days ago" "$L/worker_1_next.err"
+touch "$L/worker_2_next.err"
+gone=1
+for n in 1 2; do
+    SLURM_JOB_ID=900214 TASKQ_IDLE_MAX=600 bash "$HERE/dicc_worker.sh" > "$T/w3e$n.out" 2>&1 &
+    wpid=$!
+    waitfor 30 'grep -q "没有能领的任务" $T/w3e$n.out'
+    kids=$(pgrep -P $wpid | tr '\n' ' ')
+    kill -KILL $wpid; wait $wpid 2> /dev/null
+    [[ -n $kids ]] && { waitfor 15 '! kill -0 $kids 2> /dev/null' || gone=0; kill -KILL $kids 2> /dev/null; }
+done
+check "SIGKILL：TMPDIR 里不留临时文件，标准错误的文件按 worker 固定名字只有一个" '[[ -z $(ls -A "$TMPDIR") && $(ls "$L" | grep -c "^worker_900214_next.err$") == 1 ]]'
+check "别的 worker 留下的：7 天没动过的删掉，新的留着" '[[ ! -e $L/worker_1_next.err && -e $L/worker_2_next.err ]]'
+check "SIGKILL：worker 的后台进程跟着退出" '[[ $gone == 1 ]]'
+fi
+
 # 4b. CPU worker（WORKER_DEVICE=cpu，10/24）：只领 device=cpu 的，一次 1 个，不记 GPU；GPU worker 不领 device=cpu 的
 if want 4b; then
 reset

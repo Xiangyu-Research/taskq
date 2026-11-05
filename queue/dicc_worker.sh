@@ -79,6 +79,10 @@ BEAT=${TASKQ_BEAT:-$TQ_BEAT}                 # 心跳间隔
 TASK_CPUS=$(( NCPU / SLOTS ))           # 每个训练分到的 CPU（run_task.sh → 训练命令，如 nnU-Net 的数据增强进程数）
 LOGDIR=$DATA/$TQ_WORKER_LOGS
 mkdir -p "$LOGDIR"
+# taskq.py next 的标准错误：放在 worker 自己的日志目录、按 worker 固定名字（被 SIGKILL 也不在 /tmp 留东西，同一个 worker 重开时覆盖）；
+# 别的作业被 SIGKILL 留下的、7 天没动过的顺手删掉（11/5）
+ERRF=$LOGDIR/worker_${W}_next.err
+find "$LOGDIR" -maxdepth 1 -name 'worker_*_next.err' -mtime +7 -delete 2> /dev/null
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
@@ -126,7 +130,8 @@ echo "$(ts) 任务队列 worker（$DEVICE）：作业 $W @ $(hostname -s)，最�
 GPUCSV=$LOGDIR/worker_${W}_gpu.csv
 if [[ $DEVICE == gpu ]]; then
     nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=index,name,memory.total --format=csv,noheader 2> /dev/null
-    ( while true; do nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=timestamp,index,memory.used,memory.total,utilization.gpu --format=csv,noheader >> "$GPUCSV" 2> /dev/null; sleep 60; done ) &
+    ( while kill -0 $$ 2> /dev/null; do nvidia-smi ${NVSEL[@]+"${NVSEL[@]}"} --query-gpu=timestamp,index,memory.used,memory.total,utilization.gpu --format=csv,noheader >> "$GPUCSV" 2> /dev/null
+        for _ in $(seq 12); do sleep 5; kill -0 $$ 2> /dev/null || exit 0; done; done ) &  # worker 被 SIGKILL 后 5 秒内跟着退出
     GPUMON=$!
 else
     GPUMON=
@@ -157,7 +162,17 @@ tq() {  # tq <release|beat|missing> <key> [参数…]：带上这个 key 的 tok
 sid_of() { [[ -n ${SID[$1]:-} ]] || SID[$1]=$(ps -o pid=,sid= --ppid "$1" 2> /dev/null | awk '$1 == $2 {print $1; exit}'); }
 alive() { kill -0 "$1" 2> /dev/null || { [[ -n ${SID[$1]:-} ]] && pgrep -s "${SID[$1]}" > /dev/null; }; }
 dead() { ! alive "$1"; }
-stop_tree() { sid_of "$1"; kill_tree "$1" "${2:-TERM}"; [[ -n ${SID[$1]:-} ]] && pkill -"${2:-TERM}" -s "${SID[$1]}" 2> /dev/null; return 0; }
+stop_tree() {  # pid [信号]：先发给训练的进程组和会话（训练和子进程一起收到，同 run_task.sh；从叶子停起时训练会先看到子进程退出、
+    # 当作正常结束写训完的文件，11/5），再按进程树补发给 run_task.sh 和不在会话里的
+    local s=${2:-TERM}
+    sid_of "$1"
+    if [[ -n ${SID[$1]:-} ]]; then
+        kill -"$s" -- -"${SID[$1]}" 2> /dev/null
+        pkill -"$s" -s "${SID[$1]}" 2> /dev/null
+    fi
+    kill_tree "$1" "$s"
+    return 0
+}
 forget() { unset "KEY[$1]" "STARTED[$1]" "OUTDIR[$1]" "STALLED[$1]" "SAFE[$1]" "JTAG[$1]" "WHY[$1]"; }
 CHANGED=$T0               # 最近一个训练开始的时刻
 EXCL=()                   # 本作业失败过的 key，不再领
@@ -346,7 +361,6 @@ nap() {  # [秒数]（默认 TASKQ_POLL）
 
 why_not=
 last_beat=$(date +%s)
-ERRF=$(mktemp)
 err_since=0   # 队列从什么时候开始连续出错
 idle_since=$T0  # 从什么时候开始手上没有在训的（0 = 有在训的）
 while true; do

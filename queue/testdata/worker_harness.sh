@@ -31,6 +31,14 @@ elif [[ ${FAKE_BUSY:-} == "$1" ]]; then  # 一直在写结果文件夹、不写�
     for _ in $(seq "${FAKE_BUSY_SECS:-10}"); do touch "$out/progress"; sleep 1; done
 elif [[ ${FAKE_HANG:-} == "$1" ]]; then
     sleep 120 & wait $!
+elif [[ ${FAKE_EAGER:-} == "$1" ]]; then  # 子进程（sleep）一结束就写训完的文件，不管它怎么结束的；旁边一条 30 层深的进程链：
+    # 从叶子停进程树时会先停到 sleep、隔一会儿才停到训练本身（要整组一起停才不写训完的文件）
+    sleep 60 & c=$!
+    bash "$FAKE_CHAIN" 30 &
+    wait $c
+    : > "$out/DONE"
+    echo "end $(date +%s.%N) $1" >> "$FAKE_LOG"
+    exit 0
 else
     sleep "${FAKE_SECS:-1}" & wait $!
 fi || { echo "term $1" >> "$FAKE_LOG"; exit 143; }  # 子进程先被停（停进程树时从叶子停起）：当作收到停止，不写训完的文件
@@ -39,6 +47,12 @@ touch "$out/DONE"
 echo "end $(date +%s.%N) $1" >> "$FAKE_LOG"
 EOT
 chmod +x "$T/fake_train.sh"
+cat > "$T/chain.sh" << 'EOT'
+#!/bin/bash
+# $1 层深的进程链，最底下写 chain.ready 后睡 60 秒（FAKE_EAGER 用）
+if (( $1 > 0 )); then bash "$0" $(( $1 - 1 )); else touch "$(dirname "$0")/chain.ready"; sleep 60; fi
+EOT
+export FAKE_CHAIN=$T/chain.sh
 export FAKE_LOG=$T/train.log
 fails=0
 check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi; }
@@ -58,4 +72,4 @@ open(p, "a").write(json.dumps(t) + "\n")
 EOT
     done
 }
-reset() { : > "$T/train.log"; rm -rf "$TASKQ_DATA/runs" "$TASKQ_DIR/claims" "$TASKQ_DIR/failures" "$TASKQ_DIR/released" "$TASKQ_DIR/stopped"; }
+reset() { : > "$T/train.log"; rm -f "$T/chain.ready"; rm -rf "$TASKQ_DATA/runs" "$TASKQ_DIR/claims" "$TASKQ_DIR/failures" "$TASKQ_DIR/released" "$TASKQ_DIR/stopped"; }
