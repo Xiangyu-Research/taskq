@@ -392,6 +392,31 @@ def test_callable():
     ok("函数出错 → 这种记成没过（why = 异常）、报 smoke、这一轮照常；修好（结果变了）后重新冒烟")
 
 
+def test_race():
+    """两次检查同时跑（11/5）：后一次的总队列是前一次加冒烟之前读的，不能再排一个。"""
+    add("D8", "0", variant="V_race")
+    stale = S0()
+    more, *_ = fill(stale)
+    a = [x for x in kinds_of(more, "smoke_add") if x["params"]["variant"] == "V_race"]
+    assert len(a) == 1, more
+    run(a)
+    kid = a[0]["mark"]["kid"]
+
+    def smokes():
+        return [t["key"] for t in mtq()["tasks"] if t["key"].startswith(f"_smoke/{NAME}/{kid}-")]
+    assert smokes() == [a[0]["key"]], smokes()
+    more, *_ = fill(stale)
+    assert not [x for x in more if x["key"] == "D8/V_race/0" or x.get("params", {}).get("variant") == "V_race"], more
+    ok("后一次检查读的总队列里还没有这个冒烟：照样看成已经排了，不再排、真任务照样挡着")
+    k2 = a[0]["key"] + "x"
+    dup = dict(a[0], key=k2, params=dict(a[0]["params"], key=k2))
+    got, msg = SG.enqueue(NAME, dup)
+    assert got is None and "已经排了" in msg and smokes() == [a[0]["key"]], (got, msg, smokes())
+    msgs = run([dup])
+    assert smokes() == [a[0]["key"]] and SG.load(NAME)[a[0]["mark"]["kind"]]["key"] == a[0]["key"], (msgs, smokes())
+    ok("两次检查都决定要排：后加的那次发现已经排了，不加、不领、不报警，记录还指着先加的那个")
+
+
 def main():
     try:
         setup()
@@ -404,6 +429,7 @@ def main():
         test_shift()
         test_off()
         test_callable()
+        test_race()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print("全部通过")

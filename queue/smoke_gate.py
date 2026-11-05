@@ -7,6 +7,7 @@
     taskq smoke adopt [--dry-run]          现在分给各台的、各台训完交还的任务的种类记成过了（已经在跑的不再冒烟）
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -118,14 +119,43 @@ def load(site):
         return {}
 
 
-def update(site, fn):
+_HELD = set()  # 这个进程已经拿着锁的执行机（enqueue 里再记录时不重复拿：同一进程开两次 flock 会自己等自己）
+
+
+@contextlib.contextmanager
+def locked(site):
+    if site in _HELD:
+        yield
+        return
     os.makedirs(os.path.dirname(path(site)), exist_ok=True)
     with open(path(site) + ".lock", "a") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
+        _HELD.add(site)
+        try:
+            yield
+        finally:
+            _HELD.discard(site)
+
+
+def update(site, fn):
+    with locked(site):
         recs = load(site)
         out = fn(recs)
         write_json(path(site), recs)
     return out
+
+
+def queue_keys(mtq=None):
+    """总队列里现在有的 key：这一轮开始时读的（mtq）加上现在盘上的（别的检查在这一轮开始以后加的冒烟也算，11/5）。"""
+    keys = master_keys(mtq)
+    if taskq.have_queue():
+        keys |= {t["key"] for t in taskq.read_tasks()}
+    return keys
+
+
+def pending(r, m, keys):
+    """这个种类已经排了冒烟、还在总队列里 → True。"""
+    return fresh(r, m) and r.get("state") == QUEUED and r.get("key") in keys
 
 
 def fresh(r, m):
@@ -153,7 +183,12 @@ class Gate:
         self.oks, self.bundle = (rs or {}).get("envs_ok") or {}, (rs or {}).get("bundle")
         self.recs = load(site)
         self.want, self.alerts, self.would, self.taken, self.fails = {}, {}, {}, {}, {}
-        self._fly = None
+        self._fly = self._keys = None
+
+    def queue_keys(self):
+        if self._keys is None:
+            self._keys = queue_keys(self.mtq)
+        return self._keys
 
     def inflight(self, kind):
         if self._fly is None:
@@ -215,7 +250,7 @@ class Gate:
         if m["canary"]:
             n = self.inflight(m["kind"])
             return self._hold(key, f"{m['kind']} 在这台上还没成功过，先只送一个（已有 {n} 个）") if n else None
-        if fresh(r, m) and r.get("state") == QUEUED and r.get("key") in master_keys(self.mtq):
+        if pending(r, m, self.queue_keys()):
             if self.live and self.now - (r.get("t") or self.now) > QUEUED_ALERT_S:
                 self.alerts[alert_id("smoke", self.site, m["kid"])] = alert(
                     f"{self.site} 上 {m['kind']} 的冒烟 {r['key']} 排了 {(self.now - r['t']) / 3600:.0f} 小时还没做完",
@@ -268,8 +303,17 @@ def record(site, m, **kw):
 
 
 def enqueue(site, op):
-    """smoke_add → (加上了没有, 说明)。解析不了、环境和真任务不一样、加不进总队列的记成没过。"""
+    """smoke_add → (加上了没有, 说明)。解析不了、环境和真任务不一样、加不进总队列的记成没过。
+    这个种类已经有排着的冒烟（同时跑的另一次检查刚加的）→ (None, 说明)，不再加（11/5：两次检查同时跑，一轮里加了四百多个）。"""
     m = op["mark"]
+    with locked(site):  # 查和加之间别的检查插不进来
+        r = load(site).get(m["kind"])
+        if pending(r, m, queue_keys()):
+            return None, f"{site} 上 {m['kind']} 已经排了冒烟 {r['key']}，不再加"
+        return _enqueue(site, op, m)
+
+
+def _enqueue(site, op, m):
     try:
         sp = S.resolve(op["recipe"], op["params"])
         if S.envs_of(sp) != op["envs"]:

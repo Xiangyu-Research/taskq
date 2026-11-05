@@ -617,6 +617,8 @@ def execute(name, acts, s, run_add=None, stuck=None):
             if a["op"] == "smoke_add":  # 加进总队列，接着领过来（take → stage）
                 ok, m = SG.enqueue(name, a)
                 msgs.append(m)
+                if ok is None:  # 已经有排着的
+                    continue
                 if not ok:
                     stuck[alert_id("smoke", name, a["mark"]["kid"])] = alert(m, machine=name, kind=a["mark"]["kind"], why=m, key=k)
                     continue
