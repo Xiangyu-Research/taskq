@@ -114,9 +114,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "monitor"))
 import push as PU  # noqa: E402
 sent = []
 PU.push = lambda msg, **kw: sent.append((msg, kw))
-rc = PU.main(["--title", "T", "--kind", "report", "hello"])
-ok("taskq notify: pushed with the title, logged as a notify event", rc == 0 and sent == [("hello", dict(title="T", priority="default", tags=""))]
-   and [(x["kind"], x["msg"]) for x in EV.query(db, source="notify")] == [("report", "hello")])
+rc = PU.main(["--title", "T", "--kind", "report", "--data", '{"n": 5}', "hello"])
+ev = EV.query(db, source="notify")
+ok("taskq notify: pushed with the title, logged as a notify event with --data", rc == 0
+   and sent == [("hello", dict(title="T", priority="default", tags=""))] and [(x["kind"], x["msg"]) for x in ev] == [("report", "hello")]
+   and json.loads(ev[0]["data"]) == dict(n=5, title="T", priority="default"))
 
 # progress snapshots
 t0 = time.time()
