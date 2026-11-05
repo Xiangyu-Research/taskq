@@ -28,6 +28,15 @@ check "开始不久就失败、但不在时间窗内的两次：作业照常领�
 unset FAKE_FAIL
 fi
 
+# 3a. 假训练本身：停进程树时先停到子进程（sleep）、过一会儿才停到它，也不写训完的文件（CI 上 3b 因此偶尔看到 t/a 训完）
+if want 3a; then
+reset
+FAKE_SECS=60 bash "$T/fake_train.sh" t/z & fp=$!
+waitfor 30 'pgrep -P $fp sleep > /dev/null'
+kill -TERM $(pgrep -P $fp sleep); sleep 0.5; kill -TERM $fp 2> /dev/null; wait $fp; rc=$?
+check "假训练：子进程先被停 → 退出 143、不算训完" '[[ $rc == 143 && ! -e $TASKQ_DATA/runs/t/z/DONE ]] && grep -q "^term t/z" $T/train.log'
+fi
+
 # 3. 收到停止信号：停训练、交还领取（下一个作业能接着领）
 if want 3; then
 reset
