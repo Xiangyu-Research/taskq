@@ -65,8 +65,23 @@ ok("TASKQ_PLUGINS 空 → 没有插件", cfg.plugin_dirs() == [] and cfg.plugins
 setenv(TASKQ_PLUGINS="~/p1::/abs/p2:rel/p3")
 ok("TASKQ_PLUGINS 用 : 隔开，~ 展开，空的跳过，相对路径原样",
    cfg.plugin_dirs() == [os.path.join(HOME, "p1"), "/abs/p2", "rel/p3"])
+
+
+def plugin_error():
+    try:
+        cfg.plugins("recipes")
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 setenv(TASKQ_PLUGINS=os.path.join(T, "nonexistent"))
-ok("TASKQ_PLUGINS 不存在的文件夹：没有插件，不报错", cfg.plugins("recipes") == [])
+ok("TASKQ_PLUGINS 不存在的文件夹：报错（11/5）", "不存在" in (plugin_error() or ""))
+setenv(TASKQ_PLUGINS="rel/p3")
+ok("TASKQ_PLUGINS 相对路径：报错（11/5）", "绝对路径" in (plugin_error() or ""))
+os.makedirs(os.path.join(T, "noplug"))
+setenv(TASKQ_PLUGINS=os.path.join(T, "noplug"))
+ok("TASKQ_PLUGINS 空文件夹：没有插件，不报错", cfg.plugins("recipes") == [])
 
 # 调度代码在使用者仓库里的位置：嵌着（<仓库>/scripts/taskq）和单独的检出（核心就是仓库）
 lay = {}
@@ -84,7 +99,8 @@ ok("cfg.rel：嵌着时 scripts/taskq/…，单独的检出时没有前缀（不
    and lay["alone"] == [".", "queue/taskq.py", "queue"])
 
 # 状态文件夹
-setenv(TASKQ_STATE=None)
+os.makedirs(os.path.join(T, "c_none"))
+setenv(TASKQ_CONFIG=os.path.join(T, "c_none"), TASKQ_STATE=None)  # 没有 policy.py 的配置文件夹：默认的状态文件夹
 ok("TASKQ_STATE 没设：taskq → ~/.cache/taskq/taskq", cfg.state("taskq") == os.path.join(HOME, ".cache/taskq/taskq"))
 ok("TASKQ_STATE 没设：taskq 下的子路径", cfg.state("taskq", "claims", "k") == os.path.join(HOME, ".cache/taskq/taskq/claims/k"))
 ok("TASKQ_STATE 没设：gpu_pad/DISABLED", cfg.state("gpu_pad/DISABLED") == os.path.join(HOME, ".cache/taskq/gpu_pad/DISABLED"))
@@ -124,7 +140,12 @@ ok("outputs：没有的键 → 默认值", outputs_in(fixture.CONFIG, "no_such_k
 c1 = os.path.join(T, "c_noout")
 write(os.path.join(c1, "policy.py"), "AUTO = {}\n")
 ok("outputs：policy.py 里没有 OUTPUTS → 默认值", outputs_in(c1, "name") == "'DEF'")
+os.makedirs(os.path.join(T, "c_empty"))
 ok("outputs：配置文件夹里没有 policy.py → 默认值", outputs_in(os.path.join(T, "c_empty"), "name") == "'DEF'")
+ok("outputs：写明的配置文件夹不在 → 报错（11/5）", "不存在" in outputs_in(os.path.join(T, "c_missing"), "name"))
+c2 = os.path.join(T, "c_badimp")
+write(os.path.join(c2, "policy.py"), "import no_such_module_x\nOUTPUTS = {}\n")
+ok("outputs：policy.py 里 import 失败 → 报错，不用默认值（11/5）", "no_such_module_x" in outputs_in(c2, "name"))
 
 
 def cfg_get(config, *args):
