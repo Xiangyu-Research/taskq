@@ -30,6 +30,10 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto as PR  # noqa: E402
 cfg.use_config()
+# 核心模块先 import：项目的实验表可能把插件文件夹加进 sys.path，里面有同名的 recipes.py、relay_plugins.py
+import recipes  # noqa: E402,F401
+import relay_plugins  # noqa: E402,F401
+import smoke_gate as SG  # noqa: E402
 
 GROUPS = ("machines", "policy", "plugins", "experiments", "tasks", "steps", "needs", "bundle")
 SLOW = ("needs", "bundle")
@@ -399,6 +403,7 @@ def check_tasks(r):
     import experiments as E
     import spec as S
     g = "tasks"
+    seen = set()
     for k, t in E.tasks().items():
         r.checked(g)
         sp = t["spec"]
@@ -413,6 +418,37 @@ def check_tasks(r):
             S.outputs(sp)
         except Exception as e:  # noqa: BLE001
             r.bad(g, f"{k}：outputs 出错：{e}")
+        check_smoke(r, k, sp, seen)
+
+
+def check_smoke(r, k, sp, seen):
+    """这个任务的冒烟任务（smoke.py 的定义）解析得了、环境和真任务一样、冒烟文件夹找得到；同样的冒烟只查一次。"""
+    import spec as S
+    try:
+        d = SG.definition(sp["recipe"], sp.get("names"))
+    except Exception as e:  # noqa: BLE001
+        r.bad("tasks", f"{k}：冒烟定义出错：{e}")
+        return
+    if d is None:
+        return
+    names = sp.get("names") or {}
+    params = {p: names[p] for p in d["by"] if p in names}
+    params.update(SG.subst(d["params"], "SID"))
+    if d["vars"]:
+        params["vars"] = SG.subst(d["vars"], "SID")
+    sig = json.dumps([sp["recipe"], params], sort_keys=True, default=str)
+    if sig in seen:
+        return
+    seen.add(sig)
+    try:
+        sm = S.resolve(sp["recipe"], dict(params, machines=["x"], key="_smoke/x/SID"))
+        S.shell_lines(sm, "/d")
+        if S.envs_of(sm) != S.envs_of(sp):
+            r.bad("tasks", f"{k}：冒烟任务的环境 {S.envs_of(sm)} 和真任务的 {S.envs_of(sp)} 不一样（环境参数写进 by）")
+        if not SG.smoke_dirs(sm, "SID"):
+            r.bad("tasks", f"{k}：冒烟任务的产出不在名字带 {{smoke}} 的文件夹下（out 或 vars 的 {{data}}/…）")
+    except Exception as e:  # noqa: BLE001
+        r.bad("tasks", f"{k}：冒烟任务解析不了：{type(e).__name__}: {e}")
 
 
 # ---------------- 每个步骤 ----------------

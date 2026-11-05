@@ -86,5 +86,20 @@ ok("命令里不认识的名字", "{nosuch}" in msgs)
 exps[:], final[:] = saved
 ok("改回来以后没有问题", not K.run(only=["experiments", "steps"]).problems)
 
+# 冒烟定义（11/5）：函数出错、环境参数没写进 by、产出不在 {smoke} 文件夹下，都按任务报出来
+DEF = dict(by=["variant", "env"], params=dict(ds="SMOKE", frag="0", model="smoke/{smoke}"), vars={})
+smk = lambda: "\n".join(m for _, m in K.run(only=["tasks"]).problems if "冒烟" in m)  # noqa: E731
+try:
+    K.SG.SMOKE["toy"] = DEF
+    ok("冒烟定义没问题：不报", not smk())
+    K.SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: 1 / 0)
+    ok("params() 出错：报冒烟定义出错", "冒烟定义出错" in smk() and "ZeroDivisionError" in smk())
+    K.SG.SMOKE["toy"] = dict(DEF, by=["variant"], params=dict(DEF["params"], env="alt"))
+    ok("冒烟任务换了环境：报环境不一样", "环境" in smk())
+    K.SG.SMOKE["toy"] = dict(DEF, params=dict(ds="SMOKE", frag="0"))
+    ok("产出不在 {smoke} 文件夹下：报出来", "{smoke}" in smk())
+finally:
+    K.SG.SMOKE.pop("toy", None)
+
 print("全部通过" if not fails else f"{fails} 项失败")
 sys.exit(1 if fails else 0)
