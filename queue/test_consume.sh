@@ -183,7 +183,7 @@ waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "使用者的插件：放行后领、训完" '[[ $rc == 0 ]] && grep -q "训完 t/p" $T/wplug.out'
 fi
 
-# unit. 插件的判断（不开 worker）：gpu_share 什么时候领第二个、gpu_pad 让位、resident 的 slots
+# unit. 插件的判断（不开 worker）：gpu_share 什么时候领第二个、gpu_pad 让位、resident 的 slots、读不了时段时不领也不停手上的
 if want unit; then
 python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
 import importlib.util, os, sys, time, types
@@ -211,9 +211,17 @@ w = types.SimpleNamespace(ncpu=64, mget=lambda f: "3")
 os.environ.pop("TASKQ_SLOTS", None); os.environ["TASKQ_CPUS"] = "16"; os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 res.setup(w)
 assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True), vars(w)
+win = load("window")
+def broken():
+    raise ImportError("坏了")
+win._shift = broken; os.environ["TASKQ_SITE"] = "lab0"; said.clear(); stops = []
+w = types.SimpleNamespace(say=said.append, runs={1: 1}, zomb={}, shutdown=lambda *a: stops.append(a))
+assert win.active(w) is True and "读到之前不领" in said[0], said
+assert win.admit(w) and win.admit(w).startswith("读不了时段"), win.admit(w)
+win.tick(w); assert not stops, stops
 print("ok")
 EOT
-check "插件：gpu_share 的判断、gpu_pad 让位、resident 的核数和 slots" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
+check "插件：gpu_share 的判断、gpu_pad 让位、resident 的核数和 slots、读不了时段" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
 fi
 
 (( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; exit 1; }

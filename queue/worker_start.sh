@@ -7,9 +7,13 @@ if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/t
 QD=${TASKQ_DIR:-${TASKQ_STATE:+$TASKQ_STATE/taskq}}
 [[ -n ${TASKQ_HANDOFF:-} || -f ${QD:-$HOME/.cache/phd/taskq}/$TQ_Q_ENABLED ]] || { echo "$(date '+%F %T') 任务队列的总开关不在，结束"; exit 0; }
 read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda) || true
-[[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]] || { echo "envs/machines.py 里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2; exit 1; }
-source "$CONDA_BASE/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV" || echo "$(date '+%F %T') !! conda activate $CONDA_ENV 失败（$CONDA_BASE）：任务照常各自激活环境，显存填充多半起不来"
+if [[ ! -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
+    echo "envs/machines.py 里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2
+    [[ -n ${TASKQ_HANDOFF:-} ]] || exit 1  # 换包途中：手上有在跑的任务，不能丢下不管，照样接着跑
+else
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV" || echo "$(date '+%F %T') !! conda activate $CONDA_ENV 失败（$CONDA_BASE）：任务照常各自激活环境，显存填充多半起不来"
+fi
 TASKQ_DATA=$(python3 "$CORE/sites/mtab.py" get . data)
 export TASKQ_DATA
 source "$HERE/gpu_pad_start.sh"

@@ -41,25 +41,28 @@ def active(w):
     try:
         return _shift().rule(w.site) is not None
     except Exception as e:  # noqa: BLE001
-        w.say(f"!! 读不了时段（{type(e).__name__}: {e}），不按时段")
-        return False
+        w.say(f"!! 读不了时段（{type(e).__name__}: {e}），读到之前不领")
+        return True
 
 
 def inside(w):
-    """→ (在不在时段里, "开始–结束")。"""
-    sh, now = _shift(), _now()
-    r = sh.rule(w.site, now)
-    return bool(r and sh.dated(now, *r)[0]), f"{r[0]}–{r[1]}" if r else ""
+    """→ (在不在时段里：True / False / 读不了是 None, "开始–结束")。"""
+    try:
+        sh, now = _shift(), _now()
+        r = sh.rule(w.site, now)
+        return bool(r and sh.dated(now, *r)[0]), f"{r[0]}–{r[1]}" if r else ""
+    except Exception as e:  # noqa: BLE001
+        return None, f"读不了时段：{type(e).__name__}: {e}"
 
 
 def admit(w):
-    ok, _ = inside(w)
-    return None if ok else "时段外"
+    ok, why = inside(w)
+    return None if ok else ("时段外" if ok is False else why)
 
 
 def tick(w):
     ok, span = inside(w)
-    if ok:
+    if ok is not False:  # 读不了时只是不领新的，手上的不停
         return
     if w.runs or w.zomb:
         w.shutdown(f"时段结束（{span}），停训练、交还任务", 0)
