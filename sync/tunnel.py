@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """box 和别的机器之间经 box 的 Cloudflare 隧道传大批文件（2026-10-26），两个方向的连接都由那边发起，那边不开服务：
-  push：box 临时开文件服务，那边下载（DICC 上 1 GB 以上的在 CPU 节点上下载，见 envs/machines.py 的 transfer_job）
-  pull：box 临时开接收服务，那边按 90 MB 一块上传（Cloudflare 一次请求最多 100 MB）
+  push：那边从 box 的文件服务下载（DICC 上 1 GB 以上的在 CPU 节点上下载，见 envs/machines.py 的 transfer_job）
+  pull：那边按 90 MB 一块上传到 box 的文件服务（Cloudflare 一次请求最多 100 MB）
+同一台机器的传输一个接一个，不同机器的同时传，共用一个文件服务进程（11/5）。
 在哪里收发、地址见 queue/README.md 的“传输”一条。
 
   taskq tunnel rsync <rsync 的参数> <源> <目标>  rsync 的替身：先把要传的文件经隧道传到目标旁边的暂存目录，再照原样跑 rsync
@@ -19,6 +20,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -38,6 +40,8 @@ ROUNDS = 3  # 没传到、对不上的文件同一次里再补传几轮（11/2�
 POLL = float(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
 LOCK = os.environ.get("TUNNEL_LOCK")
+IDLE = float(os.environ.get("TUNNEL_IDLE", 300))
+TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,}")
 UA = {"User-Agent": "xfer/1"}
 STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
 
@@ -81,113 +85,307 @@ def md5_of(path):
 
 
 # ---------------- box 上的服务 ----------------
+# 所有传输共用 bind 上的一个文件服务进程（_serve，11/5）：第一个要用的传输起它，挂了下一个要用的再起，没有会话空闲 IDLE 秒后退出。
+# 每次传输是一个会话：<服务文件夹>/<token>.json 放清单、src / dst、传输进程的 pid（服务按 pid 清掉没人要的会话），
+# 服务记下的进度（传了多少字节、发出的文件的 MD5、收到的文件对不对）追加到 <token>.out，传输进程从那里读。
 
-class Serve:
-    def __init__(self, token, files, src=None, dst=None):
-        self.token, self.files, self.src, self.dst = token, files, src, dst
-        self.sent, self.done, self.moved, self.last = {}, {}, 0, time.time()
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+class Served:
+    """服务进程里的一个会话。"""
+
+    def __init__(self, path, d):
+        self.files = {r: tuple(v) for r, v in d["files"].items()}
+        self.src, self.dst, self.chunk, self.pid = d.get("src"), d.get("dst"), d.get("chunk", CHUNK), d["pid"]
+        self.out = path[:-len(".json")] + ".out"
         self.lock = threading.Lock()
+        self.pending, self.flushed = 0, time.time()
 
-    def touch(self, n):
+    def emit(self, *ev):
+        fd = os.open(self.out, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(ev) + "\n").encode())
+        finally:
+            os.close(fd)
+
+    def touch(self, n, flush=False):
         with self.lock:
-            self.moved += n
-            self.last = time.time()
+            self.pending += n
+            if self.pending and (flush or time.time() - self.flushed >= 2):
+                self.emit("M", self.pending, time.time())
+                self.pending, self.flushed = 0, time.time()
 
-    def rel(self, path):
-        p = urllib.parse.urlsplit(path)
-        pre = f"/{self.token}/"
-        if not p.path.startswith(pre):
-            return None, None
-        rel = urllib.parse.unquote(p.path[len(pre):])
-        return rel, urllib.parse.parse_qs(p.query)
 
-    def handler(self):
-        S = self
+class Registry:
+    def __init__(self, d):
+        self.d, self.cache = d, {}
 
-        class H(http.server.BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
+    def get(self, token):
+        p = os.path.join(self.d, token + ".json")
+        if not TOKEN_RE.fullmatch(token) or not os.path.exists(p):
+            self.cache.pop(token, None)
+            return None
+        if token not in self.cache:
+            try:
+                with open(p) as f:
+                    self.cache[token] = Served(p, json.load(f))
+            except (OSError, ValueError, KeyError):
+                return None
+        return self.cache[token]
 
-            def log_message(self, *a):
-                pass
+    def prune(self):
+        """删掉传输进程已经不在的会话 → 还有几个会话；服务文件夹没了 → None。"""
+        try:
+            names = os.listdir(self.d)
+        except FileNotFoundError:
+            return None
+        n = 0
+        for f in names:
+            if not f.endswith(".json"):
+                continue
+            t = f[:-len(".json")]
+            s = self.get(t)
+            if s and alive(s.pid):
+                n += 1
+                continue
+            if s:
+                for ext in (".json", ".out"):
+                    try:
+                        os.unlink(os.path.join(self.d, t + ext))
+                    except FileNotFoundError:
+                        pass
+            self.cache.pop(t, None)
+        return n
 
-            def parse_request(self):
-                if not super().parse_request():
-                    return False
-                if os.environ.get("TUNNEL_TEST_REQUIRE_UA") and self.headers.get("User-Agent") != UA["User-Agent"]:
-                    self.send_error(403)
-                    return False
-                return True
 
-            def reply(self, code, body=b""):
-                self.send_response(code)
-                self.send_header("Content-Length", str(len(body)))
+def handler(reg):
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def parse_request(self):
+            if not super().parse_request():
+                return False
+            if os.environ.get("TUNNEL_TEST_REQUIRE_UA") and self.headers.get("User-Agent") != UA["User-Agent"]:
+                self.send_error(403)
+                return False
+            return True
+
+        def reply(self, code, body=b""):
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def session(self):
+            """/<token>/<相对路径>?… → (会话, 相对路径, 参数)；token 不对 → 会话是 None。"""
+            p = urllib.parse.urlsplit(self.path)
+            parts = p.path.split("/", 2)
+            if len(parts) < 3:
+                return None, None, None
+            return reg.get(parts[1]), urllib.parse.unquote(parts[2]), urllib.parse.parse_qs(p.query)
+
+        def do_GET(self):
+            if self.path == "/":
+                return self.reply(200, b"ok")
+            S, rel, _ = self.session()
+            if S is not None and rel == "":
+                return self.reply(200, b"ok")  # 传输进程确认服务认得这个会话
+            if S is None or S.src is None or rel not in S.files:
+                return self.reply(404)
+            size = S.files[rel][0]
+            h, n = hashlib.md5(), 0
+            with open(os.path.join(S.src, rel), "rb") as f:
+                self.send_response(200)
+                self.send_header("Content-Length", str(size))
                 self.end_headers()
-                self.wfile.write(body)
+                while n < size and (b := f.read(min(1 << 20, size - n))):
+                    self.wfile.write(b)
+                    h.update(b)
+                    n += len(b)
+                    S.touch(len(b))
+            S.touch(0, flush=True)
+            if n == size:
+                S.emit("S", rel, h.hexdigest())
 
-            def do_GET(self):
-                if self.path == "/":
-                    return self.reply(200, b"ok")
-                rel, _ = S.rel(self.path)
-                if S.src is None or rel not in S.files:
-                    return self.reply(404)
-                size = S.files[rel][0]
-                h, n = hashlib.md5(), 0
-                with open(os.path.join(S.src, rel), "rb") as f:
-                    self.send_response(200)
-                    self.send_header("Content-Length", str(size))
-                    self.end_headers()
-                    while n < size and (b := f.read(min(1 << 20, size - n))):
-                        self.wfile.write(b)
-                        h.update(b)
-                        n += len(b)
-                        S.touch(len(b))
-                if n == size:
-                    S.sent[rel] = h.hexdigest()
+        def do_PUT(self):
+            S, rel, q = self.session()
+            if S is None or S.dst is None or rel not in S.files:
+                return self.reply(404)
+            size = S.files[rel][0]
+            n = int(self.headers.get("Content-Length", -1))
+            off = int((q.get("off") or ["-1"])[0])
+            if n < 0 or off < 0 or off + n > size or n > S.chunk:
+                return self.reply(400)
+            part = os.path.join(S.dst, rel) + ".tunnelpart"
+            os.makedirs(os.path.dirname(part), exist_ok=True)
+            fd = os.open(part, os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                got = 0
+                while got < n:
+                    b = self.rfile.read(min(1 << 20, n - got))
+                    if not b:
+                        break
+                    os.pwrite(fd, b, off + got)
+                    got += len(b)
+                    S.touch(len(b))
+            finally:
+                os.close(fd)
+            S.touch(0, flush=True)
+            self.reply(200 if got == n else 400)
 
-            def do_PUT(self):
-                rel, q = S.rel(self.path)
-                if S.dst is None or rel not in S.files:
-                    return self.reply(404)
-                size = S.files[rel][0]
-                n = int(self.headers.get("Content-Length", -1))
-                off = int((q.get("off") or ["-1"])[0])
-                if n < 0 or off < 0 or off + n > size or n > CHUNK:
-                    return self.reply(400)
-                part = os.path.join(S.dst, rel) + ".tunnelpart"
-                os.makedirs(os.path.dirname(part), exist_ok=True)
-                fd = os.open(part, os.O_WRONLY | os.O_CREAT, 0o600)
+        def do_POST(self):
+            S, rel, q = self.session()
+            if S is None or S.dst is None or rel not in S.files:
+                return self.reply(404)
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            part = os.path.join(S.dst, rel) + ".tunnelpart"
+            g = {k: v[0] for k, v in q.items()}
+            ok = os.path.isfile(part) and os.path.getsize(part) == S.files[rel][0] and md5_of(part) == g.get("md5")
+            if ok:
+                m = int(g["mtime"])
+                os.chmod(part, int(g["mode"]) & 0o7777)
+                os.utime(part, ns=(m, m))
+                os.replace(part, os.path.join(S.dst, rel))
+            elif os.path.exists(part):
+                os.unlink(part)
+            S.emit("D", rel, ok)
+            self.reply(200 if ok else 409)
+
+    return H
+
+
+def serve_main(bind, d, legacy):
+    """共享的文件服务（tunnel.py _serve）：bind 上已经有服务时直接退出。"""
+    old = open(legacy, "a")
+    fcntl.flock(old, fcntl.LOCK_SH)  # 旧版本（全局独占锁、自己开服务）的传输在跑时等它，它也等这个服务退出
+    reg = Registry(d)
+    host, port = bind.rsplit(":", 1)
+    try:
+        srv = http.server.ThreadingHTTPServer((host, int(port)), handler(reg))
+    except OSError as e:
+        log(f"{bind} 已经有服务（{e}），不另起")
+        return 0
+    srv.daemon_threads = True
+    pidf = os.path.join(d, "serve.pid")
+    with open(pidf, "w") as f:
+        f.write(f"{os.getpid()}\n")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"文件服务在 {bind} 起来了（pid {os.getpid()}）")
+    last = time.time()
+    while True:
+        time.sleep(min(10, IDLE / 3))
+        n = reg.prune()
+        if n is None:
+            break
+        if n:
+            last = time.time()
+        elif time.time() - last >= IDLE:
+            break
+    srv.shutdown()
+    srv.server_close()
+    try:
+        if open(pidf).read().strip() == str(os.getpid()):
+            os.unlink(pidf)
+    except OSError:
+        pass
+    log("没有会话了，文件服务退出")
+    return 0
+
+
+def srv_dir():
+    d = os.path.join(os.path.dirname(lock_path()), "tunnel_srv")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    return d
+
+
+class Session:
+    """一次传输在共享文件服务上的会话（传输进程这边）。"""
+
+    def __init__(self, files, src=None, dst=None):
+        self.token = secrets.token_urlsafe(24)
+        self.files, self.src, self.dst = files, src, dst
+        self.sent, self.done, self.moved, self.last, self.off = {}, {}, 0, time.time(), 0
+        M = machines()
+        url, bind = M.MACHINES[M.hub()]["transfer"]
+        self.url, self.bind = os.environ.get("TUNNEL_URL", url), os.environ.get("TUNNEL_BIND", bind)
+        self.cid = None
+        self.dir = srv_dir()
+        self.base = os.path.join(self.dir, self.token)
+        tmp = os.path.join(self.dir, f".{self.token}.tmp")
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            json.dump(dict(files=files, src=src and os.path.abspath(src), dst=dst and os.path.abspath(dst), chunk=CHUNK, pid=os.getpid()), f)
+        os.replace(tmp, self.base + ".json")
+
+    def ensure(self):
+        """bind 上没有服务在听时起一个（同时起了两个的，后起的绑不上自己退出）。"""
+        h, p = self.bind.rsplit(":", 1)
+        try:
+            with socket.create_connection(("127.0.0.1" if h in ("", "0.0.0.0") else h, int(p)), timeout=3):
+                return
+        except OSError:
+            pass
+        with open(os.path.join(self.dir, "serve.log"), "a") as lf:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "_serve", self.bind, self.dir, lock_path()],
+                             cwd=self.dir, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def open(self, quick=False):
+        """→ 那边用的地址。quick：用临时地址（envs/machines.py 里 hub 的 quick、RELAY 的 quick_tunnel），不用 box 的固定地址。"""
+        quick = quick and "TUNNEL_URL" not in os.environ
+        for attempt in range(3 if quick else 1):
+            self.ensure()
+            if quick:
+                if self.cid:
+                    subprocess.run(["docker", "stop", self.cid], capture_output=True)
+                self.cid, self.url = quick_tunnel(self.bind)
+            wait = 0.2
+            for _ in range(60 if quick else 30):
                 try:
-                    got = 0
-                    while got < n:
-                        b = self.rfile.read(min(1 << 20, n - got))
-                        if not b:
-                            break
-                        os.pwrite(fd, b, off + got)
-                        got += len(b)
-                        S.touch(len(b))
-                finally:
-                    os.close(fd)
-                self.reply(200 if got == n else 400)
+                    if urllib.request.urlopen(urllib.request.Request(f"{self.url}/{self.token}/", headers=UA), timeout=10).read() == b"ok":
+                        return self.url
+                except Exception:
+                    pass
+                time.sleep(wait)
+                wait = min(2 * wait, 2)
+                self.ensure()
+        raise RuntimeError(f"{self.url} 连不到文件服务（traefik 的路由或隧道）")
 
-            def do_POST(self):
-                rel, q = S.rel(self.path)
-                if S.dst is None or rel not in S.files:
-                    return self.reply(404)
-                self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                part = os.path.join(S.dst, rel) + ".tunnelpart"
-                g = {k: v[0] for k, v in q.items()}
-                ok = os.path.isfile(part) and os.path.getsize(part) == S.files[rel][0] and md5_of(part) == g.get("md5")
-                if ok:
-                    m = int(g["mtime"])
-                    os.chmod(part, int(g["mode"]) & 0o7777)
-                    os.utime(part, ns=(m, m))
-                    os.replace(part, os.path.join(S.dst, rel))
-                elif os.path.exists(part):
-                    os.unlink(part)
-                S.done[rel] = ok
-                self.reply(200 if ok else 409)
+    def poll(self):
+        try:
+            with open(self.base + ".out", "rb") as f:
+                f.seek(self.off)
+                b = f.read()
+        except FileNotFoundError:
+            return
+        b = b[:b.rfind(b"\n") + 1]
+        self.off += len(b)
+        for ln in b.splitlines():
+            k, a, c = json.loads(ln)
+            if k == "M":
+                self.moved, self.last = self.moved + a, max(self.last, c)
+            elif k == "S":
+                self.sent[a] = c
+            elif k == "D":
+                self.done[a] = c
 
-        return H
+    def close(self):
+        if self.cid:
+            subprocess.run(["docker", "stop", self.cid], capture_output=True)
+        for ext in (".json", ".out"):
+            try:
+                os.unlink(self.base + ext)
+            except FileNotFoundError:
+                pass
 
 
 def relay_of(host, site=None):
@@ -212,53 +410,25 @@ def quick_tunnel(bind):
     raise RuntimeError("临时隧道没给出地址")
 
 
-def stop_server(srv):
-    srv.shutdown()
-    srv.server_close()
-    if getattr(srv, "quick", None):
-        subprocess.run(["docker", "stop", srv.quick], capture_output=True)
+def lock_path(host=None):
+    base = os.path.expanduser(LOCK) if LOCK is not None else state("tunnel_push.lock")
+    return base if host is None else f"{base}.{re.sub(r'[^A-Za-z0-9_.-]', '_', host)}"
 
 
-def start_server(serve, quick=False):
-    """quick：用临时地址（envs/machines.py 里 hub 的 quick、RELAY 的 quick_tunnel），不用 box 的固定地址。"""
-    M = machines()
-    url, bind = M.MACHINES[M.hub()]["transfer"]
-    quick = quick and "TUNNEL_URL" not in os.environ
-    url, bind = os.environ.get("TUNNEL_URL", url), os.environ.get("TUNNEL_BIND", bind)
-    host, port = bind.rsplit(":", 1)
-    srv = http.server.ThreadingHTTPServer((host, int(port)), serve.handler())
-    srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    for attempt in range(3 if quick else 1):
-        if quick:
-            if attempt:
-                subprocess.run(["docker", "stop", srv.quick], capture_output=True)
-            try:
-                srv.quick, url = quick_tunnel(bind)
-            except Exception:
-                stop_server(srv)
-                raise
-        for _ in range(60 if quick else 30):
-            try:
-                if urllib.request.urlopen(urllib.request.Request(url + "/", headers=UA), timeout=10).read() == b"ok":
-                    return srv, url
-            except Exception:
-                pass
-            time.sleep(2)
-    stop_server(srv)
-    raise RuntimeError(f"{url} 连不到文件服务（traefik 的路由或隧道）")
-
-
-def take_lock():
-    lock = os.path.expanduser(LOCK) if LOCK is not None else state("tunnel_push.lock")
-    os.makedirs(os.path.dirname(lock), exist_ok=True)
-    f = open(lock, "w")
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        log("另一个隧道传输在跑，等它结束")
-        fcntl.flock(f, fcntl.LOCK_EX)
-    return f
+def take_lock(host):
+    """同一台机器（按 ssh 名字：lab1、lab0 是同一台）的传输一个接一个，不同机器的同时传（11/1 定）。
+    全局的锁只拿共享的，旧版本（拿全局独占锁）的传输在跑时等它。"""
+    held = []
+    for path, mode, why in ((lock_path(host), fcntl.LOCK_EX, f"{host} 的另一个隧道传输在跑"), (lock_path(), fcntl.LOCK_SH, "旧版本的隧道传输在跑")):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        f = open(path, "a")
+        try:
+            fcntl.flock(f, mode | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log(f"{why}，等它结束")
+            fcntl.flock(f, mode)
+        held.append(f)
+    return held
 
 
 def status_cmd(wd):
@@ -300,6 +470,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
     run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
+    serve.ensure()
     ssh(host, f"nohup bash {wd}/run.sh > /dev/null 2>&1 < /dev/null &")
     t0, seen, where, wait = time.time(), time.time(), "", 2
     try:
@@ -311,6 +482,8 @@ def run_remote(host, mode, plan, serve, total, site=None):
                 seen = time.time()
             except RuntimeError:
                 st = [""]
+            serve.ensure()  # 共享的服务挂了就重起，那边的 curl、上传会重试
+            serve.poll()
             if len(st) > 1 and st[1] and st[1] != where:
                 where = st[1]
                 log(f"那边{where}")
@@ -343,19 +516,19 @@ def push(host, src, dst, rels, site=None):
         st = os.stat(os.path.join(src, r))
         files[r] = (st.st_size, st.st_mtime_ns, st.st_mode & 0o7777)
     total = sum(v[0] for v in files.values())
-    token = secrets.token_urlsafe(24)
-    serve = Serve(token, files, src=src)
-    lk = take_lock()
-    srv, url = start_server(serve, quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
-    log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
-    t0, bad = time.time(), list(files)
+    lk = take_lock(host)
+    serve = Session(files, src=src)
     try:
+        url = serve.open(quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
+        log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
+        t0, bad = time.time(), list(files)
         for k in range(ROUNDS + 1):
             if k:
                 log(f"补传 {len(bad)} 个缺的文件（第 {k} 轮）")
+            serve.poll()
             for r in bad:
                 serve.sent.pop(r, None)
-            plan = dict(base=f"{url}/{token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad])
+            plan = dict(base=f"{url}/{serve.token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad])
             try:
                 res, stop = run_remote(host, "_fetch", plan, serve, sum(files[r][0] for r in bad), site), False
             except RuntimeError as e:
@@ -363,14 +536,16 @@ def push(host, src, dst, rels, site=None):
                     raise
                 log(f"补传出错（{e}），不再补")
                 res, stop = {}, True
+            serve.poll()
             bad = [r for r in bad if res.get(r) != (serve.sent.get(r) or md5_of(os.path.join(src, r)))]
             if bad:
                 ssh(host, "cd " + rq(dst) + " && rm -f -- " + " ".join(shlex.quote(r) for r in bad), check=False)
             if not bad or stop:
                 break
     finally:
-        stop_server(srv)
-        lk.close()
+        serve.close()
+        for f in lk:
+            f.close()
     dt = time.time() - t0
     log(f"传完：{len(files) - len(bad)} 个一致，{len(bad)} 个没传到或对不上（已删）；用时 {dt / 60:.0f} 分钟，平均 {total / 1e6 / dt:.1f} MB/s")
     return bad
@@ -380,20 +555,20 @@ def pull(host, src, dst, items, site=None):
     """那边的 src/<rel> → box 的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
-    token = secrets.token_urlsafe(24)
     os.makedirs(dst, exist_ok=True)
-    serve = Serve(token, files, dst=dst)
-    lk = take_lock()
-    srv, url = start_server(serve, quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
-    log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
-    t0, bad = time.time(), list(files)
+    lk = take_lock(host)
+    serve = Session(files, dst=dst)
     try:
+        url = serve.open(quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
+        log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
+        t0, bad = time.time(), list(files)
         for k in range(ROUNDS + 1):
             if k:
                 log(f"补传 {len(bad)} 个缺的文件（第 {k} 轮）")
+            serve.poll()
             for r in bad:
                 serve.done.pop(r, None)
-            plan = dict(base=f"{url}/{token}", root=src, chunk=CHUNK, npar=NPAR, round=k, files=[[r, files[r][0]] for r in bad])
+            plan = dict(base=f"{url}/{serve.token}", root=src, chunk=CHUNK, npar=NPAR, round=k, files=[[r, files[r][0]] for r in bad])
             try:
                 run_remote(host, "_send", plan, serve, sum(files[r][0] for r in bad), site)
                 stop = False
@@ -402,12 +577,14 @@ def pull(host, src, dst, items, site=None):
                     raise
                 log(f"补传出错（{e}），不再补")
                 stop = True
+            serve.poll()
             bad = [r for r in bad if not serve.done.get(r)]
             if not bad or stop:
                 break
     finally:
-        stop_server(srv)
-        lk.close()
+        serve.close()
+        for f in lk:
+            f.close()
         for r in files:
             p = os.path.join(dst, r) + ".tunnelpart"
             if os.path.exists(p):
@@ -638,6 +815,8 @@ def main(argv):
         return 0
     if cmd == "rsync":
         return wrap(a)
+    if cmd == "_serve" and len(a) == 3:
+        return serve_main(*a)
     if cmd in ("_fetch", "_send"):
         print(f"在 {os.uname().nodename} 上{'下载' if cmd == '_fetch' else '上传'}", flush=True)
         plan = json.load(open(a[0]))

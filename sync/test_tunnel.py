@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """sync/tunnel.py 的测试：在本机模拟"那边"（假的 ssh 在本地 HOME 下跑命令），服务开在 127.0.0.1。在 box 上跑。"""
-import hashlib
+import atexit
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -16,23 +18,46 @@ import fixture  # noqa: E402
 
 fixture.use()
 T = tempfile.mkdtemp(prefix="test_tunnel_")
+SRV = os.path.join(T, "tunnel_srv")  # 共享文件服务的文件夹（TUNNEL_LOCK 旁边）
+
+
+def server_pid():
+    try:
+        return int(open(os.path.join(SRV, "serve.pid")).read())
+    except (OSError, ValueError):
+        return None
+
+
+def cleanup():  # 测试中途出错也停掉本次起的服务、删临时目录
+    pid = server_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    shutil.rmtree(T, ignore_errors=True)
+
+
+atexit.register(cleanup)
 HOME = os.path.join(T, "home")
+RWD = os.path.join(HOME, ".cache/phd/tunnel")  # 那边（plainhost）的工作目录
 os.makedirs(HOME)
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
-    f.write('#!/bin/bash\nshift\ncd "$HOME" && exec bash -c "$*"\n')
+    f.write('#!/bin/bash\nshift\n[ -n "$TUNNEL_TEST_SSH_SLEEP" ] && sleep "$TUNNEL_TEST_SSH_SLEEP"\ncd "$HOME" && exec bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
-HOST = "plainhost"  # 不是执行机的 Slurm 机器（子进程里由 sitecustomize 加进机器表）
+HOST, HOST2 = "plainhost", "plainhost2"  # 不是执行机的 Slurm 机器（子进程里由 sitecustomize 加进机器表）
 with open(os.path.join(T, "sitecustomize.py"), "w") as f:
     f.write(f"import sys\nsys.path.insert(0, {fixture.CONFIG!r})\nimport machines\n"
-            f"machines.MACHINES[{HOST!r}] = dict(label='plain', ssh={HOST!r}, scheduler='slurm', transfer_job='-p x', tunnel=('push', 'pull'))\n")
+            f"for h in ({HOST!r}, {HOST2!r}):\n"
+            "    machines.MACHINES[h] = dict(label='plain', ssh=h, scheduler='slurm', transfer_job='-p x', tunnel=('push', 'pull'))\n")
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 ENV = dict(os.environ, HOME=HOME, TUNNEL_SSH=FAKE, RSYNC_RSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}",
            TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="0.1", TUNNEL_CHUNK=str(1 << 20),
-           TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", PATH=os.environ["PATH"], PYTHONPATH=T)
+           TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", TUNNEL_IDLE="3", PATH=os.environ["PATH"], PYTHONPATH=T)
 FAILS = []
 
 
@@ -82,7 +107,7 @@ dst = os.path.join(HOME, "st/pushed")
 ok("push 退出码 0", r.returncode == 0)
 ok("push 内容和修改时间一致", same(src, dst, FILES))
 ok("push 保留权限", os.stat(os.path.join(dst, "a/b/y.bin")).st_mode & 0o777 == 0o600)
-ok("push 没有留下 .tunnelpart、那边的工作目录删了", not any(p.endswith(".tunnelpart") for p in tree(dst)) and not os.listdir(os.path.join(HOME, ".cache/phd/tunnel")))
+ok("push 没有留下 .tunnelpart、那边的工作目录删了", not any(p.endswith(".tunnelpart") for p in tree(dst)) and not os.listdir(RWD))
 
 r = run("push", HOST, src, "st/pushed", lst)
 ok("push 再跑一次：已有的跳过、仍然一致", r.returncode == 0 and same(src, dst, FILES) and "4 个一致" in r.stdout)
@@ -122,12 +147,12 @@ r = run("pull", HOST, "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_DROP="
 ok("pull 第一轮断了两个：同一次里只补拉那两个，退出码 0、一致", r.returncode == 0 and same(rsrc, pdst, FILES)
    and "补传 2 个缺的文件（第 1 轮）" in r.stdout and "第 2 轮" not in r.stdout and not any(p.endswith(".tunnelpart") for p in tree(pdst)))
 
-# 服务只认清单里的路径
+# 共享服务只认会话的 token 和清单里的路径
 sys.path.insert(0, HERE)
-os.environ.update(TUNNEL_URL=ENV["TUNNEL_URL"], TUNNEL_BIND=ENV["TUNNEL_BIND"], TUNNEL_TEST_REQUIRE_UA="1")
+os.environ.update({k: ENV[k] for k in ("TUNNEL_URL", "TUNNEL_BIND", "TUNNEL_LOCK", "TUNNEL_TEST_REQUIRE_UA", "TUNNEL_IDLE")})
 import tunnel  # noqa: E402
-sv = tunnel.Serve("tok", {"a/x.bin": (5,)}, dst=os.path.join(T, "srv"))
-srv, url = tunnel.start_server(sv)
+sv = tunnel.Session({"a/x.bin": (5,)}, dst=os.path.join(T, "srv"))
+url, tok = sv.open(), sv.token
 
 
 def code_noua(path):
@@ -144,13 +169,16 @@ def code(method, path, data=b""):
         return e.code
 
 
-ok("清单外的路径 404（含 ..）", code("PUT", "/tok/../../etc/x?off=0", b"x") == 404 and code("PUT", "/tok/b.bin?off=0", b"x") == 404
-   and code("GET", "/tok/a/x.bin") == 404)
+ok("清单外的路径 404（含 ..）", code("PUT", f"/{tok}/../../etc/x?off=0", b"x") == 404 and code("PUT", f"/{tok}/b.bin?off=0", b"x") == 404
+   and code("GET", f"/{tok}/a/x.bin") == 404)
 ok("没有 User-Agent 的请求被拒（和 Cloudflare 一样）", code_noua("/") == 403)
-ok("错的 token 404", code("PUT", "/bad/a/x.bin?off=0", b"x") == 404)
-ok("超出文件大小的块 400", code("PUT", "/tok/a/x.bin?off=3", b"xxxx") == 400)
-srv.shutdown()
-srv.server_close()
+ok("错的 token 404（含服务文件夹里的别的文件名）", code("PUT", "/bad/a/x.bin?off=0", b"x") == 404 and code("GET", "/" + "A" * 32 + "/") == 404
+   and code("GET", "/serve.pid/") == 404 and code("GET", "/../serve/") == 404 and code("PUT", f"/{tok[:-1]}/a/x.bin?off=0", b"x") == 404)
+ok("对的 token：认得会话；超出文件大小的块 400", code("GET", f"/{tok}/") == 200 and code("PUT", f"/{tok}/a/x.bin?off=3", b"xxxx") == 400)
+ok("对的 token、对的块：收下", code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx") == 200)
+sv.close()
+ok("会话关掉以后它的 token 404", code("GET", f"/{tok}/") == 404 and code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx") == 404)
+ok("会话的文件删了", not [f for f in os.listdir(SRV) if f.endswith((".json", ".out"))])
 
 # rsync 的替身
 big = {"frag/check/c1.prob": 1_500_000, "frag/check/c2.prob": 700_000, "frag/final.ckpt": 400_000, "frag/plans.json": 50}
@@ -203,6 +231,78 @@ ok("执行机按名字查（lab1、lab0 的 ssh 相同）：给 site 时拿到�
    and tunnel.relay_of("lab", site="lab1") is tunnel.machines().RELAY["lab1"]
    and tunnel.relay_of("lab") is not None and tunnel.relay_of(HOST) is None)
 
-shutil.rmtree(T)
+# 不同机器同时传、同一台排队、服务挂了照常（假的 ssh 每条命令慢 0.5 秒，一次传输要几秒）
+SLOW = dict(ENV, TUNNEL_TEST_SSH_SLEEP="0.5")
+
+
+def start(*args, env=SLOW):
+    return subprocess.Popen([sys.executable, os.path.join(HERE, "tunnel.py"), *args], env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+
+
+def span(out):
+    """日志里"经隧道传"到"传完"的时间（秒）。"""
+    ts = [time.mktime(time.strptime(ln[:19], "%Y-%m-%d %H:%M:%S")) for ln in out.splitlines() if "经隧道" in ln or "传完" in ln]
+    return ts[0], ts[-1]
+
+
+def finish(p):
+    out = p.communicate(timeout=300)[0]
+    return p.returncode, out
+
+
+cdst = {h: os.path.join(HOME, f"st/conc_{h}") for h in (HOST, HOST2)}
+ps = [start("push", h, src, f"st/conc_{h}", lst) for h in (HOST, HOST2)]
+(r1, o1), (r2, o2) = finish(ps[0]), finish(ps[1])
+(s1, e1), (s2, e2) = span(o1), span(o2)
+ok("两台不同的机器同时传：都完成、一致", r1 == 0 and r2 == 0 and all(same(src, d, FILES) for d in cdst.values()))
+b0 = min(s1, s2)
+ok(f"两台不同的机器同时传：时间重叠（{s1 - b0:.0f}–{e1 - b0:.0f} 秒、{s2 - b0:.0f}–{e2 - b0:.0f} 秒）、没有排队",
+   s1 < e2 and s2 < e1 and "等它结束" not in o1 + o2)
+
+for d in cdst.values():
+    shutil.rmtree(d)
+ps = [start("push", HOST, src, f"st/conc_{h}", lst) for h in (HOST, HOST2)]
+(r1, o1), (r2, o2) = finish(ps[0]), finish(ps[1])
+(s1, e1), (s2, e2) = span(o1), span(o2)
+ok("同一台机器两次传输：都完成、一致", r1 == 0 and r2 == 0 and all(same(src, d, FILES) for d in cdst.values()))
+ok("同一台机器两次传输：排队，一个结束了另一个才开始", (s2 >= e1 or s1 >= e2) and "plainhost 的另一个隧道传输在跑，等它结束" in o1 + o2)
+
+legacy = open(ENV["TUNNEL_LOCK"], "a")
+tunnel.fcntl.flock(legacy, tunnel.fcntl.LOCK_EX)  # 旧版本的传输拿着全局独占锁
+p = start("push", HOST2, src, "st/legacy", lst, env=ENV)
+time.sleep(2)
+waiting = p.poll() is None and not os.path.exists(os.path.join(HOME, "st/legacy"))
+legacy.close()
+r, o = finish(p)
+ok("旧版本的传输拿着全局锁时等它，放开后照常", waiting and r == 0 and "旧版本的隧道传输在跑，等它结束" in o and same(src, os.path.join(HOME, "st/legacy"), FILES))
+
+shutil.rmtree(dst)
+stale = os.path.join(SRV, "Z" * 32 + ".json")
+with open(stale, "w") as f:
+    tunnel.json.dump(dict(files={}, pid=fixture.dead_pid()), f)
+p = start("push", HOST, src, "st/pushed", lst)
+for _ in range(600):  # 等那边的工作目录建好（服务已经起来、会话已经认得）
+    if server_pid() and os.listdir(RWD):
+        break
+    time.sleep(0.05)
+killed = server_pid()
+os.kill(killed, signal.SIGKILL)
+r, o = finish(p)
+ok("传到一半共享服务被杀：重新起一个，照常完成、一致", r == 0 and same(src, dst, FILES) and server_pid() not in (None, killed))
+ok("传输进程不在了的会话由服务清掉", not os.path.exists(stale))
+
+os.kill(server_pid(), signal.SIGKILL)
+shutil.rmtree(pdst)
+r = run("pull", HOST, "st/remote", pdst, items)
+ok("服务被杀后下一次传输照常（pull）", r.returncode == 0 and same(rsrc, pdst, FILES))
+
+pid = server_pid()
+for _ in range(100):
+    if not tunnel.alive(pid):
+        break
+    time.sleep(0.1)
+ok("没有会话后服务空闲几秒（TUNNEL_IDLE）自己退出", not tunnel.alive(pid) and not [f for f in os.listdir(SRV) if f.endswith((".json", ".out"))])
+
 print(f"\n{len(FAILS)} 项失败" if FAILS else "\n全部通过")
 sys.exit(1 if FAILS else 0)
