@@ -300,6 +300,21 @@ ENV["TASKQ_STALL_IDLE"] = ("test", "代替 STALL_IDLE")
 ENV["TASKQ_RUN_BEAT"] = ("test", "代替 RUN_BEAT")
 ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")
 
+# ---------------- 环境的锁（sites/envlock.py，11/5） ----------------
+WHEELHOUSE = "wheelhouse"      # 状态文件夹下：锁里的每个文件 wheelhouse/<sha256 前 2 位>/<sha256>
+LOCK_SUFFIX = ".lock.json"     # 环境描述旁边的锁 <名>.<变体>.lock.json
+LOCK_FORMAT = 1
+LOCK_TOP = ("format", "name", "variant", "spec_sha256", "platform", "base", "conda", "pip", "tools", "created")
+LOCK_CONDA = ("name", "version", "build", "channel", "subdir", "url", "fn", "size", "md5", "sha256")
+LOCK_PIP = ("name", "version", "url", "fn", "size", "sha256", "no_deps")  # 本地建的纯 Python wheel：url 为 null，built_from 是源码包的网址
+LOCK_UNHASHED = ("created",)   # 算哈希时去掉的键（描述的哈希、base 的 lock_sha256）
+
+
+def wheel(h):
+    """sha256 → 状态文件夹下的相对路径。"""
+    return f"{WHEELHOUSE}/{h[:2]}/{h}"
+
+
 # ---------------- 给 bash ----------------
 def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_PREFIX": STAGE_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,

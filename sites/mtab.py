@@ -122,21 +122,69 @@ def env_root(m):
     return (m.get("env_root") or (m["root"].rstrip("/") + "/envs" if m.get("root") else "~/envs/spec")).rstrip("/")
 
 
-def spec_hash(env):
-    """<配置文件夹>/specs/<env>.yml 内容的 sha256；没有这个描述 → None。"""
+def lock_path(env, variant="default"):
+    """环境描述旁边的锁 <配置文件夹>/specs/<env>.<变体>.lock.json（sites/envlock.py 写）。"""
+    from proto import LOCK_SUFFIX
+    return os.path.join(SPECS, f"{env}.{variant}{LOCK_SUFFIX}")
+
+
+def lock_bytes(path):
+    """锁去掉 LOCK_UNHASHED 的键以后的规范字节（键排序、紧凑）；没有这个文件 → None。"""
+    import json
+    from proto import LOCK_UNHASHED
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except OSError:
+        return None
+    d = {k: v for k, v in d.items() if k not in LOCK_UNHASHED}
+    return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def spec_hash(env, variant="default"):
+    """sha256(<env>.yml 的字节 + 这个变体的锁的规范字节)；还没有锁时只算描述；没有这个描述 → None。"""
     import hashlib
     try:
         with open(os.path.join(SPECS, f"{env}.yml"), "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
+            h = hashlib.sha256(f.read())
     except OSError:
         return None
+    lk = lock_bytes(lock_path(env, variant))
+    if lk is not None:
+        h.update(lk)
+    return h.hexdigest()
+
+
+def spec_base(env):
+    """描述里的 base（venv 建在哪个环境上）；没有 → None。"""
+    try:
+        with open(os.path.join(SPECS, f"{env}.yml"), encoding="utf-8") as f:
+            m = re.search(r"""^base:[ \t]*["']?([^\s"'#]+)""", f.read(), re.M)
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
+def spec_variant(name, env):
+    """这台机器上 env 用哪个变体：条目写了 ("spec", 变体) 就是它；venv（有 base）跟着这台的基础环境的变体（有那个变体的锁时），
+    否则 default。"""
+    e = (machine(name).get("envs") or {}).get(env)
+    if isinstance(e, (tuple, list)) and len(e) > 1:
+        return e[1]
+    b = spec_base(env)
+    if b and is_spec((machine(name).get("envs") or {}).get(b)):
+        v = spec_variant(name, b)
+        if v != "default" and os.path.isfile(lock_path(env, v)):
+            return v
+    return "default"
 
 
 def ready_envs(name, oks=None):
-    """这台机器上能用的环境名：conda / venv 条目都算；"spec" 条目要那边的 <名>.ok（oks：{名: 哈希}）和现在的描述对得上。"""
+    """这台机器上能用的环境名：conda / venv 条目都算；"spec" 条目要那边的 <名>.ok（oks：{名: 哈希}）和现在的描述（加这台用的
+    变体的锁）对得上。"""
     out = set()
     for env, e in (machine(name).get("envs") or {}).items():
-        if not is_spec(e) or ((oks or {}).get(env) and oks[env] == spec_hash(env)):
+        if not is_spec(e) or ((oks or {}).get(env) and oks[env] == spec_hash(env, spec_variant(name, env))):
             out.add(env)
     return out
 

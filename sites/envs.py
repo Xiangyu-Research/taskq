@@ -10,7 +10,7 @@ srun；pueue 类：nice、看不到卡的普通进程），不占 GPU。
 检查：envs/specs/<名>.check.py（在建好的环境里跑，参数是那台的代码目录）。
 
 那边的布局（root = 机器条目的 env_root）：<root>/<名>-<哈希前 12 位>/ 是这一版环境，<root>/<名> 是指向它的软链接（检查过了才换），
-<root>/<名>/.activate 是激活语句；状态目录里 <名>.ok（检查过的描述的 sha256）、<名>.failed、<名>.building、<名>.log。
+<root>/<名>/.activate 是激活语句；状态目录里 <名>.ok（检查过的描述的哈希：描述加这台用的变体的锁，mtab.spec_hash）、<名>.failed、<名>.building、<名>.log。
 描述一改哈希就变：新版建在新目录里，建好检查过才换软链接、写 .ok，旧版留着，在跑的任务不受影响。
 """
 import os
@@ -115,7 +115,7 @@ def build_script(name, env):
     e = entry(name, env)
     if not M.is_spec(e):
         raise EnvError(f"{name} 的 {env} 不是按描述建的（{e}），不用建")
-    sp, h = load(env), M.spec_hash(env)
+    sp, h = load(env), M.spec_hash(env, M.spec_variant(name, env))
     chk = open(check_file(env), encoding="utf-8").read()
     root, sd = sh_path(M.env_root(m)), sh_path(state_dir(m))
     conda = sh_path(m["conda"][0]) if m.get("conda") else None
@@ -232,7 +232,7 @@ def states(name, run=None):
             rows[p[1]] = p[2:]
     for k in specs:
         ok, fl, bd, ln = rows.get(k, ["", "", "", "0"])
-        h = M.spec_hash(k)
+        h = M.spec_hash(k, M.spec_variant(name, k))
         if bd:
             t = bd.split()
             age = now - int(t[1]) if len(t) > 1 and t[1].isdigit() else 0
@@ -248,6 +248,6 @@ def states(name, run=None):
     return out
 
 
-def oks_of(states_):
-    """states() 的结果 → ready_envs 用的 {环境: 哈希}（只放 ok 的）。"""
-    return {k: M.spec_hash(k) for k, v in (states_ or {}).items() if v == "ok"}
+def oks_of(states_, name):
+    """name 的 states() 的结果 → ready_envs 用的 {环境: 哈希}（只放 ok 的）。"""
+    return {k: M.spec_hash(k, M.spec_variant(name, k)) for k, v in (states_ or {}).items() if v == "ok"}

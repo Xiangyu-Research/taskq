@@ -281,6 +281,10 @@ TREE = {
         "setup": Cmd("pueue 常驻进程、组、crontab（不给名字：本机）", sh("queue/setup.sh"), "[名字]",
                      "在本机，或在 hub 上经 ssh 替别的 pueue 机器做；重复运行没关系"),
     }),
+    "env": Group("环境的锁", {
+        "lock": Cmd("把环境描述解成锁 <名>.<变体>.lock.json，文件下到 wheelhouse（不装进任何环境）", py("envlock", "lock", prog="taskq env"),
+                    own_help=True),
+    }),
     # 实验
     "exp": Group("实验表", {
         "list": Cmd("列出实验", cmd_exp("list"), own_help=True),
@@ -342,7 +346,7 @@ TREE = {
 
 SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
             ("调度", ["tick", "plan", "boot"]),
-            ("执行机和实验", ["site", "exp"]),
+            ("执行机和实验", ["site", "env", "exp"]),
             ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
             ("其他", ["tunnel", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
 

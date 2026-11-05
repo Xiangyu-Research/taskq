@@ -42,6 +42,7 @@ plugins = ["research/common/taskq_plugins"]  # 插件文件夹
 | **执行机** | | |
 | `taskq site status\|bundle\|resend <名字>` | 那边的队列；打包推过去；重新解析传过去的任务 | `relay.py status\|bundle\|resend` |
 | `taskq site env <机器> <环境> [-n]`、`taskq site envs <机器>` | 建环境；看环境的状态 | `sites/envs_cli.py`（11/4 前叫 `sites/site.py`） |
+| `taskq env lock <环境> [--variant V]`、`taskq env lock --all` | 把环境描述解成锁 `<环境>.<变体>.lock.json`，文件下到 wheelhouse（不装；`queue/README.md` 的"环境的锁"） | `sites/envlock.py` |
 | `taskq site setup [名字]` | pueue 常驻进程、组、crontab | `queue/setup.sh` |
 | **实验** | | |
 | `taskq exp list`、`taskq exp tasks [--json]` | 实验、展开后的任务 | — |

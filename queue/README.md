@@ -183,6 +183,28 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 - **状态**：box `~/.cache/phd/relay/state.json`（领着的任务）、`status.json`（那边各任务进度，登记表显示成 DICC2）、日志 `~/relay.log`。
 - **手动**：`taskq internal stage dicc2 <key> --nice N --no-add`（只传数据，不领）；`taskq site status dicc2`；`taskq site bundle dicc2`。
 
+### 环境的锁（`sites/envlock.py`，11/5）
+
+`taskq env lock <名> [--variant V]`（`--all`：每个描述 × 机器表里用到的变体，加 default；基础环境先锁）把 `<配置文件夹>/specs/<名>.yml` 解成 `<名>.<变体>.lock.json`（放在描述旁边；不叫 `.yml`，描述的 glob 不会当成描述），每个文件下到状态文件夹的 `wheelhouse/<sha256 前 2 位>/<sha256>`（`proto.WHEELHOUSE`、`proto.wheel`，同 relay 的 blob），下完核对 sha256。只解不装：
+
+- **conda**：`conda create --dry-run --json`，`CONDA_OVERRIDE_GLIBC` = glibc 上限（`envlock.GLIBC_FLOOR`，2.34 = DICC 的 Rocky 9.5；项目的 `.taskq.toml` 写 `glibc_floor = "…"` 可以改），描述写了 channels 时总带 `--override-channels`；`CONDA_PKGS_DIRS` 是只放 repodata 的 `<状态文件夹>/envlock/conda-pkgs`，所以每个包都在 `FETCH` 里、带 url、md5、sha256。顺序照 `LINK`。
+- **pip**：按建环境的顺序分步（torch 变体只用它的 `index_url`，再 `pip`，再 `pip_no_deps` 带 `--no-deps`），每步 `pip install --dry-run --report --only-binary :all: --python-version X.Y --implementation cp --abi cpXY`，`--platform` 是从 `manylinux_2_<上限>` 一个个往下到 `manylinux_2_17`、再加 `manylinux2014`、老名字和 `linux_x86_64` 的整个梯子。pip 用一个和环境里同版本的帮手 Python（`<状态文件夹>/envlock/python-<版本>`，conda 建一次）、`--python` 指到一个只有假 dist-info 的 venv：conda 装的 Python 包、基础环境的锁、前几步装的都写成"已经装着"，pip 只报这一步要装的（版本不同的照样报，后一步的替掉前一步的同名包）。占位 `{torch_mm}`、`{abi}`、`{cp}` 按已经解出来的 torch（`{abi}` 读 torch wheel 里 `TorchConfig.cmake` 的 `_GLIBCXX_USE_CXX11_ABI`）和 Python 填。描述的 pip 里可以直接写 wheel 的网址（如 GitHub release 上按 torch、CUDA、ABI 编好的）。
+- **只有源码包的**：pip 报 "No matching distribution" 时用 `pip wheel --no-deps`（`SOURCE_DATE_EPOCH` 固定）建，是 `none-any` 的纯 Python wheel 放进 wheelhouse、记 `wheelhouse/built/<源码包 sha256>.json`（以后的锁直接用同一个 wheel），条目的 `url` 为 null、`built_from` 是源码包的网址；建出来要编译的报错，说出是哪个包。
+- **venv（有 `base`）**：先要有基础环境同一变体的锁（没有就报错），只记基础环境里没有的包（同名同版本的不记），`base` 记 `{name, variant, lock_sha256}`。`lock_sha256` 和描述的哈希一样去掉 `created` 算（`proto.LOCK_UNHASHED`）。
+
+锁的格式（`format` 1；键排序、缩进 1，同样的输入、同样的索引再锁一次，除 `created` 外一字不差）：
+
+```
+{"format", "name", "variant", "spec_sha256"（描述的字节的 sha256）, "channels",
+ "platform": {"glibc_floor", "pip_platforms", "python"（X.Y）, "python_full", "implementation", "abi", "conda_subdir"},
+ "base": null 或 {"name", "variant", "lock_sha256"},
+ "conda": [{"name", "version", "build", "channel", "subdir", "url", "fn", "size", "md5", "sha256", "noarch"}],   （LINK 的顺序）
+ "pip":   [{"name", "version", "url"（本地建的为 null）, "fn", "size", "sha256", "no_deps", "step", "built_from", ["built_from_sha256"]}],
+ "tools": {"conda", "pip"}, "created"}
+```
+
+**描述的哈希**（`mtab.spec_hash(名, 变体)`，`.ok` 里写的、就绪看的）= sha256(描述的字节 + 锁去掉 `created` 后的规范 JSON 字节（键排序、紧凑、UTF-8）)；还没有这个变体的锁时只算描述。一台机器上用哪个变体：`mtab.spec_variant`，条目写 `("spec", 变体)` 就是它，venv 跟着这台基础环境的变体（有那个变体的锁时），否则 default。`taskq check`：机器条目里的 spec 环境没有锁时提示（不算问题），锁的 `spec_sha256` 和现在的描述对不上（描述改了没重新锁）算问题。
+
 ## 文件
 
 | 文件 | 内容 |

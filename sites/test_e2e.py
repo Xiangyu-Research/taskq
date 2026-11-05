@@ -334,8 +334,8 @@ def step_env_gate():
          [(t["key"], t["state"], t["worker"]) for t in bt.values()])
     rc, out = E.build(NAME, "toy", run=run_local)
     okf = os.path.join(RROOT, "state/envs/toy.ok")
-    step("taskq site env 的建法（envs.build）：建好、检查过、写 .ok（= 描述的哈希）",
-         rc == 0 and open(okf).read().strip() == M.spec_hash("toy"), out)
+    step("taskq site env 的建法（envs.build）：建好、检查过、写 .ok（= 描述加这台的变体的锁的哈希）",
+         rc == 0 and open(okf).read().strip() == M.spec_hash("toy", M.spec_variant(NAME, "toy")), out)
     a = M.activate(NAME, "toy")
     r = subprocess.run(["bash", "-c", a + "\npython -c 'import numpy,sys; print(sys.prefix)'"], capture_output=True, text=True)
     step("激活后用的是建好的 venv，能导入 numpy", r.returncode == 0 and "/envs/toy-" in r.stdout, r.stdout + r.stderr)

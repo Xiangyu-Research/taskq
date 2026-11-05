@@ -91,6 +91,9 @@ def check_machines(r):
             if M.is_spec(ev):
                 if M.spec_hash(en) is None:
                     r.bad(g, f"{where} 的环境 {en} 是 spec，但没有它的描述 {en}.yml")
+                elif not os.path.isfile(M.lock_path(en, M.spec_variant(n, en))):
+                    r.note(g, f"{where} 的环境 {en} 还没有锁 {os.path.basename(M.lock_path(en, M.spec_variant(n, en)))}"
+                              f"（taskq env lock {en} --variant {M.spec_variant(n, en)}）")
             elif not (_is_tuple(ev) and ev and ev[0] in ("conda", "venv")):
                 r.bad(g, f"{where} 的环境 {en} 要写成 (\"conda\", 名字)、(\"venv\", 目录, 底子) 或 \"spec\"，现在 {ev!r}")
             elif ev[0] == "venv" and (len(ev) != 3 or ev[2] not in envs):
@@ -148,6 +151,7 @@ def check_specs(r, M):
     sites = getattr(M, "SITES", None)
     if sites is None or fake in sites:
         return
+    check_locks(r, M, names)
     for n in names:
         r.checked(g)
         try:
@@ -175,6 +179,26 @@ def check_specs(r, M):
                 r.bad(g, f"环境描述 {n}（torch 变体 {v}）生成不出建环境的脚本：{type(e).__name__}: {e}")
             finally:
                 sites.pop(fake, None)
+
+
+def check_locks(r, M, names):
+    """<名>.<变体>.lock.json：有对应的描述，记的 spec_sha256 是现在的描述（描述改了要重新锁）。"""
+    import hashlib
+    g = "machines"
+    for p in sorted(glob.glob(os.path.join(M.SPECS, "*" + PR.LOCK_SUFFIX))):
+        r.checked(g)
+        f = os.path.basename(p)
+        try:
+            d = json.load(open(p, encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            r.bad(g, f"锁 {f} 读不了：{e}")
+            continue
+        n, v = d.get("name"), d.get("variant")
+        if f != f"{n}.{v}{PR.LOCK_SUFFIX}" or n not in names:
+            r.bad(g, f"锁 {f} 的 name / variant（{n} / {v}）和文件名对不上，或者没有描述 {n}.yml")
+            continue
+        if d.get("spec_sha256") != hashlib.sha256(open(os.path.join(M.SPECS, f"{n}.yml"), "rb").read()).hexdigest():
+            r.bad(g, f"锁 {f} 是旧描述的（{n}.yml 锁了以后改过），重新锁：taskq env lock {n} --variant {v}")
 
 
 # ---------------- policy ----------------

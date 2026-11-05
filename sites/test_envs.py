@@ -48,8 +48,9 @@ for n in names:
     ok(f"{n}.check.py 能编译", bool(compile(open(E.check_file(n), encoding="utf-8").read(), n, "exec")))
 ok("alt 建在 base 上", E.load("alt")["base"] == "base")
 ok("base 有 cu128 的变体", "cu128" in E.load("base")["torch"])
-ok("哈希 = 描述内容的 sha256",
-   M.spec_hash("base") == hashlib.sha256(open(os.path.join(M.SPECS, "base.yml"), "rb").read()).hexdigest())
+ok("还没有锁：哈希 = 描述内容的 sha256（有锁时加上锁，见 test_envlock.py）",
+   not os.path.exists(M.lock_path("base"))
+   and M.spec_hash("base") == hashlib.sha256(open(os.path.join(M.SPECS, "base.yml"), "rb").read()).hexdigest())
 ok("没有的描述 → 哈希 None", M.spec_hash("没有这个") is None)
 
 # ---------- 假机器 ----------
@@ -135,7 +136,7 @@ ok("状态：描述变了、检查失败", st["base"] == "描述变了" and st["
 st = E.states("tsite", run=fake(f"ENV|base|||{h} {now - 60}|0\nENV|alt|||{uh} {now - 7 * 3600}|0\nNOW|{now}\n"))
 ok("状态：在建、在建很久", st["base"] == "在建" and st["alt"] == "在建（可能已停）")
 ok("连不上 → None", E.states("tsite", run=lambda *a, **k: (255, "", "")) is None)
-ok("oks_of 只放 ok 的", E.oks_of({"base": "ok", "alt": "没建"}) == {"base": h})
+ok("oks_of 只放 ok 的（哈希按这台用的变体）", E.oks_of({"base": "ok", "alt": "没建"}, "tsite") == {"base": M.spec_hash("base", "cu128")})
 
 # ---------- 代码包里的机器条目 ----------
 import relay_bundle as RB  # noqa: E402
@@ -175,7 +176,7 @@ if "--real" in sys.argv:
     ok("真建：状态 ok", E.states("treal") == {"sysbase": "不是按描述建的", "tiny": "ok"})
     open(f"{d}/specs/tiny.yml", "a").write("# 改一下\n")
     ok("真建：描述改了 → 描述变了、不就绪", E.states("treal")["tiny"] == "描述变了"
-       and "tiny" not in M.ready_envs("treal", E.oks_of(E.states("treal"))))
+       and "tiny" not in M.ready_envs("treal", E.oks_of(E.states("treal"), "treal")))
     open(f"{d}/specs/tiny.check.py", "w").write("import sys\nsys.exit('故意失败')\n")
     rc, out = E.build("treal", "tiny")
     st = E.states("treal")["tiny"]
