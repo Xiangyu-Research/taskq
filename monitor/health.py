@@ -363,6 +363,19 @@ def update(P, now, dry=False):
     return [p for _, p in msgs], sent_ok
 
 
+def undeclared_writes(days=1):
+    """台账里最近 days 天 taskq run 记下的"写到声明的产出以外" → {问题编号: 说明}（过了 days 天自动消失）。"""
+    import json as _j
+    import time as _t
+    from flow import ledger as LG
+    out = {}
+    for inst, path, detail in LG.connect().execute("SELECT inst, path, detail FROM event WHERE kind='undeclared' AND t>?",
+                                                   (_t.time() - days * 86400,)):
+        n = (_j.loads(detail or "{}") or {}).get("n", 1)
+        out[alert_id("undeclared", inst)] = f"{inst} 写到了声明的产出以外：{path}{f' 等 {n} 个' if n > 1 else ''}（taskq who 看归谁）"
+    return out
+
+
 def ledger_shadow(s):
     """台账的影子对比（queue/flow/ledger.py）：和 advance.py 这一轮的判断比，结果一行写进 ~/ledger.log。"""
     import advance
@@ -436,6 +449,13 @@ def main(argv=None):
             ledger_shadow(s)
         except Exception as e:  # noqa: BLE001  影子对比出错不影响别的
             stuck2[alert_id("ledger", "error")] = f"台账的影子对比出错：{type(e).__name__}: {e}"[:300]
+    try:  # taskq run 包着的步骤卡住、写到声明以外（queue/flow/stall.py、台账的事件）
+        from flow import stall
+        stuck2.update(stall.check())
+        if policy.AUTO.get("ledger"):
+            stuck2.update(undeclared_writes())
+    except Exception as e:  # noqa: BLE001
+        stuck2[alert_id("stall", "error")] = f"卡住检测出错：{type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
     update(P, s["now"], dry=a.dry_run)

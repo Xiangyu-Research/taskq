@@ -155,7 +155,8 @@ def replay(argv):
     return 1 if d else 0
 
 
-CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept, replay=replay)
+CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept, replay=replay,
+            run=lambda argv: __import__("flow.run").run.main(argv))
 
 
 def main(argv):

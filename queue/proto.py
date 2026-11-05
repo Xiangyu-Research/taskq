@@ -273,6 +273,13 @@ A_DONE = (A_OK, A_LEGACY, A_ADOPTED)  # 算做完的尝试
 O_LIVE, O_RETIRED, O_SUPERSEDED = "live", "retired", "superseded"
 ALERTS["ledger"] = ("sub",)  # 台账的影子对比出错
 ALERTS["engine"] = ("sub",)  # 引擎（flow/engine.py）的影子对比出错
+RUNS = "runs"              # 状态文件夹下：taskq run 在跑的尝试的心跳（<实例>.json）
+RUN_BEAT = 60              # taskq run 多久写一次心跳
+STALL_IDLE = 30 * 60       # CPU 时间和产出都这么久没长 → 卡住
+ALERTS["stall"] = ("inst",)  # hub 上 taskq run 包着的步骤卡住
+ALERTS["undeclared"] = ("inst",)  # 步骤写到了声明的产出以外
+ENV["TASKQ_STALL_IDLE"] = ("test", "代替 STALL_IDLE")
+ENV["TASKQ_RUN_BEAT"] = ("test", "代替 RUN_BEAT")
 ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")
 
 # ---------------- 给 bash ----------------

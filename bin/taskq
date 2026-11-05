@@ -308,6 +308,7 @@ TREE = {
     "snapshot": Cmd("按提交号的代码副本（拉取、建副本、切 current、删旧的）", sh("sync/snapshot.sh"), "<克隆>"),
     "who": Cmd("这个文件是哪个实例的产出", py("flow.cli", "who", prog="taskq"), own_help=True),
     "dag": Cmd("实例之间的先后（--dot 画图，--check 核对）", py("flow.cli", "dag", prog="taskq"), own_help=True),
+    "run": Cmd("包一层跑 hub 上的一步（记台账、查没声明的写、写心跳）", py("flow.cli", "run", prog="taskq"), own_help=True),
     "adopt": Cmd("台账：现在做完的记成 adopted（只 stat）", py("flow.cli", "adopt", prog="taskq"), own_help=True),
     "verify": Cmd("台账：做完的产出现在还对不对", py("flow.cli", "verify", prog="taskq"), own_help=True),
     "accept": Cmd("台账：有意改过的产出按现在的样子重新记下", py("flow.cli", "accept", prog="taskq"), own_help=True),
@@ -340,6 +341,7 @@ TREE = {
 SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
             ("调度", ["tick", "plan", "boot"]),
             ("执行机和实验", ["site", "exp"]),
+            ("流程和台账", ["who", "dag", "adopt", "verify", "accept"]),
             ("其他", ["tunnel", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
 
 

@@ -543,7 +543,7 @@ def run(s, dry=False, q=None, tq=None, rm=None):
             try:
                 # 先记下来再加任务：加上了、没拿到任务号（断电、ssh 超时）时，下次按标签和创建时间找回
                 rec = C.new_record(host, t["label"], t["step"], t["key"], group=t["group"])
-                cmd = refill.then_check(t["cmd"], t["label"])
+                cmd = refill.then_check(wrap(t["cmd"], t["label"]), t["label"])
                 tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
                 C.set_record_id(rec, tid)
                 done.append(f"{t['label']}（任务 {tid}{note}）")
@@ -560,6 +560,13 @@ def run(s, dry=False, q=None, tq=None, rm=None):
     if not dry:
         log(lines, stuck, live_mode)
     return done, stuck
+
+
+def wrap(cmd, label):
+    """envs/policy.py 的 AUTO["run"] 开着时，box 上的步骤由 taskq run 包一层（记台账、查没声明的写、写心跳，flow/run.py）。"""
+    if not P.AUTO.get("run"):
+        return cmd
+    return f"{shlex.quote(os.path.join(CORE, 'bin', 'taskq'))} run {shlex.quote(label)} -- {shlex.quote(cmd)}"
 
 
 def log(lines, stuck, live_mode):

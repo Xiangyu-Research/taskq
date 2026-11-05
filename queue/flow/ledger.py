@@ -124,6 +124,44 @@ def record(db, i, state, source, root, note=None, t=None, **meta):
     return aid
 
 
+def begin(db, i, t=None, **meta):
+    """taskq run 开始：记一次 running 的尝试 → 尝试号。"""
+    t = t or time.time()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("INSERT OR IGNORE INTO instance VALUES(?,?,?,?,?)", (i.id, i.rule, i.key, i.exp, t))
+        aid = db.execute("INSERT INTO attempt(inst,state,place,machine,ref,code,bundle,start,source,note) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                         (i.id, PR.A_RUNNING, meta.get("place"), meta.get("machine"), meta.get("ref"), meta.get("code"),
+                          meta.get("bundle"), t, "run", meta.get("note"))).lastrowid
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    return aid
+
+
+def finish(db, aid, i, state, root, files=(), note=None, t=None):
+    """taskq run 结束：尝试改成 state；做完的记产出（标志、声明的产出，加上这次实际写了的文件 files，相对数据目录）。"""
+    t = t or time.time()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("UPDATE attempt SET state=?, end=?, note=coalesce(?, note) WHERE id=?", (state, t, note, aid))
+        if state in PR.A_DONE:
+            db.execute("UPDATE output SET state=? WHERE inst=? AND state=?", (PR.O_SUPERSEDED, i.id, PR.O_LIVE))
+            rows = [("marker", i.marker)] if i.marker else []
+            rows += [("output", o) for o in i.outputs if o != i.marker]
+            seen = {r for _, r in rows}
+            rows += [("file", f) for f in files if f not in seen]
+            for role, rel in rows:
+                fp = fingerprint(os.path.join(root, rel))
+                db.execute("INSERT INTO output(attempt,inst,path,role,kind,size,mtime_ns,state) VALUES(?,?,?,?,?,?,?,?)",
+                           (aid, i.id, rel, role, fp["kind"], fp["size"], fp["mtime_ns"], PR.O_LIVE))
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+
+
 def event(db, iid, path, kind, level, detail):
     db.execute("INSERT INTO event(t,inst,path,kind,level,detail) VALUES(?,?,?,?,?,?)",
                (time.time(), iid, path, kind, level, json.dumps(detail, ensure_ascii=False, sort_keys=True)))
