@@ -105,7 +105,7 @@ ok("检查拿到代码目录", "python3 - /r/x1/code/current" in s_)
 cmd, host = E.runner("tsite")
 ok("pueue 类：nice、看不到卡、在那台上", host == "tsite" and "nice -n 10 env CUDA_VISIBLE_DEVICES=" in cmd and "srun" not in cmd)
 cmd, host = E.runner("tslurm")
-ok("Slurm：CPU 分区的 srun", cmd.count("srun -I600 -p cpu-x") == 1 and "gres" not in cmd)
+ok("Slurm：CPU 分区的 srun，排着等（不设 -I）", cmd.count("srun -p cpu-x") == 1 and "gres" not in cmd and " -I" not in cmd)
 M.RELAY["tslurm"]["env_job"] = "-p gpu-a100 --gres=gpu:1"
 try:
     E.runner("tslurm")

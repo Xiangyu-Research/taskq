@@ -306,7 +306,7 @@ def online_lines(env, sp, v):
 
 def runner(name):
     """→ (在那台机器上跑的命令, ssh 名（None = 本机）)。命令把标准输入存成状态目录里的临时文件再跑（建环境的 conda、pip 不会读到
-    脚本后面的内容），只在 CPU 上跑：Slurm 用条目的 env_job（没有就用 transfer_job；没写时限时加 BUILD_MIN）在 CPU 分区 srun，
+    脚本后面的内容），只在 CPU 上跑：Slurm 用条目的 env_job（没有就用 transfer_job；没写时限时加 BUILD_MIN）在 CPU 分区 srun（排着等，不设 -I），
     其余 nice、看不到卡、最多 BUILD_MIN 分钟。"""
     m = M.machine(name)
     if m["scheduler"] == "slurm":
@@ -317,7 +317,8 @@ def runner(name):
         if any(a in ("--gres", "-G") or a.startswith(("--gres=", "--gpus", "-G")) or "gpu" in a.lower() for a in args):
             raise EnvError(f"{name} 的 env_job 要了 GPU：{job}")
         timed = any(a in ("-t", "--time") or a.startswith("--time=") for a in args)
-        launch = f"srun -I600 {job}" + ("" if timed else f" -t {BUILD_MIN}")
+        # 一直排着等节点（不用 -I：排不上就放弃再交会把排队时间清零，更排不上）；最多等到 box 这边的 BUILD_TIMEOUT
+        launch = f"srun {job}" + ("" if timed else f" -t {BUILD_MIN}")
     else:
         launch = f"timeout -k 60 {BUILD_MIN}m nice -n 10 env CUDA_VISIBLE_DEVICES="
     sd = sh_path(state_dir(m))
