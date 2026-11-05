@@ -201,6 +201,18 @@ def lock_need(lk):
 
 
 # ---------------- 建环境的脚本 ----------------
+def wheel_name(x):
+    """锁里一个 wheel 放进临时目录用的文件名：版本那一段换成元数据里的版本（x["version"]）。有的 wheel 文件名带本地版本
+    （mamba_ssm-2.3.0+cu12torch2.5cxx11abiFALSE-…），元数据却是 2.3.0，pip 按文件名找时认为不一致、不装；内容和 sha256 不变。"""
+    fn = x["fn"]
+    if not fn.endswith(".whl"):
+        return fn
+    parts = fn[:-4].split("-")
+    if len(parts) >= 5 and parts[1] != x["version"]:
+        parts[1] = str(x["version"]).replace("-", "_")
+    return "-".join(parts) + ".whl"
+
+
 def build_script(name, env, v=None, store=None):
     """→ 在那台机器上建 env 的 bash（自己带检查和状态文件）。v：变体（默认按机器条目）；store：有锁时那边放包的目录
     （<前两位>/<sha256>：执行机的 blobs、box 的 wheelhouse）。机器条目还不是 "spec" 的也能建（预建，不影响送任务）。"""
@@ -222,7 +234,7 @@ def build_script(name, env, v=None, store=None):
          "if [[ -n $T ]]; then rm -rf \"$T\"; fi; exit $rc' EXIT"]
     if lk:
         rows = [f"pkgs {x['sha256']} {x['fn']} {x['md5']}" for x in lk.get("conda") or []] + \
-               [f"wheels {x['sha256']} {x['fn']} -" for x in lk.get("pip") or []]
+               [f"wheels {x['sha256']} {wheel_name(x)} -" for x in lk.get("pip") or []]
         req = [f"{x['name']}=={x['version']} --hash=sha256:{x['sha256']}" for x in lk.get("pip") or []]
         L += [f"BL={sh_path(store)}", 'T="$ROOT/.tmp-$N-${H:0:12}-$$"',
               f'find "$ROOT" -maxdepth 1 -name ".tmp-$N-*" -mmin +{BUILD_MIN + 60} -exec rm -rf {{}} + 2>/dev/null || true',

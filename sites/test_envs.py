@@ -206,6 +206,9 @@ M.SPECS = f"{LD}/specs"
 os.environ["TASKQ_STATE"] = f"{LD}/state"
 WH = f"{LD}/state/{proto.WHEELHOUSE}"
 whl = tiny_wheel(fixture.tmpdir(prefix="whl.", dir=LD))
+ok("wheel 的文件名：本地版本换成元数据的版本，别的不动", E.wheel_name(dict(fn="m_s-2.3.0+cu12torch2.5-cp311-cp311-linux_x86_64.whl", version="2.3.0"))
+   == "m_s-2.3.0-cp311-cp311-linux_x86_64.whl" and E.wheel_name(dict(fn="a-1.0-py3-none-any.whl", version="1.0")) == "a-1.0-py3-none-any.whl"
+   and E.wheel_name(dict(fn="x-1.0.conda", version="1.0")) == "x-1.0.conda")
 pkg = f"{LD}/fake-1.0-0.conda"
 open(pkg, "wb").write(b"not really a conda package")
 cpk = dict(put(WH, pkg), name="fake", version="1.0", build="0", channel="https://x/linux-64", subdir="linux-64",
@@ -439,6 +442,9 @@ if "--real" in sys.argv:
         cpks.append(dict(put(wh, f"{dl}/{fn}"), name=x["name"], version=x["version"], build=x["build_string"], url=url,
                          channel=x["base_url"], subdir=x["platform"], md5=hashlib.md5(open(f"{dl}/{fn}", "rb").read()).hexdigest()))
     w2 = tiny_wheel(fixture.tmpdir(prefix="whl.", dir=d))
+    w2l = w2.replace("tinypkg-0.1-", "tinypkg-0.1+local-")  # 文件名带本地版本、元数据没有（同 mamba_ssm 的 wheel，11/5）
+    os.rename(w2, w2l)
+    w2 = w2l
     write_lock(M.SPECS, "creal", "default", conda=cpks, pip=[dict(put(wh, w2), name="tinypkg", version="0.1", no_deps=True)])
     shutil.rmtree(dl)
     M.MACHINES["creal"] = dict(label="本机", hostname=r"(?!)", ssh=None, scheduler="pueue", root=f"{d}/root", conda=(cd_, "base"),
