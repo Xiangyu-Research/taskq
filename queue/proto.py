@@ -136,6 +136,8 @@ S_FREE, S_CLAIMED, S_BUSY, S_STALE, S_WAITING, S_BLOCKED = "free", "claimed", "b
 S_FAILED, S_INPUT, S_STOPPED, S_BAD, S_DONE = "failed", "input", "stopped", "bad", "done"
 assert {S_FREE, S_CLAIMED, S_BUSY, S_STALE, S_WAITING, S_BLOCKED, S_FAILED, S_INPUT, S_STOPPED, S_BAD, S_DONE} == set(STATES)
 UNCLAIMED = (S_FREE, S_STALE)  # 没人领着、可以领的
+# 分给执行机、box 先不送过去的原因（relay 的状态 held 的 why；queue/bundle_gate.py，11/5）
+HELD = dict(bundle="bundle-incompatible")  # 那台在用的代码包跑不了这个说明
 
 # ---------------- 退出码 ----------------
 EXIT = dict(
@@ -206,6 +208,7 @@ ALERTS = dict(
     site=("machine", "sub", "key"), topup=("machine", "qos", "kind"), advance=("step", "who"),
     relaystage=("key",), relayfetch=("key",), relay=("machine",), feed=("sub", "machine"),
     relayadd=("machine", "op", "key"),
+    bundlegate=("machine", "key"),
 )
 
 

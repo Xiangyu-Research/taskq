@@ -1270,13 +1270,14 @@ def test_pin_refresh():
     """传数据期间定时重写钉子（那边的清理只认 12 小时内的），传完撤掉（11/4）。"""
     import threading
     pins, rpy0, every0 = [], RM.rpy, RT.PIN_EVERY
-    keep = {k: getattr(RT, k) for k in ("lookup", "_stage")}
+    keep = {k: getattr(RT, k) for k in ("lookup", "_stage", "in_use")}
     exp0, sha0 = RT.N.export, RT.ST.sha256s
     done = threading.Event()
     try:
         RT.PIN_EVERY = 0.05
         RM.rpy = lambda name, code, data=None, **kw: pins.append(data["hashes"]) if code == RM.PIN_PY else None
         RT.lookup = lambda key: {}
+        RT.in_use = lambda name: []
         RT.N.export = lambda real, D: dict(files=[("a/b.dat", "/x/b.dat")])
         RT.ST.sha256s = lambda paths: {"/x/b.dat": "h1"}
         RT._stage = lambda *a: (time.sleep(0.4), done.set(), "k")[2]
