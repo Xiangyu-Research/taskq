@@ -2,8 +2,10 @@
 """按时段开关（envs/policy.py 的 SHIFT，2026-10-30）：health.py 每次检查时、送任务之前调用。
 
 执行机（SITES 里的名字，10/31）：只在时段里领任务、开 worker（relay.py 看 allowed()）。
-  - 时段开始后：卡上没有别的用户的进程 → 恢复它的 pueue 组、记下这个时段开了（有人在用就下次检查再看，直到时段结束）；
-  - 时段结束后：暂停组、停掉 worker（SIGTERM，worker 交还手上的任务）；总队列里分给它、没训完的任务：有进度（在训、训过几轮）的
+  - 时段开始后：恢复它的 pueue 组、记下这个时段开了（卡上有没有别人、别人用过多久，由执行机上的 worker 开训前自己看，
+    queue/consumers/gpu_idle.py，11/5）；
+  - 时段结束后：worker 自己停下手上的、交还、退出（queue/consumers/window.py，11/5）；这里暂停组、还在跑的 worker 再 SIGTERM 一次（兜底，
+    旧代码包的 worker 也靠它）；总队列里分给它、没训完的任务：有进度（在训、训过几轮）的
     改分给同一台上不按时段的执行机（day_site，从存档接着训，relay.py 的收编把存档带过去），其余交还总队列。
 做了什么记在 ~/.cache/phd/shift.json（每项最近一次开、停的时段日期），日志 ~/refill.log。
 """
@@ -105,22 +107,6 @@ def save(st):
     with open(tmp, "w") as f:
         json.dump(st, f, indent=1)
     os.replace(tmp, STATE)
-
-
-def others_on(host, gpu):
-    """这张卡上别的用户的进程 → [用户名]（看不到是谁的记"?"；没有进程、显存却占了 1 GB 以上也算有人）；读不到 → None。"""
-    cmd = (f"read u m < <(nvidia-smi -i {gpu} --query-gpu=uuid,memory.used --format=csv,noheader,nounits | tr -d ,) || exit 3; "
-           "echo \"MEM|$m\"; echo \"ME|$(whoami)\"; nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader | while IFS=', ' read g p; do "
-           "[ \"$g\" = \"$u\" ] && echo \"APP|$(ps -o user= -p $p)\"; done; echo END")
-    rc, out, _ = C.run(cmd, host, timeout=60)
-    if rc or "END" not in out:
-        return None
-    lines = out.splitlines()
-    me = next((ln[3:].strip() for ln in lines if ln.startswith("ME|")), "")
-    apps = [ln[4:].strip() or "?" for ln in lines if ln.startswith("APP|")]
-    mem = next((int(ln[4:]) for ln in lines if ln.startswith("MEM|") and ln[4:].strip().isdigit()), 0)
-    who = [u for u in apps if u != me]
-    return who if apps else (["?"] if mem > 1024 else [])
 
 
 def group_tasks(host, g, pueue=PUEUE):
@@ -231,31 +217,20 @@ def run_site(name, r, now, st, dry):
     host, groups = c["ssh"], worker_groups(name)
     rec = st.setdefault(name, {})
     cur, _ = dated(now, *r)
-    # 按"现在该不该开"核对（11/1）：开过、还没确认停下的，只要现在不该开（不在时段里，或新时段卡被别人占着）就停，
-    # 不管中间漏了几次检查
+    # 按"现在该不该开"核对（11/1）：开过、还没确认停下的，只要现在不在时段里就停，不管中间漏了几次检查
     unstopped = rec.get("started") and rec.get("paused") != rec["started"]
     if cur and rec.get("started") != cur:
         gs = {g: group_tasks(host, g, c.get("pueue") or PUEUE)[0] for g in groups}
         if None in gs.values():
             return [f"{name}：读不到 pueue 组的状态，下次再看"]
-        gpu = M.worker_of(name, "gpu")
-        who = others_on(host, c["groups"][gpu["group"]][1]) if gpu else []
-        if who is None:
-            msgs.append(f"{name}：读不到卡上的进程，下次再看")
-        elif who:
-            if rec.get("busy") != cur:
-                msgs.append(f"{name}：时段开始，卡上有别人的进程（{', '.join(sorted(set(who)))}），等下次检查")
-                rec["busy"] = cur
-            if unstopped:
-                msgs += stop_rec(name, r, rec, dry)
-        elif dry:
+        if dry:
             msgs.append(f"{name}：会开始领任务（{r[0]}–{r[1]}）")
         else:
             for g in groups:
                 if gs[g] != "Running":
                     C.run(f"{c.get('pueue') or PUEUE} start -g {g}", host, timeout=60)
             rec["started"] = cur
-            msgs.append(f"{name}：{r[0]} 时段开始，卡空着，开始领任务、开 worker")
+            msgs.append(f"{name}：{r[0]} 时段开始，开始领任务、开 worker（卡上有人时 worker 等卡空出来再领）")
     elif not cur and unstopped:
         msgs += stop_rec(name, r, rec, dry)
     return msgs

@@ -486,7 +486,6 @@ def step_shift():
     os.makedirs(os.path.join(T, "r0"))
     os.symlink(os.path.join(T, "r0"), RLINK0)
     shift.STATE, shift.LOG = os.path.join(T, "shift.json"), os.path.join(T, "shift.log")
-    shift.others_on = lambda host, gpu: []
     shift.C = type("C", (), {"run": staticmethod(lambda cmd, host=None, timeout=60, **kw: run_local(cmd, host, timeout))})
     rc, out = pq("group", "add", "gpu0")
     assert rc == 0, out

@@ -41,13 +41,12 @@ assert shift.dated(T(31, "09:00"), "09:00", "09:00", "2026-10-30", "2026-10-31")
 assert shift.dated(T(31, "12:00"), "09:00", "09:00", "2026-10-30", "2026-10-30") == (None, "2026-10-30")
 ok("全天（开始 = 结束）：时段首尾相接，最后一个结束后算刚结束")
 
-calls, world = [], dict(group="Paused", who=[], tasks={})
+calls, world = [], dict(group="Paused", tasks={})
 shift.group_tasks = lambda host, g, *a: (world["group"], world["tasks"])
-shift.others_on = lambda host, gpu: (world.setdefault("cards", set()).add(gpu), world["who"])[1]
 shift.C.run = lambda cmd, host=None, timeout=0: (calls.append(cmd), (0, "", ""))[1]
 
 
-# 执行机按时段（SHIFT 写 "<执行机>": (开始, 结束, 第一个, 最后一个)，lab0）：时段外不领任务；开始时卡空着才开；结束时交出没训完的折
+# 执行机按时段（SHIFT 写 "<执行机>": (开始, 结束, 第一个, 最后一个)，lab0）：时段外不领任务；开始时恢复组；结束时交出没训完的折
 shift.M.RELAY = {"z0": dict(ssh="fake-lab", scheduler="pueue", worker=dict(group="g0"), cpu_worker=dict(group="c0"),
                         groups={"g0": (1, "0", {}), "c0": (1, None, {})}),
                  "z1": dict(ssh="fake-lab", scheduler="pueue", worker=dict(group="g1"), groups={"g1": (1, "1", {})})}
@@ -56,24 +55,20 @@ shift.P.AUTO = dict(shift.P.AUTO, z0=True, z1=True)
 shift.P.OFFLINE = {}
 shift.save({})
 shift.group_tasks = lambda host, g, *a: (world["group"], {})
-world.update(group="Paused", who=[])
+world.update(group="Paused")
 calls.clear()
 assert shift.limited("z0") and not shift.limited("z1") and shift.day_site("fake-lab", but="z0") == "z1"
 assert not shift.allowed("z0", T(31, "12:00")) and shift.allowed("z1", T(31, "12:00"))
 shift.run(now=T(30, "19:00"))
 assert not calls and not shift.allowed("z0", T(30, "19:00"))
 ok("执行机按时段：第一个时段之前不开；时段外 allowed() 不让领任务；不按时段的照常")
-world["who"] = ["jun"]
+assert not shift.allowed("z0", T(31, "18:05"))
 shift.run(now=T(31, "18:05"))
-assert not calls and not shift.allowed("z0", T(31, "18:05"))
-world["who"] = []
-shift.run(now=T(31, "18:35"))
 assert any("start -g g0" in c for c in calls) and any("start -g c0" in c for c in calls) and shift.allowed("z0", T(31, "18:40")), calls
-assert world["cards"] == {"0"}, world["cards"]
 calls.clear()
 shift.run(now=T(31, "23:00"))
 assert not calls
-ok("执行机时段开始：卡上有别人不开；空了恢复各种 worker 的组（GPU、CPU；只看 GPU 组的卡）、allowed() 放行；只开一次")
+ok("执行机时段开始：恢复各种 worker 的组（GPU、CPU；卡上有没有人由 worker 自己看）、allowed() 放行；只开一次")
 
 stops = []
 shift.stop_group = lambda host, g, pueue, wait=False: (stops.append((g, wait)), ([7], {}))[1]
@@ -105,14 +100,11 @@ shift.P.AUTO = dict(shift.P.AUTO, z0=True)
 shift.P.SHIFT = {"z0": ("18:00", "09:00", "2026-11-01", "2026-11-03")}
 D = lambda d, h, m=0: dt.datetime(2026, 11, d, h, m, tzinfo=TZ)  # noqa: E731
 for started, now, why in [("2026-11-03", D(5, 10), "11/3 开过、11/5 才恢复检查（中间漏了几次）"),
-                          ("2026-11-03", D(4, 20), "超出最后一个时段后恢复检查"),
-                          ("2026-11-02", D(3, 20), "在新时段里恢复检查、卡上有别人")]:
+                          ("2026-11-03", D(4, 20), "超出最后一个时段后恢复检查")]:
     shift.save({"z0": dict(started=started)})
-    world["who"] = ["jun"]
     stops.clear()
     shift.run(now=now)
     assert stops and shift.load()["z0"].get("paused") == started, (why, stops, shift.load())
-world["who"] = []
 ok("漏了时段结束那次检查：之后哪次检查发现不该开就停（不要求刚好是结束后那次）")
 
 shift.save({"z0": dict(started="2026-11-03")})

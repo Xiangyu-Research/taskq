@@ -24,7 +24,6 @@ QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/
 _sd = fixture.tmpdir()
 shift.LOG, shift.STATE = f"{_sd}/refill.log", f"{_sd}/shift.json"  # 不写真的 ~/refill.log、状态文件夹
 shift.group_tasks = lambda *a, **k: (None, None)  # 按时段开关不去那边查（11/5 前会 ssh 到真的 lab 查 pueue）
-shift.others_on = lambda *a, **k: None
 
 H.policy.OFFLINE = {}  # 不受配置里的暂停检查影响
 
