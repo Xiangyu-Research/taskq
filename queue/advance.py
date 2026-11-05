@@ -66,6 +66,8 @@ LOG = cfg.log("advance")
 LIVE_ST = refill.LIVE
 NO_NICE = 10 ** 6
 NOTES = []  # 这次检查里"为什么没排"的说明（写进 ~/advance.log，不报成问题）
+SHADOW = []  # ENGINE=shadow 时这次的 [一样的, 不一样的]
+SEEN = {}  # 这次检查里算过的做完判断：{任务 key: 训完没有, (步骤, key): 做完没有}（台账的影子对比用，flow/ledger.py）
 
 
 def bt():
@@ -78,6 +80,7 @@ def python(name=None):
 
 
 # ---------------- 在哪里做（envs/policy.py 的 PLACE） ----------------
+NEAR = "trainer"  # PLACE 里"源头任务所在的执行机"
 HUB_PLACES = ("box", "hub")  # PLACE 里 box:<组>（或 hub:<组>）= 总队列所在的机器（M.hub()，不管它叫什么）的 pueue 组（11/4）
 
 
@@ -144,6 +147,7 @@ def plan(s, root=None):
     hub = M.hub()
     ptasks = (s["pueue"].get(hub) or {}).get("tasks")
     NOTES.clear()
+    SEEN.clear()
     if ptasks is None:
         return [], {}  # box 的 pueue 读不到：这次什么都不做
     queue_tasks = list(((s.get("taskq") or {}).get(hub) or {}).get("tasks", []))
@@ -360,7 +364,7 @@ def plan(s, root=None):
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
         after = (t["e"] or {}).get("after", [])
         here = S.is_done(sp, root)
-        trained[key] = here
+        trained[key] = SEEN[key] = here
         archiving = ("relay_fetch", key) in live
         if not here:
             prequeue(t, after)
@@ -371,6 +375,8 @@ def plan(s, root=None):
             busy = fetching(st, t["names"])
             ok = not busy and st["done"].ok(root, t["names"])
             after_ok[(key, st["name"])] = ok
+            if not busy:
+                SEEN[(st["name"], key)] = ok
             if not ok and not blocked:
                 if not busy:
                     place(t, st, label, n, archiving, True)
@@ -396,7 +402,10 @@ def plan(s, root=None):
                     break
                 label = f"{st['name']}:{e['id']}"
                 busy = fetching(st, names)
-                if busy or not st["done"].ok(root, names):
+                gok = not busy and st["done"].ok(root, names)
+                if not busy:
+                    SEEN[(st["name"], e["id"])] = gok
+                if not gok:
                     if not busy:
                         place(dict(key=e["id"], names=names, each=e.get("each") or {}), st, label, n, False, False)
                     break
@@ -477,10 +486,26 @@ def taskq_remove(keys):
 
 
 def run(s, dry=False, q=None, tq=None, rm=None):
-    """health.py 调用：→ (这次排了的说明列表（只算不排时是"会排 …"）, 卡住的 {问题编号: 说明})。"""
+    """health.py 调用：→ (这次排了的说明列表（只算不排时是"会排 …"）, 卡住的 {问题编号: 说明})。
+    envs/policy.py 的 ENGINE（11/5）：advance（默认）用这里的 plan；shadow 照这里的排，另用 flow/engine.py 算一遍比较；dag 用 flow/engine.py 的。"""
     q = q or refill.q
     tq = tq or taskq_add
-    todo, stuck = plan(s)
+    mode = getattr(P, "ENGINE", "advance")
+    notes = NOTES
+    SHADOW.clear()
+    if mode == "dag":
+        from flow import engine
+        todo, stuck = engine.plan(s)
+        notes = engine.NOTES
+    else:
+        todo, stuck = plan(s)
+        if mode == "shadow" and not dry:
+            try:
+                from flow import engine
+                same, diff = engine.shadow(s, todo, stuck)
+                SHADOW[:] = [same, diff]
+            except Exception as e:  # noqa: BLE001  影子出错不影响照常排
+                stuck[alert_id("engine", "error")] = f"flow/engine.py 的影子对比出错：{type(e).__name__}: {e}"[:300]
     live_mode = bool(P.AUTO.get("advance")) and not dry
     done, lines = [], []
     host = M.hub()
@@ -518,7 +543,7 @@ def run(s, dry=False, q=None, tq=None, rm=None):
             try:
                 # 先记下来再加任务：加上了、没拿到任务号（断电、ssh 超时）时，下次按标签和创建时间找回
                 rec = C.new_record(host, t["label"], t["step"], t["key"], group=t["group"])
-                cmd = refill.then_check(t["cmd"], t["label"])
+                cmd = refill.then_check(wrap(t["cmd"], t["label"]), t["label"])
                 tid = q(host, f"{t['group']} -p{' --stashed' if h else ''} --label {shlex.quote(t['label'])} -- {shlex.quote(cmd)}")
                 C.set_record_id(rec, tid)
                 done.append(f"{t['label']}（任务 {tid}{note}）")
@@ -529,10 +554,19 @@ def run(s, dry=False, q=None, tq=None, rm=None):
         else:
             done.append(f"会排 {t['label']}{note}")
             lines.append(f"会排 {t['label']}（{t['group']} 组{note}）：{t['cmd']}")
-    lines += [f"没排 {x}" for x in NOTES]
+    lines += [f"没排 {x}" for x in notes]
+    if SHADOW:
+        lines.append(f"引擎影子：{SHADOW[0]} 项一样，{SHADOW[1]} 项不一样")
     if not dry:
         log(lines, stuck, live_mode)
     return done, stuck
+
+
+def wrap(cmd, label):
+    """envs/policy.py 的 AUTO["run"] 开着时，box 上的步骤由 taskq run 包一层（记台账、查没声明的写、写心跳，flow/run.py）。"""
+    if not P.AUTO.get("run"):
+        return cmd
+    return f"{shlex.quote(os.path.join(CORE, 'bin', 'taskq'))} run {shlex.quote(label)} -- {shlex.quote(cmd)}"
 
 
 def log(lines, stuck, live_mode):

@@ -268,6 +268,24 @@ for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "
     ENV["TASKQ_GPU_PAD_" + _k] = ("tune", "gpu_pad.py 的参数，默认值在它的命令行")
 
 
+# ---------------- 台账（flow/ledger.py，11/5） ----------------
+LEDGER_DB = "ledger.db"            # 在状态文件夹下
+LEDGER_SHADOW = "shadow"           # 影子对比的记录：<状态文件夹>/shadow/ledger-<日期>.jsonl
+A_QUEUED, A_RUNNING, A_OK, A_FAILED, A_STALLED, A_BLOCKED, A_LEGACY, A_ADOPTED = (
+    "queued", "running", "ok", "failed", "stalled", "publish_blocked", "legacy", "adopted")
+A_DONE = (A_OK, A_LEGACY, A_ADOPTED)  # 算做完的尝试
+O_LIVE, O_RETIRED, O_SUPERSEDED = "live", "retired", "superseded"
+ALERTS["ledger"] = ("sub",)  # 台账的影子对比出错
+ALERTS["engine"] = ("sub",)  # 引擎（flow/engine.py）的影子对比出错
+RUNS = "runs"              # 状态文件夹下：taskq run 在跑的尝试的心跳（<实例>.json）
+RUN_BEAT = 60              # taskq run 多久写一次心跳
+STALL_IDLE = 30 * 60       # CPU 时间和产出都这么久没长 → 卡住
+ALERTS["stall"] = ("inst",)  # hub 上 taskq run 包着的步骤卡住
+ALERTS["undeclared"] = ("inst",)  # 步骤写到了声明的产出以外
+ENV["TASKQ_STALL_IDLE"] = ("test", "代替 STALL_IDLE")
+ENV["TASKQ_RUN_BEAT"] = ("test", "代替 RUN_BEAT")
+ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")
+
 # ---------------- 给 bash ----------------
 def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_PREFIX": STAGE_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
