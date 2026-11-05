@@ -404,11 +404,15 @@ def test_plan():
     assert ops(acts) == [("rstop", K)], acts
     acts, _ = relay.plan(S0([mtask(K, "done", worker=None)]), NAME, RS(rtask(A, "stopped")), st)
     assert ops(acts) == [("drop", K)], acts
+    acts, _ = relay.plan(S0([mtask(K, "free", worker=None)]), NAME, RS(rtask(A, "stopped")), st)
+    assert ops(acts) == [("drop", K)], acts
+    acts, _ = relay.plan(S0([mtask(K, "free", worker=None)]), NAME, RS(rtask(A, "stopped"), tasks={A: dict(final=False, resumable=True)}), st)
+    assert ops(acts) == [], acts
     acts, stuck = relay.plan(S0([]), NAME, RS(rtask("D999_zz/tr/0", "free")), st)
     assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:D999_zz/tr/0"], stuck
     acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [] and list(stuck) == [f"site:{NAME}:orphan:{K}"], stuck
-    ok("那边有、总队列里不归它的：不让它训；总队列训完了就删；认不出的、在训的报 site:<名字>:orphan")
+    ok("那边有、总队列里不归它的：不让它训；总队列训完了、或恢复了没分给谁且那边没进度就删；认不出的、在训的报 site:<名字>:orphan")
 
     acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")]), NAME, RS(rtask(A, "free")), st)
     assert ops(acts) == [("unq", K)] and acts[0]["to"] == "other" and not stuck, acts

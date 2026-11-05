@@ -399,6 +399,8 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="unq", key=real, rkey=a["key"], to=m["worker"]))
         elif a["state"] != "stopped":
             acts.append(dict(op="rstop", key=real, rkey=a["key"]))
+        elif m["state"] != proto.S_STOPPED and not m.get("worker") and not progress(tasks.get(a["key"])):
+            acts.append(dict(op="drop", key=real, rkey=a["key"]))  # 总队列里恢复了、没分给谁，那边停着的没进度 → 删（11/5）
     for real, k in keys.items():  # 那边队列里已经删了（unq）、只剩结果的任务：总队列里训完了再删结果
         m = mt.get(real)
         if real not in mk and real not in rt and (k.get("dropped") or k.get("unq") and (m is None or m["state"] == "done")):
