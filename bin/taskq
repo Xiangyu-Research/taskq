@@ -312,6 +312,7 @@ TREE = {
     "adopt": Cmd("台账：现在做完的记成 adopted（只 stat）", py("flow.cli", "adopt", prog="taskq"), own_help=True),
     "verify": Cmd("台账：做完的产出现在还对不对", py("flow.cli", "verify", prog="taskq"), own_help=True),
     "accept": Cmd("台账：有意改过的产出按现在的样子重新记下", py("flow.cli", "accept", prog="taskq"), own_help=True),
+    "publish": Cmd("处理被冲突挡住的发布、接着做断了的发布", py("flow.cli", "publish", prog="taskq"), own_help=True),
     "check": Cmd("核对整个项目（配置、插件、实验表、所有任务）", py("check", prog="taskq check"), own_help=True),
     "path": Cmd("核心的位置：lib / api（queue/）、core（根）", cmd_path, "lib|api|core", project=False),
     "machines": Cmd("机器表（get、names、activate、show…）", cmd_machines, own_help=True),
@@ -341,7 +342,7 @@ TREE = {
 SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
             ("调度", ["tick", "plan", "boot"]),
             ("执行机和实验", ["site", "exp"]),
-            ("流程和台账", ["who", "dag", "adopt", "verify", "accept"]),
+            ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
             ("其他", ["tunnel", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
 
 

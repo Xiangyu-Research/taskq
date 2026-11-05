@@ -125,14 +125,14 @@ def record(db, i, state, source, root, note=None, t=None, **meta):
 
 
 def begin(db, i, t=None, **meta):
-    """taskq run 开始：记一次 running 的尝试 → 尝试号。"""
+    """taskq run（或发布）开始：记一次 running 的尝试 → 尝试号。"""
     t = t or time.time()
     db.execute("BEGIN IMMEDIATE")
     try:
         db.execute("INSERT OR IGNORE INTO instance VALUES(?,?,?,?,?)", (i.id, i.rule, i.key, i.exp, t))
         aid = db.execute("INSERT INTO attempt(inst,state,place,machine,ref,code,bundle,start,source,note) VALUES(?,?,?,?,?,?,?,?,?,?)",
                          (i.id, PR.A_RUNNING, meta.get("place"), meta.get("machine"), meta.get("ref"), meta.get("code"),
-                          meta.get("bundle"), t, "run", meta.get("note"))).lastrowid
+                          meta.get("bundle"), t, meta.get("source") or "run", meta.get("note"))).lastrowid
         db.execute("COMMIT")
     except BaseException:
         db.execute("ROLLBACK")
@@ -140,11 +140,14 @@ def begin(db, i, t=None, **meta):
     return aid
 
 
-def finish(db, aid, i, state, root, files=(), note=None, t=None):
-    """taskq run 结束：尝试改成 state；做完的记产出（标志、声明的产出，加上这次实际写了的文件 files，相对数据目录）。"""
+def finish(db, aid, i, state, root, files=(), note=None, t=None, retire=()):
+    """taskq run 结束：尝试改成 state；做完的记产出（标志、声明的产出，加上这次实际写了的文件 files，相对数据目录）。
+    retire：发布时归档了的路径（相对数据目录），同一个事务里改成 retired。"""
     t = t or time.time()
     db.execute("BEGIN IMMEDIATE")
     try:
+        for g in retire:
+            db.execute("UPDATE output SET state=? WHERE path=? AND state=?", (PR.O_RETIRED, g, PR.O_LIVE))
         db.execute("UPDATE attempt SET state=?, end=?, note=coalesce(?, note) WHERE id=?", (state, t, note, aid))
         if state in PR.A_DONE:
             db.execute("UPDATE output SET state=? WHERE inst=? AND state=?", (PR.O_SUPERSEDED, i.id, PR.O_LIVE))
