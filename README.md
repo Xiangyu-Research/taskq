@@ -41,6 +41,7 @@ plugins = ["plugins"]  # 插件文件夹，可以有几个
 | `taskq plan` | 只看：按时段开关、送任务、训完以后这一轮会做什么 | `shift.py --dry-run`、`feed.py`、`relay.py`、`advance.py` |
 | `taskq boot [--gpu-log]` | 开机：启动 pueued、放回被打断的任务 | `queue/on_boot.sh` |
 | `taskq notice set <名字> [文字…]`、`notice clear <名字>…`、`notice list [--json]` | 挂在健康检查上的提醒：每条报一个问题 `notice:<名字>`（进"需要处理"、推送一次），撤掉后消失 | `monitor/notice.py` |
+| `taskq notice ack <问题编号或前缀>…` | 确认健康检查报的"发生过的事"（如 `boot:<机器>` 重启），之后不再列出；一直存在的问题确认不掉，问题消失后确认记录跟着删 | `monitor/notice.py` |
 | **执行机** | | |
 | `taskq site status\|bundle\|resend <名字>` | 那边的队列；打包推过去；重新解析传过去的任务 | `relay.py status\|bundle\|resend` |
 | `taskq site env <机器> <环境> [-n]`、`taskq site envs <机器>` | 建环境；看环境的状态 | `sites/envs_cli.py`（11/4 前叫 `sites/site.py`） |

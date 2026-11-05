@@ -257,6 +257,23 @@ ok("gather：撤掉以后没有了", H.gather(remote=False)["notices"] == {})
 H.sh, H.run_on, H.spec.remote_collect, H.spec.collect = saved
 H.H_NOTICES = _keep
 
+# taskq notice ack（11/5）：只确认 kind=event 的问题；确认过的不再列出；问题消失后确认记录跟着删
+_hd = os.path.dirname(_nd)
+json.dump({"problems": {"boot:hub:2026-11-05 13:52:30": {"msg": "x", "kind": "event"}, "disk:hub": {"msg": "y", "kind": "state"}}},
+          open(os.path.join(_hd, "state.json"), "w"))
+ra, rb, rc_ = tqn("ack", "boot:hub"), tqn("ack", "disk:hub"), tqn("ack", "nosuch")
+_ak = json.load(open(os.path.join(_hd, H.proto.ACKED)))
+ok("notice ack：前缀认出发生过的事并记下；一直存在的问题、没有的问题不确认（退出码 1）",
+   ra.returncode == 0 and list(_ak) == ["boot:hub:2026-11-05 13:52:30"] and rb.returncode == 1 and "不是" in rb.stderr
+   and rc_.returncode == 1 and "没有这个问题" in rc_.stderr)
+_kp = NT.acked_path
+NT.acked_path = lambda: os.path.join(_hd, H.proto.ACKED)
+_P = {"boot:hub:2026-11-05 13:52:30": H.problem("x", kind="event"), "disk:hub": H.problem("y")}
+ok("drop_acked：确认过的发生过的事去掉，别的照常", list(H.drop_acked(dict(_P))) == ["disk:hub"])
+H.drop_acked({"disk:hub": H.problem("y")})
+ok("drop_acked：问题消失后确认记录删掉", json.load(open(NT.acked_path())) == {})
+NT.acked_path = _kp
+
 s = snap()
 s["probe"]["pueue-host"]["DISK"] = str(int(10e9))
 s["probe"]["hub"]["DISK"] = str(int(50e9))

@@ -317,6 +317,17 @@ def check(s):
 
 
 # ---------------- 推送和状态 ----------------
+def drop_acked(P, dry=False):
+    """taskq notice ack 确认过的"发生过的事"不再列出；确认记录里已经不在 P 里的删掉（11/5）。"""
+    d = NT.acked()
+    if not d:
+        return P
+    keep = {k: v for k, v in d.items() if k in P}
+    if keep != d and not dry:
+        NT.save_acked(keep)
+    return {k: p for k, p in P.items() if not (k in keep and p.get("kind") == "event")}
+
+
 def night(now):
     return now.hour >= NIGHT[0] or now.hour < NIGHT[1]
 
@@ -474,6 +485,7 @@ def main(argv=None):
         stuck2[alert_id("stall", "error")] = f"卡住检测出错：{type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
+    P = drop_acked(P, dry=a.dry_run)
     update(P, s["now"], dry=a.dry_run)
     if a.dry_run:
         for pid, p in sorted(P.items()):

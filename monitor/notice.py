@@ -5,6 +5,8 @@
     taskq notice set <名字> [文字…]     挂上或改文字（不给文字时从标准输入读）
     taskq notice clear <名字>…          撤掉（没有的不算错）
     taskq notice list [--json]           挂着的；--json：一行 JSON（proto.NOTICE_TOP，每条 proto.NOTICE_FIELDS）
+    taskq notice ack <问题编号或前缀>…    确认健康检查报的"发生过的事"（如 boot:<机器>，kind=event），之后不再列出；
+                                         一直存在的问题（盘满、连不上）确认不掉。记在状态文件夹下 proto.ACKED
 名字只能用字母、数字、_、-。
 """
 import argparse
@@ -23,6 +25,48 @@ import proto  # noqa: E402
 def notices_dir():
     """健康检查的状态文件夹（policy.py 的 OUTPUTS["health"]，没写时状态文件夹下的 health）下的 notices/。"""
     return os.path.join(os.path.expanduser(cfg.outputs("health") or cfg.state("health", expand=False)), proto.NOTICES)
+
+
+def acked_path():
+    return os.path.join(os.path.dirname(notices_dir()), proto.ACKED)
+
+
+def acked():
+    """→ {问题编号: 确认的时间}；没有 → {}。"""
+    try:
+        return json.load(open(acked_path(), encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_acked(d):
+    p = acked_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def ack(prefixes):
+    """健康检查上次记下的问题里，编号以 prefixes 之一开头、kind=event 的 → 记成确认过。→ (确认的, 认不出或不能确认的)。"""
+    try:
+        probs = json.load(open(os.path.join(os.path.dirname(notices_dir()), "state.json"), encoding="utf-8")).get("problems", {})
+    except (FileNotFoundError, ValueError):
+        probs = {}
+    d, got, bad = acked(), [], []
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    for pre in prefixes:
+        hit = [k for k in probs if k.startswith(pre)]
+        ev = [k for k in hit if probs[k].get("kind") == "event"]
+        if not ev:
+            bad.append(pre + ("（不是\"发生过的事\"，问题解决后自己消失）" if hit else "（健康检查没有这个问题）"))
+        for k in ev:
+            d[k] = now
+            got.append(k)
+    if got:
+        save_acked(d)
+    return got, bad
 
 
 def valid(name):
@@ -78,6 +122,8 @@ def main(argv):
     p.add_argument("text", nargs="*", help="提醒的文字（不给时从标准输入读）")
     p = sub.add_parser("clear", help="撤掉")
     p.add_argument("names", nargs="+")
+    p = sub.add_parser("ack", help="确认健康检查报的\"发生过的事\"（如重启），之后不再列出")
+    p.add_argument("ids", nargs="+", metavar="问题编号", help="编号或前缀（如 boot:box）")
     p = sub.add_parser("list", help="挂着的")
     p.add_argument("--json", action="store_true", help="一行 JSON（proto.NOTICE_TOP、NOTICE_FIELDS）")
     a = ap.parse_args(argv)
@@ -95,6 +141,13 @@ def main(argv):
         put(a.name, text)
         print(f"挂上了 {a.name}：{text}")
         return 0
+    if a.cmd == "ack":
+        got, bad = ack(a.ids)
+        for k in got:
+            print(f"确认了 {k}（下一轮健康检查起不再列出）")
+        for b in bad:
+            print(f"没确认 {b}", file=sys.stderr)
+        return 0 if got else 1
     if a.cmd == "clear":
         for n in a.names:
             print(f"撤掉了 {n}" if drop(n) else f"没有挂着 {n}")

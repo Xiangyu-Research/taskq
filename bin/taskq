@@ -290,6 +290,7 @@ TREE = {
         "set": Cmd("挂上或改文字（<名字> [文字…]；不给文字时读标准输入）", py("notice", "set", prog="taskq notice"), own_help=True),
         "clear": Cmd("撤掉（<名字>…）", py("notice", "clear", prog="taskq notice"), own_help=True),
         "list": Cmd("挂着的（[--json]）", py("notice", "list", prog="taskq notice"), own_help=True),
+        "ack": Cmd("确认健康检查报的\"发生过的事\"（如重启；<问题编号或前缀>…），之后不再列出", py("notice", "ack", prog="taskq notice"), own_help=True),
     }),
     "smoke": Group("冒烟闸门：一种任务第一次送到一台执行机前先跑冒烟", {
         "status": Cmd("各台的记录（[执行机] [--json]）", py("smoke_gate", "status", prog="taskq smoke"), own_help=True),
