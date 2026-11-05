@@ -1,0 +1,5 @@
+#!/bin/bash
+# 测试里的 ssh、scp（fixture.use()、fixture.sh 放在 PATH 里真的 ssh 前面）：测试不连真的机器，马上失败（同连不上，255）。
+# 测试要用假的 ssh 时自己放在 PATH 更前面，或设 RELAY_SSH、TUNNEL_SSH。
+echo "测试里不连真的机器：$(basename "$0") $*" >&2
+exit 255

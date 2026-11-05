@@ -95,12 +95,12 @@ _run = _sp.run
 seen = []
 _sp.run = lambda cmd, **kw: (seen.append((cmd, kw.get("timeout"))), _run(["true"]))[1]
 try:
-    C.run("cat ~/x | wc -l", "dicc", timeout=120)
+    C.run("cat ~/x | wc -l", "fake-dicc", timeout=120)
 finally:
     _sp.run = _run
 cmd, to = seen[0]
 ok("run：给了 host → 那边用 timeout -k 包住、比本机早 15 秒，命令原样交给 bash -c", cmd[-1] == "timeout -k 10 105 bash -c 'cat ~/x | wc -l'"
-   and cmd[-2] == "dicc" and to == 120)
+   and cmd[-2] == "fake-dicc" and to == 120)
 ok("run：本机的不套", C.run("echo hi")[1] == "hi\n")
 
 # backup_down：备份机暂停检查或这次连不上 → 说明（relay.py 据此先不排归档，11/1）

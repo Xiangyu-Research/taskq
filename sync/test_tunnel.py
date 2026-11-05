@@ -208,7 +208,7 @@ ok("替身推送：那边的暂存目录删了", not [d for d in os.listdir(os.p
 
 r = run("rsync", "-rltR", bsrc + "/./final.ckpt", "plainhost:st/arch3/")
 ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/final.ckpt")))
-r = run("rsync", "-rlt", "lab:x/", os.path.join(T, "lab/"))
+r = run("rsync", "-rlt", "fake-lab:x/", os.path.join(T, "lab/"))
 ok("不走隧道的机器（lab）：直接 rsync", "经隧道" not in r.stdout)
 
 wd, fbin = os.path.join(T, "wd"), os.path.join(T, "fbin")
@@ -227,9 +227,9 @@ ok("状态：查完 done 之后、查进程之前刚写完 done 退出 → done�
 sys.path.insert(0, HERE)
 import tunnel  # noqa: E402
 ok("执行机按名字查（lab1、lab0 的 ssh 相同）：给 site 时拿到那一台；不给时按 ssh 找第一台；不是执行机 → None",
-   tunnel.relay_of("lab", site="lab0") is tunnel.machines().RELAY["lab0"]
-   and tunnel.relay_of("lab", site="lab1") is tunnel.machines().RELAY["lab1"]
-   and tunnel.relay_of("lab") is not None and tunnel.relay_of(HOST) is None)
+   tunnel.relay_of("fake-lab", site="lab0") is tunnel.machines().RELAY["lab0"]
+   and tunnel.relay_of("fake-lab", site="lab1") is tunnel.machines().RELAY["lab1"]
+   and tunnel.relay_of("fake-lab") is not None and tunnel.relay_of(HOST) is None)
 
 # 不同机器同时传、同一台排队、服务挂了照常（假的 ssh 每条命令慢 0.5 秒，一次传输要几秒）
 SLOW = dict(ENV, TUNNEL_TEST_SSH_SLEEP="0.5")

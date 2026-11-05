@@ -191,7 +191,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `sites/slurm.py`、`pueue.py`、`remote.py` | 调度器适配器：读作业数 / worker、交 worker 作业 / 开 worker；根目录的 shell 写法（`relay.py` 用） |
 | `test_*.py`、`test_*.sh` | 测试（假训练、假队列、假快照，不连机器、不用 GPU；`test_gpu_pad_integration.sh` 用 box 的真卡）。`test_taskq.py` 的"worker 的调用方式"一组和 `test_dicc_worker.sh` 守着在跑的 worker 用的接口（停止、失败在 `test_dicc_worker_stop.sh`，不在 Slurm 里的和代码包在 `test_dicc_worker_code.sh`，共用 `testdata/worker_harness.sh`；`WORKER_TEST_ONLY` 只跑几个情况）。核心的测试不读 `envs/`、`research/`，用 `testdata/` 的固定配置（11/2）；关于真的实验表、nnU-Net 插件、机器表和环境描述的检查在 `research/common/taskq_plugins/tests/` |
 | `run_tests.py` | 跑全部测试（`taskq self test`，见根目录 `README.md` 的"测试"）：每个文件自己的临时 HOME、短 TMPDIR，`# 要真卡` 的只在 `--gpu` 时跑，退出码 77 算跳过；`test_example.py` 跑示例项目 `example/` 的 README 里的命令 |
-| `testdata/` | 测试用的固定配置：`config/`（机器表、`policy.py`、环境描述，机器名同真的）、`plugins/`（`toy` 做法、中继插件、进度读法）、`exps/demo/experiments.py`（小实验表，步骤的写法同真的）、`bin/`（假的训练和步骤脚本）、假的 conda 和 venv；`fixture.py` / `fixture.sh` 设 `TASKQ_CONFIG`、`TASKQ_PLUGINS` |
+| `testdata/` | 测试用的固定配置：`config/`（机器表、`policy.py`、环境描述，机器名同真的，ssh 名字是假的 `fake-…`）、`plugins/`（`toy` 做法、中继插件、进度读法）、`exps/demo/experiments.py`（小实验表，步骤的写法同真的）、`bin/`（假的训练和步骤脚本）、假的 conda 和 venv；`fixture.py` / `fixture.sh` 设 `TASKQ_CONFIG`、`TASKQ_PLUGINS`，并在 PATH 里真的 ssh 前面放 `noremote/`（`ssh`、`scp` 马上失败，测试连不到真的机器） |
 
 ## 命令行（`bin/taskq`，11/4）
 

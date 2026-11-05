@@ -213,7 +213,7 @@ def setup():
     rc, out = pq("group", "add", "gpu1")
     assert rc == 0, out
     # 进程里换掉 lab1 的条目（不改机器表）
-    conf = dict(M.SITES[NAME], root=RROOT, ssh="lab", adopt=None, budget=(0, 0), transfer_job=None, **ENTRY)
+    conf = dict(M.SITES[NAME], root=RROOT, ssh="fake-lab", adopt=None, budget=(0, 0), transfer_job=None, **ENTRY)
     M.SITES[NAME] = conf
     M.RELAY[NAME] = conf
     P.AUTO[NAME] = True
@@ -492,7 +492,7 @@ def step_shift():
     assert rc == 0, out
     pq("pause", "-g", "gpu0")
     e0 = dict(ENTRY, groups={"gpu0": (1, None, {})}, worker=dict(group="gpu0", id="wtest0"), env_root=RLINK0 + "/envs")
-    c0 = dict(M.SITES[NAME0], root=RLINK0, ssh="lab", adopt=[NAME], budget=(0, 0), transfer_job=None, **e0)
+    c0 = dict(M.SITES[NAME0], root=RLINK0, ssh="fake-lab", adopt=[NAME], budget=(0, 0), transfer_job=None, **e0)
     M.SITES[NAME0] = M.RELAY[NAME0] = c0
     RM.conf(NAME).update(adopt=[NAME0], budget=(0, 0))
     relay.VIEW_KEEP_S = 3600
