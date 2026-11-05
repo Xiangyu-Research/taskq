@@ -6,7 +6,6 @@ import re
 import shlex
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -97,7 +96,7 @@ def main():
         and M.kinds("dicc2") == ("gpu",) and M.worker_of("dicc1", "cpu") == dict(kind="cpu") and M.worker_of("lab0", "cpu") is None
     ok("machines.kinds / worker_of：pueue 看 worker、cpu_worker，Slurm 看 jobs")
 
-    home = tempfile.mkdtemp()
+    home = fixture.tmpdir()
     for root, shown in ((os.path.join(home, "r o'ot"), None), (os.path.join(home, "a b"), "~/a b")):
         code = os.path.join(root, "code", "v1", QR)
         os.makedirs(code)

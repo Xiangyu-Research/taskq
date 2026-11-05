@@ -186,6 +186,10 @@ def task_names(t, data, python):
     return dict(t["spec"]["names"], exp=e.get("exp", ""), id=t["exp"], data=data, python=python)
 
 
+class NotFound(spec.SpecError):
+    """实验表里没有（命令行退出码 proto.EXIT["gone"]）。"""
+
+
 def _task_of(model_dir):
     """模型文件夹（放在哪里都行）→ 实验表里训它的第一个任务（做法插件的 model_of 钩子给出 model 参数）；表里没有 → None。"""
     if "model_of" not in R.HOOKS:
@@ -198,7 +202,7 @@ def env_of(model_dir):
     """模型文件夹 → 实验表里训它用的环境；表里没有时报 SpecError（实验表以外的模型由调用的一方设 MODEL_ENV）。"""
     t = _task_of(model_dir)
     if t is None:
-        raise spec.SpecError(f"实验表里没有训这个模型的实验：{model_dir}（实验表以外的模型设 MODEL_ENV）")
+        raise NotFound(f"实验表里没有训这个模型的实验：{model_dir}（实验表以外的模型设 MODEL_ENV）")
     return spec.envs_of(t["spec"])[0]
 
 
@@ -213,7 +217,7 @@ def names_of(model_dir, *names):
     表里没有这个模型时报 SpecError：不按名字猜。"""
     e = experiment_of(model_dir)
     if e is None:
-        raise spec.SpecError(f"实验表里没有训这个模型的实验：{model_dir}")
+        raise NotFound(f"实验表里没有训这个模型的实验：{model_dir}")
     return [str((e.get("names") or {}).get(n, "")) for n in names]
 
 
@@ -245,28 +249,29 @@ def _line(obj):
 
 
 def main(argv):
-    """env-of、name-of（执行机上的脚本用，输出不变）；list、tasks（--json 一行 JSON，字段见 proto.EXP_*）。"""
+    """env-of、name-of（执行机上的脚本用，输出不变）；list、tasks（--json 一行 JSON，字段见 proto.EXP_*）。
+    退出码：0，1 出错，2 用法错，实验表里没有 proto.EXIT["gone"]。"""
     import argparse
     import proto
+    prog = os.path.basename(sys.argv[0])  # experiments.py，或 taskq exp
+
+    def fail(err):
+        print(err, file=sys.stderr)
+        return proto.EXIT["gone"] if isinstance(err, NotFound) else 1
     if argv[:1] == ["env-of"] or argv[:1] == ["name-of"]:
-        if argv[0] == "env-of" and len(argv) == 2:
-            try:
+        try:
+            if argv[0] == "env-of" and len(argv) == 2:
                 print(env_of(argv[1]))
-            except spec.SpecError as err:
-                print(err, file=sys.stderr)
-                return 1
-            return 0
-        if argv[0] == "name-of" and len(argv) >= 3:
-            try:
+                return 0
+            if argv[0] == "name-of" and len(argv) >= 3:
                 print("\n".join(names_of(argv[1], *argv[2:])))
-            except spec.SpecError as err:
-                print(err, file=sys.stderr)
-                return 1
-            return 0
-        print(USAGE, file=sys.stderr)
+                return 0
+        except spec.SpecError as err:
+            return fail(err)
+        print(USAGE.replace("experiments.py", prog), file=sys.stderr)
         return 2
-    ap = argparse.ArgumentParser(description="实验表（OUTPUTS[\"experiments\"]）",
-                                 epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog=prog, description="实验表（OUTPUTS[\"experiments\"]）",
+                                 epilog=USAGE.replace("experiments.py", prog), formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("list", help="实验表的条目")
     p.add_argument("--json", action="store_true", help="一行 JSON（proto.EXP_LIST_TOP）")
@@ -289,8 +294,7 @@ def main(argv):
         want = a.exp or []
         bad = [x for x in want if experiment(x) is None]
         if bad:
-            print(f"实验表里没有 {'、'.join(bad)}", file=sys.stderr)
-            return 1
+            raise NotFound(f"实验表里没有 {'、'.join(bad)}")
         ts = [t for t in tasks().values() if not want or t["exp"] in want]
         if a.json:
             _line(dict(version=proto.VERSION, tasks=[task_json(t) for t in ts]))
@@ -299,8 +303,7 @@ def main(argv):
                 print(f"{t['key']}\t{t['exp']}\t{label(experiment(t['exp']), t)}")
         return 0
     except spec.SpecError as err:
-        print(err, file=sys.stderr)
-        return 1
+        return fail(err)
 
 
 USAGE = """用法：experiments.py env-of <模型文件夹>

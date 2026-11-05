@@ -5,6 +5,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
+trap 'rm -rf "${T:?}"' EXIT
 export TASKQ_DATA=$T RUN_TASK_POLL=1 TASK_JOBTAG=test-1
 unset TASK_PART
 unset CUDA_VISIBLE_DEVICES SLURM_JOB_ID
@@ -165,5 +166,4 @@ check "任务的环境：TASKQ_LIB、PATH 前面是核心的 bin/" "(( rc == 0 )
 
 TASK_PART=2 $R command key=toy/o2 'cmd=touch $TASKQ_DATA/toy/o2/DONE' env=base out=toy/o2 'done=["DONE"]' > /dev/null; rc=$?
 check "新 worker：TASK_PART=2 → 日志 _part2.log，第一行记第 2 段" "(( rc == 0 )) && head -1 $T/logs/tasks/toy__o2__test-1_part2.log | grep -q '第 2 段'"
-rm -rf "$T"
 (( ok )) && echo "全部通过" || { echo "有失败"; exit 1; }

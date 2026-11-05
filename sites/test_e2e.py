@@ -30,7 +30,7 @@ REPO = cfg.REPO  # 使用者的仓库根
 PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
 PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
 
-T = tempfile.mkdtemp(prefix="e2e_", dir=os.environ.get("E2E_TMP") or None)
+T = fixture.tmpdir(prefix="e2e_", dir=os.environ.get("E2E_TMP") or None)
 BD = os.path.join(T, "box")        # box 的数据目录
 # 执行机的根目录：实际在 T/r，经系统临时目录里的一个软链接用（根目录经软链接到达的情况也测到；结束时删掉）
 os.makedirs(os.path.join(T, "r"))
@@ -58,6 +58,7 @@ os.environ.update(
     RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="0.1",
     TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"),
     RELAY_LOG=os.path.join(T, "relay.log"), PATH=BIN + ":" + os.environ["PATH"],
+    TMPDIR=T,  # 被停掉的 worker 留下的临时文件跟着 T 删
     # worker（dicc_worker.sh）、run_task.sh 的测试用开关：等得短一些
     TASKQ_POLL="1", TASKQ_IDLE_POLL="1", TASKQ_PATIENCE="0", TASKQ_IDLE_EXIT="6", TASKQ_STOP_POLL="1", TASKQ_STOP_WAIT="5",
     TASKQ_HEAD_CMD="echo same", RUN_TASK_POLL="1")

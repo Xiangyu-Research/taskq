@@ -7,20 +7,19 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
-T = tempfile.mkdtemp()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+T = fixture.tmpdir()
 TQ, DATA = os.path.join(T, "taskq"), os.path.join(T, "data")
 RES = os.path.join(DATA, "results")
 ENV = dict(os.environ, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MACHINE="dicc")  # 测试里本机当队列所在的机器
 ENV.pop("DEMO_RESULTS", None)
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, "testdata"))
-import fixture  # noqa: E402
 fixture.use()
 ENV.update(TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS)
 os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # 本进程里等锁的重试间隔（try_lock 预期拿不到的几项）
@@ -41,7 +40,7 @@ def check(name, cond):
 
 def tq(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=ENV, capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()  # 消息在 stderr
 
 
 def part(ds, tr, f):
@@ -195,7 +194,7 @@ ENV2 = dict(ENV, TASKQ_DIR=TQ2)
 
 def tq2(*args, env=None):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=env or ENV2, capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()  # 消息在 stderr
 
 
 os.makedirs(TQ2)
@@ -345,13 +344,13 @@ check("add --exp --only：从实验表展开、记下实验 id", rc == 0 and [t[
       ["D111_beta/V_save_n470/1", "D111_beta/V_save_n470/2"] and ts[0]["exp"] == "t15b")
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=stats", "out=toy/a", 'done=["DONE"]')
 check("add --recipe：实验表以外的任务", rc == 0 and "toy/a" in out and "环境 stats" in out)
-rc, out, _ = tq3("add", "--nice", "5", "--recipe", "toy", "ds=D101_alpha", "frag=0", "variantt=x")
-check("add --recipe：写错参数名报错、不加", rc == 2 and "variantt" in out and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
-rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy__a", "cmd=python3 -c 1", "env=stats", "out=toy/a2", 'done=["DONE"]')
-check("add：转成文件名和已有任务重名（toy/a 与 toy__a）→ 报错、不加", rc == 2 and "文件名" in out
+rc, out, err = tq3("add", "--nice", "5", "--recipe", "toy", "ds=D101_alpha", "frag=0", "variantt=x")
+check("add --recipe：写错参数名报错、不加", rc == 2 and "variantt" in err and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
+rc, out, err = tq3("add", "--nice", "5", "--recipe", "command", "key=toy__a", "cmd=python3 -c 1", "env=stats", "out=toy/a2", 'done=["DONE"]')
+check("add：转成文件名和已有任务重名（toy/a 与 toy__a）→ 报错、不加", rc == 2 and "文件名" in err
       and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=stats", "out=toy/a", 'done=["DONE"]')
-rc2, out2, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 2", "env=stats", "out=toy/a", 'done=["DONE"]')
+rc2, _, out2 = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 2", "env=stats", "out=toy/a", 'done=["DONE"]')
 check("add --recipe 同名：说明一样 → 跳过；说明不一样 → 报出来、退出码 2、不改原来的",
       rc == 0 and "已有，跳过" in out and rc2 == 2 and "说明不一样" in out2
       and next(x for x in taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl")) if x["key"] == "toy/a")["params"]["cmd"] == "python3 -c 1")
@@ -484,7 +483,7 @@ os.makedirs(D5, exist_ok=True)
 def tq5(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ5, TASKQ_DATA=D5),
                        capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()  # 消息在 stderr
 
 
 rc, out = tq5("next", "--worker", "900", "--envs", ALL)
@@ -526,7 +525,7 @@ with open(os.path.join(TQ6, "tasks.jsonl"), "w") as f:
 def tq6(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ6, TASKQ_DATA=DATA),
                        capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 def st6():
@@ -587,7 +586,7 @@ with open(os.path.join(TQ7, "tasks.jsonl"), "w") as f:
 def tq7(*args, env=None, stdin=None):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ7, TASKQ_DATA=DATA, **(env or {})),
                        capture_output=True, text=True, input=stdin)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 def st7(d=TQ7):
@@ -632,7 +631,7 @@ with open(os.path.join(EQ, "tasks.jsonl"), "w") as f:
 def tqe(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=EQ, TASKQ_DATA=DATA),
                        capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 rc, out = tqe("next", "--worker", "963", "--envs", ALL)
@@ -677,14 +676,14 @@ rc, out, _ = tqf("add", "--nice", "7", "--file", fn)
 tf = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))}
 check("add --file：一列任务单、--nice 优先", rc == 0 and tf["guest/alice/b"]["nice"] == 7 and tf["guest/alice/c"]["nice"] == 7)
 json.dump(dict(sheet, key="guest/alice/d", res=dict(gpu=1)), open(fn, "w"))
-rc, out, _ = tqf("add", "--file", fn)
-check("add --file：res 写错字段报错、不加", rc == 2 and "res" in out and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
+rc, _, err = tqf("add", "--file", fn)
+check("add --file：res 写错字段报错、不加", rc == 2 and "res" in err and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
 json.dump(dict(sheet, key="guest/alice/e", nice=None), open(fn, "w"))
 rc, out, err = tqf("add", "--file", fn)
 check("add --file：单子和命令行都没有档位 → 报错、不加", rc != 0 and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
 open(fn, "w").write("{oops")
-rc, out, _ = tqf("add", "--nice", "1", "--file", fn)
-check("add --file：不是 JSON → 报错", rc == 2 and "任务单" in out)
+rc, _, err = tqf("add", "--nice", "1", "--file", fn)
+check("add --file：不是 JSON → 报错", rc == 2 and "任务单" in err)
 
 # ---------------- 11/3：锁、take --assign、旧 token 交还、after 的顺序 ----------------
 TQR = os.path.join(T, "taskqr")
@@ -694,7 +693,7 @@ os.makedirs(TQR)
 def tqr(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQR, TASKQ_DATA=DATA),
                        capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 def strl():
@@ -895,9 +894,9 @@ rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", "--update-only",
                 stdin=json.dumps([dict(sp_a, cmd="python3 -c 3"), S.sendable(S.resolve("command", dict(key="gone/x", cmd="true", env="stats", out="gone/x", done="D")))]))
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
 check("add --update-only：只换已有的说明，不在队列里的不加", rc == 0 and "gone/x" not in ts and ts["sp/a"]["spec"]["cmd"] == "python3 -c 3")
-rc, out, _ = tqs("set", sp_b["key"], "env=alt2")
+rc, _, err = tqs("set", sp_b["key"], "env=alt2")
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("set：box 送来的说明不改（改总队列再 resend，11/4）", rc == 2 and "resend" in out and ts[sp_b["key"]]["spec"] == sp_b
+check("set：box 送来的说明不改（改总队列再 resend，11/4）", rc == 2 and "resend" in err and ts[sp_b["key"]]["spec"] == sp_b
       and "env" not in ts[sp_b["key"]]["params"])
 rc, out, _ = tqs("show", "sp/a")
 check("show：带说明的显示 run_task.sh --spec", rc == 0 and "run_task.sh --spec" in out)
@@ -911,7 +910,7 @@ open(os.path.join(TQX, "tasks.jsonl"), "w").close()
 def tqx(*args, stdin=None):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQX, TASKQ_DATA=DATA),
                        capture_output=True, text=True, input=stdin)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 def sx():
@@ -997,7 +996,7 @@ open(os.path.join(TQL, "tasks.jsonl"), "w").close()
 def tql(*args, stdin=None):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQL, TASKQ_DATA=DATA),
                        capture_output=True, text=True, input=stdin)
-    return r.returncode, r.stdout.strip()
+    return r.returncode, (r.stdout + r.stderr).strip()
 
 
 tql("add", "--nice", "0", "--spec-stdin", stdin=json.dumps([cspec("l/a"), cspec("l/b")]))

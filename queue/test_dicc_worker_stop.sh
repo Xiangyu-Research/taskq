@@ -5,6 +5,7 @@ set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
+trap 'rm -rf "${T:?}"' EXIT
 export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 source "$HERE/testdata/worker_harness.sh"
 
@@ -26,6 +27,15 @@ reset
 SLURM_JOB_ID=900203 TASKQ_SLOTS=1 TASKQ_FAIL_WINDOW=0 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w2e3.out" 2>&1
 check "开始不久就失败、但不在时间窗内的两次：作业照常领下一个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && ! grep -q "开始不久就失败" $T/w2e3.out'
 unset FAKE_FAIL
+fi
+
+# 3a. 假训练本身：停进程树时先停到子进程（sleep）、过一会儿才停到它，也不写训完的文件（CI 上 3b 因此偶尔看到 t/a 训完）
+if want 3a; then
+reset
+FAKE_SECS=60 bash "$T/fake_train.sh" t/z & fp=$!
+waitfor 30 'pgrep -P $fp sleep > /dev/null'
+kill -TERM $(pgrep -P $fp sleep); sleep 0.5; kill -TERM $fp 2> /dev/null; wait $fp; rc=$?
+check "假训练：子进程先被停 → 退出 143、不算训完" '[[ $rc == 143 && ! -e $TASKQ_DATA/runs/t/z/DONE ]] && grep -q "^term t/z" $T/train.log'
 fi
 
 # 3. 收到停止信号：停训练、交还领取（下一个作业能接着领）
@@ -151,4 +161,4 @@ wait $wpid
 check "run_task.sh 被 SIGKILL、训练还在：停它、接着领着；训练停下后交还，不记失败" '[[ $held == 1 && -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "终于停下了，交还" $T/w6b.out'
 fi
 
-(( fails == 0 )) && { echo "全部通过"; rm -rf "$T"; } || { echo "$fails 项失败（文件在 $T）"; exit 1; }
+(( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; exit 1; }

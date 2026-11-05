@@ -10,10 +10,12 @@ P=~/.local/bin/pueue
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 log() { echo "$(date '+%F %T') $*"; }
+PROG=${TASKQ_PROG:-on_boot.sh}
+unset TASKQ_PROG
 case ${1:-} in
     --gpu-log) GL=1 ;;
     "") GL=$(python3 "$CORE/sites/mtab.py" get . gpu_log) ;;
-    *) echo "用法：on_boot.sh [--gpu-log]" >&2; exit 2 ;;
+    *) echo "用法：$PROG [--gpu-log]" >&2; exit 2 ;;
 esac
 sleep "${ON_BOOT_WAIT:-30}"  # 等网络和数据盘
 eval "$(python3 "$CORE/queue/proto.py" sh)"

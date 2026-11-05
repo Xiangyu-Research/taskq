@@ -4,7 +4,6 @@ import datetime as dt
 import os
 import shutil
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -17,7 +16,7 @@ import shift  # noqa: E402
 TZ = shift.TZ
 real_stop_group = shift.stop_group
 real_site_tasks, real_hand_over = shift.site_tasks, shift.hand_over
-_d = tempfile.mkdtemp()
+_d = fixture.tmpdir()
 shift.STATE, shift.LOG = os.path.join(_d, "shift.json"), os.path.join(_d, "refill.log")
 
 

@@ -12,7 +12,7 @@
       中继插件送出：要传的文件、视图、拉回的文件夹（只读 --root）
   taskq spec import --spec <JSON|-> --src <目录> --dst <目录> --root <目录> [--json]
       中继插件拉回核对：src 下是拉回的文件，核对过的放进 dst（写的只有 dst）
-出错（说明不对、插件核对不过、实验表里没有）退出码 1，原因在 stderr；参数不对 2。
+出错（说明不对、插件核对不过）退出码 1，原因在 stderr；参数不对 2；机器表、实验表里没有 4（proto.EXIT["gone"]）。
 """
 import argparse
 import json
@@ -34,9 +34,9 @@ def _line(obj):
     print(json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str))
 
 
-def _fail(msg):
+def _fail(msg, rc=1):
     print(msg, file=sys.stderr)
-    return 1
+    return rc
 
 
 # ---------------- taskq machines show ----------------
@@ -78,7 +78,7 @@ def machines_show(argv):
     every = list(M.MACHINES) + [n for n in getattr(M, "SITES", {}) if n not in M.MACHINES]
     bad = [n for n in a.names if n not in every]
     if bad:
-        return _fail(f"机器表里没有 {'、'.join(bad)}（有：{'、'.join(every)}）")
+        return _fail(f"机器表里没有 {'、'.join(bad)}（有：{'、'.join(every)}）", proto.EXIT["gone"])
     specs = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(M.SPECS, "*.yml")))
     _line(dict(version=proto.VERSION, hub=M.hub(), machines={n: machine_json(n) for n in a.names or every},
                specs={s: spec_json(s) for s in specs}))
@@ -123,7 +123,7 @@ def exp_steps(argv):
         bad = [x for x in a.exp or [] if E.experiment(x) is None]
         bad += [k for k in a.key or [] if k not in E.tasks()]
         if bad:
-            return _fail(f"实验表里没有 {'、'.join(bad)}")
+            return _fail(f"实验表里没有 {'、'.join(bad)}", proto.EXIT["gone"])
         rows = []  # (行, 步骤)
         if "task" in levels:
             for k, t in E.tasks().items():
@@ -209,6 +209,9 @@ def spec_relay(argv, which):
     import spec as S
     try:
         sp = _spec_arg(a.spec)
+    except ValueError as e:  # 含 JSONDecodeError
+        ap.error(f"--spec：{e}")
+    try:
         if which == "export":
             ex = N.export(sp, a.root)
             _line(dict(version=proto.VERSION, plugin=N.plugin_of(sp), params=ex["params"], files=[list(f) for f in ex["files"]],

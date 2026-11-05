@@ -199,7 +199,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 
 - **`--help` 从不做事**：每个命令和老脚本（`shift.py`、`advance.py`、`feed.py`、`health.py`、`relay.py`、`envs_cli.py`、`qs`、`tunnel.py`、`tunnel_push.sh`）都先解析参数，`-h` / `--help` 打印说明、退出码 0。
 - **只看的命令统一认 `-n` / `--dry-run`**（老写法 `--dry` 照旧）：`plan`、`advance.py`、`feed.py`、`relay.py` 本来就只看，写不写一样；`shift.py`、`tick` 不带时真做。
-- **数据走标准输出，消息和出错走标准错误**：`taskq.py` 的"总队列在 …"、`status` 的"读不到队列"、`relay.py status` 的"读不到"在标准错误；`relay.py stage|fetch` 出错时打一行原因、退出码 1（不是 Python 的出错堆栈；排不上照旧 75）。
+- **数据走标准输出，消息和出错走标准错误**：`taskq.py` 的"总队列在 …"、`status` 的"读不到队列"、`relay.py status` 的"读不到"在标准错误；`relay.py stage|fetch` 出错时打一行原因、退出码 1（不是 Python 的出错堆栈；排不上照旧 75）。`taskq.py add / set / show / remove` 的原因、`add --spec-stdin --update-only` 逐个的"换不了"在标准错误（`relay_remote.rtq` 合并两路，读法不变）。转给 bash 脚本时 `bin/taskq` 设 `TASKQ_PROG`，脚本的用法和出错里写 `taskq <命令>`。
 - **`--json`**：一行 JSON。冻结的底层命令（`status --json`、`show --json`、`spec collect --json`）照旧以 `@@JSON ` 开头。
 - **退出码**：0 成功，1 出错，2 用法错，领域码沿用 `proto.EXIT`（表在根目录的 `README.md`）。冻结的底层命令（`worker …`、`spec …`、`internal stage`）的参数、输出、退出码不变。
 - `taskq.py` 另认 `nice`、`rm`（`set-nice`、`remove` 的别名），老名字照旧。

@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)
@@ -17,7 +16,7 @@ BIN = os.path.join(CORE, "bin", "taskq")
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
-T = tempfile.mkdtemp(prefix="test_cli_json_")
+T = fixture.tmpdir(prefix="test_cli_json_")
 HOME, PROJ, DATA = (os.path.join(T, x) for x in ("home", "proj", "data"))
 for d in (HOME, PROJ, DATA):
     os.makedirs(d)
@@ -85,7 +84,7 @@ try:
     d2 = js("machines", "show", "lab1", "box")
     ok("machines show 名…：只有这几台", set(d2["machines"]) == {"lab1", "box"} and d2["machines"]["lab1"] == ms["lab1"])
     r = taskq("machines", "show", "nope")
-    ok("machines show 不认识的机器 → 1，原因在 stderr", r.returncode == 1 and "nope" in r.stderr and not r.stdout)
+    ok("machines show 不认识的机器 → 4（proto.EXIT gone），原因在 stderr", r.returncode == proto.EXIT["gone"] and "nope" in r.stderr and not r.stdout)
     r = taskq("machines", "get", "dicc1", "root")
     ok("machines 的别的命令照旧", r.returncode == 0 and r.stdout.strip() == "~/q")
 
@@ -135,7 +134,9 @@ try:
        and all(s["needs"] is None for s in dn if s not in staged)
        and any(x.endswith("/final.ckpt") for s in staged for x in s["needs"]))
     r = taskq("exp", "steps", "--exp", "nope")
-    ok("exp steps 不认识的实验 → 1", r.returncode == 1 and "nope" in r.stderr and not r.stdout)
+    ok("exp steps 不认识的实验 → 4", r.returncode == proto.EXIT["gone"] and "nope" in r.stderr and not r.stdout)
+    r = taskq("exp", "steps", "--key", "nope/x/0")
+    ok("exp steps 不认识的 key → 4", r.returncode == proto.EXIT["gone"] and "nope/x/0" in r.stderr and not r.stdout)
     r = taskq("exp", "steps", "--level", "nope")
     ok("exp steps 参数不对 → 2", r.returncode == 2)
 
@@ -193,7 +194,9 @@ try:
     r = taskq("spec", "export", "--spec", "-", "--root", ROOT, stdin=spj)
     ok("spec export 插件报错 → 1", r.returncode == 1 and "不一致" in r.stderr and not r.stdout)
     r = taskq("spec", "export", "--spec", '{"x": 1}', "--root", ROOT)
-    ok("spec export 不是解析好的说明 → 1", r.returncode == 1 and "resolve" in r.stderr)
+    ok("spec export 不是解析好的说明 → 2", r.returncode == 2 and "resolve" in r.stderr)
+    r = taskq("spec", "export", "--spec", "/no/such.json", "--root", ROOT)
+    ok("spec export --spec 不是 JSON → 2，一行原因、没有出错堆栈", r.returncode == 2 and "--spec" in r.stderr and "Traceback" not in r.stderr)
     r = taskq("spec", "import", "--spec", "-", "--root", ROOT, stdin=spj)
     ok("spec import 缺 --src、--dst → 2", r.returncode == 2)
     ok("--help 退出码 0", all(taskq(*a, "--help").returncode == 0

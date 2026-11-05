@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "testdata"))
@@ -50,21 +49,25 @@ ok("tasks --exp：只有这个实验的任务", {t["exp"] for t in d["tasks"]} =
 rc, out, _ = run("tasks", "--json")
 ok("tasks --json：全部任务", rc == 0 and len(json.loads(out)["tasks"]) == len(E.tasks()))
 rc, out, err = run("tasks", "--exp", "nope")
-ok("tasks --exp 不认识的实验 → 1，原因在 stderr", rc == 1 and "nope" in err and not out)
+ok("tasks --exp 不认识的实验 → 4，原因在 stderr", rc == proto.EXIT["gone"] and "nope" in err and not out)
 
 key = next(iter(E.tasks()))
 rc, out, _ = run("name-of", key, "pueue")
 rc2, out2, _ = run("name-of", key)
-ok("name-of 照旧", rc in (0, 1) and rc2 == 2 and "用法" in (out2 + _))
+ok("name-of 照旧", rc in (0, proto.EXIT["gone"]) and rc2 == 2 and "用法" in (out2 + _))
+rc, out, err = run("name-of", "/no/such/model", "pueue")
+ok("name-of 实验表里没有的 → 4，原因在 stderr", rc == proto.EXIT["gone"] and not out and "/no/such/model" in err)
+rc, out, err = run("name-of")
+ok("直接跑：用法里是 experiments.py", rc == 2 and "experiments.py name-of" in err and "Traceback" not in err)
 rc, out, err = run("env-of", "nope")
-ok("env-of 不认识的 → 1", rc == 1)
+ok("env-of 不认识的 → 4", rc == proto.EXIT["gone"] and not out and "Traceback" not in err)
 rc, out, err = run("bogus")
 ok("不认识的命令 → 2", rc == 2)
 ok("main(argv) 能直接调用", E.main(["list"]) == 0)
 
 # 实验表会把自己的插件文件夹插到 sys.path[0]，里面有同名的 recipes.py；
 # check_fields 必须用核心的那份（11/4：剥离后 core 在仓库外，第一次 import 晚于插件，box 任务全挂）
-shadow = tempfile.mkdtemp()
+shadow = fixture.tmpdir()
 with open(os.path.join(shadow, "recipes.py"), "w", encoding="utf-8") as f:
     f.write("RECIPES = {'shadow': {}}\nHOOKS = {}\n")
 code = f"""

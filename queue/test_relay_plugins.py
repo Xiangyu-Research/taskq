@@ -6,13 +6,12 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 
-TMP = tempfile.mkdtemp(prefix="test_relay_plugins_")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+TMP = fixture.tmpdir(prefix="test_relay_plugins_")
 os.environ["RELAY_DIR"] = os.path.join(TMP, "relay")
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "testdata"))
-import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)

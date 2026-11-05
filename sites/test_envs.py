@@ -11,7 +11,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
@@ -153,7 +152,7 @@ M.SITES.clear(); M.SITES.update(SAVE_S)
 
 # ---------- 真建一个小环境（--real：在临时目录里，只有 numpy） ----------
 if "--real" in sys.argv:
-    d = tempfile.mkdtemp(prefix="envtest.", dir=os.environ.get("TMPDIR"))
+    d = fixture.tmpdir(prefix="envtest.", dir=os.environ.get("TMPDIR"))
     os.makedirs(f"{d}/specs")
     open(f"{d}/specs/tiny.yml", "w").write("# 测试\nbase: sysbase\npip:\n  - numpy\n")
     open(f"{d}/specs/tiny.check.py", "w").write("import numpy\nprint('numpy', numpy.__version__)\n")

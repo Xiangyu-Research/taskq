@@ -7,6 +7,7 @@ CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO�
 REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
+trap 'rm -rf "${T:?}"' EXIT
 export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
 source "$HERE/testdata/worker_harness.sh"
 HEADCMD="cat $T/head"
@@ -168,4 +169,4 @@ touch -d "-2 minutes" "$PADBASE.mib"
 check "pad_now：<base>.mib 超过 60 秒没更新（填充不在了），算 0" '[[ $(pad_now) == 0 ]]'
 fi
 
-(( fails == 0 )) && { echo "全部通过"; rm -rf "$T"; } || { echo "$fails 项失败（文件在 $T）"; exit 1; }
+(( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; exit 1; }

@@ -3,15 +3,14 @@
   python3 queue/test_feed.py"""
 import os
 import sys
-import tempfile
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-T = tempfile.mkdtemp()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+T = fixture.tmpdir()
 os.environ.update(FEED_LOG=os.path.join(T, "feed.log"))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, "testdata"))
-import fixture  # noqa: E402
 
 fixture.use()
 import feed as F  # noqa: E402

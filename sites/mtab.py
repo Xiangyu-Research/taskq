@@ -5,12 +5,12 @@
 命令行：
   mtab.py whoami                 本机的名字（认不出时退出码 1）
   mtab.py get <名|.> <字段>      字段的值（MACHINES、SITES 都认）；元组、列表用空格连起来；本机的 data、conda、repo、code 把 ~ 展开；
-                                 没有这台机器或这个字段时退出码 1
+                                 没有这台机器时退出码 4，没有这个字段时 1
   mtab.py names [角色|调度方式]  MACHINES 里的机器名，每行一个（如 names pueue、names train）
   mtab.py backups                角色 backup 的机器（MACHINES 和 SITES），每行一个
   mtab.py q-env <组>             本机这个组的环境变量（export 语句，queue/q 用）；没有这个组时退出码 2
-  mtab.py groups [名|.]          这台（默认本机）的 pueue 组，每行"组名:同时跑几个"（queue/setup.sh 用）
-  mtab.py activate <环境> [名|.] 激活这个环境的 shell 语句（eval "$(...)"）；这台机器没有这个环境时退出码 3
+  mtab.py groups [名|.]          这台（默认本机）的 pueue 组，每行"组名:同时跑几个"（queue/setup.sh 用）；没有这台机器时退出码 4
+  mtab.py activate <环境> [名|.] 激活这个环境的 shell 语句（eval "$(...)"）；没有这台机器或这个环境时退出码 4
   （taskq machines show [名…]：核心按机器表算出来的值，一行 JSON，在 queue/cli_json.py）
 """
 import os
@@ -178,29 +178,42 @@ def _value(name, field):
 
 
 def main(argv):
+    from proto import EXIT
     prog = os.path.basename(sys.argv[0])  # mtab.py，或 taskq machines
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.split("命令行：\n")[1].replace("mtab.py", prog), file=sys.stderr if not argv else sys.stdout)
         return 2 if not argv else 0
     cmd, args = argv[0], argv[1:]
     me = whoami()
+
+    def err(msg, rc):
+        print(f"{prog} {cmd}：{msg}", file=sys.stderr)
+        return rc
+
+    def gone(name):
+        if name in (".", None):
+            return err("认不出本机", 1)
+        return err(f"机器表里没有 {name}（有：{'、'.join([*MACHINES, *SITES])}；本机：{me or '认不出'}）", EXIT["gone"])
+    usage = {"get": "<名|.> <字段>", "q-env": "<组>", "activate": "<环境> [名|.]", "groups": "[名|.]", "names": "[角色|调度方式]"}
+    nargs = {"whoami": (0, 0), "get": (2, 2), "names": (0, 1), "backups": (0, 0), "q-env": (1, 1), "groups": (0, 1), "activate": (1, 2)}
+    if cmd not in nargs:
+        return err(f"不认识的命令（{prog} --help）", 2)
+    lo, hi = nargs[cmd]
+    if not lo <= len(args) <= hi:
+        print(f"用法：{prog} {cmd} {usage.get(cmd, '')}".rstrip(), file=sys.stderr)
+        return 2
     if cmd == "whoami":
         if not me:
             return 1
         print(me)
     elif cmd == "get":
-        if len(args) != 2:
-            print(f"用法：{prog} get <名|.> <字段>", file=sys.stderr)
-            return 2
         name = me if args[0] == "." else args[0]
         if name not in MACHINES and name not in SITES:
-            print(f"machines.py：不认识的机器 {args[0]}（本机：{me or '认不出'}）", file=sys.stderr)
-            return 1
+            return gone(name)
         try:
             print(_value(name, args[1]))
         except FieldError as e:
-            print(f"machines.py：{e}", file=sys.stderr)
-            return 1
+            return err(str(e), 1)
     elif cmd == "names":
         print("\n".join(names(args[0] if args else None)))
     elif cmd == "backups":
@@ -208,8 +221,7 @@ def main(argv):
     elif cmd == "q-env":
         groups = MACHINES[me]["groups"] if me else {}
         if args[0] not in groups:
-            print(f"{me or '这台机器'} 上没有组 {args[0]}（有：{'、'.join(groups) or '没有'}）", file=sys.stderr)
-            return 2
+            return err(f"{me or '这台机器'} 上没有组 {args[0]}（有：{'、'.join(groups) or '没有'}）", 2)
         _, gpu, env = groups[args[0]]
         print(f"export CUDA_VISIBLE_DEVICES={gpu or ''}")
         for k, v in env.items():
@@ -217,20 +229,17 @@ def main(argv):
     elif cmd == "activate":
         name = me if len(args) < 2 or args[1] == "." else args[1]
         if name not in MACHINES:
-            print(f"machines.py：不认识的机器（本机：{me or '认不出'}）", file=sys.stderr)
-            return 1
+            return gone(name)
         a = activate(name, args[0])
         if a is None:
-            print(f"{name} 上没有环境 {args[0]}（有：{'、'.join(MACHINES[name].get('envs') or {}) or '没有'}）", file=sys.stderr)
-            return 3
+            return err(f"{name} 上没有环境 {args[0]}（有：{'、'.join(MACHINES[name].get('envs') or {}) or '没有'}）", EXIT["gone"])
         print(a)
     elif cmd == "groups":
         name = me if not args or args[0] == "." else args[0]
+        if args and args[0] != "." and name not in MACHINES and name not in SITES:
+            return gone(name)
         for g, (n, _, _) in ((machine(name).get("groups") or {}) if name else {}).items():
             print(f"{g}:{n}")
-    else:
-        print(f"machines.py：不认识的命令 {cmd}", file=sys.stderr)
-        return 2
     return 0
 
 

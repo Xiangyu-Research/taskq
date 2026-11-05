@@ -7,7 +7,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -15,14 +14,14 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
 import fixture  # noqa: E402
 fixture.use()
-os.environ["PHD_TASKS"] = os.path.join(tempfile.mkdtemp(), "tasks.json")  # 不碰真的任务记录
-os.environ["PHD_LAST"] = os.path.join(tempfile.mkdtemp(), "last")
+os.environ["PHD_TASKS"] = os.path.join(fixture.tmpdir(), "tasks.json")  # 不碰真的任务记录
+os.environ["PHD_LAST"] = os.path.join(fixture.tmpdir(), "last")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "queue"))
 import health as H  # noqa: E402
 import shift  # noqa: E402
 import cfg  # noqa: E402
 QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
-_sd = tempfile.mkdtemp()
+_sd = fixture.tmpdir()
 shift.LOG, shift.STATE = f"{_sd}/refill.log", f"{_sd}/shift.json"  # 不写真的 ~/refill.log、状态文件夹
 
 H.policy.OFFLINE = {}  # 不受配置里的暂停检查影响
@@ -157,7 +156,7 @@ ok("lab 上 run_task.sh 的训练 90 分钟没有新 epoch → 卡住", "stuck:l
 import subprocess  # noqa: E402
 
 # ---------------- gather：各卡和卡上的进程、只看本机 ----------------
-fakebin = tempfile.mkdtemp()
+fakebin = fixture.tmpdir()
 sl = subprocess.Popen(["sleep", "30"])
 with open(os.path.join(fakebin, "nvidia-smi"), "w") as f:
     f.write(f'#!/bin/bash\ncase "$*" in *query-gpu=*) echo "0, GPU-a, 37, 1200"; echo "1, GPU-b, 0, 5";;\n'
@@ -246,7 +245,7 @@ ok("第四台机器连不上：报", "down:fake" in ids(s))
 del H.M.MACHINES["fake"]
 
 # ---------------- 推送规则（10/21：白话、并成一条、不推已恢复和汇总）----------------
-d = tempfile.mkdtemp()
+d = fixture.tmpdir()
 H.STATE, H.LOG = f"{d}/state.json", f"{d}/health.log"
 sent = []
 H.push = lambda msg, **kw: sent.append((kw.get("title", ""), msg))
@@ -371,7 +370,7 @@ ok("白话：实验表里的步骤都有中文名（STEP 表或步骤的 zh）",
 
 # 插件、实验表加载出错：health 在 import 时就停，要推送一次（同样的错不重复推，夜里不推），修好后清掉记录
 import shutil  # noqa: E402
-_lt = tempfile.mkdtemp()
+_lt = fixture.tmpdir()
 _bad = os.path.join(_lt, "bad")
 shutil.copytree(os.environ["TASKQ_PLUGINS"].split(os.pathsep)[0], _bad, ignore=shutil.ignore_patterns("__pycache__"))
 open(os.path.join(_bad, "readers", "zz_broken.py"), "w").write("PROGRESS = {\n")

@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,8 +18,9 @@ BIN = os.path.join(CORE, "bin", "taskq")
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
+from proto import EXIT  # noqa: E402
 
-T = tempfile.mkdtemp()
+T = fixture.tmpdir()
 HOME, PROJ, TQ, DATA, TMP = (os.path.join(T, x) for x in ("home", "proj", "tq", "data", "tmp"))
 for d in (HOME, PROJ, TQ, DATA, TMP):
     os.makedirs(d)
@@ -31,6 +31,7 @@ ENV = dict(CLEAN, HOME=HOME, TMPDIR=TMP, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MA
 OLD_ENV = dict(ENV, TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS, TASKQ_REPO=PROJ)  # 老脚本：直接给（找项目导出的）变量
 GIT = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 TASKS = [(1, 5, "D1/V/0"), (2, 7, "D1/V/1"), (3, 9, "D2/V/0")]
+GONE = EXIT["gone"]
 
 
 def seed():
@@ -145,18 +146,19 @@ class Routing(unittest.TestCase):
         self.assertEqual(taskq("rm", "D2/V/0").returncode, 4, "退出码照旧（4 = 队列里没有）")
 
     def test_pueue_status_and_push_dirs_usage(self):
-        """新的两个入口转到原来的脚本：用法错退出码 2，什么也不连。"""
-        self.assertEqual(taskq("pueue-status", "no-such-machine").returncode, 2)
-        self.assertEqual(old("queue/qs", "no-such-machine").returncode, 2)
+        """新的两个入口转到原来的脚本：用法错退出码 2，机器表里没有 4，什么也不连。"""
+        self.assertEqual(taskq("pueue-status", "no-such-machine").returncode, GONE)
+        self.assertEqual(old("queue/qs", "no-such-machine").returncode, GONE)
+        self.assertEqual(taskq("pueue-status", "lab1").returncode, 2, "有这台、不是 pueue 机器：用法错")
         self.assertEqual(taskq("tunnel", "push-dirs", "lab1", T).returncode, 2)
-        self.assertEqual(taskq("tunnel", "push-dirs", "no-such-machine", T, "x", "y").returncode, 2)
+        self.assertEqual(taskq("tunnel", "push-dirs", "no-such-machine", T, "x", "y").returncode, GONE)
 
     def test_unknown_site_name(self):
-        """不是执行机的名字（如显示用的标签）：退出码 2，说有哪些，不连那边。"""
+        """不是执行机的名字（如显示用的标签）：退出码 4（internal stage 冻结，照旧 2），说有哪些，不连那边。"""
         for args in (("site", "status", "NOPE2"), ("site", "bundle", "NOPE2"), ("site", "resend", "NOPE2"),
-                     ("internal", "fetch", "NOPE2", "k")):
+                     ("internal", "fetch", "NOPE2", "k"), ("internal", "stage", "NOPE2", "k", "--nice", "1")):
             r = taskq(*args)
-            self.assertEqual(r.returncode, 2, args)
+            self.assertEqual(r.returncode, 2 if args[1] == "stage" else GONE, args)
             self.assertIn("没有执行机 NOPE2（有：", r.stderr)
 
     def test_worker_next_exit_code(self):
@@ -215,6 +217,96 @@ class Routing(unittest.TestCase):
         out = buf.getvalue()
         for x in ("== 按时段开关", "开 lab0", "== 送任务", "送 a", "卡住：卡 b", "== 训完以后", "没有要排的"):
             self.assertIn(x, out)
+
+
+class Errors(unittest.TestCase):
+    """用法错 2、找不到（机器、执行机、任务 key、实验、模型文件夹）4、出错 1；一行中文消息在 stderr，没有出错堆栈，用法里是 taskq 的命令名。"""
+
+    def setUp(self):
+        seed()
+
+    def check(self, args, rc, *say, env=None):
+        r = taskq(*args, env=env)
+        self.assertEqual(r.returncode, rc, (args, r.stdout[-300:], r.stderr[-300:]))
+        self.assertEqual(r.stdout, "", (args, "消息不在标准输出"))
+        self.assertNotIn("Traceback", r.stderr, args)
+        for x in say:
+            self.assertIn(x, r.stderr, args)
+        return r
+
+    def test_exp(self):
+        r = self.check(("exp", "name-of", "nosuch"), 2, "taskq exp name-of")
+        self.assertNotIn("experiments.py", r.stderr)
+        self.check(("exp", "env-of"), 2, "taskq exp env-of")
+        self.check(("exp", "name-of", "/no/such/model", "x"), GONE, "实验表里没有")
+        self.check(("exp", "env-of", "/no/such/model"), GONE, "MODEL_ENV")
+        self.check(("exp", "tasks", "--exp", "NOPE"), GONE, "NOPE")
+
+    def test_machines(self):
+        for args in (("activate",), ("q-env",), ("get", "box"), ("whoami", "x")):
+            self.check(("machines", *args), 2, f"用法：taskq machines {args[0]}")
+        for args in (("get", "NOPE", "data"), ("groups", "NOPE"), ("activate", "base", "NOPE")):
+            self.check(("machines", *args), GONE, f"taskq machines {args[0]}：机器表里没有 NOPE")
+        self.check(("machines", "activate", "nosuchenv"), GONE, "没有环境 nosuchenv")
+        self.check(("machines", "get", "box", "nofield"), 1, "nofield")
+        self.check(("machines", "bogus"), 2, "taskq machines bogus")
+        self.assertEqual(taskq("machines", "get", "dicc1", "root").stdout.strip(), "~/q")
+
+    def test_queue(self):
+        for args in (("show", "nokey"), ("show", "--json", "nokey"), ("set", "nokey", "a=1")):
+            self.check(args, GONE, "队列里没有 nokey")
+        self.check(("set", "D1/V/0", "bad"), 2, "k=v")
+        self.check(("add",), 2, "--exp")
+        self.check(("add", "--exp", "NOPE"), GONE, "实验表里没有 NOPE")
+        self.check(("add", "--file", os.path.join(T, "no-such.json")), 2, "读不了任务单")
+        self.check(("add", "--recipe", "toy", "ds=D1"), 2, "--nice")
+        for args in (("nice", "--nice", "1", "nokey"), ("stop", "nokey")):  # 冻结：退出码照旧 1
+            self.check(args, 1, "队列里没有：nokey")
+        self.check(("rm", "nokey"), GONE, "队列里没有：nokey")
+        r = self.check(("status", "--bogus"), 2, "usage: taskq status")
+        self.assertNotIn("next", r.stderr, "用法只列这个子命令的")
+
+    def test_sites(self):
+        self.check(("site", "env", "NOPE", "base"), GONE, "taskq site env：机器表里没有 NOPE")
+        self.check(("site", "env", "lab1", "nosuch"), GONE, "lab1 的 envs 里没有 nosuch")
+        self.check(("site", "envs", "NOPE"), GONE, "taskq site envs")
+        r = self.check(("site", "setup", "NOPE"), GONE, "taskq site setup：机器表里没有 NOPE")
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.check(("site", "setup", "--bogus"), 2, "用法：taskq site setup")
+        env = dict(ENV, TASKQ_DIR=TQ, TASKQ_DATA=DATA)
+        self.check(("internal", "fetch", "lab1", "no/such/key"), GONE, "taskq internal fetch lab1：实验表和总队列里都没有 no/such/key",
+                   env=env)
+        self.check(("boot", "--bogus"), 2, "用法：taskq boot")
+
+    def test_tunnel(self):
+        fake = os.path.join(T, "fakebin")
+        os.makedirs(fake, exist_ok=True)
+        mark = os.path.join(T, "rsync_ran")
+        with open(os.path.join(fake, "rsync"), "w") as f:
+            f.write(f"#!/bin/sh\ntouch {mark}\n")
+        os.chmod(os.path.join(fake, "rsync"), 0o755)
+        env = dict(ENV, PATH=fake + os.pathsep + ENV["PATH"])
+        self.check(("tunnel", "rsync"), 2, "taskq tunnel rsync", env=env)
+        self.assertFalse(os.path.exists(mark), "没给参数：不跑 rsync")
+        lst = os.path.join(T, "list.txt")
+        open(lst, "w").close()
+        for way in ("push", "pull"):
+            self.check(("tunnel", way, "NOPE", T, "x", lst), GONE, f"taskq tunnel {way}：机器表里没有 NOPE")
+        self.check(("tunnel", "push", "lab1", T, "x", os.path.join(T, "no-list")), 2, "读不了清单")
+        self.check(("tunnel", "push", "box", T, "x", lst), 2, "box 没有 ssh")
+        self.check(("tunnel", "push-dirs"), 2, "用法：taskq tunnel push-dirs")
+        self.check(("tunnel", "push-dirs", "NOPE", T, "x", "y"), GONE, "taskq tunnel push-dirs：机器表里没有 NOPE")
+
+    def test_pueue_add_and_snapshot(self):
+        for args in ((), ("gpu",), ("gpu", "--")):
+            self.check(("pueue-add", *args), 2, "用法：taskq pueue-add")
+        r = self.check(("pueue-add", "nosuch", "--", "true"), 2, "taskq pueue-add：", "没有组 nosuch")
+        self.assertNotIn("代码副本", r.stderr, "先查组，不去更新代码副本")
+        self.check(("snapshot",), 2, "用法：taskq snapshot")
+        self.check(("snapshot", os.path.join(T, "not-a-clone")), 2, "不是 git 克隆")
+        r = subprocess.run(["bash", os.path.join(CORE, "sync", "snapshot.sh")], env=OLD_ENV, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("用法：snapshot.sh", r.stderr, "直接跑脚本：用法里是脚本名")
 
 
 class Project(unittest.TestCase):

@@ -16,7 +16,7 @@ cleanup() {
     [[ -n ${SUP:-} ]] && kill "$SUP" 2> /dev/null
     [[ -n ${PARENT:-} ]] && kill "$PARENT" 2> /dev/null
     [[ -n ${PARENT_SUP:-} ]] && kill "$PARENT_SUP" 2> /dev/null
-    rm -rf "$T"
+    rm -rf "${T:?}"
 }
 mkdir -p "$T/pad"
 cp "$HERE/gpu_pad.py" "$HERE/proto.py" "$T/pad/"

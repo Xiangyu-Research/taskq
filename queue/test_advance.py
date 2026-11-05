@@ -15,13 +15,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
 QR = _cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
-T = tempfile.mkdtemp()
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
+import fixture  # noqa: E402
+T = fixture.tmpdir()
 os.environ["ADVANCE_BT"] = T
 os.environ["ADVANCE_LOG"] = os.path.join(T, "advance.log")
 os.environ["PHD_TASKS"] = os.path.join(T, "tasks.json")
 os.environ["PHD_LAST"] = os.path.join(T, "last")
-sys.path.insert(0, os.path.join(HERE, "testdata"))
-import fixture  # noqa: E402
 fixture.use()
 sys.path.insert(0, HERE)
 import advance as A  # noqa: E402

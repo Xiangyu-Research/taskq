@@ -20,6 +20,7 @@ cfg.use_config()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "sites"))
 import mtab as M  # noqa: E402
 import common as C  # noqa: E402
+from proto import EXIT  # noqa: E402
 
 PUEUE = os.path.expanduser("~/.local/bin/pueue")
 ME = M.whoami()
@@ -73,6 +74,10 @@ def main(argv=None):
     ap.add_argument("machines", nargs="*", metavar="机器", help=f"只看这几台（{'、'.join(hosts)}）；不给就都看")
     ap.add_argument("--json", action="store_true", help="机器 → 任务列表，一行 JSON")
     a = ap.parse_args(argv)
+    gone = [m for m in a.machines if m not in M.MACHINES and m not in M.SITES]
+    if gone:
+        print(f"{ap.prog}：机器表里没有 {'、'.join(gone)}", file=sys.stderr)
+        return EXIT["gone"]
     bad = [m for m in a.machines if m not in hosts]
     if bad:
         ap.error(f"不是 pueue 机器：{'、'.join(bad)}")

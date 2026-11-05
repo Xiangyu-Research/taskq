@@ -33,7 +33,7 @@ elif [[ ${FAKE_HANG:-} == "$1" ]]; then
     sleep 120 & wait $!
 else
     sleep "${FAKE_SECS:-1}" & wait $!
-fi
+fi || { echo "term $1" >> "$FAKE_LOG"; exit 143; }  # 子进程先被停（停进程树时从叶子停起）：当作收到停止，不写训完的文件
 [[ " ${FAKE_FAIL:-} " == *" $1 "* ]] && { echo "fail $1" >> "$FAKE_LOG"; exit 1; }  # FAKE_FAIL：空格分开的任务名
 touch "$out/DONE"
 echo "end $(date +%s.%N) $1" >> "$FAKE_LOG"

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
-os.environ["TASKQ_STATE"] = tempfile.mkdtemp()  # 总开关（DISABLED）的默认位置不指到本机真的状态文件夹
+os.environ["TASKQ_STATE"] = fixture.tmpdir()  # 总开关（DISABLED）的默认位置不指到本机真的状态文件夹
 sys.path.insert(0, HERE)
 import gpu_pad as G  # noqa: E402
 

@@ -14,7 +14,9 @@
 # - 传之前在那边每个子目录里放一个 .incomplete，核对一致后才删：中途出错留下的半份数据，refill.py 不会当成"数据在"。
 set -euo pipefail
 
-USAGE="用法：tunnel_push.sh <机器> <box 上的源目录> <那边的目标目录（相对 home）> <子目录>...（taskq tunnel push-dirs）"
+PROG=${TASKQ_PROG:-tunnel_push.sh}
+unset TASKQ_PROG
+USAGE="用法：$PROG <机器> <box 上的源目录> <那边的目标目录（相对 home）> <子目录>..."
 [[ ${1:-} == -h || ${1:-} == --help ]] && { echo "$USAGE"; exit 0; }
 (( $# >= 4 )) || { echo "$USAGE" >&2; exit 2; }
 HOST=$1 SRC=$2 DEST=$3
@@ -22,8 +24,10 @@ shift 3
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 eval "$(python3 "$CORE/queue/proto.py" sh)"  # TQ_INCOMPLETE
-H=$(python3 "$CORE/sites/mtab.py" get "$HOST" ssh 2> /dev/null) || true
-[[ -n $H ]] || { echo "机器表里没有可以传过去的机器 $HOST" >&2; exit 2; }
+rc=0
+H=$(python3 "$CORE/sites/mtab.py" get "$HOST" ssh 2> /dev/null) || rc=$?
+(( rc != TQ_EXIT_GONE )) || { echo "$PROG：机器表里没有 $HOST" >&2; exit "$rc"; }
+[[ -n $H ]] || { echo "$PROG：$HOST 没有 ssh，传不过去" >&2; exit 2; }
 SUBS=("$@")
 SRC=$(cd "$SRC" && pwd)
 W=$(mktemp -d)
