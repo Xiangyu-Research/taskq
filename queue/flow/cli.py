@@ -137,6 +137,54 @@ def accept(argv):
     return 0
 
 
+def publish(argv):
+    ap = argparse.ArgumentParser(prog="taskq publish", description="处理被冲突挡住的发布（工作目录里的结果搬进数据目录），"
+                                 "或接着做中途断了的发布")
+    ap.add_argument("inst", nargs="?", help="实例 id（不给 = 列出被挡住的）")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--overwrite", action="store_true", help="冲突的文件也归档后换上")
+    g.add_argument("--accept-theirs", action="store_true", help="冲突的文件留着现在的，其余照放")
+    g.add_argument("--resume", action="store_true", help="照 journal 把中途断了的发布做完")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    from flow import publish as PB
+    flow, _, root, LG = flow_for_ledger()
+    db = LG.connect()
+    if a.resume:
+        done = PB.resume(flow, db)
+        print(json.dumps(dict(resumed=done)) if a.json else ("接着做完：" + "、".join(done) if done else "没有断了的发布"))
+        return 0
+    bl = PB.blocked(db)
+    if not a.inst:
+        if a.json:
+            print(json.dumps(dict(blocked=bl), ensure_ascii=False))
+        for k, v in sorted(bl.items()):
+            if not a.json:
+                print(f"{k}  {len(v.get('conflicts') or [])} 处冲突，工作目录 {v.get('work')}")
+        if not bl and not a.json:
+            print("没有被挡住的发布", file=sys.stderr)
+        return 0
+    i = flow.instances.get(a.inst)
+    if i is None or a.inst not in bl:
+        print(f"taskq publish：{a.inst} " + ("不在流程里" if i is None else "没有被挡住的发布"), file=sys.stderr)
+        return NOT_FOUND
+    v = bl[a.inst]
+    if not (a.overwrite or a.accept_theirs):
+        for c in v.get("conflicts") or []:
+            print(f"冲突：{c['path']}  {c['why']}")
+        print("用 --overwrite（冲突的归档后换上）或 --accept-theirs（留着现在的）", file=sys.stderr)
+        return 3
+    try:
+        r = PB.publish(i, v["work"], root, db, aid=v.get("attempt"), dest=v.get("dest"),
+                       overwrite=a.overwrite, accept_theirs=a.accept_theirs)
+    except PB.PublishError as e:
+        print(f"taskq publish：{e}", file=sys.stderr)
+        return 3
+    n = sum(op == "put" for op, _, _ in r["ops"])
+    print(json.dumps(dict(state=r["state"], placed=n)) if a.json else f"{a.inst}：放了 {n} 个文件")
+    return 0
+
+
 def replay(argv):
     ap = argparse.ArgumentParser(prog="taskq internal engine-replay", description="反事实回放：随机假设做完了哪些，advance.plan 和 "
                                  "flow/engine.py 各算一遍（不碰盘、不排任务）；有不一样的退出码 1")
@@ -155,7 +203,7 @@ def replay(argv):
     return 1 if d else 0
 
 
-CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept, replay=replay,
+CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept, publish=publish, replay=replay,
             run=lambda argv: __import__("flow.run").run.main(argv))
 
 

@@ -376,6 +376,19 @@ def undeclared_writes(days=1):
     return out
 
 
+def publishes(dry=False):
+    """接着做中途断了的发布（queue/flow/publish.py 的 journal），报被冲突挡住的 → {问题编号: 说明}。"""
+    import os as _os
+    from flow import ledger as LG
+    from flow import publish as PB
+    db = LG.connect()
+    if not dry and _os.path.isdir(PB.journal_dir()) and _os.listdir(PB.journal_dir()):
+        from flow import cli as FC
+        PB.resume(FC.flow_for_ledger()[0], db)
+    return {alert_id("publish", k): f"{k} 的发布被挡住：{len(v.get('conflicts') or [])} 个文件不归它或被改过（taskq publish {k} 看）"
+            for k, v in PB.blocked(db).items()}
+
+
 def ledger_shadow(s):
     """台账的影子对比（queue/flow/ledger.py）：和 advance.py 这一轮的判断比，结果一行写进 ~/ledger.log。"""
     import advance
@@ -454,6 +467,7 @@ def main(argv=None):
         stuck2.update(stall.check())
         if policy.AUTO.get("ledger"):
             stuck2.update(undeclared_writes())
+            stuck2.update(publishes(a.dry_run))
     except Exception as e:  # noqa: BLE001
         stuck2[alert_id("stall", "error")] = f"卡住检测出错：{type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
