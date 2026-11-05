@@ -97,9 +97,10 @@ def script(rel, argv, prog):
     return run(lambda: exec(code, m.__dict__), prog, argv)
 
 
-def bash(rel, argv):
+def bash(rel, argv, prog):
     sys.stdout.flush()
     sys.stderr.flush()
+    os.environ["TASKQ_PROG"] = prog  # 脚本的用法、出错里显示的命令名
     os.execvp("bash", ["bash", os.path.join(CORE, rel), *argv])
 
 
@@ -140,7 +141,7 @@ def py(mod, *pre, prog="taskq"):
 
 
 def sh(rel):
-    return lambda argv, _p: bash(rel, argv)
+    return lambda argv, prog: bash(rel, argv, prog)
 
 
 def cmd_status(argv, prog):

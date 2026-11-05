@@ -7,14 +7,18 @@
 # 3. 删旧副本：不是 current、没有 pueue 任务的工作目录在里面（排着、失败的也算：restart --in-place 要用）、建了 7 天以上
 # fetch 失败（GitHub 连不上）时照样用克隆里已有的 origin/main，退出码 1。
 set -u
-SRC=${1:?用法：snapshot.sh <克隆>}
+PROG=${TASKQ_PROG:-snapshot.sh}
+unset TASKQ_PROG
+(( $# == 1 )) || { echo "用法：$PROG <克隆>" >&2; exit 2; }
+SRC=$1
+git -C "$SRC" rev-parse --git-dir > /dev/null 2>&1 || { echo "$PROG：$SRC 不是 git 克隆" >&2; exit 2; }
 HERE=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 C=$(python3 "$HERE/../queue/cfg.py" state code) || exit 1
 mkdir -p "$C"
 exec 8> "$C/.lock"
-flock -w 300 8 || { echo "snapshot.sh：等锁超时"; exit 1; }
+flock -w 300 8 || { echo "$PROG：等锁超时" >&2; exit 1; }
 rc=0
-bash "$HERE/fetch.sh" "$SRC" || { echo "snapshot.sh：拉取失败，用克隆里已有的 origin/main"; rc=1; }
+bash "$HERE/fetch.sh" "$SRC" >&2 || { echo "$PROG：拉取失败，用克隆里已有的 origin/main" >&2; rc=1; }
 sha=$(git -C "$SRC" rev-parse origin/main) || exit 1
 links=$(git -C "$SRC" ls-tree -r "$sha" | awk '$1 == "160000" {print $3, $4}')  # 子模块：提交号 路径
 each() { local s p; while read -r s p; do [[ -z $p ]] || "$@" "$s" "$p" || return 1; done <<< "$links"; }
@@ -26,7 +30,7 @@ if [[ ! -d $C/$sha ]] || ! each has; then
     git -C "$SRC" worktree prune
     each sub_prune
     git -C "$SRC" worktree add -q --detach "$C/$sha.tmp" "$sha" && git -C "$SRC" worktree move "$C/$sha.tmp" "$C/$sha" && each sub_add || {
-        echo "snapshot.sh：建副本 $sha 失败"; exit 1; }
+        echo "$PROG：建副本 $sha 失败" >&2; exit 1; }
 fi
 if [[ $(readlink "$C/current" 2> /dev/null) != "$sha" ]]; then
     ln -sfn "$sha" "$C/current.tmp" && mv -Tf "$C/current.tmp" "$C/current" || exit 1
@@ -39,7 +43,7 @@ for d in "$C"/*/; do
     [[ $n == "$sha" || $n == *.tmp ]] && continue
     grep -q "^$d\(/\|$\)" <<< "$used" && continue
     [[ -n $(find "$d" -maxdepth 0 -mtime -7) ]] && continue
-    git -C "$SRC" worktree remove --force "$d" && echo "snapshot.sh：删旧副本 ${n:0:7}"
+    git -C "$SRC" worktree remove --force "$d" && echo "$PROG：删旧副本 ${n:0:7}"
 done
 each sub_prune
 exit $rc

@@ -93,7 +93,7 @@ GitHub 上每次推送跑 `.github/workflows/test.yml`：Python 3.12、装 numpy
 | 1 | 出错（`spec done`：没训完；`run_task.sh`：训练命令出错） |
 | 2 | 用法错（参数不对、找不到项目；队列命令在不是 hub、本机又没有队列的机器上；`spec`、`run_task.sh`：任务说明或环境有问题） |
 | 3 | `rm`：不删（有人领着、分出去了、别的任务等它）；`run_task.sh`：命令正常结束但没训完 |
-| 4 | `rm`：队列里没有；`run_task.sh`：缺输入 |
+| 4 | 找不到：执行机、机器、环境、任务 key、实验、模型文件夹不在表里或队列里（`rm`、`show`、`set`、`add --exp`、`exp …`、`machines …`、`site …`、`tunnel …`、`internal fetch`、`pueue-status`、`site setup`；`stop`、`nice` 冻结，照旧 1）；`run_task.sh`：缺输入 |
 | 5 | 读不了数据目录（`spec done`、`run_task.sh`） |
 | 10 / 11 / 12 / 13 | `worker next`：没有能领的 / 等排在前面刚停下的 / 队列暂停或读不了数据目录；`worker beat --strict`：领取已经不是自己的 |
 | 75 | `internal stage`：这次排不上，下次再传 |

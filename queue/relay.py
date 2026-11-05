@@ -736,7 +736,7 @@ def main(argv):
     a = ap.parse_args(argv)
     if a.cmd and a.name not in M.RELAY:
         print(f"{ap.prog} {a.cmd}：没有执行机 {a.name}（有：{'、'.join(M.RELAY) or '无'}）", file=sys.stderr)
-        return 2
+        return 2 if a.cmd == "stage" else proto.EXIT["gone"]  # stage 的退出码冻结
     if a.cmd in ("stage", "fetch"):
         if a.cmd == "stage" and a.nice is None and not a.no_add:
             ap.error("要给 --nice（或 --no-add）")
@@ -746,8 +746,11 @@ def main(argv):
             elif RT.stage(a.name, a.key, a.nice, add=not a.no_add) is None:
                 return NOSLOT_RC
         except (RN.RelayError, S.SpecError, RuntimeError, OSError, subprocess.SubprocessError) as e:
-            print(f"relay.py {a.cmd} {a.name} {a.key}：{type(e).__name__}: {e}", file=sys.stderr)
-            return 1
+            if a.cmd == "stage":  # 输出、退出码冻结
+                print(f"relay.py {a.cmd} {a.name} {a.key}：{type(e).__name__}: {e}", file=sys.stderr)
+                return 1
+            print(f"{ap.prog} {a.cmd} {a.name}：{e}", file=sys.stderr)
+            return proto.EXIT["gone"] if isinstance(e, RT.Gone) else 1
     elif a.cmd == "bundle":
         rs = remote_status(a.name)
         print(bundle(a.name, a.commit, (rs or {}).get("bundle")) or "没变")

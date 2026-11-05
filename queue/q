@@ -7,19 +7,23 @@
 # 只跑已经推送的代码，以后的代码更新不改到这个任务；没有 code 时是表里的 repo。
 # 例：taskq pueue-add gpu1 --label demo -- 'python3 train.py'
 set -euo pipefail
-G=${1:?用法：q <组> [pueue add 选项] -- '<命令>'}; shift
+PROG=${TASKQ_PROG:-q}
+unset TASKQ_PROG
+(( $# >= 2 )) && [[ $1 != -* && ${*: -1} != -- ]] || { echo "用法：$PROG <组> [pueue add 的选项] -- '<命令>'" >&2; exit 2; }
+G=$1; shift
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 HERE=$REPO
+E=$(python3 "$CORE/sites/mtab.py" q-env "$G" 2>&1 > /dev/null) || { echo "$PROG：${E#*：}" >&2; exit 2; }  # 先查组，再更新代码副本
 SRC=$(python3 "$CORE/sites/mtab.py" get . repo) CODE=$(python3 "$CORE/sites/mtab.py" get . code)
 if [[ -n $CODE ]]; then
-    bash "$CORE/sync/snapshot.sh" "$SRC" 2>&1 || echo "q：代码副本没更新到最新"
+    bash "$CORE/sync/snapshot.sh" "$SRC" 2>&1 || echo "$PROG：代码副本没更新到最新" >&2
     REPO=$(readlink -f "$CODE")
 else
     REPO=$(readlink -f "$SRC")
 fi
-[[ -d $REPO ]] || { echo "q：没有工作目录 $REPO" >&2; exit 2; }
-echo "q：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）"
+[[ -d $REPO ]] || { echo "$PROG：没有工作目录 $REPO" >&2; exit 2; }
+echo "$PROG：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）"
 ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID

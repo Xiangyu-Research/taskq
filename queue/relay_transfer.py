@@ -33,11 +33,15 @@ def box_data():
     return M.expand(M.MACHINES[M.hub()]["data"])
 
 
+class Gone(RN.RelayError):
+    """实验表和总队列里都没有这个 key。"""
+
+
 # ---------------- 传数据（box 的 wait 组里跑） ----------------
 def lookup(key):
     s = S.lookup(key)
     if s is None:
-        raise RN.RelayError(f"实验表和总队列里都没有 {key}")
+        raise Gone(f"实验表和总队列里都没有 {key}")
     return s if s.get("exp") else S.resolve(s["recipe"], s["params"])
 
 

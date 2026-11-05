@@ -635,11 +635,11 @@ def _insert(new, nice, update_only=False):
         if update_only:
             for _, s in pairs:
                 if s["key"] not in have:
-                    print(f"队列里没有，不换：{s['key']}")
+                    print(f"队列里没有，不换：{s['key']}", file=sys.stderr)
             pairs = [(t, s) for t, s in pairs if s["key"] in have]
         bad = same_file([s["key"] for t, s in pairs if not (t.get("spec") and s["key"] in have)], have)
         if bad:
-            print("加不进去：" + "；".join(bad))
+            print("加不进去：" + "；".join(bad), file=sys.stderr)
             return 2
         clash = 0
         for t, s in pairs:
@@ -648,12 +648,12 @@ def _insert(new, nice, update_only=False):
                 if t.get("spec") and old.get("spec") != t["spec"]:
                     was = spec_of(dict(old))
                     if was and (was["out"], was["done"]) != (s["out"], s["done"]) and (claim_state(s["key"], None) or ("",))[0] == "claimed":
-                        print(f"在训，out / done 变了，先不换（下次 resend 再换）：{s['key']}")
+                        print(f"在训，out / done 变了，先不换（下次 resend 再换）：{s['key']}", file=sys.stderr)
                         continue
                     old.update(spec=t["spec"], recipe=t["recipe"], params=t["params"])
                     print(f"换了说明：{s['key']}")
                 elif not t.get("spec") and not t.get("exp") and _differs(spec_of(old), s):  # --recipe、--file 加的撞名（11/4）
-                    print(f"已有同名、说明不一样的任务，没加：{s['key']}（已有 {old.get('recipe')} {json.dumps(old.get('params'), ensure_ascii=False)}）")
+                    print(f"已有同名、说明不一样的任务，没加：{s['key']}（已有 {old.get('recipe')} {json.dumps(old.get('params'), ensure_ascii=False)}）", file=sys.stderr)
                     clash += 1
                 else:
                     print(f"已有，跳过：{s['key']}")
@@ -664,7 +664,7 @@ def _insert(new, nice, update_only=False):
             print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {','.join(S.envs_of(s))}）")
         write_tasks(tasks)
     for e in errs:
-        print(f"换不了：{e}")
+        print(f"换不了：{e}", file=sys.stderr)
     return 2 if errs or clash else 0
 
 
@@ -701,21 +701,28 @@ def only_of(items):
     for x in items:
         k, sep, v = x.partition("=")
         if not sep or not k or not v:
-            sys.exit(f"--only 要写成 参数=取值[,取值…]：{x}")
+            raise S.SpecError(f"--only 要写成 参数=取值[,取值…]：{x}")
         out.setdefault(k, []).extend(v.split(","))
     return out or None
+
+
+def _err(msg, rc):
+    print(msg, file=sys.stderr)
+    return rc
 
 
 def cmd_add(a):
     import experiments as E
     try:
         if a.exp:
-            e = E.experiment(a.exp) or sys.exit(f"实验表里没有 {a.exp}（有：{', '.join(x['id'] for x in E.load()[0])}）")
+            e = E.experiment(a.exp)
+            if e is None:
+                return _err(f"实验表里没有 {a.exp}（有：{', '.join(x['id'] for x in E.load()[0])}）", GONE)
             new = [dict(exp=t["exp"], recipe=t["recipe"], params=t["params"]) for t in E.expand(e, only_of(a.only))]
             if a.nice is None:
                 a.nice = e.get("nice")
                 if a.nice is None:
-                    sys.exit(f"实验表里 {a.exp} 没有 nice，要给 --nice")
+                    return _err(f"实验表里 {a.exp} 没有 nice，要给 --nice", 2)
                 print(f"档位用实验表里的 {a.nice}")
         elif a.spec_stdin:
             try:
@@ -733,28 +740,32 @@ def cmd_add(a):
             if a.nice is None:
                 a.nice = nice
         else:
-            sys.exit("要给 --exp、--recipe、--file 或 --spec-stdin")
+            return _err("要给 --exp、--recipe、--file 或 --spec-stdin", 2)
         if a.nice is None:
-            sys.exit("要给 --nice")
+            return _err("要给 --nice", 2)
         return _insert(new, a.nice, update_only=a.update_only)
     except S.SpecError as e:
-        print(f"加不进去：{e}")
+        print(f"加不进去：{e}", file=sys.stderr)
         return 2
 
 
 def cmd_set(a):
     import experiments as E
+    try:
+        kv = S.parse_kv(a.kv)
+    except S.SpecError as e:
+        return _err(str(e), 2)
     with Lock():
         tasks = read_tasks()
         t = next((t for t in tasks if t["key"] == a.key), None)
         if t is None:
-            print(f"队列里没有 {a.key}")
-            return 1
+            print(f"队列里没有 {a.key}", file=sys.stderr)
+            return GONE
         if t.get("spec"):  # 执行机的队列：说明是 box 解析好送来的，这边按参数重新解析会丢掉它（11/4）
-            print(f"{a.key} 的说明是 box 送来的：改总队列里的参数，再 relay.py resend")
+            print(f"{a.key} 的说明是 box 送来的：改总队列里的参数，再 taskq site resend", file=sys.stderr)
             return 2
         p = dict(t["params"])
-        for k, v in S.parse_kv(a.kv).items():
+        for k, v in kv.items():
             if v == "":
                 p.pop(k, None)
             else:
@@ -762,10 +773,10 @@ def cmd_set(a):
         try:
             s = E.resolve_task(t["recipe"], p, t.get("exp"))
         except S.SpecError as e:
-            print(f"改不了：{e}")
+            print(f"改不了：{e}", file=sys.stderr)
             return 2
         if s["key"] != t["key"]:
-            print(f"改了以后任务名会变成 {s['key']}（领取记录、结果都按任务名）：改成新任务用 add，再把这个删掉")
+            print(f"改了以后任务名会变成 {s['key']}（领取记录、结果都按任务名）：改成新任务用 add，再把这个删掉", file=sys.stderr)
             return 2
         print(f"{t['key']}：{json.dumps(t['params'], ensure_ascii=False)} → {json.dumps(p, ensure_ascii=False)}")
         t["params"] = p
@@ -783,7 +794,7 @@ def cmd_set_nice(a):
         write_tasks(tasks)
     missing = set(a.keys) - {t["key"] for t in tasks}
     for k in sorted(missing):
-        print(f"队列里没有：{k}")
+        print(f"队列里没有：{k}", file=sys.stderr)
     return 0 if not missing else 1
 
 
@@ -819,9 +830,9 @@ def cmd_remove(a):
             if dep:
                 bad.append(f"{t['key']} 的 after 里有 {' '.join(dep)}（一起删，或者先改它）")
         for k in missing:
-            print(f"队列里没有：{k}")
+            print(f"队列里没有：{k}", file=sys.stderr)
         for b in bad:
-            print(f"不删：{b}")
+            print(f"不删：{b}", file=sys.stderr)
         if bad:
             return REFUSED
         keys = [k for k in a.keys if k in by]
@@ -846,7 +857,7 @@ def cmd_stop(a):
         by = {t["key"]: t for t in read_tasks()}
         missing = [k for k in a.keys if k not in by]
         for k in missing:
-            print(f"队列里没有：{k}")
+            print(f"队列里没有：{k}", file=sys.stderr)
         if missing:
             return 1
         os.makedirs(os.path.join(TQ, Q["stopped"]), exist_ok=True)
@@ -880,8 +891,8 @@ def cmd_resume(a):
 def cmd_show(a):
     t = next((t for t in read_tasks() if t["key"] == a.key), None)
     if t is None:
-        print(f"队列里没有 {a.key}")
-        return 1
+        print(f"队列里没有 {a.key}", file=sys.stderr)
+        return GONE
     s = spec_of(t)
     if a.json:
         if s is None:
@@ -1055,7 +1066,9 @@ def main(argv):
     p.add_argument("key")
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true", help="一行 JSON（前缀 proto.JSON_MARK）：{version, enabled, tasks, …}（proto.STATUS_TOP、STATUS_FIELDS；跨版本用，11/4）")
-    a = ap.parse_args(argv)  # 先解析：--help、用法错都不碰队列
+    a, extra = ap.parse_known_args(argv)  # 先解析：--help、用法错都不碰队列
+    if extra:  # 用法里只列这个子命令的参数
+        sub.choices[a.cmd].error(f"unrecognized arguments: {' '.join(extra)}")
     cmd = {"nice": "set-nice", "rm": "remove"}.get(a.cmd, a.cmd)
     if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
             and not have_queue() and here() != queue_host():

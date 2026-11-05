@@ -23,19 +23,25 @@ def main(argv):
     p = sub.add_parser("envs", help="只读：每个环境的状态（ok / 描述变了 / 没建 / 检查失败 / 在建）")
     p.add_argument("machine")
     a = ap.parse_args(argv)
+    from proto import EXIT
+    say = lambda msg: print(f"{ap.prog} {a.cmd}：{msg}", file=sys.stderr)  # noqa: E731
+    try:
+        m = E.M.machine(a.machine)
+    except KeyError:
+        say(f"机器表里没有 {a.machine}")
+        return EXIT["gone"]
     if a.cmd == "env":
+        if a.env not in (m.get("envs") or {}):
+            say(f"{a.machine} 的 envs 里没有 {a.env}（有：{'、'.join(m.get('envs') or {}) or '没有'}）")
+            return EXIT["gone"]
         try:
             rc, out = E.build(a.machine, a.env, dry=a.dry_run)
         except (E.EnvError, KeyError) as e:
-            print(f"{ap.prog}：{e}", file=sys.stderr)
+            say(e)
             return 2
         print(out)
         return rc
-    try:
-        st = E.states(a.machine)
-    except KeyError as e:
-        print(f"{ap.prog}：不认识的机器 {e}", file=sys.stderr)
-        return 2
+    st = E.states(a.machine)
     if st is None:
         print(f"连不上 {a.machine}", file=sys.stderr)
         return 1

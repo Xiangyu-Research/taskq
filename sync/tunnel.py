@@ -637,6 +637,9 @@ def main(argv):
         print(__doc__.strip())  # --help 不做事（rsync 只认紧跟着的第一个参数，后面的 -h 是 rsync 自己的）
         return 0
     if cmd == "rsync":
+        if not a:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
         return wrap(a)
     if cmd in ("_fetch", "_send"):
         print(f"在 {os.uname().nodename} 上{'下载' if cmd == '_fetch' else '上传'}", flush=True)
@@ -645,8 +648,21 @@ def main(argv):
         return 0
     if cmd in ("push", "pull") and len(a) == 4:
         M = machines()
-        host, site = M.machine(a[0])["ssh"], (a[0] if a[0] in M.RELAY else None)
-        lines = [ln for ln in open(a[3]).read().splitlines() if ln]
+        from proto import EXIT
+        prog = f"{os.path.basename(sys.argv[0])} {cmd}"  # tunnel.py push，或 taskq tunnel push
+        try:
+            host, site = M.machine(a[0]).get("ssh"), (a[0] if a[0] in M.RELAY else None)
+        except KeyError:
+            print(f"{prog}：机器表里没有 {a[0]}", file=sys.stderr)
+            return EXIT["gone"]
+        if not host:
+            print(f"{prog}：{a[0]} 没有 ssh，传不过去", file=sys.stderr)
+            return 2
+        try:
+            lines = [ln for ln in open(a[3]).read().splitlines() if ln]
+        except OSError as e:
+            print(f"{prog}：读不了清单 {a[3]}：{e.strerror}", file=sys.stderr)
+            return 2
         if cmd == "push":
             return 1 if push(host, a[1], a[2], lines, site=site) else 0
         return 1 if pull(host, a[1], a[2], [ln.split("\t") for ln in lines], site=site) else 0

@@ -13,6 +13,12 @@ if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/t
 M="python3 $CORE/sites/mtab.py"
 C="python3 $CORE/queue/cfg.py"
 eval "$(python3 "$CORE/queue/proto.py" sh)"
+PROG=${TASKQ_PROG:-setup.sh}
+unset TASKQ_PROG
+(( $# <= 1 )) && [[ ${1:-} != -* ]] || { echo "用法：$PROG [名字]" >&2; exit 2; }
+rc=0
+[[ -z ${1:-} ]] || $M get "$1" label > /dev/null 2>&1 || rc=$?
+(( rc != TQ_EXIT_GONE )) || { echo "$PROG：机器表里没有 $1" >&2; exit "$rc"; }
 if [[ -n ${1:-} && $1 != "$($M whoami 2> /dev/null)" ]]; then
     # 代码包（表里有 code）：核心在包里的 BUNDLE_CORE；仓库的克隆（只有 repo）：和这边同一布局
     ssh=$($M get "$1" ssh) code=$($M get "$1" code) sub=/$TQ_BUNDLE_CORE

@@ -244,6 +244,7 @@ ENV = dict(
     TASKQ_STAGE_TMP=("run", "1/0：开训后把输入拷到节点本地盘；没设时看 machines.py 的 stage_tmp"),
     TASKQ_LIB=("run", "调度核心的 queue/ 文件夹（run_task.sh 给任务的命令设，同时把核心的 bin/ 加在 PATH 前面）"),
     TASKQ_ENVS=("run", "worker 能领的环境（逗号分隔）；没设时看 machines.py 的 envs"),
+    TASKQ_PROG=("run", "bin/taskq 转给 bash 脚本时的命令名（如 taskq boot），脚本的用法、出错里用；脚本读完就 unset"),
     TASKQ_SLOTS=("tune", "一个 worker 最多同时训几个；Slurm 里按核数和内存（2 或 1），Slurm 外看 machines.py 的 slots"),
     TASKQ_MACHINE=("test", "当作哪台机器"),
     TASKQ_HEAD_CMD=("test", "代替读代码版本的命令"),
