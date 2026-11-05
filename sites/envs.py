@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(CORE, "monitor"))
 import mtab as M  # noqa: E402
 
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'
-BUILD_MIN = 180     # 那边建一次的时限（分钟）：Slurm 是作业时限，pueue 类是 timeout
+BUILD_MIN = 60      # 那边建一次的时限（分钟）：Slurm 是作业时限（短一点好排：box 上建 nnunet 不到 1 分钟），pueue 类是 timeout
 BUILD_TIMEOUT = 4 * 3600  # box 上等一次建环境最多这么久
 STALE_S = BUILD_TIMEOUT  # .building 这么久没动就当已经停了
 RETRY_S = 6 * 3600  # 空间不够没建的，这么久以后自动再试
