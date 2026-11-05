@@ -502,8 +502,8 @@ runpy.run_path(H, run_name="__main__")
 
 def _health(plugins, hour, *args):
     home = os.path.join(_lt, "home")
-    os.makedirs(os.path.join(home, ".config", "taskq-health"), exist_ok=True)
-    open(os.path.join(home, ".config", "taskq-health", "ntfy_topic"), "w").write("t0\n")
+    os.makedirs(os.path.join(home, ".config", "taskq"), exist_ok=True)
+    open(os.path.join(home, ".config", "taskq", "ntfy_topic"), "w").write("t0\n")
     env = dict(os.environ, HOME=home, TASKQ_PLUGINS=plugins, TASKQ_STATE=os.path.join(_lt, "st"),
                TASKQ_DIR=os.path.join(_lt, "q"))
     log = os.path.join(_lt, "pushed.log")

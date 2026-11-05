@@ -274,6 +274,7 @@ def cmd_note(argv):
     ap.add_argument("--kind", default="note", help="e.g. incident, fix, change, decision, remark (default: note)")
     ap.add_argument("--at", help="when it happened (default: now)")
     ap.add_argument("--uid", help="unique id: a second note with the same uid is ignored (for imports)")
+    ap.add_argument("--data", help="a JSON object stored with the note (shown by taskq events --json)")
     ap.add_argument("--source", default="note", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     text = " ".join(a.text).strip()
@@ -284,6 +285,7 @@ def cmd_note(argv):
         return 2
     try:
         t = when(a.at) if a.at else None
+        data = json.loads(a.data) if a.data else None
     except ValueError as e:
         print(f"taskq note: {e}", file=sys.stderr)
         return 2
@@ -292,7 +294,7 @@ def cmd_note(argv):
         print(f"taskq note: no database at {D.path()} (run on the hub; `taskq db migrate` creates it)", file=sys.stderr)
         return 1
     n = db.total_changes
-    _insert(db, [_row(a.source, text, kind=a.kind, key=a.key, site=a.site, t=t, uid=a.uid)])
+    _insert(db, [_row(a.source, text, kind=a.kind, key=a.key, site=a.site, t=t, uid=a.uid, data=data)])
     added = db.total_changes > n
     db.close()
     print("noted" if added else f"already there (uid {a.uid})")

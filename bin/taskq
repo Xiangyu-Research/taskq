@@ -290,6 +290,7 @@ TREE = {
                   py("events", "events", prog="taskq"), own_help=True),
     "note": Cmd("write a note into the event log (what went wrong, what was done)", py("events", "note", prog="taskq"), own_help=True),
     "progress": Cmd("task progress over time ([--key K] [--since T] [--json])", py("events", "progress", prog="taskq"), own_help=True),
+    "notify": Cmd("push a message to the phone (ntfy) and log it as an event", py("push", prog="taskq"), own_help=True),
     "problems": Cmd("what the last health check found ([--all] [--json])", py("notice", "problems", prog="taskq"), own_help=True),
     "notice": Group("挂在健康检查上的提醒（进\"需要处理\"、推送一次，撤掉后消失）", {
         "set": Cmd("挂上或改文字（<名字> [文字…]；不给文字时读标准输入）", py("notice", "set", prog="taskq notice"), own_help=True),
@@ -378,7 +379,7 @@ TREE = {
 }
 
 SECTIONS = [("队列", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "rm"]),
-            ("调度", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress"]),
+            ("调度", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
             ("执行机和实验", ["site", "env", "smoke", "exp"]),
             ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
             ("其他", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "snapshot", "check", "db", "path", "machines", "self"])]

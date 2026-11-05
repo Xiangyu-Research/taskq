@@ -102,6 +102,22 @@ js = [json.loads(x) for x in r.stdout.splitlines()]
 ok("taskq events --json: one row per line with proto.EVENT_FIELDS", r.returncode == 0 and len(js) == 1
    and tuple(js[0]) == EV.proto.EVENT_FIELDS and js[0]["msg"] == "fixed it")
 
+r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "--kind", "report", "--data", '{"n": 3}',
+                    "sent"], capture_output=True, text=True, env=os.environ, timeout=60)
+r2 = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "--data", "{bad", "x"],
+                    capture_output=True, text=True, env=os.environ, timeout=60)
+ok("taskq note --data: stored and read back; bad JSON refused", r.returncode == 0 and r2.returncode == 2
+   and [json.loads(x["data"]) for x in EV.query(db, source="note", kind="report")] == [{"n": 3}])
+
+# taskq notify: pushes through monitor/push.py and logs a notify event
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "monitor"))
+import push as PU  # noqa: E402
+sent = []
+PU.push = lambda msg, **kw: sent.append((msg, kw))
+rc = PU.main(["--title", "T", "--kind", "report", "hello"])
+ok("taskq notify: pushed with the title, logged as a notify event", rc == 0 and sent == [("hello", dict(title="T", priority="default", tags=""))]
+   and [(x["kind"], x["msg"]) for x in EV.query(db, source="notify")] == [("report", "hello")])
+
 # progress snapshots
 t0 = time.time()
 n1 = EV.snapshot(db, [dict(key="k1", state="running", progress=0.1, site="s"), dict(key="k2", state="queued", progress=None)], t=t0)

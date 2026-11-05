@@ -59,8 +59,6 @@ OUTPUTS = dict(
     code_dirs=(QR, QR + "/testdata/code"),
     bundle_check="base",
     env_script=QR + "/testdata/env.sh",
-    health="~/.cache/taskq-health",
-    topic="~/.config/taskq-health/ntfy_topic",
     name="Demo",
     registry=dict(cmd=QR + "/testdata/bin/registry.py", dir=QR + "/testdata/exps/demo",
                   files=("registry.csv", "registry.md")),

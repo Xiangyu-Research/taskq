@@ -19,8 +19,7 @@
   - 项目挂的提醒（taskq notice，monitor/notice.py）：每条一个问题，撤掉后消失。
 提醒（10/21 起）：每个问题推送一次，用 monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，可以看 health.log 的时间。
-文件（配置文件夹里 policy.py 的 OUTPUTS）：topic（ntfy 频道名，不进仓库）、health 下的 state.json（问题和推送记录，
-  使用者的登记表脚本可以读）、health.log（每次有变化记一行）。
+推送：monitor/push.py（频道名在 OUTPUTS["topic"] 指的文件，默认 ~/.config/taskq/ntfy_topic）。问题、提醒、日志在 hub 的数据库（taskq problems、taskq events）。
 每次检查后还做这几件事（10/18 起）：
   - queue/shift.py：按时段开关 pueue 组（policy.py 的 SHIFT）。
   - queue/feed.py：送任务的唯一入口（10/31），交给 queue/relay.py（领任务、传数据、补 worker、拉回，
@@ -31,8 +30,6 @@ import argparse
 import json
 import os
 import sys
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,15 +50,10 @@ import notice as NT  # noqa: E402
 OUT = getattr(policy, "OUTPUTS", {})
 HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
 NAME = OUT.get("name", "taskq")
-TOPIC = os.path.expanduser(OUT.get("topic", "~/.config/taskq-health/ntfy_topic"))
 NIGHT = (22, 8)  # 22:00–08:00 只推紧急的
 
 
-def push(msg, title=f"{NAME} 作业", priority="default", tags=""):
-    topic = open(TOPIC).read().strip()
-    q = urllib.parse.urlencode({"title": title, "priority": priority, "tags": tags})
-    req = urllib.request.Request(f"https://ntfy.sh/{topic}?{q}", data=msg.encode(), method="POST")
-    urllib.request.urlopen(req, timeout=30).read()
+from push import push  # noqa: E402
 
 
 def load_failed(e, dry=False):
