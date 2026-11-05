@@ -83,6 +83,11 @@ n2 = EV.import_file(db, "relay", lg)
 imp = EV.query(db, since=EV.when("2026-11-01"), until=EV.when("2026-11-02"))
 ok("import: same line twice kept twice, continuation joined; re-running adds nothing",
    len(imp) == 3 and imp[0]["msg"] == "a demo/b/0\n  more of a" and n2 == 0 and n1 == 3)
+EV._insert(db, [EV._row("feed", "live", t=EV.when("2026-11-03 12:00") + 0.7)])
+open(lg, "w").write("2026-11-03 11:59:59 old\n  cont\n2026-11-03 12:00:00 live\n  cont of live\n2026-11-03 12:05:00 later\n")
+n3 = EV.import_file(db, "feed", lg)
+ok("import: lines from the first live event's second on are left out (already written live)",
+   n3 == 1 and [x["msg"] for x in EV.query(db, source="feed", since=EV.when("2026-11-03"), until=EV.when("2026-11-04"))] == ["old\n  cont", "live"])
 
 # notes
 r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "--key", "demo/c/1", "--kind", "fix",

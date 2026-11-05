@@ -304,19 +304,27 @@ LINE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:\.\d+)?:? ?(.*)$")
 
 
 def import_file(db, source, p):
-    """Lines 'YYYY-MM-DD HH:MM:SS text' → events (uid = hash of source, line, occurrence: re-running adds nothing)."""
-    seen, rows = {}, []
+    """Lines 'YYYY-MM-DD HH:MM:SS text' → events (uid = hash of source, line, occurrence: re-running adds nothing).
+    Lines from the second of the source's first live event on are skipped: those were written to the database too."""
+    live = db.execute("SELECT min(t) FROM log WHERE source=? AND uid IS NULL", (source,)).fetchone()[0]
+    cut = int(live) if live is not None else None
+    seen, rows, skip = {}, [], False
     with open(p, errors="replace") as f:
         for ln in f:
             ln = ln.rstrip("\n")
             m = LINE.match(ln)
             if not m or not m.group(2).strip():
-                if rows and ln.strip():  # continuation line
+                if rows and ln.strip() and not skip:  # continuation line
                     rows[-1]["msg"] += "\n" + ln
                 continue
+            t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            if cut is not None and t >= cut:
+                skip = True
+                continue
+            skip = False
             n = seen[ln] = seen.get(ln, 0) + 1
             uid = hashlib.sha1(f"{source}\0{ln}\0{n}".encode()).hexdigest()
-            rows.append(_row(source, m.group(2).strip(), t=time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")), uid=uid))
+            rows.append(_row(source, m.group(2).strip(), t=t, uid=uid))
     n0 = db.total_changes
     _insert(db, rows)
     return db.total_changes - n0
