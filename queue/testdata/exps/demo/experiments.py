@@ -47,7 +47,7 @@ def _manifest_ok(path):
     return True
 
 
-# ---------------- 步骤（{data} = box 的数据目录，{python} = box 上 base 环境的 python） ----------------
+# ---------------- 步骤（{data} = hub 的数据目录，{python} = hub 上 base 环境的 python） ----------------
 PE = "bash " + QR + "/testdata/bin/step.sh"
 AN = "demo/analysis/{model}"
 T0_ENS = "D101_alpha/V_save__PlanM__full/frags_0-1-2-3-4"

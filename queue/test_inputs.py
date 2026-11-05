@@ -85,8 +85,8 @@ with open(os.path.join(BIN, "squeue"), "w") as f:
     f.write("#!/bin/sh\necho 7\n")
 os.chmod(os.path.join(BIN, "squeue"), 0o755)
 TMP = os.path.join(T, "tmp")
-L7 = os.path.join(TMP, "phd_stage_7")
-old = os.path.join(TMP, "phd_stage_5")
+L7 = os.path.join(TMP, "taskq_stage_7")
+old = os.path.join(TMP, "phd_stage_5")  # 旧前缀（11/6 前的作业）：照样认、照样清理（11/8 以后删）
 os.makedirs(os.path.join(old, "blobs"))
 env = dict(NOENV, PATH=BIN + ":" + os.environ["PATH"])
 rc, out, err = run("prepare", DATA, "k1", L7, V, env=env)
@@ -121,7 +121,7 @@ open(bad_real, "wb").write(good)
 rc, out, err = run("prepare", DATA, "k2", L7, V, env=env)
 todo2 = json.load(open(os.path.join(L7, "views", "k2.todo.json")))
 ok("第二个任务：已经在本地的直接指本地，清单里只剩没拷成的那个", rc == 0 and [x[0] for x in todo2] == ["in/ds1/" + bad_rel])
-L8 = os.path.join(TMP, "phd_stage_8")
+L8 = os.path.join(TMP, "phd_stage_8")  # 旧前缀的别的作业：照样硬链接过来、不删（11/8 以后删）
 with open(os.path.join(BIN, "squeue"), "w") as f:
     f.write("#!/bin/sh\necho 7\necho 8\n")
 rc, out, err = run("prepare", DATA, "k3", L8, V, env=env)
@@ -152,7 +152,7 @@ finally:
     I.os.kill = _kill
 ok("进程在不在：PermissionError 算在（别人的进程），ProcessLookupError 算不在", perm is True and gone is False
    and I.alive(os.getpid()) and not I.alive(fixture.dead_pid()))
-L10 = os.path.join(TMP, "phd_stage_10")
+L10 = os.path.join(TMP, "taskq_stage_10")
 run("prepare", DATA, "k10", L10, V, env=env)
 _du, _keep = I.shutil.disk_usage, I.KEEP_GB
 I.shutil.disk_usage = lambda p: shutil._ntuple_diskusage(0, 0, 1024 ** 3 + 10)
@@ -166,9 +166,9 @@ try:
 finally:
     I.shutil.disk_usage, I.KEEP_GB = _du, _keep
 ok("剩余空间：本节点别的作业已有的（硬链接）不算进要拷的量", "硬链接 7 个" in buf.getvalue() and "不拷" not in buf.getvalue())
-L11 = os.path.join(TMP, "phd_stage_11")
+L11 = os.path.join(TMP, "taskq_stage_11")
 run("prepare", DATA, "k11", L11, V, env=env)
-lk = open(os.path.join(TMP, f".phd_stage_{os.getuid()}.lock"), "a")
+lk = open(os.path.join(TMP, f".taskq_stage_{os.getuid()}.lock"), "a")
 fcntl.flock(lk, fcntl.LOCK_EX)
 p11 = subprocess.Popen(PY + ["copy", L11, "k11"], stdout=subprocess.PIPE, text=True, env=dict(os.environ, **env))
 try:
@@ -201,16 +201,16 @@ ok("同一路径内容改了（大小不变）：不用本地旧副本，读到�
 open(dj, "w").write('{"a": 1}')
 
 # 盘不够：不拷，照旧读原处
-rc, out, err = run("prepare", DATA, "k4", os.path.join(TMP, "phd_stage_9"), V, env=dict(env, STAGE_KEEP_GB="1e9"))
-rc, out, err = run("copy", os.path.join(TMP, "phd_stage_9"), "k4", env=dict(env, STAGE_KEEP_GB="1e9"))
-lv9 = os.path.join(TMP, "phd_stage_9", "views", "k4", "in", "ds1")
+rc, out, err = run("prepare", DATA, "k4", os.path.join(TMP, "taskq_stage_9"), V, env=dict(env, STAGE_KEEP_GB="1e9"))
+rc, out, err = run("copy", os.path.join(TMP, "taskq_stage_9"), "k4", env=dict(env, STAGE_KEEP_GB="1e9"))
+lv9 = os.path.join(TMP, "taskq_stage_9", "views", "k4", "in", "ds1")
 ok("盘不够：不拷，视图仍指向原处", rc == 0 and "不拷" in out and all(os.path.realpath(os.path.join(lv9, r)).startswith(STORE) for r in files))
 
 # squeue 出错时不删别的作业的目录
 with open(os.path.join(BIN, "squeue"), "w") as f:
     f.write("#!/bin/sh\nexit 1\n")
 rc, out, err = run("prepare", DATA, "k5", L7, V, env=env)
-ok("squeue 出错：不删别的作业的目录", rc == 0 and os.path.isdir(L8) and os.path.isdir(os.path.join(TMP, "phd_stage_9")))
+ok("squeue 出错：不删别的作业的目录", rc == 0 and os.path.isdir(L8) and os.path.isdir(os.path.join(TMP, "taskq_stage_9")))
 
 # run_task.sh：缺输入 → 退出码 4，不跑命令；齐了 → 命令从 TASK_INPUTS_ROOT 读；Slurm 里、STAGE_TMP 开、local_inputs → 读本地视图
 RT = os.path.join(HERE, "run_task.sh")

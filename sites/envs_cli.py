@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""执行机的环境（2026-10-31；11/4 前叫 site.py，和标准库的 site 重名）：envs.py 的命令行。在 box 上跑。
+"""执行机的环境（2026-10-31；11/4 前叫 site.py，和标准库的 site 重名）：envs.py 的命令行。在 hub 上跑。
 
     taskq site env <机器> <环境> [--variant V] [-n]
-                                      按 envs/specs/<环境>.yml（有 <环境>.<变体>.lock.json 时按锁、不联网）在那台的 CPU 上建环境、
+                                      按 <配置文件夹>/specs/<环境>.yml（有 <环境>.<变体>.lock.json 时按锁、不联网）在那台的 CPU 上建环境、
                                       跑检查，过了写 <环境>.ok。机器条目里还是 conda / venv 的也能建（预建）。变体默认按机器条目，
                                       条目不是 "spec" 时是 default（-n / --dry-run：只打印要跑的命令和脚本）
     taskq site envs <机器>              只读：每个环境的状态（ok / 描述变了 / 没建 / 检查失败 / 空间不够 / 在建）
@@ -16,9 +16,9 @@ import envs as E  # noqa: E402
 
 def main(argv):
     import argparse
-    ap = argparse.ArgumentParser(description="执行机的环境（在 box 上跑）")
+    ap = argparse.ArgumentParser(description="执行机的环境（在 hub 上跑）")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("env", help="按 envs/specs/<环境>.yml 在那台的 CPU 上建环境、跑检查，过了写 <环境>.ok")
+    p = sub.add_parser("env", help="按 <配置文件夹>/specs/<环境>.yml 在那台的 CPU 上建环境、跑检查，过了写 <环境>.ok")
     p.add_argument("machine")
     p.add_argument("env")
     p.add_argument("--variant", help="变体（默认按机器条目，不是 \"spec\" 时 default）")

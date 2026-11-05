@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """找使用者的项目（2026-11-04）：项目根目录里有 .taskq.toml，写明配置和插件文件夹（相对项目根目录）：
 
-    config = "envs"
-    plugins = ["research/common/taskq_plugins"]
+    config = "config"
+    plugins = ["plugins"]
 
 找的顺序：明确给的文件夹（--project）> 环境变量 TASKQ_PROJECT > 从当前目录往上找 .taskq.toml。只用标准库，不 import 核心的模块。
 

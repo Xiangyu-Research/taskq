@@ -89,40 +89,40 @@ try:
     # ---- 影子 ----
     ev1 = F.instances["eval:t18b_f1"]
     rec(ev1)  # 新做完
-    s = dict(pueue={"box": {"tasks": []}}, records=[])
+    s = dict(pueue={"hub": {"tasks": []}}, records=[])
     ident = lambda h, t, recs: next((r for r in recs if r["id"] == t["id"]), None)  # noqa: E731
-    n = LG.shadow(F, G, ROOT, db, s=s, hub="box", identify=ident)
+    n = LG.shadow(F, G, ROOT, db, s=s, hub="hub", identify=ident)
     ok(n["new"] == 1 and not n["unexplained"], f"新做完的记成 legacy：{n}")
     ok(LG.last_attempt(db, ev1.id)["state"] == "legacy", "legacy")
     with open(os.path.join(ROOT, ev1.marker), "a") as f:
         f.write(" ")  # 大小变了，没有调度跑过它
-    n = LG.shadow(F, G, ROOT, db, s=s, hub="box", identify=ident)
+    n = LG.shadow(F, G, ROOT, db, s=s, hub="hub", identify=ident)
     ok(n["changed"] == 1 and len(n["unexplained"]) == 1 and n["unexplained"][0]["level"] == "warn", f"改过：报一次（{n}）")
-    n = LG.shadow(F, G, ROOT, db, s=s, hub="box", identify=ident)
+    n = LG.shadow(F, G, ROOT, db, s=s, hub="hub", identify=ident)
     ok(n["changed"] == 1 and not n["unexplained"], "同样的改动不重复报")
     shadow_dir = os.path.join(T, "state", "shadow")
     lines = [ln for f in os.listdir(shadow_dir) for ln in open(os.path.join(shadow_dir, f))]
     ok(len(lines) == 1, f"说不清的写进 shadow/ledger-日期.jsonl 一行（{len(lines)}）")
     # 调度这期间跑过它：记成新的一次
-    s2 = dict(pueue={"box": {"tasks": [dict(id=7, status="Success", end="2099-01-01T00:00:00+08:00")]}},
+    s2 = dict(pueue={"hub": {"tasks": [dict(id=7, status="Success", end="2099-01-01T00:00:00+08:00")]}},
               records=[dict(id=7, step="eval", key=ev1.key)])
-    n = LG.shadow(F, G, ROOT, db, s=s2, hub="box", identify=ident)
+    n = LG.shadow(F, G, ROOT, db, s=s2, hub="hub", identify=ident)
     ok(n["rerun"] == 1 and LG.done(db, ev1, ROOT) == (True, None), f"调度重跑过：记成新的一次（{n}）")
     # 做完又不算了：标志不见了
     os.remove(os.path.join(ROOT, ev1.marker))
-    n = LG.shadow(F, G, ROOT, db, s=s, hub="box", identify=ident)
+    n = LG.shadow(F, G, ROOT, db, s=s, hub="hub", identify=ident)
     ok(n["regressed"] == 1 and n["unexplained"] and n["unexplained"][0]["level"] == "error", f"标志不见了：error（{n}）")
     # 在重跑（旧的判断说没做完）不报
     rec(ev, status="running")
-    s3 = dict(pueue={"box": {"tasks": [dict(id=8, status="Running")]}}, records=[dict(id=8, step="eval", key=ev.key)])
-    n = LG.shadow(F, G, ROOT, db, s=s3, hub="box", identify=ident)
+    s3 = dict(pueue={"hub": {"tasks": [dict(id=8, status="Running")]}}, records=[dict(id=8, step="eval", key=ev.key)])
+    n = LG.shadow(F, G, ROOT, db, s=s3, hub="hub", identify=ident)
     ok(not [u for u in n["unexplained"] if u["id"] == ev.id], "在重跑的不报")
     # advance 算过的直接用
     ev2 = F.instances["eval:t18b_f2"]  # 盘上没有，advance 这一轮说做完了：用 advance 的
-    LG.shadow(F, G, ROOT, db, s=s, seen={("eval", ev2.key): True}, hub="box", identify=ident)
+    LG.shadow(F, G, ROOT, db, s=s, seen={("eval", ev2.key): True}, hub="hub", identify=ident)
     ok((LG.last_attempt(db, ev2.id) or {"state": None})["state"] == "legacy", "用 advance 这一轮的判断")
     # 时间用完：剩下的这轮不查
-    n = LG.shadow(F, G, ROOT, db, s=s, hub="box", identify=ident, budget=-1)
+    n = LG.shadow(F, G, ROOT, db, s=s, hub="hub", identify=ident, budget=-1)
     ok(n["skipped"] == len(F.instances), "超时的这轮不查")
 finally:
     shutil.rmtree(T, ignore_errors=True)

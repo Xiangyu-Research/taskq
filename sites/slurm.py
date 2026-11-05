@@ -1,6 +1,6 @@
-"""Slurm 类机器（我的 DICC、SITES 里 scheduler="slurm" 的执行机）的适配器（2026-10-31）：读各 QOS 的作业数、按 QOS 分配、交 worker 作业。
+"""Slurm 类机器（SITES 里 scheduler="slurm" 的执行机）的适配器（2026-10-31）：读各 QOS 的作业数、按 QOS 分配、交 worker 作业。
 和 pueue.py 对应：读状态 → 调用方算交几个（queue/refill.py 的 topup_plan）→ start_workers 交。
-交的是那台的 worker.sbatch，它转交 worker_start.sh（开显存填充 gpu_pad，gpu-a100 要求 >= 40GB）。
+交的是那台的 worker.sbatch，它转交 worker_start.sh（按机器表的 gpu_pad 开显存填充，给要求显存占用的分区用）。
 run：fn(命令) → (退出码, 输出)，由调用方绑好机器（测试替换）。"""
 import os
 import secrets
@@ -48,8 +48,8 @@ def kind_of(command):
 
 def probe(name):
     """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数|其中还在排（没开始）的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
-    "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（DICC 的分区都挂 normal，所有作业都占它的名额）；
-    有一条命令出错就整个出错（不按 0 算）。QOS 来自 envs/policy.py 的 SLURM；CPU worker 按交的脚本（FILES["cpu"]）认。"""
+    "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（有的集群所有分区都挂同一个 QOS，所有作业都占它的名额）；
+    有一条命令出错就整个出错（不按 0 算）。QOS 来自 policy.py 的 SLURM；CPU worker 按交的脚本（FILES["cpu"]）认。"""
     conf = P.SLURM[name]
     out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
         "ids=$(squeue -u $USER -h -r -q $q -o %i); pd=$(squeue -u $USER -h -r -q $q -t PD -o %i); " \

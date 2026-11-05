@@ -5,13 +5,14 @@
       查每个输入（文件或文件夹；链接要指得到文件；文件夹里任一层有 .incomplete = 建到一半，读不了也算缺）。不全 → 退出码 4，标准错误里写缺几个、举几个例子。
       给了本地根目录时：在 <根>/views/<任务文件名>/ 下照数据目录的相对路径建一份只有链接的树，指向原处的文件（已经拷到本地的指本地），
       要拷的写进 <根>/views/<任务文件名>.todo.json，打印这份视图的根；没给时打印数据目录。命令从打印的目录读（$TASK_INPUTS_ROOT）。
-      先删本节点上自己的、作业已经结束的 phd_stage_<作业号>。
+      先删本节点上自己的、作业已经结束的本地副本（<前缀><作业号>，前缀见 proto.STAGE_PREFIXES）。
   inputs.py copy <本地根目录> <任务文件名>
       照清单把文件拷到 <根>/blobs/（本节点别的作业已有的硬链接过来），拷完核对（文件名是 sha256 的按内容，其他按大小），
       再替换视图里对应的链接（新建链接再 rename 盖过去）：换之前读原处，换之后读本地。拷完至少还剩 STAGE_KEEP_GB（默认 300）GB
       （能从本节点别的作业硬链接来的不算），不够就不拷。本节点的拷贝排队（一把锁），一个查完拷完下一个再查。核对不上、拷不了的留着读原处。
 退出码：0 好了；4 缺输入；其他 = 出错（run_task.sh 照旧读原处）。
 """
+import contextlib
 import fcntl
 import glob
 import hashlib
@@ -31,7 +32,7 @@ MISSING = proto.EXIT["run_missing"]
 PAR = int(os.environ.get("STAGE_PAR", 16))
 KEEP_GB = float(os.environ.get("STAGE_KEEP_GB", 300))
 HEX = re.compile(r"[0-9a-f]{64}")
-PREFIX = proto.STAGE_PREFIX
+PREFIXES = proto.STAGE_PREFIXES  # 认目录时新旧前缀都认（旧的 11/8 以后删）
 PARTIAL = ".partial."
 
 
@@ -97,15 +98,16 @@ def clean_old(root):
     live = live_jobs()
     if live is None:
         return
-    for d in glob.glob(os.path.join(os.path.dirname(root), PREFIX + "*")):
-        j = os.path.basename(d)[len(PREFIX):]
-        try:
-            mine = os.stat(d).st_uid == os.getuid()
-        except OSError:
-            continue
-        if d != root and j.isdigit() and j not in live and mine:
-            print(f"删掉已结束作业 {j} 的本地副本 {d}", file=sys.stderr)
-            shutil.rmtree(d, ignore_errors=True)
+    for pre in PREFIXES:
+        for d in glob.glob(os.path.join(os.path.dirname(root), pre + "*")):
+            j = os.path.basename(d)[len(pre):]
+            try:
+                mine = os.stat(d).st_uid == os.getuid()
+            except OSError:
+                continue
+            if d != root and j.isdigit() and j not in live and mine:
+                print(f"删掉已结束作业 {j} 的本地副本 {d}", file=sys.stderr)
+                shutil.rmtree(d, ignore_errors=True)
 
 
 def put_link(p, target):
@@ -206,9 +208,10 @@ def copy(root, key):
     by = {}
     for rel, real, size, bid in todo:
         by.setdefault(bid, [real, size, []])[2].append(rel)
-    others = [d for d in glob.glob(os.path.join(os.path.dirname(root), PREFIX + "*", "blobs")) if d != blobs]
-    with open(os.path.join(os.path.dirname(root), f".{PREFIX}{os.getuid()}.lock"), "a") as lk:  # 本节点的拷贝一个一个来（11/4）
-        fcntl.flock(lk, fcntl.LOCK_EX)
+    others = [d for pre in PREFIXES for d in glob.glob(os.path.join(os.path.dirname(root), pre + "*", "blobs")) if d != blobs]
+    with contextlib.ExitStack() as locks:  # 本节点的拷贝一个一个来（11/4）；新旧前缀的锁按固定顺序都拿（旧的 11/8 以后删）
+        for pre in reversed(PREFIXES):
+            fcntl.flock(locks.enter_context(open(os.path.join(os.path.dirname(root), f".{pre}{os.getuid()}.lock"), "a")), fcntl.LOCK_EX)
         need = sum(size for bid, (_, size, _) in by.items()
                    if not os.path.isfile(os.path.join(blobs, bid)) and not any(_size(os.path.join(o, bid)) == size for o in others))
         free = shutil.disk_usage(root).free

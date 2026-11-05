@@ -401,7 +401,7 @@ def check_experiments(r):
         labels.setdefault(E.label(E.experiment(t["exp"]), t), []).append(k)
     dup = {lb: ks for lb, ks in labels.items() if len(ks) > 1}
     if dup:
-        r.bad(g, f"任务的标签重复（box 的 pueue 标签、步骤的标签会撞）：{dict(list(dup.items())[:5])}")
+        r.bad(g, f"任务的标签重复（hub 的 pueue 标签、步骤的标签会撞）：{dict(list(dup.items())[:5])}")
     return True
 
 
@@ -507,7 +507,7 @@ def check_steps(r, root):
             S.shell_lines(s, "/d")
         except Exception as err:  # noqa: BLE001
             r.bad(g, f"{where} 的 queue 变不成总队列里的任务：{type(err).__name__}: {err}")
-        places = [t for t in A.targets(st["name"], st["group"]) if t["kind"] != "box"] if st["name"] else []
+        places = [t for t in A.targets(st["name"], st["group"]) if t["kind"] != "hub"] if st["name"] else []
         relay_places = [t for t in places if t["kind"] != "queue" or t["machine"] in M.RELAY]
         if relay_places and not ("inputs" in q or "inputs_cmd" in q or "--stage" in st["cmd"]):
             r.bad(g, f"{where} 可能放到执行机上（PLACE），但没法列出输入：queue 里写 inputs 或 inputs_cmd，或命令支持 --stage needs")

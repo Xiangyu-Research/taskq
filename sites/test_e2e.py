@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""执行机全流程测试（2026-10-31）：本机模拟一台 pueue 类执行机（lab1 的条目，根目录、conda、pueue 都换成临时的），走一遍
+"""执行机全流程测试（2026-10-31）：本机模拟一台 pueue 类执行机（site-pueue 的条目，根目录、conda、pueue 都换成临时的），走一遍
 建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理。
-完全隔离：执行机根目录、box 的数据目录、总队列都在临时目录里；pueue 是自己起的 pueued（自己的配置和 socket），结束时只停它；
+完全隔离：执行机根目录、hub 的数据目录、总队列都在临时目录里；pueue 是自己起的 pueued（自己的配置和 socket），结束时只停它；
 ssh 换成本机的 bash -c，不连任何机器；不改机器表（条目在进程里替换）。
-跑法：python3 sites/test_e2e.py（box 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
+跑法：python3 sites/test_e2e.py（hub 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
 import glob
 import json
 import os
@@ -31,7 +31,7 @@ PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
 PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
 
 T = fixture.tmpdir(prefix="e2e_", dir=os.environ.get("E2E_TMP") or None)
-BD = os.path.join(T, "box")        # box 的数据目录
+BD = os.path.join(T, "hub")        # hub 的数据目录
 # 执行机的根目录：实际在 T/r，经系统临时目录里的一个软链接用（根目录经软链接到达的情况也测到；结束时删掉）
 os.makedirs(os.path.join(T, "r"))
 RLINK = tempfile.mktemp(prefix="e2e_r_", dir="/tmp")
@@ -42,9 +42,9 @@ BIN = os.path.join(T, "bin")
 FAKE = os.path.join(BIN, "ssh")
 for d in (BD, PQ, BIN):
     os.makedirs(d)
-with open(FAKE, "w") as f:  # 假的 ssh：跳过 -o 和机器名，在本机跑；box 这边的变量不带过去
+with open(FAKE, "w") as f:  # 假的 ssh：跳过 -o 和机器名，在本机跑；hub 这边的变量不带过去
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nshift\n'
-            f'cd / && exec env -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u PHD_TASKS -u PHD_LAST bash -c "$*"\n')
+            f'cd / && exec env -u TASKQ_CONFIG -u TASKQ_PLUGINS -u TASKQ_DATA -u TASKQ_DIR -u RELAY_DIR -u TASKQ_TASKS -u TASKQ_LAST bash -c "$*"\n')
 with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # 不碰真的卡
     f.write("#!/bin/bash\nexit 0\n")
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):
@@ -56,7 +56,7 @@ s_.close()
 os.environ.update(
     RELAY_DIR=os.path.join(T, "relay"), TASKQ_DIR=os.path.join(T, "boxq"), TASKQ_DATA=BD,
     RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="0.1",
-    TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"), PHD_LAST=os.path.join(T, "last"),
+    TUNNEL_LOCK=os.path.join(T, "lock"), TASKQ_TASKS=os.path.join(T, "tasks.json"), TASKQ_LAST=os.path.join(T, "last"),
     RELAY_LOG=os.path.join(T, "relay.log"), PATH=BIN + ":" + os.environ["PATH"],
     TMPDIR=T,  # 被停掉的 worker 留下的临时文件跟着 T 删
     # worker（dicc_worker.sh）、run_task.sh 的测试用开关：等得短一些
@@ -80,7 +80,7 @@ import relay_transfer as RT  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import envs as E  # noqa: E402
 
-NAME = "lab1"
+NAME = "site-pueue"
 Q = taskq.queue_host()
 CONDA = os.path.join(RROOT, "conda")       # 假的 conda：activate 只把 bin 放进 PATH（bin/python3 是本机一个有 numpy 的 Python）
 PWRAP = os.path.join(RROOT, "bin", "pueue")  # 指到自己的 pueued
@@ -172,7 +172,7 @@ def text_of(i):
 
 
 def setup():
-    # box 上的输入：共用的代码、每个任务自己的数据（t5 的是一个文件）
+    # hub 上的输入：共用的代码、每个任务自己的数据（t5 的是一个文件）
     wb(os.path.join(BD, "guest/e2e/code/toy.py"), TOY)
     for i in range(1, 5):
         wb(os.path.join(BD, f"guest/e2e/d{i}/a.txt"), text_of(i))
@@ -212,13 +212,13 @@ def setup():
         time.sleep(0.2)
     rc, out = pq("group", "add", "gpu1")
     assert rc == 0, out
-    # 进程里换掉 lab1 的条目（不改机器表）
-    conf = dict(M.SITES[NAME], root=RROOT, ssh="fake-lab", adopt=None, budget=(0, 0), transfer_job=None, **ENTRY)
+    # 进程里换掉 site-pueue 的条目（不改机器表）
+    conf = dict(M.SITES[NAME], root=RROOT, ssh="fake-pueue-host", adopt=None, budget=(0, 0), transfer_job=None, **ENTRY)
     M.SITES[NAME] = conf
     M.RELAY[NAME] = conf
     P.AUTO[NAME] = True
     P.READY[NAME] = len(KEYS)
-    M.MACHINES[M.hub()] = dict(M.MACHINES[M.hub()], data=BD)  # box 的数据目录（relay.box_data、refill.data_gb 都读它）
+    M.MACHINES[M.hub()] = dict(M.MACHINES[M.hub()], data=BD)  # hub 的数据目录（relay.hub_data、refill.data_gb 都读它）
     relay.refill.add = fake_add
     RT.place = place_rec
     # 代码包：工作区的代码，换成临时的根目录；run_one 认这个包（不按 origin/main 重打）
@@ -239,7 +239,7 @@ def setup():
     step("cap（11/2）：剩余按 cap 减去根目录已占的算，不看整个盘", rs2 is not None and 0 < rs2["free"] <= 1e9 - used * 0.5, (rs2 or {}).get("free"))
 
 
-# ---------------- box 的 wait 组：在进程里直接做 ----------------
+# ---------------- hub 的 wait 组：在进程里直接做 ----------------
 _place = RT.place
 
 
@@ -257,14 +257,14 @@ def place_rec(src, D, written, real):
     ORDER[real["key"]] = order
 
 
-def fake_add(host, lab, step_, key, args, run=None, **rec):
+def fake_add(host, lbl, step_, key, args, run=None, **rec):
     if step_ == "relay_stage":
         RT.stage(rec.get("to") or NAME, key, nice=int(re.search(r"--nice (-?\d+)", args).group(1)), say=LOG.append)
     elif step_ == "relay_fetch":
         RT.fetch(rec.get("to") or NAME, key, say=LOG.append)
     else:
-        raise AssertionError(f"没想到的 box 任务 {step_} {key}")
-    LOG.append(f"box 任务 {step_} {key}")
+        raise AssertionError(f"没想到的 hub 任务 {step_} {key}")
+    LOG.append(f"hub 任务 {step_} {key}")
     return len(LOG)
 
 
@@ -282,7 +282,7 @@ def check(name=NAME):
     return msgs, stuck
 
 
-def box_tasks():
+def hub_tasks():
     return {t["key"]: t for t in taskq.local_status()["tasks"]}
 
 
@@ -323,12 +323,12 @@ def wait(cond, timeout, what, every=1.0, act=None):
 # ---------------- 各步 ----------------
 def step_env_gate():
     out = central(f"add --file {T}/job.json")
-    bt = box_tasks()
+    bt = hub_tasks()
     step("任务单加了 5 个任务，默认 relay=path", sorted(bt) == KEYS and all(t["spec"]["relay"] == "path" for t in bt.values()), out)
     st = E.states(NAME, run=run_local)
     step("建环境前：toy 没建", st == {"sys": "不是按描述建的", "toy": "没建"}, st)
     check()
-    bt, rs = box_tasks(), relay.remote_status(NAME)
+    bt, rs = hub_tasks(), relay.remote_status(NAME)
     step("没有 .ok：一个都不领、不传，那边队列空，不开 worker",
          all(t["state"] == "free" and not t["worker"] for t in bt.values()) and rs["taskq"]["tasks"] == [] and pueue_tasks() == {},
          [(t["key"], t["state"], t["worker"]) for t in bt.values()])
@@ -345,8 +345,8 @@ def step_env_gate():
 
 def step_stage():
     check()
-    bt, rs = box_tasks(), relay.remote_status(NAME)
-    step("有了 .ok：5 个都领给 lab1、传过去、加进那边的队列",
+    bt, rs = hub_tasks(), relay.remote_status(NAME)
+    step("有了 .ok：5 个都领给 site-pueue、传过去、加进那边的队列",
          all(t["state"] == "claimed" and t["worker"] == NAME for t in bt.values())
          and sorted(t["state"] for t in rs["taskq"]["tasks"]) == ["free"] * 5,
          lambda: ([(t["key"], t["state"]) for t in rs["taskq"]["tasks"]], relay.run_one(snapshot(), NAME, True)[0]))
@@ -358,7 +358,7 @@ def step_stage():
                                         for p, t in vf.items()), (len(blobs), vf))
     k1 = keys()[SLOW]
     rs = relay.remote_status(NAME)
-    step("和 box 一样的路径：视图是输入的文件夹、结果在 out 原样、那边的 key 就是总队列的 key",
+    step("和 hub 一样的路径：视图是输入的文件夹、结果在 out 原样、那边的 key 就是总队列的 key",
          k1["views"] == ["guest/e2e/code", "guest/e2e/d1"] and k1["params"]["out"] == "guest/e2e/r/t1" and k1["outs"] == ["guest/e2e/r/t1"]
          and sorted(t["key"] for t in rs["taskq"]["tasks"]) == KEYS, k1)
     step("那边还没开 worker（这次检查开始时还没有备好的任务）", pueue_tasks() == {}, pueue_tasks())
@@ -400,15 +400,15 @@ def step_stop():
     central(f"stop --why 测试 {SLOW}")
 
     def released():
-        t = box_tasks()[SLOW]
+        t = hub_tasks()[SLOW]
         return t["state"] == "stopped" and not t["worker"]
-    wait(released, 90, "总队列里停了 t1 后，那边停下、box 交还", every=2, act=check)
+    wait(released, 90, "总队列里停了 t1 后，那边停下、hub 交还", every=2, act=check)
     rs = relay.remote_status(NAME)
     a = next(t for t in rs["taskq"]["tasks"] if t["key"] == SLOW)
     f = (rs.get("tasks") or {}).get(SLOW)
-    t = box_tasks()[SLOW]
+    t = hub_tasks()[SLOW]
     skips = os.path.join(os.environ["TASKQ_DIR"], "skips")
-    step("停下后：那边是 stopped、没人领，按存档算有进度（resumable），box 交还时不带 skip",
+    step("停下后：那边是 stopped、没人领，按存档算有进度（resumable），hub 交还时不带 skip",
          a["state"] == "stopped" and not a.get("worker") and relay.progress(f) and t["skipped_by"] == []
          and not (os.path.isdir(skips) and os.listdir(skips)), (a, f, t["skipped_by"]))
     step("那边留着第 2 轮的存档、没有 DONE",
@@ -428,7 +428,7 @@ def step_finish():
     seen_drop = []
 
     def all_done():
-        bt = box_tasks()
+        bt = hub_tasks()
         ks = keys()
         if ks and len(ks) < len(KEYS):  # 有的已经删了、有的还在：还在的视图都完好
             vf = view_files()
@@ -448,7 +448,7 @@ def step_finish():
         logs = [f for f in os.listdir(os.path.join(BD, "logs/tasks")) if f.startswith(S.safe(k) + "__")]
         step(f"{k} 的分段日志拉回了", bool(logs), os.listdir(os.path.join(BD, "logs/tasks")))
     r = subprocess.run(["grep", "-rlF", BD, os.path.join(RROOT, "data")], capture_output=True, text=True)
-    step("执行机的数据目录里没有 box 的绝对路径（命令里的 {data} 在那边展开）", r.stdout.strip() == "", r.stdout[:500])
+    step("执行机的数据目录里没有 hub 的绝对路径（命令里的 {data} 在那边展开）", r.stdout.strip() == "", r.stdout[:500])
 
 
 def step_gc():
@@ -466,8 +466,8 @@ def step_gc():
          and os.path.isfile(os.path.join(RROOT, "state/envs/toy.ok")), top)
 
 
-# ---------------- 按时段的执行机（lab0 的晚班）：时段外不领，时段里领、开 worker，结束时交给同一台上的 lab1 接着做 ----------------
-NAME0 = "lab0"
+# ---------------- 按时段的执行机（site-pueue2 的晚班）：时段外不领，时段里领、开 worker，结束时交给同一台上的 site-pueue 接着做 ----------------
+NAME0 = "site-pueue2"
 RLINK0 = tempfile.mktemp(prefix="e2e_r0_", dir="/tmp")
 K6 = "guest/e2e/t6"
 
@@ -491,12 +491,12 @@ def step_shift():
     assert rc == 0, out
     pq("pause", "-g", "gpu0")
     e0 = dict(ENTRY, groups={"gpu0": (1, None, {})}, worker=dict(group="gpu0", id="wtest0"), env_root=RLINK0 + "/envs")
-    c0 = dict(M.SITES[NAME0], root=RLINK0, ssh="fake-lab", adopt=[NAME], budget=(0, 0), transfer_job=None, **e0)
+    c0 = dict(M.SITES[NAME0], root=RLINK0, ssh="fake-pueue-host", adopt=[NAME], budget=(0, 0), transfer_job=None, **e0)
     M.SITES[NAME0] = M.RELAY[NAME0] = c0
     RM.conf(NAME).update(adopt=[NAME0], budget=(0, 0))
     relay.VIEW_KEEP_S = 3600
     P.AUTO.update({NAME0: True, NAME: True})
-    P.READY.update({NAME0: 1, NAME: 0})  # 夜里 lab1 不领（让 lab0 领到）；交接时直接改分，不用它领
+    P.READY.update({NAME0: 1, NAME: 0})  # 夜里 site-pueue 不领（让 site-pueue2 领到）；交接时直接改分，不用它领
     bid, path = RB.build(NAME0, None, os.path.join(T, "bundles0"), root=RLINK0, entry=e0)
     relay.deploy(NAME0, bid, path)
     commit = relay.BUNDLE_REF
@@ -515,48 +515,48 @@ def step_shift():
     shift.run(now=now)
     check(NAME0)
     check(NAME0)
-    t6 = box_tasks()[K6]
+    t6 = hub_tasks()[K6]
     gpu0 = [t for t in pueue_tasks().values() if t["group"] == "gpu0"]
-    step("lab0 时段外：不领任务、不开 worker", t6["state"] == "free" and not t6["worker"] and not gpu0 and not shift.allowed(NAME0),
+    step("site-pueue2 时段外：不领任务、不开 worker", t6["state"] == "free" and not t6["worker"] and not gpu0 and not shift.allowed(NAME0),
          (t6, gpu0))
     P.SHIFT = {NAME0: (hm(-1), hm(2))}
     shift.run(now=now)
     st = shift.load()
-    step("lab0 时段开始、卡空着：恢复 worker 组，allowed() 放行", shift.allowed(NAME0) and st[NAME0].get("started"), st)
+    step("site-pueue2 时段开始、卡空着：恢复 worker 组，allowed() 放行", shift.allowed(NAME0) and st[NAME0].get("started"), st)
     check(NAME0)
-    t6 = box_tasks()[K6]
-    step("lab0 时段里：领了 t6、数据传过去", t6["worker"] == NAME0 and K6 in keys0(), (t6, LOG[-8:]))
+    t6 = hub_tasks()[K6]
+    step("site-pueue2 时段里：领了 t6、数据传过去", t6["worker"] == NAME0 and K6 in keys0(), (t6, LOG[-8:]))
     check(NAME0)
     jobs = [t for t in pueue_tasks().values() if t["group"] == "gpu0"]
-    step("下一次检查：lab0 开了 worker", len(jobs) == 1 and jobs[0]["label"] == "worker:wtest0", jobs)
-    wait(lambda: os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), 120, "t6 在 lab0 上做完第 2 轮", every=0.2)
+    step("下一次检查：site-pueue2 开了 worker", len(jobs) == 1 and jobs[0]["label"] == "worker:wtest0", jobs)
+    wait(lambda: os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), 120, "t6 在 site-pueue2 上做完第 2 轮", every=0.2)
     check(NAME0)  # 读一次状态（status.json：在训）
     msgs = shift.run(now=now + dt.timedelta(hours=3))
-    t6 = box_tasks()[K6]
-    step("时段结束：停 lab0 的 worker，有进度的 t6 改分给 lab1", t6["worker"] == NAME and t6["state"] == "claimed", (t6, msgs))
-    step("时段结束后 lab0 不再领任务", not shift.allowed(NAME0))
-    wait(lambda: all(t["status"] != "Running" for t in pueue_tasks().values() if t["group"] == "gpu0"), 60, "lab0 的 worker 停下", every=0.2)
+    t6 = hub_tasks()[K6]
+    step("时段结束：停 site-pueue2 的 worker，有进度的 t6 改分给 site-pueue", t6["worker"] == NAME and t6["state"] == "claimed", (t6, msgs))
+    step("时段结束后 site-pueue2 不再领任务", not shift.allowed(NAME0))
+    wait(lambda: all(t["status"] != "Running" for t in pueue_tasks().values() if t["group"] == "gpu0"), 60, "site-pueue2 的 worker 停下", every=0.2)
     check(NAME0)
     a0 = keys0().get(K6) or {}
     remote_q0 = relay.remote_status(NAME0)["taskq"]["tasks"]
-    step("lab0：队列里删掉 t6（unq），结果目录留着给 lab1 收编",
+    step("site-pueue2：队列里删掉 t6（unq），结果目录留着给 site-pueue 收编",
          a0.get("unq") and not remote_q0 and os.path.exists(os.path.join(out0(K6), "ckpt_02.json")), (a0, remote_q0))
 
     def done6():
-        return box_tasks()[K6]["state"] == "done"
-    check()  # lab1 收编 lab0 的存档、加进队列
+        return hub_tasks()[K6]["state"] == "done"
+    check()  # site-pueue 收编 site-pueue2 的存档、加进队列
     o1 = os.path.join(RLINK, "data", keys()[K6]["params"]["out"])
-    step("lab1 收编了 lab0 的存档，刚停的日志让那边的队列先当它有人在训（busy，15 分钟），不马上开 worker",
+    step("site-pueue 收编了 site-pueue2 的存档，刚停的日志让那边的队列先当它有人在训（busy，15 分钟），不马上开 worker",
          os.path.exists(os.path.join(o1, "ckpt_02.json")) and relay.remote_status(NAME)["taskq"]["tasks"][0]["state"] == "busy")
     old = time.time() - 20 * 60  # 下一次检查（30 分钟后）时日志已经停了一阵
     for f in os.listdir(o1):
         os.utime(os.path.join(o1, f), (old, old))
-    wait(done6, 300, "lab1 从 lab0 的存档接着做完、拉回", every=2, act=check)
+    wait(done6, 300, "site-pueue 从 site-pueue2 的存档接着做完、拉回", every=2, act=check)
     res = json.load(open(os.path.join(BD, "guest/e2e/r/t6/result.json")))
-    step("t6：lab1 从第 2 轮的存档接着做（lab0 的存档带过来了），结果对",
+    step("t6：site-pueue 从第 2 轮的存档接着做（site-pueue2 的存档带过来了），结果对",
          res["start"] == 2 and res["total"] == 3 * sum(text_of(1).encode()), res)
     check(NAME0)
-    step("总队列训完以后，lab0 上 t6 的结果删了、记录清掉",
+    step("总队列训完以后，site-pueue2 上 t6 的结果删了、记录清掉",
          K6 not in keys0() and not os.path.exists(os.path.join(RLINK0, "data", a0["params"]["out"])), keys0())
 
 

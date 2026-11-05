@@ -1,5 +1,5 @@
 #!/bin/bash
-# 装 pueue / pueued（静态编译的单文件，放 ~/.local/bin，不需要 root），box 和 lab 都用这个。
+# 装 pueue / pueued（静态编译的单文件，放 ~/.local/bin，不需要 root），hub 和 pueue 执行机都用这个。
 #   bash queue/install_pueue.sh [版本，默认 v4.0.4]
 set -euo pipefail
 V=${1:-v4.0.4}

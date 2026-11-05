@@ -5,10 +5,10 @@ eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不�
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 QD=${TASKQ_DIR:-${TASKQ_STATE:+$TASKQ_STATE/taskq}}
-[[ -n ${TASKQ_HANDOFF:-} || -f ${QD:-$HOME/.cache/phd/taskq}/$TQ_Q_ENABLED ]] || { echo "$(date '+%F %T') 任务队列的总开关不在，结束"; exit 0; }
+[[ -n ${TASKQ_HANDOFF:-} || -f ${QD:-$HOME/.cache/taskq/taskq}/$TQ_Q_ENABLED ]] || { echo "$(date '+%F %T') 任务队列的总开关不在，结束"; exit 0; }
 read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda) || true
 if [[ ! -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
-    echo "envs/machines.py 里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2
+    echo "机器表（machines.py）里没有这台机器的 conda（${CONDA_BASE:-没有}）" >&2
     [[ -n ${TASKQ_HANDOFF:-} ]] || exit 1  # 换包途中：手上有在跑的任务，不能丢下不管，照样接着跑
 else
     source "$CONDA_BASE/etc/profile.d/conda.sh"

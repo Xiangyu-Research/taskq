@@ -15,8 +15,11 @@
                      VIEW_ROOTS  [建视图的文件夹]（可省）
   consumers.py       CONSUMERS  {插件名: 消费者插件}（钩子见 consume.py、queue/README.md 的"消费者"）
   smoke.py           SMOKE  {做法名: dict(by=[参数名], params={…}, vars={…})}（冒烟闸门，见 smoke_gate.py）
+  labels.py          STEPS  {步骤名: 中文名}（推送、进度报告的白话，monitor/plain.py；实验表步骤的 zh 优先）
+                     QUIET  [进度报告里不列的步骤]（可省）
+                     PLAN_TITLES  函数() → {分析编号: 标题}（可省；pueue 标签 <编号> 或 <编号>_… 说成"分析 <编号> <标题>"）
   readers/*.py       PROGRESS、INFO、TRAINED（spec.py 读；只用标准库，经 ssh 送到别的机器上跑）
-各表合并时键重复报错。
+各表合并时键重复报错；函数（核心里默认是 None 的名字）只能有一个插件给。
 """
 import importlib.util
 import os
@@ -54,7 +57,7 @@ CORE_REL = os.path.relpath(CORE, REPO)  # 使用者的仓库里调度代码的�
 
 def rel(*parts):
     """调度代码里的文件相对使用者仓库根的路径：嵌着时 scripts/taskq/…，单独的检出时 …（核心在仓库外时带 ..）。
-    只给在本机仓库根目录下跑的命令；执行机、代码包里的用 bundle_rel，box 上排进 pueue 的用 local。"""
+    只给在本机仓库根目录下跑的命令；执行机、代码包里的用 bundle_rel，hub 上排进 pueue 的用 local。"""
     return os.path.normpath(os.path.join(CORE_REL, *parts))
 
 
@@ -67,7 +70,7 @@ def bundle_rel(*parts):
 
 
 def local(*parts):
-    """调度代码里的文件在本机的绝对路径（box 上生成、在 box 上跑的命令用）。"""
+    """调度代码里的文件在本机的绝对路径（hub 上生成、在 hub 上跑的命令用）。"""
     return os.path.join(CORE, *parts)
 
 
@@ -89,13 +92,13 @@ def project_conf():
 
 
 def config_dir():
-    """配置文件夹：TASKQ_CONFIG > 仓库根 .taskq.toml 的 config > 没有 .taskq.toml 时 <仓库>/envs。"""
+    """配置文件夹：TASKQ_CONFIG > 仓库根 .taskq.toml 的 config > 没有 .taskq.toml 时 <仓库>/config（同 example/）。"""
     v = os.environ.get("TASKQ_CONFIG")
     if v:
         return os.path.expanduser(v)
     conf = project_conf()
     if conf is None:
-        return os.path.join(REPO, "envs")
+        return os.path.join(REPO, "config")
     return os.path.normpath(os.path.join(REPO, conf.get("config", ".")))
 
 
@@ -160,12 +163,12 @@ def env(name, default=None):
 
 
 def plugin_dirs():
-    """插件文件夹：TASKQ_PLUGINS（设了就算空的也用）> 仓库根 .taskq.toml 的 plugins > 没有 .taskq.toml 时仓库里默认的那个。"""
+    """插件文件夹：TASKQ_PLUGINS（设了就算空的也用）> 仓库根 .taskq.toml 的 plugins > 没有 .taskq.toml 时没有插件。"""
     v = os.environ.get("TASKQ_PLUGINS")
     if v is None:
         conf = project_conf()
         if conf is None:
-            return [os.path.join(REPO, "research", "common", "taskq_plugins")]
+            return []
         p = conf.get("plugins") or []
         return [os.path.join(REPO, d) for d in ([p] if isinstance(p, str) else p)]
     return [os.path.expanduser(d) for d in v.split(os.pathsep) if d]
@@ -176,6 +179,7 @@ KINDS = {
     "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
     "consumers": ("CONSUMERS",),
     "smoke": ("SMOKE",),
+    "labels": ("STEPS", "QUIET", "PLAN_TITLES"),
 }
 
 
@@ -202,15 +206,23 @@ def plugins(name):
 
 def extend(ns, name, tables=None):
     """插件导出的表合进 ns 里的同名表（tables 默认 KINDS[name]）：字典插件的在前，键重复报错；列表接在后面、不重复。
+    ns 里是 None 的名字是函数：插件给的要能调用，只能有一个插件给。
     只合这些表，插件的其他名字不进 ns；插件一张表也没导出、或表的类型不对时报错。"""
     tables = tuple(tables or KINDS[name])
-    add = {t: ({} if isinstance(ns[t], dict) else []) for t in tables}
+    add = {t: ({} if isinstance(ns[t], dict) else [] if isinstance(ns[t], list) else None) for t in tables}
     for m in plugins(name):
         got = [t for t in tables if t in vars(m)]
         if not got:
             raise ValueError(f"插件 {m.__file__} 没有导出 {'、'.join(tables)} 里的任何一个")
         for k in got:
             v = vars(m)[k]
+            if ns[k] is None:
+                if not callable(v):
+                    raise ValueError(f"插件 {m.__file__} 的 {k} 要是函数")
+                if add[k] is not None:
+                    raise ValueError(f"插件 {m.__file__} 的 {k} 重名（另一个插件已经给了）")
+                add[k] = v
+                continue
             if not isinstance(v, type(add[k])):
                 raise ValueError(f"插件 {m.__file__} 的 {k} 要是{'字典' if isinstance(add[k], dict) else '列表'}")
             if isinstance(add[k], dict):
@@ -221,7 +233,10 @@ def extend(ns, name, tables=None):
             else:
                 add[k] += [x for x in v if x not in add[k] and x not in ns[k]]
     for t, v in add.items():
-        ns[t] = {**v, **ns[t]} if isinstance(v, dict) else ns[t] + v
+        if ns[t] is None:
+            ns[t] = v
+        else:
+            ns[t] = {**v, **ns[t]} if isinstance(v, dict) else ns[t] + v
 
 
 if __name__ == "__main__":

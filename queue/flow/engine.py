@@ -1,5 +1,5 @@
 """按流程（flow/compile.py 编出的实例和先后）算下一步（2026-11-05，P2）：和 advance.plan 的输出一样（op、step、key、label、cmd、
-nice、排队参数、after），由 envs/policy.py 的 ENGINE 决定用哪个：
+nice、排队参数、after），由配置文件夹里 policy.py 的 ENGINE 决定用哪个：
   advance（默认）只用 advance.plan；shadow 两个都算、照 advance 的排，差别写进 <状态文件夹>/shadow/engine-<日期>.jsonl；dag 用这里的。
 放在哪里（PLACE、源头任务所在的执行机、queue:<机器>、放不下）、提前排、撤掉提前排的，照 advance.py 原样搬过来；不同的只有"该做哪个"：
   实例的先后都做完了、自己没做完、没在拷回 → 排它；源头没做完 → 提前排它后面的；on_change=rerun 的看上游有没有更新的产出。"""
@@ -31,7 +31,7 @@ NOTES = []
 def mode():
     m = getattr(P, "ENGINE", "advance")
     if m not in ("advance", "shadow", "dag"):
-        raise ValueError(f"envs/policy.py ENGINE = {m!r}：只能是 advance、shadow、dag")
+        raise ValueError(f"policy.py ENGINE = {m!r}：只能是 advance、shadow、dag")
     return m
 
 
@@ -214,7 +214,7 @@ def plan(s, root=None, flow=None):
             o = S.outputs(S.fill({k: qd.get(k) for k in ("out", "done", "fetch")}, names, keep=()))
             out = os.path.join(root, o["outs"][0])
             if S.done_with(o, lambda a: os.path.exists(os.path.join(out, a)), empty=False):
-                stuck[alert_id("advance", st["name"], key)] = f"{label}：任务队列的 {qk} 做完、拉回了，但 box 上核对还是没做完（{out}）"
+                stuck[alert_id("advance", st["name"], key)] = f"{label}：任务队列的 {qk} 做完、拉回了，但 hub 上核对还是没做完（{out}）"
             return
         if sk in done:
             want(st["name"], key, label, cmd, st["group"], n)
@@ -224,7 +224,7 @@ def plan(s, root=None, flow=None):
             w = where(t, tg, per_task, st)
             if isinstance(w, str):
                 r = w
-            elif w["kind"] == "box":
+            elif w["kind"] == "hub":
                 want(st["name"], key, label, cmd, w["group"], n)
                 return
             elif w.get("near"):
@@ -305,7 +305,7 @@ def norm(todo, stuck, notes=()):
     """→ 可比较的集合：(op, step, key, label, group, cmd, args, after, qks) + 卡住的编号 + 没排的说明。"""
     out = set()
     for t in todo:
-        out.add(("todo", t.get("op", "box"), t["step"], t["key"], t["label"], t.get("group"), t.get("cmd", ""),
+        out.add(("todo", t.get("op", "hub"), t["step"], t["key"], t["label"], t.get("group"), t.get("cmd", ""),
                  json.dumps(t.get("args"), ensure_ascii=False), t.get("nice"), json.dumps(sorted(t.get("qks") or []))))
     out |= {("stuck", k) for k in stuck}
     out |= {("note", x) for x in notes}
@@ -332,9 +332,9 @@ def shadow(s, a_todo, a_stuck, day=None, budget=60):
 
 # ---------------- 反事实回放 ----------------
 def replay(n=200, seed=0, root="/replay", s=None, flow=None):
-    """随机假设哪些任务训完、哪些步骤做完（不碰盘：做完的判断、--stage needs 都换成假的）、box 上哪些步骤在跑或失败过、
+    """随机假设哪些任务训完、哪些步骤做完（不碰盘：做完的判断、--stage needs 都换成假的）、hub 上哪些步骤在跑或失败过、
     总队列里哪些任务分给了哪台执行机，每一种都用 advance.plan 和这里的 plan 各算一遍 → [不一样的 dict(case, only, item)]。
-    s：状态（默认空的 box，总队列 = 实验表展开的任务）。"""
+    s：状态（默认空的 hub，总队列 = 实验表展开的任务）。"""
     import random
     import copy
     import steps as STEPS
@@ -378,7 +378,7 @@ def replay(n=200, seed=0, root="/replay", s=None, flow=None):
                 MT[w] = rnd.randint(1, 100)
                 ST[w] = rnd.randint(1, 100)
                 x = rnd.random()
-                if x < 0.08:  # box 上在跑 / 做过
+                if x < 0.08:  # hub 上在跑 / 做过
                     tid = len(ptasks)
                     st = rnd.choice(["Running", "Queued", "Done", "Done"])
                     ptasks.append(dict(id=tid, label=i.id, status=st, result=rnd.choice(["Success", "Failed"]) if st == "Done" else None))

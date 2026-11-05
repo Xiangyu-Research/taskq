@@ -45,9 +45,9 @@ def write(path, text):
 
 # 配置文件夹
 setenv(TASKQ_CONFIG=None)
-ok("TASKQ_CONFIG 没设 → 仓库的 envs/", cfg.config_dir() == os.path.join(cfg.REPO, "envs"))
+ok("TASKQ_CONFIG 没设 → 仓库的 config/", cfg.config_dir() == os.path.join(cfg.REPO, "config"))
 setenv(TASKQ_CONFIG="")
-ok("TASKQ_CONFIG 空 → 仓库的 envs/", cfg.config_dir() == os.path.join(cfg.REPO, "envs"))
+ok("TASKQ_CONFIG 空 → 仓库的 config/", cfg.config_dir() == os.path.join(cfg.REPO, "config"))
 setenv(TASKQ_CONFIG="~/cfgx")
 ok("TASKQ_CONFIG 的 ~ 展开", cfg.config_dir() == os.path.join(HOME, "cfgx"))
 setenv(TASKQ_CONFIG="rel/cfg")
@@ -57,8 +57,7 @@ ok("TASKQ_CONFIG 不存在：照样返回，不报错", cfg.config_dir() == os.p
 
 # 插件文件夹
 setenv(TASKQ_PLUGINS=None)
-ok("TASKQ_PLUGINS 没设 → 仓库里默认的插件文件夹",
-   cfg.plugin_dirs() == [os.path.join(cfg.REPO, "research", "common", "taskq_plugins")])
+ok("TASKQ_PLUGINS 没设、没有 .taskq.toml → 没有插件", cfg.plugin_dirs() == [])
 setenv(TASKQ_PLUGINS="")
 ok("TASKQ_PLUGINS 空 → 没有插件", cfg.plugin_dirs() == [] and cfg.plugins("recipes") == [])
 setenv(TASKQ_PLUGINS="~/p1::/abs/p2:rel/p3")
@@ -265,10 +264,43 @@ pf = plugdir("f", """
 """)
 e = merged(pf)
 ok("extend：表的类型不对 → 报错", isinstance(e, ValueError) and "TABLE" in str(e) and "字典" in str(e))
+
+
+def merged_fn(*dirs):
+    setenv(TASKQ_PLUGINS=os.pathsep.join(dirs))
+    ns = dict(TABLE={}, FN=None)
+    try:
+        cfg.extend(ns, NAME, ("TABLE", "FN"))
+        return ns
+    except ValueError as e:
+        return e
+
+
+pg = plugdir("g", """
+    def FN():
+        return "g"
+""")
+ph = plugdir("h", """
+    TABLE = {"h": 1}
+""")
+ns = merged_fn(ph)
+ok("extend：核心里是 None 的名字（函数）插件没给 → 照旧 None", isinstance(ns, dict) and ns["FN"] is None and ns["TABLE"] == {"h": 1})
+ns = merged_fn(pg, ph)
+ok("extend：核心里是 None 的名字 → 用插件的函数", isinstance(ns, dict) and ns["FN"]() == "g")
+e = merged_fn(pg, plugdir("i", """
+    def FN():
+        return "i"
+"""))
+ok("extend：两个插件都给了同一个函数 → 报错", isinstance(e, ValueError) and "FN" in str(e))
+e = merged_fn(plugdir("j", """
+    FN = {"x": 1}
+"""))
+ok("extend：函数给成了别的 → 报错", isinstance(e, ValueError) and "FN" in str(e) and "函数" in str(e))
 # 每类插件导出的名字：cfg.KINDS，核心的模块和测试插件对得上
-ok("KINDS：recipes 导出 RECIPES、HOOKS，relay_plugins 导出 PLUGINS、ACCEPTS、VIEW_ROOTS，consumers 导出 CONSUMERS",
+ok("KINDS：recipes 导出 RECIPES、HOOKS，relay_plugins 导出 PLUGINS、ACCEPTS、VIEW_ROOTS，consumers 导出 CONSUMERS，"
+   "smoke 导出 SMOKE，labels 导出 STEPS、QUIET、PLAN_TITLES",
    cfg.KINDS == {"recipes": ("RECIPES", "HOOKS"), "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
-                 "consumers": ("CONSUMERS",)})
+                 "consumers": ("CONSUMERS",), "smoke": ("SMOKE",), "labels": ("STEPS", "QUIET", "PLAN_TITLES")})
 setenv(TASKQ_PLUGINS=fixture.PLUGINS)
 r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import recipes, relay_plugins; "
                     "print(sorted(recipes.RECIPES), sorted(recipes.HOOKS), sorted(relay_plugins.PLUGINS), "
@@ -360,9 +392,9 @@ ok("cfg：TASKQ_PROJECT 也认", cfg_in(T, "cfg.REPO", TASKQ_PROJECT=PJ) == repr
 ok("cfg：TASKQ_REPO 比往上找优先", cfg_in(os.path.join(PJ, "a"), "cfg.REPO", TASKQ_REPO=T) == repr(T))
 ok("cfg：TASKQ_CONFIG、TASKQ_PLUGINS 比 .taskq.toml 优先",
    cfg_in(PJ, "(cfg.config_dir(), cfg.plugin_dirs())", TASKQ_CONFIG="/c", TASKQ_PLUGINS="/p") == repr(("/c", ["/p"])))
-ok("cfg：找不到项目 → 核心自己，没有 .taskq.toml 时用默认的 envs/、插件文件夹",
+ok("cfg：找不到项目 → 核心自己，没有 .taskq.toml 时配置在 config/、没有插件",
    cfg_in(T, "(cfg.REPO, cfg.config_dir(), cfg.plugin_dirs())")
-   == repr((ALONE, os.path.join(ALONE, "envs"), [os.path.join(ALONE, "research", "common", "taskq_plugins")])))
+   == repr((ALONE, os.path.join(ALONE, "config"), [])))
 write(os.path.join(T, "proj_e", ".taskq.toml"), "")
 ok("cfg：.taskq.toml 没写 config、plugins → 项目根、没有插件",
    cfg_in(os.path.join(T, "proj_e"), "(cfg.config_dir(), cfg.plugin_dirs())") == repr((os.path.join(T, "proj_e"), [])))
@@ -371,8 +403,8 @@ write(os.path.join(EMB, ".taskq.toml"), 'config = "cfgdir"\n')
 ok("cfg：嵌在 <仓库>/scripts/taskq 里时就是那个仓库（不往上找），仓库根的 .taskq.toml 照样读",
    cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "cfgdir"))))
 os.remove(os.path.join(EMB, ".taskq.toml"))
-ok("cfg：嵌着、仓库根没有 .taskq.toml → <仓库>/envs（同以前）",
-   cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "envs"))))
+ok("cfg：嵌着、仓库根没有 .taskq.toml → <仓库>/config（11/5）",
+   cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "config"))))
 
 setenv(TASKQ_PLUGINS=None, TASKQ_CONFIG=None)
 print(f"\n{'全部通过' if not fails else f'{fails} 项失败'}")

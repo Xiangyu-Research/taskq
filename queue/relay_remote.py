@@ -1,11 +1,11 @@
 """relay 执行机那边：经 ssh 跑命令（rsh、那边的 taskq.py、一段 Python）和发过去跑的小程序（状态、收编、视图、列结果、删除、清理）。
-box 上的记账见 relay_store.py，传数据和拉回见 relay_transfer.py，每次检查的计划见 relay.py。
+hub 上的记账见 relay_store.py，传数据和拉回见 relay_transfer.py，每次检查的计划见 relay.py。
 
 那边的根目录 R（machines.py 的 root）的布局、标志文件、时间常数都在 proto.py（ROOT、MKDIRS、blob、QUEUE、claim_alive）：
 代码包在 code/<包名>，code/current 指向在用的那个（relay_bundle.py 打包，relay.py deploy 推过去、旧包留最新 3 个，4 天以上的删）；
 queue 是它自己的任务队列（taskq.py，key 和总队列相同）；blobs/<h[:2]>/<h> 是按 sha256 存的数据文件（内容相同的只传一次）；
-data 是数据目录，相对路径和 box 的一样：每个任务的输入是指向 blobs 的软链接（和插件生成的小文件，sites/names.py），
-产出照常写。box 上 state.json 记下每个任务放了哪些路径（视图、输入、产出），删一个任务时只删别的任务不用的（相同、上级、下级都算在用）。
+data 是数据目录，相对路径和 hub 的一样：每个任务的输入是指向 blobs 的软链接（和插件生成的小文件，sites/names.py），
+产出照常写。hub 上 state.json 记下每个任务放了哪些路径（视图、输入、产出），删一个任务时只删别的任务不用的（相同、上级、下级都算在用）。
 
 发过去的小程序在那边的代码包里跑（那边可能是旧包，没有 proto.py）：用到的协议常数在这里嵌进去（PRE），不在那边 import 调度的文件；
 只有读状态（STATUS_PY、STATES_PY）要那边的队列和任务说明：那边的包有 taskq.py status --json、spec.py collect --json 就用这两个
@@ -129,8 +129,8 @@ USAGE = """def usage(R):
     return used,out_used
 """
 
-# 读那边的队列和各任务的情况：有带版本号的命令就用（taskq.py status --json、spec.py collect --json），旧包没有（退出码 2、没有 JSON 行）
-# 时 import 那边的 taskq、spec；返回的结构两条路相同
+# 读那边的队列和各任务的情况：有带版本号的命令就用（taskq.py status --json --internal（冒烟任务也要）、spec.py collect --json），旧包没有
+# （退出码 2、没有 JSON 行；不认 --internal 的也是）时 import 那边的 taskq、spec；返回的结构两条路相同
 QUERY = """import subprocess
 def cmd(args,inp=None):
     if not os.path.isfile(os.path.join(CODEQ,args[0])):
@@ -150,7 +150,7 @@ def cmd(args,inp=None):
 def old():
     sys.path[:0]=[CODEQ,'scripts/queue']
 def local_status():
-    r=cmd(['taskq.py','status','--json'])
+    r=cmd(['taskq.py','status','--json','--internal'])
     if r is not None:
         return r,True
     old()

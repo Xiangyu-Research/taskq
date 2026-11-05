@@ -1,13 +1,13 @@
-"""送到执行机的任务（2026-11-01 起都用真名）：执行机的数据目录 R/data 和 box 的数据目录同样布局，任务要的文件以软链接放在
-同样的相对路径，参数原样送过去，结果在同样的相对路径拉回。唯一的换法：box 上数据目录外的绝对路径输入放到 abs/<路径>，
+"""送到执行机的任务（2026-11-01 起都用真名）：执行机的数据目录 R/data 和 hub 的数据目录同样布局，任务要的文件以软链接放在
+同样的相对路径，参数原样送过去，结果在同样的相对路径拉回。唯一的换法：hub 上数据目录外的绝对路径输入放到 abs/<路径>，
 参数里换成 {data}/abs/<路径>。
-  path（通用，任何任务）：输入（spec 的 inputs 或 data）是数据目录下的文件夹（视图）、文件或 glob（展开成文件），或 box 上的绝对路径。
-  nnunet、nnunet_infer（research/common/taskq_plugins/relay_plugins.py，经 queue/relay_plugins.py 加载）：nnU-Net 训练、推理按参数列出要的文件，拉回后核对。
+  path（通用，任何任务）：输入（spec 的 inputs 或 data）是数据目录下的文件夹（视图）、文件或 glob（展开成文件），或 hub 上的绝对路径。
+  项目自己的种类（插件文件夹的 relay_plugins.py，经 queue/relay_plugins.py 加载）：按参数列出要的文件，拉回后核对。
 任务用哪种：说明的 relay 字段（queue/recipes.py）。
 
 export(spec, root) → dict(params, files, texts, views, outs, cleanup)：
   params   那边加任务用的参数
-  files    [(相对路径, box 上的真实文件)]，按 sha256 放进 blobs、在那边是软链接
+  files    [(相对路径, hub 上的真实文件)]，按 sha256 放进 blobs、在那边是软链接
   texts    {相对路径: 内容}（现在的插件都不用）
   views    视图文件夹：那边按这次列出的文件同步，多出来的删掉
   outs     要拉回的文件夹（outs(spec)：out 和 fetch.also）
@@ -28,8 +28,8 @@ import relay_plugins as RN  # noqa: E402
 import spec as S  # noqa: E402
 
 RelayError = RN.RelayError
-SKIP = ("machines", "after")  # 只在 box 的总队列里有意义的参数，不送过去
-ABS = "abs"  # box 上数据目录外的输入在那边的位置
+SKIP = ("machines", "after")  # 只在 hub 的总队列里有意义的参数，不送过去
+ABS = "abs"  # hub 上数据目录外的输入在那边的位置
 
 
 def plugin_of(spec):
@@ -73,7 +73,7 @@ def export_path(spec, root):
         if any(ch in sub for ch in "*?["):
             hits = sorted(p for p in glob.glob(os.path.join(base, sub)) if os.path.isfile(p))
             if not hits:
-                raise RelayError(f"box 上没有和 {i} 对得上的文件")
+                raise RelayError(f"hub 上没有和 {i} 对得上的文件")
             files += [(pre + os.path.relpath(p, base), os.path.realpath(p)) for p in hits]
             continue
         fs, v = RN.expand(base, sub)
@@ -130,7 +130,7 @@ def export(spec, root):
     for a, p in ex["files"]:
         a = _rel(spec, "文件", a)
         if seen.setdefault(a, p) != p:
-            raise RelayError(f"{spec['key']}：{a} 对应 box 上两个不同的文件（{seen[a]}、{p}）")
+            raise RelayError(f"{spec['key']}：{a} 对应 hub 上两个不同的文件（{seen[a]}、{p}）")
         if len(files) < len(seen):
             files.append((a, p))
     views = list(dict.fromkeys(_rel(spec, "视图", v, 2) for v in ex.get("views") or []))

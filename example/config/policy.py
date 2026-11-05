@@ -9,7 +9,7 @@ HOLD = []
 
 # 步骤在哪里做：summary 在 hub 的 cpu 组（没写的步骤都在 hub 上，用实验表里写的组）
 PLACE = {
-    "summary": ["box:cpu"],
+    "summary": ["hub:cpu"],
 }
 
 SHIFT = {}

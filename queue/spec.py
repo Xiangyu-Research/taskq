@@ -4,9 +4,9 @@
 
 命令行：
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
-                                     再去掉本机 envs/machines.py 的 task_unset、加 task_vars 里还没设的）
+                                     再去掉本机 machines.py 的 task_unset、加 task_vars 里还没设的）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
-  spec.py shell|done --spec <JSON>   同上，用已经解析好的说明（box 的 relay 送任务时解析好，执行机上不再查做法，11/4）
+  spec.py shell|done --spec <JSON>   同上，用已经解析好的说明（hub 的 relay 送任务时解析好，执行机上不再查做法，11/4）
   spec.py resolve <做法> k=v…        解析好的说明（JSON，一行）
   spec.py lookup <key>               按 key 找任务（先查实验表（experiments.py），再查训练队列），打印说明（JSON）
   spec.py outputs <key> [--sh]       这个任务的输出（outputs()，JSON）；--sh：给 archive_task.sh 的 shell 语句
@@ -134,7 +134,7 @@ RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
 
 def _check(s, progress=True):
     """任务单的通用字段：data（= inputs）、resume、res、progress 统一格式并检查（2026-10-31）。
-    progress=False：不查进度解析方法（box 送来的说明已经查过；跑任务用不到，读进度的地方自己会报）。
+    progress=False：不查进度解析方法（hub 送来的说明已经查过；跑任务用不到，读进度的地方自己会报）。
     key、cmd、out、done、vars、log、fetch 只查类型（11/4：类型不对的说明在 add 时就拒绝，不等读队列时出错）。"""
     for k in ("key", "cmd", "out"):
         if k in s and not (isinstance(s[k], str) and s[k]):
@@ -232,7 +232,7 @@ def outputs(s):
       done     做完的标志（相对 out）：每一项都要有，一项是备选的列表（done 里 | 分开的），有一个就行
       exclude  不拉回的文件（文件名）
       extra    out 的上一级里一起拉回、备份的文件（通配，如 *.json）
-      archive  拉回 box 后要不要备份到备份机（archive_task.sh）
+      archive  拉回 hub 后要不要备份到备份机（archive_task.sh）
       logs     分段日志的文件名前缀（相对数据目录）；oldlogs：以前放在别处的分段日志（dir、prefix），没有时 None"""
     f = s.get("fetch") or {}
     done = s.get("done") or []
@@ -497,7 +497,7 @@ def remote_collect(ssh, specs, root, timeout=600):
 
 
 # ---------------- 查任务 ----------------
-SENT_DROP = ("machines", "after", "names", "exp")  # 只在 box 上有意义的字段：分给谁、接在谁后面、解析用的名字、实验 id
+SENT_DROP = ("machines", "after", "names", "exp")  # 只在 hub 上有意义的字段：分给谁、接在谁后面、解析用的名字、实验 id
 
 
 def sendable(s):
@@ -523,7 +523,7 @@ def from_sent(text):
 
 
 def lookup(key):
-    """key → 说明：先查实验表，再查训练队列（taskq.py show，box 上会转到 DICC）。找不到 → None。"""
+    """key → 说明：先查实验表，再查本机的任务队列（taskq.py show）。找不到 → None。"""
     import experiments as E
     t = E.tasks().get(key)
     if t:
@@ -548,7 +548,7 @@ def shell_lines(s, data, repo=REPO):
 
 
 def machine_vars(m=None):
-    """本机（m：给定的机器表条目）envs/machines.py 的 task_unset、task_vars → shell 语句：先去掉 task_unset 里的（worker 的环境里按整个作业设的，
+    """本机（m：给定的机器表条目）machines.py 的 task_unset、task_vars → shell 语句：先去掉 task_unset 里的（worker 的环境里按整个作业设的，
     任务要自己算的，11/4），再设 task_vars 里还没设（非空）的。"""
     if m is None:
         import cfg
@@ -603,7 +603,7 @@ def _main(cmd, args):
         return 2
     data = local_data()
     if cmd == "done" and not data:
-        raise SpecError("不知道本机的数据目录（TASKQ_DATA 或 envs/machines.py 的 data）")
+        raise SpecError("不知道本机的数据目录（TASKQ_DATA 或 machines.py 的 data）")
     if cmd == "lookup":
         print(json.dumps(s, ensure_ascii=False, indent=1))
     elif cmd == "outputs":
@@ -626,7 +626,7 @@ def _main(cmd, args):
 
 
 def local_data():
-    """本机的数据目录：TASKQ_DATA > envs/machines.py 的 data；都没有 → ""。"""
+    """本机的数据目录：TASKQ_DATA > machines.py 的 data；都没有 → ""。"""
     import cfg
     data = cfg.env("TASKQ_DATA")
     if not data:
@@ -646,7 +646,7 @@ def collect_cmd(args):
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise SpecError(f"输入要是 {{\"specs\": [...], \"root\": …}}：{type(e).__name__}: {e}") from None
     if not root:
-        raise SpecError("不知道本机的数据目录（输入的 root、TASKQ_DATA 或 envs/machines.py 的 data）")
+        raise SpecError("不知道本机的数据目录（输入的 root、TASKQ_DATA 或 machines.py 的 data）")
     json_out({"version": P.VERSION, **collect(specs, os.path.expanduser(root), wait=wait)})
     sys.stdout.flush()
     os._exit(0)  # 卡住的读线程不等

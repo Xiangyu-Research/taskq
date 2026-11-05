@@ -165,7 +165,7 @@ def main():
         assert exists(R, "aa1") and exists(R, "ee1") and not exists(R, "dd1"), r
         ok("根目录经软链接到达时，在用的 blob 也不删")
 
-        # 同一个盘上的另一台执行机（lab0 / lab1）：两边的 blobs 互相硬链接收编
+        # 同一个盘上的另一台执行机（site-pueue2 / site-pueue）：两边的 blobs 互相硬链接收编
         R, _ = build(fixture.tmpdir(dir=tmp))
         sib = fixture.tmpdir(dir=tmp)
         for h in ("gg1", "hh1", "ii1"):
@@ -195,7 +195,7 @@ def main():
         assert os.path.isdir(os.path.join(D, "prepared/ds_keep")), r
         ok("keep 是视图下面一层或上面一层：那个视图也不删")
 
-        # DICC（11/4）：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
+        # Slurm（11/4）：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
         R, _ = build(fixture.tmpdir(dir=tmp))
         scr = fixture.tmpdir(dir=tmp)
         os.rmdir(scr)
@@ -240,7 +240,7 @@ def main():
 
         b0, G.budget = G.budget, lambda n: None
         try:
-            assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
+            assert G.gc("site-slurm2", keep, lambda *a, **k: 1 / 0) is None
         finally:
             G.budget = b0
         ok("没有 budget 的机器不清理")

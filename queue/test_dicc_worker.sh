@@ -1,6 +1,6 @@
 #!/bin/bash
 # dicc_worker.sh 的模拟测试（2026-10-18）：临时的假队列（TASKQ_DIR）、临时数据目录、假作业号，任务用 command 做法跑假训练
-# （睡几秒后写训完的文件）；环境按测试用的机器表（testdata/config）激活：假的 conda、venv（本机 box 的 base、alt）。不用 Slurm、不用 GPU。
+# （睡几秒后写训完的文件）；环境按测试用的机器表（testdata/config）激活：假的 conda、venv（本机 hub 的 base、alt）。不用 Slurm、不用 GPU。
 # 这里是领、训、交还的基本情况；停止和失败在 test_dicc_worker_stop.sh，不在 Slurm 里的和代码包在 test_dicc_worker_code.sh。
 #   bash queue/test_dicc_worker.sh        WORKER_TEST_ONLY="1 4" 只跑这几个情况
 set -u
@@ -8,7 +8,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=slurm-login   # 本机当队列所在的机器（不转发到真的 Slurm）
 source "$HERE/testdata/worker_harness.sh"
 
 # 1. 旧作业的调用方式（带三个参数，只记日志）：按顺序领；GPU 不忙、显存够时一张卡 2 个；按任务换环境
@@ -30,7 +30,7 @@ check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $TASKQ_DATA/logs/tasks/t__a__900101_part1.log ]] && head -1 $TASKQ_DATA/logs/tasks/t__a__900101_part1.log | grep -q "^作业 900101_1 @ .*任务=t/a"'
 fi
 
-# 1b. 本机没有的环境（x3 只在 DICC 上）不领
+# 1b. 本机没有的环境（x3 只在 Slurm 上）不领
 if want 1b; then
 reset
 table << EOF
@@ -167,20 +167,20 @@ check "一直在写结果文件夹（不写日志）的不算卡住" '! grep -q 
 check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 fi
 
-# 4. 分出去的领取（take --assign，不过期；beat 30 分钟前）不被 DICC 作业领走
+# 4. 分出去的领取（take --assign，不过期；beat 30 分钟前）不被 Slurm 作业领走
 if want 4; then
 reset
 table << EOF
 t/a base
 EOF
-python3 "$HERE/taskq.py" take --worker lab --assign t/a > /dev/null
+python3 "$HERE/taskq.py" take --worker pueue-host --assign t/a > /dev/null
 python3 - "$TASKQ_DIR" << 'EOF'
 import json, os, sys, time
 p = os.path.join(sys.argv[1], "claims", os.listdir(os.path.join(sys.argv[1], "claims"))[0], "info")
 i = json.load(open(p)); i["beat"] = time.time() - 1800; json.dump(i, open(p, "w"))
 EOF
 SLURM_JOB_ID=900112 timeout 60 bash "$HERE/dicc_worker.sh" > "$T/w4.out" 2>&1
-check "分给 lab 的（30 分钟没续也不过期）：DICC 作业不领" '[[ ! -s $T/train.log ]] && grep -q "没有能领的任务" $T/w4.out'
+check "分给 pueue-host 的（30 分钟没续也不过期）：Slurm 作业不领" '[[ ! -s $T/train.log ]] && grep -q "没有能领的任务" $T/w4.out'
 fi
 
 # 5. 队列出错（任务表读不了）连续一段时间、手上没有在训的：结束作业（不再按作业名的参数训）

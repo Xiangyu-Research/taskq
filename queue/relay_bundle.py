@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""执行机（envs/machines.py 的 RELAY）用的代码包（2026-10-30；11/4 起只装执行机要用的、只按内容命名）：
+"""执行机（配置文件夹里 machines.py 的 RELAY）用的代码包（2026-10-30；11/4 起只装执行机要用的、只按内容命名）：
 调度核心里执行机要用的文件（RUNTIME：worker、run_task.sh、队列、任务说明；取自核心自己的仓库的 HEAD，放在包里的 scripts/taskq/
 （proto.BUNDLE_CORE），和本机的核心装在哪无关），旧位置的转交（COMPAT）、核心的提交号（scripts/taskq/VERSION，不算进包名）、
-使用者仓库根目录下的 .taskq.toml（有就带上），加上使用者仓库的提交里跟踪的 envs/policy.py 的 OUTPUTS["bundle"]
+使用者仓库根目录下的 .taskq.toml（有就带上），加上使用者仓库的提交里跟踪的 policy.py 的 OUTPUTS["bundle"]
 （使用者的文件夹或文件）下的代码（.py .sh .R .sbatch，1 MB 以内的 .json .csv .txt .yaml .yml），去掉 OUTPUTS["bundle_skip"] 的通配
-（测试、只在 box 上用的）；另外生成只有这一台的 envs/machines.py（去掉说明和整行注释）、envs/policy.py（OUTPUTS 只留 experiments），
+（测试、只在 hub 上用的）；另外在配置文件夹里生成只有这一台的 machines.py（去掉说明和整行注释）、policy.py（OUTPUTS 只留 experiments），
 Slurm 类按 jobs 的每种 worker 生成 sbatch（gpu → worker.sbatch，cpu → cpu_worker.sbatch，不靠 git 找代码）；家目录下的状态文件夹
 （cfg.py 的 STATE_HOME）换成那边根目录下的 queue/、state/。
 核对：本机和 OUTPUTS["bundle_check"] 那个环境的两个 Python 版本都能编译，bash -n 通过，没有钥匙（私钥、常见的 token）。
-包名 = 内容哈希的前 16 位，不带提交号：只改 box 上的代码或文档时包名不变，执行机不换包；同样的内容只建一次。
+包名 = 内容哈希的前 16 位，不带提交号：只改 hub 上的代码或文档时包名不变，执行机不换包；同样的内容只建一次。
 哪个提交建的包记在 relay.py 的状态 bundle_for（<名字>:<提交>:<核心的提交> → 包名）。
 
     relay_bundle.py build <名字> [--commit 提交] [--core-commit 提交] [--out 目录]   → 打印"包名 路径"
@@ -41,13 +41,24 @@ import policy as P  # noqa: E402
 import remote as RM  # noqa: E402
 
 OUT = cfg.state("relay", "bundles", expand=False)
-TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ("envs",)))  # envs/policy.py 的 OUTPUTS：使用者的文件夹或文件
+def conf_rel():
+    """包里配置文件夹的位置（相对包的根）：.taskq.toml 的 config，没有 .taskq.toml 时 config。"""
+    conf = cfg.project_conf()
+    rel = os.path.normpath(str((conf or {}).get("config") or ".")) if conf is not None else "config"
+    return "" if rel == "." else rel
+
+
+def conf_path(name):
+    return f"{conf_rel()}/{name}" if conf_rel() else name
+
+
+TOPS = tuple(getattr(P, "OUTPUTS", {}).get("bundle", ()) or (conf_rel() or ".",))  # policy.py 的 OUTPUTS：使用者的文件夹或文件
 SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # 不进包的通配（fnmatch，* 跨目录）
 BC = proto.BUNDLE_CORE  # 包里核心的位置（固定，和本机的核心在哪无关）
 CORE_REF = "HEAD"  # 核心文件取自核心自己的仓库的这个提交（装好的那一份，11/4）
 # 调度核心里执行机要用的（相对核心的根；包里放在 BC/ 下）：worker 的入口和循环、跑任务、队列、任务说明、实验表、显存填充、
-# 输入的本地副本；机器级的（开机、装 pueue、建组、GPU 使用记录，11/4：lab 不再用克隆）；命令行 bin/taskq（有就带上）；
-# 其余（box 上的计划、传数据、健康检查、同步）不进包
+# 输入的本地副本；机器级的（开机、装 pueue、建组、GPU 使用记录和汇总，11/4：pueue 执行机不再用仓库克隆）；命令行 bin/taskq（有就带上）和它在那边用的 taskq log；
+# 其余（hub 上的计划、传数据、健康检查、同步）不进包
 RUNTIME = (
     "queue/worker_start.sh", "queue/dicc_worker.sh", "queue/run_task.sh", "queue/gpu_pad_start.sh", "queue/gpu_pad.py",
     "queue/consume.py", "queue/consumers/__init__.py", "queue/consumers/slurm.py", "queue/consumers/resident.py",
@@ -55,13 +66,13 @@ RUNTIME = (
     "queue/shift.py", "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
     "queue/steps.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
     "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "queue/project.py", "sites/mtab.py",
-    "monitor/gpu_log.sh", "bin/taskq")
+    "monitor/gpu_log.sh", "monitor/gpu_usage.py", "queue/tasklog.py", "bin/taskq")
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 1 << 20
 SBATCH = {"gpu": "queue/worker.sbatch", "cpu": "queue/cpu_worker.sbatch"}  # worker 的种类 → 模板（相对核心；包里在 BC/ 下）
 PROJECT_FILE = ".taskq.toml"  # 使用者仓库根目录下的项目说明，有就带上
-VERSION = BC + "/VERSION"  # 核心的提交号（短）；不算进包名：只改 box 上的核心代码时包名不变、执行机不换包
+VERSION = BC + "/VERSION"  # 核心的提交号（短）；不算进包名：只改 hub 上的核心代码时包名不变、执行机不换包
 # 旧位置的入口，核心生成、每个包都有：排着的 Slurm 作业开始时跑 $REPO/scripts/queue/worker_start.sh，换包时找 dicc_worker.sh（转交）；
 # 已经交给 Slurm、还在排队的老作业脚本里写的是改名时的 start.sh；running 的老 worker 换包时找 loop.sh（软链接）。
 # 等 2026-11 前交的作业都结束后删
@@ -250,7 +261,7 @@ def relay_entry(commit, name):
     exec(compile(read_machines(commit), "machines.py", "exec"), ns)
     relay = ns.get("RELAY") or {}
     if name not in relay:
-        raise BundleError(f"{commit or '工作区'} 的 envs/machines.py 的 RELAY 里没有 {name}")
+        raise BundleError(f"{commit or '工作区'} 的机器表（machines.py）的 RELAY 里没有 {name}")
     return relay[name]
 
 
@@ -259,16 +270,16 @@ def machine_entry(name, e, root, entry=None):
     m = dict(label=name, hostname=e["hostname"], ssh=None, scheduler=e["scheduler"], repo=f"{root}/{proto.ROOT['current']}", code=None,
              data=f"{root}/{proto.ROOT['data']}", conda=tuple(e["conda"]), envs=dict(e["envs"]), groups=dict(e.get("groups") or {}),
              roles=("train",), disk=None, gpu_log=False, jobs=tuple(e.get("jobs") or ()), sbatch=dict(e.get("sbatch") or {}))
-    m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars", "task_unset") if k in e})
+    m.update({k: e[k] for k in ("slots", "worker", "cpu_worker", "task_vars", "task_unset", "gpu_pad") if k in e})
     m["env_root"] = M.env_root(e)  # 按描述建的环境（sites/envs.py）在根目录下
     m.update(entry or {})
     return m
 
 
 def gen_machines(src, name, m):
-    """把 envs/machines.py 的 MACHINES 换成只有这一项，SITES、RELAY 换成空的（查别的机器是 KeyError，11/4），
+    """把配置文件夹里 machines.py 的 MACHINES 换成只有这一项，SITES、RELAY 换成空的（查别的机器是 KeyError，11/4），
     开头的说明换成一句、删掉整行注释（改说明时包名不变）。只有数据（没有 if __name__ == "__main__"）时末尾加上命令行的转交：
-    python3 envs/machines.py <命令> 照旧能用，由包里的 sites/mtab.py 做（11/4）。"""
+    python3 <配置文件夹>/machines.py <命令> 照旧能用，由包里的 sites/mtab.py 做（11/4）。"""
     lines = src.split("\n")
     spans = {}
     body = ast.parse(src).body
@@ -276,7 +287,7 @@ def gen_machines(src, name, m):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             spans[node.targets[0].id] = (node.lineno - 1, node.end_lineno - 1)
     if "MACHINES" not in spans:
-        raise BundleError("envs/machines.py 里找不到 MACHINES")
+        raise BundleError("机器表（machines.py）里找不到 MACHINES")
     repl = {spans["MACHINES"]: "MACHINES = " + pprint.pformat({name: m}, sort_dicts=False, width=120)}
     for k in ("SITES", "RELAY"):
         if k in spans:
@@ -287,7 +298,7 @@ def gen_machines(src, name, m):
         lines[r0:r1 + 1] = [] if text is None else text.split("\n")
     out = drop_comment_lines("\n".join(lines))
     if not any(isinstance(n, ast.If) and "__main__" in ast.unparse(n.test) for n in body):
-        out = out.rstrip("\n") + "\n\n\n" + MTAB_STUB.format(mtab=os.path.join("..", cfg.bundle_rel("sites", "mtab.py")))
+        out = out.rstrip("\n") + "\n\n\n" + MTAB_STUB.format(mtab=os.path.relpath(cfg.bundle_rel("sites", "mtab.py"), conf_rel() or "."))
     return out
 
 
@@ -295,6 +306,16 @@ MTAB_STUB = """if __name__ == "__main__":
     import os, runpy; os.environ["TASKQ_CONFIG"] = os.path.dirname(os.path.abspath(__file__))
     runpy.run_path(os.path.join(os.environ["TASKQ_CONFIG"], {mtab!r}), run_name="__main__")
 """
+
+
+def gen_project():
+    """使用者没有 .taskq.toml（配置由 TASKQ_CONFIG 给）时包里生成一个：配置在 conf_rel()，插件取进了包的那些。"""
+    plug = []
+    for d in cfg.plugin_dirs():
+        rel = os.path.relpath(os.path.realpath(d), os.path.realpath(REPO))
+        if not rel.startswith("..") and any(rel == t or rel.startswith(t.rstrip("/") + "/") for t in TOPS):
+            plug.append(rel)
+    return f"config = {conf_rel() or '.'!r}\nplugins = {plug!r}\n".replace("'", '"')
 
 
 def drop_comment_lines(src):
@@ -465,13 +486,12 @@ def contents(name, commit="origin/main", root=None, entry=None, core=CORE_REF):
         except UnicodeDecodeError as err:
             raise BundleError(f"{path} 不是 UTF-8：{err}") from None
         out[path] = (home_paths(text, root, path), exe or path.endswith(".sh"))
-    out["envs/machines.py"] = (home_paths(gen_machines(read_machines(commit), name, m), root, "envs/machines.py"), True)
-    out["envs/policy.py"] = (gen_policy(name, e.get("stage_tmp", True)), False)
+    out[conf_path("machines.py")] = (home_paths(gen_machines(read_machines(commit), name, m), root, conf_path("machines.py")), True)
+    out[conf_path("policy.py")] = (gen_policy(name, e.get("stage_tmp", True)), False)
     for old, target in COMPAT.items():
         out[old] = (forwarder(old, target), True)
     toml = project_file(commit)
-    if toml is not None:
-        out[PROJECT_FILE] = (toml, False)
+    out[PROJECT_FILE] = (toml if toml is not None else gen_project(), False)
     for tpl in SBATCH.values():
         out.pop(f"{BC}/{tpl}", None)
     if m["scheduler"] == "slurm":

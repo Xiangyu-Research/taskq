@@ -73,19 +73,19 @@ try:
            and m["activate"] == {e: M.activate(n, e) for e in M.machine(n).get("envs") or {}} for n, m in d["machines"].items()))
     ms = d["machines"]
     ok("machines show：pueue 执行机有开 worker 的命令，Slurm 的、MACHINES 的没有",
-       ms["lab0"]["worker_cmds"] == {k: PQ.worker_cmd("lab0", k) for k in M.kinds("lab0")} and ms["dicc1"]["worker_cmds"] == {}
-       and ms["box"]["worker_cmds"] == {})
-    ok("machines show：根目录的 shell 写法（~ 留给那边展开）", ms["dicc1"]["root_q"] == R.q("~/q") and ms["box"]["root_q"] is None)
-    ok("machines show：给任务加的语句（task_vars）", ms["lab1"]["task_sh"] == S.machine_vars(M.machine("lab1"))
-       and any("DEMO_FAST=1" in x for x in ms["lab1"]["task_sh"]) and ms["box"]["task_sh"] == [])
+       ms["site-pueue2"]["worker_cmds"] == {k: PQ.worker_cmd("site-pueue2", k) for k in M.kinds("site-pueue2")} and ms["site-slurm"]["worker_cmds"] == {}
+       and ms["hub"]["worker_cmds"] == {})
+    ok("machines show：根目录的 shell 写法（~ 留给那边展开）", ms["site-slurm"]["root_q"] == R.q("~/q") and ms["hub"]["root_q"] is None)
+    ok("machines show：给任务加的语句（task_vars）", ms["site-pueue"]["task_sh"] == S.machine_vars(M.machine("site-pueue"))
+       and any("DEMO_FAST=1" in x for x in ms["site-pueue"]["task_sh"]) and ms["hub"]["task_sh"] == [])
     specs = sorted(f[:-4] for f in os.listdir(os.path.join(fixture.CONFIG, "specs")) if f.endswith(".yml"))
     ok("machines show：环境描述的哈希、base", sorted(d["specs"]) == specs
        and all(s["hash"] == M.spec_hash(n) for n, s in d["specs"].items()) and d["specs"]["alt"]["base"] == "base")
-    d2 = js("machines", "show", "lab1", "box")
-    ok("machines show 名…：只有这几台", set(d2["machines"]) == {"lab1", "box"} and d2["machines"]["lab1"] == ms["lab1"])
+    d2 = js("machines", "show", "site-pueue", "hub")
+    ok("machines show 名…：只有这几台", set(d2["machines"]) == {"site-pueue", "hub"} and d2["machines"]["site-pueue"] == ms["site-pueue"])
     r = taskq("machines", "show", "nope")
     ok("machines show 不认识的机器 → 4（proto.EXIT gone），原因在 stderr", r.returncode == proto.EXIT["gone"] and "nope" in r.stderr and not r.stdout)
-    r = taskq("machines", "get", "dicc1", "root")
+    r = taskq("machines", "get", "site-slurm", "root")
     ok("machines 的别的命令照旧", r.returncode == 0 and r.stdout.strip() == "~/q")
 
     # ---------------- taskq exp steps ----------------

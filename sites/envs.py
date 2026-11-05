@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""按 envs/specs/<名>.yml 在一台机器上建环境（2026-10-31）：box 生成一段 bash，交给那台机器在 CPU 上跑（Slurm：CPU 分区的
+"""按 <配置文件夹>/specs/<名>.yml 在一台机器上建环境（2026-10-31）：hub 生成一段 bash，交给那台机器在 CPU 上跑（Slurm：CPU 分区的
 srun；pueue 类：nice、看不到卡的普通进程），不占 GPU。
 
-描述的写法（envs/specs/README.md）：
+描述的写法：
   python / channels / override_channels / conda   conda 环境：conda create -p <目录> python=… <conda 包>
   base                                            venv 建在另一个环境上（--system-site-packages），先激活那个
   torch: {变体: {index_url, packages}}            先从 index_url 装 torch（default，或机器条目 ("spec", 变体) 选的）
   pip / pip_no_deps                               再装的 pip 包；{torch_mm}、{abi}、{cp} 按环境里的 torch、Python 填
-检查：envs/specs/<名>.check.py（在建好的环境里跑，参数是那台的代码目录）。
+检查：<配置文件夹>/specs/<名>.check.py（在建好的环境里跑，参数是那台的代码目录）。
 
 那边的布局（root = 机器条目的 env_root）：<root>/<名>-<哈希前 12 位>/ 是这一版环境，<root>/<名> 是指向它的软链接（检查过了才换），
 <root>/<名>/.activate 是激活语句；状态目录里 <名>.ok、<名>.failed、<名>.building、<名>.log。
@@ -15,9 +15,9 @@ srun；pueue 类：nice、看不到卡的普通进程），不占 GPU。
 描述一改哈希就变：新版建在新目录里，建好检查过才换软链接、写 .ok，旧版留着，在跑的任务不受影响。
 .ok 的内容是哈希（一行）；.failed 是"<哈希> <时间> rc <退出码>"或"<哈希> <时间> nospace <要的字节> <剩的字节>"。
 
-有锁文件 <名>.<变体>.lock.json（11/5，sites/envlock.py 写）时不联网建：锁里的 conda 包、pip 包按 sha256 存在 box 的
+有锁文件 <名>.<变体>.lock.json（11/5，sites/envlock.py 写）时不联网建：锁里的 conda 包、pip 包按 sha256 存在 hub 的
 wheelhouse（状态文件夹下的 proto.wheel(sha256)）；执行机先经 relay 的 ensure_blobs 放进根目录的 blobs（建的时候钉住，清理不删），
-那边硬链接成原来的文件名，conda create --offline --file（@EXPLICIT）、pip install --no-index --require-hashes；box 直接用 wheelhouse。
+那边硬链接成原来的文件名，conda create --offline --file（@EXPLICIT）、pip install --no-index --require-hashes；hub 直接用 wheelhouse。
 建之前按锁里的大小查空间（包 × SPACE_X，加一份临时的；有 cap 的执行机按 cap 减已占的算），不够不建、写 .failed。
 """
 import json
@@ -40,8 +40,8 @@ sys.path.insert(0, os.path.join(CORE, "monitor"))
 import mtab as M  # noqa: E402
 
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'
-BUILD_MIN = 60      # 那边建一次的时限（分钟）：Slurm 是作业时限（短一点好排：box 上建一个环境不到 1 分钟），pueue 类是 timeout
-BUILD_TIMEOUT = 4 * 3600  # box 上等一次建环境最多这么久
+BUILD_MIN = 60      # 那边建一次的时限（分钟）：Slurm 是作业时限（短一点好排：建一个环境一般几分钟），pueue 类是 timeout
+BUILD_TIMEOUT = 4 * 3600  # hub 上等一次建环境最多这么久
 STALE_S = BUILD_TIMEOUT  # .building 这么久没动就当已经停了
 RETRY_S = 6 * 3600  # 空间不够没建的，这么久以后自动再试
 SPACE_X = 2.5       # 装好的环境约为锁里的包的几倍
@@ -215,7 +215,7 @@ def wheel_name(x):
 
 def build_script(name, env, v=None, store=None):
     """→ 在那台机器上建 env 的 bash（自己带检查和状态文件）。v：变体（默认按机器条目）；store：有锁时那边放包的目录
-    （<前两位>/<sha256>：执行机的 blobs、box 的 wheelhouse）。机器条目还不是 "spec" 的也能建（预建，不影响送任务）。"""
+    （<前两位>/<sha256>：执行机的 blobs、hub 的 wheelhouse）。机器条目还不是 "spec" 的也能建（预建，不影响送任务）。"""
     m = M.machine(name)
     v = v or variant_of(name, env)
     sp, h = load(env), vhash(env, v)
@@ -317,7 +317,7 @@ def runner(name):
         if any(a in ("--gres", "-G") or a.startswith(("--gres=", "--gpus", "-G")) or "gpu" in a.lower() for a in args):
             raise EnvError(f"{name} 的 env_job 要了 GPU：{job}")
         timed = any(a in ("-t", "--time") or a.startswith("--time=") for a in args)
-        # 一直排着等节点（不用 -I：排不上就放弃再交会把排队时间清零，更排不上）；最多等到 box 这边的 BUILD_TIMEOUT
+        # 一直排着等节点（不用 -I：排不上就放弃再交会把排队时间清零，更排不上）；最多等到 hub 这边的 BUILD_TIMEOUT
         launch = f"srun {job}" + ("" if timed else f" -t {BUILD_MIN}")
     else:
         launch = f"timeout -k 60 {BUILD_MIN}m nice -n 10 env CUDA_VISIBLE_DEVICES="
@@ -388,7 +388,7 @@ def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=pri
     lk = load_lock(env, v)
     relay = name in M.RELAY
     if lk and m.get("ssh") and not relay:
-        raise EnvError(f"{env} 有锁文件，只在 box 和执行机（RELAY）上建；{name} 两样都不是")
+        raise EnvError(f"{env} 有锁文件，只在 hub 和执行机（RELAY）上建；{name} 两样都不是")
     store = (RM.root(name) + "/" + ROOT["blobs"] if relay else wheelhouse()) if lk else None
     files = lock_files(lk) if lk else {}
     script = build_script(name, env, v, store)
@@ -511,7 +511,7 @@ def oks_of(states_, name):
     return {k: M.spec_hash(k, M.spec_variant(name, k)) for k, v in (states_ or {}).items() if v == "ok"}
 
 
-# ---------------- 自动建（box 的健康检查经 relay.py 调用） ----------------
+# ---------------- 自动建（hub 的健康检查经 relay.py 调用） ----------------
 def wanted(name, extra=()):
     """这台机器要建的 {环境: 变体}（基础环境在前）：条目里 "spec" 的，加上 extra（预建：环境名或 (环境, 变体)）；
     venv 的基础环境有描述的也算。没有描述的不算。"""

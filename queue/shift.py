@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按时段开关（envs/policy.py 的 SHIFT，2026-10-30）：health.py 每次检查时、送任务之前调用。
+"""按时段开关（policy.py 的 SHIFT，2026-10-30）：health.py 每次检查时、送任务之前调用。
 
 执行机（SITES 里的名字，10/31）：只在时段里领任务、开 worker（relay.py 看 allowed()）。
   - 时段开始后：恢复它的 pueue 组、记下这个时段开了（卡上有没有别人、别人用过多久，由执行机上的 worker 开训前自己看，
@@ -7,7 +7,7 @@
   - 时段结束后：worker 自己停下手上的、交还、退出（queue/consumers/window.py，11/5）；这里暂停组、还在跑的 worker 再 SIGTERM 一次（兜底，
     旧代码包的 worker 也靠它）；总队列里分给它、没训完的任务：有进度（在训、训过几轮）的
     改分给同一台上不按时段的执行机（day_site，从存档接着训，relay.py 的收编把存档带过去），其余交还总队列。
-做了什么记在 ~/.cache/phd/shift.json（每项最近一次开、停的时段日期），日志 ~/refill.log。
+做了什么记在状态目录的 shift.json（如 ~/.cache/taskq/shift.json）（每项最近一次开、停的时段日期），日志 ~/refill.log。
 """
 import datetime as dt
 import json
@@ -125,7 +125,7 @@ def group_tasks(host, g, pueue=PUEUE):
 
 
 def hand_over(key, frm, to):
-    """总队列里把分给 frm 的 key 改分给 to（box 上，10/31；11/5 起一步改分，中间不会被别的执行机领走）→ 是否成功。"""
+    """总队列里把分给 frm 的 key 改分给 to（hub 上，10/31；11/5 起一步改分，中间不会被别的执行机领走）→ 是否成功。"""
     import taskq
     rc, _, _ = taskq.central(["take", "--worker", to, "--assign", "--from", frm, key])
     return rc == 0
@@ -178,7 +178,7 @@ def stop_group(host, g, pueue, wait=False):
 
 
 def worker_groups(name):
-    """这台各种 worker 所在的 pueue 组（envs/machines.py 的 kinds、worker_of），去重、按种类的顺序。"""
+    """这台各种 worker 所在的 pueue 组（machines.py 的 kinds、worker_of），去重、按种类的顺序。"""
     return list(dict.fromkeys(M.worker_of(name, k)["group"] for k in M.kinds(name)))
 
 
@@ -269,7 +269,7 @@ def run(s=None, dry=False, now=None):
 
 def main(argv=None):
     import argparse
-    ap = argparse.ArgumentParser(description="按时段开关执行机（envs/policy.py 的 SHIFT）：不带 -n 时真做（健康检查每次调用 run）")
+    ap = argparse.ArgumentParser(description="按时段开关执行机（policy.py 的 SHIFT）：不带 -n 时真做（健康检查每次调用 run）")
     ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看会做什么，不改任何东西")
     a = ap.parse_args(argv)
     print("\n".join(run(dry=a.dry_run)) or "不动")

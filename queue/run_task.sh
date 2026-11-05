@@ -1,13 +1,13 @@
 #!/bin/bash
 # 跑一个训练任务（2026-10-18）：所有机器共用（执行机的 worker consume.py、手动跑）。
 #   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
-#   run_task.sh --spec <JSON>        按解析好的说明跑（执行机的队列里 box 送来的，spec.py resolve 的格式；11/4）
-# 按任务说明（queue/spec.py，做法在 queue/recipes.py）：激活环境（envs/machines.py 的 envs）、设环境变量、
+#   run_task.sh --spec <JSON>        按解析好的说明跑（执行机的队列里 hub 送来的，spec.py resolve 的格式；11/4）
+# 按任务说明（queue/spec.py，做法在 queue/recipes.py）：激活环境（机器表 machines.py 的 envs）、设环境变量、
 # 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART），第一行记作业、机器、
-# 任务、代码版本（登记表 make_registry.py 读）。作业 = TASK_JOBTAG（worker 给：Slurm 里是作业号，lab 上是"主机名-时间"），否则"主机名-时间"。
+# 任务、代码版本（taskq log、使用者的登记表读）。作业 = TASK_JOBTAG（worker 给：Slurm 里是作业号，pueue 执行机上是"主机名-时间"），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
 # 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；worker 设了 TASKQ_ADMITTED=1 时不等（它领之前已看过卡，11/5）；
-# 设了 TASK_GPU_IDLE（分钟，envs/machines.py 里组的环境变量）时，还要 GPU 使用记录（monitor/gpu_log.sh，位置见 proto.py 的 GPU_LOG_DIR）里最近这么久这张卡上没有别人（11/2）；
+# 设了 TASK_GPU_IDLE（分钟，机器表 machines.py 里组的环境变量）时，还要 GPU 使用记录（monitor/gpu_log.sh，位置见 proto.py 的 GPU_LOG_DIR）里最近这么久这张卡上没有别人（11/2）；
 # 训练出错隔 5 分钟重来，最多 3 次（worker 跑的只跑 1 次，由它交还队列）。
 # 退出码（queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
 # 4 缺输入（data 里的文件不全，没开训，11/1）；5 读不了盘、判断不了训完没有（spec.py done 退出 5，11/4）；
@@ -21,7 +21,7 @@ CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO�
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v… 或 run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 DATA=${TASKQ_DATA:-$(python3 "$CORE/sites/mtab.py" get . data)}
-[[ -n $DATA ]] || { echo "envs/machines.py 里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
+[[ -n $DATA ]] || { echo "机器表（machines.py）里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 export TASKQ_DATA=$DATA
 ts() { date '+%F %T'; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
@@ -29,7 +29,7 @@ PART=${TASK_PART:-1}
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
     COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
-    git -C "$REPO" diff --quiet HEAD -- ${CODE_DIRS:-scripts/queue} 2> /dev/null || COMMIT="$COMMIT+改动"
+    [[ -z $CODE_DIRS ]] || git -C "$REPO" diff --quiet HEAD -- $CODE_DIRS 2> /dev/null || COMMIT="$COMMIT+改动"
 else
     COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名是内容哈希（16 位）
 fi
@@ -53,7 +53,7 @@ done_() { python3 "$HERE/spec.py" done "$@"; }
 done_ "$@"; rc=$?
 (( rc == TQ_EXIT_DONE_YES )) && { echo "$(ts) 已经训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"; }
 (( rc == TQ_EXIT_DONE_UNREADABLE )) && { early "读不了盘，判断不了训完没有"; exit "$TQ_EXIT_RUN_UNREADABLE"; }
-ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（envs/machines.py）"; exit "$TQ_EXIT_RUN_BAD"; }
+ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（机器表 machines.py）"; exit "$TQ_EXIT_RUN_BAD"; }
 mkdir -p "$DATA/$TQ_TASK_LOGS" "$TASK_OUT"
 LOG=$DATA/$TQ_TASK_LOGS/${TASK_SAFE}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log
 TRIES=3
@@ -130,7 +130,7 @@ if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
     if [[ ${TASK_LOCAL:-0} == 1 && -n ${TASKQ_STAGE_ROOT:-}${SLURM_JOB_ID:-} ]]; then
         ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; M = cfg.mtab(); import policy; print(int(bool(policy.STAGE_TMP.get(M.whoami()))))" 2> /dev/null || echo 0)}
-        [[ $ST == 1 ]] && LROOT=${TASKQ_STAGE_ROOT:-${TMPDIR:-/tmp}/$TQ_STAGE_PREFIX${SLURM_JOB_ID:-}}  # 消费者的 slurm 插件给的；旧 worker 按作业号
+        [[ $ST == 1 ]] && LROOT=${TASKQ_STAGE_ROOT:-${TMPDIR:-/tmp}/$TQ_STAGE_DIR_PREFIX${SLURM_JOB_ID:-}}  # 消费者的 slurm 插件给的；旧 worker 按作业号
     fi
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?
     if (( rc == TQ_EXIT_RUN_MISSING )); then

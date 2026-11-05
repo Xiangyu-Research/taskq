@@ -1,4 +1,4 @@
-"""调度脚本共用的小工具（2026-10-25），只用标准库（lab、DICC 上用系统的 python3）。"""
+"""调度脚本共用的小工具（2026-10-25），只用标准库（执行机上用系统的 python3）。"""
 import json
 import os
 
@@ -78,9 +78,9 @@ def local_time(x):
 
 # ---------------- 和上次一样就不再写日志 ----------------
 def changed(name, value):
-    """value 和上次记下的不一样 → 记下、返回 True；一样 → False。记在 ~/.cache/phd/last/<name>.json。"""
+    """value 和上次记下的不一样 → 记下、返回 True；一样 → False。记在状态目录的 last/<name>.json（如 ~/.cache/taskq/last/）。"""
     import re
-    d = os.path.expanduser(os.environ.get("PHD_LAST") or _cfg().state("last", expand=False))  # 环境变量只给测试用
+    d = os.path.expanduser(os.environ.get("TASKQ_LAST") or _cfg().state("last", expand=False))  # 环境变量只给测试用
     p = os.path.join(d, re.sub(r"[^\w.-]", "_", name) + ".json")
     try:
         if json.load(open(p)) == value:
@@ -91,9 +91,9 @@ def changed(name, value):
     return True
 
 
-# ---------------- 任务记录（2026-10-25）：box、lab 的 pueue 任务"是谁"只看这里 ----------------
+# ---------------- 任务记录（2026-10-25）：hub 和 pueue 执行机的 pueue 任务"是谁"只看这里 ----------------
 def tasks_path():
-    return os.path.expanduser(os.environ.get("PHD_TASKS") or _cfg().state("tasks.json", expand=False))  # 环境变量只给测试用
+    return os.path.expanduser(os.environ.get("TASKQ_TASKS") or _cfg().state("tasks.json", expand=False))  # 环境变量只给测试用
 
 
 def load_records():

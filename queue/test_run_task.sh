@@ -35,7 +35,7 @@ $R toy ds=D101_alpha frag=0 variantt=x > /dev/null 2>&1; rc=$?
 check "参数写错：退出码 2" "(( rc == 2 ))"
 SP=$(python3 "$HERE/spec.py" resolve command key=toy/s 'cmd=touch {data}/toy/s/DONE' env=base out=toy/s 'done=["DONE"]')
 mkdir -p "$T/noplug"; TASKQ_PLUGINS=$T/noplug $R --spec "$SP" > /dev/null; rc=$?
-check "--spec：按 box 解析好的说明跑，执行机上没有做法插件也行（11/4）" "(( rc == 0 )) && [[ -e $T/toy/s/DONE ]] && head -1 $T/logs/tasks/toy__s__test-1_part1.log | grep -q '任务=toy/s'"
+check "--spec：按 hub 解析好的说明跑，执行机上没有做法插件也行（11/4）" "(( rc == 0 )) && [[ -e $T/toy/s/DONE ]] && head -1 $T/logs/tasks/toy__s__test-1_part1.log | grep -q '任务=toy/s'"
 $R --spec '{"key": "x"}' > /dev/null 2>&1; rc=$?
 check "--spec 说明缺字段：退出码 2" "(( rc == 2 ))"
 check "说明有问题：原因写进这个任务的分段日志（第一行照常）" "head -1 $T/logs/tasks/x__test-1_part1.log | grep -q '任务=x，' && grep -q '没开训：任务说明有问题：.' $T/logs/tasks/x__test-1_part1.log"
@@ -148,17 +148,17 @@ PY
 }
 VC='cmd=echo "${DEMO_FAST:-无}/${DEMO_FAST_LOADER:-无}" > $TASKQ_DATA/toy/v.vars; echo "${DEMO_UNSET:-无}" > $TASKQ_DATA/toy/v.unset; touch $TASKQ_DATA/toy/v/DONE'
 tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER DEMO_UNSET=job TASKQ_CONFIG=$T/cfg_$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }
-check "测试用的机器表副本：本机认成 lab / box / dicc" "as_machine lab tv && as_machine box && as_machine dicc"
-tvrun lab; rc=$?
-check "lab（代码包里有 task_vars）：导出给任务" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 1/1 ]]"
-check "lab（代码包里有 task_unset）：worker 环境里设的，任务里去掉" "[[ \$(cat $T/toy/v.unset) == 无 ]]"
-tvrun lab DEMO_FAST=0; rc=$?
-check "lab：已经设了的不改，没设的照样导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 0/1 ]]"
-tvrun box; rc=$?
-check "box（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
-check "box（没有 task_unset）：照样传给任务" "[[ \$(cat $T/toy/v.unset) == job ]]"
-tvrun dicc; rc=$?
-check "dicc（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+check "测试用的机器表副本：本机认成 pueue-host / hub / slurm-login" "as_machine pueue-host tv && as_machine hub && as_machine slurm-login"
+tvrun pueue-host; rc=$?
+check "pueue-host（代码包里有 task_vars）：导出给任务" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 1/1 ]]"
+check "pueue-host（代码包里有 task_unset）：worker 环境里设的，任务里去掉" "[[ \$(cat $T/toy/v.unset) == 无 ]]"
+tvrun pueue-host DEMO_FAST=0; rc=$?
+check "pueue-host：已经设了的不改，没设的照样导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 0/1 ]]"
+tvrun hub; rc=$?
+check "hub（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+check "hub（没有 task_unset）：照样传给任务" "[[ \$(cat $T/toy/v.unset) == job ]]"
+tvrun slurm-login; rc=$?
+check "slurm-login（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
 
 # 任务的命令看得到核心（11/4）：TASKQ_LIB = 核心的 queue/，核心的 bin/ 在 PATH 最前面
 $R command key=toy/lib 'cmd=echo "$TASKQ_LIB|${PATH%%:*}" > $TASKQ_DATA/toy/lib.txt; touch $TASKQ_DATA/toy/lib/DONE' env=base out=toy/lib 'done=["DONE"]' > /dev/null; rc=$?

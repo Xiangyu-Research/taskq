@@ -1,5 +1,5 @@
-"""relay：box 上的数据传到执行机（stage）、做完的结果拉回 box（fetch）、删那边的任务和结果（drop_remote）。
-那边的路径和 box 的数据目录一样；数据按 sha256 存成 blob（relay_remote.py 的说明）。"""
+"""relay：hub 上的数据传到执行机（stage）、做完的结果拉回 hub（fetch）、删那边的任务和结果（drop_remote）。
+那边的路径和 hub 的数据目录一样；数据按 sha256 存成 blob（relay_remote.py 的说明）。"""
 import base64
 import contextlib
 import json
@@ -31,7 +31,7 @@ import bundle_gate as BG  # noqa: E402
 PIN_EVERY = 3600  # 传数据期间每隔这么久重写一次钉子（那边的清理只认 12 小时内的）
 
 
-def box_data():
+def hub_data():
     return M.expand(M.MACHINES[M.hub()]["data"])
 
 
@@ -39,7 +39,7 @@ class Gone(RN.RelayError):
     """实验表和总队列里都没有这个 key。"""
 
 
-# ---------------- 传数据（box 的 wait 组里跑） ----------------
+# ---------------- 传数据（hub 的 wait 组里跑） ----------------
 def lookup(key):
     s = S.lookup(key)
     if s is None:
@@ -48,8 +48,8 @@ def lookup(key):
 
 
 def stage(name, key, nice=None, add=True, say=print):
-    """box 上的数据 → 那边（和 box 一样的相对路径）；add 时再加进那边的队列。→ key。"""
-    real, D = lookup(key), box_data()
+    """hub 上的数据 → 那边（和 hub 一样的相对路径）；add 时再加进那边的队列。→ key。"""
+    real, D = lookup(key), hub_data()
     ex = N.export(real, D)
     ids = in_use(name) if add else []
     g = ids and BG.check_all(S.sendable(S.resolve(real["recipe"], ex["params"])), ids)
@@ -91,12 +91,12 @@ def pinned(name, key, hashes, say=print):
 
 
 def ensure_blobs(name, files, say=print, data_dir=None, what=None, n=None):
-    """box 上的文件 {sha256: 本机路径} → 那边的 blobs 里都有了 → {sha256: 那边的路径（R/blobs/<前两位>/<sha256>，~ 不展开）}。
+    """hub 上的文件 {sha256: 本机路径} → 那边的 blobs 里都有了 → {sha256: 那边的路径（R/blobs/<前两位>/<sha256>，~ 不展开）}。
     先问那边缺哪些，缺的先从那边已有的数据里收编（硬链接，老数据目录、同一个盘上别的执行机、它自己的数据目录：本机路径在
-    data_dir（默认 box 的数据目录）下的按相对路径找），还缺的经隧道传。要不被清理删掉，调用方先 pinned。
+    data_dir（默认 hub 的数据目录）下的按相对路径找），还缺的经隧道传。要不被清理删掉，调用方先 pinned。
     CPU 作业排不上 → RM.NoSlot；没传到 → RelayError。"""
     import tunnel
-    D = data_dir or box_data()
+    D = data_dir or hub_data()
     miss = RM.rpy(name, RM.MISSING_PY, sorted(files))
     say(f"{what or name}：{len(files) if n is None else n} 个文件，那边缺 {len(miss)} 个")
     if miss:
@@ -226,7 +226,7 @@ def resend(name, say=print):
     say(r[1] or "没有要换的")
 
 
-# ---------------- 拉回（box 的 wait 组里跑） ----------------
+# ---------------- 拉回（hub 的 wait 组里跑） ----------------
 def place(src, D, written, real):
     """核对过的结果（src 下，和数据目录一样的相对路径）挪进数据目录：普通文件 → out 上一级里 fetch.extra 的文件（已有的不动）→
     MANIFEST.json → 做完的标志（按 done 倒着放，第一项最后放）。"""
@@ -261,7 +261,7 @@ def place(src, D, written, real):
 def fetch(name, key, say=print):
     import stat
     import tunnel
-    real, D = lookup(key), box_data()
+    real, D = lookup(key), hub_data()
     k = ST.keys_of(ST.load_state(), name).get(key)
     if not k:
         raise RN.RelayError(f"{key} 没有传给 {RM.conf(name)['label']} 的记录")

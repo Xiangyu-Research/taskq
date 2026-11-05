@@ -106,7 +106,7 @@ cmd, host = E.runner("tsite")
 ok("pueue 类：nice、看不到卡、在那台上", host == "tsite" and "nice -n 10 env CUDA_VISIBLE_DEVICES=" in cmd and "srun" not in cmd)
 cmd, host = E.runner("tslurm")
 ok("Slurm：CPU 分区的 srun，排着等（不设 -I）", cmd.count("srun -p cpu-x") == 1 and "gres" not in cmd and " -I" not in cmd)
-M.RELAY["tslurm"]["env_job"] = "-p gpu-a100 --gres=gpu:1"
+M.RELAY["tslurm"]["env_job"] = "-p gpu-a --gres=gpu:1"
 try:
     E.runner("tslurm")
     ok("env_job 要了 GPU → 报错", False)
@@ -341,9 +341,9 @@ RT.pinned, RT.ensure_blobs = SAVE_RT
 M.MACHINES["lremote"] = dict(label="远程", hostname=r"(?!)", ssh="lr", scheduler="pueue", conda=None, envs={"tiny": "spec"}, roles=())
 try:
     E.build("lremote", "tiny", run=run_cmd)
-    ok("有锁的不在 box、执行机以外的远程机器上建", False)
+    ok("有锁的不在 hub、执行机以外的远程机器上建", False)
 except E.EnvError:
-    ok("有锁的不在 box、执行机以外的远程机器上建", True)
+    ok("有锁的不在 hub、执行机以外的远程机器上建", True)
 del M.MACHINES["lremote"]
 for k in ("lsite",):
     M.RELAY.pop(k, None)
@@ -397,7 +397,7 @@ if "--real" in sys.argv:
     M.SPECS = f"{d}/specs"
     M.MACHINES["treal"] = dict(label="本机测试", hostname=r"(?!)", ssh=None, scheduler="pueue", root=f"{d}/root",
                            conda=None, envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, roles=("train",))
-    # 基础环境：本机一个带 venv、没有 numpy 的 python（box 上是 miniforge 的 base）
+    # 基础环境：本机一个带 venv、没有 numpy 的 python（hub 上是 miniforge 的 base）
     pyd = next(p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
                if subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0)
     E.base_activation = lambda name, base: f'export PATH={pyd}:"$PATH"'

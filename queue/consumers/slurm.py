@@ -21,7 +21,7 @@ def setup(w):
     w.term_rc, w.term_why = 143, "多半是到时限"
     w.end_text = "查不到，之后再查"
     w.get_end = end_time
-    w.stage_root = os.path.join(e.get("TMPDIR") or "/tmp", proto.STAGE_PREFIX + w.W)
+    w.stage_root = os.path.join(e.get("TMPDIR") or "/tmp", proto.STAGE_DIR_PREFIX + w.W)
     w.said = set()
     w.idle_mark = None
 
@@ -65,7 +65,7 @@ def idle(w, why, now, since, err_since):
     elif why == "error" and now - err_since >= w.ERR_MAX:
         w.say(f"队列连续出错 {m(now - err_since)} 分钟（{w.err}），结束作业、把卡还回去")
     elif now - since >= w.IDLE_MAX:
-        w.say(f"手上没有在训的已经 {m(now - since)} 分钟（{w.blocked if why == 'admit' else why or ''}），结束作业、把卡还回去（DICC：GPU 使用率连续 1 小时低于 40% 会被取消）")
+        w.say(f"手上没有在训的已经 {m(now - since)} 分钟（{w.blocked if why == 'admit' else why or ''}），结束作业、把卡还回去（有的集群 GPU 使用率长时间偏低会取消作业）")
     else:
         msg = {"nothing": f"没有能领的任务，空着等，每 {w.POLL} 秒再看，最多 {m(w.IDLE_MAX)} 分钟",
                "paused": f"队列暂停领任务（3 小时内失败太多次），空着等，最多 {m(w.IDLE_MAX)} 分钟",

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""训练任务队列（2026-10-17 起；10/18 起任务不限于 nnU-Net；10/31 起总队列在 box）。
+"""训练任务队列（2026-10-17 起；10/18 起任务不限于某一种模型；10/31 起总队列在 hub）。
 
-总队列（box 的 ~/.cache/phd/taskq/）：所有训练和要进队列的步骤。只有 box 写它（实验表加任务、改档位、停止都在 box 上做）；
+总队列（hub 的状态目录下的 taskq/，如 ~/.cache/taskq/taskq/）：所有训练和要进队列的步骤。只有 hub 写它（实验表加任务、改档位、停止都在 hub 上做）；
   分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（queue/relay.py 交还）。
 执行机上的队列（relay.py 在执行机根目录里建的 R/queue/）：relay.py 替它从总队列领来的任务，key 和总队列相同。
-  worker（queue/consume.py）在那边领、心跳、交还，box 不在线时照常跑。训完以后 box 拉回，box 上有了结果才算训完（总队列的 done）。
+  worker（queue/consume.py）在那边领、心跳、交还，hub 不在线时照常跑。训完以后 hub 拉回，hub 上有了结果才算训完（总队列的 done）。
 
 每个任务 = 做法 + 参数（queue/recipes.py，解析在 queue/spec.py）：环境、命令、结果文件夹、怎么算训完都由
-任务说明决定，这里不认识具体模型。属于实验表（research/*/experiments.py）的任务记下实验 id。
+任务说明决定，这里不认识具体模型。属于实验表（使用者的 experiments.py）的任务记下实验 id。
 
 队列目录（总队列和执行机上的一样）：
-  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}；执行机的队列另有 spec（box 解析好的说明，11/4）
-  claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（DICC 作业号等）、主机、领取和最近一次心跳的时间、token
+  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}；执行机的队列另有 spec（hub 解析好的说明，11/4）
+  claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（Slurm 作业号等）、主机、领取和最近一次心跳的时间、token
                 （心跳 20 分钟不更新算过期）；总队列里是 assigned（分给哪台执行机，不过期）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
                 （多半是节点或环境坏了，免得把所有任务都标成失败、排队的作业一个个空跑掉）
@@ -37,10 +37,10 @@ worker 调用（执行机上的队列）：
     taskq.py release --worker <作业号> [--token T] <key>... [--failed 原因] [--skip 原因]
     taskq.py missing --worker <作业号> [--token T] <key> [--why 说明]   缺输入（11/1）：交还，记 inputs/<key>，补齐前不再领
         --token：只动这一轮的领取（领取已被别人接管或已经没了时，交还什么都不记）
-改队列（box 上改总队列；add --spec-stdin、set-nice、remove、stop、resume、input-ok 也由 box 的 relay.py 在执行机的队列上调用；
-在不是 box、本机又没有队列的机器上跑时退出码 2）：
+改队列（hub 上改总队列；add --spec-stdin、set-nice、remove、stop、resume、input-ok 也由 hub 的 relay.py 在执行机的队列上调用；
+在不是 hub、本机又没有队列的机器上跑时退出码 2）：
     taskq.py add [--nice <档位>] --exp <实验 id> [--only <参数>=<取值>[,<取值>…]]…   从实验表加（已有的跳过；不给 --nice 用表里的档位；
-                                       --only 只加 each 里这个参数取这些值的任务，如 --only fold=1,2）
+                                       --only 只加 each 里这个参数取这些值的任务，如 --only seed=1,2）
     taskq.py add --nice <档位> --recipe <做法> k=v…                 加一个实验表以外的任务
     taskq.py add [--nice <档位>] --file <任务单.json>               按任务单加（别人的训练、测试；不给 --nice 用单子里的）
     taskq.py add --nice <档位> --spec-stdin [--update-only] < 说明.json   加解析好的说明（执行机的队列，relay.py 送；已有的换成新说明，
@@ -53,12 +53,13 @@ worker 调用（执行机上的队列）：
     taskq.py remove <key>...         删掉没人领着的任务和它的失败、停止、缺输入、交还记录（执行机的队列连跳过也删）；after 里有它的任务
                                      要一起删；结果文件不动；分出去的先 stop。退出码 0 删了，3 不删（有人领着等），4 队列里没有
     taskq.py stop [--why 原因] <key>...   停止任务（10/30）：在训的 30 秒内停下、交还（存档是原子写的，从存档接着训），
-                                      之后不再领它；分给执行机的由 box 下次检查时在那边停（relay.py）
+                                      之后不再领它；分给执行机的由 hub 下次检查时在那边停（relay.py）
     taskq.py resume <key>...         撤销停止，照常排
     taskq.py input-ok <key>...       撤掉"缺输入"（输入补齐了，11/1）
     taskq.py take --worker <机器> --assign [--from <机器>] <key>   分给一台执行机（free / stale / waiting 的；--from：分给那台的直接改分）：分到退出码 0，分不到 10
-    taskq.py status [--json]          打印队列；--json：@@JSON 一行 {version, enabled, tasks, recent_failures, paused, recent_skips}，
-                                      每个任务是 tasks.jsonl 的一行加 proto.STATUS_FIELDS（跨版本读用它，11/4；--json-status 照旧，没有 version）
+    taskq.py status [--json] [--internal]   打印队列；--json：@@JSON 一行 {version, enabled, tasks, recent_failures, paused, recent_skips}，
+                                      每个任务是 tasks.jsonl 的一行加 proto.STATUS_FIELDS（跨版本读用它，11/4；--json-status 照旧，没有 version）；
+                                      冒烟任务（proto.SMOKE_PREFIX）只在 --internal 时列（11/5）
 """
 import argparse
 import glob
@@ -133,7 +134,7 @@ def write_tasks(tasks, path=None):
         for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
             rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec"}
             if t.get("spec"):
-                rec["spec"] = t["spec"]  # 执行机的队列：box 解析好的说明（11/4）
+                rec["spec"] = t["spec"]  # 执行机的队列：hub 解析好的说明（11/4）
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
 
@@ -227,7 +228,7 @@ _specs = {}
 
 
 def spec_of(t):
-    """任务 → 说明；解析不了时 → None（错误记在 t["bad"]）。带 spec 的（执行机的队列，box 解析好的）直接用，不查做法。"""
+    """任务 → 说明；解析不了时 → None（错误记在 t["bad"]）。带 spec 的（执行机的队列，hub 解析好的）直接用，不查做法。"""
     k = json.dumps([t.get("spec")] if t.get("spec") else [t.get("recipe"), t.get("params"), t.get("exp")], sort_keys=True)
     if k not in _specs:
         try:
@@ -247,13 +248,13 @@ def spec_of(t):
 
 
 def data_root():
-    """本机的数据目录：TASKQ_DATA > envs/machines.py。"""
+    """本机的数据目录：TASKQ_DATA > 配置文件夹里的 machines.py。"""
     if cfg.env("TASKQ_DATA"):
         return cfg.env("TASKQ_DATA")
     M = cfg.mtab()
     me = M.whoami()
     if not me or not M.MACHINES[me].get("data"):
-        sys.exit("认不出本机或本机没有数据目录（envs/machines.py），先设 TASKQ_DATA")
+        sys.exit("认不出本机或本机没有数据目录（配置文件夹里的 machines.py），先设 TASKQ_DATA")
     return M.expand(M.MACHINES[me]["data"])
 
 
@@ -405,7 +406,7 @@ def claim_state(key, age):
     return "stale", f"作业 {ci.get('worker')} 的领取已过期"
 
 
-# ---------------- DICC 上：领、心跳、交还 ----------------
+# ---------------- 执行机上：领、心跳、交还 ----------------
 def _claim(a, pick):
     """按顺序领第一个 pick(t) 不为 None 的 free / stale 任务 → (退出码, pick 的结果)。"""
     if not have_queue():
@@ -748,7 +749,7 @@ def read_sheets(path):
 
 
 def only_of(items):
-    """["fold=1,2", …] → {"fold": ["1", "2"]}；没给 → None。"""
+    """["seed=1,2", …] → {"seed": ["1", "2"]}；没给 → None。"""
     out = {}
     for x in items:
         k, sep, v = x.partition("=")
@@ -813,8 +814,8 @@ def cmd_set(a):
         if t is None:
             print(f"队列里没有 {a.key}", file=sys.stderr)
             return GONE
-        if t.get("spec"):  # 执行机的队列：说明是 box 解析好送来的，这边按参数重新解析会丢掉它（11/4）
-            print(f"{a.key} 的说明是 box 送来的：改总队列里的参数，再 taskq site resend", file=sys.stderr)
+        if t.get("spec"):  # 执行机的队列：说明是 hub 解析好送来的，这边按参数重新解析会丢掉它（11/4）
+            print(f"{a.key} 的说明是 hub 送来的：改总队列里的参数，再 taskq site resend", file=sys.stderr)
             return 2
         p = dict(t["params"])
         for k, v in kv.items():
@@ -854,7 +855,7 @@ RECORDS = tuple(Q[k] for k in ("failures", "stopped", "inputs", "released"))  # 
 
 
 def cmd_remove(a):
-    """从队列里删掉没人在做的任务（10/28：DICC 停机期间把排在那边的评测挪回 box）。有活着的领取（不管状态）、训练日志刚更新的不删；
+    """从队列里删掉没人在做的任务（10/28：执行机停机期间把排在那边的步骤挪回 hub）。有活着的领取（不管状态）、训练日志刚更新的不删；
     别的任务的 after 里有它、又不一起删的不删。删的时候连同它的失败、停止、缺输入、交还记录和过期的领取一起删（同一个 key 以后再加进来
     是新任务，11/4）；跳过（skips/）只在执行机的队列（带 spec 的记录）里删，总队列里留着（哪台执行机训不了，换个时候再加也一样）。
     结果文件不动。退出码 0 删了（一批里已经不在的跳过）；REFUSED 不删；GONE 一个都不在队列里（什么都没删）。"""
@@ -919,13 +920,13 @@ def cmd_stop(a):
                 f.write(f"{time.strftime('%F %T')}\t{a.why or ''}\n")
             w = str((ci or {}).get("worker", ""))
             if (ci or {}).get("assigned"):
-                print(f"停止：{k}（分给了 {ci['assigned']}，由 box 下次检查时在那边停、交还）")
+                print(f"停止：{k}（分给了 {ci['assigned']}，由 hub 下次检查时在那边停、交还）")
             elif not ci:
                 print(f"停止：{k}（没人在做，以后不领）")
             elif w.isdigit():
                 print(f"停止：{k}（作业 {w} 30 秒内停下、交还）")
             else:
-                print(f"停止：{k}（{w} 领着，由 box 下次检查时停、交还）")
+                print(f"停止：{k}（{w} 领着，由 hub 下次检查时停、交还）")
     return 0
 
 
@@ -1006,7 +1007,7 @@ def local_status():
 
 
 def central(args, timeout=420):  # 比锁的最长等待（300 秒）长：等不到锁时拿到退出码，不是超时
-    """box 上改总队列：本机跑 taskq.py <args>（参数列表或 shell 写法的字符串）→ (退出码, 标准输出, 标准错误)。"""
+    """hub 上改总队列：本机跑 taskq.py <args>（参数列表或 shell 写法的字符串）→ (退出码, 标准输出, 标准错误)。"""
     import subprocess
     argv = shlex.split(args) if isinstance(args, str) else list(args)
     r = subprocess.run([sys.executable, os.path.abspath(__file__)] + argv, capture_output=True, text=True, timeout=timeout)
@@ -1014,7 +1015,7 @@ def central(args, timeout=420):  # 比锁的最长等待（300 秒）长：等�
 
 
 def queue_host():
-    """总队列所在的机器：envs/machines.py 的 hub（box）；没有 hub 时（中转执行机上的代码包）是本机。"""
+    """总队列所在的机器：配置文件夹里 machines.py 的 hub；没有 hub 时（中转执行机上的代码包）是本机。"""
     M = cfg.mtab()
     try:
         return M.hub()
@@ -1032,16 +1033,17 @@ def cmd_status(a):
     if s is None:
         print("读不到队列", file=sys.stderr)
         return 1
+    smoke = 0
+    if not a.internal:  # 冒烟任务（taskq smoke status 看）只在 --internal 时列
+        smoke = sum(proto.is_smoke(t["key"]) for t in s["tasks"])
+        s["tasks"] = [t for t in s["tasks"] if not proto.is_smoke(t["key"])]
     if a.json:
         S.json_out({"version": proto.VERSION, **s})
         return 0
     print(f"总开关：{'开' if s['enabled'] else '关'}；任务 {len(s['tasks'])} 个"
           + (f"；{PAUSE_WINDOW // 3600} 小时内失败 {s.get('recent_failures')} 次，暂停领任务" if s.get("paused") else ""))
-    n, smoke = {}, 0
+    n = {}
     for t in s["tasks"]:
-        if proto.is_smoke(t["key"]):  # 冒烟任务（taskq smoke status 看）
-            smoke += 1
-            continue
         n[t["state"]] = n.get(t["state"], 0) + 1
         if t["state"] not in ("done",):
             env = ",".join(S.envs_of(t.get("spec"))) or "?"
@@ -1064,7 +1066,7 @@ def main(argv):
     p.add_argument("--free-slots", type=int, default=1)
     p.add_argument("--patience-until", type=float, default=0)
     p.add_argument("--exclude", nargs="*", default=[])
-    p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（envs/machines.py）")
+    p.add_argument("--envs", required=True, help="本机有的环境，逗号分开（配置文件夹里的 machines.py）")
     p.add_argument("--device", default="gpu", choices=["gpu", "cpu"], help="只领任务说明里 device 是这个的（2026-10-24）")
     p.add_argument("--cpus", type=int, help="这个 worker 每个任务给的 CPU 数；任务的 res.cpus 更多的不领（11/1，不给不查）")
     p.add_argument("--mem-mb", type=int, help="每个任务给的内存（MB）；res.mem 更多的不领")
@@ -1101,7 +1103,7 @@ def main(argv):
     p.add_argument("--only", action="append", default=[], metavar="参数=取值[,取值…]")
     p.add_argument("--recipe")
     p.add_argument("--file", help="任务单（JSON），不写 recipe 时是 command 做法")
-    p.add_argument("--spec-stdin", action="store_true", help="从标准输入读解析好的说明（一个或列表，spec.py resolve 的格式；box 的 relay 送任务用）")
+    p.add_argument("--spec-stdin", action="store_true", help="从标准输入读解析好的说明（一个或列表，spec.py resolve 的格式；hub 的 relay 送任务用）")
     p.add_argument("--update-only", action="store_true", help="只换已有任务的说明，不加新的（relay.py resend）")
     p.add_argument("args", nargs="*", help="--recipe 的 k=v")
     p = sub.add_parser("set")
@@ -1122,6 +1124,7 @@ def main(argv):
     p.add_argument("key")
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true", help="一行 JSON（前缀 proto.JSON_MARK）：{version, enabled, tasks, …}（proto.STATUS_TOP、STATUS_FIELDS；跨版本用，11/4）")
+    p.add_argument("--internal", action="store_true", help="也列冒烟任务（key 以 proto.SMOKE_PREFIX 开头；hub 读执行机的队列时用，11/5）")
     a, extra = ap.parse_known_args(argv)  # 先解析：--help、用法错都不碰队列
     if extra:  # 用法里只列这个子命令的参数
         sub.choices[a.cmd].error(f"unrecognized arguments: {' '.join(extra)}")

@@ -4,7 +4,7 @@
 #   on_boot.sh [--gpu-log]   不带时按本机的机器表（代码包里的机器表只有执行机那一项，所以 setup.sh 写成带参数的；11/4）
 #   被打断的任务：开机前 15 分钟到现在结束、没成功的（被杀的训练 / 推理等）。
 #   训练从存档接着训，推理跳过已经做好的。
-# 日志在 crontab 里重定向到 ~/on_boot.log；box 上的健康检查看到重启会推送一条。
+# 日志在 crontab 里重定向到 ~/on_boot.log；hub 上的健康检查看到重启会推送一条。
 set -u
 P=~/.local/bin/pueue
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）

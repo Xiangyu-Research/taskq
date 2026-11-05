@@ -88,7 +88,7 @@ ok("toy：也有 inputs、resume、一张卡、输入拷到本地，进度读插
 sl = S.shell_lines(s, "/d").splitlines()
 ok("shell：TASK_INPUTS 是输入的绝对路径（数组），TASK_LOCAL 跟 res.local_inputs", f"TASK_INPUTS=(/d/prepared/{s['params']['ds'] if 'params' in s else s['data'][0].split('/')[-1]})" in sl
    and "TASK_LOCAL=1" in sl and "TASK_LOCAL=0" in S.shell_lines(S.resolve("command", G), "/d").splitlines())
-raw = dict(S.resolve("command", G), params=dict(G, note="{trainer}_fold{fold}_"))
+raw = dict(S.resolve("command", G), params=dict(G, note="{model}_frag{frag}_"))
 ok("shell：params 里原样留着的 {名字} 不展开、不报错（10/31 起 oldlogs.prefix 这样写）", "TASK_LOCAL=0" in S.shell_lines(raw, "/d").splitlines())
 gr = fixture.tmpdir()
 gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
@@ -143,9 +143,9 @@ import relay as RL  # noqa: E402
 import refill as RF  # noqa: E402
 ok("relay.progress：只有存档（没有轮数）也算有进度", RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))
    and not RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=False)))
-src = {"src": {"lab": {"tasks": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
-               "dicc": {"tasks": {}}}}
-ok("refill.progress：只有存档也算有进度，按机器分", RF.progress(src, "guest/x", "lab") and not RF.progress(src, "guest/x", "dicc"))
+src = {"src": {"pueue-host": {"tasks": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
+               "slurm-login": {"tasks": {}}}}
+ok("refill.progress：只有存档也算有进度，按机器分", RF.progress(src, "guest/x", "pueue-host") and not RF.progress(src, "guest/x", "slurm-login"))
 
 # ---------------- 训完的判断 ----------------
 root = fixture.tmpdir()

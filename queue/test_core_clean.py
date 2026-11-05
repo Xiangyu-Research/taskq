@@ -14,7 +14,7 @@ CLEAN = [
     "queue/shift.py", "queue/relay_store.py", "queue/relay_remote.py", "queue/relay_transfer.py",
     "sites/envs.py", "sites/pueue.py", "sites/remote.py", "sites/envs_cli.py", "sites/envlock.py", "sites/test_envlock.py",
     "sites/slurm.py",
-    "monitor/health.py", "sync/tunnel.py",
+    "monitor/health.py", "monitor/notice.py", "sync/tunnel.py",
     "queue/run_task.sh", "queue/worker_start.sh",
     "queue/archive_task.sh", "queue/gpu_pad.py",
     "queue/gpu_pad_start.sh", "queue/relay_plugins.py", "queue/relay_bundle.py",
@@ -27,7 +27,13 @@ CLEAN = [
     "queue/run_tests.py", "queue/test_example.py", "queue/consume.py", "queue/dicc_worker.sh", "queue/test_consume.sh",
     "queue/consumers/__init__.py", "queue/consumers/slurm.py", "queue/consumers/resident.py", "queue/consumers/gpu_pad.py",
     "queue/consumers/gpu_share.py", "queue/consumers/gpu_idle.py", "queue/consumers/window.py",
+    "queue/tasklog.py", "queue/test_tasklog.py", "queue/test_pad_room.py", "monitor/gpu_log.sh", "monitor/gpu_usage.py",
+    "monitor/test_gpu_usage.py",
     "queue/flow/__init__.py", "queue/flow/model.py", "queue/flow/compile.py", "queue/flow/graph.py", "queue/flow/cli.py",
+    "README.md", "bin/taskq", "monitor/plain.py", "queue/cfg.py", "queue/cli_json.py", "queue/project.py", "queue/proto.py",
+    "queue/smoke_gate.py", "queue/taskq.py", "queue/relay.py", "queue/qs", "queue/setup.sh", "queue/on_boot.sh",
+    "queue/install_pueue.sh", "queue/worker.sbatch", "queue/cpu_worker.sbatch", "sites/mtab.py", "sites/names.py",
+    "sync/fetch.sh", "sync/tunnel_push.sh",
     "queue/flow/ledger.py", "queue/flow/engine.py", "queue/flow/run.py", "queue/flow/stall.py", "queue/flow/publish.py", "queue/test_publish.py", "queue/test_run.py", "queue/test_flow_compile.py", "queue/test_ledger.py", "queue/test_engine.py",
 ]
 # 后两组（11/4）：使用者的运行记录格式（runlog 的 .run.json）、nnU-Net 结果文件夹的布局（<训练器>__<plans>__<配置>）
@@ -57,12 +63,7 @@ print("\n".join(bad) if bad else f"{len(CLEAN)} 个文件都没有领域词")
 
 # 核心（testdata 外）不直接用使用者的路径、仓库（11/4）；KNOWN 是还没改的，个数只能减少
 HOST = re.compile(r"scripts/monitor|Xiangyu-Research/PhD|\.cache/phd|/work/PhD")
-KNOWN = {
-    "monitor/report.py": 1,
-    "queue/advance.py": 1, "queue/common.py": 1, "queue/gpu_pad.py": 1, "queue/relay.py": 1, "queue/shift.py": 1,
-    "queue/taskq.py": 1, "queue/worker_start.sh": 1, "queue/gpu_pad_start.sh": 1,
-    "queue/README.md": 10, "queue/test_relay.py": 4, "queue/test_relay_bundle.py": 8, "sync/test_tunnel.py": 1,
-}
+KNOWN = {}
 seen = {}
 for d, ds, fs in os.walk(ROOT):
     ds[:] = [x for x in ds if x not in ("__pycache__", ".git") and os.path.relpath(os.path.join(d, x), ROOT) != FIXTURE]

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 每分钟记一次本机各 GPU 的使用情况，用来看共用的卡什么时候被谁占着、安排我们自己的训练（2026-10-14，在 lab 上跑）。
+# 每分钟记一次本机各 GPU 的使用情况，用来看共用的卡什么时候被谁占着、安排自己的训练（2026-10-14，在和别人共用卡的机器上跑）。
 # 每张卡每分钟至少一行；卡上有多个进程时每个进程一行。只记账号名和程序名（不记完整命令行）。
 # 开机由 queue/on_boot.sh --gpu-log 启动（2026-10-16 起不放在 tmux 里；11/4 搬进调度核心）；手动启动：
 #   setsid -f bash <调度代码>/monitor/gpu_log.sh > /dev/null 2>&1 < /dev/null
-# 记录停了（10 分钟没有新的一行）box 上的健康检查会提醒。哪些机器跑它见机器表的 gpu_log。
+# 记录停了（10 分钟没有新的一行）hub 上的健康检查会提醒。哪些机器跑它见机器表的 gpu_log。
 # 输出 proto.py 的 GPU_LOG_DIR/GPU_LOG_FILE；同一个文件夹里的 GPU_LOG_PID 锁着时（已经有一个在跑）直接退出（~/gpu_usage/gpu_<年-月>.csv，环境变量 GPU_LOG_DIR 可以改）：
 #   time,gpu,util_pct,mem_used_mib,mem_total_mib,user,pid,proc_mem_mib,program
 set -u
@@ -29,10 +29,20 @@ while true; do
         [[ -z ${uuid:-} ]] && continue
         i=${IDX[$uuid]:-?}
         user=$(ps -o user= -p "$pid" 2> /dev/null | tr -d ' ')
-        # 程序名：python 的话取脚本名或模块入口，其余取可执行文件名
+        # 程序名：解释器（python*、sh、bash 等）跑的取它后面第一个不是选项的参数（脚本），-m X 取 X，-c 记成"<解释器> -c"；
+        # 其余取可执行文件名。都只取最后一段路径
         prog=$(ps -o args= -p "$pid" 2> /dev/null | awk '{
-            for (k = 1; k <= NF; k++) if ($k ~ /\.py$/ || $k ~ /run_training_entry|nnUNetv2_/) { n = split($k, a, "/"); print a[n]; exit }
-            n = split($1, a, "/"); print a[n] }' | tr -d ',;()')
+            n = split($1, a, "/"); b = a[n]
+            py = (b ~ /^python[0-9.]*$/); sh = (b ~ /^(ba|da|z|k)?sh$/)
+            if (!py && !sh) { print b; exit }
+            for (k = 2; k <= NF; k++) {
+                if (py && $k == "-m" && k < NF) { n = split($(k + 1), a, "/"); print a[n]; exit }
+                if ($k ~ /^-[A-Za-z]*c$/) { print b " -c"; exit }
+                if ((py && $k ~ /^-[WX]$/) || (sh && $k ~ /^[-+][A-Za-z]*o$/)) { k++; continue }
+                if ($k ~ /^[-+]/) continue
+                n = split($k, a, "/"); print a[n]; exit
+            }
+            print b }' | tr -d ',;()')
         echo "$ts,$i,${UTIL[$i]:-},${MU[$i]:-},${MT[$i]:-},${user:-?},$pid,$pm,${prog:-?}" >> "$f"
         SEEN[$i]=1
     done < <(nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits)

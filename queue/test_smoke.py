@@ -21,7 +21,7 @@ os.makedirs(BASE, exist_ok=True)
 TMP = tempfile.mkdtemp(prefix="smoke_", dir=BASE)
 os.environ["TASKQ_STATE"] = os.path.join(TMP, "state")
 os.environ["TASKQ_DATA"] = os.path.join(TMP, "data")
-os.environ["PHD_LAST"] = os.path.join(TMP, "last")
+os.environ["TASKQ_LAST"] = os.path.join(TMP, "last")
 os.environ["RELAY_LOG"] = os.path.join(TMP, "relay.log")
 os.makedirs(os.environ["TASKQ_DATA"])
 sys.path.insert(0, HERE)
@@ -281,6 +281,10 @@ def test_hidden():
     assert K not in {t["key"] for t in S.all_tasks(q)}
     out = central("status")
     assert K not in out and "冒烟 1 个" in out, out
+    keys = lambda *a: {t["key"] for t in S.json_in(central("status", "--json", *a))["tasks"]}  # noqa: E731
+    assert K not in keys() and K in keys("--internal") and keys() | {K} == keys("--internal")
+    out = central("status", "--internal")
+    assert K in out and "冒烟" not in out.splitlines()[-1], out
     import flow.compile as FC
     fl = FC.compile_legacy(queue_tasks=q, data="/d", python="py")
     assert fl.instances and K not in str(fl.instances), fl
@@ -291,7 +295,7 @@ def test_hidden():
     import overview
     o = overview.build(dict(s, now=None, ok={}, src={}), relay={})
     assert K not in {t["key"] for t in o["tasks"]}
-    ok("冒烟任务：taskq status 的文字、all_tasks（登记表、看板）、overview、advance、flow 都看不见（status --json 照常有）")
+    ok("冒烟任务：taskq status 的文字和 --json、all_tasks（登记表、看板）、overview、advance、flow 都看不见（status --internal 才列）")
     rs = RS(dict(key=K, state="claimed", worker="w", nice=-1000, beat=9e18))
     acts, _ = relay.plan(S0(), NAME, rs, {"keys": {NAME: {K: dict(outs=[])}}})
     assert [a["op"] for a in acts if a["key"] == K] == ["beat"], acts

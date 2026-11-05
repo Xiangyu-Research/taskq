@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """relay 用的挑任务和补作业的规则（2026-10-18）：queue/relay.py 替执行机领任务时调用。
   - 挑任务：candidates（能领的、按先后排）、next_pick（下一个领哪个、要传哪些数据）、progress（哪台机器上有进度）、data_gb；
-  - Slurm 补作业：slurm_plan（GPU worker 按 envs/policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)，
+  - Slurm 补作业：slurm_plan（GPU worker 按 policy.py 的 SLURM[机器]["gpu"]：QOS → (每段时限, 留几个)，
     排着和在跑的不到上限（sacctmgr 的 MaxSubmitPU，没设时按 sites/slurm.py 的 SUBMIT_CAP）减去留给别的作业的名额时，
     每个空位交一个 queue/worker.sbatch；纯 CPU 任务（device=cpu）有 SLURM[机器]["cpu"] 时交 cpu_worker.sbatch，
     不超过 min(这类任务数, 最多几个)，作业领不到任务就结束）。读作业数、交作业经 slurm.py；
-  - box 上的任务：add（先记任务记录再用 q 加）、then_check（做完马上跑一次健康检查）。
+  - hub 上的任务：add（先记任务记录再用 q 加）、then_check（做完马上跑一次健康检查）。
 """
 import glob
 import os
@@ -30,7 +30,7 @@ import spec as S  # noqa: E402
 import common as C  # noqa: E402
 
 TRAIN_OUT_GB = 10  # 领之前除了数据集和盘的提醒线，再给训练输出（存档、验证结果）留的空间
-_ENTRY = cfg.outputs("entry")  # 主循环的入口（相对 hub 的 repo；envs/policy.py 的 OUTPUTS，11/4）
+_ENTRY = cfg.outputs("entry")  # 主循环的入口（相对 hub 的 repo；policy.py 的 OUTPUTS，11/4）
 KICK = _ENTRY and (_ENTRY if _ENTRY.startswith(("/", "~")) else M.MACHINES[M.hub()]["repo"] + "/" + _ENTRY)  # kick 和定时的共用一把锁，最多等 5 分钟
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
@@ -72,7 +72,7 @@ def rank(tq, t, ready):
 
 def candidates(s, name, tq, ready, oks=None, kinds=("gpu",)):
     """这台机器能领的任务，按领的先后排：free、没标成有问题、环境都就绪、没限定在别的机器、种类（device）在 kinds 里、
-    任何机器上都没有进度、这台机器没跳过。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（envs/machines.py 的 ready_envs）。"""
+    任何机器上都没有进度、这台机器没跳过。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（machines.py 的 ready_envs）。"""
     envs = M.ready_envs(name, oks)
 
     def env_ok(sp):
@@ -101,7 +101,7 @@ def next_pick(tq, cands, ready, free, hard, exclude=(), moving=()):
 
 
 def data_gb(paths):
-    """box 上这些数据（相对数据目录，可以带通配符）一共多大（几个路径指到同一个文件时按几份算，和传过去后一样）；有一个不在
+    """hub 上这些数据（相对数据目录，可以带通配符）一共多大（几个路径指到同一个文件时按几份算，和传过去后一样）；有一个不在
     （带通配符的一个也对不上）→ None。"""
     ps = []
     for p in paths:
@@ -116,7 +116,7 @@ def data_gb(paths):
 
 # ---------------- 执行 ----------------
 def sh(cmd, host=None, timeout=300):
-    """在 box（host=None）或别的机器上跑一条 shell 命令 → (退出码, 输出)。"""
+    """在 hub（host=None）或别的机器上跑一条 shell 命令 → (退出码, 输出)。"""
     rc, out, err = C.run(cmd, host, timeout)
     return rc, (out + err).strip()
 
@@ -142,12 +142,12 @@ def add(name, label, step, key, args, run=sh, **rec):
 
 
 def then_check(cmd, label):
-    """box 任务的命令 → 做完（成功）后马上跑一次健康检查（不等 30 分钟，和定时的共用一把锁）；这一次里这个任务算做完
-    （health.py 看 PHD_TASK_DONE）。检查出错不算这个任务失败。没有入口（OUTPUTS["entry"]）时原样。"""
+    """hub 任务的命令 → 做完（成功）后马上跑一次健康检查（不等 30 分钟，和定时的共用一把锁）；这一次里这个任务算做完
+    （health.py 看环境变量 TASKQ_TASK_DONE；11/6 前排的命令里叫 PHD_TASK_DONE，也认）。检查出错不算这个任务失败。没有入口（OUTPUTS["entry"]）时原样。"""
     return f"{cmd}{KICK_SEP}{shlex.quote(label)} bash {KICK} kick || true; }}" if KICK else cmd
 
 
-KICK_SEP = " && { PHD_TASK_DONE="
+KICK_SEP = " && { TASKQ_TASK_DONE="
 
 
 # ---------------- Slurm 补作业 ----------------
@@ -199,7 +199,7 @@ def cpu_plan(tq, have, conf, free=None):
 
 def slurm_plan(tq, st, conf):
     """Slurm 类机器要补交的 worker 作业 → ([(QOS, 时限, 交几个, sbatch 文件)], 不交的原因)。st：sites/slurm.py 的 status；
-    conf：envs/policy.py 的 SLURM[机器]（有 gpu 补 GPU worker，有 cpu 补 CPU worker）。"""
+    conf：policy.py 的 SLURM[机器]（有 gpu 补 GPU worker，有 cpu 补 CPU worker）。"""
     subs, why = topup_plan(tq, st["counts"], conf["gpu"]) if conf.get("gpu") else ([], "")
     if conf.get("cpu"):
         csub, cwhy = cpu_plan(tq, st["cpu"], conf["cpu"], st["free"])

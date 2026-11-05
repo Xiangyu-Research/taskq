@@ -199,7 +199,7 @@ def spec_relay(argv, which):
     ap = argparse.ArgumentParser(prog=f"taskq spec {which}",
                                  description="中继插件" + ("送出（只读）" if which == "export" else "拉回核对，放进 --dst") + "（一行 JSON）")
     ap.add_argument("--spec", required=True, help="解析好的说明（JSON；- = 标准输入）")
-    ap.add_argument("--root", required=True, help="box 的数据目录")
+    ap.add_argument("--root", required=True, help="hub 的数据目录")
     if which == "import":
         ap.add_argument("--src", required=True, help="拉回的文件（真的相对路径）")
         ap.add_argument("--dst", required=True, help="核对过的放到这里")

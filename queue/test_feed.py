@@ -29,23 +29,23 @@ def ct(key, state="free", assigned=None):
 
 
 # ---------------- 分给了不是执行机的名字（执行机改名、撤掉以后留下的）----------------
-q_ = dict(tasks=[ct("a/x/0", "claimed", assigned="lab"), ct("a/x/1", "claimed", assigned="lab1"),
-                 ct("a/x/2", "claimed", assigned="dicc1"), ct("a/x/3", "done", assigned="old")])
+q_ = dict(tasks=[ct("a/x/0", "claimed", assigned="pueue-host"), ct("a/x/1", "claimed", assigned="site-pueue"),
+                 ct("a/x/2", "claimed", assigned="site-slurm"), ct("a/x/3", "done", assigned="old")])
 nb = F.nobody(q_)
-ok("分给 lab（不是执行机）的报 feed:nobody:lab，带交还的命令；分给 relay 执行机的不报；做完的不报",
-   list(nb) == ["feed:nobody:lab"] and "release --worker lab" in F.alert_msg(nb["feed:nobody:lab"])
-   and "a/x/0" in F.alert_msg(nb["feed:nobody:lab"]))
-ok("feed:nobody 带结构化数据（11/4）：worker、n、keys", nb["feed:nobody:lab"]["data"] == dict(worker="lab", n=1, keys=["a/x/0"]))
+ok("分给 pueue-host（不是执行机）的报 feed:nobody:pueue-host，带交还的命令；分给 relay 执行机的不报；做完的不报",
+   list(nb) == ["feed:nobody:pueue-host"] and "release --worker pueue-host" in F.alert_msg(nb["feed:nobody:pueue-host"])
+   and "a/x/0" in F.alert_msg(nb["feed:nobody:pueue-host"]))
+ok("feed:nobody 带结构化数据（11/4）：worker、n、keys", nb["feed:nobody:pueue-host"]["data"] == dict(worker="pueue-host", n=1, keys=["a/x/0"]))
 ok("总队列读不到：不报", F.nobody(None) == {})
 
 # ---------------- 送任务只有一个入口（10/31）：feed.run_all 转给 relay.py ----------------
 rl, rcalls = types.ModuleType("relay"), []
-rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["lab1 领了 a/x/0"], {"site:lab1:x": "y"}))[1]
+rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["site-pueue 领了 a/x/0"], {"site:site-pueue:x": "y"}))[1]
 sys.modules["relay"] = rl
 hub = F.M.hub()
 ev, st = F.run_all(dict(taskq={hub: q_}, ok={}), dry=False)
 ok("转给 relay.run_all，说明和问题并进来，加上 feed:nobody，feed.log 里有一行指向 ~/relay.log",
-   rcalls == [False] and ev == ["lab1 领了 a/x/0"] and set(st) == {"site:lab1:x", "feed:nobody:lab"}
+   rcalls == [False] and ev == ["site-pueue 领了 a/x/0"] and set(st) == {"site:site-pueue:x", "feed:nobody:pueue-host"}
    and "见 ~/relay.log" in open(F.LOG).read())
 n0 = len(open(F.LOG).read())
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)

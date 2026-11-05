@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """flow/engine.py 的测试（2026-11-05）：用 testdata 的实验表，
-  1. 反事实回放：随机假设做完了哪些、box 上在跑什么、总队列分给了谁，advance.plan 和 engine.plan 的结果一样；
+  1. 反事实回放：随机假设做完了哪些、hub 上在跑什么、总队列分给了谁，advance.plan 和 engine.plan 的结果一样；
   2. ENGINE=shadow 时照 advance 排，不一样的写进 shadow/engine-<日期>.jsonl；ENGINE=dag 时用引擎的；写错了报出来。
     python3 queue/test_engine.py
 """

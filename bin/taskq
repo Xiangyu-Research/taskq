@@ -260,6 +260,7 @@ TREE = {
     "set": Cmd("改一个任务的参数", py("taskq", "set"), own_help=True),
     "nice": Cmd("改档位（先后）", py("taskq", "nice"), own_help=True),
     "show": Cmd("一个任务的完整说明和状态", py("taskq", "show"), own_help=True),
+    "log": Cmd("一个任务的每段训练（分段日志）、调度日志里提到它的行、hub 的任务记录", py("tasklog", prog="taskq log"), own_help=True),
     "status": Cmd("队列（--all：所有任务的状态、在哪台、进度、预计完成）", cmd_status, "[--all] [--json]",
                   "不带 --all：本机的队列（taskq.py status）；--json：@@JSON 一行。\n--all：各机器汇总的每个任务的状态"),
     "stop": Cmd("停止任务（在训的 30 秒内停下、交还，之后不再领）", py("taskq", "stop"), own_help=True),
@@ -285,6 +286,11 @@ TREE = {
         "lock": Cmd("把环境描述解成锁 <名>.<变体>.lock.json，文件下到 wheelhouse（不装进任何环境）", py("envlock", "lock", prog="taskq env"),
                     own_help=True),
     }),
+    "notice": Group("挂在健康检查上的提醒（进\"需要处理\"、推送一次，撤掉后消失）", {
+        "set": Cmd("挂上或改文字（<名字> [文字…]；不给文字时读标准输入）", py("notice", "set", prog="taskq notice"), own_help=True),
+        "clear": Cmd("撤掉（<名字>…）", py("notice", "clear", prog="taskq notice"), own_help=True),
+        "list": Cmd("挂着的（[--json]）", py("notice", "list", prog="taskq notice"), own_help=True),
+    }),
     "smoke": Group("冒烟闸门：一种任务第一次送到一台执行机前先跑冒烟", {
         "status": Cmd("各台的记录（[执行机] [--json]）", py("smoke_gate", "status", prog="taskq smoke"), own_help=True),
         "retry": Cmd("没过的重新排（<执行机> [种类]）", py("smoke_gate", "retry", prog="taskq smoke"), own_help=True),
@@ -304,14 +310,22 @@ TREE = {
     "tunnel": Group("经隧道传大批文件", {
         "rsync": Cmd("rsync 的替身：先经隧道传，再照原样跑 rsync", py("tunnel", "rsync", prog="taskq tunnel"),
                      "<rsync 的参数> <源> <目标>", help_in=rsync_help),
-        "push": Cmd("box → 那边", py("tunnel", "push", prog="taskq tunnel"), "<机器> <box 上的源目录> <那边的目标目录> <清单>",
+        "push": Cmd("hub → 那边", py("tunnel", "push", prog="taskq tunnel"), "<机器> <hub 上的源目录> <那边的目标目录> <清单>",
                     "清单每行一个相对源目录的路径"),
-        "pull": Cmd("那边 → box", py("tunnel", "pull", prog="taskq tunnel"), "<机器> <那边的源目录> <box 上的目标目录> <清单>",
+        "pull": Cmd("那边 → hub", py("tunnel", "pull", prog="taskq tunnel"), "<机器> <那边的源目录> <hub 上的目标目录> <清单>",
                     "清单每行“相对路径<TAB>字节数”"),
-        "push-dirs": Cmd("box → 那边，整个子目录，传完核对", sh("sync/tunnel_push.sh"),
-                         "<机器> <box 上的源目录> <那边的目标目录（相对 home）> <子目录>…",
+        "push-dirs": Cmd("hub → 那边，整个子目录，传完核对", sh("sync/tunnel_push.sh"),
+                         "<机器> <hub 上的源目录> <那边的目标目录（相对 home）> <子目录>…",
                          "经 tunnel push 传；传之前在那边每个子目录放一个未完成标记，最后两边各算 MD5 逐个文件核对，一致才删标记。\n"
                          "那边已有、大小和修改时间相同的文件跳过，中断后重新运行接着传。会跑几十分钟，放在后台或 tmux 里"),
+    }),
+    "gpu": Group("GPU 使用记录", {
+        "usage": Cmd("各卡按钟点被谁占着、别人的每段使用（[目录] [--me 账号] [--days N] [--json]）",
+                     py("gpu_usage", prog="taskq gpu usage"), own_help=True, project=False),
+    }),
+    "pad": Group("作业里的显存填充", {
+        "room": Cmd("让填充放到 floor、等它说好了（[--wait 秒]；没有填充时什么都不做）", py("consumers.gpu_pad", prog="taskq pad room"),
+                    own_help=True, project=False),
     }),
     "pueue-add": Cmd("往本机 pueue 的一个组加一次性任务（工作目录是代码副本）", sh("queue/q"),
                      "<组> [pueue add 的选项] -- '<命令>'", "按机器表设好卡和组的环境变量；有 code 的机器先更新代码副本"),
@@ -350,11 +364,11 @@ TREE = {
     }, hidden=True),
 }
 
-SECTIONS = [("队列", ["add", "set", "nice", "show", "status", "stop", "resume", "rm"]),
-            ("调度", ["tick", "plan", "boot"]),
+SECTIONS = [("队列", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "rm"]),
+            ("调度", ["tick", "plan", "boot", "notice"]),
             ("执行机和实验", ["site", "env", "smoke", "exp"]),
             ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
-            ("其他", ["tunnel", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
+            ("其他", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "snapshot", "check", "path", "machines", "self"])]
 
 
 def top_help():

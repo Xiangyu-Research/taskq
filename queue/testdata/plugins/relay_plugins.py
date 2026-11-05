@@ -62,7 +62,7 @@ def export_toy(spec, root):
     for r in rels:
         p = os.path.join(pre, r)
         if not os.path.isfile(p):
-            raise RelayError(f"box 上没有 {base}/{r}")
+            raise RelayError(f"hub 上没有 {base}/{r}")
         files.append((f"{base}/{r}", os.path.realpath(p)))
     return dict(files=files, views=[base])
 
@@ -118,8 +118,8 @@ def _cases(names, ext):
 
 
 def check_toy_infer(spec, src, root):
-    """每个测试集的输出、概率、.meta 样本一样，和 box 上某个输入文件夹的样本一样，数目和 MANIFEST 一致；
-    MANIFEST 里的存档和 box 上的同一个（sha256）。"""
+    """每个测试集的输出、概率、.meta 样本一样，和 hub 上某个输入文件夹的样本一样，数目和 MANIFEST 一致；
+    MANIFEST 里的存档和 hub 上的同一个（sha256）。"""
     key, sdir = spec["key"], os.path.join(src, spec["out"])
     for f in (".infer_done", "MANIFEST.json"):
         if not os.path.isfile(os.path.join(sdir, f)):
@@ -142,15 +142,15 @@ def check_toy_infer(spec, src, root):
         if hit is None or probs != outs or metas != outs or v.get("n_outputs") != len(outs) or v.get("n_probs") != len(probs):
             raise RelayError(f"{key} 的 {c} 对不上：输出 {len(outs)}、概率 {len(probs)}、meta {len(metas)}，"
                              f"MANIFEST 记 {v.get('n_outputs')} / {v.get('n_probs')}，"
-                             f"{'和 box 上的输入一致' if hit is not None else 'box 上没有样本完全一样的输入文件夹'}")
+                             f"{'和 hub 上的输入一致' if hit is not None else 'hub 上没有样本完全一样的输入文件夹'}")
         free.pop(hit)
     if free:
-        raise RelayError(f"{key}：box 上有 {len(free)} 个输入文件夹没有对应的输出")
+        raise RelayError(f"{key}：hub 上有 {len(free)} 个输入文件夹没有对应的输出")
     cks = [r for r in ins if os.path.basename(r) == "final.ckpt"]
     want = [sha256(os.path.join(root, r)) for r in cks]
     sent = [x.get("sha256") for x in man.get("checkpoints") or []]
     if sorted(sent) != sorted(want):
-        raise RelayError(f"{key}：那边推理用的存档和 box 上的 {cks} 不是同一个")
+        raise RelayError(f"{key}：那边推理用的存档和 hub 上的 {cks} 不是同一个")
 
 
 PLUGINS = {"toy": (export_toy, check_toy), "toy_infer": (export_toy_infer, check_toy_infer)}

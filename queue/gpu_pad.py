@@ -30,7 +30,7 @@ def pad_env(name, default=None):
 
 
 def default_switch():
-    return tcfg.state("gpu_pad", "DISABLED") if tcfg else os.path.expanduser("~/.cache/phd/gpu_pad/DISABLED")
+    return tcfg.state("gpu_pad", "DISABLED") if tcfg else os.path.expanduser("~/.cache/taskq/gpu_pad/DISABLED")
 
 
 def env_int(name, default):
@@ -59,9 +59,9 @@ def env_float(name, default):
 
 @dataclass
 class Config:
-    floor_mib: int = 42000
-    target_mib: int = 55000
-    high_mib: int = 62000
+    floor_mib: int
+    target_mib: int
+    high_mib: int
     chunk_mib: int = 1024
     interval: float = 10.0
     settle: float = 120.0
@@ -342,10 +342,10 @@ class Pad:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="DICC GPU 作业显存填充（只占显存，不训练）")
-    p.add_argument("--floor-mib", type=int, default=env_int("FLOOR_MIB", 42000))
-    p.add_argument("--target-mib", type=int, default=env_int("TARGET_MIB", 55000))
-    p.add_argument("--high-mib", type=int, default=env_int("HIGH_MIB", 62000))
+    p = argparse.ArgumentParser(description="Slurm GPU 作业的显存填充（只占显存，不训练）；三个阈值由机器表的 gpu_pad 或环境变量给")
+    p.add_argument("--floor-mib", type=int, default=env_int("FLOOR_MIB", None))
+    p.add_argument("--target-mib", type=int, default=env_int("TARGET_MIB", None))
+    p.add_argument("--high-mib", type=int, default=env_int("HIGH_MIB", None))
     p.add_argument("--chunk-mib", type=int, default=env_int("CHUNK_MIB", 1024))
     p.add_argument("--interval", type=float, default=env_float("INTERVAL", 10.0))
     p.add_argument("--settle", type=float, default=env_float("SETTLE", 120.0))
@@ -362,6 +362,8 @@ def parse_args(argv=None):
     p.add_argument("--iterations", type=int, default=0)
     p.add_argument("--device", type=int, default=None)
     a = p.parse_args(argv)
+    if None in (a.floor_mib, a.target_mib, a.high_mib):
+        p.error("要给 floor-mib、target-mib、high-mib（机器表的 gpu_pad，或 TASKQ_GPU_PAD_FLOOR_MIB / TARGET_MIB / HIGH_MIB）")
     if not 0 < a.floor_mib <= a.target_mib <= a.high_mib:
         p.error("要求 0 < floor-mib <= target-mib <= high-mib")
     if a.chunk_mib <= 0 or a.interval < 0:

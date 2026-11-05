@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""送任务的唯一入口（2026-10-31）：box 的健康检查（monitor/health.py，每 30 分钟）调用 run_all，
-转给 queue/relay.py 处理 envs/machines.py 里 RELAY 的执行机（lab1、lab0、dicc1 等，细节记 ~/relay.log，
+"""送任务的唯一入口（2026-10-31）：hub 的健康检查（monitor/health.py，每 30 分钟）调用 run_all，
+转给 queue/relay.py 处理配置文件夹里 machines.py 的 RELAY 里的执行机（pueue 执行机、Slurm 执行机，细节记 ~/relay.log，
 ~/feed.log 里记一行指过去）。另外查总队列里分给了不是执行机的名字的任务（执行机换了名字、撤掉以后留下的），报 feed:nobody。
 
     python3 queue/feed.py [-n]       看现在会做什么（不改任何东西；-n / --dry-run / --dry 写不写都一样；taskq plan 包括它）

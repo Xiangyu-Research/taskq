@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""旧代码包闸门（11/5）：把任务说明送给执行机之前，用那台在用的代码包（box 上 relay_bundle.OUT 下同名的那份）在本机跑一遍
+"""旧代码包闸门（11/5）：把任务说明送给执行机之前，用那台在用的代码包（hub 上 relay_bundle.OUT 下同名的那份）在本机跑一遍
 执行机对说明做的事（CMDS），跑不过就不送：任务记成 held（proto.HELD["bundle"]），报 bundlegate。
 在用的包：那边 code/current 指的，加上 Slurm 里在跑的 worker 的（11/5 前的 worker 一直用开始时的包；consume.py 要领新任务时才换到 current，之前仍用旧包；
 worker 每次心跳 touch 自己的包，STALE_BEAT 内动过的算在用）。pueue 的 worker 代码变了就不再领新的，只看 current。
-不知道那台在用哪个包、box 上没有这个包、跑超时 → 放行。结果按 (包名, 说明的哈希) 在进程里记着。
+不知道那台在用哪个包、hub 上没有这个包、跑超时 → 放行。结果按 (包名, 说明的哈希) 在进程里记着。
 记录在 relay 的状态 held（<名字> → {key: dict(why, bundle, err, since)}），那台在用的包变了以后重新核对。
 
     python3 queue/bundle_gate.py <包名或包的路径> < 说明.json     跑得了退出 0；跑不了打印原因、退出 1
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import remote as R  # noqa: E402
 
 TIMEOUT = 10  # 每条命令最多几秒；超时放行
-# 执行机对送去的说明做的：run_task.sh、dicc_worker.sh 的 spec.py shell / done --spec（taskq.py add --spec-stdin 的解析同 shell）
+# 执行机对送去的说明做的：run_task.sh、worker 循环（dicc_worker.sh）的 spec.py shell / done --spec（taskq.py add --spec-stdin 的解析同 shell）
 CMDS = dict(shell=(0,), done=(proto.EXIT["done_yes"], proto.EXIT["done_no"]))  # 命令 → 算跑得了的退出码
 SPEC_PY = cfg.bundle_rel("queue", "spec.py")
 WHY = proto.HELD["bundle"]
@@ -39,7 +39,7 @@ def spec_hash(spec):
 
 
 def bundle_dir(bid, out=None):
-    """包名 → box 上那份包的路径；没有 → None。"""
+    """包名 → hub 上那份包的路径；没有 → None。"""
     if not bid or "/" in bid or bid.startswith("."):
         return None
     d = os.path.join(os.path.expanduser(out or RB.OUT), bid)
@@ -64,7 +64,7 @@ def run(d, spec):
 
 
 def check(spec, bid, out=None):
-    """包 bid 跑得了送去的说明 spec → None；跑不了 → 原因。不知道包、box 上没有这个包、没有说明 → None（放行）。"""
+    """包 bid 跑得了送去的说明 spec → None；跑不了 → 原因。不知道包、hub 上没有这个包、没有说明 → None（放行）。"""
     d = bundle_dir(bid, out)
     if d is None or not spec:
         return None
@@ -128,7 +128,7 @@ def main(argv):
         return 2
     d = argv[0] if os.path.isdir(argv[0]) else bundle_dir(argv[0])
     if d is None:
-        print(f"box 上没有包 {argv[0]}（{RB.OUT}）：放行", file=sys.stderr)
+        print(f"hub 上没有包 {argv[0]}（{RB.OUT}）：放行", file=sys.stderr)
         return 0
     _, err = run(os.path.abspath(d), json.loads(sys.stdin.read()))
     if err:

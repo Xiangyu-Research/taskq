@@ -48,7 +48,7 @@ def expand(root, rel):
         return [(f"{rel}/{f}", os.path.realpath(os.path.join(p, f))) for f in fs], rel
     if os.path.isfile(p):
         return [(rel, os.path.realpath(p))], None
-    raise RelayError(f"box 上没有输入 {rel}")
+    raise RelayError(f"hub 上没有输入 {rel}")
 
 
 def sha256(p):

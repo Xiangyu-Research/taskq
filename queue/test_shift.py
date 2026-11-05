@@ -46,10 +46,10 @@ shift.group_tasks = lambda host, g, *a: (world["group"], world["tasks"])
 shift.C.run = lambda cmd, host=None, timeout=0: (calls.append(cmd), (0, "", ""))[1]
 
 
-# 执行机按时段（SHIFT 写 "<执行机>": (开始, 结束, 第一个, 最后一个)，lab0）：时段外不领任务；开始时恢复组；结束时交出没训完的折
-shift.M.RELAY = {"z0": dict(ssh="fake-lab", scheduler="pueue", worker=dict(group="g0"), cpu_worker=dict(group="c0"),
+# 执行机按时段（SHIFT 写 "<执行机>": (开始, 结束, 第一个, 最后一个)，site-pueue2）：时段外不领任务；开始时恢复组；结束时交出没训完的折
+shift.M.RELAY = {"z0": dict(ssh="fake-pueue-host", scheduler="pueue", worker=dict(group="g0"), cpu_worker=dict(group="c0"),
                         groups={"g0": (1, "0", {}), "c0": (1, None, {})}),
-                 "z1": dict(ssh="fake-lab", scheduler="pueue", worker=dict(group="g1"), groups={"g1": (1, "1", {})})}
+                 "z1": dict(ssh="fake-pueue-host", scheduler="pueue", worker=dict(group="g1"), groups={"g1": (1, "1", {})})}
 shift.P.SHIFT = {"z0": ("18:00", "09:00", "2026-10-31", None)}
 shift.P.AUTO = dict(shift.P.AUTO, z0=True, z1=True)
 shift.P.OFFLINE = {}
@@ -57,7 +57,7 @@ shift.save({})
 shift.group_tasks = lambda host, g, *a: (world["group"], {})
 world.update(group="Paused")
 calls.clear()
-assert shift.limited("z0") and not shift.limited("z1") and shift.day_site("fake-lab", but="z0") == "z1"
+assert shift.limited("z0") and not shift.limited("z1") and shift.day_site("fake-pueue-host", but="z0") == "z1"
 assert not shift.allowed("z0", T(31, "12:00")) and shift.allowed("z1", T(31, "12:00"))
 shift.run(now=T(30, "19:00"))
 assert not calls and not shift.allowed("z0", T(30, "19:00"))

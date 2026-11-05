@@ -27,7 +27,7 @@ for d in (HOME, PROJ, TQ, DATA, TMP):
 with open(os.path.join(PROJ, ".taskq.toml"), "w") as f:
     f.write(f'config = "{fixture.CONFIG}"\nplugins = ["{fixture.PLUGINS}"]\n')
 CLEAN = {k: v for k, v in os.environ.items() if not k.startswith("TASKQ_")}
-ENV = dict(CLEAN, HOME=HOME, TMPDIR=TMP, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MACHINE="box", PYTHONDONTWRITEBYTECODE="1")
+ENV = dict(CLEAN, HOME=HOME, TMPDIR=TMP, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MACHINE="hub", PYTHONDONTWRITEBYTECODE="1")
 OLD_ENV = dict(ENV, TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS, TASKQ_REPO=PROJ)  # 老脚本：直接给（找项目导出的）变量
 GIT = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 TASKS = [(1, 5, "D1/V/0"), (2, 7, "D1/V/1"), (3, 9, "D2/V/0")]
@@ -149,8 +149,8 @@ class Routing(unittest.TestCase):
         """新的两个入口转到原来的脚本：用法错退出码 2，机器表里没有 4，什么也不连。"""
         self.assertEqual(taskq("pueue-status", "no-such-machine").returncode, GONE)
         self.assertEqual(old("queue/qs", "no-such-machine").returncode, GONE)
-        self.assertEqual(taskq("pueue-status", "lab1").returncode, 2, "有这台、不是 pueue 机器：用法错")
-        self.assertEqual(taskq("tunnel", "push-dirs", "lab1", T).returncode, 2)
+        self.assertEqual(taskq("pueue-status", "site-pueue").returncode, 2, "有这台、不是 pueue 机器：用法错")
+        self.assertEqual(taskq("tunnel", "push-dirs", "site-pueue", T).returncode, 2)
         self.assertEqual(taskq("tunnel", "push-dirs", "no-such-machine", T, "x", "y").returncode, GONE)
 
     def test_unknown_site_name(self):
@@ -177,7 +177,7 @@ class Routing(unittest.TestCase):
 
     def test_no_queue_message_on_stderr(self):
         r = taskq("add", "--nice", "1", "--recipe", "toy", "ds=D9", "variant=V", "frag=0",
-                  env=dict(ENV, TASKQ_DIR=os.path.join(T, "none"), TASKQ_MACHINE="lab1"))
+                  env=dict(ENV, TASKQ_DIR=os.path.join(T, "none"), TASKQ_MACHINE="site-pueue"))
         self.assertEqual(r.returncode, 2)
         self.assertIn("总队列在", r.stderr)
         self.assertEqual(r.stdout, "")
@@ -204,7 +204,7 @@ class Routing(unittest.TestCase):
         saved = health.gather, shift.run, feed.run_all, advance.plan
         try:
             health.gather = lambda: s
-            shift.run = lambda st, dry=False: calls.append(("shift", st is s, dry)) or ["开 lab0"]
+            shift.run = lambda st, dry=False: calls.append(("shift", st is s, dry)) or ["开 site-pueue2"]
             feed.run_all = lambda st, dry=False: calls.append(("feed", st is s, dry)) or (["送 a"], {"x": "卡 b"})
             advance.plan = lambda st: calls.append(("advance", st is s, True)) or ([], {})
             buf = io.StringIO()
@@ -215,7 +215,7 @@ class Routing(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(sorted(calls), [("advance", True, True), ("feed", True, True), ("shift", True, True)])
         out = buf.getvalue()
-        for x in ("== 按时段开关", "开 lab0", "== 送任务", "送 a", "卡住：卡 b", "== 训完以后", "没有要排的"):
+        for x in ("== 按时段开关", "开 site-pueue2", "== 送任务", "送 a", "卡住：卡 b", "== 训完以后", "没有要排的"):
             self.assertIn(x, out)
 
 
@@ -243,14 +243,14 @@ class Errors(unittest.TestCase):
         self.check(("exp", "tasks", "--exp", "NOPE"), GONE, "NOPE")
 
     def test_machines(self):
-        for args in (("activate",), ("q-env",), ("get", "box"), ("whoami", "x")):
+        for args in (("activate",), ("q-env",), ("get", "hub"), ("whoami", "x")):
             self.check(("machines", *args), 2, f"用法：taskq machines {args[0]}")
         for args in (("get", "NOPE", "data"), ("groups", "NOPE"), ("activate", "base", "NOPE")):
             self.check(("machines", *args), GONE, f"taskq machines {args[0]}：机器表里没有 NOPE")
         self.check(("machines", "activate", "nosuchenv"), GONE, "没有环境 nosuchenv")
-        self.check(("machines", "get", "box", "nofield"), 1, "nofield")
+        self.check(("machines", "get", "hub", "nofield"), 1, "nofield")
         self.check(("machines", "bogus"), 2, "taskq machines bogus")
-        self.assertEqual(taskq("machines", "get", "dicc1", "root").stdout.strip(), "~/q")
+        self.assertEqual(taskq("machines", "get", "site-slurm", "root").stdout.strip(), "~/q")
 
     def test_queue(self):
         for args in (("show", "nokey"), ("show", "--json", "nokey"), ("set", "nokey", "a=1")):
@@ -268,13 +268,13 @@ class Errors(unittest.TestCase):
 
     def test_sites(self):
         self.check(("site", "env", "NOPE", "base"), GONE, "taskq site env：机器表里没有 NOPE")
-        self.check(("site", "env", "lab1", "nosuch"), GONE, "lab1 的 envs 里没有 nosuch")
+        self.check(("site", "env", "site-pueue", "nosuch"), GONE, "site-pueue 的 envs 里没有 nosuch")
         self.check(("site", "envs", "NOPE"), GONE, "taskq site envs")
         r = self.check(("site", "setup", "NOPE"), GONE, "taskq site setup：机器表里没有 NOPE")
         self.assertEqual(len(r.stderr.strip().splitlines()), 1)
         self.check(("site", "setup", "--bogus"), 2, "用法：taskq site setup")
         env = dict(ENV, TASKQ_DIR=TQ, TASKQ_DATA=DATA)
-        self.check(("internal", "fetch", "lab1", "no/such/key"), GONE, "taskq internal fetch lab1：实验表和总队列里都没有 no/such/key",
+        self.check(("internal", "fetch", "site-pueue", "no/such/key"), GONE, "taskq internal fetch site-pueue：实验表和总队列里都没有 no/such/key",
                    env=env)
         self.check(("boot", "--bogus"), 2, "用法：taskq boot")
 
@@ -292,8 +292,8 @@ class Errors(unittest.TestCase):
         open(lst, "w").close()
         for way in ("push", "pull"):
             self.check(("tunnel", way, "NOPE", T, "x", lst), GONE, f"taskq tunnel {way}：机器表里没有 NOPE")
-        self.check(("tunnel", "push", "lab1", T, "x", os.path.join(T, "no-list")), 2, "读不了清单")
-        self.check(("tunnel", "push", "box", T, "x", lst), 2, "box 没有 ssh")
+        self.check(("tunnel", "push", "site-pueue", T, "x", os.path.join(T, "no-list")), 2, "读不了清单")
+        self.check(("tunnel", "push", "hub", T, "x", lst), 2, "hub 没有 ssh")
         self.check(("tunnel", "push-dirs"), 2, "用法：taskq tunnel push-dirs")
         self.check(("tunnel", "push-dirs", "NOPE", T, "x", "y"), GONE, "taskq tunnel push-dirs：机器表里没有 NOPE")
 

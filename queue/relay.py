@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
-"""relay 执行机（envs/machines.py 的 RELAY：lab1、lab0、dicc1、dicc2）的接力：由 box 替它在总队列（box 上的任务队列，10/31 起）
-领任务（GPU 或 CPU，按它有的 worker 种类和环境）、把输入放到和 box 一样的相对路径、放进它自己的任务队列，做完拉回、归档。
-执行机和 box 用同样的名字和路径；执行机之间不直接通信，一切经 box。
-这里是每次检查的计划和命令行；和那边说话、发过去跑的小程序在 relay_remote.py（那边根目录的布局也在那里），box 上的记账和那边的清理
+"""relay 执行机（配置文件夹里 machines.py 的 RELAY，pueue 执行机和 Slurm 执行机都是）的接力：由 hub 替它在总队列（hub 上的任务队列，10/31 起）
+领任务（GPU 或 CPU，按它有的 worker 种类和环境）、把输入放到和 hub 一样的相对路径、放进它自己的任务队列，做完拉回、归档。
+执行机和 hub 用同样的名字和路径；执行机之间不直接通信，一切经 hub。
+这里是每次检查的计划和命令行；和那边说话、发过去跑的小程序在 relay_remote.py（那边根目录的布局也在那里），hub 上的记账和那边的清理
 在 relay_store.py，传数据、拉回、删那边的任务在 relay_transfer.py。
 
 每次健康检查（monitor/health.py，每 30 分钟）经 queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
-  1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到 ~/.cache/phd/relay/status.json，登记表用）；
+  1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到状态目录的 relay/status.json，如 ~/.cache/taskq/relay/status.json，使用者的状态页面可以读）；
   2. 总队列里 worker 是它的每个任务：
-     - 还没放进那边的队列 → box 的 wait 组排 relay.py stage（补传缺的数据、建软链接、加进那边的队列；要放的路径和那边没做完的
+     - 还没放进那边的队列 → hub 的 wait 组排 relay.py stage（补传缺的数据、建软链接、加进那边的队列；要放的路径和那边没做完的
        任务的产出重叠时不传、报出来）；
      - 在那边排着、在训 → 续上（beat）；
-     - 那边做完 → box 的 wait 组排 relay.py fetch（拉回、核对）；
-     - 总队列显示训完（box 上有了）→ 删掉那边的任务和结果（11/3 定：执行机的盘只用来中转）；要归档的，备份机能用时 box 的 wait 组
-       单独排 archive_task.sh box（relay_archive，备份到 envs/machines.py 角色 backup 的那台），归档成功才交还；备份机停用
-       （envs/policy.py 的 OFFLINE）时不等，直接交还；只是这次连不上时下次检查再排；
+     - 那边做完 → hub 的 wait 组排 relay.py fetch（拉回、核对）；
+     - 总队列显示训完（hub 上有了）→ 删掉那边的任务和结果（11/3 定：执行机的盘只用来中转）；要归档的，备份机能用时 hub 的 wait 组
+       单独排 archive_task.sh <hub>（relay_archive，备份到 machines.py 里角色 backup 的那台），归档成功才交还；备份机停用
+       （policy.py 的 OFFLINE）时不等，直接交还；只是这次连不上时下次检查再排；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
-     - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 box 任务，下次检查重排）。
-  3. 那边排着没人领的任务少于 envs/policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一个任务（只领插件接受的做法，
+     - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 hub 任务，下次检查重排）。
+  3. 那边排着没人领的任务少于 policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一个任务（只领插件接受的做法，
      数据传过去后放 blobs 的盘至少还剩 budget 的第二项（没有 budget 时 HARD_GB）；有 cap 的执行机，那边每个任务的输出另留
-     refill.TRAIN_OUT_GB，cap 里留不出来就不领。blobs 可以是指到别的盘的链接（DICC：/scr，11/4），输出和队列在根目录）；
+     refill.TRAIN_OUT_GB，cap 里留不出来就不领。blobs 可以是指到别的盘的链接（如 Slurm 执行机的 scratch 盘，11/4），输出和队列在根目录）；
   4. 那边排着和在跑的 worker 作业不够、又有要卡的任务（备好的或在训的）时排满（refill.py 的 topup_plan，QOS 和个数见 SLURM[名字]["gpu"]）。
-开关 envs/policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
-按时段的执行机（envs/policy.py 的 SHIFT，queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（lab0、lab1）：
+开关 policy.py 的 AUTO[名字]：关着时第 3、4 步只记进 ~/relay.log（影子），已经领着的任务照常推进。
+按时段的执行机（policy.py 的 SHIFT，queue/shift.py）时段外不做第 3、4 步。同一个盘上的几台（如同一台主机上按时段的和不按时段的两台）：
 每次检查按整块盘的剩余算，前一台这次计划传的从后一台的剩余里扣掉；总队列里改分给别的执行机的任务，那边的队列里删掉任务
 （结果留着，接手的那台收编存档，见 machines.py 的 adopt），总队列里训完了再删结果。
 连不上它时只续总队列的领取；领着任务、连不上 2 小时以上报出来。
 
     python3 queue/relay.py                         看现在会做什么（不改任何东西；taskq plan 连同按时段开关、训完以后一起看）
     taskq internal stage <名字> <key> --nice N [--no-add]   传数据、加进那边的队列（--no-add：只传数据、撤掉那边"缺输入"的标记）
-    taskq internal fetch <名字> <key>              拉回做完的任务、核对，放进 box 的数据目录
+    taskq internal fetch <名字> <key>              拉回做完的任务、核对，放进 hub 的数据目录
     taskq site bundle <名字> [--commit C]          打包、推过去、切换 current
     taskq site status <名字>                       那边的队列
     taskq site resend <名字>                       传过去的任务按现在的做法重新解析，换掉那边队列里的说明（11/4）
@@ -81,7 +81,7 @@ STATUS = os.path.join(ST.DIR, "status.json")
 LOG = cfg.log("relay")
 HARD_GB = 100  # 领之前：传过去以后那边至少还剩这么多
 DOWN_S = 2 * 3600  # 领着任务、连不上这么久就报
-LATE_S = 3600  # 拉回、归档成功这么久了 box 上还不算训完，就报
+LATE_S = 3600  # 拉回、归档成功这么久了 hub 上还不算训完，就报
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传完、还没加进队列或刚交还）
 STATUS_S = 90  # 读状态的超时：那边的存储挂住时跳过这台，不等
@@ -92,7 +92,7 @@ PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记�
 
 def relayable(i):
     """refill.info 的结果 → 能不能领给它：做法能翻译（按本机的 recipes.py 算，总队列那边的代码可能还没更新），插件接受这个任务
-    （sites/names.py 的 accepts，如 nnU-Net 的训练器不读仓库里的病例子集）。"""
+    （sites/names.py 的 accepts，如插件不接受要读仓库里文件的任务）。"""
     sp = i["spec"]
     rec, params = i["recipe"] or sp.get("recipe"), i["params"] or sp.get("params") or {}
     try:
@@ -134,7 +134,7 @@ def current_bundle(name):
 
 def parse_sched(name, rs):
     """状态脚本读回的调度器原始输出 → rs["jobs"]（pueue：各种 worker 所在组的任务）或 rs["squeue"]（Slurm）；读不出 → None。
-    一次 ssh 读完、在 box 上用适配器解析（sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
+    一次 ssh 读完、在 hub 上用适配器解析（sites/pueue.py、slurm.py）：每台每次只连一次，状态是同一时刻的。"""
     raw, c = rs.pop("sched_raw", None), RM.conf(name)
     rs["jobs"] = rs["squeue"] = None
     if raw is not None and c["scheduler"] == "pueue":
@@ -188,7 +188,7 @@ def bundle(name, commit="origin/main", have=None, run_build=None):
 
 # ---------------- 每次检查 ----------------
 def box_task(s, step, key, since=0):
-    """box 上 step 这一步、这个 key 的最新任务（任务记录在 since 之后加的）→ pueue 任务或 None。"""
+    """hub 上 step 这一步、这个 key 的最新任务（任务记录在 since 之后加的）→ pueue 任务或 None。"""
     hub, last = M.hub(), None
     for t in sorted((s["pueue"].get(hub) or {}).get("tasks", []), key=lambda t: t["id"]):
         r = C.identify(hub, t, s.get("records") or [])
@@ -241,7 +241,7 @@ def plan(s, name, rs, st, now=None):
     if not mtq or not mtq.get("enabled"):
         return [], {}
     if rs is not None and "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):
-        rs = None  # box 的 pueue 读不到：在跑的拉回、归档看不见，不能当成没有，只续约（11/3）
+        rs = None  # hub 的 pueue 读不到：在跑的拉回、归档看不见，不能当成没有，只续约（11/3）
     if rs is None:
         acts = [dict(op="beat", key=t["key"]) for t in mine if t["state"] != "done"]
         last = (st.get("last_ok") or {}).get(name, 0)
@@ -267,18 +267,18 @@ def plan(s, name, rs, st, now=None):
         if t["state"] == "done":
             ft = box_task(s, "relay_fetch", key, t.get("since") or 0)
             at = box_task(s, "relay_archive", key, t.get("since") or 0)
-            if any(x is not None and x["status"] in LIVE for x in (ft, at)):  # box 上有了，但拉回、归档还没做完：等
+            if any(x is not None and x["status"] in LIVE for x in (ft, at)):  # hub 上有了，但拉回、归档还没做完：等
                 acts.append(dict(op="beat", key=key))
                 continue
-            # 总队列显示训完：box 上有了（结果本身，不看拉回记录）。只有单独的拉回出错时才报（11/3 起拉回不带归档）
+            # 总队列显示训完：hub 上有了（结果本身，不看拉回记录）。只有单独的拉回出错时才报（11/3 起拉回不带归档）
             fcmd = (ft or {}).get("command") or ""
             if ft is not None and ft["status"] != "Success" and "archive_task.sh" not in fcmd:
                 acts.append(dict(op="beat", key=key))
-                stuck[alert_id("relayfetch", key)] = alert(f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），领取保留；"
+                stuck[alert_id("relayfetch", key)] = alert(f"从 {L} 拉回 {key} 的 {M.hub()} 任务 {ft['id']} 出错了（{ft['status']}），领取保留；"
                                                            f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）",
                                                            machine=name, step="fetch", task=ft["id"], status=ft["status"])
                 continue
-            if k:  # box 上有了就删那边的任务和结果，不等归档（11/3 定：执行机的盘只用来中转）
+            if k:  # hub 上有了就删那边的任务和结果，不等归档（11/3 定：执行机的盘只用来中转）
                 acts.append(dict(op="drop", key=key, rkey=key))
             try:
                 want = ft is not None and bool(RT.lookup(key).get("archive"))
@@ -288,16 +288,16 @@ def plan(s, name, rs, st, now=None):
             if want and not archived:
                 if at is not None:
                     acts.append(dict(op="beat", key=key))
-                    stuck[alert_id("relayfetch", key)] = alert(f"{key} 归档到备份机的 box 任务 {at['id']} 出错了（{at['status']}），box 上有了、领取保留；"
+                    stuck[alert_id("relayfetch", key)] = alert(f"{key} 归档到备份机的 {M.hub()} 任务 {at['id']} 出错了（{at['status']}），{M.hub()} 上有了、领取保留；"
                                                                f"看 pueue log {at['id']}，处理后 pueue remove {at['id']}（下次检查重排）",
                                                                machine=name, step="archive", task=at["id"], status=at["status"])
                     continue
-                if not C.backup_down():  # 备份机能用：box 单独排归档，归档成功才交还；只是这次连不上时下次再排
+                if not C.backup_down():  # 备份机能用：hub 单独排归档，归档成功才交还；只是这次连不上时下次再排
                     acts.append(dict(op="beat", key=key))
                     if not C.backup_down(s.get("ok")):
                         acts.append(dict(op="archive", key=key))
                     continue
-            acts.append(dict(op="release", key=key, why="训完了，box 上有了" + ("、归档了" if archived else "（没有归档）")))
+            acts.append(dict(op="release", key=key, why=f"训完了，{M.hub()} 上有了" + ("、归档了" if archived else "（没有归档）")))
             sp = refill.info(mtq, key)["spec"]
             try:
                 if sp and sp.get("recipe") and SG.on():
@@ -334,9 +334,9 @@ def plan(s, name, rs, st, now=None):
                 if noslot and now - since > NOSLOT_ALERT_S:
                     stuck[alert_id("site", name, "stage")] = alert(
                         f"{L} 的 {key} {(now - since) / 3600:.0f} 小时都没传过去（CPU 作业排不上，或存档的来源那边还领着）"
-                        f"（box 任务 {sg['id']}，每次检查再试）", key=key, hours=round((now - since) / 3600, 1), task=sg["id"])
+                        f"（{M.hub()} 任务 {sg['id']}，每次检查再试）", key=key, hours=round((now - since) / 3600, 1), task=sg["id"])
             elif sg["status"] not in LIVE:
-                stuck[alert_id("relaystage", key)] = alert(f"给 {L} 传 {key} 的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
+                stuck[alert_id("relaystage", key)] = alert(f"给 {L} 传 {key} 的 {M.hub()} 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
                                                            f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）",
                                                            machine=name, step="stage", task=sg["id"], status=sg["status"])
             continue
@@ -352,10 +352,10 @@ def plan(s, name, rs, st, now=None):
             elif ft["status"] == "Success":
                 end = C.local_time(ft.get("end"))
                 if end is not None and now - end.timestamp() > LATE_S:
-                    stuck[alert_id("relayfetch", key)] = alert(f"{L} 训完的 {key} 拉回并归档成功了（box 任务 {ft['id']}），box 上却还不算训完；"
-                                                               f"看 box 上的结果文件夹", machine=name, step="late", task=ft["id"], status=ft["status"])
+                    stuck[alert_id("relayfetch", key)] = alert(f"{L} 训完的 {key} 拉回并归档成功了（{M.hub()} 任务 {ft['id']}），{M.hub()} 上却还不算训完；"
+                                                               f"看 {M.hub()} 上的结果文件夹", machine=name, step="late", task=ft["id"], status=ft["status"])
             elif ft["status"] not in LIVE:
-                stuck[alert_id("relayfetch", key)] = alert(f"从 {L} 拉回 {key} 的 box 任务 {ft['id']} 出错了（{ft['status']}），领取保留；"
+                stuck[alert_id("relayfetch", key)] = alert(f"从 {L} 拉回 {key} 的 {M.hub()} 任务 {ft['id']} 出错了（{ft['status']}），领取保留；"
                                                            f"看 pueue log {ft['id']}，处理后 pueue remove {ft['id']}（下次检查重排）",
                                                            machine=name, step="fetch", task=ft["id"], status=ft["status"])
         elif ast == "stopped":
@@ -365,7 +365,7 @@ def plan(s, name, rs, st, now=None):
             if sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC):
                 acts.append(dict(op="restage", key=key))
             elif sg["status"] not in LIVE:
-                stuck[alert_id("relaystage", key)] = alert(f"给 {L} 补传 {key} 缺的输入的 box 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
+                stuck[alert_id("relaystage", key)] = alert(f"给 {L} 补传 {key} 缺的输入的 {M.hub()} 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
                                                            f"看 pueue log {sg['id']}，处理后 pueue remove {sg['id']}（下次检查重传）",
                                                            machine=name, step="restage", task=sg["id"], status=sg["status"])
         elif ast == "failed":
@@ -413,15 +413,15 @@ def plan(s, name, rs, st, now=None):
 
 
 def fill(s, name, rs, st, acts, stuck=None, notes=None):
-    """那边备好、没人领的任务不够 READY 个时领下一个任务（每种 worker 各备 READY 个，envs/machines.py 的 kinds）→ take 动作；
+    """那边备好、没人领的任务不够 READY 个时领下一个任务（每种 worker 各备 READY 个，machines.py 的 kinds）→ take 动作；
     不领 → ([], 原因)。冒烟闸门（smoke_gate.py）挡下的不领，要排的冒烟是 smoke_add 动作；报警记进 stuck，开关关着时的影子记进 notes。"""
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
         return [], "总队列关着或暂停中"
     if not shift.allowed(name):
-        return [], "不在时段里（envs/policy.py 的 SHIFT）"
-    if "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):  # 传数据要在 box 的 pueue 排，在跑的看不见（11/3）
-        return [], "box 的 pueue 读不到"
+        return [], "不在时段里（policy.py 的 SHIFT）"
+    if "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):  # 传数据要在 hub 的 pueue 排，在跑的看不见（11/3）
+        return [], f"{M.hub()} 的 pueue 读不到"
     want, kinds = R.ready(name), M.kinds(name)
     keys = ST.keys_of(st, name)
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
@@ -535,12 +535,12 @@ def sub_kind(x):
 
 def topup(name, rs, run=None):
     """→ 要开的 worker, 不补的原因。"要几个"只在这里算，适配器只读状态、照着开。按这台能跑的种类
-    （envs/machines.py 的 kinds）各算各的：
+    （machines.py 的 kinds）各算各的：
     pueue 类：这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个 → ("pueue", 种类, 1)；
-    Slurm 类：envs/policy.py 的 SLURM 里这台能跑的种类，按 refill.slurm_plan 交 → (QOS, 时限, 交几个, sbatch 文件)。
+    Slurm 类：policy.py 的 SLURM 里这台能跑的种类，按 refill.slurm_plan 交 → (QOS, 时限, 交几个, sbatch 文件)。
     run：fn(名字, 命令) → (退出码, 输出, 错误)，测试替换。"""
     if not shift.allowed(name):
-        return [], "不在时段里（envs/policy.py 的 SHIFT）"
+        return [], "不在时段里（policy.py 的 SHIFT）"
     if RM.conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
             return [], "读不到 pueue"
@@ -558,7 +558,7 @@ def topup(name, rs, run=None):
         return subs, "；".join(why)
     conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
     if not conf_:
-        return [], "envs/policy.py 的 SLURM 里没有它"
+        return [], "policy.py 的 SLURM 里没有它"
     st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
     if st is None:
         return [], "读不到作业数"
@@ -583,7 +583,7 @@ def smoke_tail(name, rkey, n=20):
 
 
 def execute(name, acts, s, run_add=None, stuck=None):
-    """做动作 → [说明]。出错的那一步写进说明，后面的照做。在 box 上加任务（传数据、拉回、归档）出错的记进 stuck，
+    """做动作 → [说明]。出错的那一步写进说明，后面的照做。在 hub 上加任务（传数据、拉回、归档）出错的记进 stuck，
     下次检查照常重试，加上了报警就消失。"""
     L, msgs = RM.conf(name)["label"], []
     stuck = {} if stuck is None else stuck
@@ -594,7 +594,7 @@ def execute(name, acts, s, run_add=None, stuck=None):
         try:
             return raw_add(host, lab, step, k, args, **kw)
         except Exception as e:  # noqa: BLE001
-            stuck[alert_id("relayadd", name, step, k)] = alert(f"{L} 的 {k}：在 box 上排{what[step]}的任务失败（{str(e)[-200:]}），下次检查重试",
+            stuck[alert_id("relayadd", name, step, k)] = alert(f"{L} 的 {k}：在 {M.hub()} 上排{what[step]}的任务失败（{str(e)[-200:]}），下次检查重试",
                                                                 machine=name, step=step, key=k)
             raise
 
@@ -660,19 +660,19 @@ def execute(name, acts, s, run_add=None, stuck=None):
                     "--no-add" if a["op"] == "restage" else f"--nice {int(a['nice'])}")
                 tid = add(M.hub(), lab, "relay_stage", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
-                msgs.append(f"{L} 的 {k} 排了{'补传缺的输入' if a['op'] == 'restage' else '传数据'}（box 任务 {tid}）")
+                msgs.append(f"{L} 的 {k} 排了{'补传缺的输入' if a['op'] == 'restage' else '传数据'}（{M.hub()} 任务 {tid}）")
             elif a["op"] == "fetch":
                 lab = label("relay_fetch", k)
                 cmd = f"python3 {shlex.quote(cfg.local('queue', 'relay.py'))} fetch {name} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_fetch", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
-                msgs.append(f"{L} 训完了 {k}，排了拉回（box 任务 {tid}）")
+                msgs.append(f"{L} 训完了 {k}，排了拉回（{M.hub()} 任务 {tid}）")
             elif a["op"] == "archive":
                 lab = label("relay_archive", k)
                 cmd = f"bash {shlex.quote(cfg.local('queue', 'archive_task.sh'))} {M.hub()} {shlex.quote(k)}"
                 tid = add(M.hub(), lab, "relay_archive", k, f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)),
                           to=name, group="wait")
-                msgs.append(f"{L} 训完的 {k} 排了归档（box 任务 {tid}）")
+                msgs.append(f"{L} 训完的 {k} 排了归档（{M.hub()} 任务 {tid}）")
             elif a["op"] == "unq":
                 r = RM.rtq(name, f"remove {shlex.quote(a['rkey'])}")
                 if r and r[0] in (0, proto.EXIT["gone"]):  # gone：那边已经没有了
@@ -771,7 +771,7 @@ def log(lines):
 
 
 def envs_switch(name):
-    """envs/policy.py 的 AUTO["envs"] → (开着没有, 这台另外预建的 [环境 或 (环境, 变体)])。"""
+    """policy.py 的 AUTO["envs"] → (开着没有, 这台另外预建的 [环境 或 (环境, 变体)])。"""
     a = P.AUTO.get("envs")
     if isinstance(a, dict):
         return True, list(a.get(name) or [])
@@ -779,8 +779,8 @@ def envs_switch(name):
 
 
 def env_builds(s, name, rows, now, dry, stuck):
-    """按描述建的环境（sites/envs.py）：没建、描述变了、在建停了、空间不够过了 RETRY_S 的，在 box 的 wait 组排一个
-    taskq site env（一台一次一个；box 上已经有这台的就不排）；建坏的、空间不够、wheelhouse 缺包的报 site:<机器>:env:<环境>。
+    """按描述建的环境（sites/envs.py）：没建、描述变了、在建停了、空间不够过了 RETRY_S 的，在 hub 的 wait 组排一个
+    taskq site env（一台一次一个；hub 上已经有这台的就不排）；建坏的、空间不够、wheelhouse 缺包的报 site:<机器>:env:<环境>。
     开关 AUTO["envs"] 关着时只记进 ~/relay.log。rows、now：那边的标志文件和时间（envs.read_rows 或状态程序的 envs_st）。→ 说明"""
     on, extra = envs_switch(name)
     want = EV.wanted(name, extra)
@@ -797,7 +797,7 @@ def env_builds(s, name, rows, now, dry, stuck):
     env, v = nb
     hub, L = M.hub(), M.machine(name)["label"]
     d = (s.get("pueue") or {}).get(hub) or {}
-    if "tasks" not in d:  # 读不到 box 的 pueue：不知道排没排过，这次不排
+    if "tasks" not in d:  # 读不到 hub 的 pueue：不知道排没排过，这次不排
         return []
     lab = f"{proto.ENV_BUILD}:{name}:{env}"
     if any((t.get("label") or "").startswith(f"{proto.ENV_BUILD}:{name}:") and t.get("status") in refill.LIVE for t in d["tasks"]):
@@ -814,14 +814,14 @@ def env_builds(s, name, rows, now, dry, stuck):
         tid = refill.add(hub, lab, proto.ENV_BUILD, f"{name}:{env}",
                          f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)), to=name, group="wait")
     except Exception as e:  # noqa: BLE001
-        stuck[alert_id("relayadd", name, proto.ENV_BUILD, env)] = alert(f"{L} 的环境 {env}：在 box 上排建环境的任务失败（{str(e)[-200:]}），下次检查重试",
+        stuck[alert_id("relayadd", name, proto.ENV_BUILD, env)] = alert(f"{L} 的环境 {env}：在 {hub} 上排建环境的任务失败（{str(e)[-200:]}），下次检查重试",
                                                                          machine=name, step=proto.ENV_BUILD, key=env)
         return []
-    return [f"排了建 {what}（box 任务 {tid}）"]
+    return [f"排了建 {what}（{M.hub()} 任务 {tid}）"]
 
 
 def machine_envs(s, name, dry):
-    """MACHINES 里本机（ssh 是 None，如 box）的按描述建的环境，同 env_builds。→ (说明, 卡住的)"""
+    """MACHINES 里本机（ssh 是 None，如 hub）的按描述建的环境，同 env_builds。→ (说明, 卡住的)"""
     stuck = {}
     want = EV.wanted(name, envs_switch(name)[1])
     got = EV.read_rows(name, list(want)) if want else None
@@ -961,7 +961,7 @@ def main(argv):
     p.add_argument("key")
     p.add_argument("--nice", type=int)
     p.add_argument("--no-add", action="store_true")
-    p = sub.add_parser("fetch", help="拉回做完的任务、核对，放进 box 的数据目录")
+    p = sub.add_parser("fetch", help="拉回做完的任务、核对，放进 hub 的数据目录")
     p.add_argument("name")
     p.add_argument("key")
     p = sub.add_parser("bundle", help="打包、推过去、切换 current")

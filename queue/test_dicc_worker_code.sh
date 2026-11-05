@@ -8,11 +8,11 @@ REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] 
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=slurm-login   # 本机当队列所在的机器（不转发到真的 Slurm）
 source "$HERE/testdata/worker_harness.sh"
 HEADCMD="cat $T/head"
 
-# 6. 不在 Slurm 里（lab 的 pueue 组里常驻，10/31）：WORKER_ID 当名字，按本机 slots（box 没写 → 1），只看 CUDA_VISIBLE_DEVICES 那张卡；
+# 6. 不在 Slurm 里（pueue-host 的 pueue 组里常驻，10/31）：WORKER_ID 当名字，按本机 slots（hub 没写 → 1），只看 CUDA_VISIBLE_DEVICES 那张卡；
 #    空闲不到 IDLE_EXIT（默认 30 分钟）、队列出错、失败太多都不退出（RUN_TASK_TRIES=1：不在 Slurm 里 run_task.sh 自己会重试 3 次）；手上没有在训的时候提交号变了才退出（退出码 0），在训时变了等训完
 if want 6; then
 mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
@@ -22,10 +22,10 @@ table << EOF
 t/a base
 t/b base
 EOF
-(unset TASKQ_SLOTS; WORKER_ID=lab-test CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 TASKQ_HEAD_CMD=$HEADCMD PATH=$T/bin6:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/w6.out" 2>&1 &
+(unset TASKQ_SLOTS; WORKER_ID=pueue-host-test CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 TASKQ_HEAD_CMD=$HEADCMD PATH=$T/bin6:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/w6.out" 2>&1 &
 wpid=$!
 waitfor 60 '[[ $(grep -c ^end $T/train.log) == 2 ]]'
-check "不在 Slurm 里：按 slots 一次 1 个（GPU 不忙也不加第二个），两个先后训完" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]] && grep -q "作业 lab-test @ .*最多同时 1 个.*时限 无" $T/w6.out'
+check "不在 Slurm 里：按 slots 一次 1 个（GPU 不忙也不加第二个），两个先后训完" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]] && grep -q "作业 pueue-host-test @ .*最多同时 1 个.*时限 无" $T/w6.out'
 check "不在 Slurm 里：nvidia-smi 只看 CUDA_VISIBLE_DEVICES 那张卡" '[[ -s $T/nvsmi.args ]] && ! grep -qv "^-i 1 " $T/nvsmi.args'
 waitfor 20 'grep -q "没有能领的任务，每 1 秒再看" $T/w6.out'
 sleep $(( TASKQ_IDLE_MAX + 1 ))
@@ -44,7 +44,7 @@ if want 6d; then
 reset
 : > "$TASKQ_DIR/tasks.jsonl"
 echo b > "$T/head"
-(WORKER_ID=lab-test TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/dicc_worker.sh") > "$T/w6d.out" 2>&1 &
+(WORKER_ID=pueue-host-test TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/dicc_worker.sh") > "$T/w6d.out" 2>&1 &
 wpid=$!
 waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "不在 Slurm 里：空闲超过 IDLE_EXIT 就退出（退出码 0）" '[[ $rc == 0 ]] && grep -q "退出（有备好的任务时下次检查再开）" $T/w6d.out'
@@ -57,7 +57,7 @@ t/c base
 t/d base
 EOF
 echo a > "$T/head"
-(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=3 TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/dicc_worker.sh") > "$T/w6b.out" 2>&1 &
+(WORKER_ID=pueue-host-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=3 TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/dicc_worker.sh") > "$T/w6b.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/c" $T/train.log'
 echo b > "$T/head"
@@ -73,7 +73,7 @@ t/b base
 t/c base
 EOF
 echo a > "$T/head"
-(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 RUN_TASK_TRIES=1 FAKE_FAIL="t/a t/b" TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/dicc_worker.sh") > "$T/w6c.out" 2>&1 &
+(WORKER_ID=pueue-host-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 RUN_TASK_TRIES=1 FAKE_FAIL="t/a t/b" TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/dicc_worker.sh") > "$T/w6c.out" 2>&1 &
 wpid=$!
 waitfor 30 '[[ $(grep -c "^fail" $T/train.log) == 2 ]]'
 waitfor 20 'grep -q "先不领" $T/w6c.out'
@@ -88,7 +88,7 @@ reset
 table << EOF
 t/c1 base cpu
 EOF
-(WORKER_ID=lab-cpu WORKER_DEVICE=cpu TASKQ_CPUS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/dicc_worker.sh") > "$T/w6f.out" 2>&1 &
+(WORKER_ID=pueue-host-cpu WORKER_DEVICE=cpu TASKQ_CPUS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/dicc_worker.sh") > "$T/w6f.out" 2>&1 &
 wpid=$!
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid
 check "不在 Slurm 里的 CPU worker：最多用 TASKQ_CPUS 个核" 'grep -q "worker（cpu）.*CPU 1，" $T/w6f.out && grep -q "^start .* t/c1 .*cpus=1$" $T/train.log'
@@ -107,12 +107,12 @@ echo "新包的 start $WORKER_ID"
 ' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
 ln -sfn a "$T/code/current"
 touch -d "5 days ago" "$T/code/a"
-(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/w6e.out" 2>&1 &
+(WORKER_ID=pueue-host-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/w6e.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "没有能领的任务" $T/w6e.out'
 ln -sfn b "$T/code/current"
 waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "代码包换了：空闲时 exec 新包的 worker_start.sh 接着跑，不退出等重开" '[[ $rc == 0 ]] && grep -q "换成新代码 b 接着跑" $T/w6e.out && grep -q "新包的 start lab-test" $T/w6e.out'
+check "代码包换了：空闲时 exec 新包的 worker_start.sh 接着跑，不退出等重开" '[[ $rc == 0 ]] && grep -q "换成新代码 b 接着跑" $T/w6e.out && grep -q "新包的 start pueue-host-test" $T/w6e.out'
 check "代码包：worker、任务日志记的代码版本是包名（不是"未知+改动"）" 'grep -q "，代码 a$" $T/w6e.out && grep -q "^end .* t/k" $T/train.log && head -1 $TASKQ_DATA/logs/tasks/t__k__*_part1.log | grep -q "，代码 a，"'
 check "代码包：worker 在用的包更新了时间戳（清理只删 4 天没动过的）" '[[ -n $(find "$T/code/a" -maxdepth 0 -mtime -1) ]]'
 fi
@@ -128,7 +128,7 @@ cp -r "$CORE/." "$T/code/a/scripts/taskq/"; cp -r "$CORE/." "$T/code/b/scripts/t
 printf '#!/bin/bash\necho "新包的 start"\nexec bash "$(dirname "$0")/dicc_worker.sh"\n' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
 printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"
 ln -sfn a "$T/code/current"
-(WORKER_ID=lab-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
+(WORKER_ID=pueue-host-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
   FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/w6z.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "还有停不下来的训练" $T/w6z.out'

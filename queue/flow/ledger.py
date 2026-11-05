@@ -249,7 +249,7 @@ def _ts(v):
 
 
 def activity(s, hub, identify):
-    """box pueue 里调度跑过、在跑的 → {(步骤, key): 最近结束的时刻（在跑 = inf）}。"""
+    """hub 的 pueue 里调度跑过、在跑的 → {(步骤, key): 最近结束的时刻（在跑 = inf）}。"""
     out = {}
     tasks = ((s.get("pueue") or {}).get(hub) or {}).get("tasks") or []
     for t in tasks:

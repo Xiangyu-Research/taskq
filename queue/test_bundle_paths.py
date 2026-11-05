@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """核心装在哪和命令里的路径（2026-11-04）：送到执行机的命令（那边的 taskq.py、小程序的 CODEQ、交 Slurm 作业的目录、pueue 的 worker、
-生成的 sbatch）只用代码包里的固定位置 proto.BUNDLE_CORE，不带 ..；box 上排的命令（relay.py stage / fetch、archive_task.sh、
+生成的 sbatch）只用代码包里的固定位置 proto.BUNDLE_CORE，不带 ..；hub 上排的命令（relay.py stage / fetch、archive_task.sh、
 本机的 q）用核心的绝对路径，文件名不变。三种装法各跑一次：
   嵌着（<仓库>/scripts/taskq，用指过来的链接摆出这个布局）、单独的检出（仓库就是核心）、核心在仓库外（TASKQ_REPO 指别处）。
     python3 queue/test_bundle_paths.py
@@ -36,7 +36,7 @@ def child():
     keep = RM.rsh
     RM.rsh = lambda name, cmd, **kw: got.append(cmd) or (0, "", "")
     try:
-        RM.rtq("lab1", "status --json")
+        RM.rtq("site-pueue", "status --json")
     finally:
         RM.rsh = keep
     remote["rtq"] = got[0]
@@ -48,16 +48,16 @@ def child():
     keep = SL.start_workers
     SL.start_workers = lambda cwd, subs, run, names=None: got.append(cwd) or []
     try:
-        relay.submit("dicc1", [("normal", "gpu", 1)])
+        relay.submit("site-slurm", [("normal", "gpu", 1)])
     finally:
         SL.start_workers = keep
     remote["交作业的目录"] = got[0]
     assert got[0].endswith(f"/{proto.ROOT['current']}/{BC}/queue"), got
-    remote["pueue worker"] = PQ.worker_cmd("lab1")
+    remote["pueue worker"] = PQ.worker_cmd("site-pueue")
     assert f"{BC}/queue/worker_start.sh" in remote["pueue worker"]
 
-    e = B.relay_entry(None, "dicc1")
-    m = B.machine_entry("dicc1", e, "/abs/root")
+    e = B.relay_entry(None, "site-slurm")
+    m = B.machine_entry("site-slurm", e, "/abs/root")
     tpl = open(os.path.join(cfg.CORE, B.SBATCH["gpu"])).read()
     sb = B.gen_sbatch(tpl, m, "/abs/root")
     remote["sbatch"] = sb
@@ -68,23 +68,23 @@ def child():
     for what, text in remote.items():
         assert ".." not in text, (what, text)
     import ast
-    stub = B.gen_machines('MACHINES = {}\n', "lab1", B.machine_entry("lab1", B.relay_entry(None, "lab1"), "/abs/root"))
+    stub = B.gen_machines('MACHINES = {}\n', "site-pueue", B.machine_entry("site-pueue", B.relay_entry(None, "site-pueue"), "/abs/root"))
     mt = [n.value for n in ast.walk(ast.parse(stub)) if isinstance(n, ast.Constant) and str(n.value).endswith("mtab.py")]
-    assert mt == [f"../{BC}/sites/mtab.py"], mt  # 生成的 envs/machines.py 的命令行转交：包里的核心（envs/ 的上一级）
+    assert mt == [f"../{BC}/sites/mtab.py"], mt  # 生成的配置文件夹里 machines.py 的命令行转交：包里的核心（配置文件夹的上一级）
 
-    box = []
+    hubq = []
     acts = [dict(op="stage", key="k/1", nice=0), dict(op="fetch", key="k/2"), dict(op="archive", key="k/3")]
-    relay.execute("lab1", acts, {}, run_add=lambda *a, **kw: box.append(a[4]) or 1)
+    relay.execute("site-pueue", acts, {}, run_add=lambda *a, **kw: hubq.append(a[4]) or 1)
     rp, ap = cfg.local("queue", "relay.py"), cfg.local("queue", "archive_task.sh")
-    assert len(box) == 3 and f"python3 {rp} stage lab1" in box[0] and f"python3 {rp} fetch lab1" in box[1] \
-        and f"bash {ap} " in box[2], box
+    assert len(hubq) == 3 and f"python3 {rp} stage site-pueue" in hubq[0] and f"python3 {rp} fetch site-pueue" in hubq[1] \
+        and f"bash {ap} " in hubq[2], hubq
     for p in (rp, ap):
         assert os.path.isabs(p) and os.path.isfile(p) and ".." not in p, p
     got = []
-    refill.q("box", "-g cpu -- true", run=lambda c, ssh: got.append(c) or (0, "1"))
+    refill.q("hub", "-g cpu -- true", run=lambda c, ssh: got.append(c) or (0, "1"))
     qp = cfg.local("queue", "q")
     assert f" && {qp} -g cpu" in got[0] and os.path.isfile(qp), got
-    print(f"通过：{cfg.CORE_REL}：送到执行机的命令和 sbatch 只用 {BC}/…、不带 ..；box 上的命令用核心的绝对路径")
+    print(f"通过：{cfg.CORE_REL}：送到执行机的命令和 sbatch 只用 {BC}/…、不带 ..；hub 上的命令用核心的绝对路径")
 
 
 def main():

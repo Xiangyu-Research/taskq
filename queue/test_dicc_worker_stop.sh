@@ -6,7 +6,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=slurm-login   # 本机当队列所在的机器（不转发到真的 Slurm）
 source "$HERE/testdata/worker_harness.sh"
 
 # 2e. 开始不久就失败的 2 个任务：作业不再领；跑了一段时间才失败的、两次隔得比时间窗久的不算作业的问题，照常领下一个
@@ -155,7 +155,7 @@ fi
 #   代码副本里的 spec.py：FAKE_DONE5 这个文件在时 done 退出 5，FAKE_SHELL2 在时 shell 报错退出 2
 if want 5; then
 mkdir -p "$T/core"; rm -rf "$T/core/queue" "$T/core/sites"; cp -r "$HERE" "$T/core/queue"; cp -r "$HERE/../sites" "$T/core/sites"
-sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)\nif __name__ == "__main__" and sys.argv[1:2] == ["shell"] and os.path.exists(os.environ.get("FAKE_SHELL2", "/nonexistent")): sys.exit("spec.py：不认识的 {trainer}")' "$T/core/queue/spec.py"
+sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)\nif __name__ == "__main__" and sys.argv[1:2] == ["shell"] and os.path.exists(os.environ.get("FAKE_SHELL2", "/nonexistent")): sys.exit("spec.py：不认识的 {nosuch}")' "$T/core/queue/spec.py"
 reset
 table << EOF
 t/u base
@@ -167,7 +167,7 @@ rm -f "$T/unreadable"
 reset
 touch "$T/badspec"
 FAKE_SHELL2=$T/badspec SLURM_JOB_ID=900210 TASKQ_SLOTS=1 timeout 60 bash "$T/core/queue/dicc_worker.sh" > "$T/w2r.out" 2>&1
-check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退出码 2：没开训：任务说明有问题：spec.py：不认识的 {trainer}" $TASKQ_DIR/failures/t__u'
+check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退出码 2：没开训：任务说明有问题：spec.py：不认识的 {nosuch}" $TASKQ_DIR/failures/t__u'
 rm -f "$T/badspec"
 fi
 

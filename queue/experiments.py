@@ -1,4 +1,4 @@
-"""读所有实验表（envs/policy.py 的 OUTPUTS["experiments"]，相对仓库根目录的 glob；2026-10-18），展开成一个个任务。
+"""读所有实验表（配置文件夹里 policy.py 的 OUTPUTS["experiments"]，相对仓库根目录的 glob；2026-10-18），展开成一个个任务。
 taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读；
 分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
 
@@ -25,7 +25,7 @@ import recipes as R  # noqa: E402  核心的做法表；要在实验表把插件
 _cache = {}
 
 EXP_FIELDS = {
-    "id": "唯一的短名（box pueue 任务的标签、taskq.py add --exp）",
+    "id": "唯一的短名（hub 的 pueue 任务的标签、taskq.py add --exp）",
     "exp": "实验编号（登记表、看板）",
     "label": "一句话说明",
     "model": "模型的名字（登记表分组）",
@@ -43,15 +43,15 @@ EXP_FIELDS = {
     "rq": "实验表所在的文件夹名（加载时加上）",
 }
 STEP_FIELDS = {
-    "name": "步骤名（envs/policy.py 的 PLACE、HOLD 按它）",
-    "group": "在 box 上做时 pueue 的组",
-    "cmd": "在 box 上做的命令（模板）",
+    "name": "步骤名（policy.py 的 PLACE、HOLD 按它）",
+    "group": "在 hub 上做时 pueue 的组",
+    "cmd": "在 hub 上做的命令（模板）",
     "done": "怎么算做完（steps.py 的 check、exists 那样的对象）",
-    "queue": "放进任务队列时的写法（QUEUE_FIELDS）；没有 = 只在 box 上做",
+    "queue": "放进任务队列时的写法（QUEUE_FIELDS）；没有 = 只在 hub 上做",
     "needs": "实验一级的步骤：要每个任务都做完的步骤名（一个或列表）",
     "rerun_if_newer": "FINAL 的步骤：这些步骤有比它开始时新的结果就重跑",
     "rq": "FINAL 所在的实验表（加载时加上）",
-    "only": "每个任务的步骤：只对 each 取这些值的任务做（{参数: [取值…]}，如 {\"fold\": [\"0\"]}）；别的任务没有这一步（11/5）",
+    "only": "每个任务的步骤：只对 each 取这些值的任务做（{参数: [取值…]}，如 {\"part\": [\"0\"]}）；别的任务没有这一步（11/5）",
 }
 QUEUE_FIELDS = {
     "nice": "进任务队列的档位",
@@ -166,7 +166,7 @@ def short(t):
 
 
 def label(e, t):
-    """box pueue 任务标签里的任务名：实验 id + 简称的每一项前面加 "_"（如 t3met_f1）。"""
+    """hub 的 pueue 任务标签里的任务名：实验 id + 简称的每一项前面加 "_"（如 small_s1）。"""
     return e["id"] + "".join("_" + x for x in short(t).split())
 
 

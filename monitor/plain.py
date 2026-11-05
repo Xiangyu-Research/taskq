@@ -1,30 +1,27 @@
 """手机推送的白话说法（2026-10-21）：任务 key、pueue 标签 → 实验名；健康检查的问题 → 出了什么事、影响什么。
-health.py（问题推送）和 report.py（进度推送）用；登记表"需要处理"里仍是 health.py 原来的详细说明。
+health.py（问题推送）和 overview.py 用；问题清单里仍是 health.py 原来的详细说明。
 """
-import glob
 import os
-import re
 import sys
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 import proto  # noqa: E402
-REPO = cfg.REPO  # 使用者的仓库根
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
 import experiments as E  # noqa: E402
 
-# 步骤的中文名：实验表的步骤定义里有 zh 时用它（step_name），没有时查这张表，再没有用步骤名本身
-STEP = {"eval": "评测", "oof": "五折汇总", "paired": "和 T0 的配对比较", "ens": "五折集成评测", "infer": "推理",
-        "lprob": "病灶概率汇总", "prune": "删单折概率图", "p1": "P1 水肿反事实", "p2": "P2 合成病灶插入", "p2cmp": "P2 和 T0 的比较",
-        "t18cmp": "T18 的后续比较", "j1b3": "J1B3 覆盖梯度回归",
-        "archive": "存档", "train": "训练",
-        "compare_all": "对比表", "relay_fetch": "结果拉回", "relay_stage": "数据传送", "relay_archive": "存档", "env_build": "建环境"}
-QUIET = {"infer", "archive", "train", "prune"}  # 中间步骤：进度报告里不列
-_tasks = _plan = _steps = None
+# 步骤的中文名：实验表的步骤定义里有 zh 时用它（step_name），没有时查 STEPS（核心自己排的步骤 + 插件 labels.py 的），再没有用步骤名本身
+STEPS = {"train": "训练", "archive": "存档", "relay_fetch": "结果拉回", "relay_stage": "数据传送", "relay_archive": "存档",
+         proto.ENV_BUILD: "建环境"}
+QUIET = ["train", "archive"]  # 中间步骤：进度报告里不列（插件的接在后面）
+PLAN_TITLES = None  # 插件的函数：() → {分析编号: 标题}
+cfg.extend(globals(), "labels")
+_tasks = _plan = _steps = _model = None
 
 
 def table_steps():
@@ -44,22 +41,42 @@ def step_name(step):
         zh = (table_steps().get(step) or {}).get("zh")
     except Exception:  # noqa: BLE001  实验表读不了时照样说白话
         zh = None
-    return zh or STEP.get(step, step)
+    return zh or STEPS.get(step, step)
 
 
 def known_step(step):
     try:
-        return step in STEP or step in table_steps()
+        return step in STEPS or step in table_steps()
     except Exception:  # noqa: BLE001
-        return step in STEP
+        return step in STEPS
+
+
+def final_step(step):
+    try:
+        return any(st["name"] == step for st in E.load()[1])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def usual_model():
+    """实验表里最多的模型（说实验名时不提它）；读不了实验表、没有模型 → None。"""
+    global _model
+    if _model is None:
+        try:
+            n = Counter(e["model"] for e in E.load()[0] if e.get("model"))
+        except Exception:  # noqa: BLE001
+            n = Counter()
+        _model = [n.most_common(1)[0][0] if n else None]
+    return _model[0]
 
 
 def exp_name(e):
-    return f"{e['exp']} {e['label']}" + (f" {e['model']}" if e.get("model") not in (None, "nnU-Net") else "")
+    m = e.get("model")
+    return f"{e['exp']} {e['label']}" + (f" {m}" if m and m != usual_model() else "")
 
 
-def fold(key):
-    """任务 key → "T15 MEN 对齐 470 例 f3"；不在实验表里的原样返回。"""
+def key_name(key):
+    """任务 key → 实验名 + 简称（如 "exp1 小数据 s0"）；不在实验表里的原样返回。"""
     global _tasks
     try:
         if _tasks is None:
@@ -71,31 +88,30 @@ def fold(key):
 
 
 def plan_items():
-    """各 RQ 分析计划表里的编号 → 问题（"C3" → "混合训练是否改变对水肿 / 合成病灶的依赖？"）。"""
-    out = {}
-    pat = cfg.outputs("plans")
-    for f in sorted(glob.glob(os.path.join(REPO, pat))) if pat else []:
-        for ln in open(f, encoding="utf-8"):
-            m = re.match(r"\| ([A-Z]\d+) \| ([^|]+?) \|", ln)
-            if m:
-                out.setdefault(m.group(1), m.group(2))
-    return out
+    """分析编号 → 标题（插件 labels.py 的 PLAN_TITLES；没有插件 → {}）。"""
+    return dict(PLAN_TITLES() or {}) if PLAN_TITLES else {}
+
+
+def plan_of(who):
+    """标签的后半是 <编号> 或 <编号>_… 且编号有标题 → "编号 标题"；否则 None。"""
+    global _plan
+    if _plan is None:
+        _plan = plan_items()
+    k = next((k for k in _plan if who == k or who.startswith(k + "_")), None)
+    return f"{k} {_plan[k]}" if k else None
 
 
 def label(lab):
-    """pueue 标签 → (实验名, 做了什么, 任务的简称（E.short，如 "f1"）或 None)；中间步骤 → None。分析计划里的分析 → ("分析", "C3 问题", None)，
-    别的一次性任务 → ("其他", 标签, None)。"""
-    global _plan
+    """pueue 标签 → (实验名, 做了什么, 任务的简称（E.short，如 "f1"）或 None)；中间步骤 → None。实验表最后一起做的步骤（没有后半）
+    → ("所有实验", 步骤, None)；有标题的分析 → ("分析", "编号 标题", None)，别的一次性任务 → ("其他", 标签, None)。"""
     step, _, who = lab.partition(":")
     if not who:
-        return ("所有实验", "对比表", None) if step == "compare_all" else ("其他", lab, None)
+        return ("所有实验", step_name(step), None) if final_step(step) else ("其他", lab, None)
     if step in QUIET:
         return None
     if not known_step(step):
-        m = re.match(r"([A-Z]\d+)(_|$)", who)
-        if _plan is None:
-            _plan = plan_items()
-        return ("分析", f"{m.group(1)} {_plan[m.group(1)]}", None) if m and m.group(1) in _plan else ("其他", lab, None)
+        what = plan_of(who)
+        return ("分析", what, None) if what else ("其他", lab, None)
     e, t = E.parse_label(who)
     if not e:
         return ("其他", lab, None)
@@ -106,7 +122,7 @@ def task(lab):
     """pueue 标签 → 一句话（问题推送用，中间步骤也说）。"""
     step, _, who = lab.partition(":")
     if step == "train":
-        return f"{fold(who)} 的训练"
+        return f"{key_name(who)} 的训练"
     if step in QUIET:
         e, t = E.parse_label(who)
         if not e:
@@ -122,7 +138,7 @@ def task(lab):
     if lab.startswith(proto.WORKER_LABEL):
         return f"worker {who}"
     if who and known_step(step):
-        return f"{fold(who)} 的{step_name(step)}" if fold(who) != who else f"{step_name(step)}任务 {who}"
+        return f"{key_name(who)} 的{step_name(step)}" if key_name(who) != who else f"{step_name(step)}任务 {who}"
     return f"一次性任务 {lab}"
 
 
@@ -138,7 +154,7 @@ def _cat(*parts):
 
 def _who(key):
     if "/" in key:
-        return fold(key)
+        return key_name(key)
     e = E.experiment(key)
     return exp_name(e) if e else ("所有实验" if key == "all" else key)
 
@@ -155,12 +171,13 @@ def problem(pid, p):
         if kind == "unread" and "n" in d:
             return f"{L(part[1])} 上 {d['n']} 个任务的文件读不动（多半是那边的存储挂住），这些任务先不分出去，别的照常。"
         if kind == "stuck" and d:
-            what = fold(d["key"]) if d.get("key") else "一个训练"
+            what = key_name(d["key"]) if d.get("key") else "一个训练"
             return f"{L(part[1])} 上 {what} 90 分钟没有进展，可能卡住了，GPU 白占着。"
         if kind == "tqblocked":
             key = d.get("key") or pid[len("tqblocked:"):]
-            step = {"infer": "推理", "eval": "评测"}.get(key.split("/")[0], "任务")
-            return f"{fold(key)} 的{step}在等的前一步失败了（或不在队列里），不会自己开始。"
+            step = key.split("/")[0]
+            step = step_name(step) if "/" in key and known_step(step) else "任务"
+            return f"{key_name(key)} 的{step}在等的前一步失败了（或不在队列里），不会自己开始。"
         if kind == "taskq":
             return f"读不到 {L(part[1])} 的任务队列，看不到那边的训练情况。"
         if kind == "pueued":
@@ -173,8 +190,8 @@ def problem(pid, p):
         if kind == "dup":
             key = d.get("key") or pid[len("dup:"):]
             if p.get("level") == "urgent":
-                return f"{fold(key)} 同时在两处训练，存档会互相覆盖，要尽快停掉一边。"
-            return f"{fold(key)} 在两处排着，要取消一边，不然会重复训练。"
+                return f"{key_name(key)} 同时在两处训练，存档会互相覆盖，要尽快停掉一边。"
+            return f"{key_name(key)} 在两处排着，要取消一边，不然会重复训练。"
         if kind == "disk":
             what = f"{L(part[1])} {d['path']} 只剩 {d['free_gb']:.0f} GB" if "free_gb" in d else msg
             return f"{what}，盘满了训练和存档会失败。"
@@ -182,12 +199,10 @@ def problem(pid, p):
             return f"{L(part[1])} 的 GPU 使用记录停了（不影响训练）。"
         if kind == "boot":
             return f"{L(part[1])} {(d.get('time') or pid.split(':', 2)[2])[5:16]} 重启过，被打断的任务已自动放回队列，要确认训练接上了。"
-        if kind == "board" and "n" in d:
-            return f"看板有新结果，要确认后才发布（{d['n']} 个文件）。"
         if kind == "advance" and part[1] == "policy":
             return f"训完以后的步骤停了，一个都不排：{msg.split('。训完以后')[0]}。改好、提交推送后下一次检查自动恢复。"
         if kind == "advance" and part[1] == "error":
-            return "自动调度脚本出错了：训完的任务不会自动推理、评测。"
+            return "自动调度脚本出错了：训完的任务不会自动排后续步骤。"
         if kind == "site":  # 执行机（relay.py，10/31）：site:<机器>:<类>[:<key>]
             site, sub, key = L(part[1]), part[2], ":".join(part[3:])
             if sub == "down":
@@ -206,16 +221,16 @@ def problem(pid, p):
                 return f"{site} 3 小时内训练失败太多次，暂停领新任务。"
             if sub == "fail" and "progress" in d:
                 if d["progress"]:
-                    return f"{site} 上 {fold(key)} 训练失败了，有进度，要决定接着训还是放弃。"
-                return f"{site} 上 {fold(key)} 的任务出了问题，不会开始训练。"
+                    return f"{site} 上 {key_name(key)} 训练失败了，有进度，要决定接着训还是放弃。"
+                return f"{site} 上 {key_name(key)} 的任务出了问题，不会开始训练。"
             if sub == "orphan" and "unknown" in d:
                 if d["unknown"]:
                     return f"{site} 的队列里有一个认不出来的任务。"
-                return f"{site} 在训 {fold(key)}，但总队列里没分给它，可能重复训练。"
+                return f"{site} 在训 {key_name(key)}，但总队列里没分给它，可能重复训练。"
         if kind == "relayadd":
-            return f"box 上没排上 {fold(d.get('key', ''))} 的{dict(relay_stage='传数据', relay_fetch='拉回', relay_archive='归档', env_build='建环境').get(d.get('step'), '下一步')}，{L(part[1])} 那边会等着，下次检查重试。"
+            return f"{L(M.hub())} 上没排上 {key_name(d.get('key', ''))} 的{dict(relay_stage='传数据', relay_fetch='拉回', relay_archive='归档', env_build='建环境').get(d.get('step'), '下一步')}，{L(part[1])} 那边会等着，下次检查重试。"
         if kind == "bundlegate":
-            return f"{L(part[1])} 在用的代码包跑不了 {fold(d.get('key', ''))} 的任务说明，先不送过去，那边换了新包后自动再送。"
+            return f"{L(part[1])} 在用的代码包跑不了 {key_name(d.get('key', ''))} 的任务说明，先不送过去，那边换了新包后自动再送。"
         if kind == "smoke":
             k = (d.get("kind") or "").split("|")
             what = " ".join([k[0]] + [x.split("=", 1)[1] for x in k[1:] if "=" in x and not x.startswith("env=")])

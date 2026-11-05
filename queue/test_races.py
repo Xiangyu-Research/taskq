@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""并发和中途失败（11/3）：锁的抢占、box 的 pueue 读不到时 relay 只续约、GC 和 stage 抢 pin。
+"""并发和中途失败（11/3）：锁的抢占、hub 的 pueue 读不到时 relay 只续约、GC 和 stage 抢 pin。
 跑法：python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
 全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
 import json
@@ -128,10 +128,10 @@ def _lock_noowner(base):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _plan_with_box_error(mt, rt):
+def _plan_with_hub_error(mt, rt):
     K = "D1_x/tr/0"
     S = TR.S0([TR.mtask(K, mt)])
-    S["pueue"] = {M.hub(): {"error": "pueue 没有响应"}}  # health.gather：qs --json 失败或 box 的 pueue 读不到时就是这样
+    S["pueue"] = {M.hub(): {"error": "pueue 没有响应"}}  # health.gather：qs --json 失败或 hub 的 pueue 读不到时就是这样
     RS = dict(taskq=dict(tasks=[TR.rtask(K, rt)], paused=False), tasks={}, free=500e9)
     old_lookup, old_down = RT.lookup, C.backup_down
     RT.lookup = lambda k: dict(archive=True)
@@ -143,20 +143,20 @@ def _plan_with_box_error(mt, rt):
 
 
 def test_relay_err_release():
-    """box 的 pueue 读不到（s["pueue"]["box"] = {"error": …}，s["ok"]["box"] 仍是 True）：要归档的折总队列显示训完 →
+    """hub 的 pueue 读不到（s["pueue"]["hub"] = {"error": …}，s["ok"]["hub"] 仍是 True）：要归档的折总队列显示训完 →
     应当只续约、等下次；现在当成"从来没拉回过、不用归档"，删那边的结果并交还，归档永远不排。"""
-    K, (acts, stuck) = _plan_with_box_error("done", "done")
-    assert "release" not in [a["op"] for a in acts], f"box 的 pueue 读不到时交还了要归档的折：{TR.ops(acts)}，{acts}"
+    K, (acts, stuck) = _plan_with_hub_error("done", "done")
+    assert "release" not in [a["op"] for a in acts], f"hub 的 pueue 读不到时交还了要归档的折：{TR.ops(acts)}，{acts}"
 
 
 def test_relay_err_fetch():
-    """box 的 pueue 读不到：那边训完、box 上已有一个拉回在跑（读不到而已）→ 不应再排一个拉回；现在排 fetch。"""
-    K, (acts, stuck) = _plan_with_box_error("claimed", "done")
-    assert "fetch" not in [a["op"] for a in acts], f"box 的 pueue 读不到时又排了拉回：{TR.ops(acts)}"
+    """hub 的 pueue 读不到：那边训完、hub 上已有一个拉回在跑（读不到而已）→ 不应再排一个拉回；现在排 fetch。"""
+    K, (acts, stuck) = _plan_with_hub_error("claimed", "done")
+    assert "fetch" not in [a["op"] for a in acts], f"hub 的 pueue 读不到时又排了拉回：{TR.ops(acts)}"
 
 
 def test_gc_pin():
-    """GC 读完 pins 以后 stage 才写 pin（stage 在 box 的 pueue wait 组里跑，和健康检查里的 GC 并行）：
+    """GC 读完 pins 以后 stage 才写 pin（stage 在 hub 的 pueue wait 组里跑，和健康检查里的 GC 并行）：
     stage 的 MISSING_PY 已认为这个 blob 在、不再传，GC 照样删掉它 → 建视图时缺 blob。"""
     R = os.path.join(TMP, "gcroot")
     h = "ab" + "0" * 62

@@ -58,6 +58,7 @@ def code_lines(p):
 # proto 里的名字 → 在别处手写算违规的写法
 LITERALS = {
     "phd_stage_": r"phd_stage_",
+    "taskq_stage_": r"taskq_stage_",
     "/tmp/gpu_pad_": r"/tmp/gpu_pad_",
     "@@JSON": r"@@JSON",
     "gpu_pad_DISABLED": r"gpu_pad_DISABLED",
@@ -100,7 +101,7 @@ class ProtoAlone(unittest.TestCase):
         now = 10_000.0
         self.assertTrue(proto.claim_alive(None, now - 60, now))
         self.assertFalse(proto.claim_alive(None, now - proto.HALF_CLAIM - 1, now))
-        self.assertTrue(proto.claim_alive({"assigned": "lab1", "beat": 0}, 0, now))
+        self.assertTrue(proto.claim_alive({"assigned": "site-pueue", "beat": 0}, 0, now))
         self.assertTrue(proto.claim_alive({"beat": now - 60}, 0, now))
         self.assertFalse(proto.claim_alive({"beat": now - proto.STALE_BEAT - 1}, 0, now))
         self.assertTrue(proto.claim_alive({"beat": 0}, 0, now, log_age=60))

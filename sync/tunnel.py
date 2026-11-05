@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""box 和别的机器之间经 box 的 Cloudflare 隧道传大批文件（2026-10-26），两个方向的连接都由那边发起，那边不开服务：
-  push：那边从 box 的文件服务下载（DICC 上 1 GB 以上的在 CPU 节点上下载，见 envs/machines.py 的 transfer_job）
-  pull：那边按 90 MB 一块上传到 box 的文件服务（Cloudflare 一次请求最多 100 MB）
+"""hub 和别的机器之间经 hub 的 Cloudflare 隧道传大批文件（2026-10-26），两个方向的连接都由那边发起，那边不开服务：
+  push：那边从 hub 的文件服务下载（Slurm 执行机上大文件可以在 CPU 节点上下载，见机器表的 transfer_job）
+  pull：那边按 90 MB 一块上传到 hub 的文件服务（Cloudflare 一次请求最多 100 MB）
 同一台机器的传输一个接一个，不同机器的同时传，共用一个文件服务进程（11/5）。
 在哪里收发、地址见 queue/README.md 的“传输”一条。
 
   taskq tunnel rsync <rsync 的参数> <源> <目标>  rsync 的替身：先把要传的文件经隧道传到目标旁边的暂存目录，再照原样跑 rsync
                                                 （加 --link-dest，对上的文件不再经 ssh 传），最后删暂存目录
-  taskq tunnel push <机器> <box 上的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
-  taskq tunnel pull <机器> <那边的源目录> <box 上的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
+  taskq tunnel push <机器> <hub 上的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
+  taskq tunnel pull <机器> <那边的源目录> <hub 上的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
 """
 import fcntl
 import hashlib
@@ -84,7 +84,7 @@ def md5_of(path):
     return h.hexdigest()
 
 
-# ---------------- box 上的服务 ----------------
+# ---------------- hub 上的服务 ----------------
 # 所有传输共用 bind 上的一个文件服务进程（_serve，11/5）：第一个要用的传输起它，挂了下一个要用的再起，没有会话空闲 IDLE 秒后退出。
 # 每次传输是一个会话：<服务文件夹>/<token>.json 放清单、src / dst、传输进程的 pid（服务按 pid 清掉没人要的会话），
 # 服务记下的进度（传了多少字节、发出的文件的 MD5、收到的文件对不对）追加到 <token>.out，传输进程从那里读。
@@ -340,7 +340,7 @@ class Session:
                              cwd=self.dir, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
 
     def open(self, quick=False):
-        """→ 那边用的地址。quick：用临时地址（envs/machines.py 里 hub 的 quick、RELAY 的 quick_tunnel），不用 box 的固定地址。"""
+        """→ 那边用的地址。quick：用临时地址（机器表里 hub 的 quick、RELAY 的 quick_tunnel），不用 hub 的固定地址。"""
         quick = quick and "TUNNEL_URL" not in os.environ
         for attempt in range(3 if quick else 1):
             self.ensure()
@@ -390,7 +390,7 @@ class Session:
 
 def relay_of(host, site=None):
     """执行机（送去的脚本换名、不带注释，工作目录在根目录下）→ 它的条目；不是 → None。
-    site：执行机的名字，按名字查（几台执行机的 ssh 可以相同，如 lab1、lab0，11/4）；不给时按 ssh 名字找第一台。"""
+    site：执行机的名字，按名字查（几台执行机的 ssh 可以相同，如同一台主机上的两张卡，11/4）；不给时按 ssh 名字找第一台。"""
     if site is not None:
         return machines().RELAY.get(site)
     return next((m for m in machines().RELAY.values() if m.get("ssh") == host), None)
@@ -416,7 +416,7 @@ def lock_path(host=None):
 
 
 def take_lock(host):
-    """同一台机器（按 ssh 名字：lab1、lab0 是同一台）的传输一个接一个，不同机器的同时传（11/1 定）。
+    """同一台机器（按 ssh 名字：ssh 相同的几台执行机算同一台）的传输一个接一个，不同机器的同时传（11/1 定）。
     全局的锁只拿共享的，旧版本（拿全局独占锁）的传输在跑时等它。"""
     held = []
     for path, mode, why in ((lock_path(host), fcntl.LOCK_EX, f"{host} 的另一个隧道传输在跑"), (lock_path(), fcntl.LOCK_SH, "旧版本的隧道传输在跑")):
@@ -509,7 +509,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
 
 
 def push(host, src, dst, rels, site=None):
-    """box 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
+    """hub 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
     返回最后还对不上、已删掉的文件。site：执行机的名字（relay_of）。"""
     files = {}
     for r in rels:
@@ -552,7 +552,7 @@ def push(host, src, dst, rels, site=None):
 
 
 def pull(host, src, dst, items, site=None):
-    """那边的 src/<rel> → box 的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
+    """那边的 src/<rel> → hub 的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
     os.makedirs(dst, exist_ok=True)
@@ -712,7 +712,7 @@ def remote_send(plan):
                         break
             q = urllib.parse.urlencode(dict(md5="0" * 32 if rel == bad else h.hexdigest(), mtime=st.st_mtime_ns, mode=st.st_mode & 0o7777))
             if req("POST", urllib.parse.quote(rel) + "?" + q)[0] != 200:
-                raise IOError("box 上的校验和对不上")
+                raise IOError("hub 上的校验和对不上")
         except Exception as e:
             print(f"失败 {rel}：{e}", flush=True)
 

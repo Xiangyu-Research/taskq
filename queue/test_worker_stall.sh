@@ -7,14 +7,14 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc   # 本机当队列所在的机器（不转发到真的 DICC）
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=slurm-login   # 本机当队列所在的机器（不转发到真的 Slurm）
 source "$HERE/testdata/worker_harness.sh"
 reset
 table << EOT
 t/a base
 t/b base
 EOT
-(WORKER_ID=lab-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/a timeout 40 bash "$HERE/dicc_worker.sh") > "$T/w.out" 2>&1
+(WORKER_ID=pueue-host-test TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/a timeout 40 bash "$HERE/dicc_worker.sh") > "$T/w.out" 2>&1
 check "pueue worker：卡住的 t/a 被停掉、交还" 'grep -q "t/a 的日志和结果文件夹 .*当作卡住" $T/w.out && grep -q "^term t/a" $T/train.log'
 check "pueue worker：卡住后接着训 t/b" 'grep -q "end .* t/b" $T/train.log'
 check "第一次卡住：只交还，不记失败" '[[ ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "^当作卡住" $TASKQ_DATA/logs/tasks/t__a__*_part1.log'
@@ -26,7 +26,7 @@ t/z base
 t/b base
 EOT
 mkdir -p "$T/binz"; printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"   # 会话级的强制停不起作用
-(WORKER_ID=lab-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
+(WORKER_ID=pueue-host-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
   FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/wz.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^end .* t/b" $T/train.log'
@@ -43,7 +43,7 @@ reset
 table << EOT
 t/z base
 EOT
-(WORKER_ID=lab-z2 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/z timeout 40 bash "$HERE/dicc_worker.sh") > "$T/wz2.out" 2>&1
+(WORKER_ID=pueue-host-z2 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/z timeout 40 bash "$HERE/dicc_worker.sh") > "$T/wz2.out" 2>&1
 check "第 2 次卡住：记一次失败" 'grep -q "一周内第 2 次卡住，记一次失败" $T/wz2.out && grep -q "卡住（一周内第 2 次）" $TASKQ_DIR/failures/t__z'
 
 # 心跳时领取已经不是自己的（11/4）：停掉训练，不交还、不记失败
@@ -51,7 +51,7 @@ reset
 table << EOT
 t/l base
 EOT
-(WORKER_ID=lab-l TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_BEAT=1 FAKE_SECS=30 exec bash "$HERE/dicc_worker.sh") > "$T/wl.out" 2>&1 &
+(WORKER_ID=pueue-host-l TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_BEAT=1 FAKE_SECS=30 exec bash "$HERE/dicc_worker.sh") > "$T/wl.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/l" $T/train.log'
 python3 -c 'import json, sys; p = sys.argv[1]; c = json.load(open(p)); c["worker"] = "other"; json.dump(c, open(p, "w"))' "$TASKQ_DIR/claims/t__l/info"

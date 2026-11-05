@@ -168,7 +168,7 @@ def infer_setup():
     return S.resolve("command", dict(key=f"infer/{DS}/{TD}/frag_0", env="base",
                                      cmd=f"bash {INFER_SH} {{data}}/{model} 0",
                                      out=f"preds/{DS}/{TD}/frag_0", done=[".infer_done"], relay="toy_infer",
-                                     machines=["lab1"], after=[f"{DS}/V_save/0"]))
+                                     machines=["site-pueue"], after=[f"{DS}/V_save/0"]))
 
 
 def fake_pred(src, sp):
@@ -188,7 +188,7 @@ def fake_pred(src, sp):
 
 
 def test_infer_needs():
-    """真跑一次 --stage needs（模型还不在 box 上也能列）。"""
+    """真跑一次 --stage needs（模型还不在 hub 上也能列）。"""
     q = dict(key="infer/x", env="base", cmd=f"bash {INFER_SH} {{data}}/results/D9_X/T__P__c 0",
              out="preds/D9_X/T__P__c/frag_0", done=[".infer_done"], relay="toy_infer", vars=dict(SKIP_EXT="", ONLY_EXT="G-A"))
     sp = S.resolve("command", dict(q, inputs_cmd=f"bash {QR}/testdata/bin/step.sh --stage needs:infer {{data}}/results/D9_X/T__P__c 0"))
@@ -219,7 +219,7 @@ def test_infer():
     out = fake_pred(src, sp)
     written = N.import_(sp, src, os.path.join(TMP, "infer_dst"), ROOT)
     assert f"{sp['out']}/MANIFEST.json" in written and f"{sp['out']}/C-x/C-010.prob" in written, written
-    ok("推理拉回：各测试集样本齐、和 box 上的输入一致，存档的 sha256 对得上，原样放回")
+    ok("推理拉回：各测试集样本齐、和 hub 上的输入一致，存档的 sha256 对得上，原样放回")
 
     def bad(why, has, change, undo):
         change()
@@ -253,7 +253,7 @@ def test_infer():
 
 # ---------------- 通用的 path ----------------
 def path_setup():
-    """box 上：一个输入文件夹（含指向别处的软链接）、一个输入文件、glob、box 数据目录外的绝对路径。→ 任务说明。"""
+    """hub 上：一个输入文件夹（含指向别处的软链接）、一个输入文件、glob、hub 数据目录外的绝对路径。→ 任务说明。"""
     base = os.path.join(ROOT, "proj", "inputs", "cohortA")
     wb(os.path.join(base, "a", "x_0000.dat"), b"xa")
     wb(os.path.join(ROOT, "elsewhere", "y.dat"), b"yy")
@@ -269,7 +269,7 @@ def path_setup():
            f"--ref2 {ext}x --in2 {ROOT}/proj/inputs/cohortA --out {{data}}/{out}")
     return S.resolve("command", dict(key="probe/thing_run1", cmd=cmd, env="base", out=out, done=[".done", "a.csv|b.csv"],
                                      data=["proj/inputs/cohortA", "proj/lists/cases.txt", "raw/Set/*/*-seg.dat", ext],
-                                     relay="path", machines=["lab1"], vars=dict(REF=ext),
+                                     relay="path", machines=["site-pueue"], vars=dict(REF=ext),
                                      fetch=dict(exclude=[], extra=["*.json"], also=["proj/analysis/thing/shared"])))
 
 

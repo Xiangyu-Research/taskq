@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sync/tunnel.py 的测试：在本机模拟"那边"（假的 ssh 在本地 HOME 下跑命令），服务开在 127.0.0.1。在 box 上跑。"""
+"""sync/tunnel.py 的测试：在本机模拟"那边"（假的 ssh 在本地 HOME 下跑命令），服务开在 127.0.0.1。在 hub 上跑。"""
 import atexit
 import os
 import shutil
@@ -40,7 +40,7 @@ def cleanup():  # 测试中途出错也停掉本次起的服务、删临时目�
 
 atexit.register(cleanup)
 HOME = os.path.join(T, "home")
-RWD = os.path.join(HOME, ".cache/phd/tunnel")  # 那边（plainhost）的工作目录
+RWD = os.path.join(HOME, ".cache/taskq/tunnel")  # 那边（plainhost）的工作目录
 os.makedirs(HOME)
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
@@ -96,7 +96,7 @@ def tree(root):
 
 FILES = {"a/x.bin": 2_500_000, "a/b/y.bin": 10, "z.bin": 0, "top.pth": 300_000}
 
-# push：box → "那边"
+# push：hub → "那边"
 src = os.path.join(T, "src")
 make(src, FILES)
 os.chmod(os.path.join(src, "a/b/y.bin"), 0o600)
@@ -126,7 +126,7 @@ shutil.rmtree(dst)
 r = run("push", HOST, src, "st/pushed", lst, env=dict(ENV, TUNNEL_MIN_JOB="1"))
 ok("push 要在计算节点下载、srun 不能用：退回登录节点，一致", r.returncode == 0 and same(src, dst, FILES))
 
-# pull："那边" → box，分块（1 MB 一块，2.5 MB 的文件 3 块）
+# pull："那边" → hub，分块（1 MB 一块，2.5 MB 的文件 3 块）
 rsrc = os.path.join(HOME, "st/remote")
 make(rsrc, FILES)
 items = os.path.join(T, "items")
@@ -139,7 +139,7 @@ ok("pull 没有留下 .tunnelpart", not any(p.endswith(".tunnelpart") for p in t
 
 shutil.rmtree(pdst)
 r = run("pull", HOST, "st/remote", pdst, items, env=dict(ENV, TUNNEL_TEST_BADMD5="a/x.bin"))
-ok("pull 校验和对不上：补传 3 轮还不对 → 退出码 1，box 上没有那个文件、也没有半份", r.returncode == 1
+ok("pull 校验和对不上：补传 3 轮还不对 → 退出码 1，hub 上没有那个文件、也没有半份", r.returncode == 1
    and tree(pdst) == sorted(f for f in FILES if f != "a/x.bin") and "补传 1 个缺的文件（第 3 轮）" in r.stdout)
 
 shutil.rmtree(pdst)
@@ -184,7 +184,7 @@ ok("会话的文件删了", not [f for f in os.listdir(SRV) if f.endswith((".jso
 big = {"frag/check/c1.prob": 1_500_000, "frag/check/c2.prob": 700_000, "frag/final.ckpt": 400_000, "frag/plans.json": 50}
 rs = os.path.join(HOME, "st/res")
 make(rs, big)
-loc = os.path.join(T, "box/res/frag")
+loc = os.path.join(T, "hub/res/frag")
 r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "plainhost:st/res/frag/", loc + "/")
 inner = [f for f in big if f.count("/") > 1]
 ok("替身拉回第一遍（不带最上层的文件）：子文件夹齐了、标志文件 final.ckpt 没到", r.returncode == 0
@@ -198,7 +198,7 @@ shutil.rmtree(loc)
 r = run("rsync", "-rlt", "--partial", "plainhost:st/res/frag/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="check/c1.prob"))
 ok("替身拉回：隧道传坏的文件由 rsync 经 ssh 补上", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
 
-bsrc = os.path.join(T, "box/arch/frag")
+bsrc = os.path.join(T, "hub/arch/frag")
 make(bsrc, {k[5:]: v for k, v in big.items()})
 r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "plainhost:~/st/arch/frag/")
 rdst = os.path.join(HOME, "st/arch/frag")
@@ -208,8 +208,8 @@ ok("替身推送：那边的暂存目录删了", not [d for d in os.listdir(os.p
 
 r = run("rsync", "-rltR", bsrc + "/./final.ckpt", "plainhost:st/arch3/")
 ok("带 -R：直接 rsync", r.returncode == 0 and "经隧道" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/final.ckpt")))
-r = run("rsync", "-rlt", "fake-lab:x/", os.path.join(T, "lab/"))
-ok("不走隧道的机器（lab）：直接 rsync", "经隧道" not in r.stdout)
+r = run("rsync", "-rlt", "fake-pueue-host:x/", os.path.join(T, "pueue-host/"))
+ok("不走隧道的机器（pueue-host）：直接 rsync", "经隧道" not in r.stdout)
 
 wd, fbin = os.path.join(T, "wd"), os.path.join(T, "fbin")
 os.makedirs(wd)
@@ -226,10 +226,10 @@ ok("状态：查完 done 之后、查进程之前刚写完 done 退出 → done�
 
 sys.path.insert(0, HERE)
 import tunnel  # noqa: E402
-ok("执行机按名字查（lab1、lab0 的 ssh 相同）：给 site 时拿到那一台；不给时按 ssh 找第一台；不是执行机 → None",
-   tunnel.relay_of("fake-lab", site="lab0") is tunnel.machines().RELAY["lab0"]
-   and tunnel.relay_of("fake-lab", site="lab1") is tunnel.machines().RELAY["lab1"]
-   and tunnel.relay_of("fake-lab") is not None and tunnel.relay_of(HOST) is None)
+ok("执行机按名字查（site-pueue、site-pueue2 的 ssh 相同）：给 site 时拿到那一台；不给时按 ssh 找第一台；不是执行机 → None",
+   tunnel.relay_of("fake-pueue-host", site="site-pueue2") is tunnel.machines().RELAY["site-pueue2"]
+   and tunnel.relay_of("fake-pueue-host", site="site-pueue") is tunnel.machines().RELAY["site-pueue"]
+   and tunnel.relay_of("fake-pueue-host") is not None and tunnel.relay_of(HOST) is None)
 
 # 不同机器同时传、同一台排队、服务挂了照常（假的 ssh 每条命令慢 0.5 秒，一次传输要几秒）
 SLOW = dict(ENV, TUNNEL_TEST_SSH_SLEEP="0.5")

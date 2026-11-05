@@ -1,4 +1,4 @@
-"""pueue 类执行机（SITES 里 scheduler="pueue"，如 lab1、lab0）的适配器（2026-10-31）：读 worker 所在组的任务、开常驻 worker。
+"""pueue 类执行机（SITES 里 scheduler="pueue" 的）的适配器（2026-10-31）：读 worker 所在组的任务、开常驻 worker。
 和 slurm.py 对应：读状态 → 调用方定开不开（queue/relay.py 的 topup）→ start_worker 开。
 pueue 的原始输出由那边的状态脚本一次读回（relay_remote.py 的 STATUS_PY），这里只解析。"""
 import json
@@ -36,7 +36,7 @@ def parse(raw, group):
 
 
 def workers(name, jobs, kind="gpu"):
-    """跑 kind 任务的 worker（标签 worker:<id>，envs/machines.py 的 worker_of），按任务号排。"""
+    """跑 kind 任务的 worker（标签 worker:<id>，mtab.py 的 worker_of），按任务号排。"""
     w = M.worker_of(name, kind)
     return [j for j in jobs or [] if j[1] == f"{proto.WORKER_LABEL}{w['id']}"]
 

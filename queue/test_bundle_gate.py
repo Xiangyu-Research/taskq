@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """bundle_gate.py 的测试（11/5）：从工作区和旧提交建代码包，拿总队列现在会送的说明（testdata 的实验表、command 做法）过闸门：
-跑得了的放行，跑不了的挡下；box 上没有那个包、不知道包时放行；超时放行、不记着；relay.plan / fill 挡下、记 held、报 bundlegate，
+跑得了的放行，跑不了的挡下；hub 上没有那个包、不知道包时放行；超时放行、不记着；relay.plan / fill 挡下、记 held、报 bundlegate，
 包换了再送。临时目录在 ~/.cache/taskq-test/ 下，跑完删掉。浅克隆里没有旧提交时跳过旧包那几项。
     python3 queue/test_bundle_gate.py
 """
@@ -52,8 +52,19 @@ def have(commit):
     return subprocess.run(["git", "-C", CORE, "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode == 0
 
 
+def slurm_site(commit):
+    """那个提交的机器表里第一台 Slurm 的 relay 执行机（测试用的机器名 11/5 改过，旧提交里叫别的）。"""
+    ns = {"__name__": "relay_machines"}
+    exec(compile(RB.read_machines(commit), "machines.py", "exec"), ns)
+    return next(n for n, v in (ns.get("RELAY") or {}).items() if v["scheduler"] == "slurm")
+
+
 def build(commit=None):
-    return RB.build(NAME, commit, root=os.path.join(TMP, "root"), core=commit or RB.CORE_REF)[0]
+    name = slurm_site(commit) if commit else NAME
+    bid, path = RB.build(name, commit, root=os.path.join(TMP, "root"), core=commit or RB.CORE_REF)
+    if commit and not os.path.exists(os.path.join(path, "envs")):  # 11/4 的核心只认 <仓库>/envs（没有 .taskq.toml 的配置文件夹）
+        os.symlink(RB.conf_rel() or ".", os.path.join(path, "envs"))
+    return bid
 
 
 def test_check(new, old):
@@ -85,7 +96,7 @@ def test_pass_through(new):
     assert BG.in_use(NAME, None, None) == [] and BG.in_use(NAME, "a", ["b", "a", ""]) == ["a", "b"]
     if PNAME:
         assert BG.in_use(PNAME, "a", ["b"]) == ["a"]
-    ok("不知道包、box 上没有那个包、没有说明 → 放行；Slurm 的看 current 和在跑的 worker 的包，pueue 的只看 current")
+    ok("不知道包、hub 上没有那个包、没有说明 → 放行；Slurm 的看 current 和在跑的 worker 的包，pueue 的只看 current")
 
 
 def test_cache_timeout(new):
@@ -111,7 +122,7 @@ def test_cache_timeout(new):
     err = BG.check(CMD, "f" * 16)
     assert err and "退出 3" in err, err
     assert BG.main(["0" * 16]) == 0
-    ok("跑超时 → 放行、不记着（下次再跑）；退出码不对 → 挡下；命令行：box 上没有的包放行")
+    ok("跑超时 → 放行、不记着（下次再跑）；退出码不对 → 挡下；命令行：hub 上没有的包放行")
 
 
 def test_current():

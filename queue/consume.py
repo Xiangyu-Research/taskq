@@ -200,7 +200,7 @@ class Worker:
                 if s:
                     s(self)
         if not self.W:
-            print("要设 WORKER_ID（envs/machines.py 的 worker）", file=sys.stderr)
+            print("要设 WORKER_ID（配置文件夹里 machines.py 的 worker）", file=sys.stderr)
             sys.exit(1)
         if self.slots is None or self.device == "cpu":
             self.slots = 1
@@ -232,8 +232,8 @@ class Worker:
                 d = cfg.outputs("code_dirs")
             except Exception:  # noqa: BLE001
                 d = None
-            d = [d] if isinstance(d, str) else list(d or ["scripts/queue"])
-            if subprocess.run(["git", "-C", self.repo, "diff", "--quiet", "HEAD", "--", *d],
+            d = [d] if isinstance(d, str) else list(d or [])
+            if d and subprocess.run(["git", "-C", self.repo, "diff", "--quiet", "HEAD", "--", *d],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
                 c += "+改动"
             return c

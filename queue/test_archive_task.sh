@@ -1,5 +1,5 @@
 #!/bin/bash
-# archive_task.sh 的测试（2026-11-03）：box、备份机都是临时目录，假 ssh 在本机跑，机器表里不走隧道，不连网。
+# archive_task.sh 的测试（2026-11-03）：hub、备份机都是临时目录，假 ssh 在本机跑，机器表里不走隧道，不连网。
 #   bash queue/test_archive_task.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -18,8 +18,8 @@ p = f"{t}/config/machines.py"
 s = open(p).read()
 inj = f"""
 import socket
-MACHINES["box"].update(hostname=re.escape(socket.gethostname().split(".")[0]), data={t + '/box'!r})
-MACHINES["dicc"].update(ssh="t-backup", data={t + '/bk'!r}, tunnel=())
+MACHINES["hub"].update(hostname=re.escape(socket.gethostname().split(".")[0]), data={t + '/hub'!r})
+MACHINES["slurm-login"].update(ssh="t-backup", data={t + '/bk'!r}, tunnel=())
 """
 open(p, "w").write(s + inj)
 EOF
@@ -43,31 +43,31 @@ fi
 exec $(command -v rsync) "\$@"
 EOF
 chmod +x "$T/bin/ssh" "$T/bin/rsync"
-export TASKQ_CONFIG=$T/config HOME=$T/home PATH=$T/bin:$PATH TASKQ_DATA=$T/box TASKQ_STATE=$T/state TASKQ_DIR=$T/taskq \
+export TASKQ_CONFIG=$T/config HOME=$T/home PATH=$T/bin:$PATH TASKQ_DATA=$T/hub TASKQ_STATE=$T/state TASKQ_DIR=$T/taskq \
        TUNNEL_URL=http://127.0.0.1:9 TUNNEL_SSH=$T/bin/ssh
 
 KEY=D101_alpha/V_save/0 OUT=results/D101_alpha/V_save__PlanM__full/frag_0 SAFE=D101_alpha__V_save__0
 GOOD=$(head -c 20000 /dev/urandom | base64)
-# 每个场景重新搭：box 上训完拉回的任务，备份机是空的
+# 每个场景重新搭：hub 上训完拉回的任务，备份机是空的
 world() {
-    rm -rf "$T/box" "$T/bk" "$T/fail"
-    mkdir -p "$T/box/$OUT/check" "$T/box/logs/tasks" "$T/bk"
-    echo '{"a": 1}' > "$T/box/$OUT/check/summary.json"
-    echo val > "$T/box/$OUT/check/val.dat"
-    echo "$GOOD" > "$T/box/$OUT/final.ckpt"
-    echo log > "$T/box/$OUT/train_log_1.txt"
-    echo plans > "$T/box/$(dirname "$OUT")/plans.json"
-    echo seg > "$T/box/logs/tasks/${SAFE}__lab-1_part1.log"
-    echo other > "$T/box/logs/tasks/${SAFE}__x__lab-1_part1.log"  # key 更长的别的任务（D101_alpha/V_save/0/x）
-    touch -d '2026-11-01 10:00' "$T/box/$OUT/final.ckpt" "$T/box/$OUT/check/val.dat"
+    rm -rf "$T/hub" "$T/bk" "$T/fail"
+    mkdir -p "$T/hub/$OUT/check" "$T/hub/logs/tasks" "$T/bk"
+    echo '{"a": 1}' > "$T/hub/$OUT/check/summary.json"
+    echo val > "$T/hub/$OUT/check/val.dat"
+    echo "$GOOD" > "$T/hub/$OUT/final.ckpt"
+    echo log > "$T/hub/$OUT/train_log_1.txt"
+    echo plans > "$T/hub/$(dirname "$OUT")/plans.json"
+    echo seg > "$T/hub/logs/tasks/${SAFE}__w-1_part1.log"
+    echo other > "$T/hub/logs/tasks/${SAFE}__x__w-1_part1.log"  # key 更长的别的任务（D101_alpha/V_save/0/x）
+    touch -d '2026-11-01 10:00' "$T/hub/$OUT/final.ckpt" "$T/hub/$OUT/check/val.dat"
 }
 half() {  # 备份机上 final.ckpt 只有半份（中断的传输留下的），别的都在
     mkdir -p "$T/bk/$OUT"
-    cp -a "$T/box/$OUT/." "$T/bk/$OUT/"
-    head -c 1000 "$T/box/$OUT/final.ckpt" > "$T/bk/$OUT/final.ckpt"
+    cp -a "$T/hub/$OUT/." "$T/bk/$OUT/"
+    head -c 1000 "$T/hub/$OUT/final.ckpt" > "$T/bk/$OUT/final.ckpt"
     touch -d '2026-11-02 10:00' "$T/bk/$OUT/final.ckpt"
 }
-A="bash $HERE/archive_task.sh box $KEY"
+A="bash $HERE/archive_task.sh hub $KEY"
 
 world
 $A --dry-run > "$T/o0" 2>&1; rc=$?
@@ -75,15 +75,15 @@ check "dry-run：退出码 0，不往备份机写" "(( rc == 0 )) && [[ -z \$(ls
 
 world
 $A > "$T/o1" 2>&1; rc=$?
-check "正常：退出码 0，备份机和 box 一样；key 更长的别的任务的分段日志不带上" "(( rc == 0 )) && diff -r '$T/box/$OUT' '$T/bk/$OUT' > /dev/null && cmp -s '$T/box/logs/tasks/${SAFE}__lab-1_part1.log' '$T/bk/logs/tasks/${SAFE}__lab-1_part1.log' && [[ -f $T/bk/results/D101_alpha/V_save__PlanM__full/plans.json && ! -e $T/bk/logs/tasks/${SAFE}__x__lab-1_part1.log ]]"
+check "正常：退出码 0，备份机和 hub 一样；key 更长的别的任务的分段日志不带上" "(( rc == 0 )) && diff -r '$T/hub/$OUT' '$T/bk/$OUT' > /dev/null && cmp -s '$T/hub/logs/tasks/${SAFE}__w-1_part1.log' '$T/bk/logs/tasks/${SAFE}__w-1_part1.log' && [[ -f $T/bk/results/D101_alpha/V_save__PlanM__full/plans.json && ! -e $T/bk/logs/tasks/${SAFE}__x__w-1_part1.log ]]"
 
 world
-bash "$HERE/archive_task.sh" lab "$KEY" > "$T/o2" 2>&1; rc=$?
-check "机器不是 box：退出 2，不往备份机写" "(( rc == 2 )) && [[ -z \$(ls -A '$T/bk') ]]"
+bash "$HERE/archive_task.sh" pueue-host "$KEY" > "$T/o2" 2>&1; rc=$?
+check "机器不是 hub：退出 2，不往备份机写" "(( rc == 2 )) && [[ -z \$(ls -A '$T/bk') ]]"
 
 world; half
 $A > "$T/o3" 2>&1; rc=$?
-check "备份机上有半份同名文件：补齐，核对一致，退出 0" "(( rc == 0 )) && cmp -s '$T/box/$OUT/final.ckpt' '$T/bk/$OUT/final.ckpt'"
+check "备份机上有半份同名文件：补齐，核对一致，退出 0" "(( rc == 0 )) && cmp -s '$T/hub/$OUT/final.ckpt' '$T/bk/$OUT/final.ckpt'"
 
 world; half; echo error > "$T/fail"
 $A > "$T/o4" 2>&1; rc=$?

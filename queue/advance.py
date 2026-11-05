@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
-"""按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由 envs/policy.py 的 PLACE 定）：box 上的健康检查
+"""按状态推进训练完以后的事（2026-10-18；10/25 起每一步在哪里做由配置文件夹里 policy.py 的 PLACE 定）：hub 上的健康检查
 （monitor/health.py，每 30 分钟）调用。每次对每个任务看文件，算出它走到了哪一步，下一步没在做就排上；只有分给执行机的任务提前排（见下）。
-步骤和判断都从实验表（research/*/experiments.py，经 queue/experiments.py 读）和任务说明（queue/spec.py）来，
+步骤和判断都从实验表（使用者的 experiments.py，经 queue/experiments.py 读）和任务说明（queue/spec.py）来，
 这里不认识具体模型。
 
-每个任务（实验表里的，加上队列里不属于任何实验的）：box 上训完（说明里的 done）以后，实验表里每个任务的步骤（如推理 → 评测），
+每个任务（实验表里的，加上队列里不属于任何实验的）：hub 上训完（说明里的 done）以后，实验表里每个任务的步骤（如推理 → 评测），
   按顺序做第一个没做完的。执行机训完的由 relay.py 拉回、归档。
-一个实验所有任务都在 box 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs = 要每个任务都做完的步骤）。
-最后：FINAL 的步骤（如所有实验的汇总比较，在 box 上）。有 rerun_if_newer 的，列出的步骤有比它开始时更新的结果、这些步骤（和同一串
+一个实验所有任务都在 hub 上训完以后：group_after 的每一串步骤，按顺序做第一个没做完的（needs = 要每个任务都做完的步骤）。
+最后：FINAL 的步骤（如所有实验的汇总比较，在 hub 上）。有 rerun_if_newer 的，列出的步骤有比它开始时更新的结果、这些步骤（和同一串
 里排在它们前面的）都没有在排 / 在跑时重跑。
 
-在哪里做（每个任务的步骤、group_after 的步骤）：已经在某处做着（box pueue 里有、任务队列里有、任务记录里有）就接着那边的；
-否则按 PLACE[步骤] 的顺序用第一个现在能用的（写法见 envs/policy.py），都用不了时写进 ~/advance.log。没写的步骤在 box 上：
-  box:<组>       hub（总队列所在的机器，不管它在机器表里叫什么；也可以写 hub:<组>）的 pueue 里排（标签 <步骤>:<实验 id>_f<fold>，
+在哪里做（每个任务的步骤、group_after 的步骤）：已经在某处做着（hub 的 pueue 里有、任务队列里有、任务记录里有）就接着那边的；
+否则按 PLACE[步骤] 的顺序用第一个现在能用的（写法见配置文件夹里的 policy.py），都用不了时写进 ~/advance.log。没写的步骤在 hub 上：
+  hub:<组>       hub（总队列所在的机器，不管它在机器表里叫什么；也可以写 <hub 的名字>:<组>）的 pueue 里排（标签 <步骤>:<实验 id>_<简称>，
                  实验一级的 <步骤>:<实验 id>）
   queue:<机器>   加进总队列（taskq.py add --recipe command，参数是步骤 queue 里的，machines = 这台，nice = queue 的 nice）。
-                 执行机（envs/machines.py 的 RELAY）由 relay.py 领到后连同输入送过去，做完由 relay.py 拉回
+                 执行机（配置文件夹里 machines.py 的 RELAY）由 relay.py 领到后连同输入送过去，做完由 relay.py 拉回
   trainer        训这个任务的执行机：总队列里这个任务分给的那台（训完还没交还的也算），就当成 queue:<那台>（10/31）。
-                 按时段的执行机（lab0）训的任务给同一台主机上不按时段的执行机（lab1）。找不到时用下一个地方。
+                 按时段的执行机训的任务给同一台主机上不按时段的执行机。找不到时用下一个地方。
   要知道每个任务的输入：命令支持 --stage needs（把 --stage <步骤> 换成 --stage needs，打印相对数据目录的输入），或者步骤的
   queue 里写了 inputs。
 
 提前排（10/25、10/31）：一个任务在总队列里分给了执行机时，每个任务的步骤里 PLACE 第一个用得上的地方是这台的任务队列的
   （trainer 也算），现在就加进总队列，任务说明的 after 接上前一步（推理 after 训练，评测 after 推理）；after 里的没做完时那个任务
   是 waiting，worker 不领，做完后训完的那个 worker 接着就能领到。没人领的任务不提前排。
-box 上排的任务做完后马上跑一次健康检查（refill.then_check → auto_refresh.sh kick），下一步不用等 30 分钟。
-失败过的不自动重排：box pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
+hub 上排的任务做完后马上跑一次健康检查（refill.then_check → 使用者的检查入口），下一步不用等 30 分钟。
+失败过的不自动重排：hub 的 pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排。
-在不在跑：box 的 pueue 任务按任务记录认（~/.cache/phd/tasks.json，queue/common.py 的 identify；这里加的任务都先记下），
-  没有记录的（手动加的）只认训练的命令。这一步的结果还在往 box 上拷（relay.py 的拉回在跑）时不算做完。
-envs/policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/advance.log，不真排；HOLD 对上的步骤在 box 上加成暂停的
+在不在跑：hub 的 pueue 任务按任务记录认（状态目录下的 tasks.json，如 ~/.cache/taskq/tasks.json，queue/common.py 的 identify；这里加的任务都先记下），
+  没有记录的（手动加的）只认训练的命令。这一步的结果还在往 hub 上拷（relay.py 的拉回在跑）时不算做完。
+policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/advance.log，不真排；HOLD 对上的步骤在 hub 上加成暂停的
   （pueue add --stashed），进任务队列的先不加。
 
     python3 queue/advance.py           看现在会排什么（不改任何东西；taskq plan 连同送任务一起看）
@@ -79,18 +79,18 @@ def python(name=None):
     return f"{M.expand(base) if not name else base}/envs/{env}/bin/python"
 
 
-# ---------------- 在哪里做（envs/policy.py 的 PLACE） ----------------
+# ---------------- 在哪里做（policy.py 的 PLACE） ----------------
 NEAR = "trainer"  # PLACE 里"源头任务所在的执行机"
-HUB_PLACES = ("box", "hub")  # PLACE 里 box:<组>（或 hub:<组>）= 总队列所在的机器（M.hub()，不管它叫什么）的 pueue 组（11/4）
+HUB_PLACES = ("hub",)  # PLACE 里 hub:<组>（或 <hub 的名字>:<组>）= 总队列所在的机器（M.hub()）的 pueue 组（11/4）
 
 
 def targets(step, group):
-    """PLACE[步骤] → [dict(text, kind=box|trainer|queue, machine, group)]；没写 → hub 的这个组。写错了 → ValueError。"""
+    """PLACE[步骤] → [dict(text, kind=hub|trainer|queue, machine, group)]；没写 → hub 的这个组。写错了 → ValueError。"""
     out = []
-    for text in P.PLACE.get(step) or [f"box:{group}"]:
+    for text in P.PLACE.get(step) or [f"hub:{group}"]:
         w = text.split()
         if len(w) != 1:
-            raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的条件 {w[1:]}")
+            raise ValueError(f"policy.py PLACE[{step!r}] 的 {text!r}：不认识的条件 {w[1:]}")
         d = dict(text=text, machine=None, group=None)
         a, _, b = w[0].partition(":")
         if w[0] == "trainer":
@@ -98,12 +98,12 @@ def targets(step, group):
         elif a == "queue" and (b == M.hub() or b in M.RELAY):
             d.update(kind="queue", machine=b)
         elif (a in HUB_PLACES or a == M.hub()) and b in M.MACHINES[M.hub()]["groups"]:
-            d.update(kind="box", machine=M.hub(), group=b)
+            d.update(kind="hub", machine=M.hub(), group=b)
         else:
             hub = M.hub()
-            raise ValueError(f"envs/policy.py PLACE[{step!r}] 的 {text!r}：不认识的地方。能写的："
+            raise ValueError(f"policy.py PLACE[{step!r}] 的 {text!r}：不认识的地方。能写的："
                              f"trainer（训练所在的执行机）、queue:<{'|'.join([hub] + sorted(M.RELAY))}>、"
-                             f"box:<{'|'.join(M.MACHINES[hub]['groups'])}>")
+                             f"hub:<{'|'.join(M.MACHINES[hub]['groups'])}>")
         out.append(d)
     return out
 
@@ -112,7 +112,7 @@ def check_policy(steps):
     """PLACE 里的步骤都认得、每个地方都写对了；不对 → ValueError。"""
     unknown = sorted(set(P.PLACE) - set(steps))
     if unknown:
-        raise ValueError(f"envs/policy.py PLACE 里有实验表里没有的步骤 {unknown}")
+        raise ValueError(f"policy.py PLACE 里有实验表里没有的步骤 {unknown}")
     for st in P.PLACE:
         targets(st, None)
 
@@ -151,7 +151,7 @@ def plan(s, root=None):
     NOTES.clear()
     SEEN.clear()
     if ptasks is None:
-        return [], {}  # box 的 pueue 读不到：这次什么都不做
+        return [], {}  # hub 的 pueue 读不到：这次什么都不做
     queue_tasks = [t for t in ((s.get("taskq") or {}).get(hub) or {}).get("tasks", []) if not proto.is_smoke(t["key"])]
     nice = {t["key"]: t["nice"] for t in queue_tasks}
     py = python()
@@ -176,7 +176,7 @@ def plan(s, root=None):
     todo, stuck = [], {}
 
     def want(step, key, label, cmd, group, n=NO_NICE):
-        """box pueue 里排（已经在排 / 在跑的不排；失败过的、成功了结果还不对的报出来）。"""
+        """hub 的 pueue 里排（已经在排 / 在跑的不排；失败过的、成功了结果还不对的报出来）。"""
         sk = (step, key)
         if sk in live:
             return
@@ -195,7 +195,7 @@ def plan(s, root=None):
     qkeys = {t["key"] for t in queue_tasks}
 
     def fetching(st, names):
-        """这一步的结果还在往 box 上拷（relay.py 的拉回）：box 上的判断（如 MANIFEST）可能先对上，拷完再算做完（10/24）。"""
+        """这一步的结果还在往 hub 上拷（relay.py 的拉回）：hub 上的判断（如 MANIFEST）可能先对上，拷完再算做完（10/24）。"""
         qd = st.get("queue")
         return bool(qd) and ("relay_fetch", S.fill(qd["key"], names, keep=())) in live
 
@@ -238,8 +238,8 @@ def plan(s, root=None):
     relay_sites = set(M.RELAY)  # relay.py 替它领任务的执行机：RELAY 全部（READY 缺项按 1，和 relay.py 同一规则，11/4）
 
     def site_of(h):
-        """训这个任务的机器 → 放后续步骤的执行机：不按时段的执行机就是它；按时段的（lab0，envs/policy.py 的 SHIFT）→ 同一台主机上
-        开着、不按时段的执行机（lab1）；没有 → None。"""
+        """训这个任务的机器 → 放后续步骤的执行机：不按时段的执行机就是它；按时段的（policy.py 的 SHIFT）→ 同一台主机上
+        开着、不按时段的执行机；没有 → None。"""
         if h in relay_sites and not shift.limited(h):
             return h
         ssh = (M.RELAY.get(h) or {}).get("ssh")
@@ -253,7 +253,7 @@ def plan(s, root=None):
         return x.get("assigned") or None
 
     def trainer_of(key):
-        """训这个任务的执行机：总队列里分给的那台（训完、box 上有了、还没交还的也算）。"""
+        """训这个任务的执行机：总队列里分给的那台（训完、hub 上有了、还没交还的也算）。"""
         h = assigned_to(key)
         if h:
             return h
@@ -327,7 +327,7 @@ def plan(s, root=None):
         todo.extend(items)
 
     def place(t, st, label, n, archiving, per_task):
-        """这一步没做完、没在往 box 上拷：接着已经在做的地方，否则按 PLACE 选一个排上。"""
+        """这一步没做完、没在往 hub 上拷：接着已经在做的地方，否则按 PLACE 选一个排上。"""
         key, names = t["key"], t["names"]
         sk = (st["name"], key)
         cmd = S.fill(st["cmd"], names, keep=())
@@ -339,9 +339,9 @@ def plan(s, root=None):
             o = S.outputs(S.fill({k: qd.get(k) for k in ("out", "done", "fetch")}, names, keep=()))
             out = os.path.join(root, o["outs"][0])
             if S.done_with(o, lambda a: os.path.exists(os.path.join(out, a)), empty=False):
-                stuck[alert_id("advance", st["name"], key)] = f"{label}：任务队列的 {qk} 做完、拉回了，但 box 上核对还是没做完（{out}）"
+                stuck[alert_id("advance", st["name"], key)] = f"{label}：任务队列的 {qk} 做完、拉回了，但 hub 上核对还是没做完（{out}）"
             return
-        if sk in done:  # box 上做过：失败的、成功了结果还不对的报出来
+        if sk in done:  # hub 上做过：失败的、成功了结果还不对的报出来
             want(st["name"], key, label, cmd, st["group"], n)
             return
         why = []
@@ -349,10 +349,10 @@ def plan(s, root=None):
             w = where(t, tg, per_task, st)
             if isinstance(w, str):
                 r = w
-            elif w["kind"] == "box":
+            elif w["kind"] == "hub":
                 want(st["name"], key, label, cmd, w["group"], n)
                 return
-            elif w.get("trainer"):  # 模型在那边：在往 box 拉回（拉回后删那边的）时不用那边
+            elif w.get("trainer"):  # 模型在那边：在往 hub 拉回（拉回后删那边的）时不用那边
                 r = f"{w['machine']} 上在拉回这个任务" if archiving else to_queue(t, st, label, n, False, w)
             else:
                 r = to_queue(t, st, label, n, archiving, w)
@@ -361,7 +361,7 @@ def plan(s, root=None):
             why.append(f"{tg['text']}：{r}")
         NOTES.append(f"{label}：现在没有能用的地方（{'；'.join(why)}）")
 
-    trained, after_ok = {}, {}  # 任务 → box 上训完没；(任务, 步骤) → 做完没
+    trained, after_ok = {}, {}  # 任务 → hub 上训完没；(任务, 步骤) → 做完没
     for t in tasks:
         key, sp, n = t["key"], t["spec"], nice.get(t["key"], NO_NICE)
         after = t["after"]
@@ -475,7 +475,7 @@ TQ_TIMEOUT = 420  # 比队列锁的最长等待（300 秒）长：等不到锁�
 
 
 def taskq_add(nice, args):
-    """加进总队列（box 上本地的 taskq.py，10/31）→ (退出码, 输出)；relay.py 再替执行机领过去。"""
+    """加进总队列（hub 上本地的 taskq.py，10/31）→ (退出码, 输出)；relay.py 再替执行机领过去。"""
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", str(nice), "--recipe", "command", *args],
                        cwd=REPO, capture_output=True, text=True, timeout=TQ_TIMEOUT)
     return r.returncode, (r.stdout + r.stderr).strip()
@@ -490,7 +490,7 @@ def taskq_remove(keys):
 
 def run(s, dry=False, q=None, tq=None, rm=None):
     """health.py 调用：→ (这次排了的说明列表（只算不排时是"会排 …"）, 卡住的 {问题编号: 说明})。
-    envs/policy.py 的 ENGINE（11/5）：advance（默认）用这里的 plan；shadow 照这里的排，另用 flow/engine.py 算一遍比较；dag 用 flow/engine.py 的。"""
+    policy.py 的 ENGINE（11/5）：advance（默认）用这里的 plan；shadow 照这里的排，另用 flow/engine.py 算一遍比较；dag 用 flow/engine.py 的。"""
     q = q or refill.q
     tq = tq or taskq_add
     mode = getattr(P, "ENGINE", "advance")
@@ -566,7 +566,7 @@ def run(s, dry=False, q=None, tq=None, rm=None):
 
 
 def wrap(cmd, label):
-    """envs/policy.py 的 AUTO["run"] 开着时，box 上的步骤由 taskq run 包一层（记台账、查没声明的写、写心跳，flow/run.py）。"""
+    """policy.py 的 AUTO["run"] 开着时，hub 上的步骤由 taskq run 包一层（记台账、查没声明的写、写心跳，flow/run.py）。"""
     if not P.AUTO.get("run"):
         return cmd
     return f"{shlex.quote(os.path.join(CORE, 'bin', 'taskq'))} run {shlex.quote(label)} -- {shlex.quote(cmd)}"

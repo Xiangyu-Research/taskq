@@ -7,7 +7,7 @@ CORE=$(cd "$HERE/.." && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=dicc
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=slurm-login
 source "$HERE/testdata/worker_harness.sh"
 unset TASKQ_GPU_PAD_BASE   # 常驻的 worker 没有显存填充
 bundle() {  # 代码包 a、b（完整的核心）；b 的 worker_start.sh 换成只打一行再转交（不碰 conda）
@@ -26,7 +26,7 @@ t/h base
 t/f base
 EOF
 bundle
-(WORKER_ID=lab-h TASKQ_SLOTS=3 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=8 FAKE_FAIL=t/f \
+(WORKER_ID=pueue-host-h TASKQ_SLOTS=3 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=8 FAKE_FAIL=t/f \
   exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/wh.out" 2>&1 &
 wpid=$!
 waitfor 30 '[[ $(grep -c "开训" $T/wh.out) == 2 ]]'
@@ -47,7 +47,7 @@ t/s2 base
 EOF
 bundle
 printf 'raise RuntimeError("坏了")\n' > "$T/code/b/scripts/taskq/queue/consumers/slurm.py"
-(WORKER_ID=lab-s TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=3 \
+(WORKER_ID=pueue-host-s TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=3 \
   exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/whs.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "开训 t/s（" $T/whs.out'
@@ -65,7 +65,7 @@ EOF
 bundle
 git -C "$CORE" show 5097cdf:queue/dicc_worker.sh > "$T/code/a/scripts/taskq/queue/dicc_worker.sh" 2> /dev/null || { echo "跳过：没有 5097cdf"; exit 77; }
 mkdir -p "$T/binz"; printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"
-(WORKER_ID=lab-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
+(WORKER_ID=pueue-host-z TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
   FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/wold.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "还有停不下来的训练" $T/wold.out'
@@ -92,15 +92,15 @@ _s.loader.exec_module(_m)
 globals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
 ' \
   "'$TASKQ_CONFIG/machines.py'" > "$T/wcfg/machines.py"
-printf '\nSHIFT = {"lab0": ("21:00", "09:00", None, None)}\n' >> "$T/wcfg/policy.py"
+printf '\nSHIFT = {"site-pueue2": ("21:00", "09:00", None, None)}\n' >> "$T/wcfg/policy.py"
 at() { python3 -c 'import datetime as dt, sys; tz = dt.timezone(dt.timedelta(hours=8)); d = dt.datetime.now(tz).date()
 print(dt.datetime.combine(d, dt.time(*map(int, sys.argv[1].split(":"))), tz).timestamp() + 86400 * int(sys.argv[2]))' "$@"; }
 at 12:00 0 > "$T/now"
 (TASKQ_CONFIG=$T/wcfg TASKQ_TEST_NOW=$T/now WORKER_ID=wd2c85f TASKQ_IDLE_POLL=1 exec bash "$HERE/dicc_worker.sh") > "$T/win0.out" 2>&1
 rc=$?
-check "时段外开的（按 WORKER_ID 反查到 lab0）：不领，退出 0" '[[ $rc == 0 ]] && grep -q "不在时段里（21:00–09:00），退出" $T/win0.out && [[ ! -s $T/train.log ]]'
+check "时段外开的（按 WORKER_ID 反查到 site-pueue2）：不领，退出 0" '[[ $rc == 0 ]] && grep -q "不在时段里（21:00–09:00），退出" $T/win0.out && [[ ! -s $T/train.log ]]'
 at 22:00 0 > "$T/now"
-(TASKQ_CONFIG=$T/wcfg TASKQ_TEST_NOW=$T/now TASKQ_SITE=lab0 WORKER_ID=w-test TASKQ_IDLE_POLL=1 FAKE_SECS=60 \
+(TASKQ_CONFIG=$T/wcfg TASKQ_TEST_NOW=$T/now TASKQ_SITE=site-pueue2 WORKER_ID=w-test TASKQ_IDLE_POLL=1 FAKE_SECS=60 \
   exec bash "$HERE/dicc_worker.sh") > "$T/win.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/w" $T/train.log'
@@ -119,7 +119,7 @@ mkdir -p "$T/bini" "$T/gpulog"
 printf '#!/bin/bash\n[[ "$*" == *compute-apps* && -e %q ]] && echo "1, 900"\nexit 0\n' "$T/busy" > "$T/bini/nvidia-smi"; chmod +x "$T/bini/nvidia-smi"
 f=$T/gpulog/$(date +gpu_%Y-%m.csv)
 echo "$(date -d '-5 min' '+%F %T'),1,50,9000,24576,someone,4242,9000,python" > "$f"
-(WORKER_ID=lab-i CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
+(WORKER_ID=pueue-host-i CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
   PATH=$T/bini:$PATH exec bash "$HERE/dicc_worker.sh") > "$T/widle.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "卡 1 空着，别人 .* 还在用，空满 60 分钟再跑（已等 0 分钟）" $T/widle.out'
@@ -158,7 +158,7 @@ rc=$?
 n=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))")
 slots=$(( n >= 24 ? 2 : 1 ))
 check "Slurm：作业号当名字，按核数和内存定同时几个，时限查不到" '[[ $rc == 0 ]] && grep -q "作业 900300 @ .*最多同时 $slots 个，CPU $n，内存 65536M.*时限 查不到，之后再查" $T/wslurm.out && grep -q "训完 t/s" $T/wslurm.out'
-check "Slurm：本地暂存目录（TASKQ_STAGE_ROOT）、TASKQ_ADMITTED 交给 run_task.sh，作业结束时删掉" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_PREFIX}900300 ]]'
+check "Slurm：本地暂存目录（TASKQ_STAGE_ROOT）、TASKQ_ADMITTED 交给 run_task.sh，作业结束时删掉" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 ]]'
 fi
 
 # plug. 使用者的插件文件夹里的 consumers.py（CONSUMERS）：钩子照样调用；admit 挡住时不领
@@ -173,7 +173,7 @@ import os
 CONSUMERS = {"demo": {"setup": lambda w: w.say("使用者的插件到了"),
                       "admit": lambda w: None if os.path.exists(os.environ["DEMO_OPEN"]) else "门关着"}}
 EOT
-(TASKQ_PLUGINS=$T/plug DEMO_OPEN=$T/open WORKER_ID=lab-p TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/dicc_worker.sh") > "$T/wplug.out" 2>&1 &
+(TASKQ_PLUGINS=$T/plug DEMO_OPEN=$T/open WORKER_ID=pueue-host-p TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/dicc_worker.sh") > "$T/wplug.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "使用者的插件到了" $T/wplug.out'
 sleep 4
@@ -214,7 +214,7 @@ assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True), var
 win = load("window")
 def broken():
     raise ImportError("坏了")
-win._shift = broken; os.environ["TASKQ_SITE"] = "lab0"; said.clear(); stops = []
+win._shift = broken; os.environ["TASKQ_SITE"] = "site-pueue2"; said.clear(); stops = []
 w = types.SimpleNamespace(say=said.append, runs={1: 1}, zomb={}, shutdown=lambda *a: stops.append(a))
 assert win.active(w) is True and "读到之前不领" in said[0], said
 assert win.admit(w) and win.admit(w).startswith("读不了时段"), win.admit(w)

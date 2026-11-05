@@ -158,7 +158,7 @@ class Beat(threading.Thread):
 
 def main(argv):
     ap = argparse.ArgumentParser(prog="taskq run", description="包一层跑 hub 上的一步：记台账、查没声明的写、写心跳")
-    ap.add_argument("inst", help="实例 id（box 上的标签）")
+    ap.add_argument("inst", help="实例 id（hub 上的标签）")
     ap.add_argument("--attempt", type=int, help="第几次（只记下）")
     if "--" in argv:
         k = argv.index("--")

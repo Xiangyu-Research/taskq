@@ -266,8 +266,16 @@ ok("iterations=2 跑两步后释放", p._steps == 2 and b.live[0] == 0)
 ok("无 CUDA_VISIBLE_DEVICES + 多卡拒绝", not G.visible_devices_ok(None, 2) and not G.visible_devices_ok("", 2))
 ok("有 CUDA_VISIBLE_DEVICES 或多卡以下允许", G.visible_devices_ok("0", 2) and G.visible_devices_ok(None, 1))
 
+try:
+    with contextlib.redirect_stderr(io.StringIO()):
+        G.parse_args([])
+    no_thr = False
+except SystemExit:
+    no_thr = True
+ok("没给三个阈值（机器表的 gpu_pad 或环境变量）：参数错误", no_thr)
+os.environ.update(TASKQ_GPU_PAD_FLOOR_MIB="42000", TASKQ_GPU_PAD_TARGET_MIB="55000", TASKQ_GPU_PAD_HIGH_MIB="62000")
 a = G.parse_args([])
-ok("默认：floor 42000、target 55000、high 62000 MiB，settle 120 秒、start_hold 900 秒、10 秒一轮、2000MiB 以下算没有训练",
+ok("阈值取环境变量；settle 120 秒、start_hold 900 秒、10 秒一轮、2000MiB 以下算没有训练",
    (a.floor_mib, a.target_mib, a.high_mib) == (42000, 55000, 62000)
    and a.settle == 120 and a.start_hold == 900 and a.interval == 10 and a.min_train_mib == 2000)
 os.environ["SLURM_JOB_ID"] = "4242"
@@ -276,8 +284,8 @@ ok("默认 base 是 /tmp/gpu_pad_<作业号>", G.parse_args([]).base == "/tmp/gp
 ok("总开关默认在 TASKQ_STATE/gpu_pad/DISABLED", G.default_switch() == os.path.join(os.environ["TASKQ_STATE"], "gpu_pad", "DISABLED"))
 os.environ["TASKQ_GPU_PAD_FLOOR_MIB"] = "43000"
 f_new = G.parse_args([]).floor_mib
-os.environ.pop("TASKQ_GPU_PAD_FLOOR_MIB")
-ok("环境变量 TASKQ_GPU_PAD_FLOOR_MIB 改默认值", f_new == 43000)
+os.environ["TASKQ_GPU_PAD_FLOOR_MIB"] = "42000"
+ok("环境变量 TASKQ_GPU_PAD_FLOOR_MIB 改阈值", f_new == 43000)
 try:
     with contextlib.redirect_stderr(io.StringIO()):
         G.parse_args(["--target-mib", "70000", "--high-mib", "60000"])

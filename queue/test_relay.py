@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """relay.py 的测试：
-  1. 每次检查的决策（plan / fill）：假的总队列、那边的状态、box 的任务；
+  1. 每次检查的决策（plan / fill）：假的总队列、那边的状态、hub 的任务；
   2. 拉回时挪进数据目录的顺序：中途出错时训完的标志不在（不会被当成训完）；
   3. 真跑一遍：本机模拟"那边"（假的 ssh、srun 在本地跑，服务开在 127.0.0.1），推代码包、传数据（stage）、
-     那边的队列、拉回（fetch），和 box 一样的真名路径；
+     那边的队列、拉回（fetch），和 hub 一样的真名路径；
   4. 删任务时按引用计数只删别的任务不用的路径。
 跑法：python3 queue/test_relay.py（配置用测试用的 testdata/；包里的 Python 文件用本机 bundle_check 那个环境核对，没有时用当前的 Python）"""
 import contextlib
@@ -50,8 +50,8 @@ s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}",
-                  TUNNEL_POLL="0.1", TUNNEL_LOCK=os.path.join(T, "lock"), PHD_TASKS=os.path.join(T, "tasks.json"),
-                  PHD_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
+                  TUNNEL_POLL="0.1", TUNNEL_LOCK=os.path.join(T, "lock"), TASKQ_TASKS=os.path.join(T, "tasks.json"),
+                  TASKQ_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
                   PATH=BIN + ":" + os.environ["PATH"])
 
 import cfg  # noqa: E402
@@ -73,43 +73,43 @@ CONDA = os.path.join(T, "conda")
 os.makedirs(os.path.join(CONDA, "bin"))
 os.symlink(relay_bundle.check_python() or sys.executable, os.path.join(CONDA, "bin", "python3"))
 M.RELAY[NAME] = dict(M.RELAY[NAME], root=RROOT, conda=(CONDA, "pt"), transfer_job="-p test")
-Q = "box"  # 总队列所在的机器（taskq.queue_host()，10/31）
+Q = "hub"  # 总队列所在的机器（taskq.queue_host()，10/31）
 assert relay.taskq.queue_host() == Q
 
 
 def test_pueue_worker():
-    w = RM.conf("lab1")["worker"]
-    lab = f"worker:{w['id']}"
+    w = RM.conf("site-pueue")["worker"]
+    wl = f"worker:{w['id']}"
     ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
     none = dict(tasks=[dict(key="a/x/1", state="claimed")])
-    assert relay.topup("lab1", dict(jobs=None, taskq=ready)) == ([], "读不到 pueue")
-    assert relay.topup("lab1", dict(jobs=[], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=ready)) == ([], "worker 在；那边没有备好、没人领的 CPU 任务")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Killed"], [4, "other", "Running", None]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
-    subs, why = relay.topup("lab1", dict(jobs=[[3, lab, "Done", "{'Failed': 1}"]], taskq=ready))
+    assert relay.topup("site-pueue", dict(jobs=None, taskq=ready)) == ([], "读不到 pueue")
+    assert relay.topup("site-pueue", dict(jobs=[], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("site-pueue", dict(jobs=[[3, wl, "Running", None]], taskq=ready)) == ([], "worker 在；那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("site-pueue", dict(jobs=[[3, wl, "Done", "Killed"], [4, "other", "Running", None]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
+    subs, why = relay.topup("site-pueue", dict(jobs=[[3, wl, "Done", "{'Failed': 1}"]], taskq=ready))
     assert not subs and why.startswith("上一个 worker")
-    ok("pueue 类（lab1）：组里没有活着的 worker 才开，上一个失败了不重开")
-    assert relay.topup("lab1", dict(jobs=[], taskq=none)) == ([], "那边没有备好、没人领的任务；那边没有备好、没人领的 CPU 任务")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=none)) == ([], "那边没有备好、没人领的任务；那边没有备好、没人领的 CPU 任务")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Done", "Success"]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
+    ok("pueue 类（site-pueue）：组里没有活着的 worker 才开，上一个失败了不重开")
+    assert relay.topup("site-pueue", dict(jobs=[], taskq=none)) == ([], "那边没有备好、没人领的任务；那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("site-pueue", dict(jobs=[[3, wl, "Done", "Success"]], taskq=none)) == ([], "那边没有备好、没人领的任务；那边没有备好、没人领的 CPU 任务")
+    assert relay.topup("site-pueue", dict(jobs=[[3, wl, "Done", "Success"]], taskq=ready)) == ([("pueue", "gpu", 1)], "那边没有备好、没人领的 CPU 任务")
     ok("pueue 类：没有备好的任务不开 worker（空闲退出的那个不算失败），有了再开")
 
-    cw = RM.conf("lab1")["cpu_worker"]
+    cw = RM.conf("site-pueue")["cpu_worker"]
     clab = f"worker:{cw['id']}"
     cpu = dict(tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu")), dict(key="a/x/1", state="claimed")])
     both = dict(tasks=cpu["tasks"] + ready["tasks"][:1])
-    assert relay.topup("lab1", dict(jobs=[], taskq=cpu)) == ([("pueue", "cpu", 1)], "那边没有备好、没人领的任务")
-    assert relay.topup("lab1", dict(jobs=[], taskq=both)) == ([("pueue", "gpu", 1), ("pueue", "cpu", 1)], "")
-    assert relay.topup("lab1", dict(jobs=[[3, lab, "Running", None]], taskq=both)) == ([("pueue", "cpu", 1)], "worker 在")
-    assert relay.topup("lab1", dict(jobs=[[5, clab, "Running", None]], taskq=both)) == ([("pueue", "gpu", 1)], "CPU worker 在")
-    subs, why = relay.topup("lab1", dict(jobs=[[5, clab, "Done", "{'Failed': 1}"]], taskq=both))
+    assert relay.topup("site-pueue", dict(jobs=[], taskq=cpu)) == ([("pueue", "cpu", 1)], "那边没有备好、没人领的任务")
+    assert relay.topup("site-pueue", dict(jobs=[], taskq=both)) == ([("pueue", "gpu", 1), ("pueue", "cpu", 1)], "")
+    assert relay.topup("site-pueue", dict(jobs=[[3, wl, "Running", None]], taskq=both)) == ([("pueue", "cpu", 1)], "worker 在")
+    assert relay.topup("site-pueue", dict(jobs=[[5, clab, "Running", None]], taskq=both)) == ([("pueue", "gpu", 1)], "CPU worker 在")
+    subs, why = relay.topup("site-pueue", dict(jobs=[[5, clab, "Done", "{'Failed': 1}"]], taskq=both))
     assert subs == [("pueue", "gpu", 1)] and why == "上一个 CPU worker（pueue 任务 5）失败了（{'Failed': 1}）", (subs, why)
-    allowed0, relay.shift.allowed = relay.shift.allowed, lambda n, now=None: True  # 不看 box 上真实的时段记录（~/.cache/phd/shift.json）
+    allowed0, relay.shift.allowed = relay.shift.allowed, lambda n, now=None: True  # 不看 hub 上真实的时段记录（~/.cache/taskq/shift.json）
     try:
-        assert relay.topup("lab0", dict(jobs=[], taskq=cpu)) == ([], "那边没有备好、没人领的任务")
+        assert relay.topup("site-pueue2", dict(jobs=[], taskq=cpu)) == ([], "那边没有备好、没人领的任务")
     finally:
         relay.shift.allowed = allowed0
-    ok("pueue 类：GPU、CPU 两种 worker 各自判断（在不在、上一个失败没有、有没有这种任务）；没有 cpu_worker 的（lab0）不开 CPU worker")
+    ok("pueue 类：GPU、CPU 两种 worker 各自判断（在不在、上一个失败没有、有没有这种任务）；没有 cpu_worker 的（site-pueue2）不开 CPU worker")
 
 
 def test_slurm_topup_ready():
@@ -123,24 +123,24 @@ def test_slurm_topup_ready():
     assert subs == [] and "排满" in why
     subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "没有要卡的任务" in why
-    ok("Slurm 类（DICC2）：有任务就按名额排满（攒排队时间，11/2），满了不交，没有任务不交")
+    ok("Slurm 类（Slurm2）：有任务就按名额排满（攒排队时间，11/2），满了不交，没有任务不交")
     cpu = dict(enabled=True, tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu"))])
     subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "CPU" not in why, (subs, why)
     slurm0 = dict(relay.P.SLURM)
     try:
-        relay.P.SLURM["dicc1"] = dict(gpu={"long": ("3-00:00:00", 0)}, cpu=("normal", "08:00:00", 2))
-        subs, why = relay.topup("dicc1", dict(taskq=cpu), run=probe("QOS|long|10|0|0\nCPU|0\nALL|10|3\n"))
+        relay.P.SLURM["site-slurm"] = dict(gpu={"long": ("3-00:00:00", 0)}, cpu=("normal", "08:00:00", 2))
+        subs, why = relay.topup("site-slurm", dict(taskq=cpu), run=probe("QOS|long|10|0|0\nCPU|0\nALL|10|3\n"))
         assert subs == [("normal", "08:00:00", 1, "cpu_worker.sbatch")], (subs, why)
-        subs, why = relay.topup("dicc1", dict(taskq=dict(two, tasks=two["tasks"] + cpu["tasks"])), run=probe("QOS|long|10|0|0\nCPU|1\nALL|10|3\n"))
+        subs, why = relay.topup("site-slurm", dict(taskq=dict(two, tasks=two["tasks"] + cpu["tasks"])), run=probe("QOS|long|10|0|0\nCPU|1\nALL|10|3\n"))
         assert subs == [("long", "3-00:00:00", 10, "worker.sbatch")] and "CPU：已有 1 个" in why, (subs, why)
-        relay.P.SLURM["dicc2"] = dict(slurm0["dicc2"], cpu=("normal", "08:00:00", 2))
+        relay.P.SLURM["site-slurm2"] = dict(slurm0["site-slurm2"], cpu=("normal", "08:00:00", 2))
         subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\nCPU|0\nALL|10|3\n"))
         assert subs == [] and "CPU" not in why, (subs, why)
     finally:
         relay.P.SLURM.clear()
         relay.P.SLURM.update(slurm0)
-    ok("Slurm 类：jobs 里有 cpu 的（dicc1）有纯 CPU 任务时交 cpu_worker.sbatch；没有的（DICC2）SLURM 里写了 cpu 也不交")
+    ok("Slurm 类：jobs 里有 cpu 的（site-slurm）有纯 CPU 任务时交 cpu_worker.sbatch；没有的（Slurm2）SLURM 里写了 cpu 也不交")
 
 
 def ok(msg):
@@ -163,8 +163,8 @@ def record(k, **kw):
                      outs=[f"out/{k}"]), **kw)
 
 
-def S0(mt, box=(), recs=()):
-    return dict(taskq={Q: dict(enabled=True, tasks=mt)}, pueue={M.hub(): dict(tasks=list(box))}, records=list(recs),
+def S0(mt, hubq=(), recs=()):
+    return dict(taskq={Q: dict(enabled=True, tasks=mt)}, pueue={M.hub(): dict(tasks=list(hubq))}, records=list(recs),
                 ok={M.hub(): True}, src={n: dict(tasks={}) for n in M.names("train")})
 
 
@@ -311,22 +311,22 @@ def test_plan():
     assert ops(acts) == [("beat", K)] and not stuck, acts
     acts, stuck = relay.plan(S0([mtask(K, "done")], [dict(fdone[0], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
-    ok("总队列显示训完（box 上有了）→ 交还、删那边的任务和结果；拉回、归档还在跑 → 等；出错 → 报、不删")
+    ok("总队列显示训完（hub 上有了）→ 交还、删那边的任务和结果；拉回、归档还在跑 → 等；出错 → 报、不删")
 
     import common as C
     old_lookup, old_down = RT.lookup, C.backup_down
     RT.lookup = lambda k: dict(archive=True)
     arec = dict(machine=M.hub(), id=9, label="relay_archive:" + K, step="relay_archive", key=K, added=2000.0)
-    fcmd = dict(fdone[0], command=f"python3 {QR}/relay.py fetch x k && bash {QR}/archive_task.sh box k")
+    fcmd = dict(fdone[0], command=f"python3 {QR}/relay.py fetch x k && bash {QR}/archive_task.sh hub k")
     plain_fail = [dict(fdone[0], status="Failed")]
     try:
-        C.backup_down = lambda ok=None: "dicc1 暂停检查（停机）"
+        C.backup_down = lambda ok=None: "site-slurm 暂停检查（停机）"
         acts, stuck = relay.plan(S0([mtask(K, "done")], plain_fail, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("drop", K), ("release", K)] and not stuck, (acts, stuck)
         assert "没有归档" in [a for a in acts if a["op"] == "release"][0]["why"], acts
-        C.backup_down = lambda ok=None: "dicc1 这次连不上" if ok is not None else None
+        C.backup_down = lambda ok=None: "site-slurm 这次连不上" if ok is not None else None
         acts, stuck = relay.plan(S0([mtask(K, "done")], fdone, [frec]), NAME, RS(rtask(A, "done")), st)
         assert ops(acts) == [("beat", K), ("drop", K)] and not stuck, (acts, stuck)
         C.backup_down = lambda ok=None: None
@@ -351,7 +351,7 @@ def test_plan():
         assert ops(acts) == [("beat", K), ("drop", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
     finally:
         RT.lookup, C.backup_down = old_lookup, old_down
-    ok("要归档的折：box 上有了就删那边的；备份机能用时单独排归档（relay_archive），归档成功才交还，归档出错 → 报、领取保留；"
+    ok("要归档的折：hub 上有了就删那边的；备份机能用时单独排归档（relay_archive），归档成功才交还，归档出错 → 报、领取保留；"
        "备份机停用时直接交还（没有归档）；只是这次连不上 → 等；单独的拉回出错 → 报")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
@@ -380,13 +380,13 @@ def test_plan():
     ok("那边缺输入 → 排补传（stage --no-add：只补缺的、撤掉标记）；在补 → 等；补传出错 → 报；标记之前的旧任务不算")
 
     def fail_add(*a, **k):
-        raise RuntimeError("box 上加任务失败：git fetch 出错")
+        raise RuntimeError("hub 上加任务失败：git fetch 出错")
     st_ = {}
     msgs = relay.execute(NAME, [dict(op="restage", key=K), dict(op="fetch", key=K)], S0([mtask(K)]), run_add=fail_add, stuck=st_)
     assert set(st_) == {f"relayadd:{NAME}:relay_stage:{K}", f"relayadd:{NAME}:relay_fetch:{K}"} and len(msgs) == 2 and all("出错" in m for m in msgs), (st_, msgs)
     import plain
     assert "没排上" in plain.problem(next(iter(st_)), dict(msg=st_[next(iter(st_))]["msg"], data=st_[next(iter(st_))]["data"])), st_
-    ok("在 box 上排传数据、拉回出错 → 报 relayadd（下次检查重试），后面的动作照做")
+    ok("在 hub 上排传数据、拉回出错 → 报 relayadd（下次检查重试），后面的动作照做")
 
     acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(rtask(A, "claimed", "123")), st)
     assert ops(acts) == [("beat", K), ("rstop", K)], acts
@@ -444,7 +444,7 @@ def test_plan():
     berr["pueue"] = {M.hub(): {"error": "pueue 没有响应"}}
     more, why = relay.fill(berr, NAME, RS(rtask(A, "claimed", "1")), st, [])
     assert more == [] and "pueue" in why, (more, why)
-    ok("box 的 pueue 读不到：不领新任务、不换位（传数据要在 box 的 pueue 排）")
+    ok("hub 的 pueue 读不到：不领新任务、不换位（传数据要在 hub 的 pueue 排）")
     more, _ = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert [a["key"] for a in more] == [K2], more
     more, why = relay.fill(S0([mtask(K), mtask("D5_d/tr/0")] + [dict(t, nice=t["nice"] + 3) for t in cands]), NAME, RS(rtask(A, "free")), st, [])
@@ -465,7 +465,7 @@ def test_plan():
     late = [mtask(K2, "free", None, nice=6), mtask(K3, "free", None, nice=7)]
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + late), NAME, RS(rtask(A, "stopped"), rtask(K5, "free")), st2, [])
     assert more == [] and "排着 2" in why, (more, why)
-    ok("那边停着、这次要撤销停止的也算排着（11/2：lab1 多领了 2 个）")
+    ok("那边停着、这次要撤销停止的也算排着（11/2：site-pueue 多领了 2 个）")
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "free"), rtask(K5, "free")), st2, [])
     assert [(a["op"], a["key"]) for a in more] == [("drop", K5), ("release", K5), ("take", K2)] and more[0]["rkey"] == K5, more
     more, why = relay.fill(S0([mtask(K), mtask(K5, nice=6)] + cands), NAME, RS(rtask(A, "claimed", "1"), rtask(K5, "free")), st2, [])
@@ -528,14 +528,14 @@ def test_plan():
     more, why = relay.fill(S0([mtask(K)] + cands), NAME, RS(rtask(A, "free")), st, [])
     assert a1 and more == [] and "放不下" in why, (a1, more, why)
     relay.PLANNED.clear()
-    ok("同一个盘上的几台（lab0、lab1）：这次检查里已经计划传的算进去")
+    ok("同一个盘上的几台（site-pueue2、site-pueue）：这次检查里已经计划传的算进去")
 
     relay.PLANNED.clear()
     OUT = relay.refill.TRAIN_OUT_GB
     cap0 = RM.conf(NAME).get("cap")
     RM.conf(NAME)["cap"] = 90
     try:
-        three = RS(rtask(A, "claimed", "1"), rtask("Dataset9_h/tr/0", "done"), rtask("Dataset9_h/tr/1", "claimed", "2"))
+        three = RS(rtask(A, "claimed", "1"), rtask("D9_h/tr/0", "done"), rtask("D9_h/tr/1", "claimed", "2"))
         sep = dict(three, free=(3 * OUT + 5) * 1e9, out_used=12e9, dev=1, blob_dev=2, blob_free=500e9)
         more, why = relay.fill(S0([mtask(K)] + cands), NAME, sep, st, [])
         assert [a["key"] for a in more] == [K2], (more, why)  # 剩 3×OUT+5+12，3 个任务各留 OUT 后够 1 个
@@ -565,7 +565,7 @@ def test_plan():
         assert subs == [] and why, (subs, why)
     finally:
         relay.shift.rule, relay.shift.allowed = rule0, allowed0
-    ok("按时段的执行机（lab0）时段外：不领任务、不开 worker")
+    ok("按时段的执行机（site-pueue2）时段外：不领任务、不开 worker")
 
 
 # ---------------- 2. 挪进数据目录的顺序 ----------------
@@ -643,7 +643,7 @@ def test_e2e():
     TN.setup()
     sp = S.resolve("toy", dict(ds=TN.DS, frag="0"))
     RT.lookup = lambda k: sp
-    RT.box_data = lambda: TN.ROOT
+    RT.hub_data = lambda: TN.ROOT
     bid, path = relay_bundle.build(NAME, None, os.path.join(T, "bundles"), root=RROOT)
     relay.deploy(NAME, bid, path)
     rs = relay.remote_status(NAME)
@@ -688,14 +688,14 @@ def test_e2e():
     assert [(t["key"], t["state"]) for t in rs["taskq"]["tasks"]] == [(sp["key"], "free")], rs["taskq"]["tasks"]
     k = ST.keys_of(ST.load_state(), NAME)[sp["key"]]
     assert k["views"] == [f"prepared/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
-    ok(f"传数据：{blobs} 个文件按内容存、软链接放在和 box 一样的路径，key 和参数原样，加进那边的队列")
+    ok(f"传数据：{blobs} 个文件按内容存、软链接放在和 hub 一样的路径，key 和参数原样，加进那边的队列")
 
     rq = os.path.join(RROOT, "queue", "tasks.jsonl")
     recs = [json.loads(x) for x in open(rq) if x.strip()]
     want = S.sendable(S.resolve(sp["recipe"], sp["params"]))
     assert len(recs) == 1 and recs[0]["spec"] == want and recs[0]["recipe"] == sp["recipe"] and recs[0]["params"] == sp["params"], recs
     assert not {"machines", "after", "names", "exp"} & set(recs[0]["spec"]), recs[0]["spec"]
-    ok("那边队列的记录带 box 解析好的说明（去掉 machines/after/names/exp），做法和参数也留着（旧包的 worker 照旧能领）")
+    ok("那边队列的记录带 hub 解析好的说明（去掉 machines/after/names/exp），做法和参数也留着（旧包的 worker 照旧能领）")
 
     with open(rq, "w") as f:
         f.write(json.dumps({k: v for k, v in recs[0].items() if k != "spec"}, ensure_ascii=False) + "\n")
@@ -739,7 +739,7 @@ def test_e2e():
     assert "拉 2 个文件" in buf.getvalue(), buf.getvalue()
     assert not os.path.exists(os.path.join(out, "check", "old.dat")) and not os.path.exists(os.path.join(out, "debug.json.tunnelpart"))
     assert json.load(open(os.path.join(out, "check", "summary.json"))) == dict(metric_per_case=[{}, {}])
-    ok("拉回到一半（上次缺文件报错，box 上什么都没放）：再拉只拉缺的和大小、修改时间对不上的，旧的、半份的不混进结果")
+    ok("拉回到一半（上次缺文件报错，hub 上什么都没放）：再拉只拉缺的和大小、修改时间对不上的，旧的、半份的不混进结果")
     assert os.path.exists(os.path.join(out, "check", "summary.json"))
     assert sorted(f for f in os.listdir(os.path.join(out, "check")) if f.endswith(".dat")) == sorted(c + ".dat" for c in TN.CASES[:2])
     assert not os.path.exists(os.path.join(out, "latest.ckpt"))
@@ -800,7 +800,7 @@ def test_e2e_path(pre):
     assert sorted(os.listdir(out)) == [".done", "a.csv"], os.listdir(out)
     assert os.path.exists(os.path.join(TN.ROOT, "proj/analysis/thing/plans.json"))
     assert os.path.exists(os.path.join(TN.ROOT, "logs", "tasks", S.safe(sp["key"]) + "__9_seg1.log"))
-    ok("通用插件拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志放进 box")
+    ok("通用插件拉回：那边没做完不拉；做完后结果、上一级的文件、分段日志放进 hub")
 
     keys = ST.keys_of(ST.load_state(), NAME)
     tk = next(r for r in keys if r != sp["key"])
@@ -821,7 +821,7 @@ def test_e2e_path(pre):
 
 
 def test_tilde_root():
-    """根目录写成 ~/…（dicc1 的 ~/st/…）：开头的 ~ 留给那边展开，其余加引号（10/31）。"""
+    """根目录写成 ~/…（site-slurm 的 ~/st/…）：开头的 ~ 留给那边展开，其余加引号（10/31）。"""
     c0 = M.RELAY[NAME]
     M.RELAY[NAME] = dict(c0, root="~/st/t123")
     try:
@@ -845,8 +845,8 @@ def test_tilde_root():
     assert "~/st/t123/queue" in txt or "$HOME/st/t123/queue" in txt
     sh = "\n".join(t for p, (t, _) in files.items() if p.endswith((".sh", ".sbatch")))
     assert '"~/st/t123' not in sh, "shell 双引号里的 ~ 不展开（Python 的 expanduser 里可以）"
-    assert relay_bundle.home_paths('a="$HOME/.cache/phd/taskq" b=~/.cache/phd/x', "~/st/t1") == 'a="$HOME/st/t1/queue" b=~/st/t1/state/x'
-    assert relay_bundle.home_paths('a="$HOME/.cache/phd/taskq"', "/scr/u/r") == 'a="/scr/u/r/queue"'
+    assert relay_bundle.home_paths('a="$HOME/.cache/taskq/taskq" b=~/.cache/taskq/x', "~/st/t1") == 'a="$HOME/st/t1/queue" b=~/st/t1/state/x'
+    assert relay_bundle.home_paths('a="$HOME/.cache/taskq/taskq"', "/scr/u/r") == 'a="/scr/u/r/queue"'
     ok("根目录 ~/…：命令里 ~ 不加引号，sbatch 的日志用相对路径，包里 $HOME/~ 的写法照旧")
 
 
@@ -854,9 +854,9 @@ def test_adapters_in_relay():
     """调度器的读写都经 sites/pueue.py、slurm.py（10/31）。"""
     raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status=dict(Done=dict(result="Success"))),
                                  "4": dict(group="other", label="x", status="Running")}))
-    rs = relay.parse_sched("lab1", dict(sched_raw=raw, taskq={}))
+    rs = relay.parse_sched("site-pueue", dict(sched_raw=raw, taskq={}))
     assert rs["squeue"] is None and [j[0] for j in rs["jobs"]] == [3] and rs["jobs"][0][3] == "Success", rs
-    assert relay.parse_sched("lab1", dict(sched_raw=None))["jobs"] is None
+    assert relay.parse_sched("site-pueue", dict(sched_raw=None))["jobs"] is None
     rs = relay.parse_sched(NAME, dict(sched_raw="101|w|RUNNING|1:00|long|n1\n"))
     assert rs["jobs"] is None and rs["squeue"] == [["101", "w", "RUNNING", "1:00", "long", "n1"]]
     seen = []
@@ -866,31 +866,31 @@ def test_adapters_in_relay():
         assert not stuck and len(seen) == 2 and all(re.search(r"sbatch --parsable -J [a-z]+-[a-z]+ --qos=long --time=1:00:00 worker.sbatch", c) for _, c in seen)
         assert seen[0][1].startswith(f"cd {relay.R.q(RM.root(NAME))}/code/current/{BQ} && ")
         seen.clear()
-        msgs, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
+        msgs, stuck = relay.submit("site-slurm", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
         assert not stuck and len(seen) == 1 and seen[0][1].endswith("--qos=normal --time=08:00:00 cpu_worker.sbatch") and "CPU worker" in msgs[0], (seen, msgs)
         seen.clear()
-        msgs, stuck = relay.submit("lab1", [("pueue", "gpu", 1)])
+        msgs, stuck = relay.submit("site-pueue", [("pueue", "gpu", 1)])
         assert not stuck and len(seen) == 1 and " add -g " in seen[0][1] and "worker:" in seen[0][1], seen
         seen.clear()
-        msgs, stuck = relay.submit("lab1", [("pueue", "cpu", 1)])
-        cw = RM.conf("lab1")["cpu_worker"]
+        msgs, stuck = relay.submit("site-pueue", [("pueue", "cpu", 1)])
+        cw = RM.conf("site-pueue")["cpu_worker"]
         assert not stuck and len(seen) == 1 and f"add -g {cw['group']} -l worker:{cw['id']}" in seen[0][1] and "WORKER_DEVICE=cpu" in seen[0][1], seen
         RM.rsh = lambda name, cmd, input=None, timeout=300: (1, "boom", "")
-        _, stuck = relay.submit("lab1", [("pueue", "gpu", 1), ("pueue", "cpu", 1)])
-        assert list(stuck) == ["site:lab1:worker", "site:lab1:worker:cpu"], stuck
+        _, stuck = relay.submit("site-pueue", [("pueue", "gpu", 1), ("pueue", "cpu", 1)])
+        assert list(stuck) == ["site:site-pueue:worker", "site:site-pueue:worker:cpu"], stuck
         _, stuck = relay.submit(NAME, [("long", "1:00:00", 1, "worker.sbatch")])
         assert list(stuck) == [f"topup:{NAME}:long"], stuck
-        _, stuck = relay.submit("dicc1", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
-        assert list(stuck) == ["topup:dicc1:normal:cpu"], stuck
+        _, stuck = relay.submit("site-slurm", [("normal", "08:00:00", 1, "cpu_worker.sbatch")])
+        assert list(stuck) == ["topup:site-slurm:normal:cpu"], stuck
     finally:
         RM.rsh = rsh0
     assert not hasattr(relay, "worker_jobs")
     raw = json.dumps(dict(tasks={"3": dict(group="gpu1", label="worker:w1", status="Running"),
                                  "5": dict(group="cpu", label="worker:w2", status="Queued"),
                                  "6": dict(group="gpu0", label="x", status="Running")}))
-    assert [j[0] for j in relay.parse_sched("lab1", dict(sched_raw=raw))["jobs"]] == [3, 5]
-    assert [j[0] for j in relay.parse_sched("lab0", dict(sched_raw=raw))["jobs"]] == [6]
-    ok("relay：一次 ssh 读回原始输出、在 box 上用适配器解析（这台各种 worker 的组）；开 worker / 交作业用适配器，"
+    assert [j[0] for j in relay.parse_sched("site-pueue", dict(sched_raw=raw))["jobs"]] == [3, 5]
+    assert [j[0] for j in relay.parse_sched("site-pueue2", dict(sched_raw=raw))["jobs"]] == [6]
+    ok("relay：一次 ssh 读回原始输出、在 hub 上用适配器解析（这台各种 worker 的组）；开 worker / 交作业用适配器，"
        "报警的编号 GPU 照旧、CPU 加 :cpu")
 
 
@@ -928,10 +928,10 @@ def test_fresh_site():
             relay.fill = lambda *a: ([], "")
             relay.topup = lambda *a: ([], "")
             relay.log = lambda lines: None
-            relay.P.AUTO["lab0"] = True
+            relay.P.AUTO["site-pueue2"] = True
             s = {"ok": {relay.M.hub(): True}, "taskq": {relay.taskq.queue_host(): {"tasks": []}}}
             try:
-                relay.run_one(s, "lab0", False)
+                relay.run_one(s, "site-pueue2", False)
             except Exception:  # noqa: BLE001  后面的步骤不在这里测
                 pass
             assert (("cur",) in calls) == (not old), calls
@@ -940,7 +940,7 @@ def test_fresh_site():
                 assert ("plan", None) in calls and not any(c[0] == "status" for c in calls), (old, calls)
                 assert not any(c[0] == "deploy" for c in calls), calls
             else:
-                assert calls[:3] == [("deploy", "lab0", "b1"), ("status", "b1"), ("plan", "b1")], calls
+                assert calls[:3] == [("deploy", "site-pueue2", "b1"), ("status", "b1"), ("plan", "b1")], calls
     finally:
         for k, v in keep.items():
             setattr(relay, k, v)
@@ -990,12 +990,12 @@ def test_refcount():
             "t1": dict(views=["pre/X"], outs=["res/X/tr/frag_1"]),
             "inf": dict(inputs=["res/X/tr/frag_0/final.ckpt", "res/X/tr/dataset.json", "raw/A/img/a.dat"],
                         outs=["pred/X/tr/frag_0"]),
-            "ev": dict(inputs=["pred/X/tr/frag_0/a.dat", "raw/A/lab/a.dat"], outs=["an/X/frag_0/eval"])}
+            "ev": dict(inputs=["pred/X/tr/frag_0/a.dat", "raw/A/gt/a.dat"], outs=["an/X/frag_0/eval"])}
     P = lambda k: ST.paths_of(keys[k])  # noqa: E731
     assert ST.droppable(keys, "t0", P("t0")) == []
     assert ST.droppable(keys, "t1", P("t1")) == ["res/X/tr/frag_1"]
     assert ST.droppable(keys, "inf", P("inf")) == ["raw/A/img/a.dat", "res/X/tr/dataset.json"]
-    assert ST.droppable(keys, "ev", P("ev")) == ["an/X/frag_0/eval", "raw/A/lab/a.dat"]
+    assert ST.droppable(keys, "ev", P("ev")) == ["an/X/frag_0/eval", "raw/A/gt/a.dat"]
     k2 = {k: v for k, v in keys.items() if k not in ("t1", "inf")}
     assert ST.droppable(k2, "t0", P("t0")) == ["pre/X", "res/X/tr/frag_0"]
     assert ST.overlaps("a/b", {"a/b/c"}, ST.ancestors({"a/b/c"})) and ST.overlaps("a/b/c/d", {"a/b"}, set())
@@ -1113,7 +1113,7 @@ def test_view_lock():
 
 
 def test_list_unreadable():
-    """拉回前列结果：读不了的子目录不能静默跳过（11/3：只拉回一部分、box 上算训完，下一轮删掉那边的整份）。"""
+    """拉回前列结果：读不了的子目录不能静默跳过（11/3：只拉回一部分、hub 上算训完，下一轮删掉那边的整份）。"""
     root = fixture.tmpdir()
     out = os.path.join(root, "data", "out", "k")
     os.makedirs(os.path.join(out, "check"))
@@ -1243,7 +1243,7 @@ def run_snip(code, root, data):
 
 
 def test_adopt_cross_dev():
-    """收编：来源和块目录不在同一个盘（DICC：blobs 指到 /scr，数据在 home）→ 不读、不算 sha256，直接跳过（11/4）。"""
+    """收编：来源和块目录不在同一个盘（Slurm：blobs 指到 /scr，数据在 home）→ 不读、不算 sha256，直接跳过（11/4）。"""
     import hashlib
     shm = "/dev/shm"
     for blobs_elsewhere in (False, True):
@@ -1293,7 +1293,7 @@ def test_logs_exact():
     R = fixture.tmpdir(dir=T, prefix="lg_")
     L = os.path.join(R, "data", "logs", "tasks")
     os.makedirs(L)
-    mine = ["X__tr__123_part1.log", "X__tr__w7e2837_part2.log", "X__tr__lab-202611041200_seg1.log"]
+    mine = ["X__tr__123_part1.log", "X__tr__w7e2837_part2.log", "X__tr__gpuhost-202611041200_seg1.log"]
     other = ["X__tr__0__123_part1.log", "X__tr__0__w7e2837_part1.log", "X__trx__1_part1.log"]
     for f in mine + other:
         open(os.path.join(L, f), "w").close()
@@ -1334,7 +1334,7 @@ def test_pin_refresh():
 
 def test_cross_version():
     """读那边的状态：新包有 taskq.py status --json、spec.py collect --json 就用，旧包（退出码 2、没有 JSON 行）import；
-    两条路给 box 的结构一样；新命令输出不对 → 出错（11/4）。"""
+    两条路给 hub 的结构一样；新命令输出不对 → 出错（11/4）。"""
     cur = os.path.realpath(os.path.join(RROOT, "code", "current"))
     mark = os.path.join(T, "xv_mark")
     status_new = ('    if argv[:2] == ["status", "--json"]:\n'
@@ -1378,7 +1378,10 @@ def test_cross_version():
     assert rc == 0 and len(used) == 2 and used[0] == "status" and used[1].startswith("collect ") and used[1].endswith(" None"), (rc, new, used)
     rc, old, used2 = run(od, RM.STATUS_PY, arg)
     assert rc == 0 and used2 == [], (rc, old, used2)
-    strip = lambda x: {k: v for k, v in x.items() if k not in ("free", "blob_free")}
+    def strip(x):  # 剩余空间、读的时刻（两次运行可能差 1 秒）不比
+        if isinstance(x, dict):
+            return {k: strip(v) for k, v in x.items() if k not in ("free", "blob_free", "now")}
+        return [strip(v) for v in x] if isinstance(x, list) else x
     assert new["taskq"]["tasks"] and strip(new) == strip(old), (new, old)
     assert run(nd, RM.STATES_PY, {})[1] == run(od, RM.STATES_PY, {})[1] == {t["key"]: t["state"] for t in old["taskq"]["tasks"]}
     rc, err, _ = run(bd, RM.STATUS_PY, arg)
@@ -1389,7 +1392,7 @@ def test_cross_version():
 
 
 def test_env_auto():
-    """按描述建的环境自动建（11/5）：没建的排一个 box 任务（基础环境先建、一台一次一个），box 上已经排着、那边在建的不重排；
+    """按描述建的环境自动建（11/5）：没建的排一个 hub 任务（基础环境先建、一台一次一个），hub 上已经排着、那边在建的不重排；
     开关关着只记日志；空间不够、建坏了报 site:<机器>:env:<环境>；长连接断着不连。"""
     EV = relay.EV
     adds, logs = [], []
@@ -1397,7 +1400,7 @@ def test_env_auto():
     add0, auto, envs0 = relay.refill.add, dict(relay.P.AUTO), M.RELAY[NAME].get("envs")
     hub = M.hub()
     try:
-        relay.refill.add = lambda host, lab, step, k, args, **kw: adds.append((host, lab, step, k, args, kw)) or 77
+        relay.refill.add = lambda host, lbl, step, k, args, **kw: adds.append((host, lbl, step, k, args, kw)) or 77
         relay.log = lambda lines: logs.extend(lines)
         M.RELAY[NAME]["envs"] = {"base": ("spec", "cu128"), "alt": "spec"}
         relay.P.AUTO["envs"] = True
@@ -1406,11 +1409,11 @@ def test_env_auto():
         st = {}
         msgs = relay.env_builds(s, NAME, {}, now, False, st)
         assert len(adds) == 1 and not st, (adds, st)
-        host, lab, step, k, args, kw = adds[0]
-        assert host == hub and lab == f"env_build:{NAME}:base" and step == proto.ENV_BUILD and k == f"{NAME}:base" and kw == dict(to=NAME, group="wait")
+        host, lbl, step, k, args, kw = adds[0]
+        assert host == hub and lbl == f"env_build:{NAME}:base" and step == proto.ENV_BUILD and k == f"{NAME}:base" and kw == dict(to=NAME, group="wait")
         assert args.startswith(f"wait -p --label env_build:{NAME}:base -- ") and f"envs_cli.py env {NAME} base --variant cu128" in args, args
         assert msgs and "base" in msgs[0]
-        ok("没建：box 的 wait 组排 taskq site env（基础环境先建，变体按条目），一次一个")
+        ok("没建：hub 的 wait 组排 taskq site env（基础环境先建，变体按条目），一次一个")
         adds.clear()
         s2 = {"pueue": {hub: {"tasks": [dict(id=3, label=f"env_build:{NAME}:base", status="Running")]}}}
         relay.env_builds(s2, NAME, {}, now, False, {})
@@ -1418,7 +1421,7 @@ def test_env_auto():
         relay.env_builds(s, NAME, {"base": dict(building=f"{hb} {now - 60}")}, now, False, {})
         relay.env_builds({"pueue": {hub: {"error": "x"}}}, NAME, {}, now, False, {})
         assert adds == [], adds
-        ok("box 上已经排着、那边 .building 是新的、读不到 box 的 pueue：不重排")
+        ok("hub 上已经排着、那边 .building 是新的、读不到 hub 的 pueue：不重排")
         relay.env_builds(s, NAME, {"base": dict(ok=hb, active=True)}, now, False, {})
         assert len(adds) == 1 and adds[0][1] == f"env_build:{NAME}:alt" and "--variant default" in adds[0][4], adds
         adds.clear()
@@ -1472,7 +1475,7 @@ def test_env_auto():
             EV.read_rows = rr
             mb["envs"] = envs_hub
         assert [x[1] for x in adds] == [f"env_build:{hub}:base"] and ev, adds
-        ok("box 自己（MACHINES 里 ssh 是 None 的）同样自动建")
+        ok("hub 自己（MACHINES 里 ssh 是 None 的）同样自动建")
     finally:
         for k, v in keep.items():
             setattr(relay, k, v)
@@ -1482,7 +1485,7 @@ def test_env_auto():
 
 
 def test_env_remote():
-    """真跑（假 ssh）：状态程序读回环境的标志文件；建之前查空间写 .building / .failed（按 cap）；ensure_blobs 把 box 的文件放进 blobs。"""
+    """真跑（假 ssh）：状态程序读回环境的标志文件；建之前查空间写 .building / .failed（按 cap）；ensure_blobs 把 hub 的文件放进 blobs。"""
     EV = relay.EV
     envs0 = M.RELAY[NAME].get("envs")
     try:
@@ -1515,7 +1518,7 @@ def test_env_remote():
         got = RT.ensure_blobs(NAME, {hh: src}, say=lambda *_: None)
         assert got == {hh: f"{RM.root(NAME)}/{proto.blob(hh)}"} and open(os.path.join(RROOT, proto.blob(hh)), "rb").read() == b"wheel-bytes"
         assert RT.ensure_blobs(NAME, {hh: src}, say=lambda *_: None) == got
-        ok("ensure_blobs：box 的文件放进那边的 blobs，已经有的不再传，返回那边的路径")
+        ok("ensure_blobs：hub 的文件放进那边的 blobs，已经有的不再传，返回那边的路径")
     finally:
         M.RELAY[NAME]["envs"] = envs0
 

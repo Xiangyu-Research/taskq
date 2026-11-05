@@ -3,8 +3,7 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 CORE=$(dirname "$HERE")
-REPO=${TASKQ_REPO:-$CORE}; [[ -z ${TASKQ_REPO:-} && $CORE == */scripts/taskq ]] && REPO=${CORE%/scripts/taskq}
-export REPO
+export HERE
 T=$(mktemp -d)
 export T
 fails=0
@@ -50,7 +49,7 @@ if [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
     source "$CONDA_BASE/etc/profile.d/conda.sh"
     conda activate "$CONDA_ENV" || { echo "conda 环境 $CONDA_ENV 激活失败，跳过"; exit 0; }
 fi
-python3 -c "import torch" 2> /dev/null || { echo "python3 没有 torch（envs/machines.py 的 conda：${CONDA_BASE:-没有} ${CONDA_ENV:-}），跳过"; exit 0; }
+python3 -c "import torch" 2> /dev/null || { echo "python3 没有 torch（机器表的 conda：${CONDA_BASE:-没有} ${CONDA_ENV:-}），跳过"; exit 0; }
 used() { nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' '; }
 pad_gone() { ! pgrep -f "$T/pad/gpu_pad.py" > /dev/null; }
 filled() { test "$(used)" -ge 7000; }
@@ -79,7 +78,6 @@ aborted() {
 export TASKQ_DATA=$T/bt
 export CUDA_VISIBLE_DEVICES=0
 export SLURM_JOB_ID=999001
-export nnUNet_n_proc_DA=4
 export TASKQ_GPU_PAD_SWITCH=$T/switch
 export TASKQ_GPU_PAD_BASE=$T/padsig
 export TASKQ_GPU_PAD_FLOOR_MIB=5000
@@ -94,7 +92,7 @@ export TASKQ_GPU_PAD_INTERVAL=1
 export TASKQ_GPU_PAD_CHUNK_MIB=256
 PADLOG=$TASKQ_DATA/logs/workers/gpu_pad_999001.log
 
-source "$REPO/envs/nnunet_paths.sh"
+source "$HERE/gpu_pad_start.sh"
 SUP=$!
 sleep 4
 check "pad 启动且只启动一个" test -f "$PADLOG"
@@ -142,14 +140,14 @@ kill "$SUP" 2> /dev/null; SUP=
 rm -f "$T/switch"
 unset TASKQ_GPU_PAD_STARTED
 export SLURM_JOB_ID=999002 TASKQ_GPU_PAD=0
-source "$REPO/envs/nnunet_paths.sh"
+source "$HERE/gpu_pad_start.sh"
 sleep 2
 check "TASKQ_GPU_PAD=0 不启动" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999002.log"
 unset TASKQ_GPU_PAD TASKQ_GPU_PAD_STARTED
 
 touch "$T/switch"
 export SLURM_JOB_ID=999003
-source "$REPO/envs/nnunet_paths.sh"
+source "$HERE/gpu_pad_start.sh"
 sleep 2
 check "DISABLED 开关在启动前生效" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999003.log"
 rm -f "$T/switch"
@@ -158,7 +156,7 @@ unset TASKQ_GPU_PAD_STARTED
 export SLURM_JOB_ID=999005 TASKQ_GPU_PAD_BASE=$T/padsig5
 start_train
 bash -c '
-    source "$REPO/envs/nnunet_paths.sh"
+    source "$HERE/gpu_pad_start.sh"
     echo $! > "$T/parent_sup"
     sleep 60
 ' &

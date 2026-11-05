@@ -41,12 +41,12 @@ class Fake:
 
 
 def pueue_json(*tasks):
-    return json.dumps(dict(tasks={str(i): dict(group=g, label=lab, status=st) for i, g, lab, st in tasks}))
+    return json.dumps(dict(tasks={str(i): dict(group=g, label=lbl, status=st) for i, g, lbl, st in tasks}))
 
 
 def main():
-    lab1 = M.SITES["lab1"]
-    w = lab1["worker"]
+    sp = M.SITES["site-pueue"]
+    w = sp["worker"]
     wl = f"worker:{w['id']}"
 
     # ---- pueue ----
@@ -57,43 +57,43 @@ def main():
     assert PQ.parse(json.loads(raw), w["group"]) == jobs
     assert PQ.parse("not json", w["group"]) is None and PQ.parse(None, w["group"]) is None
     ok("pueue.parse：只要 worker 所在的组，Done 的结果读出来；读不出 → None")
-    assert [j[0] for j in PQ.workers("lab1", jobs)] == [3, 7]
+    assert [j[0] for j in PQ.workers("site-pueue", jobs)] == [3, 7]
     ok("pueue.workers：只认标签 worker:<id>")
 
     fake = Fake([("add -g", (0, "New task added (id 9).\n"))])
-    good, out = PQ.start_worker("lab1", fake)
+    good, out = PQ.start_worker("site-pueue", fake)
     assert good and out == "New task added (id 9)." and len(fake.calls) == 1
     argv = shlex.split(fake.calls[0])
     i = argv.index("--")
     assert len(argv) == i + 2, "pueue add 的 -- 后面只能有一个参数"
     inner = shlex.split(argv[i + 1])[1:]
     assert shlex.split(argv[i + 1])[0] == "exec" and inner[:2] == ["bash", "-c"] and len(inner) == 3
-    assert f"WORKER_ID={w['id']}" in inner[2] and f"CUDA_VISIBLE_DEVICES={lab1['groups'][w['group']][1]}" in inner[2]
+    assert f"WORKER_ID={w['id']}" in inner[2] and f"CUDA_VISIBLE_DEVICES={sp['groups'][w['group']][1]}" in inner[2]
     assert argv[argv.index("-g") + 1] == w["group"] and argv[argv.index("-l") + 1] == wl
     ok("pueue.start_worker：整条 bash -c 作为一个参数（ccb0ba6），组、标签、卡号来自 SITES")
-    assert PQ.start_worker("lab1", Fake([("add -g", (1, "boom"))])) == (False, "boom")
+    assert PQ.start_worker("site-pueue", Fake([("add -g", (1, "boom"))])) == (False, "boom")
     ok("pueue.start_worker：出错 → (False, 输出)")
-    c0 = PQ.worker_cmd("lab0")
-    assert "CUDA_VISIBLE_DEVICES=0" in c0 and M.SITES["lab0"]["worker"]["id"] in c0
-    assert all(f" {k}={v}" in c0 for k, v in M.SITES["lab0"]["groups"]["gpu0"][2].items())  # 组的环境变量带给 worker
-    ok("pueue：lab0 条目拼得出命令")
-    cw = lab1["cpu_worker"]
+    c0 = PQ.worker_cmd("site-pueue2")
+    assert "CUDA_VISIBLE_DEVICES=0" in c0 and M.SITES["site-pueue2"]["worker"]["id"] in c0
+    assert all(f" {k}={v}" in c0 for k, v in M.SITES["site-pueue2"]["groups"]["gpu0"][2].items())  # 组的环境变量带给 worker
+    ok("pueue：site-pueue2 条目拼得出命令")
+    cw = sp["cpu_worker"]
     fake = Fake([("add -g", (0, "New task added (id 10).\n"))])
-    assert PQ.start_worker("lab1", fake, "cpu") == (True, "New task added (id 10).")
+    assert PQ.start_worker("site-pueue", fake, "cpu") == (True, "New task added (id 10).")
     argv = shlex.split(fake.calls[0])
     run = shlex.split(argv[argv.index("--") + 1])[3]
     assert argv[argv.index("-g") + 1] == cw["group"] and argv[argv.index("-l") + 1] == f"worker:{cw['id']}"
     assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES= TASKQ_CPUS={cw['cpus']};" in run, run
-    assert run.endswith(f'exec bash "$REPO/{QR}/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("lab1")
-    assert "TASKQ_CPUS" not in PQ.worker_cmd("lab1")
+    assert run.endswith(f'exec bash "$REPO/{QR}/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("site-pueue")
+    assert "TASKQ_CPUS" not in PQ.worker_cmd("site-pueue")
     ok("pueue：CPU worker 在 cpu_worker 的组、WORKER_DEVICE=cpu、看不到卡、最多用 cpus 个核，入口是 worker_start.sh")
     raw2 = pueue_json((3, w["group"], wl, "Running"), (4, cw["group"], f"worker:{cw['id']}", "Queued"), (5, "gpu0", "x", "Running"))
     jobs2 = PQ.parse(raw2, [w["group"], cw["group"]])
-    assert [j[0] for j in jobs2] == [3, 4] and [j[0] for j in PQ.workers("lab1", jobs2, "cpu")] == [4]
-    assert [j[0] for j in PQ.workers("lab1", jobs2)] == [3]
+    assert [j[0] for j in jobs2] == [3, 4] and [j[0] for j in PQ.workers("site-pueue", jobs2, "cpu")] == [4]
+    assert [j[0] for j in PQ.workers("site-pueue", jobs2)] == [3]
     ok("pueue.parse 读几个组；workers 按种类认标签")
-    assert M.kinds("lab1") == ("gpu", "cpu") and M.kinds("lab0") == ("gpu",) and M.kinds("dicc1") == ("gpu", "cpu") \
-        and M.kinds("dicc2") == ("gpu",) and M.worker_of("dicc1", "cpu") == dict(kind="cpu") and M.worker_of("lab0", "cpu") is None
+    assert M.kinds("site-pueue") == ("gpu", "cpu") and M.kinds("site-pueue2") == ("gpu",) and M.kinds("site-slurm") == ("gpu", "cpu") \
+        and M.kinds("site-slurm2") == ("gpu",) and M.worker_of("site-slurm", "cpu") == dict(kind="cpu") and M.worker_of("site-pueue2", "cpu") is None
     ok("machines.kinds / worker_of：pueue 看 worker、cpu_worker，Slurm 看 jobs")
 
     home = fixture.tmpdir()
@@ -106,7 +106,7 @@ def main():
         old_conf = PQ.R.conf
         PQ.R.conf = lambda name: dict(old_conf(name), root=(shown or root) + "/")
         try:
-            argv = shlex.split(PQ.worker_cmd("lab1"))
+            argv = shlex.split(PQ.worker_cmd("site-pueue"))
         finally:
             PQ.R.conf = old_conf
         p = subprocess.Popen(["sh", "-c", argv[argv.index("--") + 1]], env=dict(PATH=os.environ["PATH"], HOME=home))  # pueue 的跑法
@@ -119,18 +119,18 @@ def main():
     # ---- slurm ----
     old = dict(P.SLURM)
     try:
-        P.SLURM["dicc2"] = dict(gpu={"long": ("3-00:00:00", 0), "normal": "1-00:00:00"})
-        pr = SL.probe("dicc2")
+        P.SLURM["site-slurm2"] = dict(gpu={"long": ("3-00:00:00", 0), "normal": "1-00:00:00"})
+        pr = SL.probe("site-slurm2")
         assert "for q in long normal;" in pr and "CPU|" not in pr
-        st = SL.status("dicc2", Fake([("sacctmgr", (0, "QOS|long|10|8|1\nQOS|normal||1|0\n"))]))
+        st = SL.status("site-slurm2", Fake([("sacctmgr", (0, "QOS|long|10|8|1\nQOS|normal||1|0\n"))]))
         assert st == dict(counts={"long": (10, 8, 1), "normal": (None, 1, 0)}, cpu=None, free=None), st
-        assert SL.status("dicc2", Fake([("sacctmgr", (255, "ssh"))])) is None
+        assert SL.status("site-slurm2", Fake([("sacctmgr", (255, "ssh"))])) is None
         assert SL.parse("QOS|long|10||0\nCPU|2\nALL|10|7\n") == dict(counts={}, cpu=2, free=3)
         ok("slurm.status / parse：各 QOS 的上限、段数、在排的段数；CPU、ALL 两行；读不到 → None")
         assert SL.squeue("101|w|RUNNING|1:00|long|n1\n\n") == [["101", "w", "RUNNING", "1:00", "long", "n1"]]
         ok("slurm.squeue：每行按 | 分，空行不要")
 
-        qos = P.SLURM["dicc2"]["gpu"]
+        qos = P.SLURM["site-slurm2"]["gpu"]
         assert SL.distribute(qos, st["counts"], 5, "worker.sbatch") == [("long", "3-00:00:00", 2, "worker.sbatch"),
                                                                         ("normal", "1-00:00:00", 3, "worker.sbatch")]
         assert SL.distribute(qos, st["counts"], 1, "worker.sbatch") == [("long", "3-00:00:00", 1, "worker.sbatch")]
@@ -153,7 +153,7 @@ def main():
            "按机器表的 job_names 用各自的一套（pair：<词>-<词>，star：<星名><两位数>）")
         assert SL.kind_of(f"/home/user/a/q/code/current/{QR}/worker.sbatch") == "gpu" and SL.kind_of("cpu_worker.sbatch") == "cpu" \
             and SL.kind_of("/bin/sh") is None and SL.kind_of("/x/worker.sbatch.bak") is None and SL.kind_of(None) is None
-        pr = SL.probe("dicc1")
+        pr = SL.probe("site-slurm")
         assert "-n " not in pr and "%o" in pr and "cpu_worker[.]sbatch" in pr
         ok("slurm.kind_of / probe：按交的脚本认 worker，不按作业名")
         fake = Fake([("sbatch", (1, "QOSMaxSubmitJobPerUserLimit"))])
@@ -169,13 +169,13 @@ def main():
 
     # ---- remote ----
     assert R.q("~") == "~" and R.q("~/st/a b") == "~/'st/a b'" and R.q("/scr/x") == "/scr/x"
-    assert R.q(M.SITES["dicc1"]["root"]).startswith("~/") and "user-x" not in R.q(M.SITES["dicc1"]["root"])
+    assert R.q(M.SITES["site-slurm"]["root"]).startswith("~/") and "user-x" not in R.q(M.SITES["site-slurm"]["root"])
     ok("remote.q：开头的 ~ 留给那边展开，命令里没有用户名")
-    assert R.conf("dicc") is M.MACHINES["dicc"] and R.conf("lab1") is M.RELAY["lab1"]
-    ok("remote.conf：执行机和我的 DICC（MACHINES）都查得到")
+    assert R.conf("slurm-login") is M.MACHINES["slurm-login"] and R.conf("site-pueue") is M.RELAY["site-pueue"]
+    ok("remote.conf：执行机和我的 Slurm（MACHINES）都查得到")
 
     # ---- SITES / RELAY ----
-    assert set(M.RELAY) == {k for k, v in M.SITES.items() if v.get("relay")} and {"lab0", "dicc1", "lab1", "dicc2"} <= set(M.RELAY)
+    assert set(M.RELAY) == {k for k, v in M.SITES.items() if v.get("relay")} and {"site-pueue2", "site-slurm", "site-pueue", "site-slurm2"} <= set(M.RELAY)
     for n, c in M.SITES.items():
         assert c["scheduler"] in ("slurm", "pueue") and c.get("root")
         assert c["scheduler"] != "pueue" or (c.get("worker") and all(M.worker_of(n, k)["group"] in c["groups"] for k in M.kinds(n)))
