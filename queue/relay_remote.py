@@ -54,6 +54,13 @@ def ssh_argv():
     return shlex.split(os.environ.get("RELAY_SSH", "ssh")) + C.SSH[1:]  # RELAY_SSH 只给测试用
 
 
+def master_down(m):
+    """机器条目 m 要用 ssh 长连接（ssh_master）、长连接断着 → True：不另起连接（中转执行机认证失败多了会被锁）。"""
+    import subprocess
+    return bool(m.get("ssh_master") and m.get("ssh")) and subprocess.run(
+        ssh_argv()[:1] + ["-O", "check", m["ssh"]], capture_output=True, timeout=30).returncode != 0
+
+
 def rsh(name, cmd, input=None, timeout=300):
     return C.run(cmd, conf(name)["ssh"], timeout, input=input, ssh=ssh_argv())
 
@@ -104,6 +111,24 @@ PRE = ("import json,os,sys\n" + "".join(f"{k}={v!r}\n" for k, v in CONST.items()
        + "def json_out(x):\n    print(MARK+json.dumps(x),flush=True)\n")
 HEAD = PRE + "R=sys.argv[1]\nA=json.load(sys.stdin)\n"
 
+# 根目录已占的（有 cap 的执行机按 cap 减去它算剩余）：硬链接只算一次、软链接不算 → (总共, 其中 blobs、code 以外的)
+USAGE = """def usage(R):
+    used,seen,out_used=0,set(),0
+    for dp,dns,fns in os.walk(R):
+        top=os.path.relpath(dp,R).split(os.sep)[0]
+        for f in fns:
+            x=os.lstat(os.path.join(dp,f))
+            if x.st_nlink>1:
+                if (x.st_dev,x.st_ino) in seen:
+                    continue
+                seen.add((x.st_dev,x.st_ino))
+            if not os.path.islink(os.path.join(dp,f)):
+                used+=x.st_blocks*512
+                if top not in (R_BLOBS,R_CODE):
+                    out_used+=x.st_blocks*512
+    return used,out_used
+"""
+
 # 读那边的队列和各任务的情况：有带版本号的命令就用（taskq.py status --json、spec.py collect --json），旧包没有（退出码 2、没有 JSON 行）
 # 时 import 那边的 taskq、spec；返回的结构两条路相同
 QUERY = """import subprocess
@@ -143,7 +168,7 @@ def collect(tasks,new):
     return spec.collect(sp,os.environ['TASKQ_DATA'])
 """
 
-STATUS_PY = HEAD + QUERY + """import shutil,time
+STATUS_PY = HEAD + QUERY + USAGE + """import shutil,time
 st,new=local_status()
 col=collect(st['tasks'],new)
 raw=None
@@ -157,29 +182,31 @@ except Exception:
     raw=None
 ed=os.path.join(R,R_ENVS_OK)
 oks={f[:-3]:open(os.path.join(ed,f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith('.ok')}
+envs_st={}
+er=os.path.expanduser(A.get('env_root') or os.path.join(R,R_ENVS))
+for n in A.get('envs') or []:
+    d=envs_st[n]=dict(active=os.path.exists(os.path.join(er,n,'.activate')),log='')
+    for x in ('ok','failed','building'):
+        try:
+            d[x]=open(os.path.join(ed,n+'.'+x)).readline().strip()
+        except OSError:
+            d[x]=''
+    if d['failed']:
+        try:
+            d['log']=open(os.path.join(ed,n+'.log'),'rb').read()[-2000:].decode('utf-8','replace')
+        except OSError:
+            pass
 free=shutil.disk_usage(R).free
 out_used=None
 if A.get('cap'):
-    used,seen,out_used=0,set(),0
-    for dp,dns,fns in os.walk(R):
-        top=os.path.relpath(dp,R).split(os.sep)[0]
-        for f in fns:
-            x=os.lstat(os.path.join(dp,f))
-            if x.st_nlink>1:
-                if (x.st_dev,x.st_ino) in seen:
-                    continue
-                seen.add((x.st_dev,x.st_ino))
-            if not os.path.islink(os.path.join(dp,f)):
-                used+=x.st_blocks*512
-                if top not in (R_BLOBS,R_CODE):
-                    out_used+=x.st_blocks*512
+    used,out_used=usage(R)
     free=min(free,max(0,int(A['cap']*1e9)-used))
 cdir=os.path.join(R,R_CODE)
 live=[d for d in (os.listdir(cdir) if os.path.isdir(cdir) else []) if '.tmp' not in d and os.path.isdir(os.path.join(cdir,d))
       and time.time()-os.stat(os.path.join(cdir,d)).st_mtime<STALE_BEAT]
 B=os.path.realpath(os.path.join(R,R_BLOBS))
 bdev=os.stat(B).st_dev if os.path.isdir(B) else os.stat(R).st_dev
-json_out(dict(taskq=st,tasks=col.get('tasks'),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,out_used=out_used,
+json_out(dict(taskq=st,tasks=col.get('tasks'),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,envs_st=envs_st,now=int(time.time()),out_used=out_used,
                    blob_dev=bdev,blob_free=free if bdev==os.stat(R).st_dev else shutil.disk_usage(B).free,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,R_CURRENT))),live=live))
 """

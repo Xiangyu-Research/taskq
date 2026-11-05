@@ -20,6 +20,7 @@ fixture.use()
 sys.path.insert(0, HERE)
 import relay_store as G  # noqa: E402
 import spec as S  # noqa: E402
+import proto  # noqa: E402
 
 GB = 10 ** 9
 
@@ -235,6 +236,7 @@ def main():
         ok("清理删视图时等建视图的锁（view.lock）")
 
         gc_pins_read_once(tmp)
+        gc_envs(tmp)
 
         b0, G.budget = G.budget, lambda n: None
         try:
@@ -245,6 +247,26 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("全部通过")
+
+
+def gc_envs(tmp):
+    """建环境期间（11/5）：用到的 wheel / conda 包钉在 pins/env.<环境>.json，清理不删；建好的环境（R/envs）清理从来不碰。"""
+    R = os.path.join(tmp, "Renv")
+    os.makedirs(os.path.join(R, "data", "prepared"))
+    h1, h2 = "a1" + "0" * 62, "b2" + "0" * 62
+    for h in (h1, h2):
+        os.utime(blob(R, h, GB // 100), (1000, 1000))
+    envd = os.path.join(R, "envs", "base")
+    os.makedirs(os.path.join(envd, "lib"))
+    for f in ("lib/big.so", ".ok"):
+        with open(os.path.join(envd, f), "wb") as fh:
+            fh.truncate(GB // 50)
+        os.utime(os.path.join(envd, f), (1000, 1000))
+    local_rpy(R)("x", G.RM.PIN_PY, dict(key=proto.safe("env.base"), hashes=[h1]))
+    r = G.gc("x", [], local_rpy(R), soft_gb=1e-6, free=0)
+    assert os.path.exists(os.path.join(R, "blobs", h1[:2], h1)) and not os.path.exists(os.path.join(R, "blobs", h2[:2], h2)), r
+    assert sorted(os.listdir(envd)) == [".ok", "lib"] and os.path.getsize(os.path.join(envd, "lib", "big.so")) == GB // 50, r
+    ok("GC：建环境钉住的块不删、没钉的照删；R/envs 下建好的环境（再大、再旧）不碰")
 
 
 def gc_pins_read_once(tmp):

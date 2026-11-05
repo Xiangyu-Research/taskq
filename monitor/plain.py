@@ -22,7 +22,7 @@ STEP = {"eval": "评测", "oof": "五折汇总", "paired": "和 T0 的配对比�
         "lprob": "病灶概率汇总", "prune": "删单折概率图", "p1": "P1 水肿反事实", "p2": "P2 合成病灶插入", "p2cmp": "P2 和 T0 的比较",
         "t18cmp": "T18 的后续比较", "j1b3": "J1B3 覆盖梯度回归",
         "archive": "存档", "train": "训练",
-        "compare_all": "对比表", "relay_fetch": "结果拉回", "relay_stage": "数据传送", "relay_archive": "存档"}
+        "compare_all": "对比表", "relay_fetch": "结果拉回", "relay_stage": "数据传送", "relay_archive": "存档", "env_build": "建环境"}
 QUIET = {"infer", "archive", "train", "prune"}  # 中间步骤：进度报告里不列
 _tasks = _plan = _steps = None
 
@@ -192,6 +192,12 @@ def problem(pid, p):
             site, sub, key = L(part[1]), part[2], ":".join(part[3:])
             if sub == "down":
                 return f"{site} 读不到了，看不到分给它的训练还在不在跑。"
+            if sub == "env" and d.get("state") == "空间不够":
+                return f"{site} 空间不够，环境 {key} 没建，用它的任务不会送过去；空出地方后自动再建。"
+            if sub == "env" and key:
+                return f"{site} 上的环境 {key} 建不了，用它的任务不会送过去，要看建环境的日志。"
+            if sub == "env":
+                return f"{site} 的环境自动建出错了。"
             if sub == "worker" and key:
                 return f"{site} 上的 {key.upper()} worker 出错停了，那边的 {key.upper()} 任务没人做，要看日志后重开。"
             if sub == "worker":
@@ -207,7 +213,7 @@ def problem(pid, p):
                     return f"{site} 的队列里有一个认不出来的任务。"
                 return f"{site} 在训 {fold(key)}，但总队列里没分给它，可能重复训练。"
         if kind == "relayadd":
-            return f"box 上没排上 {fold(d.get('key', ''))} 的{dict(relay_stage='传数据', relay_fetch='拉回', relay_archive='归档').get(d.get('step'), '下一步')}，{L(part[1])} 那边会等着，下次检查重试。"
+            return f"box 上没排上 {fold(d.get('key', ''))} 的{dict(relay_stage='传数据', relay_fetch='拉回', relay_archive='归档', env_build='建环境').get(d.get('step'), '下一步')}，{L(part[1])} 那边会等着，下次检查重试。"
         if kind == "bundlegate":
             return f"{L(part[1])} 在用的代码包跑不了 {fold(d.get('key', ''))} 的任务说明，先不送过去，那边换了新包后自动再送。"
         if kind == "topup":

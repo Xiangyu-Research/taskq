@@ -39,6 +39,7 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 | `envs/policy.py` `AUTO["advance"]` | True / False | 训完以后的步骤真的排；False 时只把"会排什么"写进 box `~/advance.log` |
 | `envs/policy.py` `READY` | 执行机 → 个数 | 备几个没人领的训练（`relay.py`）；relay 执行机备满时，总队列里有更优先的就把最靠后、备好没人领、没有进度的一个交还换它（每次检查一个，11/2；有存档的不换，11/4） |
 | `envs/policy.py` `AUTO["dicc2"]`、`AUTO["lab1"]`、`AUTO["lab0"]`、`AUTO["dicc1"]` | True / False | relay 执行机（DICC2、lab 的两张卡、我的 DICC 账号）：领新的任务、补交作业 / 开 worker；False 时只记进 box `~/relay.log`，已领的任务照常推进（见下面"执行机"） |
+| `envs/policy.py` `AUTO["envs"]` | True / False / {机器: [环境 或 (环境, 变体)]} | 按描述建的环境自动建（11/5，见下面"建环境"）：True = 每台机器条目里写 `"spec"` 的；dict = 这些之外再预建列出的（条目还是 conda / venv 的也建，切换前先建好）；没写或 False 时只把"会建什么"记一次进 box `~/relay.log`，不报环境的问题 |
 | `envs/policy.py` `HOLD` | 任务标签的通配式列表（如 `"infer:*"`） | 对上的步骤在 box 上加成暂停的（`pueue enqueue <号>` 才跑），进任务队列的先不加 |
 | `envs/policy.py` `PLACE` | 步骤 → 地方的列表 | 每个步骤在哪里做（写法见文件开头）。没写的步骤在 box 上，用实验表里写的组。已经在某处做着的不挪 |
 | `envs/machines.py` `task_vars` | 机器 → {变量: 值} | 这台机器上 `run_task.sh` 跑的每个任务都带的环境变量（`spec.py shell` 设，任务自己已经设了的不改；执行机的代码包里生成的 `machines.py` 照样带）；新开始或续训的段生效。现在 lab1、lab0 是 `RQ1_GPU_AUG=1`（训练集的数据增强在 GPU 上做）、`RQ1_GPU_AUG_LOADER=1`（GPU 增强的加载改成训练进程里的线程直接写锁页内存、只传交集，`gpu_aug_loader.py`），没设时 `train.sh` 当 0；11/2 前是 `envs/policy.py` 的 `GPU_AUG`、`GPU_AUG_LOADER` |
@@ -204,6 +205,18 @@ pueue 在 box、lab 上只当运行器：按组限并发、留日志、断开 ss
 ```
 
 **描述的哈希**（`mtab.spec_hash(名, 变体)`，`.ok` 里写的、就绪看的）= sha256(描述的字节 + 锁去掉 `created` 后的规范 JSON 字节（键排序、紧凑、UTF-8）)；还没有这个变体的锁时只算描述。一台机器上用哪个变体：`mtab.spec_variant`，条目写 `("spec", 变体)` 就是它，venv 跟着这台基础环境的变体（有那个变体的锁时），否则 default。`taskq check`：机器条目里的 spec 环境没有锁时提示（不算问题），锁的 `spec_sha256` 和现在的描述对不上（描述改了没重新锁）算问题。
+
+
+### 建环境（`sites/envs.py`，11/5）
+
+`taskq site env <机器> <环境> [--variant V]` 在那台的 CPU 上（Slurm 的机器用条目的 `env_job`（没有就 `transfer_job`）`srun` 到 CPU 分区，不许要 GPU；其余 `timeout 180m`、`nice 10`、`CUDA_VISIBLE_DEVICES=`）建到 `<env_root>/<环境>-<哈希前 12 位>`，跑 `<环境>.check.py`，过了才把 `<env_root>/<环境>` 这个软链接换过去、写 `<状态>/<环境>.ok`（内容 = `mtab.spec_hash(环境, 变体)`，`envs.states` / `oks_of` 拿它和现在的哈希比，对上才就绪）。失败时旧的环境和 `.ok` 不动。
+
+- **有锁时不联网**：要的包（锁里的 conda 和 pip 项）按 sha256 在 box 的 wheelhouse 里找；执行机先 `relay_transfer.pinned(机器, "env.<环境>", 哈希)` 钉住，再 `relay_transfer.ensure_blobs` 放进那边的 `R/blobs`（那边已经有的不传，同一个盘上有同样内容的文件先收编），box 和 MACHINES 里的机器直接用 wheelhouse。那边硬链接成原来的文件名放进临时目录 `<env_root>/.tmp-<环境>-…`（退出时删，4 小时以上的残留下次建时删）：conda 写 `@EXPLICIT` 清单（`file://…#md5`）后 `CONDA_PKGS_DIRS=<临时目录>/pkgs conda create --offline --file`；pip 一次 `pip install --no-index --no-deps --require-hashes --no-build-isolation --find-links <临时目录>/wheels`，按锁的顺序。哈希对不上 pip 不装、算检查失败。没有锁时照旧联网装。
+- **空间**：建之前在那边查（同 relay 的 `USAGE`：有 `cap` 时按 cap 减已占的，否则看盘剩多少），要的 = 包的大小 × 2.5（解开的环境）+ 包的大小（临时目录），不够时不建、写 `.failed`，报 `site:<机器>:env`。
+- **标志文件**（`<状态>/` = `proto.ROOT["envs_ok"]`）：`<环境>.building` = `<哈希> <开始的时间戳>`（建之前写，结束时删；超过 4 小时当作已经停了）；`<环境>.failed` = `<哈希> <时间戳> rc <退出码>` 或 `<哈希> <时间戳> nospace <要的字节> <剩的字节>`（11/5 前只有哈希，照样认）；`<环境>.log` 是建的日志，失败时状态程序带回最后 2000 字节。
+- **状态**（`taskq site envs <机器>`、`envs.classify`）：ok、描述变了、没建、在建、在建（可能已停）、检查失败、空间不够。
+- **清理**：`relay_store` 的 GC 只删 `R/data` 下的视图和 `R/blobs` 里没人用、没钉住的块，`<env_root>` 从来不碰；建的时候用到的块钉着（`pins/env.<环境>.json`）。
+- **自动建**（`relay.env_builds`，relay 执行机在每次检查里、MACHINES 里本机的（ssh 是 None，如 box）在 `relay.run_all` 里）：读那边的状态时一起读环境的标志文件；要的环境（`envs.wanted`：条目里 `"spec"` 的加 `AUTO["envs"]` 里预建的，venv 用到的按描述建的基础环境排在前面）里挑下一个（`envs.next_build`：一台一次只建一个；基础环境没好的先等；检查失败的等描述或锁改了再建；空间不够的 6 小时后再试），在 box 的 `wait` 组排 `taskq site env <机器> <环境> --variant <变体>`，标签 `env_build:<机器>:<环境>`；box 上已经有这台的 `env_build:<机器>:` 在跑或排着、或那边 `.building` 是新的时不排。执行机的开关（`AUTO[<执行机>]`）关着、手上没有任务时也照样建。ssh 长连接断着（`relay_remote.master_down`）时不读、不建，不另起连接。检查失败、空间不够、锁或描述有问题时报 `site:<机器>:env:<环境>`（带日志最后几行），box 上建环境的任务失败另有 box pueue 的报警。
 
 ## 文件
 

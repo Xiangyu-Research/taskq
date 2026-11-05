@@ -174,7 +174,7 @@ def check_specs(r, M):
             sites[fake] = dict(label=fake, hostname=r"(?!)", scheduler="pueue", root="/check/root", conda=("/check/conda", "base"),
                                envs=envs, roles=())
             try:
-                EV.build_script(fake, n)
+                EV.build_script(fake, n, store="/check/root/blobs")
             except Exception as e:  # noqa: BLE001
                 r.bad(g, f"环境描述 {n}（torch 变体 {v}）生成不出建环境的脚本：{type(e).__name__}: {e}")
             finally:
@@ -221,9 +221,16 @@ def check_policy(r):
     bad = sorted(set(auto) - every - set(PR.AUTO_SWITCHES))
     if bad:
         r.bad(g, f"AUTO 里有不认识的机器 {bad}（能写：{'、'.join(PR.AUTO_SWITCHES)} 和机器名）")
-    nb = sorted(k for k, v in auto.items() if not isinstance(v, bool))
+    nb = sorted(k for k, v in auto.items() if not isinstance(v, bool) and not (k == "envs" and isinstance(v, dict)))
     if nb:
-        r.bad(g, f"AUTO 的 {nb} 要写 True / False")
+        r.bad(g, f"AUTO 的 {nb} 要写 True / False（envs 也可以是 {{机器: [环境 或 (环境, 变体)]}}）")
+    for mn, lst in (auto.get("envs") if isinstance(auto.get("envs"), dict) else {}).items():
+        if mn not in every:
+            r.bad(g, f"AUTO['envs'] 里有不认识的机器 {mn!r}")
+        for x in lst if isinstance(lst, (list, tuple)) else [None]:
+            e = x if isinstance(x, str) else x[0] if isinstance(x, (list, tuple)) and 1 <= len(x) <= 2 else None
+            if e is None or M.spec_hash(e) is None:
+                r.bad(g, f"AUTO['envs'][{mn!r}] 的 {x!r} 要是有描述的环境名或 (环境, 变体)")
     for name in ("READY", "SLURM", "SHIFT", "OFFLINE"):
         bad = sorted(set(getattr(P, name, {}) or {}) - every)
         if bad:
