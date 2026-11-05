@@ -89,7 +89,7 @@ def test_lock_noowner():
     """拿到锁、owner 没写上（盘满等）：退出时只删还是自己建的那个目录；锁已被别人抢走、重新建过的不删（11/5）。"""
     _lock_noowner(taskq.TQ)
     if os.path.isdir("/var/tmp"):
-        disk = tempfile.mkdtemp(prefix="test_races_", dir="/var/tmp")
+        disk = fixture.tmpdir(prefix="test_races_", dir="/var/tmp")
         try:
             _lock_noowner(disk)
         finally:
