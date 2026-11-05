@@ -235,6 +235,8 @@ def main():
         assert held and p.returncode == 0 and not os.path.exists(os.path.join(R, "data", "prepared", "ds_old")), held
         ok("清理删视图时等建视图的锁（view.lock）")
 
+        gc_pins_read_once(tmp)
+
         b0, G.budget = G.budget, lambda n: None
         try:
             assert G.gc("dicc2", keep, lambda *a, **k: 1 / 0) is None
@@ -244,6 +246,38 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("全部通过")
+
+
+def gc_pins_read_once(tmp):
+    """删每个块前都看 pins：pins 没变时不重新读（11/5：几百个块、几十个 pin 时 GC 很慢）；钉住的照样不删。"""
+    import time
+    R = os.path.join(tmp, "Rpins")
+    os.makedirs(os.path.join(R, "data", "prepared"))
+    hs = [f"{i:02x}" + "0" * 62 for i in range(200)]
+    for h in hs:
+        os.utime(blob(R, h, 10), (1000, 1000))
+    pd = os.path.join(R, "state", "pins")
+    os.makedirs(pd)
+    for i in range(20):
+        with open(os.path.join(pd, f"t__{i}.json"), "w") as f:
+            json.dump(hs[i * 5:i * 5 + 1], f)
+    old = time.time() - 60
+    os.utime(pd, (old, old))
+    hook = ("import json\n_l=json.load\n_n=[0]\n"
+            "def _load(*a,**k):\n    _n[0]+=1\n    return _l(*a,**k)\n"
+            "json.load=_load\nimport atexit,sys\natexit.register(lambda: sys.stderr.write('LOADS=%d\\n'%_n[0]))\n"
+            "exec(compile(open(sys.argv.pop(1)).read(),'GC_PY','exec'))")
+    gc_file = os.path.join(tmp, "gc_py.py")
+    with open(gc_file, "w") as f:
+        f.write(G.RM.GC_PY)
+    r = subprocess.run([sys.executable, "-c", hook, gc_file, R], cwd=REPO, capture_output=True, text=True,
+                       input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["prepared"], siblings=[])))
+    assert r.returncode == 0, r.stderr
+    loads = int(r.stderr.split("LOADS=")[1].split()[0])
+    left = [h for h in hs if os.path.exists(os.path.join(R, "blobs", h[:2], h))]
+    assert left == hs[0:100:5], left
+    assert loads <= 3 * 20, f"读了 {loads} 次 pin（20 个 pin、删 180 个块）"
+    ok("GC：pins 没变时不重新读，钉住的照样不删")
 
 
 if __name__ == "__main__":

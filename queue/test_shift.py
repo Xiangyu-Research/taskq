@@ -2,6 +2,7 @@
 """shift.py 的测试：时段的判断；按时段的执行机开始时卡空着才开、结束时交出没训完的任务、每个时段只做一次。"""
 import datetime as dt
 import os
+import shutil
 import sys
 import tempfile
 
@@ -15,6 +16,7 @@ import shift  # noqa: E402
 
 TZ = shift.TZ
 real_stop_group = shift.stop_group
+real_site_tasks, real_hand_over = shift.site_tasks, shift.hand_over
 _d = tempfile.mkdtemp()
 shift.STATE, shift.LOG = os.path.join(_d, "shift.json"), os.path.join(_d, "refill.log")
 
@@ -179,4 +181,32 @@ msg, done = shift.stop_site("z0")
 assert not done and not moves and not gave, (msg, done, moves, gave)
 ok("worker 停下后组变回 Running：不算停下，不交出任务")
 
+# 11/5：交班时现读那边的进度（读不到就不交出）；改分一步做完（take --from）
+moves.clear(), gave.clear()
+shift.group_tasks = lambda host, g, *a: ("Paused", {7: dict(state="Done")})
+shift.site_tasks = lambda name: None
+msg, done = shift.stop_site("z0")
+assert not done and not moves and not gave, (msg, done, moves, gave)
+shift.site_tasks = real_site_tasks
+import relay  # noqa: E402
+rs0, ld0 = relay.remote_status, relay.ST.load_state
+relay.remote_status = lambda name: dict(taskq=dict(tasks=[dict(key="D/t/1", state="free"), dict(key="D/t/2", state="free")]),
+                                        tasks={"D/t/1": dict(runs=[], resumable=True), "D/t/2": dict(runs=[])})
+relay.ST.load_state = lambda: dict(keys={"z0": {"D/t/1": {}, "D/t/2": {}}})
+try:
+    msg, done = shift.stop_site("z0")
+finally:
+    relay.remote_status, relay.ST.load_state = rs0, ld0
+assert done and moves == [("D/t/1", "z0", "z1")] and gave == [("D/t/2", "z0")], (msg, done, moves, gave)
+ok("交班时现读那边的进度：读不到不交出；只有存档（resumable）也算有进度")
+import taskq  # noqa: E402
+cen, c0 = [], taskq.central
+taskq.central = lambda args, timeout=420: (cen.append(list(args)), (0, "", ""))[1]
+try:
+    assert real_hand_over("D/t/1", "z0", "z1") and cen == [["take", "--worker", "z1", "--assign", "--from", "z0", "D/t/1"]], cen
+finally:
+    taskq.central = c0
+ok("交班改分只调一次 take --from（中间不交还，别的执行机领不走）")
+
+shutil.rmtree(_d, ignore_errors=True)
 print("全部通过")

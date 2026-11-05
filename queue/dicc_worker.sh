@@ -146,7 +146,7 @@ declare -A SAFE=()        # pid → key 转成的文件名（spec.py 的 TASK_SA
 declare -A JTAG=()        # pid → 分段日志名里的作业名（run_task.sh 的 TASK_JOBTAG）
 declare -A STALLED=()     # pid → 当作卡住、开始停它的时刻
 declare -A TOK=()         # key → 这次领取的 token（taskq.py next 的第三行；交还、心跳时带上，11/1）
-declare -A WHY=()         # pid → 为什么在停：stall（卡住）、stop（taskq.py stop）、lost（领取已经不是自己的）
+declare -A WHY=()         # pid → 为什么在停：stall（卡住）、stop（taskq.py stop）、lost（领取已经不是自己的）、killed（run_task.sh 被单独停掉）
 declare -A SID=()         # pid → 训练所在的会话（run_task.sh 用 setsid 开的；run_task.sh 退出了，训练可能还在）
 declare -A ZOMB=()        # 停不下来、已经空出位置的：run_task.sh 的 pid → key（接着心跳，真停下了才交还，11/4）
 declare -A LATER=()       # key → 本作业到这个时刻前不再领（读不了盘，11/4）
@@ -352,7 +352,7 @@ idle_since=$T0  # 从什么时候开始手上没有在训的（0 = 有在训的�
 while true; do
     # 收训完的（run_task.sh 的退出码：0 训完，3 命令正常结束但没训完，4 缺输入，5 读不了盘，其他 = 出错）
     for p in "${!KEY[@]}"; do
-        kill -0 "$p" 2> /dev/null && continue
+        kill -0 "$p" 2> /dev/null && { sid_of "$p"; continue; }  # 先记下训练的会话：run_task.sh 被单独停掉后还认得出训练
         [[ -n ${STALLED[$p]:-} ]] && alive "$p" && continue  # run_task.sh 退出了，训练还在
         wait "$p"; rc=$?
         key=${KEY[$p]} why=${WHY[$p]:-} log=$(task_log "$p") safe=${SAFE[$p]}
@@ -381,10 +381,22 @@ while true; do
         elif (( rc == TQ_EXIT_RUN_NOT_DONE )); then
             echo "$(ts) $key 命令正常结束，但没有训完的文件，交还并记一次失败"
             fail "$key" "退出码 0 但没训完" "$ran"
+        elif (( rc > 128 )) && [[ -n ${SID[$p]:-} ]] && pgrep -s "${SID[$p]}" > /dev/null; then
+            # run_task.sh 被单独停掉（多半是 SIGKILL），训练还在：停掉训练，真停下了再交还，不算失败（11/5）
+            echo "$(ts) $key 的 run_task.sh 被停掉（退出码 $rc），训练还在：停掉它，停下了再交还（不算失败），本作业不再领它"
+            pkill -TERM -s "${SID[$p]}" 2> /dev/null
+            ZOMB[$p]=$key WHY[$p]=killed
+            EXCL+=("$key")
+            continue
+        elif (( rc == TQ_EXIT_RUN_TERM )); then
+            echo "$(ts) $key 被外部停掉（run_task.sh 收到停止信号），训练已停下：交还（不算失败），本作业不再领它"
+            tq release "$key"
+            EXCL+=("$key")
         else
             echo "$(ts) $key 训练失败（run_task.sh 退出码 $rc），交还并记一次失败"
             fail "$key" "退出码 $rc$( (( rc == TQ_EXIT_RUN_BAD )) && tail -n 1 "$log" 2> /dev/null | sed 's/^[-0-9: ]*/：/' | cut -c 1-300)" "$ran"
         fi
+        unset "SID[$p]"
     done
     # 停不下来的：真停下了才交还
     for p in "${!ZOMB[@]}"; do

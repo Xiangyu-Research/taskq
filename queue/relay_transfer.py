@@ -272,14 +272,24 @@ def fetch(name, key, say=print):
 
 
 # ---------------- 删那边的任务 ----------------
+class PathsLeft(Exception):
+    """那边的任务删了、路径没删掉：记录里标了 dropped，relay.plan 下一轮再删（11/5）。"""
+
+
 def drop_remote(name, key, rk, gone=False):
     """删那边的任务（taskq.py remove 在锁里查过没人领着），再删这个任务占的、别的任务不用的路径和日志，最后删记录 → 出错说明或 None。"""
     if not gone:
         r = RM.rtq(name, f"remove {shlex.quote(rk)}")
         if not r or r[0] not in (0, proto.EXIT["gone"]):  # gone：上次删了任务、没删完路径
             return f"任务没删掉，路径留着：{(r or [0, 'ssh 不通'])[1][-150:]}"
+        ST.update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(key) or {}).update(dropped=time.time()))
     keys = ST.keys_of(ST.load_state(), name)
     paths = ST.droppable(keys, key, ST.paths_of(keys.get(key) or {}))
-    RM.rpy(name, RM.DROP_PY, dict(paths=paths, logs=proto.safe(rk)))
+    try:
+        RM.rpy(name, RM.DROP_PY, dict(paths=paths, logs=proto.safe(rk)))
+    except (RuntimeError, OSError) as e:
+        if not gone:
+            raise PathsLeft(str(e)[-150:]) from e
+        raise
     ST.update_state(lambda st: (st.get("keys") or {}).get(name, {}).pop(key, None))
     return None

@@ -360,7 +360,7 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="rstop", key=real, rkey=a["key"]))
     for real, k in keys.items():  # 那边队列里已经删了（unq）、只剩结果的任务：总队列里训完了再删结果
         m = mt.get(real)
-        if real not in mk and real not in rt and k.get("unq") and (m is None or m["state"] == "done"):
+        if real not in mk and real not in rt and (k.get("dropped") or k.get("unq") and (m is None or m["state"] == "done")):
             acts.append(dict(op="drop", key=real, rkey=real, gone=True))
     acts += [dict(op="unhold", key=k) for k in holds if k not in gated]
     if rs["taskq"].get("paused"):
@@ -532,13 +532,19 @@ def execute(name, acts, s, run_add=None, stuck=None):
         r = taskq.central(args)
         return r[0], r[1] + r[2]
     beats = [a["key"] for a in acts if a["op"] == "beat"]
+    lost = set()  # 总队列里已经不是分给它的（别处交还或改分了）：这一轮不再替它动这些
     if beats:
-        r = master(f"beat --worker {name} " + " ".join(shlex.quote(k) for k in beats))
-        if r is None or r[0]:
-            msgs.append(f"{L} 的领取续不上（{(r or [0, 'ssh 不通'])[1][-150:]}）")
+        rc, out, err = taskq.central(["beat", "--strict", "--worker", name] + beats)
+        if rc == proto.EXIT["lost"]:
+            lost = set(out.split()) & set(beats)
+            msgs.append(f"{L} 的领取已经不是它的：{', '.join(sorted(lost))}，这一轮不动")
+        elif rc:
+            msgs.append(f"{L} 的领取续不上（{(out + err)[-150:]}）")
     kept = set()  # 那边没删掉的：总队列里不交还（交还了别处会再领，两处一起训）
     for a in acts:
         k = a["key"]
+        if k in lost:
+            continue
         try:
             if a["op"] == "release" and k in kept:
                 msgs.append(f"{L} 上 {k} 没删掉，先不交还")
@@ -582,7 +588,11 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 else:
                     msgs.append(f"{L} 的队列里删 {k} 出错：{(r or [0, 'ssh 不通'])[1][-150:]}")
             elif a["op"] == "drop":
-                err = RT.drop_remote(name, k, a["rkey"], gone=a.get("gone"))
+                try:
+                    err = RT.drop_remote(name, k, a["rkey"], gone=a.get("gone"))
+                except RT.PathsLeft as e:  # 任务已经删了，不会再训：照常交还，路径下一轮再删
+                    msgs.append(f"{L} 上删了 {k} 的任务，结果没删掉（{e}），下次检查再删")
+                    continue
                 if err:
                     msgs.append(f"{L} 上删 {k} 出错（{err}）")
                     kept.add(k)
@@ -634,16 +644,21 @@ def submit(name, subs):
     return msgs, stuck
 
 
-def write_status(name, rs, st):
-    keys = ST.keys_of(st, name)
-    rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
+def site_view(name, rs, st):
+    """那边的状态 → {真 key: dict(state, worker, runs, final, resumable, debug)}（status.json 的 tasks；shift.py 交班时现读）。"""
+    rt = {t["key"]: t for t in (rs.get("taskq") or {}).get("tasks") or []}
     out = {}
-    for real, k in keys.items():
+    for real in ST.keys_of(st, name):
         a = rt.get(real)
         if a:
             f = (rs.get("tasks") or {}).get(real) or {}
             out[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
-                             debug=f.get("debug") or {})
+                             resumable=f.get("resumable"), debug=f.get("debug") or {})
+    return out
+
+
+def write_status(name, rs, st):
+    out = site_view(name, rs, st)
     try:
         allst = json.load(open(STATUS))
     except (OSError, ValueError):

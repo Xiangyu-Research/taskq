@@ -113,12 +113,18 @@ def use_config():
 
 
 def outputs(key, default=None):
+    """policy.py 的 OUTPUTS[key]；配置文件夹里没有 policy.py → default。写明的配置文件夹不在、policy.py 读不了 → 报错（11/5：
+    不悄悄用默认的状态文件夹）。"""
     d = config_dir()
     if d not in sys.path:
         sys.path.insert(0, d)
     try:
         import policy
-    except ImportError:
+    except ModuleNotFoundError as e:
+        if e.name != "policy":
+            raise
+        if (os.environ.get("TASKQ_CONFIG") or project_conf() is not None) and not os.path.isdir(d):
+            raise ValueError(f"配置文件夹 {d} 不存在（TASKQ_CONFIG 或 .taskq.toml 的 config）") from None
         return default
     return getattr(policy, "OUTPUTS", {}).get(key, default)
 
@@ -170,8 +176,14 @@ KINDS = {
 
 
 def plugins(name):
+    """各插件文件夹里的 <name>.py → [模块]。插件文件夹要是绝对路径；写明的（TASKQ_PLUGINS、.taskq.toml）不在 → 报错（11/5）。"""
     mods = []
+    named = os.environ.get("TASKQ_PLUGINS") is not None or project_conf() is not None
     for i, d in enumerate(plugin_dirs()):
+        if not os.path.isabs(d):
+            raise ValueError(f"插件文件夹要写绝对路径：{d}")
+        if named and not os.path.isdir(d):
+            raise ValueError(f"插件文件夹 {d} 不存在（TASKQ_PLUGINS 或 .taskq.toml 的 plugins）")
         p = os.path.join(d, name + ".py")
         if not os.path.isfile(p):
             continue

@@ -237,6 +237,12 @@ rc, out = tq2("take", "--worker", "other", "--assign", UM)
 check("take 分给别人的：分不到（退出码 10）", rc == 10)
 rc, _ = tq2("take", "--worker", "lab", UM)
 check("take 不带 --assign（box 替 lab 领的老写法，11/4 删）：参数错", rc == 2)
+rc, _ = tq2("take", "--worker", "other", "--assign", "--from", "nobody", UM)
+check("take --from 不是现在分给的那台：分不到", rc == 10 and json.load(open(os.path.join(TQ2, "claims", taskq.safe(UM), "info")))["assigned"] == "lab")
+rc, _ = tq2("take", "--worker", "other", "--assign", "--from", "lab", UM)
+ci3 = json.load(open(os.path.join(TQ2, "claims", taskq.safe(UM), "info")))
+check("take --from：分给 lab 的一步改分给 other（交班，11/5），领取时间重算", rc == 0 and ci3["assigned"] == ci3["worker"] == "other" and ci3["since"] > ci["since"])
+tq2("release", "--worker", "other", UM)
 tq2("release", "--worker", "lab", UM)
 rc, out = tq2("next", "--worker", "501", "--envs", ALL, "--exclude", "D101_alpha/V_s/0", "D116_gamma/V_save/4")
 check("交还以后 DICC 作业能接着领", rc == 0 and out.startswith(UM))
@@ -1040,6 +1046,20 @@ check("proto.claim_alive 和 11/4 前 claim_state 的判断一样（默认值和
       all(proto.claim_alive(ci, made, now, age) == old_alive(ci, made, now, age, 1200, 900, 300) for ci, made, age in grid)
       and all(proto.claim_alive(ci, made, now, age, stale=100, fresh=50, half=20) == old_alive(ci, made, now, age, 100, 50, 20)
               for ci, made, age in grid))
+
+# next 领了、还没打印就被停（11/5）：撤掉这次领取，不留到过期；退出仍是被信号停的
+TQK = os.path.join(T, "taskq_kill")
+write_jsonl(os.path.join(TQK, "tasks.jsonl"), [(1, 0, "D103_y/V_save/0")])
+KILL_NEXT = ("import os,signal,sys\nsys.path.insert(0, sys.argv.pop(1))\nimport taskq\n_w = taskq.write_json\n"
+             "def w(p, *a, **k):\n    _w(p, *a, **k)\n    os.kill(os.getpid(), signal.SIGTERM)\n"
+             "taskq.write_json = w\nsys.exit(taskq.main(sys.argv[1:]))")
+r = subprocess.run([sys.executable, "-c", KILL_NEXT, HERE, "next", "--worker", "600", "--envs", ALL], env=dict(ENV, TASKQ_DIR=TQK),
+                   capture_output=True, text=True)
+left = os.listdir(os.path.join(TQK, "claims")) if os.path.isdir(os.path.join(TQK, "claims")) else []
+r2 = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "601", "--envs", ALL], env=dict(ENV, TASKQ_DIR=TQK),
+                    capture_output=True, text=True)
+check("next 领了、打印前被 SIGTERM：撤掉领取（别的 worker 马上能领），退出码仍是被信号停的",
+      r.returncode == -15 and not r.stdout and not left and r2.returncode == 0 and r2.stdout.startswith("D103_y/V_save/0"))
 
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
