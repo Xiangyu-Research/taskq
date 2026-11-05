@@ -333,6 +333,7 @@ TREE = {
     "internal": Group("调度自己排的步骤", {
         "stage": Cmd("传数据、加进执行机的队列（排不上退出码 75）", py("relay", "stage", prog="taskq internal"), own_help=True),
         "fetch": Cmd("拉回做完的任务", py("relay", "fetch", prog="taskq internal"), own_help=True),
+        "engine-replay": Cmd("反事实回放：advance 和 flow 引擎各算一遍比较", py("flow.cli", "replay", prog="taskq internal"), own_help=True),
     }, hidden=True),
 }
 

@@ -272,6 +272,7 @@ A_QUEUED, A_RUNNING, A_OK, A_FAILED, A_STALLED, A_BLOCKED, A_LEGACY, A_ADOPTED =
 A_DONE = (A_OK, A_LEGACY, A_ADOPTED)  # 算做完的尝试
 O_LIVE, O_RETIRED, O_SUPERSEDED = "live", "retired", "superseded"
 ALERTS["ledger"] = ("sub",)  # 台账的影子对比出错
+ALERTS["engine"] = ("sub",)  # 引擎（flow/engine.py）的影子对比出错
 ENV["TASKQ_LEDGER"] = ("test", "台账文件的位置（代替 <状态文件夹>/ledger.db）")
 
 # ---------------- 给 bash ----------------

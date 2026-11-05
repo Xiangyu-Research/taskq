@@ -78,21 +78,21 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
             errors.append(f"实例 id 重复：{i.id}")
         inst[i.id] = i
 
-    def source(key, exp, recipe, sp):
+    def source(key, exp, recipe, sp, lab):
         add_rule(Rule(name=recipe, scope=SOURCE))
         o = S.outputs(sp)
         outs = o["outs"]
         shared = [norm(os.path.join(os.path.dirname(outs[0]), x)) for x in o["extra"]]
         marker = norm(os.path.join(outs[0], o["done"][0][0])) if o["done"] else ""
         i = Instance(id=key, rule=recipe, key=key, exp=exp or "", names=dict(sp.get("names") or {}), outputs=outs,
-                     shared=shared, marker=marker, spec=sp)
+                     shared=shared, marker=marker, spec=sp, lab=lab)
         add(i)
         return i
 
     ids = {e["id"] for e in exps}
     table = {k: t for k, t in E.tasks().items() if t["exp"] in ids}
     for key, t in table.items():
-        source(key, t["exp"], t["recipe"], t["spec"])
+        source(key, t["exp"], t["recipe"], t["spec"], E.label(E.experiment(t["exp"]), t))
     for q in queue_tasks:
         if q["key"] in table or q["key"] in inst or not q.get("recipe"):
             continue
@@ -100,7 +100,7 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
             sp = q.get("spec") or E.resolve_task(q["recipe"], q.get("params") or {}, q.get("exp"))
         except S.SpecError:
             continue
-        source(q["key"], None, q["recipe"], sp)
+        source(q["key"], None, q["recipe"], sp, q["key"])
 
     for e in exps:
         mine = [t for t in table.values() if t["exp"] == e["id"]]
@@ -115,7 +115,7 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
                 qk = norm(fill(st["queue"]["key"], names)) if st.get("queue") else ""
                 i = Instance(id=f"{st['name']}:{lab}", rule=st["name"], key=t["key"], exp=e["id"], names=names,
                              deps=list(prev),
-                             qk=qk, outputs=outs, inputs=ins, marker=marker, task=t["key"])
+                             qk=qk, outputs=outs, inputs=ins, marker=marker, task=t["key"], step=st, lab=lab)
                 add(i)
                 by_rule.setdefault(st["name"], []).append(i.id)
                 prev.append(i.id)
@@ -135,7 +135,8 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
                 outs, marker, ins = step_paths(st, gnames, e.get("each") or ())
                 qk = norm(fill(st["queue"]["key"], gnames)) if st.get("queue") else ""
                 i = Instance(id=f"{st['name']}:{e['id']}", rule=st["name"], key=e["id"], exp=e["id"], names=gnames,
-                             deps=list(dict.fromkeys(deps)), qk=qk, outputs=outs, inputs=ins, marker=marker)
+                             deps=list(dict.fromkeys(deps)), qk=qk, outputs=outs, inputs=ins, marker=marker,
+                             step=st, each=e.get("each") or {})
                 add(i)
                 deps = i.deps + [i.id]
 
@@ -148,7 +149,8 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
         names = dict(data=data, python=python)
         outs, marker, ins = step_paths(f, names)
         deps = [x for w in r.watch for x in gathered.get(w, []) if rules[inst[x].rule].scope == GATHER]
-        add(Instance(id=f["name"], rule=f["name"], key="all", names=names, deps=deps, outputs=outs, inputs=ins, marker=marker))
+        add(Instance(id=f["name"], rule=f["name"], key="all", names=names, deps=deps, outputs=outs, inputs=ins, marker=marker,
+                     step=f))
 
     # done 判断的路径是别的实例产出的上级（如删单折概率图的那一步看整个预测目录）：算它改别人的产出，不归它
     for i in inst.values():

@@ -36,6 +36,9 @@ class Instance:
     marker: str = ""            # 做完的标志
     task: str = ""              # each：所属源头任务的 key
     spec: dict = None           # 源头任务的说明（判断做完用）
+    step: dict = None           # 编译来源的那一步（实验表的 after / group_after / FINAL 的一项；引擎排的时候用它的 cmd、queue、done）
+    lab: str = ""               # 源头任务的简称（<实验>_<简称>）；不属于实验的 = key
+    each: dict = None           # gather：实验的 each（展开输入用）
 
 
 @dataclass

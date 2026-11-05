@@ -137,7 +137,25 @@ def accept(argv):
     return 0
 
 
-CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept)
+def replay(argv):
+    ap = argparse.ArgumentParser(prog="taskq internal engine-replay", description="反事实回放：随机假设做完了哪些，advance.plan 和 "
+                                 "flow/engine.py 各算一遍（不碰盘、不排任务）；有不一样的退出码 1")
+    ap.add_argument("-n", type=int, default=100, help="几种假设（默认 100）")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    from flow import engine
+    d = engine.replay(n=a.n, seed=a.seed)
+    if a.json:
+        print(json.dumps(dict(cases=a.n, diffs=d), ensure_ascii=False))
+    else:
+        for x in d[:50]:
+            print(f"假设 {x['case']}：只有 {x['only']} 有 {x['item']}")
+        print(f"{a.n} 种假设，{len(d)} 处不一样", file=sys.stderr)
+    return 1 if d else 0
+
+
+CMDS = dict(who=who, dag=dag, adopt=adopt, verify=verify, accept=accept, replay=replay)
 
 
 def main(argv):
