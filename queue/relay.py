@@ -484,10 +484,21 @@ def label(op, key):
     return f"{op}:{key}"
 
 
-def execute(name, acts, s, run_add=None):
-    """做动作 → [说明]。出错的那一步写进说明，后面的照做。"""
+def execute(name, acts, s, run_add=None, stuck=None):
+    """做动作 → [说明]。出错的那一步写进说明，后面的照做。在 box 上加任务（传数据、拉回、归档）出错的记进 stuck，
+    下次检查照常重试，加上了报警就消失。"""
     L, msgs = RM.conf(name)["label"], []
-    add = run_add or refill.add
+    stuck = {} if stuck is None else stuck
+    raw_add = run_add or refill.add
+    what = dict(relay_stage="传数据", relay_fetch="拉回", relay_archive="归档")
+
+    def add(host, lab, step, k, args, **kw):
+        try:
+            return raw_add(host, lab, step, k, args, **kw)
+        except Exception as e:  # noqa: BLE001
+            stuck[alert_id("relayadd", name, step, k)] = alert(f"{L} 的 {k}：在 box 上排{what[step]}的任务失败（{str(e)[-200:]}），下次检查重试",
+                                                                machine=name, step=step, key=k)
+            raise
 
     def master(args):
         r = taskq.central(args)
@@ -702,9 +713,9 @@ def run_one(s, name, dry):
     if dry:
         return [f"{L}：会 {desc}" if desc else f"{L}：不动（{why}）",
                 f"{L}：会 {sdesc}" if sdesc else f"{L}：不交作业（{swhy}）"] + notes, stuck
-    msgs = notes + execute(name, acts, s)
+    msgs = notes + execute(name, acts, s, stuck=stuck)
     if live:
-        msgs += execute(name, more, s)
+        msgs += execute(name, more, s, stuck=stuck)
         m2, st2 = submit(name, subs)
         msgs += m2
         stuck.update(st2)
