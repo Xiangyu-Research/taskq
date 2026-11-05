@@ -1,6 +1,7 @@
 """relay：box 上的数据传到执行机（stage）、做完的结果拉回 box（fetch）、删那边的任务和结果（drop_remote）。
 那边的路径和 box 的数据目录一样；数据按 sha256 存成 blob（relay_remote.py 的说明）。"""
 import base64
+import contextlib
 import json
 import os
 import shlex
@@ -58,9 +59,16 @@ def stage(name, key, nice=None, add=True, say=print):
         return None
     hs = ST.sha256s(sorted({p for _, p in ex["files"]}))
     links = {rel: hs[p] for rel, p in ex["files"]}
+    with pinned(name, key, links.values(), say):  # 视图建好前那边的清理不删这些块（11/1）
+        return _stage(name, key, nice, add, say, real, D, ex, hs, links)
+
+
+@contextlib.contextmanager
+def pinned(name, key, hashes, say=print):
+    """这段时间里那边的清理不删这些 blob（R/state/pins/<key>.json）；时间长时定时重写，钉子不过期（11/4），出来时撤掉。"""
     pin = proto.safe(key)
-    want = dict(key=pin, hashes=sorted(set(links.values())))
-    RM.rpy(name, RM.PIN_PY, want)  # 视图建好前那边的清理不删这些块（11/1）；传得久时定时重写，钉子不过期（11/4）
+    want = dict(key=pin, hashes=sorted(set(hashes)))
+    RM.rpy(name, RM.PIN_PY, want)
     stop = threading.Event()
 
     def refresh():
@@ -72,7 +80,7 @@ def stage(name, key, nice=None, add=True, say=print):
     th = threading.Thread(target=refresh, daemon=True)
     th.start()
     try:
-        return _stage(name, key, nice, add, say, real, D, ex, hs, links)
+        yield
     finally:
         stop.set()
         th.join()
@@ -80,6 +88,39 @@ def stage(name, key, nice=None, add=True, say=print):
             RM.rpy(name, RM.PIN_PY, dict(key=pin, hashes=None))
         except RuntimeError as e:
             say(f"撤掉 {key} 的钉住记录没成（{e}），清理 12 小时后不再认它")
+
+
+def ensure_blobs(name, files, say=print, data_dir=None, what=None, n=None):
+    """box 上的文件 {sha256: 本机路径} → 那边的 blobs 里都有了 → {sha256: 那边的路径（R/blobs/<前两位>/<sha256>，~ 不展开）}。
+    先问那边缺哪些，缺的先从那边已有的数据里收编（硬链接，老数据目录、同一个盘上别的执行机、它自己的数据目录：本机路径在
+    data_dir（默认 box 的数据目录）下的按相对路径找），还缺的经隧道传。要不被清理删掉，调用方先 pinned。
+    CPU 作业排不上 → RM.NoSlot；没传到 → RelayError。"""
+    import tunnel
+    D = data_dir or box_data()
+    miss = RM.rpy(name, RM.MISSING_PY, sorted(files))
+    say(f"{what or name}：{len(files) if n is None else n} 个文件，那边缺 {len(miss)} 个")
+    if miss:
+        srcs, job = RM.adopt_srcs(name), RM.conf(name).get("adopt_job")
+        meta = {h: (os.path.relpath(files[h], D) if files[h].startswith(D.rstrip("/") + "/") else None, os.path.getsize(files[h]))
+                for h in miss}
+        got = set(RM.rpy(name, RM.ADOPT_PY, dict(srcs=srcs + [dict(path=f"{RM.root(name)}/{ROOT['data']}", site=False)], files=meta),
+                         timeout=3 * 3600, job=job))
+        miss = [h for h in miss if h not in got]
+        say(f"那边已有的数据里收编了 {len(got)} 个，还缺 {len(miss)} 个")
+    if miss:
+        os.makedirs(ST.DIR, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="push_", dir=ST.DIR)
+        try:
+            rels = {h: os.path.relpath(proto.blob(h), ROOT["blobs"]) for h in miss}  # 相对 blobs
+            for h in miss:
+                os.makedirs(os.path.dirname(os.path.join(tmp, rels[h])), exist_ok=True)
+                os.symlink(files[h], os.path.join(tmp, rels[h]))
+            bad = tunnel.push(RM.conf(name)["ssh"], tmp, f"{RM.root(name)}/{ROOT['blobs']}", [rels[h] for h in miss], site=name)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if bad:
+            raise RN.RelayError(f"{len(bad)} 个文件没传到或对不上（下次重传）")
+    return {h: f"{RM.root(name)}/{proto.blob(h)}" for h in files}
 
 
 def in_use(name):
@@ -114,34 +155,13 @@ def _stage(name, key, nice, add, say, real, D, ex, hs, links):
     outs = [ST.safe_rel(o) for o in ex.get("outs") or N.outs(real)]
     cleanup = [ST.safe_rel(c) for c in ex["cleanup"]]
     check_overlap(name, key, views + inputs)
-    miss = RM.rpy(name, RM.MISSING_PY, sorted(set(links.values())))
-    say(f"{key}：{len(links)} 个文件，那边缺 {len(miss)} 个")
-    srcs, job = RM.adopt_srcs(name), RM.conf(name).get("adopt_job")
-    if miss:  # 那边老数据目录、同一个盘上别的执行机、它自己的数据目录里内容一样的文件硬链接进 blobs，不重传
-        by = {h: p for p, h in hs.items()}
-        files = {h: (os.path.relpath(by[h], D) if by[h].startswith(D.rstrip("/") + "/") else None, os.path.getsize(by[h])) for h in miss}
-        try:
-            got = set(RM.rpy(name, RM.ADOPT_PY, dict(srcs=srcs + [dict(path=f"{RM.root(name)}/{ROOT['data']}", site=False)], files=files),
-                             timeout=3 * 3600, job=job))
-        except RM.NoSlot as e:
-            say(f"{e}；这次不传，下次检查再来")
-            return None
-        miss = [h for h in miss if h not in got]
-        say(f"那边已有的数据里收编了 {len(got)} 个，还缺 {len(miss)} 个")
-    if miss:
-        by = {h: p for p, h in hs.items()}
-        os.makedirs(ST.DIR, exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix="push_", dir=ST.DIR)
-        try:
-            rels = {h: os.path.relpath(proto.blob(h), ROOT["blobs"]) for h in miss}  # 相对 blobs
-            for h in miss:
-                os.makedirs(os.path.dirname(os.path.join(tmp, rels[h])), exist_ok=True)
-                os.symlink(by[h], os.path.join(tmp, rels[h]))
-            bad = tunnel.push(RM.conf(name)["ssh"], tmp, f"{RM.root(name)}/{ROOT['blobs']}", [rels[h] for h in miss], site=name)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        if bad:
-            raise RN.RelayError(f"{len(bad)} 个文件没传到或对不上（下次重传）")
+    srcs = RM.adopt_srcs(name)
+    job = RM.conf(name).get("adopt_job")
+    try:
+        ensure_blobs(name, {h: p for p, h in hs.items()}, say, D, what=key, n=len(links))
+    except RM.NoSlot as e:
+        say(f"{e}；这次不传，下次检查再来")
+        return None
     now = time.time()
     ST.update_state(lambda st: st.setdefault("views", {}).setdefault(name, {}).update({v: now for v in views}))
     texts = {k: (v if isinstance(v, bytes) else v.encode()) for k, v in ex["texts"].items()}

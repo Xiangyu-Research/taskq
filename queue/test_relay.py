@@ -1384,6 +1384,138 @@ def test_cross_version():
     ok("读状态：新包用 status --json、collect --json（wait=None），旧包 import，两条路结构一样；新命令没有带版本号的 JSON 行 → 出错")
 
 
+def test_env_auto():
+    """按描述建的环境自动建（11/5）：没建的排一个 box 任务（基础环境先建、一台一次一个），box 上已经排着、那边在建的不重排；
+    开关关着只记日志；空间不够、建坏了报 site:<机器>:env:<环境>；长连接断着不连。"""
+    EV = relay.EV
+    adds, logs = [], []
+    keep = {k: getattr(relay, k) for k in ("log", "remote_status")}
+    add0, auto, envs0 = relay.refill.add, dict(relay.P.AUTO), M.RELAY[NAME].get("envs")
+    hub = M.hub()
+    try:
+        relay.refill.add = lambda host, lab, step, k, args, **kw: adds.append((host, lab, step, k, args, kw)) or 77
+        relay.log = lambda lines: logs.extend(lines)
+        M.RELAY[NAME]["envs"] = {"base": ("spec", "cu128"), "alt": "spec"}
+        relay.P.AUTO["envs"] = True
+        now = 2_000_000_000
+        s = {"pueue": {hub: {"tasks": []}}}
+        st = {}
+        msgs = relay.env_builds(s, NAME, {}, now, False, st)
+        assert len(adds) == 1 and not st, (adds, st)
+        host, lab, step, k, args, kw = adds[0]
+        assert host == hub and lab == f"env_build:{NAME}:base" and step == proto.ENV_BUILD and k == f"{NAME}:base" and kw == dict(to=NAME, group="wait")
+        assert args.startswith(f"wait -p --label env_build:{NAME}:base -- ") and f"envs_cli.py env {NAME} base --variant cu128" in args, args
+        assert msgs and "base" in msgs[0]
+        ok("没建：box 的 wait 组排 taskq site env（基础环境先建，变体按条目），一次一个")
+        adds.clear()
+        s2 = {"pueue": {hub: {"tasks": [dict(id=3, label=f"env_build:{NAME}:base", status="Running")]}}}
+        relay.env_builds(s2, NAME, {}, now, False, {})
+        hb = EV.vhash("base", "cu128")
+        relay.env_builds(s, NAME, {"base": dict(building=f"{hb} {now - 60}")}, now, False, {})
+        relay.env_builds({"pueue": {hub: {"error": "x"}}}, NAME, {}, now, False, {})
+        assert adds == [], adds
+        ok("box 上已经排着、那边 .building 是新的、读不到 box 的 pueue：不重排")
+        relay.env_builds(s, NAME, {"base": dict(ok=hb, active=True)}, now, False, {})
+        assert len(adds) == 1 and adds[0][1] == f"env_build:{NAME}:alt" and "--variant default" in adds[0][4], adds
+        adds.clear()
+        ok("基础环境好了才建建在它上面的 venv")
+        st = {}
+        rows = {"base": dict(failed=f"{hb} {now - 60} nospace 5000000000 1000000000")}
+        relay.env_builds(s, NAME, rows, now, False, st)
+        a = st.get(f"site:{NAME}:env:base")
+        assert adds == [] and a and proto.alert_data(a)["state"] == "空间不够" and "5.0 GB" in proto.alert_msg(a), st
+        st = {}
+        relay.env_builds(s, NAME, {"base": dict(failed=f"{hb} {now - 60} rc 1", log="...\npip 坏了\n")}, now, False, st)
+        assert adds == [] and "pip 坏了" in proto.alert_msg(st[f"site:{NAME}:env:base"]), st
+        ok("空间不够、建坏了：不重排，报 site:<机器>:env:<环境>（带要多少剩多少、日志最后几行）")
+        relay.P.AUTO["envs"] = False
+        st = {}
+        relay.env_builds(s, NAME, {}, now, False, st)
+        relay.env_builds(s, NAME, {}, now, False, st)
+        assert adds == [] and not st and len([x for x in logs if "开关没开" in x]) == 1, logs
+        assert relay.env_builds(s, NAME, {}, now, True, {}) and adds == []
+        ok("AUTO['envs'] 关着：不排、不报，只记一次 ~/relay.log；dry 只说会建")
+        relay.P.AUTO["envs"] = {NAME: ["alt"]}
+        M.RELAY[NAME]["envs"] = {"base": ("conda", "x")}
+        relay.env_builds(s, NAME, {}, now, False, {})
+        assert [x[1] for x in adds] == [f"env_build:{NAME}:base"] and "--variant default" in adds[0][4], adds
+        adds.clear()
+        ok("AUTO['envs'] = {机器: [环境]}：条目还不是 spec 的也预建（预建的 venv 用按描述建的基础环境，基础环境先建）")
+        M.RELAY[NAME]["envs"] = {"base": ("spec", "cu128")}
+        relay.P.AUTO["envs"] = True
+        relay.P.AUTO[NAME] = False
+        ts = {"ok": {hub: True}, "taskq": {relay.taskq.queue_host(): {"tasks": []}}, "pueue": {hub: {"tasks": []}}}
+        relay.remote_status = lambda n: dict(envs_st={}, now=now)
+        relay.run_one(ts, NAME, False)
+        assert [x[1] for x in adds] == [f"env_build:{NAME}:base"], adds
+        adds.clear()
+        relay.remote_status = keep["remote_status"]
+        open(os.path.join(T, "master_down"), "w").close()
+        try:
+            assert relay.run_one(ts, NAME, False) == ([], {}) and adds == []
+            assert EV.read_rows(NAME, ["base"]) is None
+        finally:
+            os.remove(os.path.join(T, "master_down"))
+        ok("执行机的开关关着、没有它的任务也建；ssh 长连接断着：读不到、不建、不另起连接")
+        mb = M.MACHINES[hub]
+        envs_hub = mb.get("envs")
+        mb["envs"] = dict(envs_hub or {}, base="spec")
+        rr = EV.read_rows
+        EV.read_rows = lambda name, envs_, run=None: ({}, now)
+        try:
+            ev, _ = relay.machine_envs(ts, hub, False)
+        finally:
+            EV.read_rows = rr
+            mb["envs"] = envs_hub
+        assert [x[1] for x in adds] == [f"env_build:{hub}:base"] and ev, adds
+        ok("box 自己（MACHINES 里 ssh 是 None 的）同样自动建")
+    finally:
+        for k, v in keep.items():
+            setattr(relay, k, v)
+        relay.refill.add = add0
+        relay.P.AUTO.clear(); relay.P.AUTO.update(auto)
+        M.RELAY[NAME]["envs"] = envs0
+
+
+def test_env_remote():
+    """真跑（假 ssh）：状态程序读回环境的标志文件；建之前查空间写 .building / .failed（按 cap）；ensure_blobs 把 box 的文件放进 blobs。"""
+    EV = relay.EV
+    envs0 = M.RELAY[NAME].get("envs")
+    try:
+        M.RELAY[NAME]["envs"] = {"base": ("spec", "cu128")}
+        h = EV.vhash("base", "cu128")
+        r = EV.mark(NAME, "base", h, "reserve", need=1)
+        sd = os.path.join(RROOT, proto.ROOT["envs_ok"])
+        assert r["ok"] and open(os.path.join(sd, "base.building")).read().split()[0] == h, r
+        rs = relay.remote_status(NAME)
+        assert rs["envs_st"]["base"]["building"].startswith(h) and not rs["envs_st"]["base"]["active"] and rs["now"] > 0, rs["envs_st"]
+        EV.mark(NAME, "base", h, "clear")
+        assert not os.path.exists(os.path.join(sd, "base.building"))
+        r = EV.mark(NAME, "base", h, "reserve", need=10 ** 18)
+        fl = open(os.path.join(sd, "base.failed")).read().split()
+        assert not r["ok"] and fl[0] == h and fl[2] == "nospace" and not os.path.exists(os.path.join(sd, "base.building")), (r, fl)
+        c0 = M.RELAY[NAME]
+        M.RELAY[NAME] = dict(c0, cap=1e-9)
+        try:
+            assert not EV.mark(NAME, "base", h, "reserve", need=10 ** 6)["ok"]
+        finally:
+            M.RELAY[NAME] = c0
+        rs = relay.remote_status(NAME)
+        st = EV.classify(rs["envs_st"], {"base": "cu128"}, rs["now"])
+        assert st == {"base": "空间不够"}, st
+        os.remove(os.path.join(sd, "base.failed"))
+        ok("那边：按要的空间（有 cap 时按 cap 减已占的）写 .building 或 .failed nospace；状态程序读回来")
+        src = os.path.join(T, "envblob.bin")
+        open(src, "wb").write(b"wheel-bytes")
+        hh = ST.sha256s([src])[src]
+        got = RT.ensure_blobs(NAME, {hh: src}, say=lambda *_: None)
+        assert got == {hh: f"{RM.root(NAME)}/{proto.blob(hh)}"} and open(os.path.join(RROOT, proto.blob(hh)), "rb").read() == b"wheel-bytes"
+        assert RT.ensure_blobs(NAME, {hh: src}, say=lambda *_: None) == got
+        ok("ensure_blobs：box 的文件放进那边的 blobs，已经有的不再传，返回那边的路径")
+    finally:
+        M.RELAY[NAME]["envs"] = envs0
+
+
 def test_programs_ascii():
     """送到那边的小程序：只有 ASCII、能编译，不 import proto（那边的旧包里可能没有）。"""
     for k in dir(RM):
@@ -1392,6 +1524,9 @@ def test_programs_ascii():
             code.encode("ascii")
             compile(code, k, "exec")
             assert "import proto" not in code and "from proto" not in code, k
+    code = RM.HEAD + RM.USAGE + relay.EV.MARK_PY
+    code.encode("ascii")
+    compile(code, "MARK_PY", "exec")
     ok("送到那边的小程序只有 ASCII、能编译、不 import proto")
 
 
@@ -1409,6 +1544,8 @@ if __name__ == "__main__":
     test_adopt_out()
     test_place()
     test_e2e_path(test_e2e())
+    test_env_remote()
+    test_env_auto()
     test_cross_version()
     test_programs_ascii()
     test_view_lock()

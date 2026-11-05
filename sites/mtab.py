@@ -169,7 +169,7 @@ def spec_variant(name, env):
     """这台机器上 env 用哪个变体：条目写了 ("spec", 变体) 就是它；venv（有 base）跟着这台的基础环境的变体（有那个变体的锁时），
     否则 default。"""
     e = (machine(name).get("envs") or {}).get(env)
-    if isinstance(e, (tuple, list)) and len(e) > 1:
+    if is_spec(e) and isinstance(e, (tuple, list)) and len(e) > 1:
         return e[1]
     b = spec_base(env)
     if b and is_spec((machine(name).get("envs") or {}).get(b)):

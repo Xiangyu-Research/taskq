@@ -73,6 +73,7 @@ import relay_transfer as RT  # noqa: E402
 import bundle_gate as BG  # noqa: E402
 import smoke_gate as SG  # noqa: E402
 import names as N  # noqa: E402
+import envs as EV  # noqa: E402
 import shift  # noqa: E402
 from common import write_json  # noqa: E402
 
@@ -111,10 +112,11 @@ def gate(name, rs, mtq, key):
 def remote_status(name):
     """→ 那边的状态 dict；连不上或出错 → None。"""
     c = RM.conf(name)
-    if c.get("ssh_master") and subprocess.run(RM.ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
-        return None  # 长连接断着：不另起连接（中转执行机认证失败多了会被锁）
+    if RM.master_down(c):
+        return None
     try:
-        rs = RM.rpy(name, RM.STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap")), timeout=STATUS_S)
+        rs = RM.rpy(name, RM.STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap"), env_root=M.env_root(c),
+                                             envs=sorted(EV.wanted(name, envs_switch(name)[1]))), timeout=STATUS_S)
     except RuntimeError:
         return None
     return parse_sched(name, rs)
@@ -123,7 +125,7 @@ def remote_status(name):
 def current_bundle(name):
     """读不到状态时看那边的 code/current → 包名；还没有代码包（新机器第一次）→ ""；连不上 → None。"""
     c = RM.conf(name)
-    if c.get("ssh_master") and subprocess.run(RM.ssh_argv()[:1] + ["-O", "check", c["ssh"]], capture_output=True, timeout=30).returncode:
+    if RM.master_down(c):
         return None
     cur = f"{R.q(RM.root(name))}/{ROOT['current']}"
     rc, out, _ = RM.rsh(name, f'if [ -e {cur} ]; then basename "$(readlink -f {cur})"; fi', timeout=30)
@@ -764,6 +766,69 @@ def log(lines):
             fo.writelines(f"{time.strftime('%F %T')} {x}\n" for x in lines)
 
 
+def envs_switch(name):
+    """envs/policy.py 的 AUTO["envs"] → (开着没有, 这台另外预建的 [环境 或 (环境, 变体)])。"""
+    a = P.AUTO.get("envs")
+    if isinstance(a, dict):
+        return True, list(a.get(name) or [])
+    return bool(a), []
+
+
+def env_builds(s, name, rows, now, dry, stuck):
+    """按描述建的环境（sites/envs.py）：没建、描述变了、在建停了、空间不够过了 RETRY_S 的，在 box 的 wait 组排一个
+    taskq site env（一台一次一个；box 上已经有这台的就不排）；建坏的、空间不够、wheelhouse 缺包的报 site:<机器>:env:<环境>。
+    开关 AUTO["envs"] 关着时只记进 ~/relay.log。rows、now：那边的标志文件和时间（envs.read_rows 或状态程序的 envs_st）。→ 说明"""
+    on, extra = envs_switch(name)
+    want = EV.wanted(name, extra)
+    if not want:
+        return []
+    st = EV.classify(rows, want, now)
+    probs = EV.problems(name, want, st, rows)
+    if on:
+        for env, msg in probs:
+            stuck[alert_id("site", name, "env", env)] = alert(msg[:1500], machine=name, sub="env", key=env, state=st.get(env))
+    nb = EV.next_build(want, st, rows, now, skip={k for k, _ in probs if st.get(k) not in ("检查失败", "空间不够")})
+    if nb is None:
+        return []
+    env, v = nb
+    hub, L = M.hub(), M.machine(name)["label"]
+    d = (s.get("pueue") or {}).get(hub) or {}
+    if "tasks" not in d:  # 读不到 box 的 pueue：不知道排没排过，这次不排
+        return []
+    lab = f"{proto.ENV_BUILD}:{name}:{env}"
+    if any((t.get("label") or "").startswith(f"{proto.ENV_BUILD}:{name}:") and t.get("status") in refill.LIVE for t in d["tasks"]):
+        return []
+    what = f"{L} 的环境 {env}（{v}，{st[env]}）"
+    if dry:
+        return [f"会建 {what}"]
+    if not on:
+        if C.changed(f"envs_{name}", lab):
+            log([f"（开关没开）会建 {what}"])
+        return []
+    cmd = f"python3 {shlex.quote(cfg.local('sites', 'envs_cli.py'))} env {name} {shlex.quote(env)} --variant {shlex.quote(v)}"
+    try:
+        tid = refill.add(hub, lab, proto.ENV_BUILD, f"{name}:{env}",
+                         f"wait -p --label {shlex.quote(lab)} -- " + shlex.quote(refill.then_check(cmd, lab)), to=name, group="wait")
+    except Exception as e:  # noqa: BLE001
+        stuck[alert_id("relayadd", name, proto.ENV_BUILD, env)] = alert(f"{L} 的环境 {env}：在 box 上排建环境的任务失败（{str(e)[-200:]}），下次检查重试",
+                                                                         machine=name, step=proto.ENV_BUILD, key=env)
+        return []
+    return [f"排了建 {what}（box 任务 {tid}）"]
+
+
+def machine_envs(s, name, dry):
+    """MACHINES 里本机（ssh 是 None，如 box）的按描述建的环境，同 env_builds。→ (说明, 卡住的)"""
+    stuck = {}
+    want = EV.wanted(name, envs_switch(name)[1])
+    got = EV.read_rows(name, list(want)) if want else None
+    if got is None:
+        return [], stuck
+    msgs = env_builds(s, name, got[0], got[1], dry, stuck)
+    if not dry:
+        log(msgs)
+    return msgs, stuck
+
+
 def run_all(s, dry=False):
     """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。"""
     events, stuck = [], {}
@@ -777,6 +842,15 @@ def run_all(s, dry=False):
             ev, st_ = [], {alert_id("relay", name): f"queue/relay.py（{name}）出错：{type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
+    for name, m in M.MACHINES.items():
+        if m.get("ssh") or name in P.OFFLINE or not s["ok"].get(name):
+            continue
+        try:
+            ev, st_ = machine_envs(s, name, dry)
+        except Exception as e:  # noqa: BLE001
+            ev, st_ = [], {alert_id("site", name, "env"): f"{name} 的环境：{type(e).__name__}: {e}"[:300]}
+        events += ev
+        stuck.update(st_)
     return events, stuck
 
 
@@ -785,10 +859,15 @@ def run_one(s, name, dry):
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     mine = [t for t in (mtq or {}).get("tasks", []) if t.get("worker") == name]
     L, st = RM.conf(name)["label"], ST.load_state()
-    if not mine and not live and not dry:
-        return [], {}
     if not s["ok"].get(M.hub()) or not mtq:
         return [], {}
+    if not mine and not live and not dry:  # 开关关着、没有它的任务：只看要不要建环境
+        if not envs_switch(name)[0]:
+            return [], {}
+        rs, stuck = remote_status(name), {}
+        msgs = env_builds(s, name, rs["envs_st"], rs["now"], False, stuck) if rs and "envs_st" in rs else []
+        log(msgs)
+        return msgs, stuck
     rs = remote_status(name)
     notes = []
     # 读不到状态、但连得上：还没有代码包（新机器），或那边的旧包跑不了这边新改的状态程序（11/4）→ 包不同时先部署，再读一次
@@ -837,6 +916,8 @@ def run_one(s, name, dry):
         except Exception as e:  # noqa: BLE001
             notes.append(f"{L} 清理出错：{e}")
     acts, stuck = plan(s, name, rs, st)
+    if rs is not None and "envs_st" in rs:
+        notes += env_builds(s, name, rs["envs_st"], rs["now"], dry, stuck)
     if not live:  # 开关关着：不传、不重传、不让那边接着训；训完的照常拉回、交还
         acts = [a for a in acts if a["op"] not in ("stage", "restage", "rresume")]
     snotes = []
