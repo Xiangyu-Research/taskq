@@ -58,8 +58,18 @@ def dag(argv):
     ap.add_argument("target", nargs="?", help="实例 id、规则名、实验 id 或 key")
     ap.add_argument("--dot", action="store_true", help="输出 Graphviz（dot -Tsvg）")
     ap.add_argument("--check", action="store_true", help="核对：产出重叠、有环、输入是别的产出的上级、输入的产出者不在前面；有问题退出码 1")
+    ap.add_argument("--json", action="store_true", help="全部实例（id、规则、key、实验、依赖、产出、队列 key），--check 时是问题列表")
     a = ap.parse_args(argv)
     g = graph()
+    if a.json:
+        if a.check:
+            probs = g.check()
+            print(json.dumps({"problems": probs}, ensure_ascii=False))
+            return 1 if probs else 0
+        print(json.dumps({"instances": [dict(id=i.id, rule=i.rule, key=i.key, exp=i.exp, deps=list(i.deps), qk=i.qk,
+                                              outputs=list(i.outputs), shared=list(i.shared))
+                                         for i in g.flow.instances.values()]}, ensure_ascii=False))
+        return 0
     if a.check:
         probs = g.check()
         print("\n".join(probs) if probs else f"{len(g.inst)} 个实例，先后和产出都没有问题", file=sys.stderr if probs else sys.stdout)
