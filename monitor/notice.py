@@ -83,12 +83,18 @@ def problems(db):
 
 
 def save_problems(db, cur, checked):
-    """Replace the problem list; acks of problems that are gone are dropped."""
+    """Replace the problem list (acked ones already left out)."""
     with D.tx(db):
         db.execute("DELETE FROM problem")
         db.executemany("INSERT INTO problem(id, body) VALUES(?, ?)", [(k, json.dumps(v, ensure_ascii=False)) for k, v in cur.items()])
         D.set_meta(db, "checked", checked)
-        db.execute("DELETE FROM ack WHERE id NOT IN (SELECT id FROM problem)")
+
+
+def prune_acks(db, raised):
+    """Acks of problems this check no longer raises at all are dropped (an acked one is still raised, just not listed)."""
+    with D.tx(db):
+        for pid in [k for k in acked(db) if k not in raised]:
+            db.execute("DELETE FROM ack WHERE id=?", (pid,))
 
 
 def acked(db):

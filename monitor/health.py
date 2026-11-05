@@ -306,9 +306,11 @@ def check(s):
 
 
 # ---------------- 推送和状态 ----------------
-def drop_acked(P, db):
-    """Acked "something happened" problems (taskq notice ack) are left out; acks of gone problems are dropped on save."""
+def drop_acked(P, db, dry=False):
+    """Acked "something happened" problems (taskq notice ack) are left out; acks of problems no longer raised are dropped."""
     d = NT.acked(db) if db else {}
+    if d and not dry and NT.D.writable(db):
+        NT.prune_acks(db, set(P))
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
@@ -483,7 +485,7 @@ def main(argv=None):
     if not a.dry_run and (db is None or not NT.D.writable(db)):
         P[alert_id("db", M.hub())] = problem(f"hub database {NT.D.path()} cannot be written (network filesystem, or made by a newer "
                                              "taskq): problems are pushed again every check", level="urgent")
-    P = drop_acked(P, db)
+    P = drop_acked(P, db, dry=a.dry_run)
     update(P, s["now"], db, dry=a.dry_run)
     if not a.dry_run and db is not None and NT.D.writable(db):
         try:

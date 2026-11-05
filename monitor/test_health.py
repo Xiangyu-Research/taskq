@@ -281,7 +281,12 @@ ok("notice ack: prefix finds the event; ongoing or unknown problems are not acke
 _P = {"boot:hub:2026-11-05 13:52:30": H.problem("x", kind="event"), "disk:hub": H.problem("y")}
 ok("drop_acked: acked events left out, others kept", list(H.drop_acked(dict(_P), _wdb)) == ["disk:hub"])
 NT.save_problems(_wdb, {"disk:hub": H.problem("y")}, "2026-11-05 14:00")
-ok("save_problems: acks of gone problems dropped", NT.acked(_wdb) == {})
+ok("an ack outlives the save of the filtered list: still left out on the next check (11/5: it came back one check later)",
+   list(H.drop_acked(dict(_P), _wdb)) == ["disk:hub"] and "boot:hub:2026-11-05 13:52:30" in NT.acked(_wdb))
+H.drop_acked({"disk:hub": H.problem("y")}, _wdb, dry=True)
+ok("dry run: acks kept even when the event is gone", "boot:hub:2026-11-05 13:52:30" in NT.acked(_wdb))
+H.drop_acked({"disk:hub": H.problem("y")}, _wdb)
+ok("event no longer raised: its ack dropped", NT.acked(_wdb) == {})
 rp = subprocess.run([sys.executable, TQ, "problems", "--json", "--all"], capture_output=True, text=True, env=_nenv, timeout=60)
 _pj = json.loads(rp.stdout)
 ok("taskq problems --json: proto.PROBLEMS_TOP, each problem proto.OVERVIEW_PROBLEM",
