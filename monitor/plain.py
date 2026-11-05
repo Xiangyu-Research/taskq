@@ -210,6 +210,10 @@ def problem(pid, p):
             return f"box 上没排上 {fold(d.get('key', ''))} 的{dict(relay_stage='传数据', relay_fetch='拉回', relay_archive='归档').get(d.get('step'), '下一步')}，{L(part[1])} 那边会等着，下次检查重试。"
         if kind == "bundlegate":
             return f"{L(part[1])} 在用的代码包跑不了 {fold(d.get('key', ''))} 的任务说明，先不送过去，那边换了新包后自动再送。"
+        if kind == "smoke":
+            k = (d.get("kind") or "").split("|")
+            what = " ".join([k[0]] + [x.split("=", 1)[1] for x in k[1:] if "=" in x and not x.startswith("env=")])
+            return f"{L(part[1])} 上 {what} 冒烟没过：{(d.get('why') or '').splitlines()[0][:120] if d.get('why') else '原因看 taskq smoke status'}，这种任务先不送过去。"
         if kind == "topup":
             return f"给 {L(part[1])} 补交作业出错，那边排队的作业会越来越少。"
         if kind == "advance":

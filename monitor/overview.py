@@ -149,7 +149,7 @@ def build(s, relay=None):
     hub = M.hub()
     L = lambda n: (M.MACHINES.get(n) or M.SITES.get(n) or {}).get("label", n)  # noqa: E731
     q = (s.get("taskq") or {}).get(hub)
-    queue = list((q or {}).get("tasks") or []) if q and q.get("enabled") else []
+    queue = [t for t in (q or {}).get("tasks") or [] if not proto.is_smoke(t["key"])] if q and q.get("enabled") else []
     rank = {t["key"]: i + 1 for i, t in enumerate(t for t in queue if t.get("state") != proto.S_DONE)}
     qt = {t["key"]: t for t in queue}
     seen = [n for n in M.MACHINES if n in (s.get("ok") or {})]

@@ -182,6 +182,12 @@ def worker_groups(name):
     return list(dict.fromkeys(M.worker_of(name, k)["group"] for k in M.kinds(name)))
 
 
+def smoke_passed(site, key):
+    """接手的那台过了这种任务的冒烟（queue/smoke_gate.py；没过的交还总队列，由那台的冒烟闸门排冒烟）。"""
+    import smoke_gate
+    return smoke_gate.passed(site, key)
+
+
 def stop_site(name):
     """时段结束：暂停执行机的 worker 组、SIGTERM worker（它交还手上的任务），总队列里分给它的任务：有进度的交给白天的执行机，其余交还
     → (说明, 做完没有)。worker 确认停下了才交出任务；没停下、没交出去的下次检查再做（每一步都可以重做，11/1）。"""
@@ -199,7 +205,7 @@ def stop_site(name):
         return "worker 停了，读不到那边的进度，任务先不交出，下次检查再交", False
     moved, gave, left = [], [], []
     for k in central_mine(name):
-        if to and has_progress(have.get(k)) and hand_over(k, name, to):
+        if to and has_progress(have.get(k)) and smoke_passed(to, k) and hand_over(k, name, to):
             moved.append(k)
         elif give_back(k, name):
             gave.append(k)

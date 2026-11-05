@@ -14,6 +14,7 @@
                      ACCEPTS  {插件名: 函数(参数) → 能不能送}（可省）
                      VIEW_ROOTS  [建视图的文件夹]（可省）
   consumers.py       CONSUMERS  {插件名: 消费者插件}（钩子见 consume.py、queue/README.md 的"消费者"）
+  smoke.py           SMOKE  {做法名: dict(by=[参数名], params={…}, vars={…})}（冒烟闸门，见 smoke_gate.py）
   readers/*.py       PROGRESS、INFO、TRAINED（spec.py 读；只用标准库，经 ssh 送到别的机器上跑）
 各表合并时键重复报错。
 """
@@ -174,6 +175,7 @@ KINDS = {
     "recipes": ("RECIPES", "HOOKS"),
     "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
     "consumers": ("CONSUMERS",),
+    "smoke": ("SMOKE",),
 }
 
 

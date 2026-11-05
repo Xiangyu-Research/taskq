@@ -94,7 +94,7 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
     for key, t in table.items():
         source(key, t["exp"], t["recipe"], t["spec"], E.label(E.experiment(t["exp"]), t))
     for q in queue_tasks:
-        if q["key"] in table or q["key"] in inst or not q.get("recipe"):
+        if q["key"] in table or q["key"] in inst or not q.get("recipe") or S.P.is_smoke(q["key"]):
             continue
         try:
             sp = q.get("spec") or E.resolve_task(q["recipe"], q.get("params") or {}, q.get("exp"))

@@ -150,7 +150,7 @@ def plan(s, root=None):
     SEEN.clear()
     if ptasks is None:
         return [], {}  # box 的 pueue 读不到：这次什么都不做
-    queue_tasks = list(((s.get("taskq") or {}).get(hub) or {}).get("tasks", []))
+    queue_tasks = [t for t in ((s.get("taskq") or {}).get(hub) or {}).get("tasks", []) if not proto.is_smoke(t["key"])]
     nice = {t["key"]: t["nice"] for t in queue_tasks}
     py = python()
     tasks, groups, final = candidates(root, py, queue_tasks)
