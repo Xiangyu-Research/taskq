@@ -56,7 +56,7 @@ worker 调用（执行机上的队列）：
                                       之后不再领它；分给执行机的由 box 下次检查时在那边停（relay.py）
     taskq.py resume <key>...         撤销停止，照常排
     taskq.py input-ok <key>...       撤掉"缺输入"（输入补齐了，11/1）
-    taskq.py take --worker <机器> --assign <key>   分给一台执行机（free / stale / waiting 的）：分到退出码 0，分不到 10
+    taskq.py take --worker <机器> --assign [--from <机器>] <key>   分给一台执行机（free / stale / waiting 的；--from：分给那台的直接改分）：分到退出码 0，分不到 10
     taskq.py status [--json]          打印队列；--json：@@JSON 一行 {version, enabled, tasks, recent_failures, paused, recent_skips}，
                                       每个任务是 tasks.jsonl 的一行加 proto.STATUS_FIELDS（跨版本读用它，11/4；--json-status 照旧，没有 version）
 """
@@ -66,6 +66,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import socket
 import sys
 import time
@@ -142,6 +143,7 @@ class Lock:
         self.d = os.path.join(TQ, Q["lock"])
         self.tries = tries
         self.me = None
+        self.dir_id = None
 
     def __enter__(self):
         os.makedirs(TQ, exist_ok=True)
@@ -171,7 +173,11 @@ class Lock:
                     f.write(me)
                 self.me = me
             except OSError:
-                pass
+                try:  # owner 没写上：记下目录本身，退出时只删还是这个的
+                    st = os.stat(self.d)
+                    self.dir_id = (st.st_ino, st.st_mtime_ns)
+                except OSError:
+                    pass
             return self
         raise SystemExit("拿不到队列的锁")
 
@@ -205,6 +211,12 @@ class Lock:
                 if open(p).read() != self.me:  # 锁已被别人接管
                     return
                 os.remove(p)
+            else:
+                st = os.stat(self.d)
+                if (st.st_ino, st.st_mtime_ns) != self.dir_id:
+                    return
+                if os.path.lexists(p):
+                    os.remove(p)
             os.rmdir(self.d)
         except OSError:
             pass
@@ -435,6 +447,7 @@ def _claim(a, pick):
                 os.mkdir(d)
             except FileExistsError:
                 continue
+            a.claim_dir = d
             now = time.time()
             a.token = os.urandom(6).hex()
             info = dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now, token=a.token)
@@ -463,10 +476,48 @@ def cmd_next(a):
         if not S.fits(s.get("res"), a.cpus, a.mem_mb, a.gpu_mem)[0]:
             return None
         return t["key"] + "\n" + " ".join(shlex.quote(x) for x in run_args(t))
-    rc, out = _claim(a, pick)
-    if rc == 0:
-        print(out + "\n" + a.token)  # 第三行：这次领取的 token（11/1 加，只读两行的老 worker 不受影响）
-    return rc
+    sigs = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+    def on_sig(n, _f):
+        raise _Killed(n)
+    old = {n: signal.signal(n, on_sig) for n in sigs}
+    printed = False
+    try:
+        rc, out = _claim(a, pick)
+        if rc == 0:
+            print(out + "\n" + a.token)  # 第三行：这次领取的 token（11/1 加，只读两行的老 worker 不受影响）
+            sys.stdout.flush()
+            printed = True
+        return rc
+    except _Killed as e:
+        # 领了、还没打印就被停：worker 不知道领了哪个，撤掉这次领取，不留到过期（11/5）
+        for n in sigs:
+            signal.signal(n, signal.SIG_IGN)
+        if not printed and getattr(a, "claim_dir", None):
+            _unclaim(a)
+        signal.signal(e.args[0], signal.SIG_DFL)
+        os.kill(os.getpid(), e.args[0])
+        raise SystemExit(128 + e.args[0])
+    finally:
+        for n, h in old.items():
+            signal.signal(n, h)
+
+
+class _Killed(Exception):
+    pass
+
+
+def _unclaim(a):
+    try:
+        with Lock(tries=40):
+            try:
+                ci = json.load(open(os.path.join(a.claim_dir, proto.CLAIM_INFO)))
+            except (OSError, ValueError):
+                ci = None
+            if ci is None or ci.get("token") == getattr(a, "token", None):
+                shutil.rmtree(a.claim_dir, ignore_errors=True)
+    except (SystemExit, OSError):
+        pass
 
 
 def owns(ci, a):
@@ -561,7 +612,7 @@ def cmd_input_ok(a):
 
 def cmd_take(a):
     """把指定的一个分给执行机 a.worker（10/31，relay.py、shift.py 调用）：不过期；free / stale / waiting 的能分（waiting 的提前送到那边，
-    after 做完后那边接着做）；已经分给它的再分一次照样成功（since 不变）。"""
+    after 做完后那边接着做）；已经分给它的再分一次照样成功（since 不变）；--from F：分给 F 的直接改分（不先交还，中间没有空档）。"""
     root = data_root()
     err = root_error(root)
     if err:
@@ -574,11 +625,12 @@ def cmd_take(a):
             return NOTHING
         ci = claim_info(a.key)
         mine = bool(ci) and str(ci.get("worker")) == str(a.worker)
-        if ci and ci.get("assigned") and not mine:
+        moved = bool(ci) and not mine and a.frm is not None and str(ci.get("assigned")) == a.frm
+        if ci and ci.get("assigned") and not mine and not moved:
             print(f"{a.key}：已分给 {ci['assigned']}")
             return NOTHING
         st, note = state(t, root)
-        if st in ("done", "stopped") or (not mine and st not in ("free", "stale", "waiting")):
+        if st in ("done", "stopped") or (not mine and not moved and st not in ("free", "stale", "waiting")):
             print(f"{a.key}：{st} {note}")
             return NOTHING
         d = os.path.join(TQ, Q["claims"], safe(a.key))
@@ -1027,6 +1079,7 @@ def main(argv):
     p = sub.add_parser("take")
     p.add_argument("--worker", required=True)
     p.add_argument("--assign", action="store_true", required=True, help="分给执行机：不过期，waiting 的也能分（10/31）")
+    p.add_argument("--from", dest="frm", help="现在分给这台执行机的，在同一把锁里直接改分（shift.py 交班，11/5）")
     p.add_argument("key")
     p = sub.add_parser("add")
     p.add_argument("--nice", type=int, help="档位；--exp 时不给就用实验表里的 nice")

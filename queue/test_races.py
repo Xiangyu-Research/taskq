@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """并发和中途失败（11/3）：锁的抢占、box 的 pueue 读不到时 relay 只续约、GC 和 stage 抢 pin。
-跑法：python3 queue/test_races.py [lock|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
+跑法：python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
 全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
 import json
 import os
@@ -84,6 +84,49 @@ def _lock_race(base):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_lock_noowner():
+    """拿到锁、owner 没写上（盘满等）：退出时只删还是自己建的那个目录；锁已被别人抢走、重新建过的不删（11/5）。"""
+    _lock_noowner(taskq.TQ)
+    if os.path.isdir("/var/tmp"):
+        disk = tempfile.mkdtemp(prefix="test_races_", dir="/var/tmp")
+        try:
+            _lock_noowner(disk)
+        finally:
+            shutil.rmtree(disk, ignore_errors=True)
+
+
+def _lock_noowner(base):
+    os.makedirs(base, exist_ok=True)
+    d = os.path.join(base, "lock")
+    real_open = open
+
+    def bad(p, *a, **k):
+        if str(p).endswith(os.sep + "owner") and "w" in (a[0] if a else k.get("mode", "r")):
+            raise OSError("写不了")
+        return real_open(p, *a, **k)
+    try:
+        for taken in (False, True):
+            A = taskq.Lock(tries=4)
+            A.d = d
+            taskq.open = bad
+            try:
+                A.__enter__()
+            finally:
+                del taskq.open
+            assert A.me is None and os.path.isdir(d), A.me
+            if taken:  # A 卡住、锁过期：B 抢走（rename 后删掉）、刚 mkdir 了新锁，还没写 owner
+                os.rmdir(d)
+                os.mkdir(d)
+            A.__exit__(None, None, None)
+            if not taken:
+                assert not os.path.exists(d), f"{base}：owner 没写上的锁退出时没删"
+            else:
+                assert os.path.isdir(d), f"{base}：A 的 owner 没写上，退出时删了 B 刚建的锁"
+                os.rmdir(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _plan_with_box_error(mt, rt):
     K = "D1_x/tr/0"
     S = TR.S0([TR.mtask(K, mt)])
@@ -155,7 +198,7 @@ def test_central_timeout():
         assert t > wait + 30, f"advance.{f.__name__} 的超时 {t} 秒不比锁的最长等待 {wait} 秒长"
 
 
-TESTS = dict(lock=test_lock, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,
+TESTS = dict(lock=test_lock, lock_noowner=test_lock_noowner, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,
              central_timeout=test_central_timeout)
 
 if __name__ == "__main__":
