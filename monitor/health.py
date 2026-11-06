@@ -16,7 +16,7 @@
   - 盘：表里 disk 一项（路径、剩多少 GB 提醒、剩多少 GB 紧急）。
   - GPU 使用记录（表里 gpu_log 的机器，monitor/gpu_log.sh）10 分钟没有新记录。
   - pueue 机器 24 小时内重启过（queue/on_boot.sh 放回了哪些任务）。
-  - 项目挂的提醒（taskq notice，monitor/notice.py）：每条一个问题，撤掉后消失。
+  - 项目挂的提醒（taskq notice，monitor/notice.py）：每条一个问题，撤掉后消失；只列在 taskq problems 里，不推送（11/6）。
 提醒（10/21 起）：每个问题推送一次，用 monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，可以看 health.log 的时间。
 推送：monitor/push.py（频道名在 OUTPUTS["topic"] 指的文件，默认 ~/.config/taskq/ntfy_topic）。问题、提醒、日志在 hub 的数据库（taskq problems、taskq events）。
@@ -314,6 +314,9 @@ def drop_acked(P, db, dry=False):
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
+QUIET = ("notice",)  # 只列在 taskq problems 里、不推送的问题种类（11/6：手机只收故障，到期的提醒开工时看）
+
+
 def night(now):
     return now.hour >= NIGHT[0] or now.hour < NIGHT[1]
 
@@ -329,7 +332,8 @@ def update(P, now, db, dry=False):
         p["notified"] = o.get("notified", False)
         age = (now - datetime.strptime(p["first"], "%Y-%m-%d %H:%M")).total_seconds() / 60
         p["active"] = age >= p["after"]
-        if p["active"] and not p["notified"] and p["level"] != "info" and (p["level"] == "urgent" or not night(now)):
+        if p["active"] and not p["notified"] and p["level"] != "info" and pid.split(":")[0] not in QUIET \
+                and (p["level"] == "urgent" or not night(now)):
             msgs.append((pid, p))
         if pid not in old:
             log.append(f"新问题 {pid}：{p['msg']}")

@@ -362,6 +362,9 @@ out = run(B, datetime(2026, 10, 17, 10, 30))
 ok("同一次查到几件：并成一条", len(out) == 1 and "（2 件）" in out[0][0] and out[0][1].count("\n- ") == 1)
 I = {"idle:pueue-host:gpu1": dict(msg="只剩在训的", level="info", kind="state", after=0)}
 ok("info 级不推送", run(I, datetime(2026, 10, 17, 11, 0)) == [])
+N = {"notice:board": dict(msg="看板等确认", level="normal", kind="state", after=0)}
+ok("提醒（notice）不推送，只列在 problems 里", run(N, datetime(2026, 10, 17, 11, 30)) == []
+   and "notice:board" in NT.problems(_wdb)[0])
 
 # ---------------- feed / advance 出错不让健康检查停掉 ----------------
 import types  # noqa: E402
