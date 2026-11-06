@@ -422,7 +422,7 @@ def _claim(a, pick):
         return PAUSED, None
     busy_ahead = 0  # 排在前面、刚停下（日志 15 分钟内更新过、没人领）的
     with Lock():
-        for t in read_tasks():
+        for t in sorted(read_tasks(), key=lambda t: (t["nice"], not has_progress(t, root), t["order"])):
             if t["key"] in a.exclude:
                 continue
             st, _ = state(t, root)
@@ -457,6 +457,17 @@ def _claim(a, pick):
             write_json(os.path.join(d, proto.CLAIM_INFO), info, indent=None)
             return 0, out
     return NOTHING, None
+
+
+def has_progress(t, root):
+    """这台机器上这个任务的输出目录里有没有存档（说明的 resume）：同一档里有存档的先领，接着训到一半的（交还、收编来的）不排在没开始的后面（11/7）。"""
+    s = spec_of(t)
+    if not s or not s.get("resume"):
+        return False
+    try:
+        return S.resumable(s, S.out_dir(s, root))
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
 
 
 def run_args(t):

@@ -1060,5 +1060,36 @@ r2 = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--
 check("next 领了、打印前被 SIGTERM：撤掉领取（别的 worker 马上能领），退出码仍是被信号停的",
       r.returncode == -15 and not r.stdout and not left and r2.returncode == 0 and r2.stdout.startswith("D103_y/V_save/0"))
 
+# ---------------- 11/7：同一档里有存档（接着训到一半的）先领，档位仍然优先 ----------------
+TQP = os.path.join(T, "taskq_progress")
+os.makedirs(TQP)
+open(os.path.join(TQP, "tasks.jsonl"), "w").close()
+EP = dict(ENV, TASKQ_DIR=TQP, TASKQ_DATA=DATA)
+
+
+def tqp(*args, stdin=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=EP, capture_output=True, text=True, input=stdin)
+    return r.returncode, r.stdout.strip()
+
+
+def pspec(key):
+    return dict(S.sendable(S.resolve("command", dict(key=key, cmd="true", env="stats", out=f"p/{key}", done="DONE"))), resume=["ckpt_*.pt"])
+
+
+tqp("add", "--nice", "70", "--spec-stdin", stdin=json.dumps([pspec("p/new1"), pspec("p/half"), pspec("p/new2")]))
+os.makedirs(os.path.join(DATA, "p/p/half"), exist_ok=True)
+open(os.path.join(DATA, "p/p/half", "ckpt_latest.pt"), "w").close()
+rc, out = tqp("next", "--worker", "p1", "--envs", "stats")
+rc2, out2 = tqp("next", "--worker", "p2", "--envs", "stats")
+check("next：同一档里有存档的先领（排在先加的、没开始的前面），其余照加的先后",
+      rc == 0 and out.startswith("p/half\n") and rc2 == 0 and out2.startswith("p/new1\n"))
+tqp("add", "--nice", "-100", "--spec-stdin", stdin=json.dumps(pspec("p/urgent")))
+os.makedirs(os.path.join(DATA, "p/p/new2"), exist_ok=True)
+open(os.path.join(DATA, "p/p/new2", "ckpt_latest.pt"), "w").close()
+rc, out = tqp("next", "--worker", "p3", "--envs", "stats")
+rc2, out2 = tqp("next", "--worker", "p4", "--envs", "stats")
+check("next：更靠前的档（没有存档的新任务）仍然先领，有存档的只在同一档里提前",
+      rc == 0 and out.startswith("p/urgent\n") and rc2 == 0 and out2.startswith("p/new2\n"))
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)
