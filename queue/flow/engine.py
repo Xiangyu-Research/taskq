@@ -95,7 +95,7 @@ def plan(s, root=None, flow=None):
         qd = st["queue"]
         q = {}
         for k, v in qd.items():
-            if k not in ("nice", "inputs", "disk"):
+            if k not in ("nice", "inputs", "disk", "out_disk"):
                 q[k] = S.fill(v, dict(t["names"], data="{data}"), keep=())
             if k == "env":
                 q["machines"] = [mach]
@@ -144,9 +144,7 @@ def plan(s, root=None, flow=None):
         return r if r in relay_sites else None
 
     def too_big(m, st):
-        c, gb = (M.RELAY.get(m) or {}).get("cap"), ((st or {}).get("queue") or {}).get("disk")
-        hard = ((M.RELAY.get(m) or {}).get("budget") or (0, 0))[1]
-        return f"要 {gb} GB，{m} 最多放 {c} GB" if c and gb and gb + hard > c else None
+        return refill.too_big(m, (st or {}).get("queue"))
 
     def where(t, tg, per_task, st=None):
         if tg["kind"] == "queue":

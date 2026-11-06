@@ -120,6 +120,8 @@ def check_machines(r):
                 r.bad(g, f"{where} 的 job_names {m['job_names']!r} 不在 slurm.STYLES 里（{sorted(SL.STYLES)}）")
         if m.get("relay") and m.get("cap") and m.get("budget") and m["budget"][1] >= m["cap"]:
             r.bad(g, f"{where} 的 budget 第二项 {m['budget'][1]} GB 不小于 cap {m['cap']} GB，什么都放不下")
+        if m.get("relay") and m.get("blob_cap") and m.get("budget") and m["budget"][1] >= m["blob_cap"]:
+            r.bad(g, f"{where} 的 budget 第二项 {m['budget'][1]} GB 不小于 blob_cap {m['blob_cap']} GB，什么都放不下")
     names = [sites[n].get("job_names") or "pair" for n in sites if sites[n].get("scheduler") == "slurm"]
     dup = sorted({x for x in names if names.count(x) > 1})
     if dup:
@@ -534,7 +536,7 @@ def check_steps(r, root):
             continue
         try:
             mach = next(iter(M.RELAY), M.hub())
-            item = {k: S.fill(v, dict(names, data="{data}"), keep=()) for k, v in q.items() if k not in ("nice", "inputs", "disk")}
+            item = {k: S.fill(v, dict(names, data="{data}"), keep=()) for k, v in q.items() if k not in ("nice", "inputs", "disk", "out_disk")}
             item["machines"] = [mach]
             s = S.resolve("command", S.parse_kv(S.kv_args("command", item)[1:]))
             S.shell_lines(s, "/d")

@@ -469,6 +469,31 @@ A.P.AUTO = dict(A.P.AUTO, **{"site-pueue": False})
 x = tc(A.plan(snap())[0])
 check("下一个执行机 site-pueue 的 AUTO 关着 → 也跳过，用 hub", len(x) == 1 and x[0].get("group") == "gpu")
 A.P.AUTO = dict(A.P.AUTO, **{"site-pueue": True})
+INFS = list({id(st["queue"]): st["queue"] for e in A.E.load()[0] for st in e.get("after", []) if st["name"] == "infer" and st.get("queue")}.values())
+
+
+def out_disk(v):
+    for q in INFS:
+        q.pop("out_disk", None) if v is None else q.update(out_disk=v)
+
+
+out_disk(14)
+A.M.RELAY["site-slurm"]["blob_cap"] = 400
+x = tc(A.plan(snap())[0])
+check("blobs 另有 blob_cap、步骤写了 out_disk（11/6）：产出 14 + 硬线对 cap 60、输入 61 + 硬线对 blob_cap 400 → 放得下，给 site-slurm",
+      len(x) == 1 and 'machines=["site-slurm"]' in x[0]["args"])
+A.M.RELAY["site-slurm"]["blob_cap"] = 70
+x = tc(A.plan(snap())[0])
+check("输入加硬线超过 blob_cap → 用下一个地方", len(x) == 1 and 'machines=["site-pueue"]' in x[0]["args"])
+A.M.RELAY["site-slurm"]["blob_cap"] = 400
+out_disk(59)
+x = tc(A.plan(snap())[0])
+check("产出加硬线超过 cap → 用下一个地方", len(x) == 1 and 'machines=["site-pueue"]' in x[0]["args"])
+out_disk(None)
+x = tc(A.plan(snap())[0])
+check("步骤没写 out_disk：照旧 disk 整个对 cap", len(x) == 1 and 'machines=["site-pueue"]' in x[0]["args"])
+A.M.RELAY["site-slurm"].pop("blob_cap")
+A.P.AUTO = dict(A.P.AUTO, **{"site-pueue": True})
 A.M.RELAY["site-slurm"].pop("cap")
 A.P.PLACE = dict(BASE, infer=["queue:site-slurm", "hub:gpu"])
 A.P.OFFLINE = {"site-slurm": "停机"}

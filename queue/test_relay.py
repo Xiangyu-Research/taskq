@@ -14,6 +14,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import sys
 import time
 
@@ -1386,6 +1387,31 @@ def test_cross_version():
     assert run(nd, RM.STATES_PY, {})[1] == run(od, RM.STATES_PY, {})[1] == {t["key"]: t["state"] for t in old["taskq"]["tasks"]}
     rc, err, _ = run(bd, RM.STATUS_PY, arg)
     assert rc != 0 and "status --json" in err, (rc, err)
+    # blobs 指到另一个盘（/dev/shm）、写了 blob_cap：blob_free = min(那个盘剩的, blob_cap − blobs 已占的)（11/6）
+    B0 = os.path.join(RROOT, "blobs")
+    shm = tempfile.mkdtemp(prefix="test_relay_blobs_", dir="/dev/shm") if os.path.isdir("/dev/shm") else None
+    if shm and os.stat(shm).st_dev != os.stat(RROOT).st_dev:
+        saved = B0 + ".save"
+        if os.path.lexists(B0):
+            os.rename(B0, saved)
+        try:
+            os.makedirs(os.path.join(shm, "xx"))
+            with open(os.path.join(shm, "xx", "xx1"), "wb") as f:
+                f.write(b"x" * 3_000_000)
+            os.symlink(shm, B0)
+            used_b = os.lstat(os.path.join(shm, "xx", "xx1")).st_blocks * 512
+            rc, st, _ = run(od, RM.STATUS_PY, dict(arg, blob_cap=0.002))
+            assert rc == 0 and st["blob_free"] == 0 and st["blob_dev"] != st["dev"], (rc, st)
+            rc, st, _ = run(od, RM.STATUS_PY, dict(arg, blob_cap=1))
+            assert rc == 0 and st["blob_free"] == min(shutil.disk_usage(shm).free, int(1e9) - used_b), (rc, st.get("blob_free"), used_b)
+            rc, st, _ = run(od, RM.STATUS_PY, arg)
+            assert rc == 0 and abs(st["blob_free"] - shutil.disk_usage(shm).free) < 1e6, (rc, st.get("blob_free"))
+        finally:
+            os.remove(B0)
+            if os.path.lexists(saved):
+                os.rename(saved, B0)
+            shutil.rmtree(shm)
+        ok("读状态：blobs 在另一个盘、写了 blob_cap → blob_free 按 blob_cap 减去 blobs 已占的算；没写 → 那个盘剩多少")
     for d in (nd, od, bd):
         shutil.rmtree(d)
     ok("读状态：新包用 status --json、collect --json（wait=None），旧包 import，两条路结构一样；新命令没有带版本号的 JSON 行 → 出错")

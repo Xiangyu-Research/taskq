@@ -114,7 +114,7 @@ def remote_status(name):
     if RM.master_down(c):
         return None
     try:
-        rs = RM.rpy(name, RM.STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap"), env_root=M.env_root(c),
+        rs = RM.rpy(name, RM.STATUS_PY, dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap"), blob_cap=c.get("blob_cap"), env_root=M.env_root(c),
                                              envs=sorted(EV.wanted(name, envs_switch(name)[1]))), timeout=STATUS_S)
     except RuntimeError:
         return None
@@ -908,7 +908,8 @@ def run_one(s, name, dry):
             keep = {v for k in ST.keys_of(st, name).values() for v in (k.get("outs") or [] if k.get("unq") else ST.paths_of(k))}
             keep |= {v for v, t in reg.items() if time.time() - t < VIEW_KEEP_S}
             g = ST.gc(name, keep, RM.rpy, views=reg, siblings=[x["path"] for x in M.adopt_sources(name) if x["site"]],
-                      free=rs.get("free") if RM.conf(name).get("cap") else None)
+                      free=rs.get("free") if RM.conf(name).get("cap") else None,
+                      blob_free=rs.get("blob_free") if RM.conf(name).get("blob_cap") else None)
             if g and g["removed_views"]:
                 ST.update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
             if g and (g["removed_views"] or g["removed_blobs"]):

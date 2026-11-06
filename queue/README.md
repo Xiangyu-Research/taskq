@@ -149,7 +149,7 @@ pueue 在 hub 和 pueue 执行机上只当运行器：按组限并发、留日�
 
 - **调度器**只分 Slurm、pueue 两种，读写都经 `sites/slurm.py`、`sites/pueue.py`（10/31）：那边的状态（队列、进度、`pueue status --json` 或 `squeue` 的原始输出、剩余空间、建好的环境）每次检查一次 ssh 读回，在 hub 上用适配器解析；要开几个 worker 只在 `relay.topup` 算，每种（gpu、cpu）各算各的（Slurm 用 `refill.slurm_plan`；pueue 这种 worker 没有活着的、上一个没失败、那边有备好没人领的这种任务时开一个），适配器照着开。
 - **根目录**写成 `~/…`（如 `~/q`）时，命令里开头的 `~` 留给那边展开（`sites/remote.py` 的 `q()`）；代码包里 `worker.sbatch` 的日志用相对路径（Slurm 不展开 `~`）。
-- **空间**：`cap`（`machines.py`）是根目录最多占多少 GB（共享盘按账号限额时用），剩余按 cap 减去根目录已占的算（`relay_remote.py` 的 `STATUS_PY`，硬链接只算一次、软链接不算），清理（`relay_store.py` 的 `gc`）、领任务（`fill`）都用它；没写 cap 时看盘剩多少。实验表 `queue` 的 `disk`（这一步大约要占多少 GB）加上 `budget` 的第二项超过 cap 的步骤，`advance.py` 不放这台，用 `PLACE` 的下一项。
+- **空间**：`cap`（`machines.py`）是根目录最多占多少 GB（共享盘按账号限额时用），剩余按 cap 减去根目录已占的算（`relay_remote.py` 的 `STATUS_PY`，硬链接只算一次、软链接不算），清理（`relay_store.py` 的 `gc`）、领任务（`fill`）都用它；没写 cap 时看盘剩多少。实验表 `queue` 的 `disk`（这一步大约要占多少 GB）加上 `budget` 的第二项超过 cap 的步骤，`advance.py` 不放这台，用 `PLACE` 的下一项。`R/blobs` 指到另一个盘时可以另写 `blob_cap`（blobs 最多占多少 GB，11/6）：`STATUS_PY` 的 `blob_free` 按它减去 blobs 已占的算，领任务的输入、清理 blob 都看它；步骤写了 `out_disk`（`disk` 里写在根目录的产出）时，产出对 cap、其余（输入）对 blob_cap 判断放不放得下（`refill.too_big`，`advance.py` 和流程引擎共用）。
 - **AUTO 关着 = 这台整个停下**（11/2）：不领新的、不传、不重传、不让那边接着训、不交作业，只续已有的领取、把训完的拉回、交还；`advance.py` 也不往它排步骤。
 - **传数据排不上 CPU 作业**（收编在 CPU 节点上做的执行机）：`relay.py stage` 退出码 75，hub 上显示 Failed，下次定时检查再传、不报；领了 3 小时以上还排不上才报 `site:<名>:stage`。
 - **Slurm worker 开始时没有任务**：和等着的一样空等到 `IDLE_MAX`（40 分钟），这期间有任务进来就领；一直没有才结束（11/2）。纯 CPU 的 worker 照旧领不到就结束。
@@ -169,7 +169,7 @@ pueue 在 hub 和 pueue 执行机上只当运行器：按组限并发、留日�
 - **数据**：那边 `R/blobs/` 按 sha256 存，同样的内容只传一次；数据目录里是指向 blob 的软链接，路径和 hub 一样，文件内容不改；要哪些文件由做法的 `relay` 插件列（`sites/names.py`、插件文件夹的 `relay_plugins.py`）。拉回时插件核对（如训练的验证结果和这个任务的划分一致、推理的输出齐、模型的 sha256 和 hub 上的一样），对不上不收、报出来。
 - **传输**：都经隧道（`sync/tunnel.py`）：往那边传 1 GB 以上的、执行机条目写了传输作业（`transfer_job`）的先交 CPU 作业，10 分钟排不上就在登录节点下载；拉回在登录节点上传。地址用每次新开的临时 trycloudflare 地址（hub 上的 cloudflared，机器表 hub 的 `quick`、`RELAY` 的 `quick_tunnel`）。同一台机器（按 ssh 名字，同一台主机上的几个执行机算一台）的传输一个接一个，不同机器的同时传（11/1 定）；hub 上共用一个文件服务进程（`tunnel.py _serve`，第一个要用的传输起它，挂了下一个再起，没有会话 5 分钟后退出），每次传输是它的一个会话，会话、`serve.pid`、`serve.log` 在状态文件夹的 `tunnel_srv/`（11/5）。
 - **个数**：`policy.py` 的 `READY[名字]`（那边每种 worker 备好、等领的任务数）、`SLURM[名字]`（`gpu`、`cpu`：QOS、时限、个数）。
-- **盘**：有 `budget` 的剩不到软线时由 `relay_store.py` 的 `gc` 清理：先删总队列不再要的视图（和建视图拿同一把锁 `R/state/view.lock`），再按最久没用删没人指向的 blob；领任务时传完至少要剩硬线。`R/blobs` 是指到别的盘的软链接时（11/4）照样清理，只删 `blobs/<前两位>/` 下的块文件，不跟随别的链接。传数据期间钉住要传的块（`R/state/pins/`），每小时重写一次，传完撤掉；清理只认 12 小时内写过的。收编只认和块目录同一个盘的文件（跨盘不能硬链接，不读、不算 sha256）。别的执行机里训到一半的存档，那台的队列里还领着这个任务（心跳没过期）时不拷，下次检查再来（存档可能写到一半，11/4）。
+- **盘**：有 `budget` 的剩不到软线时由 `relay_store.py` 的 `gc` 清理：先删总队列不再要的视图（和建视图拿同一把锁 `R/state/view.lock`），再按最久没用删没人指向的 blob（有 `blob_cap` 时删 blob 看 blobs 那边剩不到软线，删视图看两边任一边）；领任务时传完至少要剩硬线。`R/blobs` 是指到别的盘的软链接时（11/4）照样清理，只删 `blobs/<前两位>/` 下的块文件，不跟随别的链接。传数据期间钉住要传的块（`R/state/pins/`），每小时重写一次，传完撤掉；清理只认 12 小时内写过的。收编只认和块目录同一个盘的文件（跨盘不能硬链接，不读、不算 sha256）。别的执行机里训到一半的存档，那台的队列里还领着这个任务（心跳没过期）时不拷，下次检查再来（存档可能写到一半，11/4）。
 - **状态**：hub 的 `<状态>/relay/state.json`（领着的任务）、`status.json`（那边各任务进度）、日志 `~/relay.log`。
 - **手动**：`taskq internal stage <执行机> <key> --nice N --no-add`（只传数据，不领）；`taskq site status <执行机>`；`taskq site bundle <执行机>`。
 

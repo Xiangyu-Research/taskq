@@ -35,6 +35,23 @@ KICK = _ENTRY and (_ENTRY if _ENTRY.startswith(("/", "~")) else M.MACHINES[M.hub
 LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 
+def too_big(m, q):
+    """实验表一步（queue = 它的 QUEUE_FIELDS）在执行机 m 上放不下 → 原因；放得下或 m 没有上限 → None。
+    cap 管根目录；blobs 在另一个盘、m 写了 blob_cap 且这一步写了 out_disk 时，产出 out_disk 对 cap、输入（disk − out_disk）
+    对 blob_cap（11/6）；否则 disk 整个对 cap。两边都要留出 budget 的第二项。"""
+    c = M.RELAY.get(m) or {}
+    q = q or {}
+    gb, out, cap, bcap = q.get("disk"), q.get("out_disk"), c.get("cap"), c.get("blob_cap")
+    hard = (c.get("budget") or (0, 0))[1]
+    if not gb:
+        return None
+    if bcap and out is not None:
+        if cap and out + hard > cap:
+            return f"产出要 {out} GB，{m} 的根目录最多放 {cap} GB"
+        return f"输入要 {gb - out} GB，{m} 的 blobs 最多放 {bcap} GB" if gb - out + hard > bcap else None
+    return f"要 {gb} GB，{m} 最多放 {cap} GB" if cap and gb + hard > cap else None
+
+
 def info(tq, key):
     """队列里的任务 → dict(recipe, params, spec)；队列状态里没有说明时从实验表找。"""
     t = next((t for t in (tq or {}).get("tasks", []) if t["key"] == key), {})

@@ -203,7 +203,7 @@ def plan(s, root=None):
         qd = st["queue"]
         q = {}
         for k, v in qd.items():
-            if k not in ("nice", "inputs", "disk"):
+            if k not in ("nice", "inputs", "disk", "out_disk"):
                 q[k] = S.fill(v, dict(t["names"], data="{data}"), keep=())
             if k == "env":
                 q["machines"] = [mach]
@@ -260,10 +260,7 @@ def plan(s, root=None):
         return r if r in relay_sites else None
 
     def too_big(m, st):
-        """这一步在执行机 m 上放不下（m 有 cap，实验表 queue 的 disk 加上 budget 的第二项超过 cap）→ 原因；放得下 → None。"""
-        c, gb = (M.RELAY.get(m) or {}).get("cap"), ((st or {}).get("queue") or {}).get("disk")
-        hard = ((M.RELAY.get(m) or {}).get("budget") or (0, 0))[1]
-        return f"要 {gb} GB，{m} 最多放 {c} GB" if c and gb and gb + hard > c else None
+        return refill.too_big(m, (st or {}).get("queue"))
 
     def where(t, tg, per_task, st=None):
         """PLACE 里的一项 → 地方（trainer 换成训这个任务的执行机的 queue，带 trainer=True），或者用不了的原因。

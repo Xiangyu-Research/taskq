@@ -135,10 +135,12 @@ def budget(name):
     return M.machine(name).get("budget")
 
 
-def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=(), siblings=()):
+def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=(), siblings=(), blob_free=None):
     """name 这台的清理 → dict(freed, removed_views, removed_blobs, free)；没有 budget → None。
     keep_dirs：分给这台的任务要用的、刚建的视图（相对 R/data）。views：登记过的视图（state.json 的 views）。siblings：同一个盘上别的执行机的根目录。rpy：relay_remote.rpy。
-    free：剩余的字节数（有 cap 的执行机由 relay.py 按 cap 算好传进来；不给时看盘本身）。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
+    free：剩余的字节数（有 cap 的执行机由 relay.py 按 cap 算好传进来；不给时看盘本身）。
+    blob_free：blobs 在另一个盘、有 blob_cap 时 blobs 那边的剩余（relay.py 按 blob_cap 算好传进来，11/6）：删 blob 只看它，
+    删视图看两边哪边剩不到软线；不给时 blob 和视图都看 free。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
     if soft_gb is None:
         b = budget(name)
         if not b:
@@ -147,4 +149,4 @@ def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=(), siblings=()):
     sys.path.insert(0, os.path.join(CORE, "sites"))
     import names as N
     return rpy(name, RM.GC_PY, dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS,
-                                    siblings=list(siblings)))
+                                    siblings=list(siblings), blob_free=blob_free))

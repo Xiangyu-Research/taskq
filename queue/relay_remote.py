@@ -206,8 +206,13 @@ live=[d for d in (os.listdir(cdir) if os.path.isdir(cdir) else []) if '.tmp' not
       and time.time()-os.stat(os.path.join(cdir,d)).st_mtime<STALE_BEAT]
 B=os.path.realpath(os.path.join(R,R_BLOBS))
 bdev=os.stat(B).st_dev if os.path.isdir(B) else os.stat(R).st_dev
+bfree=free
+if bdev!=os.stat(R).st_dev:
+    bfree=shutil.disk_usage(B).free
+    if A.get('blob_cap'):
+        bfree=min(bfree,max(0,int(A['blob_cap']*1e9)-usage(B)[0]))
 json_out(dict(taskq=st,tasks=col.get('tasks'),sched_raw=raw,free=free,dev=os.stat(R).st_dev,envs_ok=oks,envs_st=envs_st,now=int(time.time()),out_used=out_used,
-                   blob_dev=bdev,blob_free=free if bdev==os.stat(R).st_dev else shutil.disk_usage(B).free,
+                   blob_dev=bdev,blob_free=bfree,
                    bundle=os.path.basename(os.path.realpath(os.path.join(R,R_CURRENT))),live=live))
 """
 
@@ -458,9 +463,13 @@ def isblob(dp,f):
     return len(f)>2 and os.path.normpath(dp)==os.path.dirname(os.path.join(R,blob(f)))
 blobs_ok=os.path.isdir(B) and (inside(B,R) or os.path.islink(B) and not inside(R,BR))
 free0=A['free'] if A.get('free') is not None else shutil.disk_usage(R).free
+bfree0=A.get('blob_free')
 out=dict(freed=0,removed_views=[],removed_blobs=0,free=free0)
+_bf=[0]
 def free():
-    return free0+out['freed']
+    return free0+out['freed']-(_bf[0] if bfree0 is not None else 0)
+def bfree():
+    return free() if bfree0 is None else bfree0+_bf[0]
 def rmtree(d):
     if os.path.islink(d):
         os.remove(d)
@@ -481,7 +490,7 @@ def rmtree(d):
             else:
                 os.rmdir(p)
     os.rmdir(d)
-if free()<soft:
+if free()<soft or bfree()<soft:
     os.makedirs(os.path.dirname(os.path.join(R,R_VIEW_LOCK)),exist_ok=True)
     L=open(os.path.join(R,R_VIEW_LOCK),'w')
     fcntl.flock(L,fcntl.LOCK_EX)
@@ -539,7 +548,7 @@ def skip(p,f):
         except OSError:
             return True
     return False
-if free()<soft and blobs_ok:
+if bfree()<soft and blobs_ok:
     used=set()
     for dp,dns,fns in os.walk(D):
         for f in fns+dns:
@@ -560,7 +569,7 @@ if free()<soft and blobs_ok:
                 continue
             cand.append((max(st.st_atime,st.st_mtime),p,st.st_size))
     for _,p,sz in sorted(cand):
-        if free()>=soft:
+        if bfree()>=soft:
             break
         if not inside(p,BR) or os.path.basename(p) in pins():
             continue
@@ -569,8 +578,9 @@ if free()<soft and blobs_ok:
         except OSError:
             continue
         out['freed']+=sz
+        _bf[0]+=sz
         out['removed_blobs']+=1
-if free()<soft and blobs_ok:
+if bfree()<soft and blobs_ok:
     sib=[os.path.join(os.path.realpath(os.path.expanduser(x)),R_BLOBS) for x in A.get('siblings') or []]
     for dp,_,fns in os.walk(B):
         for f in fns:
@@ -595,5 +605,7 @@ if free()<soft and blobs_ok:
                     out['unlinked']=out.get('unlinked',0)+1
                     break
 out['free']=free()
+if bfree0 is not None:
+    out['blob_free']=bfree()
 json_out(out)
 """

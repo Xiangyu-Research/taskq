@@ -133,6 +133,18 @@ def main():
         assert not exists(R, "dd1") and not os.path.exists(part), r
         ok("正在传的任务钉住的块、传到一半的临时文件不删；钉住记录过了 12 小时、临时文件放了一天以上就不再认")
 
+        # blobs 在另一个盘、有 blob_cap（11/6）：删 blob 只看 blob_free，删视图看两边任一边；删 blob 不算进根目录的剩余
+        R, _ = build(fixture.tmpdir(dir=tmp))
+        r = G.gc("x", keep, local_rpy(R), soft_gb=5000 / GB, free=200 * GB, blob_free=0)
+        assert r["removed_views"] == ["prepared/ds_old"] and not exists(R, "dd1"), r
+        assert r["free"] == 200 * GB + 2002 and r["blob_free"] == r["freed"] - 2002 and r["removed_blobs"] >= 1, r
+        assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1"), r
+        ok("有 blob_free：blobs 那边剩不到软线 → 删视图和没人指的 blob，根目录的剩余不加删掉的 blob")
+        R, _ = build(fixture.tmpdir(dir=tmp))
+        r = G.gc("x", keep, local_rpy(R), soft_gb=5000 / GB, free=0, blob_free=200 * GB)
+        assert r["removed_views"] == ["prepared/ds_old"] and r["removed_blobs"] == 0 and exists(R, "dd1"), r
+        ok("有 blob_free：只有根目录剩不到软线 → 删视图，blob 不删（删了也不给根目录腾地方）")
+
         R, _ = build(fixture.tmpdir(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1")
