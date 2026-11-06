@@ -533,5 +533,59 @@ if os.path.exists(os.path.join(_lt, "pushed.log")):
 rc4, p4 = _health(_bad, 23)
 ok("插件写错、夜里：不推送（早上第一次检查时推）", rc4 != 0 and p4 == [])
 
+# ---------------- pueued 没了：自动恢复（11/6）----------------
+_seen_s = snap(pueue={"hub": {"groups": {"gpu": "Running", "cpu": "Paused", "wait": "Running"}, "tasks": []},
+                      "pueue-host": {"error": "Error: connection refused"}})
+_sp = os.path.join(H.HDIR, H.proto.PUEUE_SEEN)
+if os.path.exists(_sp):
+    os.remove(_sp)
+H.C.write_json(_sp, {"pueue-host": dict(t=111, running=["gpu1"])})
+_seen = H.pueue_seen(_seen_s, dry=True)
+ok("pueue_seen：记下 pueued 在的机器的时间和开着的组；没响应的那台留着上次的；dry 不写",
+   _seen["hub"] == dict(t=int(NOW.timestamp()), running=["gpu", "wait"]) and _seen["pueue-host"]["t"] == 111
+   and json.load(open(_sp)) == {"pueue-host": dict(t=111, running=["gpu1"])})
+H.pueue_seen(_seen_s)
+ok("pueue_seen：不是 dry 时写下", json.load(open(_sp))["hub"]["running"] == ["gpu", "wait"])
+_ran, _qs = [], {"out": ""}
+_ro, _sh = H.run_on, H.sh
+H.run_on = lambda m, script, timeout=120: (_ran.append((m["ssh"], script)), (0, "2026-11-06 08:17:00 pueued 恢复：放回队列 3 4\n"))[1]
+H.sh = lambda cmd, inp=None, timeout=120: (0, _qs["out"])
+_ev_added = []
+import events as _EV  # noqa: E402
+_EV_add = _EV.add
+_EV.add = lambda source, msg, db=None, **kw: _ev_added.append((source, msg, kw))
+try:
+    _down = snap(pueue={"hub": {"error": "Error: no socket"}, "pueue-host": {"error": "Error: no socket"}})
+    H.policy.AUTO["revive"] = False
+    ok("revive：开关关着不动", H.revive(_down, {}) == ([], {}) and not _ran)
+    H.policy.AUTO["revive"] = True
+    _qs["out"] = json.dumps({"hub": {"groups": {}, "tasks": []}, "pueue-host": {"groups": {}, "tasks": []}})
+    ev, still = H.revive(_down, {"hub": dict(t=1000, running=["gpu", "wait"]), "pueue-host": dict(t=2000, running=[])})
+    hub_cmd = next(sc for sh_, sc in _ran if sh_ is None)
+    ph_cmd = next(sc for sh_, sc in _ran if sh_ == "fake-pueue-host")
+    ok("revive：hub 本机跑 on_boot.sh --since <上次在的时间-60> --resume <那时开着的组>",
+       hub_cmd.endswith("queue/on_boot.sh --since 940 --resume gpu,wait") and hub_cmd.startswith("bash /"))
+    ok("revive：别的机器跑它代码包里的 on_boot.sh（没有开着的组时不带 --resume）",
+       ph_cmd.startswith("bash " + H.M.MACHINES["pueue-host"]["code"] + "/") and "--since 1940" in ph_cmd and "--resume" not in ph_cmd)
+    ok("revive：恢复成功 → 记事件（health/revive），不留原因", len(ev) == 2 and all("已自动恢复" in e and "放回队列 3 4" in e for e in ev)
+       and still == {} and {x[2].get("site") for x in _ev_added} == {"hub", "pueue-host"} and _ev_added[0][2]["kind"] == "revive")
+    _ran.clear()
+    ev, still = H.revive(_down, {}, dry=True)
+    ok("revive：dry 只说会做什么，不跑", not _ran and len(ev) == 2 and all("会自动恢复" in e for e in ev))
+    ev, still = H.revive(snap(pueue={"hub": {"error": "x"}, "pueue-host": {"groups": {}, "tasks": []}}), {})
+    ok("revive：没有上次的记录 → 只启动（--since 现在、不带 --resume）；pueued 在的机器不动",
+       len(_ran) == 1 and f"--since {int(NOW.timestamp())}" in _ran[0][1] and "--resume" not in _ran[0][1])
+    _qs["out"] = json.dumps({"hub": {"error": "still down"}})
+    _ran.clear()
+    ev, still = H.revive(snap(pueue={"hub": {"error": "x"}, "pueue-host": {"groups": {}, "tasks": []}}), {})
+    ok("revive：恢复后还是没响应 → 返回原因（照常报 pueued）", ev == [] and "自动恢复没成功" in still.get("hub", ""))
+    _off = snap(pueue={"hub": {"error": "x"}, "pueue-host": {"error": "x"}}, ok={"hub": True, "pueue-host": False})
+    _ran.clear()
+    H.revive(_off, {})
+    ok("revive：连不上的机器不动", [x[0] for x in _ran] == [None])
+finally:
+    H.run_on, H.sh, _EV.add = _ro, _sh, _EV_add
+    H.policy.AUTO.pop("revive", None)
+
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

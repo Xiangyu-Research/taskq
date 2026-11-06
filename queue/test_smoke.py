@@ -233,6 +233,29 @@ def test_real_adopt():
     central("release", "--worker", NAME, T)
 
 
+def test_env_variant():
+    """11/6：环境编号只按描述加这台的变体算；冒烟过了以后真任务训完不改写记录（以前 lab 的 .ok 是变体的哈希、读不到时退回默认变体，
+    两边对不上，又排一次冒烟）。"""
+    T = add("D8", "0", variant="V_env")
+    sp = next(t for t in mtq()["tasks"] if t["key"] == T)["spec"]
+    e0, h0, v0 = M.RELAY[NAME]["envs"]["base"], M.spec_hash, M.spec_variant
+    M.RELAY[NAME]["envs"]["base"] = ("spec", "gpu2")
+    M.spec_hash = lambda env, variant="default": f"{env}-{variant}"
+    try:
+        assert M.spec_variant(NAME, "base") == "gpu2"
+        m = SG.mark(NAME, sp)
+        assert m["env"] == f"base:{SG.h12('base-gpu2')}", m
+        g = SG.Gate(NAME, RS(oks={"base": "stale"}), mtq(), live=True)
+        assert g.verdict(T, sp) and SG.mark(NAME, sp)["env"] == m["env"]
+        SG.record(NAME, m, state="ok", src="smoke", key="_smoke/x", why="")
+        assert SG.real_done(NAME, SG.mark(NAME, sp)) is False and SG.load(NAME)[m["kind"]]["src"] == "smoke"
+        assert SG.Gate(NAME, RS(), mtq(), live=True).verdict(T, sp) is None
+        assert SG.Gate(NAME, RS(oks={"base": "base-gpu2"}), mtq(), live=True).verdict(T, sp) is None
+    finally:
+        M.RELAY[NAME]["envs"]["base"], M.spec_hash, M.spec_variant = e0, h0, v0
+    ok("环境编号按描述加这台的变体算，不看那边的 .ok 读没读到；冒烟过了 → 真任务训完不改写、不再排冒烟")
+
+
 def test_canary():
     for t in mtq()["tasks"]:  # 前面领着的都交还（canary 的种类只按做法和环境算）
         if t.get("assigned") == NAME:
@@ -304,7 +327,7 @@ def test_shift():
     T = add("D7", "0", variant="V_shift")
     assert shift.smoke_passed(NAME, T) is False
     sp = next(t for t in mtq()["tasks"] if t["key"] == T)["spec"]
-    SG.real_done(NAME, SG.mark(NAME, sp, SG.site_oks(NAME)))
+    SG.real_done(NAME, SG.mark(NAME, sp))
     assert shift.smoke_passed(NAME, T) is True
     assert shift.smoke_passed(NAME, "_smoke/x/y") is False
     relay.P.AUTO["smoke"] = False
@@ -357,7 +380,11 @@ def test_callable():
         sp = S.resolve("toy", dict(ds="D9X", frag="0", variant="V_call"))
         sp2 = S.resolve("toy", dict(ds="D9", frag="0", variant="V_call"))
         m, m2 = SG.mark(NAME, sp), SG.mark(NAME, sp2)
-        assert m["kind"] == m2["kind"] and m["defn"] != m2["defn"], (m, m2)
+        assert m["kind"] != m2["kind"] and "ds=SMOKE_X" in m["kind"] and m["defn"] != m2["defn"], (m, m2)
+        SG.real_done(NAME, m2)
+        assert SG.real_done(NAME, m) and SG.load(NAME)[m2["kind"]]["state"] == "ok"
+        assert SG.Gate(NAME, RS(), mtq(), live=True).verdict("D9/V_call/0", sp2) is None
+        SG.update(NAME, lambda recs: [recs.pop(k) for k in (m["kind"], m2["kind"])])
         assert seen and seen[0] == os.environ["TASKQ_DATA"], seen
         g = SG.Gate(NAME, RS(), mtq(), live=True)
         g.want[m["kind"]] = dict(sp=sp, m=m)
@@ -369,18 +396,25 @@ def test_callable():
         SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: dict(DEF["params"], ds="SMOKE_Y"))
         assert SG.mark(NAME, sp)["defn"] != m["defn"]
         assert SG.Gate(NAME, RS(), mtq(), live=True).verdict("D9X/V_call/0", sp), "函数的结果变了要重新冒烟"
-        ok("params、vars 可以是函数 f(真任务的参数, hub 的数据目录)：定义的 id 按算出来的结果，结果变了重新冒烟")
+        ok("params、vars 可以是函数 f(真任务的参数, hub 的数据目录)：换成的数据不同是两种、各记各的；定义的 id 按算出来的结果，结果变了重新冒烟")
+
+        got = {}
+        SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: got.update(tp) or dict(DEF["params"]))
+        SG.mark(NAME, sp)
+        assert got.get("data") == list(sp.get("data") or []) and "data" not in (sp.get("names") or {}), got
+        ok("冒烟定义的函数拿到真任务的 data（冒烟要带上的输入从这里取）")
 
         def boom(tp, data):
             raise KeyError("no labels")
         SG.SMOKE["toy"] = dict(DEF, params=boom)
+        me = SG.mark(NAME, sp)
         g = SG.Gate(NAME, RS(), mtq(), live=True)
         why = g.verdict("D9X/V_call/0", sp)
-        assert why and "no labels" in why and list(g.alerts) == [f"smoke:{NAME}:{m['kid']}"], (why, g.alerts)
+        assert why and "no labels" in why and list(g.alerts) == [f"smoke:{NAME}:{me['kid']}"], (why, g.alerts)
         fails = [o for o in g.ops() if o["op"] == "smoke_fail"]
         assert len(fails) == 1 and not [o for o in g.ops() if o["op"] == "smoke_add"], g.ops()
         run(fails)
-        r = SG.load(NAME)[m["kind"]]
+        r = SG.load(NAME)[me["kind"]]
         assert r["state"] == "failed" and "no labels" in r["why"], r
         g = SG.Gate(NAME, RS(), mtq(), live=True)
         assert g.verdict("D9X/V_call/0", sp) and g.alerts and not g.ops()
@@ -425,6 +459,7 @@ def main():
         test_enqueue_pass()
         test_fail_retry()
         test_real_adopt()
+        test_env_variant()
         test_canary()
         test_hidden()
         test_shift()

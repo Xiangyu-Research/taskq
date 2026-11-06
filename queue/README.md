@@ -208,9 +208,9 @@ pueue 在 hub 和 pueue 执行机上只当运行器：按组限并发、留日�
 
 ### 冒烟闸门（`smoke_gate.py`，11/5）
 
-一种任务（做法 + 插件 `smoke.py` 的 `SMOKE` 里 `by` 列的参数值 + 用到的环境）在一台执行机上第一次送真任务之前，先在那台上跑一个很小的同种任务（冒烟），过了才送；环境（`status.json` 里那台的 `envs_ok`，没有时按说明算的哈希）、冒烟定义变了要重跑。开关 `AUTO["smoke"]`。
+一种任务（做法 + 插件 `smoke.py` 的 `SMOKE` 里 `by` 列的参数值 + 冒烟换成的参数（如换成的冒烟数据集，带 `{smoke}` 的除外）+ 用到的环境）在一台执行机上第一次送真任务之前，先在那台上跑一个很小的同种任务（冒烟），过了才送；环境（`spec` 环境按描述和那台用的变体算的哈希，和那边建好后记下的同一个；conda / venv 按机器表里的条目；11/6 起不看那边报上来的，以前两种算法对不上、来回重排）、冒烟定义变了要重跑。开关 `AUTO["smoke"]`。
 
-- **插件**：`SMOKE = {做法名: dict(by=[参数名…], params={…}, vars={…})}`。冒烟任务 = 真任务的做法 + `by` 列的参数照抄真任务 + `params` 覆盖（可以覆盖做法的 `out`、`model` 等）+ `vars` 合进做法的环境变量，`machines=[这台]`，档位 `SMOKE_NICE`（-1000）。`params`、`vars` 也可以是函数 `f(真任务的参数, hub 的数据目录) -> dict`（如按真任务的数据集挑冒烟数据集），每次在 hub 上算，算出的结果进定义的哈希；函数出错 = 这种冒烟没过（原因是异常），照常报。
+- **插件**：`SMOKE = {做法名: dict(by=[参数名…], params={…}, vars={…})}`。冒烟任务 = 真任务的做法 + `by` 列的参数照抄真任务 + `params` 覆盖（可以覆盖做法的 `out`、`model` 等）+ `vars` 合进做法的环境变量，`machines=[这台]`，档位 `SMOKE_NICE`（-1000）。`params`、`vars` 也可以是函数 `f(真任务的参数, hub 的数据目录) -> dict`（如按真任务的数据集挑冒烟数据集；真任务的参数里另有 `data` = 真任务要传的输入，冒烟要带上其中的权重之类时从这里取、写进返回的 `data`），每次在 hub 上算，算出的结果进定义的哈希；函数出错 = 这种冒烟没过（原因是异常），照常报。
 - **`{smoke}`**：`params`、`vars` 的字符串里换成这次冒烟的名字 `<执行机>-<种类哈希12位>-<时间>-<4位随机>`；`{data}`、`{repo}` 照旧留给那边展开。冒烟的产出要放在名字含 `{smoke}` 的文件夹下、至少第二层（`out`，或 `vars` 里以 `{data}/` 开头的路径），如 `{data}/smoke/{smoke}/results`；收尾时删的就是这些文件夹。冒烟用的环境要和真任务一样（不一样记没过），环境由参数决定时把那个参数写进 `by`。
 - **没有定义的做法**（金丝雀）：这种（做法 + 环境）在这台上还没成功过一次时，同时只送一个真任务；它做完就算过。
 - **记录**：hub 总队列的 `smoke/<执行机>.json`，按种类一条：`state` 是 `queued`、`ok`、`failed`，`src` 是 `smoke`（冒烟）、`real`（真任务做完）、`adopted`（`taskq smoke adopt` 按已做完的任务补记），带环境、定义哈希、代码包、原因。
@@ -236,7 +236,7 @@ pueue 在 hub 和 pueue 执行机上只当运行器：按组限并发、留日�
 | `advance.py` | 训完以后的步骤（见上面）；`taskq plan` 只看会排什么 |
 | `archive_task.sh <hub> <key> [--dry-run]` | 执行机上训完、拉回 hub 以后：备份 `spec.py outputs` 的 `outs`、上一级的 `extra` 和分段日志到备份机（`machines.py` 的 `backup`），核对一致；rsync 经 `taskq tunnel rsync`（`sync/tunnel.py`；`machines.py` 的 `tunnel` 里有的方向经隧道传） |
 | `tasklog.py` | `taskq log <key>`：一个任务的每段训练、hub 上调度日志里提到它的行、任务记录（JSON 字段 `proto.TASKLOG_*`） |
-| `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（命令要能从存档接着做），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录 |
+| `on_boot.sh` | 开机（`@reboot`）：启动 pueued，把被打断的任务原地放回队列（命令要能从存档接着做），记在 `~/on_boot.log`；`gpu_log` 的机器启动 GPU 使用记录。pueued 没了但机器没重启时，健康检查（`AUTO["revive"]` 开着）替那台跑一次 `on_boot.sh --since <上次见到它活着> --resume <那时开着的组>`：放回那之后被杀的任务、只打开那时开着的组（特意暂停的组照旧暂停），记在 `taskq events --source health`（11/6） |
 | `setup.sh`、`install_pueue.sh` | 装 pueue、启动常驻进程、按表建组（表里没有的空组删掉）、写 crontab（`on_boot.sh --gpu-log`，从表里的 `code` 跑：执行机是代码包的 `R/code/current`；hub 另按 `OUTPUTS` 的 `cron` 调 `entry`，项目的入口脚本也负责更新 hub 的代码副本）。`setup.sh <名字>`（11/4）：在 hub 上替一台没有仓库克隆的机器做，经 ssh 跑那边代码包里的 `setup.sh` |
 | `proto.py` | 协议的唯一定义（见"约定"第一条）；`python3 proto.py sh` 打印 bash 用的 `TQ_*` 变量，`python3 proto.py json` 打印全部 |
 | `taskq_api.py` | 插件用的核心接口（`REQUIRED`、`RelayError`、`expand`、`sha256`、`check`…） |

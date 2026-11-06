@@ -176,6 +176,67 @@ def gather(remote=True):
     return s
 
 
+def pueue_seen(s, dry=False):
+    """这一轮查到 pueued 在的机器：记下时间和开着的组（proto.PUEUE_SEEN）。→ 记录（含以前的）。"""
+    p = os.path.join(HDIR, proto.PUEUE_SEEN)
+    try:
+        seen = json.load(open(p))
+    except (OSError, ValueError):
+        seen = {}
+    t = int(s["now"].timestamp())
+    for name, d in (s.get("pueue") or {}).items():
+        if isinstance(d, dict) and "error" not in d:
+            seen[name] = dict(t=t, running=sorted(g for g, st in (d.get("groups") or {}).items() if st == "Running"))
+    if not dry:
+        C.write_json(p, seen)
+    return seen
+
+
+def revive(s, seen, dry=False):
+    """pueued 没响应、机器连得上（开关 AUTO["revive"]）：在那台跑 on_boot.sh --since（上次查到它在的时间）--resume（那时开着的组），
+    启动 pueued、放回被打断的任务、打开原来开着的组（11/6：box 的 pueued 夜里没了，7.5 小时没排任何东西）。
+    → (事件, {机器: 恢复后还是不行的原因})。恢复成功的机器这一轮不报 pueued。"""
+    if not policy.AUTO.get("revive"):
+        return [], {}
+    events, still = [], {}
+    for name in M.names("pueue"):
+        d = (s.get("pueue") or {}).get(name)
+        if name in policy.OFFLINE or not s["ok"].get(name) or not (isinstance(d, dict) and "error" in d):
+            continue
+        m, last = M.MACHINES[name], seen.get(name) or {}
+        since = int(last["t"]) - 60 if last.get("t") else int(s["now"].timestamp())  # 没有记录：只启动，不放回任务
+        args = ["--since", str(since)] + (["--resume", ",".join(last["running"])] if last.get("running") else [])
+        if m["ssh"] is None:
+            script = " ".join(["bash", os.path.join(CORE, "queue", "on_boot.sh")] + args)
+        elif m.get("code"):
+            script = " ".join(["bash", m["code"].rstrip("/") + "/" + cfg.bundle_rel("queue", "on_boot.sh")] + args
+                              + (["--gpu-log"] if m.get("gpu_log") else []))
+        else:
+            still[name] = "表里没有代码目录（code），没法自动恢复"
+            continue
+        if dry:
+            events.append(f"{L(name)} 的 pueued 没响应：会自动恢复（{script}）")
+            continue
+        rc, out = run_on(m, script, timeout=180)
+        rc2, out2 = sh([os.path.join(CORE, "queue", "qs"), "--json", name], timeout=90)
+        try:
+            back = rc2 == 0 and "error" not in json.loads(out2).get(name, {"error": 1})
+        except ValueError:
+            back = False
+        tail = " ".join(ln.split(" ", 2)[-1] for ln in out.strip().splitlines()[-3:])
+        if back:
+            events.append(f"{L(name)} 的 pueued 没响应，已自动恢复：{tail or '启动了 pueued'}")
+            import events as EV
+            EV.add("health", events[-1], kind="revive", site=name)
+        else:
+            still[name] = f"自动恢复没成功（退出码 {rc}）：{(out or out2).strip()[-200:]}"
+    return events, still
+
+
+def L(name):
+    return M.MACHINES[name]["label"]
+
+
 def task_info(s, key):
     """各机器上这个任务：(是否训完, 训完的 epoch 数, 最后一个 epoch 的时间)。"""
     out = {}
@@ -448,6 +509,19 @@ def main(argv=None):
     if not a.dry_run:
         s["records"] = C.update_records(lambda recs: C.sync_records(s["pueue"], recs))
     P = check(s)
+    try:
+        revived, still = revive(s, pueue_seen(s, dry=a.dry_run), dry=a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        revived, still = [], {}
+        P[alert_id("revive", "error")] = problem(f"pueued 的自动恢复出错：{type(e).__name__}: {e}"[:300])
+    for line in revived:
+        name = next((n for n in M.names("pueue") if line.startswith(L(n) + " ")), None)
+        if name and "已自动恢复" in line:
+            P.pop(alert_id("pueued", name), None)
+    for name, why in still.items():
+        pid = alert_id("pueued", name)
+        if pid in P:
+            P[pid] = dict(P[pid], msg=f"{P[pid]['msg']}；{why}")
     # 这几步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
     try:
         import shift  # queue/shift.py：按时段开关 pueue 组（policy.py 的 SHIFT）
@@ -456,7 +530,7 @@ def main(argv=None):
         shift_msgs, shift_err = [], f"queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
     else:
         shift_err = None
-    events, stuck = shift_msgs, {}
+    events, stuck = revived + shift_msgs, {}
     if shift_err:
         stuck["shift:error"] = shift_err
     try:

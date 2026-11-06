@@ -27,7 +27,6 @@ import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
-import relay_store as ST  # noqa: E402
 from common import write_json  # noqa: E402
 
 SMOKE = {}
@@ -51,9 +50,14 @@ def hub_data():
     return os.environ.get("TASKQ_DATA") or M.expand(M.machine(M.hub())["data"])
 
 
+def real_params(sp):
+    """交给冒烟定义里的函数的真任务参数：说明的 names，加上它的 data（要传的输入，展开后的；冒烟任务按需带上其中的一部分）。"""
+    return dict(sp.get("names") or {}, data=list(sp.get("data") or []))
+
+
 def definition(recipe, names=None):
-    """做法的冒烟定义 → dict(by, params, vars)；params、vars 是函数 f(真任务的参数, hub 的数据目录) 时算出来（出错 → DefError）。
-    没有定义 → None；写法不对 → ValueError。"""
+    """做法的冒烟定义 → dict(by, params, vars)；params、vars 是函数 f(真任务的参数 real_params, hub 的数据目录) 时算出来
+    （出错 → DefError）。没有定义 → None；写法不对 → ValueError。"""
     d = SMOKE.get(recipe)
     if d is None:
         return None
@@ -80,29 +84,34 @@ def h12(x):
     return hashlib.sha256((x if isinstance(x, str) else json.dumps(x, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()[:12]
 
 
-def env_id(site, sp, oks=None):
-    """这台上这个说明的环境 → id：spec 条目按那边的 .ok（没读到时按描述），conda / venv 条目按条目本身。"""
+def env_id(site, sp):
+    """这台上这个说明的环境 → id：spec 条目按描述加这台用的变体的锁（和那边建好后 .ok 里写的同一个哈希，不看那边读没读到），
+    conda / venv 条目按条目本身。"""
     envs = (M.machine(site).get("envs") or {})
     out = []
     for e in S.envs_of(sp):
         x = envs.get(e)
-        v = ((oks or {}).get(e) or M.spec_hash(e)) if M.is_spec(x) else repr(tuple(x) if isinstance(x, list) else x)
+        v = M.spec_hash(e, M.spec_variant(site, e)) if M.is_spec(x) else repr(tuple(x) if isinstance(x, list) else x)
         out.append(f"{e}:{h12(str(v))}")
     return ",".join(out)
 
 
-def mark(site, sp, oks=None):
-    """说明 → dict(kind, kid, env, defn, canary)。kind = 做法 + by 的参数值 + 环境名；没有冒烟定义的做法是 canary。"""
+def mark(site, sp):
+    """说明 → dict(kind, kid, env, defn, canary)。kind = 做法 + by 的参数值 + 冒烟任务换成的参数（不含带 {smoke} 的）+ 环境名：
+    同一 by 的任务冒烟换成的数据不同（如通道不同）时是两种，各测各的、各记各的（11/6：以前算一种，两边互相改写记录、来回重排）。
+    没有冒烟定义的做法是 canary。"""
     rec = sp.get("recipe")
     names = sp.get("names") or {}
     err = None
     try:
-        d = definition(rec, names)
+        d = definition(rec, real_params(sp))
     except DefError as e:
         err, d = str(e), None
     by = (d or {}).get("by") or (SMOKE.get(rec) or {}).get("by") or []
-    kind = "|".join([str(rec)] + [f"{p}={names.get(p)}" for p in by] + [f"env={','.join(S.envs_of(sp))}"])
-    return dict(kind=kind, kid=h12(kind), env=env_id(site, sp, oks), defn=h12({"error": err}) if err else h12(d) if d else "",
+    swap = [f"{p}={v}" for p, v in sorted(((d or {}).get("params") or {}).items())
+            if p not in by and TAG not in json.dumps(v, ensure_ascii=False)]
+    kind = "|".join([str(rec)] + [f"{p}={names.get(p)}" for p in by] + swap + [f"env={','.join(S.envs_of(sp))}"])
+    return dict(kind=kind, kid=h12(kind), env=env_id(site, sp), defn=h12({"error": err}) if err else h12(d) if d else "",
                 canary=d is None and err is None, recipe=rec, defs=d, error=err)
 
 
@@ -162,14 +171,6 @@ def fresh(r, m):
     return bool(r) and r.get("env") == m["env"] and r.get("defn") == m["defn"]
 
 
-def site_oks(site):
-    try:
-        with open(os.path.join(ST.DIR, "status.json")) as f:
-            return (json.load(f).get(site) or {}).get("envs_ok") or {}
-    except (OSError, ValueError):
-        return {}
-
-
 def master_keys(mtq):
     return {t["key"] for t in (mtq or {}).get("tasks", [])}
 
@@ -180,7 +181,7 @@ class Gate:
     def __init__(self, site, rs, mtq, live=None, now=None):
         self.site, self.mtq, self.now = site, mtq or {}, now or time.time()
         self.live = on() if live is None else live
-        self.oks, self.bundle = (rs or {}).get("envs_ok") or {}, (rs or {}).get("bundle")
+        self.bundle = (rs or {}).get("bundle")
         self.recs = load(site)
         self.want, self.alerts, self.would, self.taken, self.fails = {}, {}, {}, {}, {}
         self._fly = self._keys = None
@@ -196,7 +197,7 @@ class Gate:
             for t in self.mtq.get("tasks", []):
                 if t.get("worker") == self.site and t.get("state") != proto.S_DONE and not is_smoke(t["key"]) and t.get("spec"):
                     try:
-                        k = mark(self.site, t["spec"], self.oks)["kind"]
+                        k = mark(self.site, t["spec"])["kind"]
                     except ValueError:
                         continue
                     self._fly[k] = self._fly.get(k, 0) + 1
@@ -206,7 +207,7 @@ class Gate:
         if is_smoke(key) or not sp:
             return
         try:
-            k = mark(self.site, sp, self.oks)["kind"]
+            k = mark(self.site, sp)["kind"]
         except ValueError:
             return
         self.taken[k] = self.taken.get(k, 0) + 1
@@ -230,7 +231,7 @@ class Gate:
         if is_smoke(key) or not sp:
             return None
         try:
-            m = mark(self.site, sp, self.oks)
+            m = mark(self.site, sp)
         except ValueError as e:
             if self.live:
                 self.alerts[alert_id("smoke", self.site, h12(str(sp.get("recipe"))))] = alert(
@@ -383,7 +384,7 @@ def passed(site, key):
     if not sp:
         return False
     try:
-        m = mark(site, sp, site_oks(site))
+        m = mark(site, sp)
     except ValueError:
         return False
     r = load(site).get(m["kind"])
@@ -415,7 +416,7 @@ def adopt(dry=False):
             except OSError:
                 site = None
         if site in M.RELAY:
-            m = mark(site, t["spec"], site_oks(site))
+            m = mark(site, t["spec"])
             got.setdefault(site, {})[m["kind"]] = m
     new = []
     for site, ms in got.items():

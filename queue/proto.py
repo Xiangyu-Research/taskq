@@ -308,8 +308,9 @@ NOTICE_TOP = ("version", "notices")  # taskq notice list --json
 NOTICE_FIELDS = ("name", "text", "since", "at")  # since：最后一次挂上的时间（%Y-%m-%d %H:%M:%S）
 ALERTS["notice"] = ("name",)
 ACKED = "acked.json"  # taskq notice ack（11/5）：健康检查的状态文件夹下，{问题编号: 确认的时间}；只认 kind=event 的问题，问题消失后这一项跟着删
-AUTO_SWITCHES = ("advance", "ledger", "run", "smoke", "envs")  # policy.AUTO 里机器名以外的开关：advance 排下游、台账的影子对比、taskq run 包 hub 的步骤、冒烟闸门、
-# envs 自动建环境（True，或 {机器: [环境 或 (环境, 变体)]} 另外预建的，sites/envs.py）
+AUTO_SWITCHES = ("advance", "ledger", "run", "smoke", "envs", "revive")  # policy.AUTO 里机器名以外的开关：advance 排下游、台账的影子对比、taskq run 包 hub 的步骤、冒烟闸门、
+# envs 自动建环境（True，或 {机器: [环境 或 (环境, 变体)]} 另外预建的，sites/envs.py）、revive pueued 没了时健康检查自动恢复（11/6）
+PUEUE_SEEN = "pueue_seen.json"  # 健康检查的状态文件夹下，{pueue 机器: {t: 最后一次查到 pueued 在的时间戳, running: [那时开着的组]}}（11/6，revive 用）
 
 # ---------------- 冒烟（smoke_gate.py，11/5） ----------------
 SMOKE_PREFIX = "_smoke/"   # 冒烟任务的 key：_smoke/<执行机>/<种类 id>-<时间>-<随机>（{smoke} = <执行机>-<种类 id>-<时间>-<随机>）

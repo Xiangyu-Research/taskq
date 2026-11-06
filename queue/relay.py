@@ -300,7 +300,7 @@ def plan(s, name, rs, st, now=None):
             sp = refill.info(mtq, key)["spec"]
             try:
                 if sp and sp.get("recipe") and SG.on():
-                    acts.append(dict(op="smoke_real", key=key, mark=SG.mark(name, sp, rs.get("envs_ok"))))
+                    acts.append(dict(op="smoke_real", key=key, mark=SG.mark(name, sp)))
             except ValueError:
                 pass
             continue

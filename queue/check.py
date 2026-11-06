@@ -465,7 +465,7 @@ def check_smoke(r, k, sp, seen):
     """这个任务的冒烟任务（smoke.py 的定义）解析得了、环境和真任务一样、冒烟文件夹找得到；同样的冒烟只查一次。"""
     import spec as S
     try:
-        d = SG.definition(sp["recipe"], sp.get("names"))
+        d = SG.definition(sp["recipe"], SG.real_params(sp))
     except Exception as e:  # noqa: BLE001
         r.bad("tasks", f"{k}：冒烟定义出错：{e}")
         return
