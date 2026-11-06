@@ -34,7 +34,7 @@ pueue 在 hub 和 pueue 执行机上只当运行器：按组限并发、留日�
 
 ## 开关和配置
 
-下表的 `policy.py`、`machines.py` 都在配置文件夹里；`<状态>` 是本机的状态文件夹（默认 `~/.cache/taskq/`，见 `TASKQ_STATE`）。
+下表的 `policy.py`、`machines.py` 都在配置文件夹里；`<状态>` 是本机的状态文件夹（默认 `~/.local/state/taskq/`，见 `TASKQ_STATE`）。
 
 | 在哪 | 是什么 | 作用 |
 |---|---|---|
@@ -52,14 +52,14 @@ pueue 在 hub 和 pueue 执行机上只当运行器：按组限并发、留日�
 | `policy.py` `SLURM` | 每台 Slurm 执行机的 QOS、时限、个数 | `relay.py` 补交多少 GPU / CPU worker 作业（`refill.slurm_plan` 算） |
 | `policy.py` `SHIFT` | 执行机 → (开始, 结束, 第一个, 最后一个) | `shift.py` 跟着健康检查在时段开始时恢复执行机的 worker 组（卡上有别人的进程就等），`allowed()` 放行后 `relay.py` 才替它领任务、开 worker；结束时停 worker（等它交还），有进度的任务在总队列里改分给同一台上不按时段的执行机（`adopt` 收编存档、接着训），没开始的交还总队列，这台的队列里删掉（`unq`），那台训完后删这边的结果。每个时段只动这两次，记录在 hub 的 `<状态>/shift.json`，日志 `~/refill.log` |
 | `policy.py` `OFFLINE_UNTIL` | 机器 → (到期时间, 原因) | 到期前健康检查、送任务、补交作业、拉回前的查看、代码同步都不连它，`advance.py` 不往它排（`OFFLINE` 由它算出）；到期后自动恢复 |
-| `policy.py` `OUTPUTS` | 键 → 路径 | 调度在仓库里、本机上读写的地方（11/2）：代码包带的顶层文件夹（`bundle`、`bundle_skip`，`relay_bundle.py`）、健康检查的状态文件夹（`health`）和 ntfy 频道文件、推送标题的前缀（`name`）、各机器代码提交号的记录（hub 的定时入口写、`health.py` 读）、实验表 `experiments`（`experiments.py`，glob；代码包里生成的 `policy.py` 也带）、`code_dirs`（`run_task.sh`、`consume.py` 的代码版本后面标"+改动"时看的目录）、`bundle_check`（`relay_bundle.py` 另用本机哪个环境的 python 核对能编译）、`env_script`（`q` 加的任务先 source 的环境脚本）、`state`（本机的状态文件夹，11/4；没写时核心的默认 `~/.cache/taskq/`）、`logs`（`feed`、`relay`、`advance`、`refill` 的 `.log` 所在的文件夹，没写时家目录；`cfg.py log <名字>`）、`entry`（每 30 分钟的入口脚本，`refill.py` 的 KICK、`setup.sh` 写 cron 用）、`cron`（hub 的定时：(时间, `entry` 的参数)）、`origin`（`setup.sh` 在 hub 上克隆的仓库地址）。没写的键：没有实验表、只看核心的 `queue/`、只用当前的 python 核对、不 source。bash 读：`python3 queue/cfg.py get <键>` |
+| `policy.py` `OUTPUTS` | 键 → 路径 | 调度在仓库里、本机上读写的地方（11/2）：代码包带的顶层文件夹（`bundle`、`bundle_skip`，`relay_bundle.py`）、健康检查的状态文件夹（`health`）和 ntfy 频道文件、推送标题的前缀（`name`）、各机器代码提交号的记录（hub 的定时入口写、`health.py` 读）、实验表 `experiments`（`experiments.py`，glob；代码包里生成的 `policy.py` 也带）、`code_dirs`（`run_task.sh`、`consume.py` 的代码版本后面标"+改动"时看的目录）、`bundle_check`（`relay_bundle.py` 另用本机哪个环境的 python 核对能编译）、`env_script`（`q` 加的任务先 source 的环境脚本）、`state`（本机的状态文件夹，11/4；没写时核心的默认 `~/.local/state/taskq/`）、`logs`（`feed`、`relay`、`advance`、`refill` 的 `.log` 所在的文件夹，没写时家目录；`cfg.py log <名字>`）、`entry`（每 30 分钟的入口脚本，`refill.py` 的 KICK、`setup.sh` 写 cron 用）、`cron`（hub 的定时：(时间, `entry` 的参数)）、`origin`（`setup.sh` 在 hub 上克隆的仓库地址）。没写的键：没有实验表、只看核心的 `queue/`、只用当前的 python 核对、不 source。bash 读：`python3 queue/cfg.py get <键>` |
 | `machines.py` `backup` | 备份机（`roles` 有 `backup`）→ 备份目录 | `archive_task.sh` 把训完的任务备份到这里（`machines.py backups`） |
 | hub `<状态>/taskq/ENABLED` | 文件 | 总队列的开关：没有时 `relay.py` 什么都不分 |
 | 执行机 `R/queue/ENABLED` | 文件 | 那边队列的开关：没有时排着的 worker 作业开始后直接结束（`worker_start.sh`，只在 worker 开始时查；在跑的 worker 照样领）；`relay.py` 建队列时放上 |
 | 执行机 `R/queue/gpu_pad_DISABLED`（hub 等非执行机：`<状态>/gpu_pad/DISABLED`） | 文件 | 有时不填显存，在跑的填充 10 秒内放掉退出 |
 | `TASKQ_GPU_PAD=0` | 环境变量 | 单个作业 / 脚本不开显存填充（见下面"显存填充"）；`gpu_pad*` 的参数 `TASKQ_GPU_PAD_*` |
 | `TASKQ_DATA` | 环境变量 | 本机的数据目录（`run_task.sh`、`consume.py`、`taskq.py` 先读它，没有再查 `machines.py`） |
-| `TASKQ_STATE` | 环境变量 | 本机的状态文件夹（11/2）：设了时任务队列、`relay/`、`last/`、`tasks.json`、`envs/`、隧道、显存填充的开关、`code/`（`snapshot.sh`）都在它下面（`<它>/taskq`、`<它>/gpu_pad/DISABLED`…）；没设时在 `OUTPUTS["state"]`，再没有就是核心的默认 `~/.cache/taskq/`（`cfg.py` 的 `STATE_HOME`、`STATE_PLACES`，Python 经 `cfg.state()`，bash 经 `cfg.py state <名字>`）。`TASKQ_DIR`、`TASKQ_GPU_PAD_SWITCH` 等单项的变量优先。执行机的代码包把这些默认写法换成根目录下的 `queue/`、`state/` |
+| `TASKQ_STATE` | 环境变量 | 本机的状态文件夹（11/2）：设了时任务队列、`relay/`、`last/`、`tasks.json`、`envs/`、隧道、显存填充的开关、`code/`（`snapshot.sh`）都在它下面（`<它>/taskq`、`<它>/gpu_pad/DISABLED`…）；没设时在 `OUTPUTS["state"]`，再没有就是核心的默认 `~/.local/state/taskq/`（`cfg.py` 的 `STATE_HOME`、`STATE_PLACES`，Python 经 `cfg.state()`，bash 经 `cfg.py state <名字>`）。`TASKQ_DIR`、`TASKQ_GPU_PAD_SWITCH` 等单项的变量优先。执行机的代码包把这些默认写法换成根目录下的 `queue/`、`state/` |
 | `TASK_WAIT_GPU` | 环境变量 | 不在 Slurm 里时卡被占最多等几分钟：任务单的 `res.wait_gpu` 经 `spec.py` 给 `run_task.sh`；pueue 组的默认值在 `machines.py` 的 `groups` |
 | `TASKQ_*` | 环境变量 | 全部登记在 `proto.py` 的 `ENV`：谁设、什么意思、`run`（生产里会设，如 `TASKQ_DIR`、`TASKQ_DATA`、`TASKQ_CPUS`、`TASKQ_GPU_PAD_SWITCH`、`TASKQ_ZOMBIES`）/ `tune`（阈值，默认值在 `consume.py` 的 `Worker.__init__`或 `gpu_pad.py` 的命令行）/ `test`（只给测试）；`test_protocol.py` 核对代码里出现的都登记了 |
 | `.taskq.toml` | 项目根目录的文件 | 找项目（11/4，`project.py`）：`--project` > `TASKQ_PROJECT` > 从当前目录往上找 `.taskq.toml`；里面写 `config = "config"`、`plugins = ["plugins"]`（相对项目根，同 `example/.taskq.toml`）。核心的仓库根 `REPO`：`TASKQ_REPO` > 核心在 `<仓库>/scripts/taskq` 里（代码包）时那个仓库 > 找到的项目 > 核心本身（`cfg.py`；bash 脚本不嵌着、没设 `TASKQ_REPO` 时 `eval "$(python3 $CORE/queue/project.py sh)"`）。仓库根有 `.taskq.toml` 时配置和插件按它，没有时用下面两行的默认 |

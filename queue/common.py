@@ -78,7 +78,7 @@ def local_time(x):
 
 # ---------------- 和上次一样就不再写日志 ----------------
 def changed(name, value):
-    """value 和上次记下的不一样 → 记下、返回 True；一样 → False。记在状态目录的 last/<name>.json（如 ~/.cache/taskq/last/）。"""
+    """value 和上次记下的不一样 → 记下、返回 True；一样 → False。记在状态目录的 last/<name>.json（如 ~/.local/state/taskq/last/）。"""
     import re
     d = os.path.expanduser(os.environ.get("TASKQ_LAST") or _cfg().state("last", expand=False))  # 环境变量只给测试用
     p = os.path.join(d, re.sub(r"[^\w.-]", "_", name) + ".json")

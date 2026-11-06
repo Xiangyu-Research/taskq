@@ -6,7 +6,7 @@
 在 relay_store.py，传数据、拉回、删那边的任务在 relay_transfer.py。
 
 每次健康检查（monitor/health.py，每 30 分钟）经 queue/feed.py 的 run_all 调用这里的 run_all（送任务只有一个入口，10/31）：
-  1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到状态目录的 relay/status.json，如 ~/.cache/taskq/relay/status.json，使用者的状态页面可以读）；
+  1. ssh 一次读那边的队列、各任务进度、作业、剩余空间（写到状态目录的 relay/status.json，如 ~/.local/state/taskq/relay/status.json，使用者的状态页面可以读）；
   2. 总队列里 worker 是它的每个任务：
      - 还没放进那边的队列 → hub 的 wait 组排 relay.py stage（补传缺的数据、建软链接、加进那边的队列；要放的路径和那边没做完的
        任务的产出重叠时不传、报出来）；

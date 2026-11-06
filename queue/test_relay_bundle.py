@@ -176,10 +176,10 @@ def test_bundle(T):
         assert os.readlink(os.path.join(path, ln)) == tgt and os.path.isfile(os.path.join(path, ln)), ln
     sha = subprocess.run(["git", "-C", CORE, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     assert open(os.path.join(path, B.VERSION)).read() == sha + "\n"
-    assert ".cache/taskq" in src[f"{BQ}/gpu_pad_start.sh"][0].decode()
+    assert ".local/state/taskq" in src[f"{BQ}/gpu_pad_start.sh"][0].decode()
     gp = open(os.path.join(path, f"{BQ}/gpu_pad_start.sh"), encoding="utf-8").read()
-    assert ".cache/taskq" not in gp, gp[:300]
-    ok("包里的文件：提交里的代码原样（step.sh、infer_task.sh 等不改），~/.cache/taskq 换成根目录下的；旧位置的转交和原来的逐字相同、"
+    assert ".local/state/taskq" not in gp and ".cache/taskq" not in gp, gp[:300]
+    ok("包里的文件：提交里的代码原样（step.sh、infer_task.sh 等不改），~/.local/state/taskq 换成根目录下的；旧位置的转交和原来的逐字相同、"
        "指到包里的核心，start.sh、loop.sh 指向它们；VERSION 是核心的提交号")
 
     os.symlink(bid, os.path.join(R, "code", "current"))
@@ -212,9 +212,11 @@ def test_bundle(T):
 
     tq, cf = open(os.path.join(cur, BQ, "taskq.py")).read(), open(os.path.join(cur, BQ, "cfg.py")).read()
     assert tq.split("\n")[:10] == src[f"{BQ}/taskq.py"][0].decode().split("\n")[:10]
-    assert "~/.cache/taskq" not in "\n".join(ln for ln in cf.split("\n") if ln.startswith("STATE_")) and f'STATE_HOME = "{R}/state/"' in cf, cf
+    assert not any(h in "\n".join(ln for ln in cf.split("\n") if ln.startswith("STATE_")) for h in ("~/.cache/taskq", "~/.local/state/taskq")) and f'STATE_HOME = "{R}/state/"' in cf, cf
     sh = B.home_paths("#!/bin/bash\n# 队列在 ~/.cache/taskq/taskq\nQ=${Q:-$HOME/.cache/taskq/taskq}\n", R, "x.sh").split("\n")
     assert sh[1] == "# 队列在 ~/.cache/taskq/taskq" and sh[2] == f"Q=${{Q:-{R}/queue}}", sh
+    sh = B.home_paths("Q=${Q:-$HOME/.local/state/taskq/taskq}\n", R, "x.sh")
+    assert sh == f"Q=${{Q:-{R}/queue}}\n", sh
     ok("换家目录下的路径只换代码：taskq.py 开头的说明、shell 的注释行不换，cfg.py 的 STATE_HOME 等照常换")
 
     sb = open(os.path.join(cur, f"{BQ}/worker.sbatch")).read().split("\n")

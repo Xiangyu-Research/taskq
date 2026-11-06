@@ -10,7 +10,7 @@
 
   跳过：文件开头几行有"# 要真卡"的（--gpu 才跑）；测试自己退出码 77（缺 numpy、pueue 等，原因是输出里"跳过："那一行）。
   结果：每个文件一行（测试、结果、秒、"通过："的项数、备注：跳过的原因、写进 HOME 的东西）打在标准输出，同时写 <目录>/report.tsv，
-        每个文件的输出在 <目录>/log_<文件>.txt。默认目录 ~/.cache/taskq/test。
+        每个文件的输出在 <目录>/log_<文件>.txt。默认目录 ~/.cache/taskq-test。
   退出码：0 都通过（或跳过），1 有没通过的，2 用法错（没有匹配的测试）。
 """
 import argparse
@@ -29,7 +29,7 @@ CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = ("queue", "sites", "sync", "monitor")
 SKIP = 77  # 测试自己说跳过（automake 的写法）
 GPU_MARK = re.compile(r"^#\s*要真卡")
-OUT = "~/.cache/taskq/test"
+OUT = "~/.cache/taskq-test"
 PASS, SKIPPED = "通过", "跳过"
 
 

@@ -81,7 +81,7 @@ taskq self test relay e2e         # 只跑路径里有这些字的（也可以�
 taskq self test -l                # 只列出会跑哪些
 ```
 
-跑的是 `queue/`、`sites/`、`sync/`、`monitor/` 下的 `test_*.py`、`test_*.sh`（`queue/run_tests.py`），用测试自己的固定配置（`queue/testdata/`），不读项目。结果表打在标准输出，同时写 `~/.cache/taskq/test/report.tsv`（`--out` 改位置），每个文件的输出在同一个文件夹的 `log_*.txt`；都通过（或跳过）退出码 0，否则 1。开头写了 `# 要真卡` 的（`test_gpu_pad_integration.sh`）只在 `--gpu` 时跑；测试缺东西时自己退出 77、打一行"跳过：原因"（`sites/test_e2e.py` 要 pueue 和带 numpy 的 Python），算跳过。每个文件最多跑 900 秒（`--timeout`）。
+跑的是 `queue/`、`sites/`、`sync/`、`monitor/` 下的 `test_*.py`、`test_*.sh`（`queue/run_tests.py`），用测试自己的固定配置（`queue/testdata/`），不读项目。结果表打在标准输出，同时写 `~/.cache/taskq-test/report.tsv`（`--out` 改位置），每个文件的输出在同一个文件夹的 `log_*.txt`；都通过（或跳过）退出码 0，否则 1。开头写了 `# 要真卡` 的（`test_gpu_pad_integration.sh`）只在 `--gpu` 时跑；测试缺东西时自己退出 77、打一行"跳过：原因"（`sites/test_e2e.py` 要 pueue 和带 numpy 的 Python），算跳过。每个文件最多跑 900 秒（`--timeout`）。
 
 改了哪个文件跑哪些测试（只改了几个文件时先跑这些，`taskq self test <模式…>`；同一个改动全套只跑一次）：
 

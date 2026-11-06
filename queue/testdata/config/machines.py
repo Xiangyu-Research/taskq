@@ -15,7 +15,7 @@ WS1_ROOT = "/mnt/disk1/datasets/ee09fdd2"
 
 MACHINES = {
     "hub": dict(label="hub", hostname=r"hub-host|" + LOCAL, ssh=None, scheduler="pueue", repo="~/auto/demo",
-                code="~/.cache/taskq/code/current",
+                code="~/.local/state/taskq/code/current",
                 data="/data/others/DEMO_DATA", conda=(FAKE_CONDA, "base0"),
                 envs={"base": ("conda", "base0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                       "alt2": ("venv", FAKE + "/venv/alt2", "base"), "stats": ("conda", "stats0"),

@@ -40,7 +40,7 @@ def cleanup():  # 测试中途出错也停掉本次起的服务、删临时目�
 
 atexit.register(cleanup)
 HOME = os.path.join(T, "home")
-RWD = os.path.join(HOME, ".cache/taskq/tunnel")  # 那边（plainhost）的工作目录
+RWD = os.path.join(HOME, ".local/state/taskq/tunnel")  # 那边（plainhost）的工作目录
 os.makedirs(HOME)
 FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:

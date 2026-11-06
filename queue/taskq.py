@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """训练任务队列（2026-10-17 起；10/18 起任务不限于某一种模型；10/31 起总队列在 hub）。
 
-总队列（hub 的状态目录下的 taskq/，如 ~/.cache/taskq/taskq/）：所有训练和要进队列的步骤。只有 hub 写它（实验表加任务、改档位、停止都在 hub 上做）；
+总队列（hub 的状态目录下的 taskq/，如 ~/.local/state/taskq/taskq/）：所有训练和要进队列的步骤。只有 hub 写它（实验表加任务、改档位、停止都在 hub 上做）；
   分给某台执行机的任务记为 claims/<key>/info 里的 assigned: <机器>：没有心跳、不过期，只靠交还结束（queue/relay.py 交还）。
 执行机上的队列（relay.py 在执行机根目录里建的 R/queue/）：relay.py 替它从总队列领来的任务，key 和总队列相同。
   worker（queue/consume.py）在那边领、心跳、交还，hub 不在线时照常跑。训完以后 hub 拉回，hub 上有了结果才算训完（总队列的 done）。

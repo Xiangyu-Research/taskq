@@ -378,7 +378,7 @@ HOME_MAP = dict(proto.STATE_IN_ROOT)  # cfg.py 的 STATE_PLACES → 根目录下
 def home_paths(text, root, path=""):
     """家目录下的状态文件夹（cfg.py 的 STATE_HOME 的默认写法）换成根目录下的：任务队列 → queue/，显存填充的开关 →
     queue/gpu_pad_DISABLED，其余 → state/。只换代码（.py 的注释、文档字符串和别的文件里 # 开头的行不换，11/4）。"""
-    homes = [x[2:] for x in dict.fromkeys((cfg.state_home(), cfg.STATE_HOME)) if x.startswith("~/")]  # 配置的和核心的默认（11/4）
+    homes = [x[2:] for x in dict.fromkeys((cfg.state_home(), cfg.STATE_HOME, cfg.STATE_HOME_OLD)) if x.startswith("~/")]  # 配置的、核心的默认和 11/6 前的默认（11/4）
 
     def sub(s):
         for pre in ("$HOME/", "~/"):

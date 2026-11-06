@@ -27,7 +27,7 @@
 hub 上排的任务做完后马上跑一次健康检查（refill.then_check → 使用者的检查入口），下一步不用等 30 分钟。
 失败过的不自动重排：hub 的 pueue 里这一步最后一次成功之后有失败的任务，或者成功跑完了但结果还是不对（rerun_if_newer 的除外），
   就只报出来（健康检查"需要处理"），看过 pueue log、处理好以后 pueue remove 那个任务，下一次就会重排。
-在不在跑：hub 的 pueue 任务按任务记录认（状态目录下的 tasks.json，如 ~/.cache/taskq/tasks.json，queue/common.py 的 identify；这里加的任务都先记下），
+在不在跑：hub 的 pueue 任务按任务记录认（状态目录下的 tasks.json，如 ~/.local/state/taskq/tasks.json，queue/common.py 的 identify；这里加的任务都先记下），
   没有记录的（手动加的）只认训练的命令。这一步的结果还在往 hub 上拷（relay.py 的拉回在跑）时不算做完。
 policy.py 的 AUTO["advance"] 是 False 时只把"会排什么"写进 ~/advance.log，不真排；HOLD 对上的步骤在 hub 上加成暂停的
   （pueue add --stashed），进任务队列的先不加。

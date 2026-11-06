@@ -49,7 +49,7 @@ SLURM = {
 READY = {"site-slurm2": 2, "site-pueue": 2, "site-pueue2": 1, "site-slurm": 2}
 
 OUTPUTS = dict(
-    state="~/.cache/taskq/",
+    state="~/.local/state/taskq/",
     entry="bin/loop.sh",
     cron=(("5,35 * * * *", "health"), ("30 8-20/2 * * *", "registry")),
     origin="git@example.org:demo/demo.git",

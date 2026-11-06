@@ -4,7 +4,8 @@
 # 1. 克隆拉取一次（fetch.sh：连同子模块钉的提交），取 origin/main；状态文件夹的 code/<提交号>（cfg.py state code）没有就用 git worktree
 #    建一份（git rev-parse、runlog 照常能用）；子模块在副本里用克隆里那个子模块的 worktree（不连网）
 # 2. code/current 指到它（一步换过去）
-# 3. 删旧副本：不是 current、没有 pueue 任务的工作目录在里面（排着、失败的也算：restart --in-place 要用）、建了 7 天以上
+# 3. 删旧副本：不是 current、没有 pueue 任务的工作目录在里面（排着、失败的也算：restart --in-place 要用；按真实路径比，11/6 前的任务
+#    记的是 ~/.cache/taskq/code/…）、建了 7 天以上
 # fetch 失败（GitHub 连不上）时照样用克隆里已有的 origin/main，退出码 1。
 set -u
 PROG=${TASKQ_PROG:-snapshot.sh}
@@ -37,11 +38,12 @@ if [[ $(readlink "$C/current" 2> /dev/null) != "$sha" ]]; then
 fi
 used=$(~/.local/bin/pueue status --json 2> /dev/null | python3 -c '
 import json, sys
-print("\n".join(t["path"] for t in json.load(sys.stdin)["tasks"].values()))') || exit $rc
+import os
+print("\n".join(os.path.realpath(t["path"]) for t in json.load(sys.stdin)["tasks"].values()))') || exit $rc
 for d in "$C"/*/; do
     d=${d%/} n=${d##*/}
     [[ $n == "$sha" || $n == *.tmp ]] && continue
-    grep -q "^$d\(/\|$\)" <<< "$used" && continue
+    awk -v d="$(readlink -f "$d")" '$0 == d || index($0, d "/") == 1 {f = 1} END {exit !f}' <<< "$used" && continue
     [[ -n $(find "$d" -maxdepth 0 -mtime -7) ]] && continue
     git -C "$SRC" worktree remove --force "$d" && echo "$PROG：删旧副本 ${n:0:7}"
 done

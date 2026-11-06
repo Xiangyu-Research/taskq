@@ -30,7 +30,7 @@ def pad_env(name, default=None):
 
 
 def default_switch():
-    return tcfg.state("gpu_pad", "DISABLED") if tcfg else os.path.expanduser("~/.cache/taskq/gpu_pad/DISABLED")
+    return tcfg.state("gpu_pad", "DISABLED") if tcfg else os.path.expanduser("~/.local/state/taskq/gpu_pad/DISABLED")
 
 
 def env_int(name, default):

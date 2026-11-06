@@ -7,7 +7,7 @@
   - 时段结束后：worker 自己停下手上的、交还、退出（queue/consumers/window.py，11/5）；这里暂停组、还在跑的 worker 再 SIGTERM 一次（兜底，
     旧代码包的 worker 也靠它）；总队列里分给它、没训完的任务：有进度（在训、训过几轮）的
     改分给同一台上不按时段的执行机（day_site，从存档接着训，relay.py 的收编把存档带过去），其余交还总队列。
-做了什么记在状态目录的 shift.json（如 ~/.cache/taskq/shift.json）（每项最近一次开、停的时段日期），日志 ~/refill.log。
+做了什么记在状态目录的 shift.json（如 ~/.local/state/taskq/shift.json）（每项最近一次开、停的时段日期），日志 ~/refill.log。
 """
 import datetime as dt
 import json

@@ -74,10 +74,11 @@ def local(*parts):
     return os.path.join(CORE, *parts)
 
 
-# 状态文件夹：TASKQ_STATE > policy.py 的 OUTPUTS["state"] > 下面的默认（11/4）。代码包里 relay_bundle.py 把这几个字面量换成
+# 状态文件夹：TASKQ_STATE > policy.py 的 OUTPUTS["state"] > 下面的默认（11/4；11/6 从 ~/.cache/taskq 改到 ~/.local/state/taskq）。代码包里 relay_bundle.py 把这几个字面量换成
 # 根目录下的（STATE_PLACES 的 → queue/，其余 → state/），键同 proto.STATE_IN_ROOT
-STATE_HOME = "~/.cache/taskq/"
-STATE_PLACES = {"taskq": "~/.cache/taskq/taskq", "gpu_pad/DISABLED": "~/.cache/taskq/gpu_pad/DISABLED"}
+STATE_HOME = "~/.local/state/taskq/"
+STATE_PLACES = {"taskq": "~/.local/state/taskq/taskq", "gpu_pad/DISABLED": "~/.local/state/taskq/gpu_pad/DISABLED"}
+STATE_HOME_OLD = "~/.cache/taskq/"  # 11/6 前的默认（~/.cache 会被当缓存整个删掉，改到 ~/.local/state）；代码包照样把这种写法换成根目录下的
 
 
 _PROJECT = []
