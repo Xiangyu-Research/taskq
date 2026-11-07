@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
-#SBATCH --output=%x_%j.out
-# 模板（11/4）：relay_bundle.py 只取 #SBATCH 行，分区、qos、时限、CPU、内存都写在执行机条目的 sbatch 里（这里只放通用的），生成各执行机的
-exec bash "${SLURM_SUBMIT_DIR:-.}/worker_start.sh"
+# GPU worker 作业：sites/slurm.py 交，分区、卡、核、内存、QOS、时限、日志、TASKQ_ROOT、TASKQ_MACHINE 都在 sbatch 的命令行上；
+# $1 = 根目录 code/current 下的 worker_start.sh（作业开始时才解析，用的是那时的代码包）
+exec bash "$1"

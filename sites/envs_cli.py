@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""执行机的环境（2026-10-31；11/4 前叫 site.py，和标准库的 site 重名）：envs.py 的命令行。在 hub 上跑。
+"""执行机的环境：envs.py 的命令行。在 hub 上跑。
 
     taskq site env <机器> <环境> [--variant V] [-n]
                                       按 <配置文件夹>/specs/<环境>.yml（有 <环境>.<变体>.lock.json 时按锁、不联网）在那台的 CPU 上建环境、

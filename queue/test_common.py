@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""common.py 的测试（2026-10-25）：任务记录的读写、找回任务号、清理；pueue 的时间。临时文件，不连机器。
+"""common.py 的测试：任务记录的读写、找回任务号、清理；pueue 的时间。临时文件，不连机器。
     python3 queue/test_common.py
 """
 import json
@@ -89,7 +89,7 @@ ths = [threading.Thread(target=many, args=(20,)) for _ in range(4)]
 [t.join() for t in ths]
 ok("几个进程同时加：加锁读改写，一条不丢", len(C.load_records()) == 80 and isinstance(json.load(open(C.tasks_path())), list))
 
-# 到别的机器跑的命令那边也限时（11/1）：本机超时断开后那边不留卡住的进程
+# 到别的机器跑的命令那边也限时：本机超时断开后那边不留卡住的进程
 _sp = __import__("subprocess")
 _run = _sp.run
 seen = []
@@ -103,7 +103,7 @@ ok("run：给了 host → 那边用 timeout -k 包住、比本机早 15 秒，�
    and cmd[-2] == "fake-slurm-login" and to == 120)
 ok("run：本机的不套", C.run("echo hi")[1] == "hi\n")
 
-# backup_down：备份机暂停检查或这次连不上 → 说明（relay.py 据此先不排归档，11/1）
+# backup_down：备份机暂停着或这次连不上 → 说明（relay.py 据此先不排归档）
 fixture.use()
 import cfg  # noqa: E402
 cfg.use_config()
@@ -111,21 +111,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 bk = next(b for b in M.backups() if b != M.hub())
-P.OFFLINE = {bk: "停机"}
-ok("backup_down：备份机暂停检查 → 说明", C.backup_down() == f"{bk} 暂停检查（停机）")
-P.OFFLINE = {}
+P.PAUSE = {bk: (None, "停机")}
+ok("backup_down：备份机暂停着（PAUSE 没写到期）→ 说明", C.backup_down() == f"{bk} 暂停着（停机）")
+P.PAUSE = {bk: ("2000-01-01 00:00", "停机")}
+ok("backup_down：PAUSE 已经到期 → 不算暂停", C.backup_down() is None)
+P.PAUSE = {bk: ("2999-01-01 00:00", "停机")}
+ok("backup_down：PAUSE 还没到期 → 说明", C.backup_down() == f"{bk} 暂停着（停机）")
+P.PAUSE = {}
 ok("backup_down：这次连不上 → 说明；能用 → None", C.backup_down({bk: False}) == f"{bk} 这次连不上"
    and C.backup_down({bk: True}) is None and C.backup_down() is None)
-
-# from_command 认 run_task.sh --spec <JSON>（执行机队列里 hub 送来的说明，11/4）
-import shlex  # noqa: E402
-sp = dict(key="ds/tr/0", cmd="python3 -c 'print(1)'", out="r/0", done=["D"], data=[], res={}, vars={})
-js = json.dumps(sp, ensure_ascii=False, separators=(",", ":"))
-ok("from_command：run_task.sh --spec <JSON> 认成训练（JSON 里有空格也行）",
-   C.from_command(f"bash /x/run_task.sh --spec {shlex.quote(js)}") == dict(step="train", key="ds/tr/0")
-   and C.from_command(shlex.quote(f"bash /x/run_task.sh --spec {shlex.quote(js)}")) == dict(step="train", key="ds/tr/0"))
-ok("from_command：--spec 后面不是说明 → None", C.from_command("bash /x/run_task.sh --spec '{\"key\": 1'") is None
-   and C.from_command("bash /x/run_task.sh --spec") is None)
 
 print("\n全部通过" if not fails else f"\n{fails} 项失败")
 sys.exit(1 if fails else 0)

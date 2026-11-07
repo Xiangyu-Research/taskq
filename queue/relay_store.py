@@ -1,14 +1,12 @@
-"""relay 在 hub 上的记账（RELAY_DIR 下的 state.json：每台各任务放过去的路径、视图、代码包；sha256 缓存在 hub 的数据库里）
-和执行机根目录的清理。
+"""relay 在 hub 上的记账（状态文件夹的 relay/state.json，cfg.state：每台各任务放过去的路径、视图、代码包）和执行机根目录的清理。
 
-清理（2026-10-31）：剩余低于软线时，先删总队列不再要的
-视图（state 里登记过的各任务的视图，加上插件建视图的文件夹（sites/names.py 的 VIEW_ROOTS）下的目录；不在 keep 里、没有 .incomplete（正在建）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
-硬链接收编、老目录还有一份的不碰；正在传、视图还没建好的任务钉住的（R/state/pins/，relay.py stage 写，12 小时内的）和传到一半的临时文件不碰，11/1），直到剩余回到软线以上。还不够时，自己不用、另一个链接在同一个盘上别的执行机（siblings）
-blobs 里的 blob 删掉自己这个链接（那台不用了它下次清理时删）。只碰根目录 R 里面的东西；R/blobs 是指到别的盘的软链接时（如 Slurm 执行机的 scratch 盘，11/4）
-也清理它，只删 blobs/<前两位>/ 下的文件。删视图时拿建视图的锁（R/state/view.lock）。
+清理：剩余低于软线时，先删总队列不再要的视图（state 里登记过的各任务的视图，加上插件建视图的文件夹（sites/names.py 的
+VIEW_ROOTS）下的目录；不在 keep 里、没有 .incomplete（正在建，或位置上有别的真文件、没建成）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
+别处还有硬链接的不碰；正在传、视图还没建好的任务钉住的（R/state/pins/，relay.py stage 写，PIN_TTL 内的）和传到一半的临时文件
+不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西；R/blobs 是指到别的盘的软链接时（如 Slurm 执行机的 scratch 盘）也清理它，
+只删 blobs/<前两位>/ 下的文件。删视图时拿建视图的锁（R/state/view.lock）。
 根目录经软链接到达时，视图里的软链接指的是软链接的路径，比较时都换成真实路径。"""
 import fcntl
-import hashlib
 import json
 import os
 import sys
@@ -21,12 +19,10 @@ cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
 import relay_plugins as RN  # noqa: E402
-import relay_remote as RM  # noqa: E402
 from common import write_json  # noqa: E402
 
-DIR = RN.RELAY_DIR
+DIR = cfg.state("relay")
 STATE = os.path.join(DIR, "state.json")
-HASHES = os.path.join(DIR, "hashes.json")
 
 
 # ---------------- 状态文件 ----------------
@@ -49,14 +45,14 @@ def load_state():
 
 
 def keys_of(st, name):
-    """key → dict(recipe, params, data, staged, views, inputs, outs, cleanup)。inputs：放过去的文件、视图里的除外（相对 R/data）；
+    """key → dict(recipe, params, inputs, staged, views, placed, outs, cleanup)。inputs：说明里的输入；placed：放过去的文件、视图里的除外（相对 R/data）；
     outs：产出的文件夹。"""
     return (st.get("keys") or {}).get(name) or {}
 
 
 def paths_of(k):
     """一个任务在那边占的路径（相对 R/data）：视图、输入、产出、要清理的。"""
-    return set(views_of(k)) | set(k.get("inputs") or []) | set(k.get("outs") or []) | set(k.get("cleanup") or [])
+    return set(views_of(k)) | set(k.get("placed") or []) | set(k.get("outs") or []) | set(k.get("cleanup") or [])
 
 
 def overlaps(p, used, anc):
@@ -91,55 +87,16 @@ def safe_rel(rel):
     return r
 
 
-def sha256s(paths):
-    """Real path → sha256, cached by (path, size, mtime) in the hub database (table hash; without one, not cached)."""
-    import db as D
-    db = D.connect()
-    if db is not None and not (D.has(db, "hash") and D.writable(db)):
-        db.close()
-        db = None
-    if db is not None and os.path.exists(HASHES):  # the old JSON cache, taken over once
-        try:
-            old = json.load(open(HASHES))
-            with D.tx(db):
-                db.executemany("INSERT OR IGNORE INTO hash(k, sha) VALUES(?, ?)", old.items())
-        except ValueError:
-            pass
-        os.replace(HASHES, HASHES + ".migrated")
-    out, new = {}, []
-    try:
-        for p in paths:
-            st = os.stat(p)
-            k = f"{p}|{st.st_size}|{st.st_mtime_ns}"
-            r = db.execute("SELECT sha FROM hash WHERE k=?", (k,)).fetchone() if db else None
-            if r:
-                out[p] = r[0]
-                continue
-            h = hashlib.sha256()
-            with open(p, "rb") as f:
-                for blk in iter(lambda: f.read(1 << 22), b""):
-                    h.update(blk)
-            out[p] = h.hexdigest()
-            new.append((k, out[p]))
-        if db and new:
-            with D.tx(db):
-                db.executemany("INSERT OR REPLACE INTO hash(k, sha) VALUES(?, ?)", new)
-    finally:
-        if db:
-            db.close()
-    return out
-
-
 # ---------------- 清理 ----------------
 def budget(name):
     return M.machine(name).get("budget")
 
 
-def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=(), siblings=(), blob_free=None):
+def gc(name, keep_dirs, op, soft_gb=None, free=None, views=(), blob_free=None):
     """name 这台的清理 → dict(freed, removed_views, removed_blobs, free)；没有 budget → None。
-    keep_dirs：分给这台的任务要用的、刚建的视图（相对 R/data）。views：登记过的视图（state.json 的 views）。siblings：同一个盘上别的执行机的根目录。rpy：relay_remote.rpy。
+    keep_dirs：分给这台的任务要用的、刚建的视图（相对 R/data）。views：登记过的视图（state.json 的 views）。op：relay_remote.op。
     free：剩余的字节数（有 cap 的执行机由 relay.py 按 cap 算好传进来；不给时看盘本身）。
-    blob_free：blobs 在另一个盘、有 blob_cap 时 blobs 那边的剩余（relay.py 按 blob_cap 算好传进来，11/6）：删 blob 只看它，
+    blob_free：blobs 在另一个盘、有 blob_cap 时 blobs 那边的剩余（relay.py 按 blob_cap 算好传进来）：删 blob 只看它，
     删视图看两边哪边剩不到软线；不给时 blob 和视图都看 free。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
     if soft_gb is None:
         b = budget(name)
@@ -148,5 +105,4 @@ def gc(name, keep_dirs, rpy, soft_gb=None, free=None, views=(), siblings=(), blo
         soft_gb = b[0]
     sys.path.insert(0, os.path.join(CORE, "sites"))
     import names as N
-    return rpy(name, RM.GC_PY, dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS,
-                                    siblings=list(siblings), blob_free=blob_free))
+    return op(name, "gc", dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS, blob_free=blob_free))

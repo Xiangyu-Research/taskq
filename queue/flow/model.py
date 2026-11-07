@@ -1,57 +1,35 @@
-"""规则和实例（2026-11-05）。规则 = 一步怎么做；实例 = 规则代入参数后的一个任务。
-路径都相对数据目录。实例 id 就是现在的 hub 上的 pueue 标签（<规则>:<实验>_<简称>，实验一级的 <规则>:<实验>，最后的 <规则>），
-源头任务（实验展开出来、进总队列的）的 id 是它的队列 key。"""
+"""实例（实验表编译出的一个个要做的事，flow/compile.py）。路径都相对数据目录。
+源头（SOURCE）是实验展开出来、进总队列训练的任务，id 是它的队列 key；步骤的实例 id 也是它进总队列的 key：
+每个任务的步骤 <步骤>/<实验 id>_<简称>，实验一级的 <步骤>/<实验 id>，FINAL 的 <步骤>。"""
 from dataclasses import dataclass, field
 
-EACH, GATHER, GLOBAL, SOURCE = "each", "gather", "global", "source"
-
-
-@dataclass
-class Rule:
-    name: str
-    scope: str                  # each | gather | global | source
-    group: str = ""             # 没写 PLACE 时 hub 的哪个组
-    cmd: str = ""               # 模板
-    done: object = None         # where/ok/mtime/started 的对象；源头任务是 None（看说明的 done）
-    queue: dict = None          # 进总队列时的写法（实验表的 queue）
-    needs: tuple = ()           # gather：要各实例都做完的 each 规则
-    on_change: str = ""         # "rerun"：输入有更新的就重跑（旧的 rerun_if_newer）
-    watch: tuple = ()           # on_change 看哪些规则的产出
-    rq: str = ""
+SOURCE, EACH, GATHER, GLOBAL = "source", "each", "gather", "global"
 
 
 @dataclass
 class Instance:
     id: str
-    rule: str
-    key: str                    # 旧的 (步骤, key) 里的 key：each 是任务 key，gather 是实验 id，global 是 "all"，源头是任务 key
+    scope: str                  # source | each | gather | global
+    rule: str                   # 步骤名；源头是训练的做法
     exp: str = ""
-    names: dict = field(default_factory=dict)
-    deps: list = field(default_factory=list)     # 先要做完的实例 id
-    qk: str = ""                # 进总队列时的 key
-    outputs: list = field(default_factory=list)  # 归它的路径（文件或目录）
-    shared: list = field(default_factory=list)   # 几个实例都会产出的同一个文件
-    mutates: list = field(default_factory=list)  # 会改别的实例的产出（不归它）
-    inputs: list = field(default_factory=list)   # 声明的输入（只用来核对先后）
-    marker: str = ""            # 做完的标志
+    names: dict = field(default_factory=dict)    # 模板名字（{data} 留着）
+    deps: list = field(default_factory=list)     # 先要做完的实例 id：同一个任务里前面的，加上输入落在它产出里的
+    outputs: list = field(default_factory=list)  # 归它的路径（第一个是主目录，done 相对它）
+    shared: list = field(default_factory=list)   # 几个源头都会写的同一个文件（训练的 fetch.extra）：不归谁，也不算原始数据
+    inputs: list = field(default_factory=list)   # 声明的输入（可以带通配）
+    raw: list = field(default_factory=list)      # 输入里不在任何产出里的：原始数据，要在 store 上已经有
     task: str = ""              # each：所属源头任务的 key
-    spec: dict = None           # 源头任务的说明（判断做完用）
-    step: dict = None           # 编译来源的那一步（实验表的 after / group_after / FINAL 的一项；引擎排的时候用它的 cmd、queue、done）
-    lab: str = ""               # 源头任务的简称（<实验>_<简称>）；不属于实验的 = key
-    each: dict = None           # gather：实验的 each（展开输入用）
+    spec: dict = None           # 源头：任务说明
+    step: dict = None           # 步骤：实验表里的那一步（补好默认值）
+    lab: str = ""               # 源头任务的简称（<实验>_<简称>）
+    each: dict = None           # gather：实验的 each
+
+    @property
+    def key(self):
+        return self.id
 
 
 @dataclass
 class Flow:
-    rules: dict                 # 名字 → Rule
     instances: dict             # id → Instance（按实验表的顺序）
     errors: list = field(default_factory=list)
-
-    def by_key(self, rule, key):
-        """旧的 (步骤, key) → 实例。"""
-        return self._idx().get((rule, key))
-
-    def _idx(self):
-        if not hasattr(self, "_sk"):
-            self._sk = {(i.rule, i.key): i for i in self.instances.values()}
-        return self._sk

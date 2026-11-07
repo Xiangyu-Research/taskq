@@ -1,13 +1,11 @@
 """测试用的中继插件（2026-11-02）：形状同真的领域插件。
   toy        训练：prepared/<ds>/ 里这次要用的文件，视图是整个文件夹；拉回核对验证集（check/）
-  toy_infer  推理：任务参数 inputs_cmd（testdata/bin/step.sh --stage needs:infer）列出的模型文件和测试集的输入；拉回核对 MANIFEST"""
+  toy_infer  推理：任务说明的 inputs_cmd（testdata/bin/step.sh --stage needs:infer）列出的模型文件和测试集的输入；拉回核对 MANIFEST"""
 import json
 import os
 import re
-import shlex
-import subprocess
 
-from taskq_api import REPO, RelayError, expand, sha256  # REPO：任务命令里的路径相对它
+from taskq_api import RelayError, expand, listed_inputs, sha256
 
 FIX = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -62,7 +60,7 @@ def export_toy(spec, root):
     for r in rels:
         p = os.path.join(pre, r)
         if not os.path.isfile(p):
-            raise RelayError(f"hub 上没有 {base}/{r}")
+            raise RelayError(f"store 上没有 {base}/{r}")
         files.append((f"{base}/{r}", os.path.realpath(p)))
     return dict(files=files, views=[base])
 
@@ -85,17 +83,11 @@ def check_toy(spec, src, root):
 
 # ---------------- 推理（testdata/bin/infer_task.sh） ----------------
 def infer_inputs(spec, root):
-    """推理要的输入（相对数据目录）：跑任务参数 inputs_cmd（实验表里 infer 步骤的 queue 给的，在仓库根目录、带任务的 vars，
+    """推理要的输入（相对数据目录）：跑任务说明的 inputs_cmd（实验表里 infer 步骤的 inputs_cmd，在仓库根目录、带任务的 vars，
     {data} = root）打印的路径。"""
-    cmd = (spec.get("names") or {}).get("inputs_cmd")
-    if not cmd:
+    if not spec.get("inputs_cmd"):
         raise RelayError(f"{spec['key']}：推理任务没有 inputs_cmd")
-    toks = [t.replace("{data}", root) for t in shlex.split(cmd)]
-    env = dict(os.environ, **{k: str(v).replace("{data}", root) for k, v in (spec.get("vars") or {}).items()}, TASKQ_DATA=root)
-    r = subprocess.run(toks, cwd=REPO, capture_output=True, text=True, timeout=300, env=env)
-    if r.returncode:
-        raise RelayError(f"列输入出错（{cmd}）：{(r.stderr.strip().splitlines() or ['?'])[-1]}")
-    out = [ln.strip().rstrip("/") for ln in r.stdout.splitlines() if ln.strip()]
+    out = listed_inputs(spec, root)
     if not out:
         raise RelayError(f"{spec['key']}：列输入的命令什么都没列")
     return out
@@ -118,12 +110,11 @@ def _cases(names, ext):
 
 
 def check_toy_infer(spec, src, root):
-    """每个测试集的输出、概率、.meta 样本一样，和 hub 上某个输入文件夹的样本一样，数目和 MANIFEST 一致；
-    MANIFEST 里的存档和 hub 上的同一个（sha256）。"""
+    """每个测试集的输出、概率、.meta 样本一样，和 store 上某个输入文件夹的样本一样，数目和 MANIFEST 一致；
+    MANIFEST 里的存档和 store 上的同一个（sha256）。"""
     key, sdir = spec["key"], os.path.join(src, spec["out"])
-    for f in (".infer_done", "MANIFEST.json"):
-        if not os.path.isfile(os.path.join(sdir, f)):
-            raise RelayError(f"{key} 的结果里没有 {f}")
+    if not os.path.isfile(os.path.join(sdir, "MANIFEST.json")):
+        raise RelayError(f"{key} 的结果里没有 MANIFEST.json")
     ins = infer_inputs(spec, root)
     dirs = [d for d in ins if os.path.isdir(os.path.join(root, d))]
     free = [{m.group(1) for m in map(IN_RE.match, os.listdir(os.path.join(root, d))) if m} for d in dirs]
@@ -142,15 +133,15 @@ def check_toy_infer(spec, src, root):
         if hit is None or probs != outs or metas != outs or v.get("n_outputs") != len(outs) or v.get("n_probs") != len(probs):
             raise RelayError(f"{key} 的 {c} 对不上：输出 {len(outs)}、概率 {len(probs)}、meta {len(metas)}，"
                              f"MANIFEST 记 {v.get('n_outputs')} / {v.get('n_probs')}，"
-                             f"{'和 hub 上的输入一致' if hit is not None else 'hub 上没有样本完全一样的输入文件夹'}")
+                             f"{'和 store 上的输入一致' if hit is not None else 'store 上没有样本完全一样的输入文件夹'}")
         free.pop(hit)
     if free:
-        raise RelayError(f"{key}：hub 上有 {len(free)} 个输入文件夹没有对应的输出")
+        raise RelayError(f"{key}：store 上有 {len(free)} 个输入文件夹没有对应的输出")
     cks = [r for r in ins if os.path.basename(r) == "final.ckpt"]
     want = [sha256(os.path.join(root, r)) for r in cks]
     sent = [x.get("sha256") for x in man.get("checkpoints") or []]
     if sorted(sent) != sorted(want):
-        raise RelayError(f"{key}：那边推理用的存档和 hub 上的 {cks} 不是同一个")
+        raise RelayError(f"{key}：那边推理用的存档和 store 上的 {cks} 不是同一个")
 
 
 PLUGINS = {"toy": (export_toy, check_toy), "toy_infer": (export_toy_infer, check_toy_infer)}

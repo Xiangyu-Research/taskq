@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""任务说明（2026-10-18）：做法（queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
-调度的各个脚本都经这里解析和判断，不自己拼路径。只用标准库：健康检查（monitor/health.py 的 gather）把本文件经 ssh 送到别的机器上跑 collect()。
+"""任务说明：做法（queue/recipes.py）+ 参数 → 完整的说明（key、环境、命令、结果文件夹、怎么算训完……）。
+调度的各个脚本都经这里解析和判断，不自己拼路径。collect() 在数据所在的机器上跑（执行机的 status、store 的 collect，queue/site_ops.py）。
 
 命令行：
   spec.py shell <做法> k=v…          给 run_task.sh 的 shell 语句（TASK_KEY、TASK_ENV、TASK_CMD、TASK_OUT 和 vars，按本机展开；
                                      再去掉本机 machines.py 的 task_unset、加 task_vars 里还没设的）
   spec.py done <做法> k=v…           训完了退出码 0，没训完 1
-  spec.py shell|done --spec <JSON>   同上，用已经解析好的说明（hub 的 relay 送任务时解析好，执行机上不再查做法，11/4）
+  spec.py shell|done --spec <JSON>   同上，用已经解析好的说明（hub 的 relay 送任务时解析好，执行机上不再查做法）
   spec.py resolve <做法> k=v…        解析好的说明（JSON，一行）
   spec.py lookup <key>               按 key 找任务（先查实验表（experiments.py），再查训练队列），打印说明（JSON）
-  spec.py outputs <key> [--sh]       这个任务的输出（outputs()，JSON）；--sh：给 archive_task.sh 的 shell 语句
-  spec.py collect --json < 输入.json  本机的 collect()（跨版本读用它，11/4）：输入 {"specs": [说明…], "root": 数据目录（可省，同 done），
+  spec.py outputs <key>|--spec <JSON> [--sh]  这个任务的输出（outputs()，JSON）；--sh：给 archive_task.sh 的 shell 语句
+  spec.py collect --json < 输入.json  本机的 collect()（跨版本读用它）：输入 {"specs": [说明…], "root": 数据目录（可省，同 done），
                                      "wait": 秒（可省，默认 COLLECT_WAIT）}；输出 @@JSON 一行 {"version": …, "tasks", "seglogs"[, "stuck", "errors"]}
 k=v 的值以 [ 或 { 开头时按 JSON 读（如 done='["a","b|c"]'），其他都是字符串。
 """
@@ -27,23 +27,17 @@ from datetime import datetime, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
 sys.path.insert(0, os.path.join(CORE, "queue"))
-try:
-    import cfg as _cfg  # noqa: E402
-    REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
-except ImportError:  # 本文件经 ssh 送到别的机器上单独跑时（remote_collect）
-    REPO = CORE
-if globals().get("_PROTO_INLINE"):  # remote_collect：proto.py 的源码拼在本文件前面，名字已经在这里
-    P = sys.modules[__name__]
-else:
-    import proto as P  # noqa: E402
+import cfg as _cfg  # noqa: E402
+import proto as P  # noqa: E402
+REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
 BUILTIN = ("data", "repo")  # 运行时按机器展开的名字
 FRESH_LOG = P.FRESH_LOG
 SAFE = P.SAFE
 safe = P.safe  # key → 文件名（领取记录、分段日志）
-JSON_MARK = P.JSON_MARK  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（queue/README.md 的"约定"）
+JSON_MARK = P.JSON_MARK  # 给别的机器经 ssh 读的 JSON 只写在以它开头的一行里（queue/README.md 的"命令行和约定"）
 
 
-COLLECT_WAIT = 90  # remote_collect 一共等几秒（各任务同时读）
+COLLECT_WAIT = 90  # collect 一共等几秒（各任务同时读）
 
 
 def json_out(obj):
@@ -92,18 +86,22 @@ def fill(v, names, keep=BUILTIN):
 
 def resolve(recipe, params, exp=None):
     """做法 + 参数 → 说明（dict）。exp：实验表里的实验 id（只记下来）。"""
+    import copy
     import recipes as R  # 只在解析时用（collect() 在别的机器上跑时没有这个文件）
+    import schema
     if recipe not in R.RECIPES:
         raise SpecError(f"不认识的做法 {recipe}（有：{', '.join(R.RECIPES)}）")
     r = R.RECIPES[recipe]
-    if "inputs" in params:  # inputs 是 data 的另一个名字（2026-10-31）
-        if "data" in params:
-            raise SpecError("inputs 和 data 是同一个字段，只给一个")
-        params = {("data" if k == "inputs" else k): v for k, v in params.items()}
-    fields = [k for k in r if k not in ("params", "open")]
+    odd = sorted(set(r) - set(schema.RECIPE_FIELDS) - {"params", "open"})
+    if odd:
+        raise SpecError(f"做法 {recipe} 里不认识的字段 {', '.join(odd)}（能写的见 queue/schema.py 的 RECIPE_FIELDS）")
+    fields = list(schema.RECIPE_FIELDS)
     over = {k: v for k, v in params.items() if k in fields and k not in r["params"]}
     p = {k: v for k, v in r["params"].items()}
     extra = [k for k in params if k not in p and k not in over]
+    taken = sorted(set(params) & set(BUILTIN))
+    if taken:
+        raise SpecError(f"参数不能叫 {', '.join(taken)}（{{{taken[0]}}} 留给执行机展开；输入写在 inputs 里）")
     if extra and not r.get("open"):
         raise SpecError(f"做法 {recipe} 没有参数 {', '.join(extra)}（有：{', '.join(list(p) + fields)}）")
     p.update({k: v for k, v in params.items() if k not in over})
@@ -118,7 +116,9 @@ def resolve(recipe, params, exp=None):
         p = q
     s = {}
     for k in fields:
-        v = r[k]
+        if k not in r and schema.RECIPE_FIELDS[k][1] is schema.REQUIRED:
+            raise SpecError(f"做法 {recipe} 缺字段 {k}")
+        v = copy.deepcopy(r[k] if k in r else schema.RECIPE_FIELDS[k][1])
         if k in over:
             v = {**v, **over[k]} if isinstance(v, dict) and isinstance(over[k], dict) else over[k]
         s[k] = fill(v, p)
@@ -133,9 +133,9 @@ RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
 
 
 def _check(s, progress=True):
-    """任务单的通用字段：data（= inputs）、resume、res、progress 统一格式并检查（2026-10-31）。
+    """任务单的通用字段：inputs、resume、res、progress 统一格式并检查。
     progress=False：不查进度解析方法（hub 送来的说明已经查过；跑任务用不到，读进度的地方自己会报）。
-    key、cmd、out、done、vars、log、fetch 只查类型（11/4：类型不对的说明在 add 时就拒绝，不等读队列时出错）。"""
+    key、cmd、out、done、vars、log、fetch 只查类型（类型不对的说明在 add 时就拒绝，不等读队列时出错）。"""
     for k in ("key", "cmd", "out"):
         if k in s and not (isinstance(s[k], str) and s[k]):
             raise SpecError(f"{k} 要是非空的字符串：{s[k]!r}")
@@ -144,16 +144,15 @@ def _check(s, progress=True):
     for k, typ in (("vars", dict), ("fetch", dict), ("res", dict), ("log", str)):
         if s.get(k) is not None and not isinstance(s[k], typ):
             raise SpecError(f"{k} 要是{'字典' if typ is dict else '字符串'}：{s[k]!r}")
-    for k in ("data", "resume"):
+    for k in ("inputs", "resume"):
         v = s.get(k)
         if isinstance(v, str):
             v = [v]
         if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) and x for x in v)):
             raise SpecError(f"{k} 要是路径的列表：{v!r}")
-        if k == "data" and any(".." in x.split("/") for x in v or []):
-            raise SpecError(f"data 里不能有 ..：{v!r}")
+        if k == "inputs" and any(".." in x.split("/") for x in v or []):
+            raise SpecError(f"inputs 里不能有 ..：{v!r}")
         s[k] = v if k == "resume" else (v or [])
-    s["inputs"] = s["data"]
     res = dict(s.get("res") or {})
     if set(res) - set(RES):
         raise SpecError(f"res 只能有 {', '.join(RES)}：{res!r}")
@@ -172,7 +171,7 @@ def _check(s, progress=True):
         if res[k] < 0:
             raise SpecError(f"res.{k} 不能是负数：{v!r}")
     if (res.get("gpus") or 0) > 1:
-        raise SpecError(f"res.gpus 最多 1（worker 每个任务只给一张卡，11/1）：{res['gpus']!r}")
+        raise SpecError(f"res.gpus 最多 1（worker 每个任务只给一张卡）：{res['gpus']!r}")
     s["res"] = res
     if progress and s.get("progress") not in PROGRESS:
         raise SpecError(f"不认识的进度解析方法 {s.get('progress')}（有：{', '.join(k for k in PROGRESS if k)}）")
@@ -193,7 +192,7 @@ def mem_mb(v):
 
 
 def fits(res, cpus=None, mem_mb_=None, gpu_mem=None):
-    """任务的 res 在 worker 给得起的范围里（worker 没说的那项不查，11/1）→ (能不能, 不够的说明)。"""
+    """任务的 res 在 worker 给得起的范围里（worker 没说的那项不查）→ (能不能, 不够的说明)。"""
     res = res or {}
     need = [("cpus", res.get("cpus"), cpus, "个 CPU"), ("mem", mem_mb(res.get("mem")), mem_mb_, " MB 内存"),
             ("gpu_mem", res.get("gpu_mem"), gpu_mem, " GB 显存")]
@@ -221,6 +220,22 @@ def expand(v, data, repo=REPO):
     return fill(v, dict(data=data, repo=repo), keep=())
 
 
+def listed_inputs(cmd, data, vars=None, timeout=300):
+    """步骤的 inputs_cmd（任务的名字已填好）在仓库根目录真跑一次 → 它打印的输入（相对数据目录，每行一个）。
+    {data}、{repo} 在这里换成 data 和仓库根；vars（任务的环境变量，同样换）和 TASKQ_DATA=data 带给它，核心的库和命令
+    和 run_task.sh 给任务的命令一样（TASKQ_LIB，核心的 bin/ 在 PATH 最前面）。出错、超时 → SpecError。"""
+    cmd = expand(cmd, data)
+    env = dict(os.environ, **{k: str(expand(v, data)) for k, v in (vars or {}).items()}, TASKQ_DATA=data, TASKQ_LIB=HERE,
+               PATH=os.path.join(CORE, "bin") + os.pathsep + os.environ.get("PATH", ""))
+    try:
+        p = subprocess.run(["bash", "-c", cmd], cwd=REPO, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise SpecError(f"inputs_cmd 超时（{timeout} 秒）：{cmd}")
+    if p.returncode:
+        raise SpecError(f"inputs_cmd 出错（{p.returncode}）：{(p.stderr or p.stdout).strip()[-300:]}")
+    return [ln.strip().rstrip("/") for ln in p.stdout.splitlines() if ln.strip()]
+
+
 # ---------------- 看文件（只用标准库；collect 会被送到别的机器上跑） ----------------
 def out_dir(s, root):
     return os.path.join(root, s["out"])
@@ -232,17 +247,15 @@ def outputs(s):
       done     做完的标志（相对 out）：每一项都要有，一项是备选的列表（done 里 | 分开的），有一个就行
       exclude  不拉回的文件（文件名）
       extra    out 的上一级里一起拉回、备份的文件（通配，如 *.json）
-      archive  拉回 hub 后要不要备份到备份机（archive_task.sh）
-      logs     分段日志的文件名前缀（相对数据目录）；oldlogs：以前放在别处的分段日志（dir、prefix），没有时 None"""
+      archive  拉回 store 后要不要备份到备份机（archive_task.sh）
+      logs     分段日志的文件名前缀（相对数据目录）"""
     f = s.get("fetch") or {}
     done = s.get("done") or []
     if isinstance(done, str):
         done = [done]
-    old = s.get("oldlogs") or {}
     return dict(outs=[os.path.normpath(o.strip("/")) for o in [s["out"]] + list(f.get("also") or [])],
                 done=[d.split("|") for d in done], exclude=list(f.get("exclude") or []), extra=list(f.get("extra") or []),
-                archive=bool(s.get("archive")), logs=f"{P.TASK_LOGS}/{safe(s['key'])}{SAFE}" if s.get("key") else None,
-                oldlogs=old if old.get("dir") and old.get("prefix") else None)
+                archive=bool(s.get("archive")), logs=f"{P.TASK_LOGS}/{safe(s['key'])}{SAFE}" if s.get("key") else None)
 
 
 def done_missing(o, exists):
@@ -275,6 +288,59 @@ def log_age(s, root):
     """训练日志多久没更新（秒）；没有日志 → None。"""
     logs = glob.glob(os.path.join(out_dir(s, root), s["log"])) if s.get("log") else []
     return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
+
+
+# ---------------- 盘上的事实（taskq.py 判断队列里各任务的状态用） ----------------
+def dir_age(d):
+    """文件夹和它下一层里最新的修改时间离现在多久（秒；推理一个测试集时日志不动、预测文件夹在变）；没有 → None。"""
+    try:
+        ms = [os.path.getmtime(d)] + [e.stat().st_mtime for e in os.scandir(d)]
+    except OSError:
+        return None
+    return time.time() - max(ms)
+
+
+def seg_age(root, key, tag):
+    """作业 tag（领取记录里的日志名或 worker 名）写的这个任务的分段日志（run_task.sh）多久没更新（秒）；没有 → None。"""
+    pre = os.path.join(root, P.TASK_LOGS, f"{glob.escape(safe(key))}{SAFE}{glob.escape(str(tag))}_")
+    try:
+        logs = glob.glob(f"{pre}{P.LOG_PART}*.log")
+        return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
+    except OSError:
+        return None
+
+
+def ran(root, key, since=None):
+    """数据目录里有没有这个任务的分段日志（任何作业、任何一段；key a/b 不算 a/b/c 的）；
+    since：只算这之后写过的（mtime；任务的 added）；None = 都算。"""
+    pre = os.path.join(root, P.TASK_LOGS, f"{safe(key)}{SAFE}")
+    for p in glob.glob(f"{glob.escape(pre)}*_{P.LOG_PART}*.log"):
+        if SAFE in os.path.basename(p)[len(os.path.basename(pre)):]:
+            continue
+        try:
+            if since is None or os.path.getmtime(p) >= float(since):
+                return True
+        except (OSError, TypeError, ValueError):
+            continue
+    return False
+
+
+def facts(items, root):
+    """[dict(spec, since, tags)] → {任务名: dict(done, log_age, out_age, resumable, ran, tag_age={tag: 秒})}：数据目录 root 里
+    各任务的结果、日志（since：任务的 added，更早的分段日志不算；tags：领取记录里的作业名）。执行机的队列在本机算，
+    hub 的总队列在 store 上算（site_ops facts）。root 读不了、done 判断不了 → OSError（不当成没做完）。"""
+    os.listdir(root)
+    out = {}
+    for it in items:
+        s = it["spec"]
+        fd = out_dir(s, root)
+        try:
+            res = bool(s.get("resume")) and resumable(s, fd)
+        except (OSError, KeyError, TypeError, ValueError):
+            res = False
+        out[s["key"]] = dict(done=is_done(s, root), log_age=log_age(s, root), out_age=dir_age(fd), resumable=res,
+                             ran=ran(root, s["key"], it.get("since")), tag_age={t: seg_age(root, s["key"], t) for t in it.get("tags") or [] if t})
+    return out
 
 
 def eta_at(runs, nep, hours=3):
@@ -317,7 +383,7 @@ def plain_log(path):
 
 
 # 进度、训练设置的读法：通用的在这里，某种模型专用的放在 TASKQ_PLUGINS 各文件夹的 readers/<名>.py（PROGRESS、INFO、TRAINED 三张表，只用标准库），
-# 加载时合进来（2026-10-31）。collect() 送到别的机器上跑时 remote_collect 把 readers/ 的内容一起送过去。
+# 加载时合进来。
 PROGRESS = {"progress_json": plain_log, None: plain_log}  # progress_json：日志只看时间，进度另读
 INFO = {None: lambda fd: {}}
 TRAINED = []  # 分段日志里出现这些字样之一 = 至少做完了一轮（各 reader 的 TRAINED；另外 run_task.sh 写的"训完"开头的行也算）
@@ -355,8 +421,7 @@ def load_readers(sources):
         TRAINED.extend(x for x in getattr(m, "TRAINED", []) if x not in TRAINED)
 
 
-if os.path.basename(__file__) == "spec.py":  # 经 ssh 送过去跑时（__file__ 不是 spec.py），由 remote_collect 另外调用
-    load_readers(reader_sources())
+load_readers(reader_sources())
 
 
 def metrics(s, fd):
@@ -395,11 +460,11 @@ def task_specs(queue=()):
 
 def collect(specs, root, wait=None):
     """这台机器上每个任务的情况（健康检查、登记表用）：{"tasks": {key: …}, "seglogs": […]}，有读不动的再加 "stuck": [key…]，
-    读的时候出错的再加 "errors": {key: 原因}（不算卡住，别的任务照常，11/4）。
+    读的时候出错的再加 "errors": {key: 原因}（不算卡住，别的任务照常）。
     specs：[说明]（至少有 key、out、done、log、progress、info、metrics）；root：本机的数据目录。
-    分段日志在 logs/tasks/，加上说明里 oldlogs 的 dir（以前放在别处的）。
-    wait：给了就每个任务一个线程同时读，wait 秒后还没读完的（文件卡在存储里）记进 stuck、不再等（11/1），
-    卡住的线程留着，进程结束时一起结束（remote_collect 读完后 os._exit）。"""
+    分段日志在 logs/tasks/。
+    wait：给了就每个任务一个线程同时读，wait 秒后还没读完的（文件卡在存储里）记进 stuck、不再等，
+    卡住的线程留着，进程结束时一起结束（collect --json 读完后 os._exit）。"""
     errors = {}
 
     def run(k, fn):
@@ -409,7 +474,7 @@ def collect(specs, root, wait=None):
             errors[k] = f"{type(e).__name__}: {e}"[:300]
             return None
 
-    jobs = [(s["key"], lambda s=s: one_task(s, root)) for s in specs] + [("@seglogs", lambda: seg_logs(specs, root))]
+    jobs = [(s["key"], lambda s=s: one_task(s, root)) for s in specs] + [("@seglogs", lambda: seg_logs(root))]
     if wait is None:
         res = {k: run(k, fn) for k, fn in jobs}
     else:
@@ -449,16 +514,14 @@ def one_task(s, root):
         pj = progress_json(fd)
         if pj:
             runs.append(pj)
-    return dict(runs=runs, final=is_done(s, root), archived=os.path.exists(os.path.join(fd, P.ARCHIVED)),
-                dice=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd), resumable=resumable(s, fd))
+    return dict(runs=runs, final=is_done(s, root),
+                metrics=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd), resumable=resumable(s, fd))
 
 
-def seg_logs(specs, root):
+def seg_logs(root):
     """collect 里的分段日志：[{name, first, trained}]。"""
     out = {"seglogs": []}
-    dirs = sorted({s["oldlogs"]["dir"] for s in specs if (s.get("oldlogs") or {}).get("dir")})
-    pats = [os.path.join(root, d, "*_seg*.log") for d in dirs] + [os.path.join(root, P.TASK_LOGS, f"*_{w}*.log") for w in P.LOG_PARTS[::-1]]
-    for p in (q for pat in pats for q in glob.glob(pat)):
+    for p in glob.glob(os.path.join(root, P.TASK_LOGS, f"*_{P.LOG_PART}*.log")):
         first, trained = "", False
         try:
             with open(p, errors="replace") as f:
@@ -470,34 +533,8 @@ def seg_logs(specs, root):
     return out["seglogs"]
 
 
-def remote_program():
-    """经 stdin 送到别的机器单独跑的程序：proto.py（去掉命令行）+ 本文件（不跑命令行）+ readers/。"""
-    main_ = '\nif __name__ == "__main__":'
-    prog = open(os.path.abspath(P.__file__), encoding="utf-8").read().split(main_)[0] + "\n_PROTO_INLINE = True\n"
-    prog += open(os.path.abspath(__file__), encoding="utf-8").read().replace(main_, "\nif False:")
-    return prog + f"\nload_readers(json.loads({json.dumps(json.dumps(reader_sources()))}))"
-
-
-def remote_collect(ssh, specs, root, timeout=600):
-    """ssh 到别的机器上跑 collect()：把 proto.py、本文件、readers/ 和调用一起经 stdin 送过去（那边的仓库可能还是旧版本）。"""
-    import common as C
-    prog = remote_program()
-    prog += (f"\njson_out(collect(json.loads({json.dumps(json.dumps(specs))}), os.path.expanduser({root!r}), "
-             f"wait={COLLECT_WAIT}))\nos._exit(0)\n")  # 卡住的线程不等
-    try:
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", ssh, C.remote_timeout("python3 -", timeout)], input=prog,
-                           capture_output=True, text=True, timeout=timeout)
-        out = json_in(r.stdout)
-        if out is None:
-            print(f"收集 {ssh} 失败（退出码 {r.returncode}）：{r.stderr.strip()[-300:]}", file=sys.stderr)
-        return out
-    except Exception as e:  # noqa: BLE001
-        print(f"收集 {ssh} 失败：{e}", file=sys.stderr)
-        return None
-
-
 # ---------------- 查任务 ----------------
-SENT_DROP = ("machines", "after", "names", "exp")  # 只在 hub 上有意义的字段：分给谁、接在谁后面、解析用的名字、实验 id
+SENT_DROP = ("machines", "names", "exp")  # 只在 hub 上有意义的字段：能去哪几台、解析用的名字、实验 id
 
 
 def sendable(s):
@@ -513,7 +550,7 @@ def from_sent(text):
         raise SpecError(f"说明不是 JSON 对象：{e}")
     if not isinstance(s, dict):
         raise SpecError(f"说明不是 JSON 对象：{s!r:.80}")
-    miss = [k for k in ("key", "cmd", "out", "done", "data", "res", "vars") if k not in s]
+    miss = [k for k in ("key", "cmd", "out", "done", "inputs", "res", "vars") if k not in s]
     if miss:
         raise SpecError(f"说明缺字段 {', '.join(miss)}")
     if isinstance(s["done"], str):
@@ -532,7 +569,7 @@ def lookup(key):
     return json_in(r.stdout) if r.returncode == 0 else None
 
 
-SHELL_FIELDS = ("key", "env", "cmd", "out", "data", "res", "vars")
+SHELL_FIELDS = ("key", "env", "cmd", "out", "inputs", "res", "vars")
 
 
 def shell_lines(s, data, repo=REPO):
@@ -541,7 +578,7 @@ def shell_lines(s, data, repo=REPO):
     lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote((envs_of(e) or [''])[0])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
              f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
              f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
-             "TASK_INPUTS=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["data"]) + ")",
+             "TASK_INPUTS=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["inputs"]) + ")",
              f"TASK_LOCAL={int(bool(e['res'].get('local_inputs')))}"]
     lines += [f"export {k}={shlex.quote(str(v))}" for k, v in e["vars"].items()]
     return "\n".join(lines)
@@ -549,7 +586,7 @@ def shell_lines(s, data, repo=REPO):
 
 def machine_vars(m=None):
     """本机（m：给定的机器表条目）machines.py 的 task_unset、task_vars → shell 语句：先去掉 task_unset 里的（worker 的环境里按整个作业设的，
-    任务要自己算的，11/4），再设 task_vars 里还没设（非空）的。"""
+    任务要自己算的），再设 task_vars 里还没设（非空）的。"""
     if m is None:
         import cfg
         M = cfg.mtab()
@@ -580,17 +617,17 @@ def main(argv):
         return DISK_RC
 
 
-DISK_RC = P.EXIT["done_unreadable"]  # spec.py done 读不了盘（queue/README.md 的"约定"）
+DISK_RC = P.EXIT["done_unreadable"]  # spec.py done 读不了盘（退出码都在 proto.EXIT）
 
 
 def _main(cmd, args):
-    import cfg
     if cmd in ("shell", "done", "resolve", "lookup", "outputs") and not args:
         raise SpecError(f"{cmd} 缺参数")
     if cmd == "collect":
         return collect_cmd(args)
-    if cmd in ("shell", "done") and args[:1] == ["--spec"] and len(args) == 2:
+    if cmd in ("shell", "done", "outputs") and args[:1] == ["--spec"] and len(args) >= 2:
         s = from_sent(args[1])
+        args = args[1:]
     elif cmd in ("shell", "done", "resolve"):
         s = resolve(args[0], parse_kv(args[1:]))
     elif cmd in ("lookup", "outputs"):
@@ -612,10 +649,8 @@ def _main(cmd, args):
             print(json.dumps(o, ensure_ascii=False, indent=1))
             return 0
         test = " && ".join("{ " + " || ".join("test -e " + shlex.quote(a) for a in item) + "; }" for item in o["done"])
-        old = o["oldlogs"] or {}
-        print("\n".join([f"OUTS=({' '.join(shlex.quote(x) for x in o['outs'])})", f"EXTRA=({' '.join(shlex.quote(x) for x in o['extra'])})",
-                         f"TEST={shlex.quote(test or 'true')}", f"ARCHIVE={int(o['archive'])}", f"LOGS={shlex.quote(o['logs'] or '')}",
-                         f"OLDDIR={shlex.quote(old.get('dir', ''))}", f"OLDSEG={shlex.quote(old.get('prefix', ''))}"]))
+        print("\n".join([f"KEY={shlex.quote(s['key'])}", f"OUTS=({' '.join(shlex.quote(x) for x in o['outs'])})", f"EXTRA=({' '.join(shlex.quote(x) for x in o['extra'])})",
+                         f"TEST={shlex.quote(test or 'true')}", f"ARCHIVE={int(o['archive'])}", f"LOGS={shlex.quote(o['logs'] or '')}"]))
     elif cmd == "resolve":
         print(json.dumps(s, ensure_ascii=False, separators=(",", ":")))
     elif cmd == "shell":
@@ -626,14 +661,9 @@ def _main(cmd, args):
 
 
 def local_data():
-    """本机的数据目录：TASKQ_DATA > machines.py 的 data；都没有 → ""。"""
+    """本机的数据目录（cfg.data_dir）；没有 → ""。"""
     import cfg
-    data = cfg.env("TASKQ_DATA")
-    if not data:
-        M = cfg.mtab()
-        me = M.whoami()
-        data = M.expand(M.MACHINES[me].get("data") or "") if me else ""
-    return data
+    return cfg.data_dir()
 
 
 def collect_cmd(args):

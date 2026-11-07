@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""任务队列的消费者（worker，11/5 起替代 dicc_worker.sh 的循环）：从队列领任务、开 run_task.sh、收退出码、心跳、停、交还。
+"""任务队列的消费者（worker）：从队列领任务、开 run_task.sh、收退出码、心跳、停、交还。
 不同执行机的差别（Slurm、pueue 常驻、显存填充、一张卡几个、等卡空、时段）在插件 queue/consumers/ 和使用者的 consumers.py 里。
 说明见 queue/README.md 的"消费者"。
 
-    python3 consume.py              （worker_start.sh → dicc_worker.sh → 这里）
+    python3 consume.py              （worker_start.sh → 这里）
     python3 consume.py --selftest   换代码包前在新包里跑：import、脚本语法、交接格式都没问题时退出 0
 """
 import importlib.util
@@ -145,7 +145,7 @@ class Worker:
         self.W = os.environ.get("WORKER_ID", "")
         self.host = socket.gethostname().split(".")[0]
         self._m = None
-        self.data = os.environ.get("TASKQ_DATA") or self.mget("data")
+        self.data = cfg.data_dir()
         os.environ["TASKQ_DATA"] = self.data
         self.envs = os.environ.get("TASKQ_ENVS") or ",".join(self.mget("envs").split())
         try:
@@ -331,7 +331,7 @@ class Worker:
             say(f"本作业 {self.FAIL_WINDOW // 60} 分钟内已有 {self.own} 个任务开始不久就失败，不再领新任务（多半是这个节点或环境有问题）")
 
     def task_log(self, r):
-        return os.path.join(self.data, proto.TASK_LOGS, f"{r.safe}{proto.SAFE}{r.jtag or self.W}_{proto.LOG_PARTS[0]}1.log")
+        return os.path.join(self.data, proto.TASK_LOGS, f"{r.safe}{proto.SAFE}{r.jtag or self.W}_{proto.LOG_PART}1.log")
 
     def stalls(self, safe):
         d, n = os.path.join(self.data, proto.TASK_LOGS), 0
@@ -618,16 +618,6 @@ class Worker:
                 else:
                     self.runs[r.pid] = r
                     say(f"接着管 {r.key}（pid {r.pid}）")
-        for ln in os.environ.pop("TASKQ_ZOMBIES", "").split("\n"):
-            f = ln.split()
-            if len(f) < 6 or not f[0].isdigit():
-                continue
-            p, sid, k, tok, why, safe = f[:6]
-            self.zomb[int(p)] = Run(int(p), k, safe=safe, why=why, stalled=time.time(), sid=None if sid == "-" else int(sid))
-            if tok != "-":
-                self.tok[k] = tok
-            self.exclude(k)
-            say(f"接着跟停不下来的 {k}（pid {p}）")
 
     def selftest(self, core):
         try:
@@ -645,18 +635,12 @@ class Worker:
             return False
         name = os.path.basename(self.bundle_cur())
         env = dict(os.environ)
-        if os.path.isfile(os.path.join(core, "queue", "consume.py")):
-            ok, why = self.selftest(core)
-            if not ok:
-                say(f"新代码包 {name} 自检没过（{why}），留在 {self.commit}")
-                self.bad.add(head)
-                return False
-            env["TASKQ_HANDOFF"] = json.dumps(self.handoff(), ensure_ascii=False)
-        elif self.runs:
+        ok, why = self.selftest(core)
+        if not ok:
+            say(f"新代码包 {name} 自检没过（{why}），留在 {self.commit}")
+            self.bad.add(head)
             return False
-        else:
-            env["TASKQ_ZOMBIES"] = "\n".join(f"{r.pid} {r.sid or '-'} {r.key} {self.tok.get(r.key) or '-'} {r.why or 'stall'} {r.safe}"
-                                             for r in self.zomb.values())
+        env["TASKQ_HANDOFF"] = json.dumps(self.handoff(), ensure_ascii=False)
         say("代码更新了")
         n = len(self.runs)
         say(f"换成新代码 {name} 接着跑" + (f"（在训的 {n} 个交给新代码接着管）" if n else ""))
@@ -833,7 +817,7 @@ class Worker:
                     changed = self.code_changed(head)
                     break
                 tried = True
-                jt = f"{self.host}-{time.strftime('%Y%m%d%H%M')}" if self.tag_each else self.W
+                jt = f"{self.W}-{time.strftime('%Y%m%d%H%M%S')}" if self.tag_each else self.W  # 同一台几个 worker 同一分钟开训也不撞
                 rc, out, err = self.claim(jt)
                 if rc == X["next_ok"]:
                     err_since = 0
@@ -886,10 +870,7 @@ def selftest():
         load(os.path.join(HERE, "consumers", n + ".py"), "taskq_consumer_" + n)
     ns = {"CONSUMERS": {}}
     cfg.extend(ns, "consumers")
-    d = cfg.config_dir()
-    if os.path.isfile(os.path.join(d, "policy.py")):
-        import shift  # noqa: F401
-    for s in ("run_task.sh", "worker_start.sh", "dicc_worker.sh"):
+    for s in ("run_task.sh", "worker_start.sh"):
         subprocess.run(["bash", "-n", os.path.join(HERE, s)], check=True)
     for s in ("taskq.py", "spec.py"):
         with open(os.path.join(HERE, s)) as f:

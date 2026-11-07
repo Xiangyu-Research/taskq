@@ -1,4 +1,4 @@
-"""调度核心的测试用的固定配置（2026-11-02）：机器表、policy（config/）、做法和插件（plugins/）、实验表（exps/demo/）、
+"""调度核心的测试用的固定配置：机器表、policy（config/）、做法和插件（plugins/）、实验表（exps/demo/）、
 假的 conda 和 venv、步骤脚本（bin/）。
 
     sys.path.insert(0, os.path.join(HERE, "testdata")); import fixture; fixture.use()
@@ -47,10 +47,12 @@ def use():
     os.environ["TASKQ_CONFIG"] = CONFIG
     os.environ["TASKQ_PLUGINS"] = PLUGINS
     os.environ["PATH"] = guard_path(os.environ.get("PATH", ""))
-    if not os.environ.get("TASKQ_DB"):  # hub database and old text logs: never the real ones
+    if not os.environ.get("TASKQ_DB"):  # hub 的数据库、纯文字日志：测试里从不用真的
+        sys.path.insert(0, os.path.dirname(FIX)) if os.path.dirname(FIX) not in sys.path else None
+        import proto
         d = tmpdir(prefix="taskq-logs-")
         os.environ["TASKQ_DB"] = os.path.join(d, "taskq.db")
-        for n in ("relay", "feed", "advance", "refill", "ledger", "health"):
+        for n in sorted(set(proto.TEXT_LOGS.values())):
             os.environ.setdefault(n.upper() + "_LOG", os.path.join(d, n + ".log"))
     return CONFIG, PLUGINS
 
@@ -65,6 +67,32 @@ def tmpdir(**kw):
             shutil.rmtree(d, ignore_errors=True)
     atexit.register(rm)
     return d
+
+
+def store_bundle(root, plugins=(), config=None):
+    """store 上的操作（site_ops.py）真跑用的手搭代码包：root（store 的根目录，展开了的）/code/current 里 scripts/taskq 链到这份核心，
+    .taskq.toml 指到 config（默认 TASKQ_CONFIG）和 PLUGINS 加 plugins（本机跑时 hub 才有的变量去掉了，配置只从包里读）；
+    另搭一个临时的 conda（bin/python3 是跑测试的这个）。再调用只重写 .taskq.toml。→ conda 的目录（store 的 conda 指到它，
+    或把 relay_remote 的 py 换成 lambda name: <它>/bin/python3）。"""
+    import json
+    if os.path.dirname(FIX) not in sys.path:
+        sys.path.insert(0, os.path.dirname(FIX))
+    import proto
+    cur = os.path.join(root, proto.ROOT["current"])
+    core = os.path.join(cur, proto.BUNDLE_CORE)
+    if not os.path.lexists(core):
+        os.makedirs(os.path.dirname(core), exist_ok=True)
+        os.symlink(os.path.dirname(os.path.dirname(FIX)), core)
+    with open(os.path.join(cur, ".taskq.toml"), "w", encoding="utf-8") as f:
+        f.write(f"config = {json.dumps(config or os.environ.get('TASKQ_CONFIG') or CONFIG)}\nplugins = {json.dumps([PLUGINS, *plugins])}\n")
+    if root not in _CONDA:
+        _CONDA[root] = os.path.join(tmpdir(), "conda")
+        os.makedirs(os.path.join(_CONDA[root], "bin"))
+        os.symlink(sys.executable, os.path.join(_CONDA[root], "bin", "python3"))
+    return _CONDA[root]
+
+
+_CONDA = {}
 
 
 def dead_pid():

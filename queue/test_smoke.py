@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""smoke_gate.py 的测试（11/5）：没有记录 → 排冒烟、挡下真任务；冒烟过了 → 送；没过 → 挡下、报 smoke；环境、定义、代码包变了或
+"""smoke_gate.py 的测试：没有记录 → 排冒烟、挡下真任务；冒烟过了 → 送；没过 → 挡下、报 smoke；环境、定义、代码包变了或
 taskq smoke retry 后重排；真任务训完记成过了；adopt 重复跑不多记；没有定义的做法一次只送一个；冒烟任务不拉回、从总队列里去掉、
-清理那边的文件夹；status、all_tasks、advance、flow 看不见冒烟任务；交班要接手的那台过了；开关关着只记影子；每次一个新文件夹。
+清理那边的文件夹；status、all_tasks、advance、flow 看不见冒烟任务；开关关着只记影子；每次一个新文件夹；定义里的函数在 store 上算。
 总队列是临时目录里真的（taskq.py 子进程），不连别的机器。
     python3 queue/test_smoke.py
 """
@@ -33,9 +33,8 @@ import taskq  # noqa: E402
 import relay  # noqa: E402
 import relay_store as ST  # noqa: E402
 import smoke_gate as SG  # noqa: E402
-import shift  # noqa: E402
 
-NAME = next(iter(M.RELAY))
+NAME = M.names("slurm")[0]
 HUB = taskq.queue_host()
 DEF = dict(by=["variant"], params=dict(ds="SMOKE", frag="0", model="smoke/{smoke}"),
            vars=dict(DEMO_RESULTS="{data}/smoke/{smoke}/results"))
@@ -63,7 +62,7 @@ def mtq():
 
 
 def S0():
-    return dict(taskq={HUB: mtq()}, pueue={M.hub(): dict(tasks=[])}, records=[], ok={M.hub(): True})
+    return dict(taskq={HUB: mtq()}, pueue={M.hub(): dict(tasks=[])}, records=[], ok={M.hub(): True}, src={})
 
 
 def RS(*ts, bundle=None, oks=None):
@@ -71,10 +70,10 @@ def RS(*ts, bundle=None, oks=None):
 
 
 def fill(s=None, rs=None):
-    stuck, notes = {}, []
-    relay.PLANNED.clear()
-    more, why = relay.fill(s or S0(), NAME, rs or RS(), {}, [], stuck, notes)
-    return more, why, stuck, notes
+    """只有这一台时的派任务（relay.assign）→ (这台的动作, 没领的原因, 报警, 影子)。"""
+    stuck, notes = {}, {}
+    out, why = relay.assign(s or S0(), {NAME: dict(rs=rs or RS(), st={})}, stuck, notes)
+    return out.get(NAME, []), why.get(NAME), stuck, notes.get(NAME, [])
 
 
 def run(acts, s=None):
@@ -89,10 +88,8 @@ def setup():
     os.makedirs(taskq.TQ, exist_ok=True)
     open(os.path.join(taskq.TQ, proto.QUEUE["enabled"]), "w").close()
     open(taskq.tasks_path(), "w").close()
-    relay.refill.candidates = lambda s, name, mtq, ready, envs_ok, kinds=None, held=None: [
-        t for t in mtq["tasks"] if t["state"] == proto.S_FREE and M.serves(name, (t.get("spec") or {}).get("machines"))]
     relay.relayable = lambda i: True
-    relay.refill.data_gb = lambda paths: 1.0
+    relay.refill.data_sizes = lambda paths, probe: {p: 1.0 for p in paths}
     relay.P.READY[NAME] = 2
     relay.P.AUTO["smoke"] = True
     SG.SMOKE["toy"] = DEF
@@ -171,13 +168,13 @@ def test_fail_retry():
     assert "冒烟没过" in plain.problem(list(stuck)[0], dict(msg=proto.alert_msg(list(stuck.values())[0]),
                                                            data=proto.alert_data(list(stuck.values())[0]))), stuck
     ok("冒烟没过 → 记 failed（带那边日志的尾巴）、真任务挡着、报 smoke:<执行机>:<种类 id>（白话说清哪种没过）")
-    m0 = M.RELAY[NAME]["envs"]["base"]
-    M.RELAY[NAME]["envs"]["base"] = ("conda", "pt-new")
+    m0 = M.MACHINES[NAME]["envs"]["base"]
+    M.MACHINES[NAME]["envs"]["base"] = ("conda", "pt-new")
     try:
         more, *_ = fill()
         assert len(kinds_of(more, "smoke_add")) == 1, more
     finally:
-        M.RELAY[NAME]["envs"]["base"] = m0
+        M.MACHINES[NAME]["envs"]["base"] = m0
     ok("环境变了 → 重新冒烟")
     SG.SMOKE["toy"] = dict(DEF, params=dict(DEF["params"], cfg="lite"))
     try:
@@ -234,12 +231,11 @@ def test_real_adopt():
 
 
 def test_env_variant():
-    """11/6：环境编号只按描述加这台的变体算；冒烟过了以后真任务训完不改写记录（以前 lab 的 .ok 是变体的哈希、读不到时退回默认变体，
-    两边对不上，又排一次冒烟）。"""
+    """环境编号只按描述加这台的变体算（不看那边的 .ok）；冒烟过了以后真任务训完不改写记录。"""
     T = add("D8", "0", variant="V_env")
     sp = next(t for t in mtq()["tasks"] if t["key"] == T)["spec"]
-    e0, h0, v0 = M.RELAY[NAME]["envs"]["base"], M.spec_hash, M.spec_variant
-    M.RELAY[NAME]["envs"]["base"] = ("spec", "gpu2")
+    e0, h0, v0 = M.MACHINES[NAME]["envs"]["base"], M.spec_hash, M.spec_variant
+    M.MACHINES[NAME]["envs"]["base"] = ("spec", "gpu2")
     M.spec_hash = lambda env, variant="default": f"{env}-{variant}"
     try:
         assert M.spec_variant(NAME, "base") == "gpu2"
@@ -252,7 +248,7 @@ def test_env_variant():
         assert SG.Gate(NAME, RS(), mtq(), live=True).verdict(T, sp) is None
         assert SG.Gate(NAME, RS(oks={"base": "base-gpu2"}), mtq(), live=True).verdict(T, sp) is None
     finally:
-        M.RELAY[NAME]["envs"]["base"], M.spec_hash, M.spec_variant = e0, h0, v0
+        M.MACHINES[NAME]["envs"]["base"], M.spec_hash, M.spec_variant = e0, h0, v0
     ok("环境编号按描述加这台的变体算，不看那边的 .ok 读没读到；冒烟过了 → 真任务训完不改写、不再排冒烟")
 
 
@@ -306,11 +302,11 @@ def test_hidden():
     out = central("status", "--internal")
     assert K in out and "冒烟" not in out.splitlines()[-1], out
     import flow.compile as FC
-    fl = FC.compile_legacy(queue_tasks=q, data="/d", python="py")
+    fl = FC.build(queue_tasks=q)
     assert fl.instances and K not in str(fl.instances), fl
     import advance
     s = S0()
-    todo, _ = advance.plan(s, root=os.environ["TASKQ_DATA"])
+    todo, _ = advance.plan(s)
     assert not any(K in str(x) for x in todo), todo
     import overview
     o = overview.build(dict(s, now=None, ok={}, src={}), relay={})
@@ -321,21 +317,6 @@ def test_hidden():
     assert [a["op"] for a in acts if a["key"] == K] == ["beat"], acts
     ok("冒烟在训 → 只续约")
     return K
-
-
-def test_shift():
-    T = add("D7", "0", variant="V_shift")
-    assert shift.smoke_passed(NAME, T) is False
-    sp = next(t for t in mtq()["tasks"] if t["key"] == T)["spec"]
-    SG.real_done(NAME, SG.mark(NAME, sp))
-    assert shift.smoke_passed(NAME, T) is True
-    assert shift.smoke_passed(NAME, "_smoke/x/y") is False
-    relay.P.AUTO["smoke"] = False
-    try:
-        assert shift.smoke_passed(NAME, add("D7", "1", variant="V_shift2")) is True
-    finally:
-        relay.P.AUTO["smoke"] = True
-    ok("交班：接手的那台没过这种 → 不交给它（交还总队列）；过了 → 交；开关关着 → 照旧")
 
 
 def test_off():
@@ -369,6 +350,19 @@ def test_plugin_table():
     ok("插件表 SMOKE：只认 by、params、vars；by 是参数名的列表")
 
 
+def store_smoke(what, data):
+    """store 上的 smoke 操作（site_ops.op_smoke）在这个进程里跑：定义用这个测试改过的 SG.SMOKE，store 的数据目录是 TASKQ_DATA
+    （真在 store 上跑一次的在 test_check）。"""
+    import site_ops
+    assert what == "smoke", what
+    ext = cfg.extend
+    cfg.extend = lambda ns, kind: ns.update(SMOKE=SG.SMOKE) if kind == "smoke" else ext(ns, kind)
+    try:
+        return site_ops.op_smoke(dict(data, data=os.environ["TASKQ_DATA"]))
+    finally:
+        cfg.extend = ext
+
+
 def test_callable():
     seen = []
 
@@ -376,6 +370,7 @@ def test_callable():
         seen.append(data)
         return dict(DEF["params"], ds="SMOKE_X" if tp["ds"].endswith("X") else "SMOKE")
     SG.SMOKE["toy"] = dict(DEF, params=params, vars=lambda tp, data: dict(DEMO_RESULTS="{data}/smoke/{smoke}/" + tp["ds"]))
+    saved, SG.RM.store_op = SG.RM.store_op, store_smoke
     try:
         sp = S.resolve("toy", dict(ds="D9X", frag="0", variant="V_call"))
         sp2 = S.resolve("toy", dict(ds="D9", frag="0", variant="V_call"))
@@ -396,13 +391,13 @@ def test_callable():
         SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: dict(DEF["params"], ds="SMOKE_Y"))
         assert SG.mark(NAME, sp)["defn"] != m["defn"]
         assert SG.Gate(NAME, RS(), mtq(), live=True).verdict("D9X/V_call/0", sp), "函数的结果变了要重新冒烟"
-        ok("params、vars 可以是函数 f(真任务的参数, hub 的数据目录)：换成的数据不同是两种、各记各的；定义的 id 按算出来的结果，结果变了重新冒烟")
+        ok("params、vars 可以是函数 f(真任务的参数, store 的数据目录)：换成的数据不同是两种、各记各的；定义的 id 按算出来的结果，结果变了重新冒烟")
 
         got = {}
         SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: got.update(tp) or dict(DEF["params"]))
         SG.mark(NAME, sp)
-        assert got.get("data") == list(sp.get("data") or []) and "data" not in (sp.get("names") or {}), got
-        ok("冒烟定义的函数拿到真任务的 data（冒烟要带上的输入从这里取）")
+        assert got.get("inputs") == list(sp.get("inputs") or []) and "inputs" not in (sp.get("names") or {}), got
+        ok("冒烟定义的函数拿到真任务的 inputs（冒烟要带上的输入从这里取）")
 
         def boom(tp, data):
             raise KeyError("no labels")
@@ -424,11 +419,12 @@ def test_callable():
         assert [o["op"] for o in g.ops()] == ["smoke_add"], g.ops()
     finally:
         SG.SMOKE["toy"] = DEF
+        SG.RM.store_op = saved
     ok("函数出错 → 这种记成没过（why = 异常）、报 smoke、这一轮照常；修好（结果变了）后重新冒烟")
 
 
 def test_race():
-    """两次检查同时跑（11/5）：后一次的总队列是前一次加冒烟之前读的，不能再排一个。"""
+    """两次检查同时跑：后一次的总队列是前一次加冒烟之前读的，不能再排一个。"""
     add("D8", "0", variant="V_race")
     stale = S0()
     more, *_ = fill(stale)
@@ -462,7 +458,6 @@ def main():
         test_env_variant()
         test_canary()
         test_hidden()
-        test_shift()
         test_off()
         test_callable()
         test_race()

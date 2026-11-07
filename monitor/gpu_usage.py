@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""汇总 GPU 使用记录（monitor/gpu_log.sh 写的）：每张卡在一天各个钟点被谁占着、别人的每段使用从几点到几点（2026-10-14，11/5 搬进核心）。
+"""汇总 GPU 使用记录（monitor/gpu_log.sh 写的）：每张卡在一天各个钟点被谁占着、别人的每段使用从几点到几点。
 
     taskq gpu usage [目录] [--me 账号] [--days N] [--json]
 

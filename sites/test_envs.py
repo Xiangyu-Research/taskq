@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测 sites/envs.py 和机器表里按描述建的环境（2026-10-31）：描述能读、激活语句、.ok 对不上时不送任务、
+"""测 sites/envs.py 和机器表里按描述建的环境：描述能读、激活语句、.ok 对不上时不送任务、
 建环境的命令只在 CPU 上跑；最后在临时目录里真建一个只有 numpy 的 venv（不联网时跳过装包那一步之外的部分不跑）。
 
     python3 sites/test_envs.py [--real]
@@ -55,15 +55,13 @@ ok("还没有锁：哈希 = 描述内容的 sha256（有锁时加上锁，见 te
 ok("没有的描述 → 哈希 None", M.spec_hash("没有这个") is None)
 
 # ---------- 假机器 ----------
-SAVE_M, SAVE_R = copy.deepcopy(M.MACHINES), copy.deepcopy(M.RELAY)
-M.RELAY["tsite"] = M.SITES["tsite"] = dict(label="测试", hostname=r"(?!)", ssh="tsite", scheduler="pueue", root="/r/x1",
-                       conda=("/opt/c", "base"), envs={"base": ("spec", "cu128"), "alt": "spec", "old": ("conda", "o")},
-                       roles=("train",))
-M.RELAY["tslurm"] = M.SITES["tslurm"] = dict(label="测试 Slurm", hostname=r"(?!)", ssh="tslurm", scheduler="slurm", root="/s/y",
-                        conda=("/app/c", "pt"), envs={"base": "spec"}, roles=("train",),
-                        transfer_job="-p cpu-x --qos=normal -c 4 --mem=4G")
-SAVE_S = copy.deepcopy(M.SITES)
-M.SITES.update(tsite=M.RELAY["tsite"], tslurm=M.RELAY["tslurm"])  # machine() 读 SITES（10/31 起 RELAY 是它的一部分）
+SAVE_M = copy.deepcopy(M.MACHINES)
+M.MACHINES["tsite"] = dict(label="测试", hostname=r"tsite-host", ssh="tsite", scheduler="pueue", root="/r/x1",
+                           conda=("/opt/c", "base"), envs={"base": ("spec", "cu128"), "alt": "spec", "old": ("conda", "o")},
+                           workers=[dict(gpu="0")])
+M.MACHINES["tslurm"] = dict(label="测试 Slurm", hostname=r"tslurm-host", ssh="tslurm", scheduler="slurm", root="/s/y",
+                            conda=("/app/c", "pt"), envs={"base": "spec"}, jobs=dict(gpu=dict(partition="gpu-x")),
+                            transfer_job="-p cpu-x --qos=normal -c 4 --mem=4G")
 
 a = M.activate("tsite", "alt")
 ok("spec 环境的激活语句 = 根目录下的 .activate", "source /r/x1/envs/alt/.activate" in a)
@@ -73,17 +71,19 @@ h = M.spec_hash("base")
 ok(".ok 对得上才就绪", M.ready_envs("tsite", {"base": h}) == {"old", "base"})
 ok(".ok 是旧描述的哈希 → 不就绪", M.ready_envs("tsite", {"base": "0" * 64}) == {"old"})
 ok("现有机器条目的环境都还就绪（没改成 spec）",
-   all(M.ready_envs(n) == set(M.machine(n).get("envs") or {}) for n in list(SAVE_M) + list(SAVE_R)))
+   all(M.ready_envs(n) == set(M.machine(n).get("envs") or {}) for n in SAVE_M))
 
-# ---------- 送任务的门槛（refill.candidates，relay 用它） ----------
-def task(key, env):
-    return dict(key=key, state="free", nice=0, order=0, spec=dict(env=env, device="gpu"))
+# ---------- 送任务的门槛（refill.choose：这台的 Site.envs = 就绪的环境） ----------
+TASKS = [dict(key=k, nice=0, order=i) for i, k in enumerate("abc")]
+SPECS = {k: (None, dict(env=e, device="gpu")) for k, e in zip("abc", ("base", "old", "alt"))}
 
 
-tq = dict(tasks=[task("a", "base"), task("b", "old"), task("c", "alt")])
-refill.info = lambda tq_, k: dict(spec=next(t["spec"] for t in tq_["tasks"] if t["key"] == k), recipe=None, params={})
-refill.progress = lambda s, k, h=None: None
-got = lambda oks: sorted(t["key"] for t in refill.candidates({}, "tsite", tq, set(), oks))
+def got(oks):
+    site = refill.Site("tsite", {"gpu": 9}, envs=M.ready_envs("tsite", oks), root=(1, 1000.0))
+    refill.choose(TASKS, {"tsite": site}, SPECS)
+    return sorted(t["key"] for t in site.take)
+
+
 ok("没有 .ok：只送 conda 环境的任务", got(None) == ["b"])
 ok("base 的 .ok 对上：也送 base 的", got({"base": h}) == ["a", "b"])
 ok("alt 的 .ok 是旧的：不送", got({"base": h, "alt": "x"}) == ["a", "b"])
@@ -92,9 +92,9 @@ ok("alt 的 .ok 是旧的：不送", got({"base": h, "alt": "x"}) == ["a", "b"])
 s_ = E.build_script("tsite", "alt")
 ok("venv：先激活基础环境（它的 .activate）", "source /r/x1/envs/base/.activate" in s_)
 ok("venv：--system-site-packages", "--system-site-packages" in s_)
-M.RELAY["tsite"]["envs"]["alt3"] = "spec"
+M.MACHINES["tsite"]["envs"]["alt3"] = "spec"
 s_ = E.build_script("tsite", "alt3")
-del M.RELAY["tsite"]["envs"]["alt3"]
+del M.MACHINES["tsite"]["envs"]["alt3"]
 ok("占位换成按环境算的变量", "${SPEC_TORCH_MM}" in s_ and "{torch_mm}" not in s_)
 ok("看不到卡", "export CUDA_VISIBLE_DEVICES=" in s_)
 ok("检查过才写 .ok、换软链接", s_.index("CHECK_EOF") < s_.index('mv -T') < s_.index('.ok"'))
@@ -106,7 +106,7 @@ cmd, host = E.runner("tsite")
 ok("pueue 类：nice、看不到卡、在那台上", host == "tsite" and "nice -n 10 env CUDA_VISIBLE_DEVICES=" in cmd and "srun" not in cmd)
 cmd, host = E.runner("tslurm")
 ok("Slurm：CPU 分区的 srun，排着等（不设 -I）", cmd.count("srun -p cpu-x") == 1 and "gres" not in cmd and " -I" not in cmd)
-M.RELAY["tslurm"]["env_job"] = "-p gpu-a --gres=gpu:1"
+M.MACHINES["tslurm"]["env_job"] = "-p gpu-a --gres=gpu:1"
 try:
     E.runner("tslurm")
     ok("env_job 要了 GPU → 报错", False)
@@ -117,7 +117,7 @@ try:
     ok("不是按描述建的环境 → 报错", False)
 except E.EnvError:
     ok("不是按描述建的环境 → 报错", True)
-M.RELAY["tsite"]["envs"]["alt"] = "spec"
+M.MACHINES["tsite"]["envs"]["alt"] = "spec"
 ok("dry-run 不跑命令", E.build("tsite", "alt", dry=True,
                               run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("跑了")))[0] == 0)
 ok("生成的脚本 bash -n 过", all(subprocess.run(["bash", "-n"], input=E.build_script("tsite", n), text=True).returncode == 0
@@ -139,20 +139,10 @@ ok("状态：在建、在建很久", st["base"] == "在建" and st["alt"] == "�
 ok("连不上 → None", E.states("tsite", run=lambda *a, **k: (255, "", "")) is None)
 ok("oks_of 只放 ok 的（哈希按这台用的变体）", E.oks_of({"base": "ok", "alt": "没建"}, "tsite") == {"base": M.spec_hash("base", "cu128")})
 
-# ---------- 代码包里的机器条目 ----------
-import relay_bundle as RB  # noqa: E402
-e = RB.machine_entry("tsite", M.RELAY["tsite"], "/r/x1")
-ok("代码包的条目带 env_root，那边的激活语句指到根目录下", e["env_root"] == "/r/x1/envs")
-src = RB.gen_machines(open(os.path.join(fixture.CONFIG, "machines.py"), encoding="utf-8").read(), "tsite", e)
-ns = {"__name__": "x", "__file__": os.path.join(fixture.CONFIG, "machines.py")}
-exec(compile(src, "machines.py", "exec"), ns)
-M.MACHINES.update(ns["MACHINES"])
-ok("生成的 machines.py 的条目能用，spec 环境的激活语句对", "source /r/x1/envs/alt/.activate" in M.activate("tsite", "alt"))
-M.MACHINES.clear(); M.MACHINES.update(SAVE_M)
-M.RELAY.clear(); M.RELAY.update(SAVE_R)
-M.SITES.clear(); M.SITES.update(SAVE_S)
+M.MACHINES.clear()
+M.MACHINES.update(SAVE_M)
 
-# ---------- 锁文件：不联网建（11/5） ----------
+# ---------- 锁文件：不联网建 ----------
 import base64  # noqa: E402
 import json  # noqa: E402
 import zipfile  # noqa: E402
@@ -216,9 +206,9 @@ cpk = dict(put(WH, pkg), name="fake", version="1.0", build="0", channel="https:/
 wpk = dict(put(WH, whl), name="tinypkg", version="0.1", no_deps=True)
 write_lock(M.SPECS, "cbase", "default", conda=[cpk])
 write_lock(M.SPECS, "tiny", "default", pip=[wpk])
-M.RELAY["lsite"] = M.SITES["lsite"] = dict(label="锁测试", hostname=r"(?!)", ssh="lsite", scheduler="pueue", root="/r/l", cap=50,
-                                          conda=("/opt/c", "base"), envs={"cbase": "spec", "tiny": "spec", "sysbase": ("conda", "s")},
-                                          roles=("train",), ssh_master=True)
+M.MACHINES["lsite"] = dict(label="锁测试", hostname=r"lsite-host", ssh="lsite", scheduler="pueue", root="/r/l", cap=50,
+                           conda=("/opt/c", "base"), envs={"cbase": "spec", "tiny": "spec", "sysbase": ("conda", "s")},
+                           workers=[dict(cpus=4)], ssh_master=True)
 s_ = E.build_script("lsite", "cbase", store="/r/l/blobs")
 ok("锁：conda 不联网建（--offline、explicit 文件、临时包目录）", 'conda create --offline -y -p "$P" --file "$T/explicit.txt"' in s_
    and 'CONDA_PKGS_DIRS="$T/pkgs"' in s_ and "CONDA_OFFLINE=1" in s_ and "conda-forge" not in s_)
@@ -248,7 +238,7 @@ os.remove(f"{M.SPECS}/tiny.v2.lock.json")
 ok("没有这个变体的锁 → None（照旧联网建）", E.load_lock("tiny", "nolock") is None)
 
 # 预建：条目还是 conda / venv 的也能建，venv 的基础环境用按描述建的那个
-M.RELAY["lsite"]["envs"]["tiny"] = ("venv", "/old/tiny", "sysbase")
+M.MACHINES["lsite"]["envs"]["tiny"] = ("venv", "/old/tiny", "sysbase")
 open(f"{LD}/specs/sysbase.yml", "w").write("python: '3.12'\n")
 open(f"{LD}/specs/sysbase.check.py", "w").write("print('ok')\n")
 s_ = E.build_script("lsite", "tiny", store="/r/l/blobs")
@@ -256,7 +246,7 @@ ok("预建：条目是 venv 的也能建，基础环境用 env_root 下按描述
 ok("预建：要建的里基础环境排在前面", list(E.wanted("lsite", ["tiny"])) == ["cbase", "sysbase", "tiny"])
 os.remove(f"{LD}/specs/sysbase.yml")
 ok("基础环境没有描述：只建它自己", list(E.wanted("lsite", ["tiny"])) == ["cbase", "tiny"])
-M.RELAY["lsite"]["envs"]["tiny"] = "spec"
+M.MACHINES["lsite"]["envs"]["tiny"] = "spec"
 ok("条目里 spec 的都要建、变体按条目", E.wanted("lsite") == {"cbase": "default", "tiny": "default"})
 
 # 状态：.failed 的两种写法
@@ -266,7 +256,6 @@ W = {"cbase": "default", "tiny": "default"}
 rows = {"cbase": dict(failed=f"{hc} {now - 60} rc 1", log="a\nb\n坏了"), "tiny": dict(failed=f"{ht} {now - 60} nospace 900 100")}
 st = E.classify(rows, W, now)
 ok("状态：rc → 检查失败，nospace → 空间不够", st == {"cbase": "检查失败", "tiny": "空间不够"})
-ok("状态：旧写法（只有哈希）还认", E.classify({"cbase": dict(failed=hc)}, {"cbase": "default"}, now) == {"cbase": "检查失败"})
 ok("下一个：检查失败的不重建，空间不够的没过 6 小时不再试", E.next_build(W, st, rows, now) is None)
 ok("下一个：空间不够的 6 小时后再试", E.next_build(W, st, rows, now + 7 * 3600) == ("tiny", "default"))
 ok("下一个：有在建的就不建", E.next_build(W, {"cbase": "在建", "tiny": "没建"}, {}, now) is None)
@@ -278,7 +267,7 @@ pr = E.problems("lsite", {"tiny": "default"}, {"tiny": "没建"}, {})
 ok("报：wheelhouse 里缺包", len(pr) == 1 and "wheelhouse" in pr[0][1])
 os.rename(f"{LD}/moved", f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}")
 
-# build()：执行机先查空间、钉住、放 blobs，再跑；空间不够不跑；长连接断着不连
+# build()：执行机先查空间、钉住、由 hub 把 wheelhouse 里的包送进 blobs，再跑；空间不够不跑；长连接断着不连
 calls = []
 
 
@@ -295,12 +284,12 @@ class Pin:
 
 SAVE_RT, SAVE_MD = (RT.pinned, RT.ensure_blobs), RM.master_down
 RT.pinned = Pin
-RT.ensure_blobs = lambda name, files, say=print, **kw: calls.append(("blobs", sorted(files))) or {h: f"/r/l/blobs/{h[:2]}/{h}" for h in files}
+RT.ensure_blobs = lambda name, files, say=print, **kw: calls.append(("blobs", files, kw.get("src"))) or {h: f"/r/l/blobs/{h[:2]}/{h}" for h in files}
 free = [10 ** 12]
 
 
-def run_py(name, code, data):
-    calls.append(("mark", data["mode"], data["need"], data["cap"]))
+def run_op(name, what, data):
+    calls.append(("mark", data["mode"], data["need"], data["cap"], what))
     return dict(ok=free[0] >= data["need"], free=free[0], need=data["need"])
 
 
@@ -310,12 +299,15 @@ def run_cmd(cmd, host, timeout, input=None):
 
 
 RM.master_down = lambda m: False
-rc, out = E.build("lsite", "tiny", run=run_cmd, run_py=run_py, say=lambda *_: None)
-ok("执行机：查空间（按 cap）→ 钉住 → 放进 blobs → 跑 → 撤钉", rc == 0 and [c[0] for c in calls] == ["mark", "pin", "blobs", "run", "unpin"]
-   and calls[0][3] == 50 and calls[1][2] == [wpk["sha256"]], calls)
+rc, out = E.build("lsite", "tiny", run=run_cmd, run_op=run_op, say=lambda *_: None)
+ok("执行机：查空间（site_ops 的 env_mark，按 cap）→ 钉住 → 放进 blobs → 跑 → 撤钉",
+   rc == 0 and [c[0] for c in calls] == ["mark", "pin", "blobs", "run", "unpin"]
+   and calls[0][3] == 50 and calls[0][4] == "env_mark" and calls[1][2] == [wpk["sha256"]], calls)
+ok("执行机：包从 hub 的 wheelhouse 送（src = hub，{sha256: [None, 字节数, wheelhouse 里的路径]}）",
+   calls[2][2] == M.hub() and calls[2][1] == {wpk["sha256"]: [None, wpk["size"], f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}"]}, calls)
 calls.clear()
 free[0] = 10
-rc, out = E.build("lsite", "tiny", run=run_cmd, run_py=run_py, say=lambda *_: None)
+rc, out = E.build("lsite", "tiny", run=run_cmd, run_op=run_op, say=lambda *_: None)
 ok("执行机：空间不够 → 不传、不跑、退出码 1", rc == 1 and [c[0] for c in calls] == ["mark"] and "空间不够" in out, (calls, out))
 calls.clear()
 free[0] = 10 ** 12
@@ -326,41 +318,69 @@ def noslot(*a, **k):
 
 
 RT.ensure_blobs = noslot
-rc, out = E.build("lsite", "tiny", run=run_cmd, run_py=run_py, say=lambda *_: None)
+rc, out = E.build("lsite", "tiny", run=run_cmd, run_op=run_op, say=lambda *_: None)
 ok("执行机：CPU 作业排不上 → stage_later、撤掉 .building、不跑", rc == proto.EXIT["stage_later"]
    and [c[:2] for c in calls] == [("mark", "reserve"), ("pin", "env.tiny"), ("unpin",), ("mark", "clear")], calls)
 calls.clear()
 RM.master_down = lambda m: True
 try:
-    E.build("lsite", "tiny", run=run_cmd, run_py=run_py)
+    E.build("lsite", "tiny", run=run_cmd, run_op=run_op)
     ok("长连接断着 → 报错，不连", False)
 except E.EnvError:
     ok("长连接断着 → 报错，不连", calls == [])
 RM.master_down = SAVE_MD
 RT.pinned, RT.ensure_blobs = SAVE_RT
-M.MACHINES["lremote"] = dict(label="远程", hostname=r"(?!)", ssh="lr", scheduler="pueue", conda=None, envs={"tiny": "spec"}, roles=())
+M.MACHINES["lremote"] = dict(label="远程", hostname=r"lr-host", ssh="lr", conda=None, envs={"tiny": "spec"})
 try:
     E.build("lremote", "tiny", run=run_cmd)
     ok("有锁的不在 hub、执行机以外的远程机器上建", False)
 except E.EnvError:
     ok("有锁的不在 hub、执行机以外的远程机器上建", True)
 del M.MACHINES["lremote"]
-for k in ("lsite",):
-    M.RELAY.pop(k, None)
-    M.SITES.pop(k, None)
+del M.MACHINES["lsite"]
 
-# 本机真建（不联网）：venv 建在一个现成的 Python 上，pip 包只从 wheelhouse 来
+# 本机执行机真建（不联网）：venv 建在一个现成的 Python 上，pip 包从 hub 的 wheelhouse 送进这台的 blobs（同 hub 一台机器：硬链接）。
+# site_ops 的操作（env_mark、pin、missing、ingest，hub 上的 push）在这个进程里跑，TASKQ_ROOT、TASKQ_MACHINE 同 relay_remote.op 的前缀
+# （本机条目只在这个进程的机器表里，子进程读的配置里没有它）
+import site_ops as SO  # noqa: E402
+ops_run = []
+
+
+def local_op(name, what, data=None, timeout=600, job=None, say=None):
+    ops_run.append((name, what))
+    keep = {k: os.environ.get(k) for k in ("TASKQ_ROOT", "TASKQ_MACHINE")}
+    os.environ.update(TASKQ_ROOT=M.machine(name)["root"], TASKQ_MACHINE=name)
+    try:
+        return json.loads(json.dumps(SO.OPS[what](json.loads(json.dumps(data)))))
+    except SO.Bad as e:
+        raise RuntimeError(f"{name} 上 {what} 出错：{e}") from None
+    finally:
+        for k, v in keep.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+SAVE_OP, SAVE_HUBROOT = RM.op, M.MACHINES[M.hub()]["root"]
+RM.op = local_op
+M.MACHINES[M.hub()]["root"] = f"{LD}/hubroot"  # hub 跑 push 用的临时目录在它的根目录下：不碰真的家目录
 pyd = next(p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
            if subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0)
 E.base_activation = lambda name, base: f'export PATH={pyd}:"$PATH"'
 open(f"{LD}/specs/tiny.check.py", "w").write("import tinypkg, sys\nprint('tinypkg', tinypkg.VERSION, sys.prefix)\n")
-M.MACHINES["toff"] = dict(label="本机", hostname=r"(?!)", ssh=None, scheduler="pueue", root=f"{LD}/root", conda=None,
-                          envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, roles=("train",))
+M.MACHINES["toff"] = dict(label="本机", hostname=r"toff-host", ssh=None, scheduler="pueue", root=f"{LD}/root", conda=None,
+                          envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, workers=[dict(cpus=2)])
 PX = {k: os.environ.get(k) for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "PIP_INDEX_URL")}
 os.environ.update(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
                   HTTPS_PROXY="http://127.0.0.1:9", PIP_INDEX_URL="http://127.0.0.1:9/simple")
 rc, out = E.build("toff", "tiny")
 ok("本机不联网建：退出码 0", rc == 0, out)
+ok("本机执行机走执行机的路：这台 env_mark、pin、missing，hub 上 push，建完撤钉",
+   [w for n, w in ops_run if n == "toff"][:3] == ["env_mark", "pin", "missing"] and ("hub", "push") in ops_run
+   and ops_run[-1] == ("toff", "pin") and not os.listdir(f"{LD}/root/{proto.ROOT['pins']}"), ops_run)
+ok("本机执行机：包硬链接进这台的 blobs", os.path.samefile(f"{LD}/root/{proto.blob(wpk['sha256'])}",
+                                                      f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}"))
 okf = f"{LD}/root/state/envs/tiny.ok"
 ok("本机不联网建：.ok 是哈希，状态 ok，没留临时目录", os.path.isfile(okf) and open(okf).read().strip() == E.vhash("tiny", "default")
    and E.states("toff")["tiny"] == "ok" and not glob.glob(f"{LD}/root/envs/.tmp-*"))
@@ -395,8 +415,8 @@ if "--real" in sys.argv:
     open(f"{d}/specs/tiny.yml", "w").write("# 测试\nbase: sysbase\npip:\n  - numpy\n")
     open(f"{d}/specs/tiny.check.py", "w").write("import numpy\nprint('numpy', numpy.__version__)\n")
     M.SPECS = f"{d}/specs"
-    M.MACHINES["treal"] = dict(label="本机测试", hostname=r"(?!)", ssh=None, scheduler="pueue", root=f"{d}/root",
-                           conda=None, envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, roles=("train",))
+    M.MACHINES["treal"] = dict(label="本机测试", hostname=r"treal-host", ssh=None, scheduler="pueue", root=f"{d}/root",
+                               conda=None, envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, workers=[dict(cpus=2)])
     # 基础环境：本机一个带 venv、没有 numpy 的 python（hub 上是 miniforge 的 base）
     pyd = next(p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
                if subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0)
@@ -421,7 +441,7 @@ if "--real" in sys.argv:
        and open(okf).read().strip() != M.spec_hash("tiny"))
     shutil.rmtree(d)
 
-    # conda + pip 都从锁、不联网（11/5）：先按 conda 解出的包从 conda-forge 下载进 wheelhouse，再断网建
+    # conda + pip 都从锁、不联网：先按 conda 解出的包从 conda-forge 下载进 wheelhouse，再断网建
     import urllib.request
     cd_ = os.path.expanduser("~/miniforge3")
     d = fixture.tmpdir(prefix="envtestc.", dir=os.environ.get("TMPDIR"))
@@ -442,13 +462,13 @@ if "--real" in sys.argv:
         cpks.append(dict(put(wh, f"{dl}/{fn}"), name=x["name"], version=x["version"], build=x["build_string"], url=url,
                          channel=x["base_url"], subdir=x["platform"], md5=hashlib.md5(open(f"{dl}/{fn}", "rb").read()).hexdigest()))
     w2 = tiny_wheel(fixture.tmpdir(prefix="whl.", dir=d))
-    w2l = w2.replace("tinypkg-0.1-", "tinypkg-0.1+local-")  # 文件名带本地版本、元数据没有（同 mamba_ssm 的 wheel，11/5）
+    w2l = w2.replace("tinypkg-0.1-", "tinypkg-0.1+local-")  # 文件名带本地版本、元数据没有（同 mamba_ssm 的 wheel）
     os.rename(w2, w2l)
     w2 = w2l
     write_lock(M.SPECS, "creal", "default", conda=cpks, pip=[dict(put(wh, w2), name="tinypkg", version="0.1", no_deps=True)])
     shutil.rmtree(dl)
-    M.MACHINES["creal"] = dict(label="本机", hostname=r"(?!)", ssh=None, scheduler="pueue", root=f"{d}/root", conda=(cd_, "base"),
-                               envs={"creal": "spec"}, roles=("train",))
+    M.MACHINES["creal"] = dict(label="本机", hostname=r"creal-host", ssh=None, scheduler="pueue", root=f"{d}/root", conda=(cd_, "base"),
+                               envs={"creal": "spec"}, workers=[dict(cpus=2)])
     os.environ.update(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
                       HTTPS_PROXY="http://127.0.0.1:9", PIP_INDEX_URL="http://127.0.0.1:9/simple", CONDA_OFFLINE="1")
     rc, out = E.build("creal", "creal")
@@ -469,6 +489,8 @@ if "--real" in sys.argv:
     else:
         os.environ["TASKQ_STATE"] = SAVE_ST
     shutil.rmtree(d)
+
+RM.op, M.MACHINES[M.hub()]["root"] = SAVE_OP, SAVE_HUBROOT
 
 print("全部通过" if not fails else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

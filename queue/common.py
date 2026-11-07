@@ -1,4 +1,4 @@
-"""调度脚本共用的小工具（2026-10-25），只用标准库（执行机上用系统的 python3）。"""
+"""调度脚本共用的小工具，只用标准库（执行机上用系统的 python3）。"""
 import json
 import os
 
@@ -17,21 +17,126 @@ def _cfg():
     return cfg
 
 
-def write_json(path, obj, indent=1):
-    """整份写到临时文件、落盘以后再换过去：断电、被杀时文件要么是旧的、要么是新的，不会只写一半。"""
+def tmp_of(path):
+    """path 写到一半时的名字（同一个文件夹、带进程号，结尾 proto.TMP）：写完再 os.replace 过去。"""
+    return f"{path}.{os.getpid()}{_proto().TMP}"
+
+
+def atomic_put(path, make):
+    """make(临时名) 在同目录的临时名上建出文件或链接，再换到 path：path 要么是旧的、要么是建好的。make 出错 → 异常照抛，path 不动。"""
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
+    tmp = tmp_of(path)
     try:
-        with open(tmp, "w") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=indent)
-            f.flush()
-            os.fsync(f.fileno())
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        make(tmp)
         os.replace(tmp, path)
     finally:
-        if os.path.exists(tmp):
+        if os.path.lexists(tmp):
             os.remove(tmp)
+
+
+def atomic_write(path, data):
+    """整份写到临时名、落盘以后再换过去：断电、被杀时文件要么是旧的、要么是新的，不会只写一半。data：str 或 bytes。"""
+    def make(tmp):
+        with open(tmp, "wb") as f:
+            f.write(data.encode() if isinstance(data, str) else data)
+            f.flush()
+            os.fsync(f.fileno())
+    atomic_put(path, make)
+
+
+def atomic_link(target, path):
+    """path 换成指向 target 的软链接。"""
+    atomic_put(path, lambda tmp: os.symlink(target, tmp))
+
+
+def atomic_copy(src, dst, link=False, size=None, sha=None):
+    """src 放到 dst：link=True 时先试硬链接（同一个盘才成），否则拷贝（带修改时间）；先放到临时名，核对大小（size）、
+    sha256（sha，拷贝时边拷边算）后再换过去。对不上 → OSError，dst 不动。→ 是不是硬链接的。"""
+    import hashlib
+    import shutil
+    linked = []
+
+    def make(tmp):
+        if link:
+            try:
+                os.link(src, tmp)
+                linked.append(1)
+            except OSError:
+                pass
+        if not linked:
+            h = hashlib.sha256() if sha else None
+            with open(src, "rb") as fi, open(tmp, "wb") as fo:
+                for b in iter(lambda: fi.read(1 << 22), b""):
+                    fo.write(b)
+                    if h:
+                        h.update(b)
+            shutil.copystat(src, tmp)
+            if h and h.hexdigest() != sha:
+                raise OSError(f"{src}：内容和 sha256 {sha[:12]}… 对不上")
+        elif sha and sha256(tmp) != sha:
+            raise OSError(f"{src}：内容和 sha256 {sha[:12]}… 对不上")
+        got = os.path.getsize(tmp)
+        if size is not None and got != size:
+            raise OSError(f"{src}：大小 {got}，应为 {size}")
+    atomic_put(dst, make)
+    return bool(linked)
+
+
+def write_json(path, obj, indent=1):
+    atomic_write(path, json.dumps(obj, ensure_ascii=False, indent=indent))
+
+
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 22), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def inside(path, base):
+    """path（解开软链接后）是 base 本身或在它下面。"""
+    p, b = os.path.realpath(path), os.path.realpath(base)
+    return p == b or p.startswith(b.rstrip("/") + "/")
+
+
+def under(p, d):
+    """相对路径 p 等于 d 或在 d 下面（按路径的段，不解开链接）。"""
+    return p == d or p.startswith(d.rstrip("/") + "/")
+
+
+def du(paths, skip_top=(), follow=False):
+    """paths（文件或文件夹）占的盘（字节）：硬链接只算一次 → (总共, 其中不在 skip_top 里的)。
+    skip_top：第一个 path 下第一级的名字（根目录的 blobs、code）不算进第二个数。
+    follow：软链接按指到的内容算（要传多少：传过去的是内容）；否则不算。"""
+    used, rest, seen = 0, 0, set()
+    for top in paths:
+        if os.path.isfile(top) and (follow or not os.path.islink(top)):
+            walk = [(os.path.dirname(top), [], [os.path.basename(top)])]
+        else:
+            walk = os.walk(top, followlinks=follow)
+        for dp, _, fns in walk:
+            first = os.path.relpath(dp, top).split(os.sep)[0]
+            for f in fns:
+                p = os.path.join(dp, f)
+                try:
+                    x = os.stat(p) if follow else os.lstat(p)
+                except OSError:
+                    continue
+                if not os.path.isfile(p) or os.path.islink(p) and not follow:
+                    continue
+                if (x.st_dev, x.st_ino) in seen:
+                    continue
+                seen.add((x.st_dev, x.st_ino))
+                used += x.st_blocks * 512
+                if first not in skip_top:
+                    rest += x.st_blocks * 512
+    return used, rest
 
 
 # ---------------- 跑命令（本机或经 ssh） ----------------
@@ -39,7 +144,7 @@ SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 
 
 def remote_timeout(cmd, timeout):
-    """ssh 到那边跑的命令外面套一层那边的 timeout：本机这边超时断开后，那边卡在存储里的进程也结束，不留在登录节点上（11/1）。"""
+    """ssh 到那边跑的命令外面套一层那边的 timeout：本机这边超时断开后，那边卡在存储里的进程也结束，不留在登录节点上。"""
     return f"timeout -k 10 {max(int(timeout) - 15, 10)} {cmd}"
 
 
@@ -91,7 +196,7 @@ def changed(name, value):
     return True
 
 
-# ---------------- 任务记录（2026-10-25）：hub 和 pueue 执行机的 pueue 任务"是谁"只看这里 ----------------
+# ---------------- 任务记录：核心加进 pueue 的任务（hub 核心组里的传数据、拉回、归档、建环境）"是谁"只看这里 ----------------
 def tasks_path():
     return os.path.expanduser(os.environ.get("TASKQ_TASKS") or _cfg().state("tasks.json", expand=False))  # 环境变量只给测试用
 
@@ -171,50 +276,20 @@ def sync_records(pueue, recs, now=None):
 
 
 def identify(machine, task, recs):
-    """这台机器上的 pueue 任务是谁 → dict(step, key, …)；认不出 → None。
-    先看记录（任务号和标签都对上）；没有记录的（手动加的）按命令只认训练（run_task.sh）。"""
+    """这台机器上的 pueue 任务是谁 → 它的记录 dict(step, key, …)（任务号和标签都对上）；没有记录的（手动加的）→ None。"""
     label = task.get("label") or ""
-    for r in recs:
-        if r["machine"] == machine and r.get("id") == task["id"] and r["label"] == label:
-            return r
-    return from_command(task.get("command") or "")
-
-
-def from_command(cmd):
-    import shlex
-    try:
-        tok = shlex.split(cmd)
-    except ValueError:
-        return None
-    flat = []
-    for x in tok:  # 整条命令被引号包成一个参数时（q 加的任务）再拆一层；--spec 后面的 JSON 不拆
-        try:
-            flat += shlex.split(x) if " " in x and x[:1] not in "{[" else [x]
-        except ValueError:
-            flat.append(x)
-    for i, x in enumerate(flat):
-        b, rest = os.path.basename(x), flat[i + 1:]
-        if b == "run_task.sh" and rest:
-            try:
-                import spec
-                if rest[0] == "--spec":
-                    return dict(step="train", key=spec.from_sent(rest[1])["key"])
-                return dict(step="train", key=spec.resolve(rest[0], spec.parse_kv([r for r in rest[1:] if "=" in r]))["key"])
-            except Exception:  # noqa: BLE001
-                return None
-    return None
+    return next((r for r in recs if r["machine"] == machine and r.get("id") == task["id"] and r["label"] == label), None)
 
 
 def backup_down(ok=None):
-    """备份机（machines.py 里角色 backup 的）暂停检查（policy.py 的 OFFLINE），或这次检查连不上（ok：快照的 s["ok"]）
-    → 说明；能用 → None。连不上时先不排归档，免得排上去的归档都失败、停住（11/1）。"""
+    """备份机（machines.py 里角色 backup 的）暂停着（policy.py 的 PAUSE），或这次检查连不上（ok：快照的 s["ok"]）
+    → 说明；能用 → None。连不上时先不排归档，免得排上去的归档都失败、停住。"""
     M = _cfg().mtab()
-    import policy as P
     for b in M.backups():
         if b == M.hub():
             continue
-        if b in P.OFFLINE:
-            return f"{b} 暂停检查（{P.OFFLINE[b]}）"
+        if M.paused(b):
+            return f"{b} 暂停着（{M.paused(b)}）"
         if ok is not None and ok.get(b) is False:
             return f"{b} 这次连不上"
     return None

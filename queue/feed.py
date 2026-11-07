@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""送任务的唯一入口（2026-10-31）：hub 的健康检查（monitor/health.py，每 30 分钟）调用 run_all，
-转给 queue/relay.py 处理配置文件夹里 machines.py 的 RELAY 里的执行机（pueue 执行机、Slurm 执行机，细节记 ~/relay.log，
+"""送任务的唯一入口：hub 的健康检查（monitor/health.py，每 30 分钟）调用 run_all，
+转给 queue/relay.py 处理机器表里的执行机（pueue 执行机、Slurm 执行机，细节记 ~/relay.log，
 ~/feed.log 里记一行指过去）。另外查总队列里分给了不是执行机的名字的任务（执行机换了名字、撤掉以后留下的），报 feed:nobody。
 
     python3 queue/feed.py [-n]       看现在会做什么（不改任何东西；-n / --dry-run / --dry 写不写都一样；taskq plan 包括它）
 """
 import os
 import sys
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # 调度代码的根
@@ -28,7 +27,7 @@ def log(lines):
 
 def nobody(ctq):
     """总队列里分给了不是执行机的名字的 → {问题编号: 说明（带 data）}。"""
-    own = set(M.RELAY)
+    own = set(M.executors())
     by = {}
     for t in (ctq or {}).get("tasks") or []:
         if t.get("assigned") and t["assigned"] not in own and t["state"] != "done":
@@ -46,7 +45,7 @@ def run_all(s, dry=False):
     except Exception as e:  # noqa: BLE001
         events, stuck = [], {alert_id("relay", "error"): f"queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
     if events and not dry:
-        log([f"执行机 {'、'.join(sorted(M.RELAY))}（relay.py）：{len(events)} 条，见 ~/relay.log"])
+        log([f"执行机 {'、'.join(sorted(M.executors()))}（relay.py）：{len(events)} 条，见 ~/relay.log"])
     stuck = dict(stuck)
     stuck.update(nobody((s.get("taskq") or {}).get(M.hub())))
     return events, stuck

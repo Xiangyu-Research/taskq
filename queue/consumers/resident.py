@@ -1,4 +1,4 @@
-"""常驻的 worker（pueue 组里，不在 Slurm 里）：WORKER_ID 当名字，最多用 TASKQ_CPUS 个核，同时训几个看机器表的 slots，
+"""常驻的 worker（pueue 组里，不在 Slurm 里）：WORKER_ID 当名字，最多用 TASKQ_CPUS 个核，同时训 TASKQ_SLOTS 个（机器表 worker 的 slots），
 每次开训另起分段日志的作业名；领不到、出错、失败太多都不马上退出，手上没有在训的满 IDLE_EXIT 秒才退出（退出码 0）。"""
 import os
 
@@ -12,7 +12,7 @@ def setup(w):
     c = e.get("TASKQ_CPUS", "")
     if c.isdigit() and 0 < int(c) < w.ncpu:
         w.ncpu = int(c)
-    s = e.get("TASKQ_SLOTS") or w.mget("slots")
+    s = e.get("TASKQ_SLOTS")
     w.slots = int(s) if str(s).isdigit() else 1
     cvd = e.get("CUDA_VISIBLE_DEVICES", "")
     if cvd.isdigit():

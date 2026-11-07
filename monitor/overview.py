@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""全部状态的汇总（2026-11-04）：总队列、各机器（health.gather，只读）、每个任务进度最新的那份、分段日志、健康检查记下的问题，
+"""全部状态的汇总：总队列、各机器（health.gather，只读）、每个任务进度最新的那份、分段日志、健康检查记下的问题，
 给登记表这类汇总用，使用者那边不再 import 核心的内部函数。
 
     python3 monitor/overview.py [--json] [--no-remote]     --no-remote：只看本机
@@ -42,7 +42,7 @@ RELAY_FRESH = 2 * 3600  # relay.py 记下的执行机状态这么久以内的才
 
 
 def relay_status_file():
-    return os.path.join(os.path.expanduser(os.environ.get("RELAY_DIR") or cfg.state("relay", expand=False)), "status.json")
+    return cfg.state("relay", "status.json")
 
 
 def relay_sources(now_ts):
@@ -55,14 +55,13 @@ def relay_sources(now_ts):
     for name, r in st.items():
         if not isinstance(r, dict) or now_ts - (r.get("time") or 0) >= RELAY_FRESH:
             continue
-        tasks = {k: dict(f, archived=False, dice={}, resumable=None) for k, f in (r.get("tasks") or {}).items()}
+        tasks = {k: dict(f, metrics={}, resumable=None) for k, f in (r.get("tasks") or {}).items()}
         out[r.get("label") or name] = dict(name=name, time=r.get("time"), tasks=tasks, seglogs=[])
     return out
 
 
 def machine_of(job):
-    fn = getattr(M, "machine_of_jobtag", None)
-    return fn(job) if fn else job
+    return M.machine_of_jobtag(job)
 
 
 def best_copy(sources, key):
@@ -80,12 +79,9 @@ def best_copy(sources, key):
 
 
 def parts_of(seglogs, key, sp):
-    """这个任务的分段日志：<safe key>__<作业>_part<n>.log（以前 _seg<n>），和说明里 oldlogs 的 prefix 开头的。"""
+    """这个任务的分段日志：<safe key>__<作业>_part<n>.log。"""
     prefixes = [proto.safe(key) + proto.SAFE]
-    old = sp.get("oldlogs") or {}
-    if old.get("prefix"):
-        prefixes.append(old["prefix"])
-    kinds = "|".join(proto.LOG_PARTS)
+    kinds = proto.LOG_PART
     seen, out = set(), []
     for s in seglogs:
         n = s["name"]
@@ -136,7 +132,7 @@ def build(s, relay=None):
     """gather() 的结果 → 汇总（proto.OVERVIEW_TOP）。relay：执行机的进度（默认读 relay.py 的 status.json）。"""
     now = s.get("now") or datetime.now()
     hub = M.hub()
-    L = lambda n: (M.MACHINES.get(n) or M.SITES.get(n) or {}).get("label", n)  # noqa: E731
+    L = lambda n: (M.MACHINES.get(n) or {}).get("label", n)  # noqa: E731
     q = (s.get("taskq") or {}).get(hub)
     queue = [t for t in (q or {}).get("tasks") or [] if not proto.is_smoke(t["key"])] if q and q.get("enabled") else []
     rank = {t["key"]: i + 1 for i, t in enumerate(t for t in queue if t.get("state") != proto.S_DONE)}
@@ -151,7 +147,7 @@ def build(s, relay=None):
         sources[lab] = r
         src_info.append(dict(name=r.get("name"), label=lab, kind="relay", time=r.get("time")))
     seglogs = list({x["name"]: x for src in sources.values() for x in src.get("seglogs") or []}.values())
-    machines = [dict(name=n, label=L(n), scheduler=M.MACHINES[n]["scheduler"], ok=bool(s["ok"].get(n)), why=(s.get("why") or {}).get(n),
+    machines = [dict(name=n, label=L(n), scheduler=M.MACHINES[n].get("scheduler"), ok=bool(s["ok"].get(n)), why=(s.get("why") or {}).get(n),
                      gpus=(s.get("gpus") or {}).get(n, []), pueue=pueue_view((s.get("pueue") or {}).get(n))) for n in seen]
     tasks = []
     for t in S.all_tasks(queue):
@@ -172,15 +168,14 @@ def build(s, relay=None):
             checkpoint=os.path.join(o["outs"][0], sp["checkpoint"]) if sp.get("checkpoint") else None,
             queue=dict(rank=rank.get(key), **{k: x.get(k) for k in proto.OVERVIEW_TASK_QUEUE if k != "rank"}) if x else None,
             copy=dict(where=where, source=next((i["name"] for i in src_info if i["label"] == where), None), final=bool(f.get("final")),
-                      archived=f.get("archived"), epochs=epochs,
+                      epochs=epochs,
                       start=min([r["start"] for r in runs if r.get("start")] or [None], key=lambda v: v or ""),
-                      last=best[0][2] or None, runs=runs, dice=f.get("dice") or {}, debug=f.get("debug") or {},
+                      last=best[0][2] or None, runs=runs, metrics=f.get("metrics") or {}, debug=f.get("debug") or {},
                       resumable=f.get("resumable")) if f else None,
             total=total, progress=progress, eta=eta.strftime("%Y-%m-%d %H:%M") if eta else None,
             parts=parts, commits=list(dict.fromkeys(p["commit"] for p in parts if p["commit"] and p["trained"]))))
-    data = (M.MACHINES.get(hub) or {}).get("data")
     return dict(version=proto.VERSION, now=now.strftime("%Y-%m-%d %H:%M:%S"), hub=hub,
-                data=os.environ.get("TASKQ_DATA") or (M.expand(data) if data else None),
+                data=dict(machine=M.store(), path=M.data()),
                 queue=dict(enabled=bool(q and q.get("enabled")), readable=q is not None), sources=src_info, machines=machines,
                 tasks=tasks, health=health_view(), code=s.get("code") or {})
 

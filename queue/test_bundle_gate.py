@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""bundle_gate.py 的测试（11/5）：从工作区和旧提交建代码包，拿总队列现在会送的说明（testdata 的实验表、command 做法）过闸门：
-跑得了的放行，跑不了的挡下；hub 上没有那个包、不知道包时放行；超时放行、不记着；relay.plan / fill 挡下、记 held、报 bundlegate，
-包换了再送。临时目录跑完删掉。浅克隆里没有旧提交时跳过旧包那几项。
+"""bundle_gate.py 的测试：从工作区和旧提交建代码包，拿总队列现在会送的说明（testdata 的实验表、command 做法）过闸门：
+跑得了的放行，跑不了的挡下；hub 上没有那个包、不知道包时放行；超时放行、不记着；relay.plan 挡下、记 held、报 bundlegate，
+包换了再送；relay.assign 不派那边在用的包跑不了的；stage 送之前再核对一次。临时目录跑完删掉。浅克隆里没有旧提交时跳过旧包那几项。
     python3 queue/test_bundle_gate.py
 """
-import json
+import contextlib
 import os
 import shutil
 import subprocess
@@ -33,12 +33,12 @@ import relay_store as ST  # noqa: E402
 import bundle_gate as BG  # noqa: E402
 import relay  # noqa: E402
 
-NAME = next(n for n in M.RELAY if M.RELAY[n]["scheduler"] == "slurm")
-PNAME = next((n for n in M.RELAY if M.RELAY[n]["scheduler"] == "pueue"), None)
+NAME = next(n for n in M.executors() if M.machine(n)["scheduler"] == "slurm")
+PNAME = next((n for n in M.executors() if M.machine(n)["scheduler"] == "pueue"), None)
 OUT = os.path.expanduser(RB.OUT)
-OLD = "c5dace4"  # 11/4 有 --spec、还会展开 params 里的 {…}（11/5 出事的那种包）
+OLD = "c5dace4"  # 旧核心：说明的格式和现在的不一样（输入叫 data）
 CMD = S.sendable(S.resolve("command", dict(key="job/a", cmd="echo hi > {data}/out/a/x", env="pt", out="out/a", done="x", relay="path")))
-TMPL = dict(CMD, params=dict(CMD["params"], note="{other}"))  # params 里留着给做法自己用的 {…}：新包不展开，旧包报不认识
+TMPL = dict(CMD, params=dict(CMD["params"], note="{other}"))  # params 里留着给做法自己用的 {…}：现在的包不展开，假包 picky() 挡下
 
 
 def ok(msg):
@@ -49,17 +49,23 @@ def have(commit):
     return subprocess.run(["git", "-C", CORE, "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode == 0
 
 
-def slurm_site(commit):
-    """那个提交的机器表里第一台 Slurm 的 relay 执行机（测试用的机器名 11/5 改过，旧提交里叫别的）。"""
-    ns = {"__name__": "relay_machines"}
-    exec(compile(RB.read_machines(commit), "machines.py", "exec"), ns)
-    return next(n for n, v in (ns.get("RELAY") or {}).items() if v["scheduler"] == "slurm")
+@contextlib.contextmanager
+def patched(obj, **kw):
+    """暂时换掉 obj 的属性，出来时换回。"""
+    old = {k: getattr(obj, k) for k in kw}
+    for k, v in kw.items():
+        setattr(obj, k, v)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            setattr(obj, k, v)
 
 
 def build(commit=None):
-    name = slurm_site(commit) if commit else NAME
-    bid, path = RB.build(name, commit, root=os.path.join(TMP, "root"), core=commit or RB.CORE_REF)
-    if commit and not os.path.exists(os.path.join(path, "envs")):  # 11/4 的核心只认 <仓库>/envs（没有 .taskq.toml 的配置文件夹）
+    """commit=None：工作区的使用者文件和核心；否则两边都取自 commit（核心和测试的项目在同一个仓库）。"""
+    bid, path = RB.build(commit, core=commit or RB.CORE_REF)
+    if commit and not os.path.exists(os.path.join(path, "envs")):  # 旧核心只认 <仓库>/envs（没有 .taskq.toml 的配置文件夹）
         os.symlink(RB.conf_rel() or ".", os.path.join(path, "envs"))
     return bid
 
@@ -76,13 +82,12 @@ def test_check(new, old):
     if old is None:
         print(f"跳过：没有提交 {OLD}（浅克隆）")
         return
-    assert BG.check(CMD, old) is None, BG.check(CMD, old)
-    err = BG.check(TMPL, old)
-    assert err and "{other}" in err, err
+    err = BG.check(CMD, old)
+    assert err and "spec.py shell" in err, err
     bad = [k for k, sp in specs.items() if BG.check(sp, old)]
-    assert bad, "旧包应该跑不了带模板的说明"
-    ok(f"{OLD} 的包：普通说明放行；params 里带 {{…}} 的挡下（{len(bad)}/{len(specs)} 个实验表的说明）")
-    assert BG.check_all(TMPL, [new, old]) == (old, err) and BG.check_all(TMPL, [new]) is None
+    assert len(bad) == len(specs), bad
+    ok(f"{OLD} 的包（说明的格式是旧的）：现在送的说明都挡下（{len(bad)}/{len(specs)} 个）")
+    assert BG.check_all(CMD, [new, old]) == (old, err) and BG.check_all(CMD, [new]) is None
     ok("check_all：报第一个跑不了的包")
 
 
@@ -124,13 +129,12 @@ def test_cache_timeout(new):
 
 def test_current():
     """那边的 current 和 STALE_BEAT 内动过的包（假的 ssh 在本机跑）；还没有包 → ""；连不上 → None。"""
-    import relay_remote as RM
     fake, root = os.path.join(TMP, "fake_ssh"), os.path.join(TMP, "remote")
     with open(fake, "w") as f:
         f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\n[[ $1 == -O ]] && exit 0\nshift\nexec bash -c "$*"\n')
     os.chmod(fake, 0o755)
-    conf0, env0 = M.RELAY[NAME], os.environ.get("RELAY_SSH")
-    M.RELAY[NAME] = dict(conf0, root=root)
+    conf0, env0 = dict(M.MACHINES[NAME]), os.environ.get("RELAY_SSH")
+    M.MACHINES[NAME]["root"] = root
     os.environ["RELAY_SSH"] = fake
     try:
         assert BG.current(NAME) == ("", [])
@@ -147,7 +151,8 @@ def test_current():
             f.write("#!/bin/bash\nexit 255\n")
         assert BG.current(NAME) is None
     finally:
-        M.RELAY[NAME] = conf0
+        M.MACHINES[NAME].clear()
+        M.MACHINES[NAME].update(conf0)
         if env0 is None:
             os.environ.pop("RELAY_SSH", None)
         else:
@@ -157,7 +162,7 @@ def test_current():
 
 def S0(mt):
     return dict(taskq={relay.taskq.queue_host(): dict(enabled=True, tasks=mt)}, pueue={M.hub(): dict(tasks=[])}, records=[],
-                ok={M.hub(): True})
+                ok={M.hub(): True}, src={n: dict(tasks={}) for n in M.executors()})
 
 
 def mtask(key, sp, state="claimed", worker=NAME, nice=5):
@@ -165,7 +170,7 @@ def mtask(key, sp, state="claimed", worker=NAME, nice=5):
 
 
 def RS(bid, live=(), *ts):
-    return dict(taskq=dict(tasks=list(ts), paused=False), tasks={}, free=500e9, bundle=bid, live=list(live))
+    return dict(taskq=dict(tasks=list(ts), paused=False), tasks={}, free=500e9, out_used=0, envs_ok={}, bundle=bid, live=list(live))
 
 
 def ops(acts):
@@ -173,14 +178,13 @@ def ops(acts):
 
 
 def test_plan(new, old):
+    """old：只挡带 {other} 的说明的假包（picky）。"""
     K = "job/t"
     acts, stuck = relay.plan(S0([mtask(K, TMPL)]), NAME, RS(new), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
     acts, stuck = relay.plan(S0([mtask(K, TMPL)]), NAME, RS(None), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
     ok("plan：包跑得了、不知道那边的包 → 照常传")
-    if old is None:
-        return
     for rs in (RS(old), RS(new, [old])):
         acts, stuck = relay.plan(S0([mtask(K, TMPL)]), NAME, rs, {})
         assert ops(acts) == [("beat", K), ("hold", K)] and acts[-1]["bundle"] == old, acts
@@ -211,52 +215,68 @@ def test_plan(new, old):
         ok("pueue 的执行机：只看 current（worker 代码变了就不再领）")
 
 
-def test_fill(new, old):
-    if old is None:
-        return
+def test_assign(new, old):
+    """relay.assign（refill.choose 的 block）：那边在用的包跑不了的不派，接着挑下一个；都跑不了时 why 里写代码包。old 是假包 picky。"""
     K2, K3 = "job/f2", "job/f3"
-    cands = [mtask(K2, TMPL, "free", None, nice=3), mtask(K3, CMD, "free", None, nice=4)]
-    saved = relay.refill.candidates, relay.relayable, relay.refill.data_gb, relay.P.READY.get(NAME)
-    relay.refill.candidates = lambda s, name, mtq, ready, envs_ok, kinds=None, held=None: [t for t in mtq["tasks"] if not t["worker"]]
-    relay.relayable = lambda i: True
-    relay.refill.data_gb = lambda paths: 1.0
-    relay.P.READY[NAME] = 2
-    try:
-        more, why = relay.fill(S0(cands), NAME, RS(new), {}, [])
-        assert [a["key"] for a in more] == [K2, K3], (more, why)
-        relay.PLANNED.clear()
-        more, why = relay.fill(S0(cands), NAME, RS(old), {}, [])
-        assert [a["key"] for a in more] == [K3], (more, why)
-        relay.PLANNED.clear()
-        more, why = relay.fill(S0(cands[:1]), NAME, RS(old), {}, [])
-        assert more == [] and "代码包" in why, (more, why)
-    finally:
-        relay.refill.candidates, relay.relayable, relay.refill.data_gb = saved[:3]
-        relay.P.READY[NAME] = saved[3]
-        relay.PLANNED.clear()
-    ok("fill：那边在用的包跑不了的不领，接着挑下一个")
+    env = sorted(M.ready_envs(NAME))[0]  # 这台不用另建就有的环境
+    cands = [mtask(K2, dict(TMPL, env=env), "free", None, nice=3), mtask(K3, dict(CMD, env=env), "free", None, nice=4)]
+
+    def probe(what, data, **kw):
+        return {p: dict(n=1, newest=None, size=1e9) for p in data["pats"]}
+
+    def run(mt, rs):
+        out, why = relay.assign(S0(mt), {NAME: dict(rs=rs, st={})}, {}, {})
+        return [a["key"] for a in out.get(NAME, []) if a["op"] == "take"], why
+
+    with patched(relay.RM, store_op=probe), patched(relay, relayable=lambda i: True), \
+            patched(relay.SG, on=lambda: False), patched(relay.R, ready=lambda name: 2):
+        took, why = run(cands, RS(new))
+        assert took == [K2, K3], (took, why)
+        took, why = run(cands, RS(old))
+        assert took == [K3], (took, why)
+        took, why = run(cands, RS(new, [old]))
+        assert took == [K3], (took, why)
+        took, why = run(cands[:1], RS(old))
+        assert took == [] and f"在用的代码包 {old} 跑不了" in why[NAME] and "{other}" in why[NAME], (took, why)
+    ok("assign：那边在用的包（current、Slurm 在跑的 worker 的）跑不了的不派，接着挑下一个；都跑不了 → why 写代码包")
 
 
-def test_stage(new, old):
+def test_stage(new):
+    """RT.stage：送之前按 export 给的参数解析出要送的说明，用那边在用的包再核对一次。跑不了的包用一个假包（spec.py 退出 3）。"""
     import relay_transfer as RT
-    if old is None:
-        return
-    k = next(k for k, t in E.tasks().items() if BG.check(S.sendable(t["spec"]), old))
-    saved, said, export = BG.current, [], RT.N.export
-    BG.current = lambda name: (new, [old])
-    RT.N.export = lambda real, D: dict(params=real["params"])  # 闸门在用到数据之前
-    try:
-        assert RT.stage(NAME, k, nice=5, say=said.append) is None
-        assert BG.held(ST.load_state(), NAME)[k]["bundle"] == old and "先不送" in said[-1], said
+    k = next(iter(E.tasks()))
+    bad = "e" * 16
+    os.makedirs(os.path.dirname(os.path.join(OUT, bad, BG.SPEC_PY)), exist_ok=True)
+    with open(os.path.join(OUT, bad, BG.SPEC_PY), "w") as f:
+        f.write("import sys\nsys.exit(3)\n")
+    said, asked = [], []
+
+    def export(what, data, **kw):  # 闸门在用到数据之前：只要 params
+        asked.append(what)
+        return dict(params=data["spec"]["params"], files=[], views=[], outs=[], texts={}, cleanup=[])
+    with patched(BG, current=lambda name: (new, [bad])), patched(RT.RM, store_op=export):
+        assert RT.stage(NAME, k, nice=5, say=said.append) is None and asked == ["export"], asked
+        h = BG.held(ST.load_state(), NAME)[k]
+        assert h["bundle"] == bad and "退出 3" in h["err"] and "先不送" in said[-1], (h, said)
         assert ST.keys_of(ST.load_state(), NAME).get(k) is None
         sp = S.sendable(S.resolve(E.tasks()[k]["recipe"], E.tasks()[k]["params"]))
         BG.current = lambda name: (new, [])
         assert BG.check_all(sp, RT.in_use(NAME)) is None
         BG.current = lambda name: None
         assert RT.in_use(NAME) == []
-    finally:
-        BG.current, RT.N.export = saved, export
-    ok("stage：送之前按要送的说明再核对一次，跑不了 → 不传、不加、记 held，退出码同排不上（下次检查再来）")
+    BG.unhold(NAME, k)
+    ok("stage：送之前按要送的说明再核对一次，跑不了 → 不传、不加、记 held（下次检查再来）；连不上 → 不核对")
+
+
+def picky():
+    """假包：说明里带 {other} 的跑不了（spec.py 退出 2），别的都跑得了。plan、assign 的测试要一个只挡一部分说明的包。"""
+    bid = "f" * 16
+    p = os.path.join(OUT, bid, BG.SPEC_PY)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write("import sys\nif '{other}' in sys.argv[-1]:\n    sys.exit('不认识 {other}')\n"
+                f"sys.exit({proto.EXIT['done_no']} if sys.argv[1] == 'done' else 0)\n")
+    return bid
 
 
 def main():
@@ -267,9 +287,9 @@ def main():
         test_pass_through(new)
         test_current()
         test_cache_timeout(new)
-        test_plan(new, old)
-        test_fill(new, old)
-        test_stage(new, old)
+        test_plan(new, picky())
+        test_assign(new, picky())
+        test_stage(new)
         print("全部通过")
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

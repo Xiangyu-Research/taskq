@@ -1,6 +1,6 @@
-"""pueue 类执行机（SITES 里 scheduler="pueue" 的）的适配器（2026-10-31）：读 worker 所在组的任务、开常驻 worker。
+"""pueue 执行机（机器表里 scheduler="pueue" 的）的适配器：读 worker 所在组的任务、开常驻 worker。
 和 slurm.py 对应：读状态 → 调用方定开不开（queue/relay.py 的 topup）→ start_worker 开。
-pueue 的原始输出由那边的状态脚本一次读回（relay_remote.py 的 STATUS_PY），这里只解析。"""
+pueue 的原始输出由那边的状态脚本一次读回（site_ops.py 的 status），这里只解析。"""
 import json
 import os
 import shlex
@@ -35,32 +35,26 @@ def parse(raw, group):
     return jobs
 
 
-def workers(name, jobs, kind="gpu"):
-    """跑 kind 任务的 worker（标签 worker:<id>，mtab.py 的 worker_of），按任务号排。"""
-    w = M.worker_of(name, kind)
+def workers(w, jobs):
+    """worker w（mtab.workers 的一项）的 pueue 任务（标签 worker:<id>），按任务号排。"""
     return [j for j in jobs or [] if j[1] == f"{proto.WORKER_LABEL}{w['id']}"]
 
 
 
-def busy_cmd():
-    """排着的 worker 开始时才解析 code/current，不占着旧包：没有要留的。"""
-    return "true"
-
-def worker_cmd(name, kind="gpu"):
-    """开 worker 的 pueue add 命令。整条 bash -c 作为一个参数：pueue 把 -- 后面的参数用空格拼起来交给 sh（ccb0ba6）。
-    前面加 exec：pueue 的子进程就是 worker 本身。不加时 sh 收到 pueue kill 的 SIGTERM 先退出，pueue 马上记为结束，
-    worker 还在停训练、交还任务（11/3）。pueue add 带上的是加任务那边的环境：先去掉 hub 自己的变量（proto.HUB_ONLY_ENV），
-    和 hub 在同一台上的执行机（ssh 是 None）的 worker 不会把 hub 的数据目录、配置当成自己的（11/7）。"""
-    c, w = R.conf(name), M.worker_of(name, kind)
-    gpu = c["groups"][w["group"]][1]
-    env = f"TASKQ_SITE={name} WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
-    env += "".join(f" {k}={shlex.quote(str(v))}" for k, v in (c["groups"][w["group"]][2] or {}).items())  # 组的环境变量（如 TASK_GPU_IDLE）
-    run = (f'unset {" ".join(proto.HUB_ONLY_ENV)}; R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/{ROOT["current"]}"); export TASKQ_DIR="$R/{ROOT["queue"]}" {env}; '
-           f'exec bash "$REPO/{cfg.bundle_rel("queue", "worker_start.sh")}"')
+def worker_cmd(name, w):
+    """开 worker w（mtab.workers 的一项）的 pueue add 命令。整条 bash -c 作为一个参数：pueue 把 -- 后面的参数用空格拼起来交给 sh。
+    前面加 exec：pueue 的子进程就是 worker 本身（不加时 sh 收到 pueue kill 的 SIGTERM 先退出，pueue 马上记为结束，worker 还在停训练、交还任务）。
+    pueue add 带上的是加任务那边的环境：先去掉 hub 自己的变量（proto.HUB_ONLY_ENV），和 hub 在同一台上的执行机的 worker
+    不会把 hub 的配置、队列当成自己的。"""
+    c = M.machine(name)
+    env = {"TASKQ_MACHINE": name, **M.worker_env(w)}
+    env = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
+    run = (f'unset {" ".join(proto.HUB_ONLY_ENV)}; R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/{ROOT["current"]}"); '
+           f'export TASKQ_ROOT="$R" {env}; exec bash "$REPO/{cfg.bundle_rel("queue", "worker_start.sh")}"')
     return f"{c['pueue']} add -g {w['group']} -l {proto.WORKER_LABEL}{w['id']} -- {shlex.quote('exec bash -c ' + shlex.quote(run))}"
 
 
-def start_worker(name, run, kind="gpu"):
-    """开一个跑 kind 任务的 worker → (成功与否, 输出)。run：fn(命令) → (退出码, 输出)。"""
-    rc, out = run(worker_cmd(name, kind))
+def start_worker(name, run, w):
+    """开 worker w → (成功与否, 输出)。run：fn(命令) → (退出码, 输出)。"""
+    rc, out = run(worker_cmd(name, w))
     return rc == 0, out.strip()[-200:]

@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
-"""各台机器（配置文件夹里的 machines.py）的健康检查（2026-10-16）：hub 上 cron 每 30 分钟跑一次，发现问题推送到手机（ntfy），
-同时记进状态文件（使用者的登记表脚本可以读它，把当前的问题列出来）。各机器的状态只在 gather() 里取，
+"""各台机器（配置文件夹里的 machines.py）的健康检查：hub 上 cron 每 30 分钟跑一次，发现问题推送到手机（ntfy），
+同时记进 hub 的数据库（使用者的登记表脚本可以读它，把当前的问题列出来）。各机器的状态只在 gather() 里取，
 使用者的登记表脚本也可以用它。
 
     taskq tick              检查、推送、更新状态
     taskq tick --dry-run    只打印这次查到的问题，不推送、不改任何文件
     taskq tick --test       推送一条测试消息
 
-查什么（每项一个问题编号，同一个问题只推送一次）：
-  - 连不上：pueue 机器 ssh 不通 30 分钟。
-  - pueue：常驻进程连不上；任务失败（手动停的 143 / Killed 只记进登记表，不推送；调度停的 worker 不算）。
-  - 训练卡住：pueue 在跑的训练任务，开始超过 1 小时、训练日志 90 分钟没有新 epoch。
-  - 同一个任务两处：同一个任务在两台以上机器上排队或在训。两边都已经开训（或有段间的进度）算紧急。
-  - 执行机（relay.py 管的）的问题由 relay.py 报（经 feed.run_all）。
+查什么（每项一个问题编号，同一个问题只推送一次）。探查、读 pueue、恢复 pueued 的机器是有 pueue 组的（mtab.pueue_hosts：
+pueue 执行机、hub、store、写了 manual_groups 的）：
+  - 连不上：ssh 不通 30 分钟；store 上收集训练状态出错。
+  - pueue：常驻进程没响应（开关 AUTO["revive"] 开着时先自动恢复）；任务失败（手动停的 143 / Killed 只记进登记表，
+    不推送；调度停的 worker 不算）。
+  - store 上读不动、读出错的任务（spec.collect 的 stuck、errors）。
+  - 执行机的问题（领任务、传数据、worker、能去的执行机都跳过了的任务）由 relay.py 报（经 feed.run_all）。
   - 盘：表里 disk 一项（路径、剩多少 GB 提醒、剩多少 GB 紧急）。
   - GPU 使用记录（表里 gpu_log 的机器，monitor/gpu_log.sh）10 分钟没有新记录。
-  - pueue 机器 24 小时内重启过（queue/on_boot.sh 放回了哪些任务）。
-  - 项目挂的提醒（taskq notice，monitor/notice.py）：每条一个问题，撤掉后消失；只列在 taskq problems 里，不推送（11/6）。
-提醒（10/21 起）：每个问题推送一次，用 monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
+  - 24 小时内重启过（queue/on_boot.sh 放回了哪些任务）。
+  - 项目挂的提醒（taskq notice，monitor/notice.py）：每条一个问题，撤掉后消失；只列在 taskq problems 里，不推送。
+提醒：每个问题推送一次，用 monitor/plain.py 的白话（出了什么事、影响什么），同一次检查查到几件并成一条；
   恢复了不推送。22:00–08:00 只即时推送紧急的，其余在 08:00 后的第一次检查时推。检查本身在不在跑，可以看 health.log 的时间。
 推送：monitor/push.py（频道名在 OUTPUTS["topic"] 指的文件，默认 ~/.config/taskq/ntfy_topic）。问题、提醒、日志在 hub 的数据库（taskq problems、taskq events）。
-每次检查后还做这几件事（10/18 起）：
-  - queue/shift.py：按时段开关 pueue 组（policy.py 的 SHIFT）。
-  - queue/feed.py：送任务的唯一入口（10/31），交给 queue/relay.py（领任务、传数据、补 worker、拉回，
-    记在 ~/relay.log；停住等人处理的报成问题）。
-  - queue/advance.py：hub 上按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤）；失败停住的报成问题。
+每次检查后还做这几件事：
+  - queue/advance.py：按每个任务的状态排下一步（拉回 → 每个任务的步骤 → 实验一级的步骤），加进总队列；失败停住的报成问题。
+  - queue/feed.py：送任务的唯一入口，交给 queue/relay.py（派任务、传数据、补 worker、拉回，记在 relay.log；停住等人处理的报成问题）。
 """
 import argparse
 import json
@@ -71,9 +70,9 @@ def load_failed(e, dry=False):
 
 
 try:
-    import experiments as E  # noqa: E402  queue/experiments.py：实验表
     import spec  # noqa: E402  queue/spec.py：任务说明、各机器上的收集
-    import taskq  # noqa: E402  queue/taskq.py：总队列（hub，10/31）
+    import relay_remote as RM  # noqa: E402  queue/relay_remote.py：在 store 上跑 site_ops 的操作（import 时读插件）
+    import taskq  # noqa: E402  queue/taskq.py：总队列（在 hub）
     import plain as PL  # noqa: E402  monitor/plain.py：推送的白话说法
     import common as C  # noqa: E402  queue/common.py
 except Exception as _e:
@@ -85,7 +84,7 @@ else:
 
 
 def stopped(t):
-    """手动停的（pueue kill，或 SIGTERM 让 run_task.sh 退出 143）：只记进登记表，不推送。"""
+    """手动停的（pueue kill，或 SIGTERM 让任务退出 143）：只记进登记表，不推送。"""
     return t.get("result") == "Killed" or t.get("code") == 143
 
 
@@ -114,7 +113,7 @@ def probe_ok(rc, out):
 
 
 def probe_script(m):
-    """pueue 机器上要查的东西（按表里的字段），每行"项|值"。"""
+    """有 pueue 组的机器上要查的东西（按表里的字段），每行"项|值"。"""
     lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"', GPU_PROBE]
     if m["disk"]:
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
@@ -138,22 +137,30 @@ def run_on(m, script, timeout=120):
 def gather(remote=True):
     """各机器的状态（只读）。remote=False：只看本机（不连别的机器）。"""
     s = dict(now=datetime.now(), ok={}, why={}, probe={}, gpus={}, src={}, taskq={})
-    here = [n for n in M.names("pueue") if (remote or M.MACHINES[n]["ssh"] is None) and n not in policy.OFFLINE]
-    for n in set(M.names("pueue")) & set(policy.OFFLINE):
-        s["ok"][n], s["why"][n] = False, f"暂停检查：{policy.OFFLINE[n]}"
-    rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"] + ([] if remote else here), timeout=180)
-    s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in here}
+    hosts = M.pueue_hosts()
+    here = [n for n in hosts if (remote or M.local(n)) and not M.paused(n)]
+    for n in hosts:
+        if M.paused(n):
+            s["ok"][n], s["why"][n] = False, f"暂停着：{M.paused(n)}"
+    if here:  # qs 不带机器名会问全部：只问这一轮要看的
+        rc, out = sh([os.path.join(CORE, "queue", "qs"), "--json"] + here, timeout=180)
+        s["pueue"] = json.loads(out) if rc == 0 else {n: {"error": out} for n in here}
+    else:
+        s["pueue"] = {}
     s["records"] = C.sync_records(s["pueue"], C.load_records())  # 任务记录（queue/common.py），main() 里写回
-    just = os.environ.get("TASKQ_TASK_DONE") or os.environ.get("PHD_TASK_DONE")  # hub 的任务做完后马上调用检查时设上（它的标签；PHD_TASK_DONE 是 11/6 前排的命令里的旧名字，等 hub 的 pueue 里没有这种命令后删）：这个任务这一次算做完（2026-10-24）
+    just = os.environ.get("TASKQ_TASK_DONE")  # hub 核心组的任务做完后马上调用检查时设上（它的标签）：这个任务这一次算做完
     for t in (s["pueue"].get(M.hub()) or {}).get("tasks", []) if just else []:
         if t["label"] == just and t["status"] == "Running":
             t.update(status="Success", result="Success", code=0)
-    # 总队列在 hub（10/31）：收集训练状态要用队列里的任务
+    # 总队列在 hub：收集训练状态要用队列里的任务
     hub = M.hub()
-    s["taskq"][hub] = taskq.local_status()
+    try:
+        s["taskq"][hub] = taskq.local_status()
+    except taskq.DiskError as e:  # store 连不上、上面的代码包还用不了：这一轮不派任务（relay 照样先换包）
+        s["taskq"][hub], s["why"]["taskq"] = None, str(e)
     queue = list((s["taskq"][hub] or {}).get("tasks", []))
     for name in here:
-        m = M.MACHINES[name]
+        m = M.machine(name)
         rc, out = run_on(m, probe_script(m))
         ok = probe_ok(rc, out)
         if ok:
@@ -162,15 +169,13 @@ def gather(remote=True):
             s["gpus"][name] = gpus_of(lines)
         s["ok"][name] = ok
     specs = spec.task_specs(queue)
-    for name in here:  # 各机器上每个任务的训练状态（spec.collect）：有数据目录的
-        m = M.MACHINES[name]
-        if s["ok"][name] and m.get("data"):
-            r = spec.collect(specs, M.expand(m["data"])) if m["ssh"] is None else spec.remote_collect(m["ssh"], specs, m["data"])
-            if r:
-                s["src"][name] = r
-            elif m["ssh"] is not None:  # 收集超时（多半是那边的存储挂住，10/31）：这次检查后面的步骤都当它连不上，不再去连
-                s["ok"][name] = False
-                s["why"][name] = "收集训练状态超时或出错（多半是那边的存储挂住）"
+    st = M.store()  # 每个任务在 store 上的训练状态（spec.collect，在 store 上跑）；执行机上的由 relay 的 status 读
+    s["collect"] = {}  # 收集出错的：{store: 原因}（连得上、代码包用不了、存储挂住都在这里，不当成整台连不上）
+    if (remote or M.local(st)) and s["ok"].get(st, True):
+        try:
+            s["src"][st] = RM.store_op("collect", dict(specs=specs, wait=spec.COLLECT_WAIT), timeout=2 * spec.COLLECT_WAIT + 120)
+        except RuntimeError as e:
+            s["collect"][st] = str(e)[-300:]
     db = NT.open_db(write=False)
     s["notices"] = {n: v["text"] for n, v in NT.notices(db).items()} if db else {}
     return s
@@ -194,26 +199,23 @@ def pueue_seen(s, dry=False):
 
 def revive(s, seen, dry=False):
     """pueued 没响应、机器连得上（开关 AUTO["revive"]）：在那台跑 on_boot.sh --since（上次查到它在的时间）--resume（那时开着的组），
-    启动 pueued、放回被打断的任务、打开原来开着的组（11/6：box 的 pueued 夜里没了，7.5 小时没排任何东西）。
+    启动 pueued、放回被打断的任务、打开原来开着的组。on_boot.sh 用那台上的调度代码（mtab.core：代码包，或仓库的克隆）。
     → (事件, {机器: 恢复后还是不行的原因})。恢复成功的机器这一轮不报 pueued。"""
     if not policy.AUTO.get("revive"):
         return [], {}
     events, still = [], {}
-    for name in M.names("pueue"):
+    for name in M.pueue_hosts():
         d = (s.get("pueue") or {}).get(name)
-        if name in policy.OFFLINE or not s["ok"].get(name) or not (isinstance(d, dict) and "error" in d):
+        if M.paused(name) or not s["ok"].get(name) or not (isinstance(d, dict) and "error" in d):
             continue
-        m, last = M.MACHINES[name], seen.get(name) or {}
+        m, last, core = M.machine(name), seen.get(name) or {}, M.core(name)
+        if core is None:
+            still[name] = "不知道那台的调度代码在哪（机器表里没有 root 也没有 repo），没法自动恢复"
+            continue
         since = int(last["t"]) - 60 if last.get("t") else int(s["now"].timestamp())  # 没有记录：只启动，不放回任务
         args = ["--since", str(since)] + (["--resume", ",".join(last["running"])] if last.get("running") else [])
-        if m["ssh"] is None:
-            script = " ".join(["bash", os.path.join(CORE, "queue", "on_boot.sh")] + args)
-        elif m.get("code"):
-            script = " ".join(["bash", m["code"].rstrip("/") + "/" + cfg.bundle_rel("queue", "on_boot.sh")] + args
-                              + (["--gpu-log"] if m.get("gpu_log") else []))
-        else:
-            still[name] = "表里没有代码目录（code），没法自动恢复"
-            continue
+        script = " ".join(["bash", core + "/queue/on_boot.sh"] + args
+                          + (["--gpu-log"] if m.get("gpu_log") else []))
         if dry:
             events.append(f"{L(name)} 的 pueued 没响应：会自动恢复（{script}）")
             continue
@@ -237,18 +239,6 @@ def L(name):
     return M.MACHINES[name]["label"]
 
 
-def task_info(s, key):
-    """各机器上这个任务：(是否训完, 训完的 epoch 数, 最后一个 epoch 的时间)。"""
-    out = {}
-    for host, data in s["src"].items():
-        f = data["tasks"].get(key)
-        if f:
-            ends = [r["end"] for r in f["runs"] if r["end"]]
-            out[host] = (f["final"], max([r["epochs_done"] for r in f["runs"]] or [0]),
-                         datetime.strptime(max(ends), "%Y-%m-%d %H:%M:%S") if ends else None)
-    return out
-
-
 # ---------------- 检查 ----------------
 def problem(msg, level="normal", kind="state", after=0, data=None):
     """一个问题：msg 是给人看的说明（登记表），data 是结构化的事实（plain.py 据此说白话）。"""
@@ -266,17 +256,11 @@ def check(s):
     def add(pid, msg, level="normal", kind="state", after=0, data=None):
         P[pid] = problem(msg, level, kind, after, data)
 
-    claims = {}  # key → {"机器:组": [描述]}（排队或在训）
-    busy = {}  # key → {机器（同上）}：在训，或段间等待（有进度、下一段在排队）
-
-    def claim(key, name, desc):
-        claims.setdefault(key, {}).setdefault(name, []).append(desc)
-
     for name, ok in s["ok"].items():
-        if not ok and name not in policy.OFFLINE:
+        if not ok and not M.paused(name):
             add(alert_id("down", name), f"{L(name)} 连不上（{(s.get('why') or {}).get(name) or 'ssh ' + str(M.MACHINES[name]['ssh'])}）",
                 after=30)
-    for name, d in (s.get("src") or {}).items():  # 存储挂住、读不动的任务（spec.collect 的 stuck，11/1）
+    for name, d in (s.get("src") or {}).items():  # 存储挂住、读不动的任务（spec.collect 的 stuck）
         if d.get("stuck"):
             add(alert_id("unread", name), f"{L(name)} 上 {len(d['stuck'])} 个任务的文件读不动（多半是存储挂住），先不分、不交还："
                 f"{'、'.join(d['stuck'][:5])}{' …' if len(d['stuck']) > 5 else ''}", after=60, data=dict(n=len(d["stuck"]), keys=d["stuck"]))
@@ -284,19 +268,17 @@ def check(s):
             er = sorted(d["errors"].items())
             add(alert_id("readerr", name), f"{L(name)} 上 {len(er)} 个任务读状态出错，先不分、不交还："
                 f"{'；'.join(f'{k}（{v}）' for k, v in er[:3])}{' …' if len(er) > 3 else ''}", after=60, data=dict(n=len(er)))
-    # --- 总队列（hub，10/31）---
+    # --- 总队列（在 hub）---
     hub = M.hub()
     ctq = s.get("taskq", {}).get(hub)
+    for name, why in (s.get("collect") or {}).items():
+        add(alert_id("collect", name), f"在 {L(name)} 上收集训练状态出错：{why}", after=30)
     if hub in s.get("taskq", {}) and ctq is None:
-        add(alert_id("taskq", hub), f"{L(hub)} 读不到总队列（{TQS}/）")
+        add(alert_id("taskq", hub), f"{L(hub)} 读不到总队列（{TQS}/）{('：' + s['why']['taskq']) if s.get('why', {}).get('taskq') else ''}")
     elif ctq and not ctq.get("enabled"):
         add(alert_id("tqoff", hub), f"{L(hub)} 的总队列关着（{TQS}/{proto.QUEUE['enabled']} 不在），不会往执行机送任务", after=60)
-    elif ctq:
-        for t in ctq["tasks"]:
-            if t["state"] == proto.S_BLOCKED and not t.get("assigned") and not proto.is_smoke(t["key"]):
-                add(alert_id("tqblocked", t["key"]), f"总队列任务 {t['key']} {t['note']}，不会开始", data=dict(key=t["key"]))
     # --- pueue ---
-    for name in M.names("pueue"):
+    for name in M.pueue_hosts():
         if not s["ok"].get(name):
             continue
         d = s["pueue"].get(name) or {"error": "没有结果"}
@@ -309,21 +291,8 @@ def check(s):
             if r:
                 newer[r["step"], r["key"]] = max(i, newer.get((r["step"], r["key"]), i))
         for t in d["tasks"]:
-            r = ident[t["id"]]
-            kind, key = (r["step"], r["key"]) if r else (None, None)
             tname = t["label"] or f"#{t['id']}"
             st = t["status"]
-            if kind == "train":
-                if st in LIVE:
-                    claim(key, f"{name}:{t['group']}", f"任务 {t['id']} {tname}（{st}）")
-                if st == "Running":
-                    busy.setdefault(key, set()).add(f"{name}:{t['group']}")
-                    info = task_info(s, key).get(name)
-                    start = C.local_time(t["start"])
-                    if start and now - start > timedelta(minutes=60) and \
-                            (not info or not info[2] or now - max(info[2], start) > timedelta(minutes=90)):
-                        add(alert_id("stuck", name, t["id"]), f"{L(name)} 任务 {t['id']} {tname}：90 分钟没有新 epoch（在等卡，或训练卡住）",
-                            data=dict(key=key, label=tname))
             if st in LIVE or st == "Success":
                 continue
             if stopped(t) and tname.startswith(proto.WORKER_LABEL):  # 时段结束、让卡时调度停的 worker；worker 出错由 relay 报 site:<机器>:worker
@@ -336,16 +305,9 @@ def check(s):
             add(alert_id("pueue", name, t["id"], str(t["end"])), f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if stopped(t) else "normal", kind="event", data=dict(label=tname, status=st))
 
-    # --- 同一个任务两处 ---
-    for key in sorted(k for k, v in claims.items() if len(v) >= 2):
-        both = len(busy.get(key, ())) >= 2
-        add(alert_id("dup", key), f"同一个任务在两处：{key}，" + "；".join(f"{L(n.split(':')[0])}{' ' + n.split(':')[1] if ':' in n else ''} {'、'.join(v)}" for n, v in claims[key].items())
-            + ("（两边都在训或有进度，同步时会互相覆盖存档）" if both else "（还没同时开训，取消一边前要确认作业号）"),
-            level="urgent" if both else "normal", data=dict(key=key, both=both, where=sorted(claims[key])))
-
-    # --- 盘、GPU 记录、代码同步、重启 ---
+    # --- 盘、GPU 记录、重启 ---
     for name, pr in s["probe"].items():
-        m = M.MACHINES[name]
+        m = M.machine(name)
         if m["disk"] and pr.get("DISK", "").strip().isdigit():
             free, warn, urgent = int(pr["DISK"]) / 1e9, m["disk"][1], m["disk"][2]
             if free < warn:
@@ -375,14 +337,14 @@ def check(s):
 
 # ---------------- 推送和状态 ----------------
 def drop_acked(P, db, dry=False):
-    """Acked "something happened" problems (taskq notice ack) are left out; acks of problems no longer raised are dropped."""
+    """确认过的"发生过的事"（taskq notice ack）不列出；已经不再报的问题的确认记录删掉。"""
     d = NT.acked(db) if db else {}
     if d and not dry and NT.D.writable(db):
         NT.prune_acks(db, set(P))
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
-QUIET = ("notice", "undeclared")  # 只列在 taskq problems 里、不推送的问题种类（11/6：手机只收故障，到期的提醒开工时看；11/12 加写到声明以外）
+QUIET = ("notice",)  # 只列在 taskq problems 里、不推送的问题种类（手机只收故障，到期的提醒开工时看）
 
 
 def night(now):
@@ -430,52 +392,6 @@ def update(P, now, db, dry=False):
     return [p for _, p in msgs], sent_ok
 
 
-def undeclared_writes(days=1):
-    """台账里最近 days 天 taskq run 记下的"写到声明的产出以外" → {问题编号: 说明}（过了 days 天自动消失）。"""
-    import json as _j
-    import time as _t
-    from flow import ledger as LG
-    out = {}
-    for inst, path, detail in LG.connect().execute("SELECT inst, path, detail FROM event WHERE kind='undeclared' AND t>?",
-                                                   (_t.time() - days * 86400,)):
-        n = (_j.loads(detail or "{}") or {}).get("n", 1)
-        out[alert_id("undeclared", inst)] = f"{inst} 写到了声明的产出以外：{path}{f' 等 {n} 个' if n > 1 else ''}（taskq who 看归谁）"
-    return out
-
-
-def publishes(dry=False):
-    """接着做中途断了的发布（queue/flow/publish.py 的 journal），报被冲突挡住的 → {问题编号: 说明}。"""
-    import os as _os
-    from flow import ledger as LG
-    from flow import publish as PB
-    db = LG.connect()
-    if not dry and _os.path.isdir(PB.journal_dir()) and _os.listdir(PB.journal_dir()):
-        from flow import cli as FC
-        PB.resume(FC.flow_for_ledger()[0], db)
-    return {alert_id("publish", k): f"{k} 的发布被挡住：{len(v.get('conflicts') or [])} 个文件不归它或被改过（taskq publish {k} 看）"
-            for k, v in PB.blocked(db).items()}
-
-
-def ledger_shadow(s):
-    """台账的影子对比（queue/flow/ledger.py）：和 advance.py 这一轮的判断比，结果一行写进 ~/ledger.log。"""
-    import advance
-    from flow.compile import compile_legacy
-    from flow.graph import Graph
-    from flow import ledger as LG
-    root = advance.bt()
-    flow = compile_legacy(queue_tasks=((s.get("taskq") or {}).get(M.hub()) or {}).get("tasks", []), python=advance.python())
-    db = LG.connect()
-    try:
-        n = LG.shadow(flow, Graph(flow), root, db, s=s, seen=advance.SEEN, hub=M.hub(), identify=C.identify)
-    finally:
-        db.close()
-    line = (f"一致 {n['agree']}、新做完 {n['new']}、重跑 {n['rerun']}、改过 {n['changed']}、"
-            f"做完又不算了 {n['regressed']}、这轮没查 {n['skipped']}；新出的说不清的 {len(n['unexplained'])}（{n['seconds']} 秒）")
-    import events
-    events.add("ledger", line, kind="shadow", data={k: v for k, v in n.items() if k != "unexplained"})
-    return n
-
-
 def progress_snapshot(s, db):
     """Each task's state, progress and where its best copy is → the progress table (only what changed)."""
     import events
@@ -486,14 +402,14 @@ def progress_snapshot(s, db):
 
 
 def from_step(v):
-    """shift / feed（relay）/ advance 报的卡住：说明（str），或 dict(msg, data) → 问题。"""
+    """feed（relay）/ advance 报的卡住：说明（str），或 dict(msg, data) → 问题。"""
     if isinstance(v, dict):
-        return problem(v["msg"], level=v.get("level", "normal"), data=v.get("data"))  # level="info"：只是在等，记下不推送
+        return problem(v["msg"], data=v.get("data"), after=v.get("after", 0))
     return problem(v)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="健康检查一轮：查各机器、推送问题、按时段开关、送任务、排下一步")
+    ap = argparse.ArgumentParser(description="健康检查一轮：查各机器、推送问题、排下一步、送任务")
     ap.add_argument("-n", "--dry-run", action="store_true", help="只打印这次查到的问题，不推送、不改任何文件")
     ap.add_argument("--test", action="store_true", help="推送一条测试消息")
     a = ap.parse_args(argv)
@@ -507,7 +423,7 @@ def main(argv=None):
         try:
             events.flush(db)
         except Exception as e:  # noqa: BLE001
-            print(f"event spool not imported: {e}", file=sys.stderr)
+            print(f"事件暂存没导进数据库：{e}", file=sys.stderr)
     if a.test:
         push("测试：健康检查的推送能收到", tags="tada")
         print("已推送测试消息")
@@ -522,7 +438,7 @@ def main(argv=None):
         revived, still = [], {}
         P[alert_id("revive", "error")] = problem(f"pueued 的自动恢复出错：{type(e).__name__}: {e}"[:300])
     for line in revived:
-        name = next((n for n in M.names("pueue") if line.startswith(L(n) + " ")), None)
+        name = next((n for n in M.pueue_hosts() if line.startswith(L(n) + " ")), None)
         if name and "已自动恢复" in line:
             P.pop(alert_id("pueued", name), None)
     for name, why in still.items():
@@ -530,59 +446,42 @@ def main(argv=None):
         if pid in P:
             P[pid] = dict(P[pid], msg=f"{P[pid]['msg']}；{why}")
     # 这几步出错（包括 import 出错）不能让健康检查本身停掉（报警、登记表都靠它）：出错时报出来，其余照常
-    try:
-        import shift  # queue/shift.py：按时段开关 pueue 组（policy.py 的 SHIFT）
-        shift_msgs = shift.run(s, dry=a.dry_run)
+    events, stuck = list(revived), {}
+    try:  # 先排训完以后的步骤，当轮排出来的当轮就派出去
+        import advance  # queue/advance.py：按实验表推下一步，加进总队列
+        done, stuck2 = advance.run(s, dry=a.dry_run)
+        if done and not a.dry_run:
+            try:
+                s["taskq"][M.hub()] = taskq.local_status()
+            except taskq.DiskError as e:
+                s["taskq"][M.hub()], s["why"]["taskq"] = None, str(e)
     except Exception as e:  # noqa: BLE001
-        shift_msgs, shift_err = [], f"queue/shift.py 出错：{type(e).__name__}: {e}"[:300]
-    else:
-        shift_err = None
-    events, stuck = revived + shift_msgs, {}
-    if shift_err:
-        stuck["shift:error"] = shift_err
+        done, stuck2 = [], {"advance:error": f"queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
     try:
-        import feed  # queue/feed.py：送任务的唯一入口，转给 relay.py（10/31）
+        import feed  # queue/feed.py：送任务的唯一入口，转给 relay.py
         ev, st = feed.run_all(s, dry=a.dry_run)
         events.extend(ev)
         stuck.update(st)
     except Exception as e:  # noqa: BLE001
         stuck["feed:error"] = f"queue/feed.py 出错：{type(e).__name__}: {e}"[:300]
-    try:
-        import advance  # queue/advance.py：hub 上按状态排下一步
-        done, stuck2 = advance.run(s, dry=a.dry_run)
-    except Exception as e:  # noqa: BLE001
-        done, stuck2 = [], {"advance:error": f"queue/advance.py 出错：{type(e).__name__}: {e}"[:300]}
-    if policy.AUTO.get("ledger") and not a.dry_run:
-        try:
-            ledger_shadow(s)
-        except Exception as e:  # noqa: BLE001  影子对比出错不影响别的
-            stuck2[alert_id("ledger", "error")] = f"台账的影子对比出错：{type(e).__name__}: {e}"[:300]
-    try:  # taskq run 包着的步骤卡住、写到声明以外（queue/flow/stall.py、台账的事件）
-        from flow import stall
-        stuck2.update(stall.check())
-        if policy.AUTO.get("ledger"):
-            stuck2.update(undeclared_writes())
-            stuck2.update(publishes(a.dry_run))
-    except Exception as e:  # noqa: BLE001
-        stuck2[alert_id("stall", "error")] = f"卡住检测出错：{type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
     if not a.dry_run and (db is None or not NT.D.writable(db)):
-        P[alert_id("db", M.hub())] = problem(f"hub database {NT.D.path()} cannot be written (network filesystem, or made by a newer "
-                                             "taskq): problems are pushed again every check", level="urgent")
+        P[alert_id("db", M.hub())] = problem(f"hub 的数据库 {NT.D.path()} 写不了（在网络盘上，或是新版本的 "
+                                             "taskq 建的）：每次检查都会把问题再推一遍", level="urgent")
     P = drop_acked(P, db, dry=a.dry_run)
     update(P, s["now"], db, dry=a.dry_run)
     if not a.dry_run and db is not None and NT.D.writable(db):
         try:
             progress_snapshot(s, db)
         except Exception as e:  # noqa: BLE001
-            print(f"progress snapshot failed: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"进度快照没记上：{type(e).__name__}: {e}", file=sys.stderr)
     if a.dry_run:
         for pid, p in sorted(P.items()):
             wait = f"/持续 {p['after']} 分钟才报" if p["after"] else ""
             print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\n送任务、补作业、按时段开关：" + "；".join(events))
-        print(f"{M.hub()} 按状态推进：" + ("；".join(done) or "没有要排的（影子模式时看 ~/advance.log）"))
+        print("\n送任务、补作业：" + "；".join(events))
+        print(f"{M.hub()} 按状态推进：" + ("；".join(done) or "没有要排的"))
     return 0
 
 

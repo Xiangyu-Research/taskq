@@ -9,6 +9,7 @@ source "$HERE/testdata/fixture.sh"
 ENV_SCRIPT=$REPO/$(python3 "$HERE/cfg.py" get env_script)
 T=$(mktemp -d)
 trap 'stop_pads; rm -rf "${T:?}"' EXIT
+SWITCH=$(TASKQ_ROOT=$T/root python3 "$HERE/cfg.py" state gpu_pad/DISABLED)  # 执行机的总开关：根目录的 queue/ 下
 fails=0
 check() {
     if "${@:2}"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi
@@ -40,7 +41,7 @@ source_it() {
     local path=$1; shift
     (
         export PATH=$path TASKQ_DATA=$T/bt TASKQ_GPU_PAD_SCRIPT=$T/fake_pad.py \
-               TASKQ_GPU_PAD_SWITCH=$T/switch TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
+               TASKQ_ROOT=$T/root TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
                FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed \
                TASKQ_GPU_PAD_FLOOR_MIB=1 TASKQ_GPU_PAD_TARGET_MIB=2 TASKQ_GPU_PAD_HIGH_MIB=3
         local kv
@@ -51,7 +52,7 @@ source_it() {
 source_it_twice() {
     (
         export PATH=$T/bin TASKQ_DATA=$T/bt TASKQ_GPU_PAD_SCRIPT=$T/fake_pad.py \
-               TASKQ_GPU_PAD_SWITCH=$T/switch TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
+               TASKQ_ROOT=$T/root TASKQ_GPU_PAD_RETRY_DELAY=0.1 \
                FAKE_PAD_ARGS=$T/args FAKE_PAD_FAILED=$T/failed \
                SLURM_JOB_ID=2001 CUDA_VISIBLE_DEVICES=0 \
                TASKQ_GPU_PAD_FLOOR_MIB=1 TASKQ_GPU_PAD_TARGET_MIB=2 TASKQ_GPU_PAD_HIGH_MIB=3
@@ -67,7 +68,7 @@ stop_pads() {
 }
 lines() { if [[ -f $T/args ]]; then wc -l < "$T/args"; else echo 0; fi; }
 waitfor() { local i; for (( i = 0; i < $1 * 10; i++ )); do eval "$2" && return 0; sleep 0.1; done; return 1; }  # 秒数 条件
-reset() { stop_pads; rm -f "$T/args" "$T/failed" "$T/switch"; }
+reset() { stop_pads; rm -f "$T/args" "$T/failed" "$SWITCH"; }
 
 reset
 source_it "$T/bin" SLURM_JOB_ID=1001 CUDA_VISIBLE_DEVICES=0
@@ -95,7 +96,7 @@ reset; source_it "$T/bin" SLURM_JOB_ID=1005 CUDA_VISIBLE_DEVICES=0 TASKQ_TEST_FA
 sleep 0.3; check "测试环境 TASKQ_TEST_FAKEBIN：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/bin" SLURM_JOB_ID=1006 CUDA_VISIBLE_DEVICES=0 QUEUE_TEST_DIR=$T
 sleep 0.3; check "测试环境 QUEUE_TEST_DIR：不启动" test "$(lines)" -eq 0
-printf 'MACHINES = {"m": dict(label="m", hostname=r".*", ssh=None, scheduler="slurm", gpu_pad=(1, 2, 3))}\nSITES = {}\nRELAY = {}\n' > "$T/machines_pad.py"
+printf 'MACHINES = {"m": dict(label="m", hostname=r".*", ssh=None, scheduler="slurm", gpu_pad=(1, 2, 3))}\n' > "$T/machines_pad.py"
 mkdir -p "$T/conf_pad" "$T/conf_nopad"; mv "$T/machines_pad.py" "$T/conf_pad/machines.py"
 sed 's/, gpu_pad=(1, 2, 3)//' "$T/conf_pad/machines.py" > "$T/conf_nopad/machines.py"
 reset; source_it "$T/bin" SLURM_JOB_ID=1014 CUDA_VISIBLE_DEVICES=0 TASKQ_GPU_PAD_FLOOR_MIB= TASKQ_GPU_PAD_TARGET_MIB= TASKQ_GPU_PAD_HIGH_MIB= TASKQ_CONFIG=$T/conf_nopad
@@ -105,7 +106,7 @@ waitfor 20 '(( $(lines) >= 1 ))'; sleep 0.3
 check "阈值取机器表的 gpu_pad：启动" test "$(lines)" -eq 1
 reset; source_it "$T/bin" SLURM_JOB_ID=1007 CUDA_VISIBLE_DEVICES=0 TASKQ_GPU_PAD=0
 sleep 0.3; check "TASKQ_GPU_PAD=0：不启动" test "$(lines)" -eq 0
-reset; touch "$T/switch"
+reset; mkdir -p "$(dirname "$SWITCH")"; touch "$SWITCH"
 source_it "$T/bin" SLURM_JOB_ID=1008 CUDA_VISIBLE_DEVICES=0
 sleep 0.3; check "DISABLED 开关：不启动" test "$(lines)" -eq 0
 reset; source_it "$T/nobin" SLURM_JOB_ID=1009 CUDA_VISIBLE_DEVICES=0

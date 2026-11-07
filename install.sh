@@ -1,5 +1,5 @@
 #!/bin/bash
-# 装 taskq（2026-11-04）：克隆到 ${TASKQ_HOME:-~/.local/share/taskq}，~/.local/bin/taskq 链到它的 bin/taskq。重复运行没关系：
+# 装 taskq：克隆到 ${TASKQ_HOME:-~/.local/share/taskq}，~/.local/bin/taskq 链到它的 bin/taskq。重复运行没关系：
 # 已经装了就更新（taskq self update，拉 origin/main）。
 #   bash install.sh
 #   curl -fsSL https://raw.githubusercontent.com/Xiangyu-Research/taskq/main/install.sh | bash

@@ -1,56 +1,39 @@
-"""时段（配置的 policy.SHIFT，queue/shift.py）：执行机按时段训练时，时段外不领；时段结束时停下手上的、交还、退出 0。
-执行机的名字看 TASKQ_SITE，没设时按 WORKER_ID 在机器表里反查。"""
-import datetime as dt
+"""时段（机器表里 worker 的 hours）：时段外不领；时段结束时停下手上的、交还、退出 0（同一台的别的 worker 从存档接着训）。
+本机看 TASKQ_MACHINE，自己是哪个 worker 看 WORKER_ID。"""
 import os
 import time
 
 
-def _site(w):
-    s = os.environ.get("TASKQ_SITE")
-    if s:
-        return s
-    try:
-        M = __import__("cfg").mtab()
-        for name in M.SITES:
-            try:
-                x = M.worker_of(name, w.device)
-            except (KeyError, TypeError):
-                continue
-            if isinstance(x, dict) and x.get("id") == w.W:
-                return name
-    except Exception:  # noqa: BLE001
-        pass
-    return None
+def _me(w):
+    """→ (机器名, 机器表里这个 worker) 或 (None, None)。"""
+    M = __import__("cfg").mtab()
+    name = M.whoami()
+    x = M.worker(name, w.W) if name else None
+    return (name, x) if x else (None, None)
 
 
 def _now():
     f = os.environ.get("TASKQ_TEST_NOW")
-    t = float(open(f).read().strip()) if f and os.path.isfile(f) else time.time()
-    return dt.datetime.fromtimestamp(t, _shift().TZ)
-
-
-def _shift():
-    import shift
-    return shift
+    return float(open(f).read().strip()) if f and os.path.isfile(f) else time.time()
 
 
 def active(w):
-    w.site = _site(w)
-    if not w.site:
-        return False
     try:
-        return _shift().rule(w.site) is not None
+        w.site, w.wconf = _me(w)
     except Exception as e:  # noqa: BLE001
-        w.say(f"!! 读不了时段（{type(e).__name__}: {e}），读到之前不领")
+        w.say(f"!! 读不了机器表（{type(e).__name__}: {e}），读到之前不领")
+        w.site, w.wconf = None, None
         return True
+    return bool(w.wconf and w.wconf.get("hours"))
 
 
 def inside(w):
     """→ (在不在时段里：True / False / 读不了是 None, "开始–结束")。"""
+    if not w.site:
+        return None, "读不了机器表"
     try:
-        sh, now = _shift(), _now()
-        r = sh.rule(w.site, now)
-        return bool(r and sh.dated(now, *r)[0]), f"{r[0]}–{r[1]}" if r else ""
+        M = __import__("cfg").mtab()
+        return M.in_hours(w.wconf["hours"], M.now_at(w.site, _now()))
     except Exception as e:  # noqa: BLE001
         return None, f"读不了时段：{type(e).__name__}: {e}"
 

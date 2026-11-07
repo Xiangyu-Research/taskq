@@ -46,11 +46,11 @@ FAKE = os.path.join(T, "fake_ssh")
 with open(FAKE, "w") as f:
     f.write('#!/bin/bash\nshift\n[ -n "$TUNNEL_TEST_SSH_SLEEP" ] && sleep "$TUNNEL_TEST_SSH_SLEEP"\ncd "$HOME" && exec bash -c "$*"\n')
 os.chmod(FAKE, 0o755)
-HOST, HOST2 = "plainhost", "plainhost2"  # 不是执行机的 Slurm 机器（子进程里由 sitecustomize 加进机器表）
+HOST, HOST2 = "plainhost", "plainhost2"  # 没有根目录的机器（备份机那样；子进程里由 sitecustomize 加进机器表）
 with open(os.path.join(T, "sitecustomize.py"), "w") as f:
     f.write(f"import sys\nsys.path.insert(0, {fixture.CONFIG!r})\nimport machines\n"
             f"for h in ({HOST!r}, {HOST2!r}):\n"
-            "    machines.MACHINES[h] = dict(label='plain', ssh=h, scheduler='slurm', transfer_job='-p x', tunnel=('push', 'pull'))\n")
+            "    machines.MACHINES[h] = dict(label='plain', hostname=h, ssh=h, transfer_job='-p x', tunnel=('push', 'pull'))\n")
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
@@ -62,7 +62,7 @@ FAILS = []
 
 
 def ok(name, cond):
-    print(("ok   " if cond else "FAIL ") + name)
+    print(("通过：" if cond else "没通过：") + name)
     if not cond:
         FAILS.append(name)
 
@@ -226,10 +226,10 @@ ok("状态：查完 done 之后、查进程之前刚写完 done 退出 → done�
 
 sys.path.insert(0, HERE)
 import tunnel  # noqa: E402
-ok("执行机按名字查（site-pueue、site-pueue2 的 ssh 相同）：给 site 时拿到那一台；不给时按 ssh 找第一台；不是执行机 → None",
-   tunnel.relay_of("fake-pueue-host", site="site-pueue2") is tunnel.machines().RELAY["site-pueue2"]
-   and tunnel.relay_of("fake-pueue-host", site="site-pueue") is tunnel.machines().RELAY["site-pueue"]
-   and tunnel.relay_of("fake-pueue-host") is not None and tunnel.relay_of(HOST) is None)
+ok("机器按名字查（site-slurm、site-slurm2 主机名相同）：给 site 时拿到那一台；不给时按 ssh 名字找；机器表里没有 → {}",
+   tunnel.entry("fake-slurm-login", site="site-slurm2") == tunnel.machines().machine("site-slurm2")
+   and tunnel.entry("fake-pueue-host") == tunnel.machines().machine("site-pueue")
+   and tunnel.entry("no-such-host") == {})
 
 # 不同机器同时传、同一台排队、服务挂了照常（假的 ssh 每条命令慢 0.5 秒，一次传输要几秒）
 SLOW = dict(ENV, TUNNEL_TEST_SSH_SLEEP="0.5")
@@ -267,15 +267,6 @@ ps = [start("push", HOST, src, f"st/conc_{h}", lst) for h in (HOST, HOST2)]
 (s1, e1), (s2, e2) = span(o1), span(o2)
 ok("同一台机器两次传输：都完成、一致", r1 == 0 and r2 == 0 and all(same(src, d, FILES) for d in cdst.values()))
 ok("同一台机器两次传输：排队，一个结束了另一个才开始", (s2 >= e1 or s1 >= e2) and "plainhost 的另一个隧道传输在跑，等它结束" in o1 + o2)
-
-legacy = open(ENV["TUNNEL_LOCK"], "a")
-tunnel.fcntl.flock(legacy, tunnel.fcntl.LOCK_EX)  # 旧版本的传输拿着全局独占锁
-p = start("push", HOST2, src, "st/legacy", lst, env=ENV)
-time.sleep(2)
-waiting = p.poll() is None and not os.path.exists(os.path.join(HOME, "st/legacy"))
-legacy.close()
-r, o = finish(p)
-ok("旧版本的传输拿着全局锁时等它，放开后照常", waiting and r == 0 and "旧版本的隧道传输在跑，等它结束" in o and same(src, os.path.join(HOME, "st/legacy"), FILES))
 
 shutil.rmtree(dst)
 stale = os.path.join(SRV, "Z" * 32 + ".json")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cfg.py 的测试（2026-11-02）：TASKQ_CONFIG / TASKQ_PLUGINS / TASKQ_STATE 没设、空、不存在、相对路径；state()、outputs()、env() 和旧名、
+"""cfg.py 的测试：TASKQ_CONFIG / TASKQ_PLUGINS / TASKQ_STATE / TASKQ_ROOT 没设、空、不存在、相对路径；state()、data_dir()、outputs()、env()、
 cfg.py get / state / log；插件合并（extend）的重名。临时文件，不连机器。
     python3 queue/test_cfg.py
 """
@@ -11,6 +11,7 @@ import textwrap
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
+import schema  # noqa: E402
 QR = _cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "testdata"))
@@ -74,9 +75,9 @@ def plugin_error():
 
 
 setenv(TASKQ_PLUGINS=os.path.join(T, "nonexistent"))
-ok("TASKQ_PLUGINS 不存在的文件夹：报错（11/5）", "不存在" in (plugin_error() or ""))
+ok("TASKQ_PLUGINS 不存在的文件夹：报错", "不存在" in (plugin_error() or ""))
 setenv(TASKQ_PLUGINS="rel/p3")
-ok("TASKQ_PLUGINS 相对路径：报错（11/5）", "绝对路径" in (plugin_error() or ""))
+ok("TASKQ_PLUGINS 相对路径：报错", "绝对路径" in (plugin_error() or ""))
 os.makedirs(os.path.join(T, "noplug"))
 setenv(TASKQ_PLUGINS=os.path.join(T, "noplug"))
 ok("TASKQ_PLUGINS 空文件夹：没有插件，不报错", cfg.plugins("recipes") == [])
@@ -110,11 +111,26 @@ ok("TASKQ_STATE 空 → 同没设", cfg.state("taskq") == os.path.join(HOME, ".l
 setenv(TASKQ_STATE=os.path.join(T, "st") + "/")
 ok("TASKQ_STATE 设了：都在它下面（末尾 / 去掉）",
    cfg.state("taskq") == os.path.join(T, "st/taskq") and cfg.state("gpu_pad/DISABLED") == os.path.join(T, "st/gpu_pad/DISABLED"))
-ok("TASKQ_STATE 设了：不带名字 → 它本身", cfg.state() == os.path.join(T, "st"))
+ok("TASKQ_STATE 设了：不带名字 → 它本身，末尾带 /", cfg.state() == os.path.join(T, "st") + "/")
 setenv(TASKQ_STATE="~/stx")
 ok("TASKQ_STATE 的 ~：expand 时展开，不 expand 时留着",
    cfg.state("taskq") == os.path.join(HOME, "stx/taskq") and cfg.state("taskq", expand=False) == "~/stx/taskq")
+setenv(TASKQ_STATE=None, TASKQ_ROOT="~/rt/")
+ok("TASKQ_ROOT 设了（执行机上的进程）：taskq → 根目录的 queue，gpu_pad/DISABLED → queue 下的开关",
+   cfg.state("taskq", "claims") == os.path.join(HOME, "rt/queue/claims")
+   and cfg.state("gpu_pad/DISABLED") == os.path.join(HOME, "rt/queue/gpu_pad_DISABLED"))
+ok("TASKQ_ROOT 设了：别的名字在根目录的 state/ 下，taskqx 不算 taskq 下",
+   cfg.state("tasks.json") == os.path.join(HOME, "rt/state/tasks.json") and cfg.state("taskqx") == os.path.join(HOME, "rt/state/taskqx"))
+setenv(TASKQ_STATE=os.path.join(T, "st"))
+ok("TASKQ_STATE 比 TASKQ_ROOT 优先", cfg.state("taskq") == os.path.join(T, "st/taskq"))
 setenv(TASKQ_STATE=None)
+
+# data_dir()
+setenv(TASKQ_DATA="~/dd")
+ok("data_dir：TASKQ_DATA 优先，~ 展开", cfg.data_dir() == os.path.join(HOME, "dd"))
+setenv(TASKQ_DATA=None)
+ok("data_dir：TASKQ_ROOT 设了 → 根目录下的 data", cfg.data_dir() == os.path.join(HOME, "rt/data"))
+setenv(TASKQ_ROOT=None)
 
 # env()
 setenv(TASKQ_DATA="/new")
@@ -126,24 +142,24 @@ ok("env：没设 → 默认值", cfg.env("TASKQ_DATA", "d") == "d" and cfg.env("
 
 
 # outputs()：import policy 会缓存，每种情况在单独的进程里跑
-def outputs_in(config, key, default="DEF"):
-    code = f"import sys; sys.path.insert(0, {HERE!r}); import cfg; print(repr(cfg.outputs({key!r}, {default!r})))"
+def outputs_in(config, key):
+    code = f"import sys; sys.path.insert(0, {HERE!r}); import cfg; print(repr(cfg.outputs({key!r})))"
     env = dict(os.environ, TASKQ_CONFIG=config)
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else "ERR " + r.stderr
 
 
 ok("outputs：测试配置的 name", outputs_in(fixture.CONFIG, "name") == "'Demo'")
-ok("outputs：没有的键 → 默认值", outputs_in(fixture.CONFIG, "no_such_key") == "'DEF'")
+ok("outputs：schema 里没有的键 → 报错（说有哪些）", "ERR" in (o := outputs_in(fixture.CONFIG, "no_such_key")) and "no_such_key" in o and "state" in o)
 c1 = os.path.join(T, "c_noout")
 write(os.path.join(c1, "policy.py"), "AUTO = {}\n")
-ok("outputs：policy.py 里没有 OUTPUTS → 默认值", outputs_in(c1, "name") == "'DEF'")
+ok("outputs：policy.py 里没有 OUTPUTS → schema 的默认值", outputs_in(c1, "name") == repr(schema.OUTPUT_FIELDS["name"][1]))
 os.makedirs(os.path.join(T, "c_empty"))
-ok("outputs：配置文件夹里没有 policy.py → 默认值", outputs_in(os.path.join(T, "c_empty"), "name") == "'DEF'")
-ok("outputs：写明的配置文件夹不在 → 报错（11/5）", "不存在" in outputs_in(os.path.join(T, "c_missing"), "name"))
+ok("outputs：配置文件夹里没有 policy.py → schema 的默认值", outputs_in(os.path.join(T, "c_empty"), "name") == repr(schema.OUTPUT_FIELDS["name"][1]))
+ok("outputs：写明的配置文件夹不在 → 报错", "不存在" in outputs_in(os.path.join(T, "c_missing"), "name"))
 c2 = os.path.join(T, "c_badimp")
 write(os.path.join(c2, "policy.py"), "import no_such_module_x\nOUTPUTS = {}\n")
-ok("outputs：policy.py 里 import 失败 → 报错，不用默认值（11/5）", "no_such_module_x" in outputs_in(c2, "name"))
+ok("outputs：policy.py 里 import 失败 → 报错，不用默认值", "no_such_module_x" in outputs_in(c2, "name"))
 
 
 def cfg_get(config, *args):
@@ -156,18 +172,18 @@ ok("cfg.py get：字符串原样", r.returncode == 0 and r.stdout == "Demo\n")
 r = cfg_get(fixture.CONFIG, "get", "code_dirs")
 ok("cfg.py get：元组用空格连起来", r.returncode == 0 and r.stdout == f"{QR} {QR}/testdata/code\n")
 r = cfg_get(fixture.CONFIG, "get", "no_such_key")
-ok("cfg.py get：没有的键 → 空行，退出码 0", r.returncode == 0 and r.stdout == "\n")
+ok("cfg.py get：schema 里没有的键 → 报错，退出码非 0", r.returncode != 0 and "no_such_key" in r.stderr)
 r = cfg_get(c1, "get", "name")
-ok("cfg.py get：没有 OUTPUTS → 空行", r.returncode == 0 and r.stdout == "\n")
+ok("cfg.py get：没有 OUTPUTS → schema 的默认值", r.returncode == 0 and r.stdout == schema.OUTPUT_FIELDS["name"][1] + "\n")
 r = cfg_get(fixture.CONFIG, "get")
 r2 = cfg_get(fixture.CONFIG, "set", "name")
 ok("cfg.py：参数不对 → 打印用法、退出码非 0", r.returncode != 0 and r2.returncode != 0 and "cfg.py get" in r.stderr)
 
-# OUTPUTS["state"]、OUTPUTS["logs"]（11/4）：每种情况单独的进程
+# OUTPUTS["state"]、OUTPUTS["logs"]：每种情况单独的进程
 cs = os.path.join(T, "c_state")
 write(os.path.join(cs, "policy.py"), 'OUTPUTS = dict(state="~/st_o", logs="~/lg")\n')
 r = cfg_get(cs, "state", "taskq")
-ok("cfg.py state：OUTPUTS[\"state\"] 代替默认（STATE_PLACES 也不用）", r.returncode == 0 and r.stdout == os.path.join(HOME, "st_o/taskq") + "\n")
+ok("cfg.py state：OUTPUTS[\"state\"] 代替默认", r.returncode == 0 and r.stdout == os.path.join(HOME, "st_o/taskq") + "\n")
 r = cfg_get(cs, "state")
 ok("cfg.py state：不带名字 → 文件夹本身，末尾带 /", r.returncode == 0 and r.stdout == os.path.join(HOME, "st_o") + "/\n")
 r = subprocess.run([sys.executable, os.path.join(HERE, "cfg.py"), "state", "taskq"], capture_output=True, text=True,
@@ -182,8 +198,8 @@ ok("cfg.py log：没有 OUTPUTS[\"logs\"] → ~/<名字>.log", r.stdout == os.pa
 r = subprocess.run([sys.executable, os.path.join(HERE, "cfg.py"), "log", "feed"], capture_output=True, text=True,
                    env=dict(os.environ, TASKQ_CONFIG=cs, FEED_LOG="~/x.log"))
 ok("cfg.py log：<名字大写>_LOG 优先", r.stdout == os.path.join(HOME, "x.log") + "\n")
-write(os.path.join(T, "c_cron", "policy.py"), 'OUTPUTS = dict(cron=(("5 * * * *", "a"), ("@daily", "b")), dirs=("x", "y"))\n')
-r, r2 = cfg_get(os.path.join(T, "c_cron"), "get", "cron"), cfg_get(os.path.join(T, "c_cron"), "get", "dirs")
+write(os.path.join(T, "c_cron", "policy.py"), 'OUTPUTS = dict(cron=(("5 * * * *", "a"), ("@daily", "b")), code_dirs=("x", "y"))\n')
+r, r2 = cfg_get(os.path.join(T, "c_cron"), "get", "cron"), cfg_get(os.path.join(T, "c_cron"), "get", "code_dirs")
 ok("cfg.py get：元组的元组每项一行，平的元组仍用空格连", r.stdout == "5 * * * * a\n@daily b\n" and r2.stdout == "x y\n")
 
 
@@ -239,7 +255,7 @@ ok("extend：两个插件文件夹合进来不报错", isinstance(ns, dict))
 if isinstance(ns, dict):
     ok("extend：字典插件的在前，核心的在后，都在", list(ns["TABLE"]) == ["pa", "pb", "core"])
     ok("extend：列表接在后面、不重复", ns["LIST"] == ["a", "b", "c"])
-    ok("extend：只合约定的表，插件的其他名字（函数、类、import 的模块、常量）不进来（11/4）",
+    ok("extend：只合约定的表，插件的其他名字（函数、类、import 的模块、常量）不进来",
        not {"helper", "other", "Thing", "_private", "json", "join"} & set(ns))
     ok("extend：核心已有的常量、函数不被插件改", ns["CONST"] == 1 and ns["core_fn"] is core_fn)
 
@@ -310,7 +326,7 @@ r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.ar
 ok("测试插件：做法、钩子、中继插件合进来，插件里的函数不进核心模块，RelayError 是 taskq_api 的同一个",
    r.stdout.split() == ["['command',", "'toy']", "['model_of']", "['toy',", "'toy_infer']", "False", "False", "True"])
 
-# 找项目（project.py，11/4）：--project > TASKQ_PROJECT > 从当前目录往上找 .taskq.toml > ~/.config/taskq/project（11/5）；cfg 的仓库根：TASKQ_REPO > 嵌着 > 找到的项目 > CORE
+# 找项目（project.py）：--project（经 TASKQ_PROJECT 传给子进程）> 从当前目录往上找 .taskq.toml；cfg 的仓库根：TASKQ_REPO > 嵌着 > 找到的项目 > CORE
 import project  # noqa: E402
 PJ = os.path.join(T, "proj")
 write(os.path.join(PJ, ".taskq.toml"), """
@@ -327,16 +343,6 @@ setenv(TASKQ_PROJECT="~/pj")
 ok("project.find：TASKQ_PROJECT 比往上找优先，~ 展开", project.find(start=PJ) == os.path.join(HOME, "pj"))
 ok("project.find：明确给的比 TASKQ_PROJECT 优先", project.find(PJ) == PJ)
 setenv(TASKQ_PROJECT=None)
-project.DEFAULT = os.path.join(T, "default_project")  # never the real ~/.config/taskq/project
-_dp = project.DEFAULT
-write(_dp, PJ + "\n")
-ok("project.find：往上没有时用 ~/.config/taskq/project 写的（11/5）", project.find(start=os.path.join(T, "layout")) == PJ)
-PJ2 = os.path.join(T, "proj2")
-write(os.path.join(PJ2, ".taskq.toml"), 'config = "c"\n')
-ok("project.find：往上找到的比默认项目优先", project.find(start=PJ2) == PJ2)
-write(_dp, os.path.join(T, "layout") + "\n")
-ok("project.find：默认项目里没有 .taskq.toml → None", project.find(start=os.path.join(T, "layout")) is None)
-os.remove(_dp)
 ok("project.load：读 config、plugins", project.load(PJ) == {"config": "conf", "plugins": ["p1", "p/two"]})
 ok("project.load：没有 .taskq.toml → {}", project.load(T) == {})
 ok("project.parse（没有 tomllib 时）：字符串、列表、空列表、注释、空行",
@@ -428,7 +434,7 @@ write(os.path.join(EMB, ".taskq.toml"), 'config = "cfgdir"\n')
 ok("cfg：嵌在 <仓库>/scripts/taskq 里时就是那个仓库（不往上找），仓库根的 .taskq.toml 照样读",
    cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "cfgdir"))))
 os.remove(os.path.join(EMB, ".taskq.toml"))
-ok("cfg：嵌着、仓库根没有 .taskq.toml → <仓库>/config（11/5）",
+ok("cfg：嵌着、仓库根没有 .taskq.toml → <仓库>/config",
    cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "config"))))
 
 setenv(TASKQ_PLUGINS=None, TASKQ_CONFIG=None)

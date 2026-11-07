@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""hub 和别的机器之间经 hub 的 Cloudflare 隧道传大批文件（2026-10-26），两个方向的连接都由那边发起，那边不开服务：
-  push：那边从 hub 的文件服务下载（Slurm 执行机上大文件可以在 CPU 节点上下载，见机器表的 transfer_job）
-  pull：那边按 90 MB 一块上传到 hub 的文件服务（Cloudflare 一次请求最多 100 MB）
-同一台机器的传输一个接一个，不同机器的同时传，共用一个文件服务进程（11/5）。
+"""本机（跑传输的机器：store，或送环境包时的 hub）和别的机器之间经本机的 Cloudflare 隧道传大批文件，两个方向的连接都由
+那边发起，那边不开服务；本机的地址是机器表里本机的 transfer（临时地址：quick）：
+  push：那边从本机的文件服务下载（Slurm 执行机上大文件可以在 CPU 节点上下载，见机器表的 transfer_job）
+  pull：那边按 90 MB 一块上传到本机的文件服务（Cloudflare 一次请求最多 100 MB）
+同一台机器的传输一个接一个，不同机器的同时传，共用一个文件服务进程。
 在哪里收发、地址见 queue/README.md 的“传输”一条。
 
   taskq tunnel rsync <rsync 的参数> <源> <目标>  rsync 的替身：先把要传的文件经隧道传到目标旁边的暂存目录，再照原样跑 rsync
                                                 （加 --link-dest，对上的文件不再经 ssh 传），最后删暂存目录
-  taskq tunnel push <机器> <hub 上的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
-  taskq tunnel pull <机器> <那边的源目录> <hub 上的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
+  taskq tunnel push <机器> <本机的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
+  taskq tunnel pull <机器> <那边的源目录> <本机的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
 """
 import fcntl
 import hashlib
@@ -36,7 +37,7 @@ NPAR = int(os.environ.get("TUNNEL_NPAR", 8))
 MIN_JOB = float(os.environ.get("TUNNEL_MIN_JOB", 1e9))
 JOB_WAIT = 600
 STALL = int(os.environ.get("TUNNEL_STALL", 3600))
-ROUNDS = 3  # 没传到、对不上的文件同一次里再补传几轮（11/2：一万多个文件偶尔断几个）
+ROUNDS = 3  # 没传到、对不上的文件同一次里再补传几轮（文件多时偶尔断几个）
 POLL = float(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
 LOCK = os.environ.get("TUNNEL_LOCK")
@@ -64,7 +65,7 @@ def state(*parts, **kw):
 
 
 def ssh(host, cmd, check=True, input=None, timeout=300):
-    """那边跑一条短命令；那边也限时，卡在存储里时不留进程（11/1）。"""
+    """那边跑一条短命令；那边也限时，卡在存储里时不留进程。"""
     r = subprocess.run(SSH + [host, f"timeout -k 10 {timeout - 15} bash -c {shlex.quote(cmd)}"], input=input, capture_output=True, text=True,
                        timeout=timeout)
     if check and r.returncode:
@@ -84,8 +85,8 @@ def md5_of(path):
     return h.hexdigest()
 
 
-# ---------------- hub 上的服务 ----------------
-# 所有传输共用 bind 上的一个文件服务进程（_serve，11/5）：第一个要用的传输起它，挂了下一个要用的再起，没有会话空闲 IDLE 秒后退出。
+# ---------------- 本机的文件服务 ----------------
+# 所有传输共用 bind 上的一个文件服务进程（_serve）：第一个要用的传输起它，挂了下一个要用的再起，没有会话空闲 IDLE 秒后退出。
 # 每次传输是一个会话：<服务文件夹>/<token>.json 放清单、src / dst、传输进程的 pid（服务按 pid 清掉没人要的会话），
 # 服务记下的进度（传了多少字节、发出的文件的 MD5、收到的文件对不对）追加到 <token>.out，传输进程从那里读。
 
@@ -265,10 +266,8 @@ def handler(reg):
     return H
 
 
-def serve_main(bind, d, legacy):
+def serve_main(bind, d):
     """共享的文件服务（tunnel.py _serve）：bind 上已经有服务时直接退出。"""
-    old = open(legacy, "a")
-    fcntl.flock(old, fcntl.LOCK_SH)  # 旧版本（全局独占锁、自己开服务）的传输在跑时等它，它也等这个服务退出
     reg = Registry(d)
     host, port = bind.rsplit(":", 1)
     try:
@@ -316,8 +315,7 @@ class Session:
         self.token = secrets.token_urlsafe(24)
         self.files, self.src, self.dst = files, src, dst
         self.sent, self.done, self.moved, self.last, self.off = {}, {}, 0, time.time(), 0
-        M = machines()
-        url, bind = M.MACHINES[M.hub()]["transfer"]
+        url, bind = here()["transfer"]
         self.url, self.bind = os.environ.get("TUNNEL_URL", url), os.environ.get("TUNNEL_BIND", bind)
         self.cid = None
         self.dir = srv_dir()
@@ -336,11 +334,11 @@ class Session:
         except OSError:
             pass
         with open(os.path.join(self.dir, "serve.log"), "a") as lf:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__), "_serve", self.bind, self.dir, lock_path()],
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "_serve", self.bind, self.dir],
                              cwd=self.dir, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
 
     def open(self, quick=False):
-        """→ 那边用的地址。quick：用临时地址（机器表里 hub 的 quick、RELAY 的 quick_tunnel），不用 hub 的固定地址。"""
+        """→ 那边用的地址。quick：用临时地址（机器表里本机的 quick、执行机的 quick_tunnel），不用本机的固定地址。"""
         quick = quick and "TUNNEL_URL" not in os.environ
         for attempt in range(3 if quick else 1):
             self.ensure()
@@ -388,16 +386,25 @@ class Session:
                 pass
 
 
-def relay_of(host, site=None):
-    """执行机（送去的脚本换名、不带注释，工作目录在根目录下）→ 它的条目；不是 → None。
-    site：执行机的名字，按名字查（几台执行机的 ssh 可以相同，如同一台主机上的两张卡，11/4）；不给时按 ssh 名字找第一台。"""
+def entry(host, site=None):
+    """那边的机器条目：site 给了按名字查，不给按 ssh 名字找；机器表里没有 → {}。"""
+    M = machines()
     if site is not None:
-        return machines().RELAY.get(site)
-    return next((m for m in machines().RELAY.values() if m.get("ssh") == host), None)
+        return M.machine(site) if site in M.MACHINES else {}
+    return next((M.machine(n) for n, m in M.MACHINES.items() if m.get("ssh") == host), {})
+
+
+def here():
+    """本机（跑传输的机器）的机器条目：TASKQ_MACHINE，或按主机名认。"""
+    M = machines()
+    me = M.whoami()
+    if me is None or not M.machine(me).get("transfer"):
+        raise RuntimeError(f"本机（{me or '机器表里认不出'}）没有 transfer（文件服务的地址），不能经隧道传")
+    return M.machine(me)
 
 
 def quick_tunnel(bind):
-    image, pat = machines().MACHINES[machines().hub()]["quick"]
+    image, pat = here()["quick"]
     cid = subprocess.run(["docker", "run", "-d", "--rm", "--network", "host", image, "tunnel", "--no-autoupdate", "--url", f"http://{bind}"],
                          capture_output=True, text=True, check=True).stdout.strip()
     for _ in range(60):
@@ -416,19 +423,16 @@ def lock_path(host=None):
 
 
 def take_lock(host):
-    """同一台机器（按 ssh 名字：ssh 相同的几台执行机算同一台）的传输一个接一个，不同机器的同时传（11/1 定）。
-    全局的锁只拿共享的，旧版本（拿全局独占锁）的传输在跑时等它。"""
-    held = []
-    for path, mode, why in ((lock_path(host), fcntl.LOCK_EX, f"{host} 的另一个隧道传输在跑"), (lock_path(), fcntl.LOCK_SH, "旧版本的隧道传输在跑")):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        f = open(path, "a")
-        try:
-            fcntl.flock(f, mode | fcntl.LOCK_NB)
-        except BlockingIOError:
-            log(f"{why}，等它结束")
-            fcntl.flock(f, mode)
-        held.append(f)
-    return held
+    """同一台机器（按 ssh 名字）的传输一个接一个，不同机器的同时传。→ 拿着的锁（进程退出时放开）。"""
+    path = lock_path(host)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    f = open(path, "a")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log(f"{host} 的另一个隧道传输在跑，等它结束")
+        fcntl.flock(f, fcntl.LOCK_EX)
+    return f
 
 
 def status_cmd(wd):
@@ -438,26 +442,17 @@ def status_cmd(wd):
 
 
 def run_remote(host, mode, plan, serve, total, site=None):
-    """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。"""
-    M = machines()
-    relay = relay_of(host, site)
-    name = site if relay else next((n for n, m in M.MACHINES.items() if m.get("ssh") == host), host)
-    pyx = "python3"
+    """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。
+    工作目录：有根目录的机器在根目录的 tmp 下，没有的在状态文件夹下；Python 用那台 conda 的（没有 conda 用 python3）。"""
+    sys.path.insert(0, os.path.join(CORE, "queue"))
+    import proto
+    m = entry(host, site)
+    pyx = m["conda"][0] + "/bin/python3" if m.get("conda") else "python3"
     with open(__file__) as f:
         src = f.read()
-    if relay:  # 执行机（queue/relay.py）：工作目录在它的根目录下；在哪里跑同其他 Slurm 机器
-        sys.path.insert(0, os.path.join(CORE, "queue"))
-        import proto
-        import relay_bundle
-        base = relay["root"].rstrip("/")
-        job = relay.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
-        pyx, src = relay["conda"][0] + "/bin/python3", relay_bundle.home_paths(src, base)
-        script = "xfer.py"
-        base += "/" + proto.ROOT["tmp"]
-    else:
-        job = M.MACHINES.get(name, {}).get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
-        script = "tunnel.py"
-        base = state("tunnel", expand=False)
+    base = m["root"].rstrip("/") + "/" + proto.ROOT["tmp"] if m.get("root") else state("tunnel", expand=False)
+    job = m.get("transfer_job") if mode == "_fetch" and total >= MIN_JOB else None
+    script = "xfer.py"
     wd = ssh(host, f"d={base}/{secrets.token_hex(6)} && mkdir -p {base} && mkdir -m 700 $d && cd $d && pwd").strip()
     ssh(host, f"cat > {wd}/{script}", input=src)
     ssh(host, f"cat > {wd}/plan.json", input=json.dumps(plan))
@@ -466,7 +461,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
         t = max(30, int(total / 5e6 / 60) + 10)
         sys.path.insert(0, os.path.join(CORE, "sites"))
         import slurm  # 作业名每次随机
-        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname((relay or M.MACHINES.get(name, {})).get('job_names'))} {pyx} {script} {mode} plan.json >> log 2>&1")
+        run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname(m.get('job_names'))} {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
@@ -514,7 +509,7 @@ def home_path(p):
 
 
 def local_copy(src, dst, rels, link=False):
-    """和 hub 在同一台机器上的执行机（ssh 是 None）：不开隧道，直接在本机拷 src/<rel> → dst/<rel>。
+    """和本机在同一台机器上的执行机：不开隧道，直接在本机拷 src/<rel> → dst/<rel>。
     先写到同目录的 .tunnelpart、核对大小（push 另核 MD5）、带上修改时间和权限，再改名；已有、大小和修改时间都一样的不再拷。
     link（push）：先试硬链接（blob 按内容命名、不改，和收编一样），不在一个盘上再拷、核对 MD5。返回没拷成的（已删掉半个）。"""
     bad = []
@@ -551,8 +546,8 @@ def local_copy(src, dst, rels, link=False):
 
 
 def push(host, src, dst, rels, site=None):
-    """hub 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
-    返回最后还对不上、已删掉的文件。site：执行机的名字（relay_of）。"""
+    """本机的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
+    返回最后还对不上、已删掉的文件。site：那边的机器名（entry）。"""
     files = {}
     for r in rels:
         st = os.stat(os.path.join(src, r))
@@ -564,7 +559,7 @@ def push(host, src, dst, rels, site=None):
     lk = take_lock(host)
     serve = Session(files, src=src)
     try:
-        url = serve.open(quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
+        url = serve.open(quick=bool(entry(host, site).get("quick_tunnel")))
         log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
         t0, bad = time.time(), list(files)
         for k in range(ROUNDS + 1):
@@ -589,15 +584,14 @@ def push(host, src, dst, rels, site=None):
                 break
     finally:
         serve.close()
-        for f in lk:
-            f.close()
+        lk.close()
     dt = time.time() - t0
     log(f"传完：{len(files) - len(bad)} 个一致，{len(bad)} 个没传到或对不上（已删）；用时 {dt / 60:.0f} 分钟，平均 {total / 1e6 / dt:.1f} MB/s")
     return bad
 
 
 def pull(host, src, dst, items, site=None):
-    """那边的 src/<rel> → hub 的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
+    """那边的 src/<rel> → 本机的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
     os.makedirs(dst, exist_ok=True)
@@ -607,7 +601,7 @@ def pull(host, src, dst, items, site=None):
     lk = take_lock(host)
     serve = Session(files, dst=dst)
     try:
-        url = serve.open(quick=bool((relay_of(host, site) or {}).get("quick_tunnel")))
+        url = serve.open(quick=bool(entry(host, site).get("quick_tunnel")))
         log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
         t0, bad = time.time(), list(files)
         for k in range(ROUNDS + 1):
@@ -631,8 +625,7 @@ def pull(host, src, dst, items, site=None):
                 break
     finally:
         serve.close()
-        for f in lk:
-            f.close()
+        lk.close()
         for r in files:
             p = os.path.join(dst, r) + ".tunnelpart"
             if os.path.exists(p):
@@ -760,7 +753,7 @@ def remote_send(plan):
                         break
             q = urllib.parse.urlencode(dict(md5="0" * 32 if rel == bad else h.hexdigest(), mtime=st.st_mtime_ns, mode=st.st_mode & 0o7777))
             if req("POST", urllib.parse.quote(rel) + "?" + q)[0] != 200:
-                raise IOError("hub 上的校验和对不上")
+                raise IOError("本机的校验和对不上")
         except Exception as e:
             print(f"失败 {rel}：{e}", flush=True)
 
@@ -804,9 +797,10 @@ def wrap(args):
     if flags & NO_TUNNEL or any(re.fullmatch(r"-[a-zA-Z]*[Rn][a-zA-Z]*", o) for o in opts):
         plain(args)
     M = machines()
-    if M.whoami() != M.hub():
+    me = M.whoami()
+    if me is None or not M.machine(me).get("transfer"):  # 本机没有文件服务：照原样跑 rsync
         plain(args)
-    hosts = {m["ssh"]: m for m in [*M.SITES.values(), *M.MACHINES.values()] if m.get("ssh")}  # 同一个 ssh 名字以 MACHINES 的为准
+    hosts = {m["ssh"]: m for m in M.MACHINES.values() if m.get("ssh")}
     rs, rd = (re.match(r"^([^/:]+):(.*)$", x) for x in (src, dst))
     if bool(rs) == bool(rd):
         plain(args)
@@ -822,7 +816,6 @@ def wrap(args):
         p = ln.split("\t", 2)
         if len(p) == 3 and len(p[0]) > 1 and p[0][0] in "<>" and p[0][1] == "f":
             items.append((p[2], int(p[1])))
-    total = sum(n for _, n in items)
     if not items:
         plain(args)
     sroot = rs.group(2) if rs else src
@@ -866,7 +859,7 @@ def main(argv):
             print(__doc__.strip(), file=sys.stderr)
             return 2
         return wrap(a)
-    if cmd == "_serve" and len(a) == 3:
+    if cmd == "_serve" and len(a) == 2:
         return serve_main(*a)
     if cmd in ("_fetch", "_send"):
         print(f"在 {os.uname().nodename} 上{'下载' if cmd == '_fetch' else '上传'}", flush=True)
@@ -878,11 +871,11 @@ def main(argv):
         from proto import EXIT
         prog = f"{os.path.basename(sys.argv[0])} {cmd}"  # tunnel.py push，或 taskq tunnel push
         try:
-            host, site = M.machine(a[0]).get("ssh"), (a[0] if a[0] in M.RELAY else None)
+            host, site = M.machine(a[0]).get("ssh"), (a[0] if M.MACHINES[a[0]].get("root") else None)
         except KeyError:
             print(f"{prog}：机器表里没有 {a[0]}", file=sys.stderr)
             return EXIT["gone"]
-        if not host and not site:  # 和 hub 在同一台上的执行机（ssh 是 None）本机拷
+        if not host and not site:
             print(f"{prog}：{a[0]} 没有 ssh，传不过去", file=sys.stderr)
             return 2
         try:

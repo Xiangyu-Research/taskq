@@ -1,5 +1,5 @@
-"""手机推送的白话说法（2026-10-21）：任务 key、pueue 标签 → 实验名；健康检查的问题 → 出了什么事、影响什么。
-health.py（问题推送）和 overview.py 用；问题清单里仍是 health.py 原来的详细说明。
+"""手机推送的白话说法：任务 key、pueue 标签 → 实验名；健康检查的问题 → 出了什么事、影响什么。
+health.py（问题推送）和 overview.py 用；问题清单里是 health.py 的详细说明。
 """
 import os
 import sys
@@ -30,18 +30,14 @@ def table_steps():
     if _steps is None:
         exps, final = E.load()
         _steps = {}
-        for st in [x for e in exps for x in e.get("after", []) + [y for c in e.get("group_after", []) for y in c]] + final:
+        for st in [x for e in exps for x in e["after"] + e["group_after"]] + final:
             _steps.setdefault(st["name"], st)
     return _steps
 
 
 def step_name(step):
-    """步骤名 → 中文名。"""
-    try:
-        zh = (table_steps().get(step) or {}).get("zh")
-    except Exception:  # noqa: BLE001  实验表读不了时照样说白话
-        zh = None
-    return zh or STEPS.get(step, step)
+    """步骤名 → 中文名（labels 插件的 STEPS；没写的用步骤名本身）。"""
+    return STEPS.get(step, step)
 
 
 def known_step(step):
@@ -161,39 +157,31 @@ def _who(key):
 
 def problem(pid, p):
     """健康检查的问题编号 → 推送的白话（出了什么事 + 影响）。要用到的事实（个数、有无进度…）从 p["data"] 取（health.py、relay.py
-    报问题时给的）；该有 data 却没有的（旧状态文件里的）、没对上的，用原来的说明。"""
+    报问题时给的）；该有 data 却没有的、没对上的，用 p["msg"] 的说明。"""
     msg, part, d = p["msg"], pid.split(":"), p.get("data") or {}
     kind = part[0]
-    L = lambda n: M.machine(n)["label"] if n in M.MACHINES or n in M.RELAY else n  # noqa: E731
+    L = lambda n: M.MACHINES[n]["label"] if n in M.MACHINES else n  # noqa: E731
     try:
         if kind == "down":
             return f"{L(part[1])} 读不到状态了（网络断了，或那边的存储挂住），看不到上面的训练还在不在跑。"
         if kind == "unread" and "n" in d:
             return f"{L(part[1])} 上 {d['n']} 个任务的文件读不动（多半是那边的存储挂住），这些任务先不分出去，别的照常。"
-        if kind == "stuck" and d:
-            what = key_name(d["key"]) if d.get("key") else "一个训练"
-            return f"{L(part[1])} 上 {what} 90 分钟没有进展，可能卡住了，GPU 白占着。"
         if kind == "tqblocked":
             key = d.get("key") or pid[len("tqblocked:"):]
-            step = key.split("/")[0]
-            step = step_name(step) if "/" in key and known_step(step) else "任务"
-            return f"{key_name(key)} 的{step}在等的前一步失败了（或不在队列里），不会自己开始。"
+            return f"{key_name(key)} 能去的执行机都试过、都训不了（跳过了），不会自己开始。"
+        if kind == "tqroom":
+            key = d.get("key") or pid[len("tqroom:"):]
+            return f"{key_name(key)} 能去的执行机上盘都不够放，不会开始，要腾出地方。"
         if kind == "taskq":
             return f"读不到 {L(part[1])} 的任务队列，看不到那边的训练情况。"
+        if kind == "collect":
+            return f"在 {L(part[1])} 上收集训练状态出错，这一轮看不到结果的情况、不交还任务。"
         if kind == "pueued":
             return f"{L(part[1])} 的任务队列程序没有响应，上面的训练和分析可能都停了。"
         if kind == "pueue" and "label" in d:
             return f"{_cat(L(part[1]), '上的', task(d['label']), '出错停了。')}"
-        if kind == "idle":
-            gpu = M.MACHINES[part[1]]["groups"][part[2]][1]
-            return f"{L(part[1])} {gpu} 号卡空着，没有训练。"
-        if kind == "dup":
-            key = d.get("key") or pid[len("dup:"):]
-            if p.get("level") == "urgent":
-                return f"{key_name(key)} 同时在两处训练，存档会互相覆盖，要尽快停掉一边。"
-            return f"{key_name(key)} 在两处排着，要取消一边，不然会重复训练。"
         if kind == "disk":
-            what = f"{L(part[1])} {d['path']} 只剩 {d['free_gb']:.0f} GB" if "free_gb" in d else msg
+            what = f"{L(part[1])} {d['path']} 只剩 {d['free_gb']:.0f} GB"
             return f"{what}，盘满了训练和存档会失败。"
         if kind == "gpulog":
             return f"{L(part[1])} 的 GPU 使用记录停了（不影响训练）。"
@@ -203,7 +191,7 @@ def problem(pid, p):
             return f"训完以后的步骤停了，一个都不排：{msg.split('。训完以后')[0]}。改好、提交推送后下一次检查自动恢复。"
         if kind == "advance" and part[1] == "error":
             return "自动调度脚本出错了：训完的任务不会自动排后续步骤。"
-        if kind == "site":  # 执行机（relay.py，10/31）：site:<机器>:<类>[:<key>]
+        if kind == "site":  # 执行机（relay.py）：site:<机器>:<类>[:<key>]
             site, sub, key = L(part[1]), part[2], ":".join(part[3:])
             if sub == "down":
                 return f"{site} 读不到了，看不到分给它的训练还在不在跑。"

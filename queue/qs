@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""查看各 pueue 机器（配置文件夹里的 machines.py）的队列（2026-10-16）：每个任务一行，按机器、组排列；已结束的只列最近 24 小时的。
+"""查看有 pueue 组的机器（配置文件夹里的 machines.py；mtab.pueue_hosts）的队列：每个任务一行，按机器、组排列；已结束的只列最近 24 小时的。
 
     taskq pueue-status              都看（在 hub 上运行；别的机器经 ssh）
-    taskq pueue-status <机器>       只看一台（如 taskq pueue-status gpubox）
+    taskq pueue-status <机器>       只看这一台
     taskq pueue-status --json       机器 → 任务列表（monitor/health.py 用）：status 是给人看的（如 "Failed (1)"），
                                     程序看 result（Success / Failed / Killed / …，没结束是 None）和 code（退出码，没有是 None）
-（原来的 queue/qs 照旧能用，参数一样。）
 wait 组里在跑的任务（拉回、归档、传输）下面多一行：输出的最后一行。
-单个任务的输出：pueue log <编号>（别的机器上：ssh <机器> ~/.local/bin/pueue log <编号>）。
+单个任务的输出：pueue log <编号>（pueue 是机器表里那台的 pueue，默认 ~/.local/bin/pueue）。
 """
 import datetime as dt
 import json
@@ -22,15 +21,15 @@ import mtab as M  # noqa: E402
 import common as C  # noqa: E402
 from proto import EXIT  # noqa: E402
 
-PUEUE = os.path.expanduser("~/.local/bin/pueue")
 ME = M.whoami()
 
 
 def pueue(machine, args):
-    """这台机器上跑 pueue <args> → (退出码, 标准输出, 标准错误)。"""
+    """这台机器上跑 pueue <args>（机器表里这台的 pueue；别的机器上开头的 ~ 留给那边展开）→ (退出码, 标准输出, 标准错误)。"""
+    p = M.machine(machine)["pueue"]
     if machine == ME:
-        return C.run([PUEUE, *args], timeout=60)
-    return C.run(" ".join(["~/.local/bin/pueue", *args]), M.MACHINES[machine]["ssh"], timeout=60)
+        return C.run([M.expand(p), *args], timeout=60)
+    return C.run(" ".join([p, *args]), M.MACHINES[machine]["ssh"], timeout=60)
 
 
 def status(machine):
@@ -69,18 +68,18 @@ def tasks(d):
 
 def main(argv=None):
     import argparse
-    hosts = M.names("pueue")
-    ap = argparse.ArgumentParser(description="各 pueue 机器的队列（只看）")
+    hosts = M.pueue_hosts()
+    ap = argparse.ArgumentParser(description="有 pueue 组的机器的队列（只看）")
     ap.add_argument("machines", nargs="*", metavar="机器", help=f"只看这几台（{'、'.join(hosts)}）；不给就都看")
     ap.add_argument("--json", action="store_true", help="机器 → 任务列表，一行 JSON")
     a = ap.parse_args(argv)
-    gone = [m for m in a.machines if m not in M.MACHINES and m not in M.SITES]
+    gone = [m for m in a.machines if m not in M.MACHINES]
     if gone:
         print(f"{ap.prog}：机器表里没有 {'、'.join(gone)}", file=sys.stderr)
         return EXIT["gone"]
     bad = [m for m in a.machines if m not in hosts]
     if bad:
-        ap.error(f"不是 pueue 机器：{'、'.join(bad)}")
+        ap.error(f"没有 pueue 组：{'、'.join(bad)}")
     as_json = a.json
     machines = a.machines or hosts
     out = {}

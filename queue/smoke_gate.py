@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""冒烟闸门（11/5）：一种任务（做法 + 插件 smoke.py 里 by 列的参数 + 环境）第一次送到一台执行机之前，先在那台上跑一个小的冒烟任务，
+"""冒烟闸门：一种任务（做法 + 插件 smoke.py 里 by 列的参数 + 环境）第一次送到一台执行机之前，先在那台上跑一个小的冒烟任务，
 过了才送真的。说明见 queue/README.md 的"冒烟"。
 
     taskq smoke status [执行机] [--json]   各台的记录
@@ -25,6 +25,7 @@ from proto import alert, alert_id, is_smoke  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
+import relay_remote as RM  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
 from common import write_json  # noqa: E402
@@ -45,18 +46,17 @@ class DefError(Exception):
     """定义里的函数出错（这种记成没过）。"""
 
 
-def hub_data():
-    """hub 本机的数据目录（relay 从这里读要传的输入）。"""
-    return os.environ.get("TASKQ_DATA") or M.expand(M.machine(M.hub())["data"])
+class StoreError(DefError):
+    """在 store 上算定义时 store 那边出错（连不上、代码包不对），和哪个任务无关。"""
 
 
 def real_params(sp):
-    """交给冒烟定义里的函数的真任务参数：说明的 names，加上它的 data（要传的输入，展开后的；冒烟任务按需带上其中的一部分）。"""
-    return dict(sp.get("names") or {}, data=list(sp.get("data") or []))
+    """交给冒烟定义里的函数的真任务参数：说明的 names，加上它的 inputs（要传的输入，展开后的；冒烟任务按需带上其中的一部分）。"""
+    return dict(sp.get("names") or {}, inputs=list(sp.get("inputs") or []))
 
 
 def definition(recipe, names=None):
-    """做法的冒烟定义 → dict(by, params, vars)；params、vars 是函数 f(真任务的参数 real_params, hub 的数据目录) 时算出来
+    """做法的冒烟定义 → dict(by, params, vars)；params、vars 是函数 f(真任务的参数 real_params, store 的数据目录) 时在 store 上算出来
     （出错 → DefError）。没有定义 → None；写法不对 → ValueError。"""
     d = SMOKE.get(recipe)
     if d is None:
@@ -67,13 +67,16 @@ def definition(recipe, names=None):
     if not isinstance(by, list) or not all(isinstance(x, str) for x in by):
         raise ValueError(f"smoke.py 的 {recipe} 的 by 要是参数名的列表")
     out = dict(by=by)
+    got = {}
+    if any(callable(d.get(f)) for f in ("params", "vars")):  # 函数要读数据目录：在 store 上算（site_ops smoke）
+        try:
+            got = RM.store_op("smoke", dict(recipe=recipe, names=dict(names or {})))
+        except RuntimeError as e:
+            raise StoreError(f"在 store 上算冒烟定义出错：{str(e)[-300:]}") from None
+        for f, why in (got.pop("error", None) or {}).items():
+            raise DefError(f"{f}()：{why}")
     for f in ("params", "vars"):
-        v = d.get(f) or {}
-        if callable(v):
-            try:
-                v = v(dict(names or {}), hub_data())
-            except Exception as e:  # noqa: BLE001
-                raise DefError(f"{f}()：{type(e).__name__}: {e}") from None
+        v = got[f] if callable(d.get(f)) else d.get(f) or {}
         if not isinstance(v, dict):
             raise ValueError(f"smoke.py 的 {recipe} 的 {f} 要是字典，或返回字典的函数：{v!r}")
         out[f] = dict(v)
@@ -98,7 +101,7 @@ def env_id(site, sp):
 
 def mark(site, sp):
     """说明 → dict(kind, kid, env, defn, canary)。kind = 做法 + by 的参数值 + 冒烟任务换成的参数（不含带 {smoke} 的）+ 环境名：
-    同一 by 的任务冒烟换成的数据不同（如通道不同）时是两种，各测各的、各记各的（11/6：以前算一种，两边互相改写记录、来回重排）。
+    同一 by 的任务冒烟换成的数据不同（如通道不同）时是两种，各测各的、各记各的（算成一种的话两边会互相改写记录、来回重排）。
     没有冒烟定义的做法是 canary。"""
     rec = sp.get("recipe")
     names = sp.get("names") or {}
@@ -155,7 +158,7 @@ def update(site, fn):
 
 
 def queue_keys(mtq=None):
-    """总队列里现在有的 key：这一轮开始时读的（mtq）加上现在盘上的（别的检查在这一轮开始以后加的冒烟也算，11/5）。"""
+    """总队列里现在有的 key：这一轮开始时读的（mtq）加上现在盘上的（别的检查在这一轮开始以后加的冒烟也算）。"""
     keys = master_keys(mtq)
     if taskq.have_queue():
         keys |= {t["key"] for t in taskq.read_tasks()}
@@ -305,7 +308,7 @@ def record(site, m, **kw):
 
 def enqueue(site, op):
     """smoke_add → (加上了没有, 说明)。解析不了、环境和真任务不一样、加不进总队列的记成没过。
-    这个种类已经有排着的冒烟（同时跑的另一次检查刚加的）→ (None, 说明)，不再加（11/5：两次检查同时跑，一轮里加了四百多个）。"""
+    这个种类已经有排着的冒烟（同时跑的另一次检查刚加的）→ (None, 说明)，不再加（两次检查同时跑时不重复加）。"""
     m = op["mark"]
     with locked(site):  # 查和加之间别的检查插不进来
         r = load(site).get(m["kind"])
@@ -403,19 +406,14 @@ def retry(site, kind=None):
 def adopt(dry=False):
     """现在分给各台的、各台训完交还的任务 → 那台的这种记成过了（src=adopted）。→ [(执行机, 种类)]（新记的）。"""
     st = taskq.local_status()
-    rel = os.path.join(taskq.TQ, proto.QUEUE["released"])
     got = {}
     for t in st["tasks"]:
         if is_smoke(t["key"]) or not t.get("spec"):
             continue
         site = t.get("assigned") or t.get("worker")
-        if site not in M.RELAY and t["state"] == proto.S_DONE:
-            try:
-                with open(os.path.join(rel, proto.safe(t["key"]))) as f:
-                    site = (f.read().split() + ["", ""])[1]
-            except OSError:
-                site = None
-        if site in M.RELAY:
+        if site not in M.executors() and t["state"] == proto.S_DONE:
+            site = (taskq.released_info(t["key"]) or (None, None))[1]
+        if site in M.executors():
             m = mark(site, t["spec"])
             got.setdefault(site, {})[m["kind"]] = m
     new = []
@@ -445,11 +443,11 @@ def main(argv):
     p = sub.add_parser("adopt", help="分给各台的、训完交还的任务的种类记成过了")
     p.add_argument("-n", "--dry-run", action="store_true")
     a = ap.parse_args(argv)
-    if getattr(a, "site", None) and a.site not in M.RELAY:
-        print(f"没有执行机 {a.site}（有：{'、'.join(M.RELAY)}）", file=sys.stderr)
+    if getattr(a, "site", None) and a.site not in M.executors():
+        print(f"没有执行机 {a.site}（有：{'、'.join(M.executors())}）", file=sys.stderr)
         return proto.EXIT["gone"]
     if a.cmd == "status":
-        allr = {s: load(s) for s in ([a.site] if a.site else M.RELAY)}
+        allr = {s: load(s) for s in ([a.site] if a.site else M.executors())}
         if a.json:
             S.json_out(dict(version=proto.VERSION, on=on(), sites=allr))
             return 0

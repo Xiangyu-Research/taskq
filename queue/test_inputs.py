@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""inputs.py 和 run_task.sh 查输入、本地私有视图的测试（2026-11-01）：临时目录里的假数据目录、假 blob、假 squeue。
+"""inputs.py 和 run_task.sh 查输入、本地私有视图的测试：临时目录里的假数据目录、假 blob、假 squeue。
   python3 scripts/taskq/queue/test_inputs.py"""
 import hashlib
 import json
@@ -60,7 +60,7 @@ open(os.path.join(V, ".incomplete"), "w").close()
 rc, out, err = run("prepare", DATA, "k1", "", V)
 ok("查输入：视图建到一半（.incomplete）→ 退出码 4", rc == 4 and "建到一半" in err)
 os.remove(os.path.join(V, ".incomplete"))
-# 下面某一层建到一半、某一层读不了也算缺（11/3）
+# 下面某一层建到一半、某一层读不了也算缺
 open(os.path.join(V, "sub", ".incomplete"), "w").close()
 rc, out, err = run("prepare", DATA, "k1", "", os.path.join(DATA, "in"))
 ok("查输入：子文件夹里有 .incomplete → 退出码 4", rc == 4 and "建到一半" in err and "ds1/sub" in err)
@@ -86,7 +86,7 @@ with open(os.path.join(BIN, "squeue"), "w") as f:
 os.chmod(os.path.join(BIN, "squeue"), 0o755)
 TMP = os.path.join(T, "tmp")
 L7 = os.path.join(TMP, "taskq_stage_7")
-old = os.path.join(TMP, "phd_stage_5")  # 旧前缀（11/6 前的作业）：照样认、照样清理（11/8 以后删）
+old = os.path.join(TMP, "taskq_stage_5")  # 已经结束的作业留下的
 os.makedirs(os.path.join(old, "blobs"))
 env = dict(NOENV, PATH=BIN + ":" + os.environ["PATH"])
 rc, out, err = run("prepare", DATA, "k1", L7, V, env=env)
@@ -94,43 +94,44 @@ view = os.path.join(L7, "views", "k1")
 lv = os.path.join(view, "in", "ds1")
 ok("本地视图：打印视图的根，相对路径和数据目录一样，先都指向原处", rc == 0 and out == view
    and all(os.path.realpath(os.path.join(lv, r)) == os.path.realpath(os.path.join(V, r)) for r in files)
-   and open(os.path.join(lv, "dataset.json")).read() == '{"a": 1}')
+   and os.path.realpath(os.path.join(lv, "dataset.json")) == os.path.join(V, "dataset.json"))
 ok("本地视图：删了本节点上已结束作业的目录，在跑的留着", not os.path.exists(old) and os.path.isdir(L7))
 todo = json.load(open(view + ".todo.json"))
-ok("本地视图：要拷的清单里是全部 7 个文件", len(todo) == 7)
+ok("本地视图：要拷的清单里是全部 6 个 blob（不是 blob 的文件读原处）", sorted(x[0] for x in todo) == sorted("in/ds1/" + r for r in files))
 
-# 拷到一半：死掉的进程留下的 .partial、一个 blob 内容和名字对不上
-os.makedirs(os.path.join(L7, "blobs"), exist_ok=True)
-stale = os.path.join(L7, "blobs", f"abc.partial.{fixture.dead_pid()}")
+# 拷到一半：死掉的进程留下的临时名、一个 blob 内容和名字对不上
+os.makedirs(os.path.join(L7, "blobs", "ab"), exist_ok=True)
+stale = os.path.join(L7, "blobs", "ab", f"abc.{fixture.dead_pid()}.tmp")
 open(stale, "w").write("half")
 bad_rel = "sub/c1.b2nd"
 bad_real = os.path.realpath(os.path.join(V, bad_rel))
 good = open(bad_real, "rb").read()
 open(bad_real, "wb").write(b"x" * len(good))  # 大小对、内容不对
 rc, out, err = run("copy", L7, "k1", env=env)
-ok("拷贝：被停掉的拷贝留下的 .partial 删了", not os.path.exists(stale))
+ok("拷贝：被停掉的拷贝留下的临时名删了", not os.path.exists(stale))
 ok("拷贝：内容核对不上的不换，仍指向原处，说明里写出来", rc == 0 and os.path.realpath(os.path.join(lv, bad_rel)) == bad_real
-   and "没拷成" in out and not any(p.endswith(".partial." + str(os.getpid())) for p in os.listdir(os.path.join(L7, "blobs"))))
+   and "没拷成" in out and not any(f.endswith(".tmp") for _, _, fs in os.walk(os.path.join(L7, "blobs")) for f in fs))
 ok("拷贝：其余的都换成本地，内容一样", all(os.path.realpath(os.path.join(lv, r)).startswith(os.path.join(L7, "blobs") + "/")
                                           and open(os.path.join(lv, r), "rb").read() == c for r, c in files.items() if r != bad_rel)
-   and os.path.realpath(os.path.join(lv, "dataset.json")).startswith(L7 + "/") and open(os.path.join(lv, "dataset.json")).read() == '{"a": 1}')
-ok("拷贝：视图里没留下临时链接", not any(f.endswith(".taskq_tmp") for d, _, fs in os.walk(view) for f in fs))
+   and all(os.path.relpath(os.path.realpath(os.path.join(lv, r)), L7).split("/")[:2] == ["blobs", os.path.basename(os.path.realpath(os.path.join(lv, r)))[:2]]
+           for r in files if r != bad_rel))
+ok("拷贝：视图里没留下临时链接", not any(f.endswith(".tmp") for d, _, fs in os.walk(view) for f in fs))
 open(bad_real, "wb").write(good)
 
 # 同一作业的第二个任务：已拷好的直接指本地，只拷剩下的；本节点别的作业有的硬链接过来
 rc, out, err = run("prepare", DATA, "k2", L7, V, env=env)
 todo2 = json.load(open(os.path.join(L7, "views", "k2.todo.json")))
 ok("第二个任务：已经在本地的直接指本地，清单里只剩没拷成的那个", rc == 0 and [x[0] for x in todo2] == ["in/ds1/" + bad_rel])
-L8 = os.path.join(TMP, "phd_stage_8")  # 旧前缀的别的作业：照样硬链接过来、不删（11/8 以后删）
+L8 = os.path.join(TMP, "taskq_stage_8")  # 本节点别的作业
 with open(os.path.join(BIN, "squeue"), "w") as f:
     f.write("#!/bin/sh\necho 7\necho 8\n")
 rc, out, err = run("prepare", DATA, "k3", L8, V, env=env)
 rc, out, err = run("copy", L8, "k3", env=env)
 ino = lambda p: os.stat(p).st_ino  # noqa: E731
-ok("别的作业：本节点已有的硬链接过来，不重拷", rc == 0 and "硬链接 6 个" in out and "新拷 1 个" in out
+ok("别的作业：本节点已有的硬链接过来，不重拷", rc == 0 and "硬链接 5 个" in out and "新拷 1 个" in out
    and ino(os.path.join(L8, "views", "k3", "in", "ds1", "sub/c2.b2nd")) == ino(os.path.join(L7, "views", "k1", "in", "ds1", "sub/c2.b2nd")))
 
-# 剩余空间：本节点别的作业有的（能硬链接）不算要拷的量；本节点的拷贝排队（锁），两个同时查不会各算各的（11/4）
+# 剩余空间：本节点别的作业有的（能硬链接）不算要拷的量；本节点的拷贝排队（锁），两个同时查不会各算各的
 sys.path.insert(0, HERE)
 import inputs as I  # noqa: E402
 import fcntl  # noqa: E402
@@ -165,7 +166,7 @@ try:
         I.copy(L10, "k10")
 finally:
     I.shutil.disk_usage, I.KEEP_GB = _du, _keep
-ok("剩余空间：本节点别的作业已有的（硬链接）不算进要拷的量", "硬链接 7 个" in buf.getvalue() and "不拷" not in buf.getvalue())
+ok("剩余空间：本节点别的作业已有的（硬链接）不算进要拷的量", "硬链接 6 个" in buf.getvalue() and "不拷" not in buf.getvalue())
 L11 = os.path.join(TMP, "taskq_stage_11")
 run("prepare", DATA, "k11", L11, V, env=env)
 lk = open(os.path.join(TMP, f".taskq_stage_{os.getuid()}.lock"), "a")
@@ -179,7 +180,7 @@ waited = p11.poll() is None
 fcntl.flock(lk, fcntl.LOCK_UN)
 lk.close()
 out11 = p11.communicate(timeout=60)[0]
-ok("本节点的拷贝排队：别的拷贝拿着锁时等着，放开后照常拷", waited and p11.returncode == 0 and "硬链接 7 个" in out11)
+ok("本节点的拷贝排队：别的拷贝拿着锁时等着，放开后照常拷", waited and p11.returncode == 0 and "硬链接 6 个" in out11)
 
 # 作业数组：squeue 的 %i 是 <数组号>_<序号>，本地目录用的是每个子任务自己的作业号（%A）；别的作业不能删它
 with open(os.path.join(BIN, "squeue"), "w") as f:
@@ -189,14 +190,12 @@ ok("作业数组的子任务（作业号 8、显示成 3_0）还在：不删它�
 with open(os.path.join(BIN, "squeue"), "w") as f:
     f.write("#!/bin/sh\necho 7\necho 8\n")
 
-# 同一路径、大小不变、内容改了（改动时间变了）：不复用本地旧副本（11/1）
+# 不是 blob 的文件（执行机自己做出的）：读原处，内容改了读到新的
 dj = os.path.join(V, "dataset.json")
-st0 = os.stat(dj)
 open(dj, "w").write('{"a": 2}')
-os.utime(dj, ns=(st0.st_atime_ns, st0.st_mtime_ns + 10 ** 9))
 rc, out, err = run("prepare", DATA, "k6", L7, V, env=env)
 todo6 = json.load(open(os.path.join(L7, "views", "k6.todo.json")))
-ok("同一路径内容改了（大小不变）：不用本地旧副本，读到新内容", rc == 0 and "in/ds1/dataset.json" in [x[0] for x in todo6]
+ok("不是 blob 的文件：不进清单，读原处的新内容", rc == 0 and "in/ds1/dataset.json" not in [x[0] for x in todo6]
    and open(os.path.join(L7, "views", "k6", "in", "ds1", "dataset.json")).read() == '{"a": 2}')
 open(dj, "w").write('{"a": 1}')
 
@@ -212,7 +211,7 @@ with open(os.path.join(BIN, "squeue"), "w") as f:
 rc, out, err = run("prepare", DATA, "k5", L7, V, env=env)
 ok("squeue 出错：不删别的作业的目录", rc == 0 and os.path.isdir(L8) and os.path.isdir(os.path.join(TMP, "taskq_stage_9")))
 
-# run_task.sh：缺输入 → 退出码 4，不跑命令；齐了 → 命令从 TASK_INPUTS_ROOT 读；Slurm 里、STAGE_TMP 开、local_inputs → 读本地视图
+# run_task.sh：缺输入 → 退出码 4，不跑命令；齐了 → 命令从 TASK_INPUTS_ROOT 读；有暂存目录（TASKQ_STAGE_ROOT）、local_inputs → 读本地视图
 RT = os.path.join(HERE, "run_task.sh")
 OUT = os.path.join(DATA, "jobs", "t")
 
@@ -237,12 +236,12 @@ if envs_ok:
     r = rtask(["in/ds1"], 0)
     ok("run_task.sh：输入齐了、不拷本地 → TASK_INPUTS_ROOT 是数据目录", r.returncode == 0
        and open(os.path.join(OUT, "root")).read().strip() == DATA and open(os.path.join(OUT, "seen")).read() == '{"a": 1}')
-    r = rtask(["in/ds1"], 1, SLURM_JOB_ID="7", TASKQ_STAGE_TMP="1")
-    ok("run_task.sh：Slurm 里、STAGE_TMP 开、local_inputs → 读节点本地盘上的私有视图", r.returncode == 0
+    r = rtask(["in/ds1"], 1, SLURM_JOB_ID="7", TASKQ_STAGE_ROOT=L7)
+    ok("run_task.sh：有暂存目录、local_inputs → 读节点本地盘上的私有视图", r.returncode == 0
        and open(os.path.join(OUT, "root")).read().strip() == os.path.join(L7, "views", "t__one")
        and open(os.path.join(OUT, "seen")).read() == '{"a": 1}')
-    r = rtask(["in/ds1"], 1, SLURM_JOB_ID="7", TASKQ_STAGE_TMP="0")
-    ok("run_task.sh：STAGE_TMP 关 → 读数据目录", r.returncode == 0 and open(os.path.join(OUT, "root")).read().strip() == DATA)
+    r = rtask(["in/ds1"], 0, SLURM_JOB_ID="7", TASKQ_STAGE_ROOT=L7)
+    ok("run_task.sh：任务没要 local_inputs → 读数据目录", r.returncode == 0 and open(os.path.join(OUT, "root")).read().strip() == DATA)
 else:
     print("跳过 run_task.sh 的几条：测试用的机器表认不出本机（没有 stats 环境）")
 

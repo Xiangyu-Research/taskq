@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 每分钟记一次本机各 GPU 的使用情况，用来看共用的卡什么时候被谁占着、安排自己的训练（2026-10-14，在和别人共用卡的机器上跑）。
+# 每分钟记一次本机各 GPU 的使用情况，用来看共用的卡什么时候被谁占着、安排自己的训练（在和别人共用卡的机器上跑）。
 # 每张卡每分钟至少一行；卡上有多个进程时每个进程一行。只记账号名和程序名（不记完整命令行）。
-# 开机由 queue/on_boot.sh --gpu-log 启动（2026-10-16 起不放在 tmux 里；11/4 搬进调度核心）；手动启动：
+# 开机由 queue/on_boot.sh --gpu-log 启动（不放在 tmux 里）；手动启动：
 #   setsid -f bash <调度代码>/monitor/gpu_log.sh > /dev/null 2>&1 < /dev/null
 # 记录停了（10 分钟没有新的一行）hub 上的健康检查会提醒。哪些机器跑它见机器表的 gpu_log。
 # 输出 proto.py 的 GPU_LOG_DIR/GPU_LOG_FILE；同一个文件夹里的 GPU_LOG_PID 锁着时（已经有一个在跑）直接退出（~/gpu_usage/gpu_<年-月>.csv，环境变量 GPU_LOG_DIR 可以改）：
@@ -13,7 +13,7 @@ eval "$(python3 "$CORE/queue/proto.py" sh)" || exit 1
 OUT=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}}
 INTERVAL=${GPU_LOG_INTERVAL:-60}
 mkdir -p "$OUT"
-# 每个账号只跑一个：跑着时一直锁着 $OUT/gpu_log.pid（proto.py 的 GPU_LOG_PID），已经有一个在跑就退出（11/4）
+# 每个账号只跑一个：跑着时一直锁着 $OUT/gpu_log.pid（proto.py 的 GPU_LOG_PID），已经有一个在跑就退出
 exec 9>> "$OUT/$TQ_GPU_LOG_PID"
 flock -n 9 || exit 0
 echo $$ > "$OUT/$TQ_GPU_LOG_PID"

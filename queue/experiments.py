@@ -1,11 +1,11 @@
-"""读所有实验表（配置文件夹里 policy.py 的 OUTPUTS["experiments"]，相对仓库根目录的 glob；2026-10-18），展开成一个个任务。
-taskq.py（add --exp、解析队列里的任务）、advance.py（训完以后的步骤）、make_registry.py（登记表）都从这里读；
+"""读所有实验表（配置文件夹里 policy.py 的 OUTPUTS["experiments"]，相对仓库根目录的 glob），展开成一个个任务。
+taskq.py（add --exp、解析队列里的任务）、flow/compile.py（步骤的实例和先后）、登记表都从这里读；
 分析脚本按模型文件夹查所属实验的声明（name-of、names_of）。
 
-字段（11/4 起加载时核对，不认识的报错）：实验见 EXP_FIELDS，步骤（after、group_after、FINAL 里的）见 STEP_FIELDS，
-步骤的 queue 见 QUEUE_FIELDS（另外可以写 command 做法的字段，见 recipes.py 开头）。
-实验一级的步骤（group_after、FINAL）的模板里，each 的每个参数 <参数> 另有 <参数>_list（取值空格隔开）、<参数>_list_q（加了引号的），
-见 group_names。表的模块里另外可以有 FINAL（所有实验做完后的步骤）。"""
+字段见 queue/schema.py：实验 EXP_FIELDS，步骤（after、group_after、FINAL 里的）STEP_FIELDS；加载时核对，不认识的、缺必写的报错。
+步骤的模板里能用的名字：每个任务的步骤是任务的参数 + exp、id（task_names）；实验一级的步骤是各任务都一样的参数 + exp、id
++ each 的每个参数 <参数>_list（取值空格隔开）、<参数>_list_q（加了引号的） + 实验的 names（group_names）；FINAL 只有 data。
+{data} 留到执行机上换成那边的数据目录。表的模块里另外可以有 FINAL（不属于哪个实验的步骤）。"""
 import glob
 import importlib.util
 import itertools
@@ -20,62 +20,38 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 import spec  # noqa: E402
-import recipes as R  # noqa: E402  核心的做法表；要在实验表把插件文件夹加进 sys.path 之前加载，免得同名插件顶掉（11/4）
+import schema  # noqa: E402
+import recipes as R  # noqa: E402  核心的做法表；要在实验表把插件文件夹加进 sys.path 之前加载，免得同名插件顶掉
 
 _cache = {}
 
-EXP_FIELDS = {
-    "id": "唯一的短名（hub 的 pueue 任务的标签、taskq.py add --exp）",
-    "exp": "实验编号（登记表、看板）",
-    "label": "一句话说明",
-    "model": "模型的名字（登记表分组）",
-    "hours": "每个任务折算的小时数（登记表的总进度）",
-    "recipe": "做法（recipes.py）",
-    "params": "做法的参数",
-    "fields": "任务说明里另外覆盖的字段（如 metrics、vars；worker 领任务时按现在的实验表合并）",
-    "each": "{参数: [取值…]}：按每种组合展开成一组任务；没有就是一个任务",
-    "after": "每个任务训完以后的步骤（STEP_FIELDS），按顺序做",
-    "group_after": "所有任务都训完以后的几串步骤（每串按顺序做）",
-    "names": "步骤模板里另外可用的名字（分析脚本也按 name-of 读）",
-    "nice": "taskq.py add --exp 不给 --nice 时的档位",
-    "board": "看板用（各表自己定）",
-    "design": "做了什么的中性说明（事实档案用）",
-    "rq": "实验表所在的文件夹名（加载时加上）",
-}
-STEP_FIELDS = {
-    "name": "步骤名（policy.py 的 PLACE、HOLD 按它）",
-    "group": "在 hub 上做时 pueue 的组",
-    "cmd": "在 hub 上做的命令（模板）",
-    "done": "怎么算做完（steps.py 的 check、exists 那样的对象）",
-    "queue": "放进任务队列时的写法（QUEUE_FIELDS）；没有 = 只在 hub 上做",
-    "needs": "实验一级的步骤：要每个任务都做完的步骤名（一个或列表）",
-    "rerun_if_newer": "FINAL 的步骤：这些步骤有比它开始时新的结果就重跑",
-    "rq": "FINAL 所在的实验表（加载时加上）",
-    "only": "每个任务的步骤：只对 each 取这些值的任务做（{参数: [取值…]}，如 {\"part\": [\"0\"]}）；别的任务没有这一步（11/5）",
-}
-QUEUE_FIELDS = {
-    "nice": "进任务队列的档位",
-    "inputs": "执行机要准备的输入（相对数据目录的模板；命令不支持 --stage needs 时用）",
-    "disk": "在执行机上要占多少 GB（输入加产出；超过执行机的 cap 就不放那里）",
-    "out_disk": "disk 里写在根目录的产出（GB）；执行机的 blobs 在另一个盘、写了 blob_cap 时，产出对 cap、其余（输入）对 blob_cap（11/6）",
-    "inputs_cmd": "打印要读的输入（相对数据目录，每行一个）的命令，中继插件按它准备输入（11/4）",
-}
 
-
-def _check_fields(where, d, allowed):
-    bad = sorted(set(d) - set(allowed))
+def _check_fields(where, d, table):
+    if not isinstance(d, dict):
+        raise spec.SpecError(f"{where}：要写成 dict")
+    bad = sorted(set(d) - set(table))
     if bad:
-        raise spec.SpecError(f"{where}：不认识的字段 {'、'.join(bad)}（允许：{'、'.join(allowed)}）")
+        raise spec.SpecError(f"{where}：不认识的字段 {'、'.join(bad)}（允许：{'、'.join(table)}；见 taskq machines fields）")
+    miss = [k for k, v in table.items() if v[1] is schema.REQUIRED and k not in d]
+    if miss:
+        raise spec.SpecError(f"{where}：缺必写的字段 {'、'.join(miss)}")
+
+
+def step(st):
+    """步骤补上默认值；out、done、inputs、env、temp 写成列表。"""
+    st = schema.defaults(schema.STEP_FIELDS, st)
+    for k in ("out", "done", "inputs", "env", "temp"):
+        v = st.get(k)
+        st[k] = [v] if isinstance(v, str) else list(v or [])
+    return st
 
 
 def check_fields(path, mod):
-    """实验表模块里每个实验、步骤、queue 的字段都认识；不认识的报 SpecError。"""
-    cmd = R.RECIPES["command"]
-    qf = list(QUEUE_FIELDS) + [k for k in cmd if k not in ("params", "open")]
-    steps = [(f"FINAL 的步骤 {st.get('name')}", st) for st in getattr(mod, "FINAL", [])]
+    """实验表模块里每个实验、步骤的字段都认识、必写的都有；不对的报 SpecError。"""
+    steps = [(f"{path} 的 FINAL 的步骤 {st.get('name')}", st) for st in getattr(mod, "FINAL", [])]
     for e in mod.EXPERIMENTS:
         where = f"{path} 的实验 {e.get('id')}"
-        _check_fields(where, e, EXP_FIELDS)
+        _check_fields(where, e, schema.EXP_FIELDS)
         each = e.get("each") or {}
         for st in e.get("after") or []:
             only = st.get("only")
@@ -84,24 +60,24 @@ def check_fields(path, mod):
             bad = [k for k in (only if isinstance(only, dict) else ["?"]) if k not in each]
             if bad or not all(isinstance(v, (list, tuple)) for v in only.values()):
                 raise spec.SpecError(f"{where} 的步骤 {st.get('name')}：only 要写成 {{each 的参数: [取值…]}}（each 里有：{'、'.join(each) or '没有'}）")
-        for c in e.get("group_after") or []:
-            for st in c:
-                if "only" in st:
-                    raise spec.SpecError(f"{where} 的步骤 {st.get('name')}：only 只用在每个任务的步骤（after）上")
-        steps += [(f"{where} 的步骤 {st.get('name')}", st) for st in e.get("after") or []]
-        steps += [(f"{where} 的步骤 {st.get('name')}", st) for g in e.get("group_after") or [] for st in g]
+        for st in e.get("group_after") or []:
+            if not isinstance(st, dict):
+                raise spec.SpecError(f"{where} 的 group_after：每项是一个步骤（dict），先后按输入推，不用分串")
+            if "only" in st:
+                raise spec.SpecError(f"{where} 的步骤 {st.get('name')}：only 只用在每个任务的步骤（after）上")
+        steps += [(f"{where} 的步骤 {st.get('name')}", st) for st in list(e.get("after") or []) + list(e.get("group_after") or [])]
     seen = set()
     for where, st in steps:
         if id(st) in seen:
             continue
         seen.add(id(st))
-        _check_fields(where, st, STEP_FIELDS)
-        if st.get("queue"):
-            _check_fields(where + " 的 queue", st["queue"], qf)
+        _check_fields(where, st, schema.STEP_FIELDS)
+        if st.get("device", "gpu") not in ("gpu", "cpu"):
+            raise spec.SpecError(f"{where}：device 只能是 gpu 或 cpu")
 
 
 def load():
-    """→ (实验列表, 结束步骤列表)。每个实验加上 rq（实验表所在的文件夹名）。id、任务名重复时报错。"""
+    """→ (实验列表, FINAL 的步骤列表)，都补上了默认值；每个实验加上 rq（实验表所在的文件夹名）。id、任务名重复时报错。"""
     if "exps" in _cache:
         return _cache["exps"], _cache["final"]
     exps, final = [], []
@@ -113,8 +89,9 @@ def load():
         sp.loader.exec_module(mod)
         check_fields(os.path.relpath(path, REPO), mod)
         for e in mod.EXPERIMENTS:
-            exps.append(dict(e, rq=rq))
-        final += [dict(f, rq=rq) for f in getattr(mod, "FINAL", [])]
+            e = schema.defaults(schema.EXP_FIELDS, e)
+            exps.append(dict(e, rq=rq, after=[step(x) for x in e["after"]], group_after=[step(x) for x in e["group_after"]]))
+        final += [step(f) for f in getattr(mod, "FINAL", [])]
     ids = [e["id"] for e in exps]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:
@@ -195,22 +172,22 @@ def tasks():
     return out
 
 
-def group_names(e, data, python):
-    """实验一级步骤（group_after、FINAL）的模板名字：各任务都一样的参数 + exp、id + each 的每个参数 <参数>_list（取值空格隔开）、
-    <参数>_list_q（加了引号的） + 实验的 names + data、python。"""
+def group_names(e):
+    """实验一级步骤（group_after）的模板名字：各任务都一样的参数 + exp、id + each 的每个参数 <参数>_list（取值空格隔开）、
+    <参数>_list_q（加了引号的） + 实验的 names。"""
     ts = expand(e)
     common = {k: v for k, v in ts[0]["spec"]["names"].items() if all(t["spec"]["names"].get(k) == v for t in ts)}
     lists = {}
     for k, vs in (e.get("each") or {}).items():
         lists[f"{k}_list"] = " ".join(vs)
         lists[f"{k}_list_q"] = shlex.quote(" ".join(vs))
-    return dict(common, exp=e["exp"], id=e["id"], **lists, **(e.get("names") or {}), data=data, python=python)
+    return dict(common, exp=e["exp"], id=e["id"], **lists, **(e.get("names") or {}))
 
 
-def task_names(t, data, python):
-    """每个任务的步骤（after）的模板名字：任务的参数 + exp、id + data、python。"""
+def task_names(t):
+    """每个任务的步骤（after）的模板名字：任务的参数 + exp、id。"""
     e = experiment(t["exp"]) or {}
-    return dict(t["spec"]["names"], exp=e.get("exp", ""), id=t["exp"], data=data, python=python)
+    return dict(t["spec"]["names"], exp=e.get("exp", ""), id=t["exp"])
 
 
 class NotFound(spec.SpecError):

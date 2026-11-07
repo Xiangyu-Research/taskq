@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测 sites/envlock.py（2026-11-05）：假的 conda、pip（换掉 Locker 的 run、get），不联网。--real：真锁一个只有 six 的小描述
+"""测 sites/envlock.py：假的 conda、pip（换掉 Locker 的 run、get），不联网。--real：真锁一个只有 six 的小描述
 （真的 conda、pip，下到临时目录）。
 
     python3 sites/test_envlock.py [--real]
@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(CORE, "queue", "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
+import common as C  # noqa: E402
 import envlock as L  # noqa: E402
 M = L.M
 
@@ -240,7 +241,7 @@ ok("conda 照 LINK 的顺序，字段齐", [c["name"] for c in base["conda"]] ==
 names = [e["name"] for e in base["pip"]]
 ok("pip：torch、它的依赖、pip 的包都在；conda 装过的 pip 不重复", names == ["torch", "numpy", "six", "purepkg"], names)
 ok("pip 条目字段齐、sha256 是文件的", all(set(L.P.LOCK_PIP) <= set(e) for e in base["pip"])
-   and all(os.path.isfile(lk.path(e["sha256"])) and L.sha256_file(lk.path(e["sha256"])) == e["sha256"] for e in base["pip"]))
+   and all(os.path.isfile(lk.path(e["sha256"])) and C.sha256(lk.path(e["sha256"])) == e["sha256"] for e in base["pip"]))
 pp = next(e for e in base["pip"] if e["name"] == "purepkg")
 ok("只有源码包的纯 Python：本地建 wheel，url 为 null，built_from 是源码包", pp["url"] is None
    and pp["built_from"] == "https://files/purepkg-1.0.tar.gz" and pp["fn"] == "purepkg-1.0-py3-none-any.whl"
@@ -298,9 +299,9 @@ except L.LockError as e:
 ok("失败时不写锁", not os.path.exists(M.lock_path("bad")))
 
 # ---------- 机器上用哪个变体、--all ----------
-SAVE = {k: dict(v) for k, v in M.SITES.items()}
-M.SITES["tl"] = M.RELAY["tl"] = dict(label="t", hostname=r"(?!)", scheduler="pueue", root="/r",
-                                     envs={"base": ("spec", "cu128"), "layer": "spec", "ext": "spec"}, roles=())
+SAVE = {k: dict(v) for k, v in M.MACHINES.items()}
+M.MACHINES["tl"] = dict(label="t", hostname=r"tl-host", ssh="fake-tl", scheduler="pueue", root="/r",
+                        envs={"base": ("spec", "cu128"), "layer": "spec", "ext": "spec"}, workers=[dict(gpu="0")])
 ok("venv 跟着基础环境的变体（有那个变体的锁时），没有时 default",
    M.spec_variant("tl", "ext") == "cu128" and M.spec_variant("tl", "layer") == "default" and M.spec_variant("tl", "base") == "cu128")
 ok("就绪按这台的变体算哈希", M.ready_envs("tl", {"base": M.spec_hash("base", "cu128")}) >= {"base"}
@@ -310,7 +311,7 @@ ok("--all：基础环境在前；base 用 default 和机器上写的变体；有
    t.index(("base", "default")) + 1 == t.index(("base", "cu128")) < min(t.index(("ext", "cu128")), t.index(("layer", "default")))
    and ("bad", "default") in t
    and ("layer", "cu128") not in t, t)
-del M.SITES["tl"], M.RELAY["tl"]
+del M.MACHINES["tl"]
 
 # ---------- taskq check：旧锁 ----------
 import check as CK  # noqa: E402
@@ -337,8 +338,8 @@ open(os.path.join(SPECS, "layer.yml"), "a").write("# 改了\n")
 r = R()
 CK.check_locks(r, M, L.spec_names())
 ok("check：描述改了、锁是旧的 → 报", len(r.problems) == 1 and "layer.default.lock.json" in r.problems[0], r.problems)
-M.SITES.clear()
-M.SITES.update(SAVE)
+M.MACHINES.clear()
+M.MACHINES.update(SAVE)
 
 # ---------- 真锁（--real）：python 3.11 + six ----------
 if "--real" in sys.argv:
@@ -353,7 +354,7 @@ if "--real" in sys.argv:
     ok("真锁：conda 有 python，pip 有 six 1.16.0，文件都在 wheelhouse、sha256 对",
        any(c["name"] == "python" and c["version"].startswith("3.11") for c in lock["conda"])
        and six and six[0]["version"] == "1.16.0" and six[0]["url"].startswith("https://")
-       and all(L.sha256_file(rl.path(e["sha256"])) == e["sha256"] for e in lock["conda"] + lock["pip"]), lock["pip"])
+       and all(C.sha256(rl.path(e["sha256"])) == e["sha256"] for e in lock["conda"] + lock["pip"]), lock["pip"])
     shutil.rmtree(rd, ignore_errors=True)
 
 shutil.rmtree(d, ignore_errors=True)

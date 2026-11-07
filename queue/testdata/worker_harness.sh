@@ -1,8 +1,9 @@
-# dicc_worker.sh 的测试共用的假训练和小工具：先建 $T、设 TASKQ_DIR、TASKQ_DATA、TASKQ_MACHINE，再 source
+# worker（worker_start.sh → consume.py）的测试共用的假训练和小工具：先建 $T、设 TASKQ_DIR、TASKQ_DATA、TASKQ_MACHINE，再 source
 # WORKER_TEST_ONLY="<情况…>"：只跑这几个情况（want），没设时都跑
 export TASKQ_POLL=1 TASKQ_IDLE_MAX=2 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_SLOTS=2 TASKQ_ADD_AFTER=0 TASKQ_ERR_MAX=2
 export WORKER_TEST_GPU="50 10 20000 81920"   # 近 10 分钟使用率 50%、训练占 20GB
 export TASKQ_GPU_PAD_BASE=$T/nopad TMPDIR=$T/tmp   # 显存填充、本地副本不用 /tmp 下按作业号的路径
+export TASKQ_GPU_PAD=0   # worker_start.sh 不开真的显存填充（和填充的握手由 TASKQ_GPU_PAD_BASE 下的假文件模拟）
 mkdir -p "$TASKQ_DIR" "$TASKQ_DATA" "$TMPDIR"
 touch "$TASKQ_DIR/ENABLED"
 cat > "$T/fake_train.sh" << 'EOT'

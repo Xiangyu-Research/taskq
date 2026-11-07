@@ -1,9 +1,9 @@
 """示例的实验表：做法 count（plugins/recipes.py），每个实验按 seed 展开成几个任务，每个任务数完后写摘要（summary 步骤）。
-字段说明见核心的 queue/experiments.py 开头。"""
-from taskq_api import exists
+字段见 queue/schema.py 的 EXP_FIELDS、STEP_FIELDS。"""
 
-SUMMARY = dict(name="summary", group="cpu", cmd="bash bin/summary.sh {data}/results/{name}/seed_{seed}",
-               done=exists("results/{name}/seed_{seed}/summary.txt"))
+SUMMARY = dict(name="summary", env="base", device="cpu",
+               cmd="bash bin/summary.sh {data}/results/{name}/seed_{seed} {data}/summaries/{name}/seed_{seed}",
+               inputs=["results/{name}/seed_{seed}"], out="summaries/{name}/seed_{seed}", done="summary.txt")
 
 
 def _x(id, label, n, seeds, nice):

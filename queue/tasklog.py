@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""一个任务的经过（2026-11-05）：每段训练（run_task.sh 的分段日志）、调度日志里提到它的行、hub 的任务记录。
+"""一个任务的经过：每段训练（run_task.sh 的分段日志）、事件日志里关于它的、hub 的任务记录。
 
     taskq log <key> [--data 目录] [--json]
 
-段：<数据目录>/logs/tasks/<safe key>__<作业>_part<段>.log（10/31 前 _seg<段>）里每个开头行（proto.LOG_HEAD）算一段：作业、机器
+段：<数据目录>/logs/tasks/<safe key>__<作业>_part<段>.log里每个开头行（proto.LOG_HEAD）算一段：作业、机器
 （按作业名认）、主机、第几段、环境、代码、开始；后面的行里认结束（proto.TASKLOG_STATES）：训完、命令结束和退出码、没开训、
 等不到卡、被当作卡住；都没有时日志 FRESH_LOG 内更新过算还在跑，否则算没有结束的记录。path 是日志的完整路径，日志里别的内容
 （任务自己的输出）由使用者自己读。
-数据目录：--data，没给时 TASKQ_DATA，再没有时机器表里本机的 data。hub 上执行机训的段在拉回以后才有（拉回带着这个任务的
+数据目录：--data，没给时 cfg.data_dir()。hub 上执行机训的段在拉回以后才有（拉回带着这个任务的
 分段日志）；还在执行机上的看 taskq status --all --json 的 parts，或在那边 taskq log --data <根目录>/data。
-调度日志（proto.SCHED_LOGS，cfg.log 的位置）和任务记录（tasks.json）只在 hub 上有，别的机器上是空的。
+事件日志（hub 的数据库）和任务记录（tasks.json）只在 hub 上有，别的机器上是空的。
 --json：一行 JSON，字段见 proto 的 TASKLOG_*。
 """
 import argparse
@@ -36,12 +36,8 @@ GPU_BUSY = re.compile(r"^" + TS + r" 卡 \S+ 被别人占着.*不跑$")
 def data_dir(arg=None):
     if arg:
         return os.path.expanduser(arg)
-    if os.environ.get("TASKQ_DATA"):
-        return os.environ["TASKQ_DATA"]
     try:
-        M = cfg.mtab()
-        me = M.whoami()
-        return M._value(me, "data") if me else ""
+        return cfg.data_dir()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -117,29 +113,22 @@ def attempts(key, data, now=None):
 
 
 def events(key):
-    """Event log rows about this key (hub database; without one, the old text logs). A key followed by a letter, digit or /
-    is another task."""
+    """Event log rows about this key (hub database; none elsewhere). A key followed by a letter, digit or / is another task."""
     try:
         import db as D
         import events as EV
         db = D.connect(ro=True)
     except Exception:  # noqa: BLE001
-        db = None
-    if db is not None and D.has(db, "log"):
-        return [dict(log=proto.LEGACY_LOGS.get(r["source"], r["source"]), time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["t"])),
-                     text=r["msg"]) for r in EV.query(db, key=key)]
-    pat = re.compile(re.escape(key) + r"(?![\w/])")
-    out = []
-    for name in proto.SCHED_LOGS:
-        try:
-            with open(cfg.log(name), errors="replace") as f:
-                for ln in f:
-                    if pat.search(ln):
-                        m = LINE_TS.match(ln.rstrip("\n"))
-                        out.append(dict(log=name, time=m.group(1) if m else None, text=(m.group(2) if m else ln).strip()))
-        except OSError:
-            continue
-    return sorted(out, key=lambda e: e["time"] or "")
+        return []
+    if db is None:
+        return []
+    try:
+        if not D.has(db, "log"):
+            return []
+        return [dict(log=r["source"], time=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["t"])), text=r["msg"])
+                for r in EV.query(db, key=key)]
+    finally:
+        db.close()
 
 
 def records(key):
@@ -167,7 +156,7 @@ def show(r):
         print(f"  第 {a['part']} 段  作业 {a['job']}{f'（{where}）' if where else ''} @ {a['host']}  {a['start']} → {a['end'] or a['last']}  "
               f"{res}  环境 {a['env']}  代码 {a['code']}")
     if r["events"]:
-        print(f"\n调度日志里提到它的 {len(r['events'])} 行：")
+        print(f"\n事件日志里关于它的 {len(r['events'])} 条：")
         for e in r["events"]:
             print(f"  {e['time'] or '':19}  {e['log']:8} {e['text']}")
     if r["records"]:
@@ -179,9 +168,9 @@ def show(r):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="一个任务的每段训练、调度日志里提到它的行、hub 的任务记录")
+    ap = argparse.ArgumentParser(description="一个任务的每段训练、事件日志里关于它的、hub 的任务记录")
     ap.add_argument("key")
-    ap.add_argument("--data", help="数据目录（默认 TASKQ_DATA，再没有时机器表里本机的 data）")
+    ap.add_argument("--data", help="数据目录（默认 cfg.data_dir()）")
     ap.add_argument("--json", action="store_true", help="一行 JSON（proto 的 TASKLOG_*）")
     a = ap.parse_args(argv)
     data = data_dir(a.data)

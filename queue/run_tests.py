@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""跑核心的全部测试（2026-11-04）：queue/、sites/、sync/、monitor/ 下的 test_*.py、test_*.sh，同时跑 -j 个文件，上次慢的先跑。
+"""跑核心的全部测试：queue/、sites/、sync/、monitor/ 下的 test_*.py、test_*.sh，同时跑 -j 个文件，上次慢的先跑。
 
     taskq self test [-j N] [--out 目录] [--timeout 秒] [--gpu] [-l] [文件或模式…]
     python3 queue/run_tests.py …（同上）
@@ -9,7 +9,7 @@
 模式：文件的路径或文件名，可以用 * ?，也可以是路径的一部分（relay → test_relay*.py）。
 
   跳过：文件开头几行有"# 要真卡"的（--gpu 才跑）；测试自己退出码 77（缺 numpy、pueue 等，原因是输出里"跳过："那一行）。
-  结果：每个文件一行（测试、结果、秒、"通过："的项数、备注：跳过的原因、写进 HOME 的东西）打在标准输出，同时写 <目录>/report.tsv，
+  结果：每个文件一行（测试、结果、秒、项数：输出里"通过："开头的行加 unittest 的 Ran N tests、备注：跳过的原因、写进 HOME 的东西）打在标准输出，同时写 <目录>/report.tsv，
         每个文件的输出在 <目录>/log_<文件>.txt。默认目录 ~/.cache/taskq-test。
   退出码：0 都通过（或跳过），1 有没通过的，2 用法错（没有匹配的测试）。
 """
@@ -110,16 +110,19 @@ def stop_group(p):
             pass
 
 
+def log_name(t):
+    return f"log_{t.replace('/', '__')}.txt"
+
+
 def run_one(t, i, a, out, base, env):
     """→ (测试, 结果, 秒, 项, 备注)"""
     if not a.gpu and needs_gpu(t):
         return t, SKIPPED, 0, 0, "要真卡（--gpu 才跑）"
-    name = t.replace("/", "__")
     home, tmp = os.path.join(base, str(i), "h"), os.path.join(base, str(i), "t")
     made = make_home(home)
     os.makedirs(tmp)
     cmd = [sys.executable, t] if t.endswith(".py") else ["bash", t]
-    log = os.path.join(out, f"log_{name}.txt")
+    log = os.path.join(out, log_name(t))
     s = time.time()
     with open(log, "w") as lf:
         p = subprocess.Popen(cmd, cwd=CORE, env=dict(env, HOME=home, TMPDIR=tmp), stdout=lf, stderr=subprocess.STDOUT,
@@ -131,7 +134,9 @@ def run_one(t, i, a, out, base, env):
         stop_group(p)  # 超时的整组停掉；正常结束的，测试留下的后台进程也停掉
     sec = int(time.time() - s)
     with open(log, encoding="utf-8", errors="replace") as lf:
-        n = sum(ln.lstrip().startswith("通过：") for ln in lf)
+        text = lf.read()
+    ran = re.search(r"^Ran (\d+) tests?\b", text, re.M)  # unittest 写的测试
+    n = sum(ln.lstrip().startswith("通过：") for ln in text.splitlines()) + (int(ran.group(1)) if ran else 0)
     wrote = sorted(set(os.listdir(home)) - made)
     note = ("写了 HOME：" + " ".join(wrote)) if wrote else ""
     if rc == SKIP:
@@ -180,6 +185,10 @@ def main(argv=None):
         return 0
     out = os.path.abspath(os.path.expanduser(a.out))
     os.makedirs(out, exist_ok=True)
+    have = {log_name(t) for t in discover()}
+    for f in os.listdir(out):  # 已经删掉的测试留下的日志
+        if f.startswith("log_") and f.endswith(".txt") and f not in have:
+            os.remove(os.path.join(out, f))
     rep = os.path.join(out, "report.tsv")
     last = last_seconds(rep)
     base = short_base()

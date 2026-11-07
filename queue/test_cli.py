@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bin/taskq 的测试（2026-11-04）：每个命令的 --help 退出码 0、不碰任何文件；转给模块的命令和老脚本的结果一样；--version、
+"""bin/taskq 的测试：每个命令的 --help 退出码 0、不碰任何文件；转给模块的命令和老脚本的结果一样；--version、
 path、找项目、self update 和 install.sh（临时 HOME、本地的来源仓库）。不连任何机器。  python3 queue/test_cli.py"""
 import contextlib
 import importlib.machinery
@@ -112,7 +112,7 @@ class Help(unittest.TestCase):
 
     def test_old_scripts_help_does_not_act(self):
         before = tree(T)
-        for script in ("queue/shift.py", "queue/advance.py", "queue/feed.py", "monitor/health.py", "sites/envs_cli.py",
+        for script in ("queue/advance.py", "queue/feed.py", "monitor/health.py", "sites/envs_cli.py",
                        "queue/qs", "queue/relay.py", "queue/taskq.py"):
             r = old(script, "--help")
             self.assertEqual(r.returncode, 0, (script, r.stderr[-500:]))
@@ -149,7 +149,7 @@ class Routing(unittest.TestCase):
         """新的两个入口转到原来的脚本：用法错退出码 2，机器表里没有 4，什么也不连。"""
         self.assertEqual(taskq("pueue-status", "no-such-machine").returncode, GONE)
         self.assertEqual(old("queue/qs", "no-such-machine").returncode, GONE)
-        self.assertEqual(taskq("pueue-status", "site-pueue").returncode, 2, "有这台、不是 pueue 机器：用法错")
+        self.assertEqual(taskq("pueue-status", "site-slurm").returncode, 2, "有这台、不是 pueue 机器：用法错")
         self.assertEqual(taskq("tunnel", "push-dirs", "site-pueue", T).returncode, 2)
         self.assertEqual(taskq("tunnel", "push-dirs", "no-such-machine", T, "x", "y").returncode, GONE)
 
@@ -191,32 +191,31 @@ class Routing(unittest.TestCase):
         self.assertEqual(taskq("--bogus").returncode, 2)
 
     def test_plan_sections_read_only(self):
-        """plan：同一份 gather() 给 shift、feed、advance，都是 dry。"""
+        """plan：同一份 gather() 给 feed、advance，都是 dry。"""
         fixture.use()
         os.environ.update(TASKQ_DIR=TQ, TASKQ_DATA=DATA)
         m = cli()
         m.paths()
         import health
-        import shift
         import feed
         import advance
         calls, s = [], {"x": 1}
-        saved = health.gather, shift.run, feed.run_all, advance.plan
+        saved = health.gather, feed.run_all, advance.plan
         try:
             health.gather = lambda: s
-            shift.run = lambda st, dry=False: calls.append(("shift", st is s, dry)) or ["开 site-pueue2"]
             feed.run_all = lambda st, dry=False: calls.append(("feed", st is s, dry)) or (["送 a"], {"x": "卡 b"})
             advance.plan = lambda st: calls.append(("advance", st is s, True)) or ([], {})
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = m.main(["plan", "-n"])
         finally:
-            health.gather, shift.run, feed.run_all, advance.plan = saved
+            health.gather, feed.run_all, advance.plan = saved
         self.assertEqual(rc, 0)
-        self.assertEqual(sorted(calls), [("advance", True, True), ("feed", True, True), ("shift", True, True)])
+        self.assertEqual(sorted(calls), [("advance", True, True), ("feed", True, True)])
         out = buf.getvalue()
-        for x in ("== 按时段开关", "开 site-pueue2", "== 送任务", "送 a", "卡住：卡 b", "== 训完以后", "没有要排的"):
+        for x in ("== 送任务", "送 a", "卡住：卡 b", "== 训完以后", "没有要排的"):
             self.assertIn(x, out)
+        self.assertNotIn("按时段", out)
 
 
 class Errors(unittest.TestCase):
@@ -260,9 +259,8 @@ class Errors(unittest.TestCase):
         self.check(("add", "--exp", "NOPE"), GONE, "实验表里没有 NOPE")
         self.check(("add", "--file", os.path.join(T, "no-such.json")), 2, "读不了任务单")
         self.check(("add", "--recipe", "toy", "ds=D1"), 2, "--nice")
-        for args in (("nice", "--nice", "1", "nokey"), ("stop", "nokey")):  # 冻结：退出码照旧 1
-            self.check(args, 1, "队列里没有：nokey")
-        self.check(("rm", "nokey"), GONE, "队列里没有：nokey")
+        for args in (("nice", "--nice", "1", "nokey"), ("stop", "nokey"), ("rm", "nokey")):
+            self.check(args, GONE, "队列里没有：nokey")
         r = self.check(("status", "--bogus"), 2, "usage: taskq status")
         self.assertNotIn("next", r.stderr, "用法只列这个子命令的")
 
@@ -293,20 +291,26 @@ class Errors(unittest.TestCase):
         for way in ("push", "pull"):
             self.check(("tunnel", way, "NOPE", T, "x", lst), GONE, f"taskq tunnel {way}：机器表里没有 NOPE")
         self.check(("tunnel", "push", "site-pueue", T, "x", os.path.join(T, "no-list")), 2, "读不了清单")
-        self.check(("tunnel", "push", "hub", T, "x", lst), 2, "hub 没有 ssh")
+        src = os.path.join(T, "tsrc")
+        os.makedirs(src, exist_ok=True)
+        with open(os.path.join(src, "a.txt"), "w") as f:
+            f.write("a")
+        one = os.path.join(T, "one.txt")
+        with open(one, "w") as f:
+            f.write("a.txt\n")
+        r = taskq("tunnel", "push", "hub", src, "tdst", one, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr[-300:])
+        with open(os.path.join(HOME, "tdst", "a.txt")) as f:
+            self.assertEqual(f.read(), "a", "ssh 是 None、有根目录的机器：在本机拷（dst 相对 home）")
+        self.assertFalse(os.path.exists(mark), "本机拷不跑 rsync")
         self.check(("tunnel", "push-dirs"), 2, "用法：taskq tunnel push-dirs")
         self.check(("tunnel", "push-dirs", "NOPE", T, "x", "y"), GONE, "taskq tunnel push-dirs：机器表里没有 NOPE")
 
-    def test_pueue_add_and_snapshot(self):
+    def test_pueue_add(self):
         for args in ((), ("gpu",), ("gpu", "--")):
             self.check(("pueue-add", *args), 2, "用法：taskq pueue-add")
         r = self.check(("pueue-add", "nosuch", "--", "true"), 2, "taskq pueue-add：", "没有组 nosuch")
         self.assertNotIn("代码副本", r.stderr, "先查组，不去更新代码副本")
-        self.check(("snapshot",), 2, "用法：taskq snapshot")
-        self.check(("snapshot", os.path.join(T, "not-a-clone")), 2, "不是 git 克隆")
-        r = subprocess.run(["bash", os.path.join(CORE, "sync", "snapshot.sh")], env=OLD_ENV, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("用法：snapshot.sh", r.stderr, "直接跑脚本：用法里是脚本名")
 
 
 class Project(unittest.TestCase):

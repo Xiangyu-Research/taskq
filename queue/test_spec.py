@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测任务说明的解析（2026-10-18；11/2 起用 testdata/ 的配置和实验表）：queue/spec.py、recipes.py、experiments.py。不连机器。
+"""测任务说明的解析（用 testdata/ 的配置和实验表）：queue/spec.py、recipes.py、experiments.py。不连机器。
 
     python3 queue/test_spec.py
 """
@@ -17,6 +17,7 @@ import fixture  # noqa: E402
 fixture.use()
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402
+import proto  # noqa: E402
 import cfg  # noqa: E402
 QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
 
@@ -41,7 +42,7 @@ def raises(fn):
 s = S.resolve("toy", {"ds": "D111_beta", "variant": "V_save_n470", "frag": "1"})
 ok("toy：key、out、env 默认值", s["key"] == "D111_beta/V_save_n470/1"
    and s["out"] == "results/D111_beta/V_save_n470__PlanM__full/frag_1"
-   and s["env"] == "base" and s["data"] == ["prepared/D111_beta"])
+   and s["env"] == "base" and s["inputs"] == ["prepared/D111_beta"])
 ok("toy：命令按参数填", s["cmd"] == f"bash {QR}/testdata/bin/toy_train.sh D111_beta full 1 PlanM V_save_n470")
 ok("toy：{data}、{repo} 留到运行时展开", "{data}" in s["vars"]["DEMO_RESULTS"] and "{repo}" in s["vars"]["DEMO_CODE"])
 ok("缺必填参数（frag）：报错", raises(lambda: S.resolve("toy", {"ds": "D101_alpha"})))
@@ -54,42 +55,45 @@ ok("参数给了 plan：进模型文件夹", S.resolve("toy", {"ds": "D101_alpha
 
 # ---------------- 做法 command ----------------
 c = S.resolve("command", {"key": "misc/a", "cmd": "python x.py --out {data}/misc/a", "env": "base", "out": "misc/a",
-                          "done": ["model.pt"], "data": ["other/stuff"], "extra": "1"})
+                          "done": ["model.pt"], "inputs": ["other/stuff"], "extra": "1"})
 ok("command：任务自己给 key、cmd、out、done，可以带别的参数", c["key"] == "misc/a" and c["done"] == ["model.pt"]
-   and c["data"] == ["other/stuff"] and "{data}" in c["cmd"] and c["archive"] is None)
+   and c["inputs"] == ["other/stuff"] and "{data}" in c["cmd"] and c["archive"] is False)
 ok("command：缺 cmd 报错", raises(lambda: S.resolve("command", {"key": "a", "env": "x", "out": "a", "done": "x"})))
 
-# ---------------- 10/31：任务单的通用字段 ----------------
+# ---------------- 任务单的通用字段 ----------------
 G = dict(key="guest/x", cmd="python3 t.py", env="base", out="guest/x", done="DONE")
 g = S.resolve("command", dict(G, inputs="guest/in", res={"gpus": "1", "mem": "16G"}, resume="ckpt_*.pt", owner="bob",
                               progress="progress_json"))
-ok("任务单：inputs = data（字符串变列表）、res 转成数、resume 变列表、owner", g["data"] == ["guest/in"] and g["inputs"] == ["guest/in"]
+ok("任务单：inputs（字符串变列表）、res 转成数、resume 变列表、owner", g["inputs"] == ["guest/in"]
    and g["res"] == {"gpus": 1, "mem": "16G"} and g["resume"] == ["ckpt_*.pt"] and g["owner"] == "bob")
-ok("任务单：command 默认不交给执行机、一张卡、没有存档", S.resolve("command", G)["relay"] is None
-   and S.resolve("command", G)["res"] == {"gpus": 1} and S.resolve("command", G)["resume"] is None)
-ok("res.gpus > 1 → 报错（worker 只给一张卡，11/1）", raises(lambda: S.resolve("command", dict(G, res={"gpus": 2}))))
+g0 = S.resolve("command", G)
+ok("任务单：command 默认输入就是 inputs 里的（relay=path）、要卡、res 空、没有存档、不归档、不限机器",
+   g0["relay"] == "path" and g0["device"] == "gpu" and g0["res"] == {} and g0["resume"] is None and g0["archive"] is False
+   and g0["machines"] is None and g0["inputs"] == [])
+ok("res.gpus > 1 → 报错（worker 只给一张卡）", raises(lambda: S.resolve("command", dict(G, res={"gpus": 2}))))
 ok("fits：worker 没说的不查；CPU、内存、显存超了不领", S.fits({"cpus": 64, "mem": "200G", "gpu_mem": 90})[0]
    and not S.fits({"cpus": 64}, cpus=16)[0] and not S.fits({"mem": "200G"}, mem_mb_=64 * 1024)[0]
    and not S.fits({"gpu_mem": 40}, gpu_mem=32)[0] and S.fits({"cpus": 8, "mem": "32G", "gpu_mem": 20}, 16, 64 * 1024, 80)[0]
    and S.mem_mb("2T") == 2 * 1024 ** 2)
-ok("任务单：inputs 和 data 都给 → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["a"], data=["b"]))))
 ok("任务单：res 写错字段、不是数、mem 格式不对 → 报错", raises(lambda: S.resolve("command", dict(G, res={"gpu": 1})))
    and raises(lambda: S.resolve("command", dict(G, res={"cpus": "many"})))
    and raises(lambda: S.resolve("command", dict(G, res={"mem": "lots"}))))
 w = S.resolve("command", dict(G, res={"wait_gpu": "120"}))
-ok("任务单：res.wait_gpu 转成分钟数、和默认的卡数合在一起，shell 里给 TASK_WAIT_GPU；不写时为空、负数报错",
-   w["res"] == {"gpus": 1, "wait_gpu": 120} and "TASK_WAIT_GPU=120" in S.shell_lines(w, "/d").splitlines()
+ok("任务单：res.wait_gpu 转成分钟数，shell 里给 TASK_WAIT_GPU；不写时为空、负数报错",
+   w["res"] == {"wait_gpu": 120} and "TASK_WAIT_GPU=120" in S.shell_lines(w, "/d").splitlines()
    and "TASK_WAIT_GPU=" in S.shell_lines(S.resolve("command", G), "/d").splitlines()
    and raises(lambda: S.resolve("command", dict(G, res={"wait_gpu": -1}))))
-ok("任务单：data 里有 .. → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["../etc"]))))
+ok("任务单：inputs 里有 .. → 报错", raises(lambda: S.resolve("command", dict(G, inputs=["../etc"]))))
+ok("参数叫 data、repo（运行时展开的名字）→ 报错", raises(lambda: S.resolve("command", dict(G, data=["x"])))
+   and raises(lambda: S.resolve("command", dict(G, repo="r"))))
 ok("任务单：不认识的 progress → 报错", raises(lambda: S.resolve("command", dict(G, progress="tqdm"))))
-ok("toy：也有 inputs、resume、一张卡、输入拷到本地，进度读插件的日志读法", s["inputs"] == s["data"] and s["resume"]
+ok("toy：也有 resume、一张卡、输入拷到本地，进度读插件的日志读法", s["resume"]
    and s["res"] == {"gpus": 1, "local_inputs": 1} and s["progress"] == "toy_log" and s["relay"] == "toy")
 sl = S.shell_lines(s, "/d").splitlines()
-ok("shell：TASK_INPUTS 是输入的绝对路径（数组），TASK_LOCAL 跟 res.local_inputs", f"TASK_INPUTS=(/d/prepared/{s['params']['ds'] if 'params' in s else s['data'][0].split('/')[-1]})" in sl
+ok("shell：TASK_INPUTS 是输入的绝对路径（数组），TASK_LOCAL 跟 res.local_inputs", f"TASK_INPUTS=(/d/prepared/{s['params']['ds'] if 'params' in s else s['inputs'][0].split('/')[-1]})" in sl
    and "TASK_LOCAL=1" in sl and "TASK_LOCAL=0" in S.shell_lines(S.resolve("command", G), "/d").splitlines())
 raw = dict(S.resolve("command", G), params=dict(G, note="{model}_frag{frag}_"))
-ok("shell：params 里原样留着的 {名字} 不展开、不报错（10/31 起 oldlogs.prefix 这样写）", "TASK_LOCAL=0" in S.shell_lines(raw, "/d").splitlines())
+ok("shell：params 里原样留着的 {名字} 不展开、不报错", "TASK_LOCAL=0" in S.shell_lines(raw, "/d").splitlines())
 gr = fixture.tmpdir()
 gs = {k: g.get(k) for k in S.COLLECT_FIELDS}
 gd = os.path.join(gr, "guest/x")
@@ -105,7 +109,7 @@ open(os.path.join(gd, "PROGRESS.json"), "w").write("{broken")
 ok("collect：PROGRESS.json 坏了 → 不报错、当没进度", max(r["epochs_done"] for r in S.collect([gs], gr)["tasks"]["guest/x"]["runs"]) == 0)
 open(os.path.join(gd, "ckpt_0003.pt"), "w").close()
 ok("collect：有 resume 里的存档 → resumable", S.collect([gs], gr)["tasks"]["guest/x"]["resumable"])
-# 存储挂住（11/1）：一个任务的文件读不动 → 这个任务记进 stuck、跳过，别的照常读；一共等的时间有上限
+# 存储挂住：一个任务的文件读不动 → 这个任务记进 stuck、跳过，别的照常读；一共等的时间有上限
 import threading  # noqa: E402
 hang = threading.Event()
 S.PROGRESS["hang"] = lambda p: hang.wait(30) or {}
@@ -119,7 +123,7 @@ ok("collect：一个任务读不动 → 记进 stuck、不等它，别的任务�
 ok("collect：都读得动 → 没有 stuck", "stuck" not in S.collect([gs], gr, wait=5))
 hang.set()
 del S.PROGRESS["hang"]
-# 读的时候出错（11/4）：记进 errors（带原因），不算卡住；不带 wait 时也不让整个 collect 失败
+# 读的时候出错：记进 errors（带原因），不算卡住；不带 wait 时也不让整个 collect 失败
 S.INFO["boom"] = lambda fd: 1 / 0
 bs = dict(gs, key="guest/boom", out="guest/x", info="boom")
 for w in (None, 5):
@@ -128,7 +132,7 @@ for w in (None, 5):
        "ZeroDivisionError" in rb.get("errors", {}).get("guest/boom", "") and "stuck" not in rb and "guest/x" in rb["tasks"]
        and "guest/boom" not in rb["tasks"])
 del S.INFO["boom"]
-# spec.py 命令行的错误（11/4）：说明有问题 → 一句话、退出码 2；done 读不了数据目录 → 退出码 5
+# spec.py 命令行的错误：说明有问题 → 一句话、退出码 2；done 读不了数据目录 → 退出码 5
 SP = [sys.executable, os.path.join(HERE, "spec.py")]
 bad = dict(S.sendable(S.resolve("command", G)), cmd="run {nope}")
 r = subprocess.run(SP + ["shell", "--spec", __import__("json").dumps(bad)], capture_output=True, text=True)
@@ -139,10 +143,9 @@ gone = os.path.join(gr, "not_mounted")
 r = subprocess.run(SP + ["done", "--spec", __import__("json").dumps(S.sendable(S.resolve("command", G)))], capture_output=True, text=True,
                    env=dict(os.environ, TASKQ_DATA=gone))
 ok("spec.py done：数据目录读不了 → 一句话、退出码 5（稍后再查）", r.returncode == 5 and "Traceback" not in r.stderr and r.stderr.strip())
-import relay as RL  # noqa: E402
 import refill as RF  # noqa: E402
-ok("relay.progress：只有存档（没有轮数）也算有进度", RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))
-   and not RL.progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=False)))
+ok("refill.site_progress：只有存档（没有轮数）也算有进度", RF.site_progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=True))
+   and not RF.site_progress(dict(final=False, runs=[dict(epochs_done=0)], resumable=False)))
 src = {"src": {"pueue-host": {"tasks": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
                "slurm-login": {"tasks": {}}}}
 ok("refill.progress：只有存档也算有进度，按机器分", RF.progress(src, "guest/x", "pueue-host") and not RF.progress(src, "guest/x", "slurm-login"))
@@ -154,8 +157,8 @@ os.makedirs(os.path.join(out, "check"))
 ok("什么都没有：没训完", not S.is_done(s, root))
 open(os.path.join(out, "check", "summary.json"), "w").write("{}")
 ok("只有 summary.json：没训完", not S.is_done(s, root))
-open(os.path.join(out, "ARCHIVED"), "w").close()
-ok("summary.json + ARCHIVED（| 里有一个就行）：训完", S.is_done(s, root))
+open(os.path.join(out, "final.ckpt"), "w").close()
+ok("summary.json + final.ckpt：训完", S.is_done(s, root))
 def oserr(fn):
     try:
         fn()
@@ -184,16 +187,25 @@ ok("kv_args → parse_kv 来回一致（列表用 JSON）", S.parse_kv(args[1:])
 
 # ---------------- 输出（outputs，只在这一处解释 out、done、fetch、archive） ----------------
 o = S.outputs(dict(key="a/b/0", out="/res/a//b/", done="x|y", fetch=dict(also=["pred/a/"], exclude=["big.pth"], extra=["*.json"]),
-                   archive=dict(drop=["*"]), oldlogs=dict(dir="old", prefix="p_")))
+                   archive=dict(drop=["*"])))
 ok("outputs：out 和 also 规整成相对路径、字符串 done 变成一项、| 分开成备选、archive 是开关、分段日志前缀",
    o == dict(outs=["res/a/b", "pred/a"], done=[["x", "y"]], exclude=["big.pth"], extra=["*.json"], archive=True,
-             logs="logs/tasks/a__b__0__", oldlogs=dict(dir="old", prefix="p_")))
+             logs="logs/tasks/a__b__0__"))
 o2 = S.outputs(dict(out="r", done=[], archive=None))
-ok("outputs：没有 fetch、done 空、不归档、没有 key", o2 == dict(outs=["r"], done=[], exclude=[], extra=[], archive=False, logs=None, oldlogs=None))
+ok("outputs：没有 fetch、done 空、不归档、没有 key", o2 == dict(outs=["r"], done=[], exclude=[], extra=[], archive=False, logs=None))
 o3 = S.outputs(dict(out="r", done=["a", "b|c"]))
 ok("done_with：每一项都要有、一项里有一个备选就行", S.done_with(o3, {"a", "c"}.__contains__) and not S.done_with(o3, {"b", "c"}.__contains__))
 ok("done_missing：列出缺的项（原来的写法）", S.done_missing(o3, {"a"}.__contains__) == ["b|c"])
 ok("done_with：done 是空的 → 按调用方给的 empty", S.done_with(o2, lambda a: False) and not S.done_with(o2, lambda a: False, empty=False))
+_os = dict(S.sendable(S.resolve("command", dict(G, archive=True, fetch=dict(extra=["*.json"])))))
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "outputs", "--spec", json.dumps(_os), "--sh"], capture_output=True, text=True)
+_sh = _r.stdout.splitlines()
+ok("spec.py outputs --spec <JSON> --sh：给 archive_task.sh 的 KEY、OUTS、EXTRA、TEST、ARCHIVE",
+   _r.returncode == 0 and "KEY=guest/x" in _sh and "OUTS=(guest/x)" in _sh and "EXTRA=('*.json')" in _sh
+   and "ARCHIVE=1" in _sh and any(x.startswith("TEST=") and "DONE" in x for x in _sh))
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "outputs", "--spec", json.dumps(_os)], capture_output=True, text=True)
+ok("spec.py outputs --spec <JSON>：JSON 和 outputs() 一样", _r.returncode == 0 and json.loads(_r.stdout) == S.outputs(_os))
+
 
 # ---------------- 实验表 ----------------
 ts = E.tasks()
@@ -212,7 +224,7 @@ ok("each：only 只展开给的取值；only 里的参数不在 each 里 → 报
    and raises(lambda: E.expand(_ex, dict(lr=["1"]))))
 ok("each：标签 = id + 每个参数的 _<首字母><取值>；没有 each → 只有 id",
    E.label(_ex, _t[1]) == "gx_s1_f1" and E.label(dict(id="gy"), E.expand(dict(id="gy", exp="GY", recipe="command", params={}))[0]) == "gy")
-_g = E.group_names(_ex, "/d", "py")
+_g = E.group_names(_ex)
 ok("each：实验一级的名字有 <参数>_list、<参数>_list_q",
    _g["frag_list"] == "0 1 2" and _g["frag_list_q"] == "'0 1 2'" and _g["seed_list"] == "1 2" and "frag" not in _g and _g["p"] == "1")
 E.resolve_task = _rt
@@ -238,7 +250,7 @@ r = subprocess.run([sys.executable, os.path.join(HERE, "experiments.py"), "env-o
 ok("experiments.py env-of：表里没有 → 退出码非 0、说明在标准错误（predict.sh 因此停下）", r.returncode != 0 and "MODEL_ENV" in r.stderr and not r.stdout)
 
 
-# ---------------- 实验的声明（10/24）：别的脚本按模型文件夹查，不按名字猜 ----------------
+# ---------------- 实验的声明：别的脚本按模型文件夹查，不按名字猜 ----------------
 M = "/x/{}/V_save__PlanM__full"
 ok("names_of：t24cov 跳过 G 的四个外部集、用 t24_splits.json",
    E.names_of(M.format("D155_gamma_ecov"), "skip_ext", "splits") == ["G-A G-B G-C G-D", "t24_splits.json"])
@@ -248,7 +260,7 @@ ok("names_of：表里没有的模型报错（不猜）", raises(lambda: E.names_
 ok("每个实验都有档位和看板名称", all(isinstance(e.get("nice"), int) and set(e.get("board") or {}) == {"group", "en", "zh"}
                                 for e in exps if e["rq"] == "demo"))
 ok("有 oof 步骤的都给了划分文件", all(e["names"]["splits"] for e in exps if e["rq"] == "demo"
-                                     and any(s["name"] == "oof" for c in e["group_after"] for s in c)))
+                                     and any(s["name"] == "oof" for s in e["group_after"])))
 import importlib.util  # noqa: E402
 spec_ = importlib.util.spec_from_file_location("demo_exps", os.path.join(fixture.EXPS, "demo", "experiments.py"))
 R = importlib.util.module_from_spec(spec_)
@@ -256,7 +268,7 @@ spec_.loader.exec_module(R)
 x = R._x("toy", "T99", "玩具", "base", "D999_x", ("G", "en", "zh"), 0, steps=R.OOF5 + ["ens"] + R.PROBE, splits="s.json", probe="p")
 
 
-# 实验表的字段核对（11/4）：不认识的字段报错，说清哪个实验、哪个字段、允许哪些
+# 实验表的字段核对：不认识的字段报错，说清哪个实验、哪个字段、允许哪些
 class _Mod:
     def __init__(self, exps, final=()):
         self.EXPERIMENTS, self.FINAL = exps, list(final)
@@ -276,18 +288,27 @@ _bad = dict(_e, nicee=1)
 _m = _field_err(_Mod([_bad]))
 ok("字段核对：实验里拼错的字段 → 报错，写明文件、实验、字段、允许的", bool(_m) and "x/experiments.py" in _m and "toy" in _m
    and "nicee" in _m and "group_after" in _m)
-_inf = dict(R.INFER, queue=dict(R.INFER["queue"], dsik=75))
-_m = _field_err(_Mod([dict(_e, after=[_inf])]))
-ok("字段核对：步骤 queue 里拼错的 dsik → 报错（不再静默变成做法参数、跳过大小检查）",
-   bool(_m) and "dsik" in _m and "infer" in _m and "queue" in _m and "disk" in _m)
+_m = _field_err(_Mod([dict(_e, after=[dict(R.INFER, out_bg=75)])]))
+ok("字段核对：步骤里拼错的 out_bg → 报错，写明步骤、允许的（out_gb）",
+   bool(_m) and "out_bg" in _m and "infer" in _m and "out_gb" in _m)
+_m = _field_err(_Mod([dict(_e, group_after=[[R.OOF, R.PAIRED]])]))
+ok("字段核对：group_after 里分串（列表套列表）→ 报错（先后按输入推）", bool(_m) and "group_after" in _m)
+_m = _field_err(_Mod([dict(_e, group_after=[dict(R.OOF, only=dict(frag=["0"]))])]))
+ok("字段核对：实验一级的步骤写 only → 报错", bool(_m) and "only" in _m)
+_m = _field_err(_Mod([dict(_e, after=[dict(R.INFER, only=dict(seed=["0"]))])]))
+ok("字段核对：only 里的参数不在 each 里 → 报错", bool(_m) and "only" in _m and "frag" in _m)
+_m = _field_err(_Mod([dict(_e, after=[dict(R.EVAL, device="tpu")])]))
+ok("字段核对：device 不是 gpu / cpu → 报错", bool(_m) and "device" in _m)
+_m = _field_err(_Mod([dict(_e, after=[{k: v for k, v in R.INFER.items() if k != "done"}])]))
+ok("字段核对：步骤缺必写的 done → 报错", bool(_m) and "done" in _m)
 _m = _field_err(_Mod([_e], [dict(R.FINAL[0], rerun_if_newr=["x"])]))
 ok("字段核对：FINAL 步骤里拼错的字段 → 报错", bool(_m) and "rerun_if_newr" in _m)
-ok("字段核对：queue 里可以写 command 做法的字段（res、fetch、device…）",
-   _field_err(_Mod([dict(_e, after=[dict(R.INFER, queue=dict(R.INFER["queue"], fetch={}, device="gpu", vars={}))])])) is None)
+ok("字段核对：步骤里直接写 res、device、relay、out_gb、temp、rerun",
+   _field_err(_Mod([dict(_e, after=[dict(R.INFER, res={}, device="gpu", relay="path", out_gb=1, temp=["x"], rerun=True)])])) is None)
 
-ok("_x：steps 展开成每份的步骤和一串串实验级步骤（paired 接 oof、p2cmp 接 p2）",
+ok("_x：steps 展开成每份的步骤和实验级步骤（一层列表，先后按输入推）",
    [s["name"] for s in x["after"]] == ["infer", "eval"]
-   and [[s["name"] for s in c] for c in x["group_after"]] == [["oof", "paired"], ["ens"], ["p1"], ["p2", "p2cmp"]])
+   and [s["name"] for s in x["group_after"]] == ["oof", "paired", "ens", "p1", "p2", "p2cmp"])
 
 
 def bad(**kw):
@@ -298,10 +319,10 @@ def bad(**kw):
     return False
 
 
-ok("_x：写错步骤名、oof 没给 splits、paired 不跟在 oof 后面、P1 没给 probe 都报错",
-   bad(steps=["infer", "evl"]) and bad(steps=["oof"]) and bad(steps=["paired"], splits="s.json") and bad(steps=["p1"]))
+ok("_x：写错步骤名、oof 没给 splits、P1 没给 probe 都报错",
+   bad(steps=["infer", "evl"]) and bad(steps=["oof"]) and bad(steps=["p1"]))
 
-# 模型专用的读法放在 readers/（10/31）：本机加载后表里有；remote_collect 送到别处（经 stdin，没有 readers/ 目录）也能读
+# 模型专用的读法放在插件的 readers/：加载后表里有
 ok("readers：toy_log、toy_debug 加载进 PROGRESS、INFO，有训完一轮的字样",
    "toy_log" in S.PROGRESS and "toy_debug" in S.INFO and S.TRAINED)
 ok("readers：重名的报错", raises(lambda: S.load_readers({"a.py": "PROGRESS={'toy_log': None}"})))
@@ -322,26 +343,15 @@ od = os.path.join(rr, ns["out"])
 os.makedirs(od)
 open(os.path.join(od, "train_log_1.txt"), "w").write(
     "2026-10-01 10:00:00.1: Epoch 0\n2026-10-01 10:05:00.1: Epoch time: 300 s\n2026-10-01 10:05:01.1: Epoch 1\n")
-os.makedirs(os.path.join(rr, ns["oldlogs"]["dir"]))
-open(os.path.join(rr, ns["oldlogs"]["dir"], ns["oldlogs"]["prefix"] + "123_seg1.log"), "w").write("作业 123_1\nx: Epoch time: 300 s\n")
-_run = S.subprocess.run
-S.subprocess.run = lambda cmd, **kw: _run([sys.executable, "-"], **kw)
-try:
-    rc = S.remote_collect("host", [{k: ns.get(k) for k in S.COLLECT_FIELDS}], rr)
-finally:
-    S.subprocess.run = _run
-ok("remote_collect：经 stdin 跑时 readers 一起送过去（toy_log 读出训完 1 轮，oldlogs 目录里的分段日志算训完一轮）",
+_lg = os.path.join(rr, "logs", "tasks", S.safe(ns["key"]) + proto.SAFE + "123_" + proto.LOG_PART + "1.log")
+os.makedirs(os.path.dirname(_lg))
+open(_lg, "w").write("作业 123_1\nx: Epoch time: 300 s\n")
+rc = S.collect([{k: ns.get(k) for k in S.COLLECT_FIELDS}], rr)
+ok("collect：toy_log 读出训完 1 轮，logs/tasks 里的分段日志算训完一轮",
    rc and rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1
-   and [x["trained"] for x in rc["seglogs"] if x["name"].startswith(ns["oldlogs"]["prefix"])] == [True])
+   and [x["trained"] for x in rc["seglogs"] if x["name"] == os.path.basename(_lg)] == [True])
 
-# 11/4：送过去的程序前面拼着 proto.py，那边空目录里、不读本机任何文件也能跑；spec.py collect --json（跨版本读）
-_empty = fixture.tmpdir()
-_prog = S.remote_program() + (f"\njson_out(collect(json.loads({json.dumps(json.dumps([{k: ns.get(k) for k in S.COLLECT_FIELDS}]))}), "
-                              f"{rr!r}, wait=30))\nos._exit(0)\n")
-_r = subprocess.run([sys.executable, "-I", "-"], input=_prog, capture_output=True, text=True, cwd=_empty, env={"PATH": os.environ.get("PATH", "")})
-_rc = S.json_in(_r.stdout)
-ok("remote_program：空目录里 python3 -I - 跑得起来（proto 的名字在程序里），读出的和 remote_collect 一样",
-   _r.returncode == 0 and _rc and _rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1 and _rc == rc and not os.listdir(_empty))
+# spec.py collect --json：store 和执行机上的 site_ops 经它读进度
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect", "--json"], capture_output=True, text=True,
                     input=json.dumps({"specs": [{k: ns.get(k) for k in S.COLLECT_FIELDS}], "root": rr, "wait": 30}))
 _cj = S.json_in(_r.stdout)
@@ -351,6 +361,16 @@ ok("spec.py collect --json：标准输入给说明和数据目录 → @@JSON 一
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect"], capture_output=True, text=True, input="{}")
 _r2 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect", "--json"], capture_output=True, text=True, input="[1]")
 ok("spec.py collect：不带 --json、输入不对 → 退出码 2", _r.returncode == 2 and _r2.returncode == 2)
+
+# inputs_cmd 和任务的命令一样能用核心的命令（bin/taskq）和库：cron 的 PATH 里没有 taskq 时也行
+_path = os.environ["PATH"]
+os.environ["PATH"] = "/usr/bin:/bin"
+try:
+    _li = S.listed_inputs("command -v taskq; echo $TASKQ_LIB", "/nonexistent")
+finally:
+    os.environ["PATH"] = _path
+ok("inputs_cmd：核心的 bin/ 在 PATH 最前面、TASKQ_LIB 是核心的 queue/（和 run_task.sh 给任务的命令一样）",
+   _li == [os.path.join(os.path.dirname(HERE), "bin", "taskq"), HERE])
 
 print("全部通过" if fails == 0 else f"{fails} 项失败")
 sys.exit(1 if fails else 0)

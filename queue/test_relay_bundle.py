@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""relay_bundle.py 的测试（2026-10-30；11/1 起不改名）：取文件、钥匙、生成的文件、包里的 taskq.py 完整走一遍、包里的 dicc_worker.sh 跑 test_dicc_worker*.sh 的几个情况。
-包从工作区建（commit=None），根目录换成临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 只有 scripts）。
+"""relay_bundle.py 的测试：取文件、钥匙、包里的文件原样（不生成、不改写）、包名、包里的 taskq.py 和 site_ops.py 完整走一遍、
+包里的 worker 跑 test_worker*.sh 的几个情况。
+包从工作区建（commit=None），根目录是临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 是调度代码所在的文件夹）。
+包里的命令不带本机的 TASKQ_CONFIG、TASKQ_PLUGINS：配置和插件按包里的 .taskq.toml 找，是哪台由 TASKQ_MACHINE、根目录由 TASKQ_ROOT 告诉它。
     python3 queue/test_relay_bundle.py
 """
-import ast
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -22,50 +22,49 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 REPO = cfg.REPO  # 使用者的仓库根
 QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
-BQ = cfg.bundle_rel("queue")  # 包里调度代码的 queue/（总是 scripts/taskq/queue，11/4）
+BQ = cfg.bundle_rel("queue")  # 包里调度代码的 queue/（总是 scripts/taskq/queue）
 
 cfg.use_config()
-sys.path.insert(0, os.path.join(CORE, "sites"))
-import mtab as M  # noqa: E402
+import proto  # noqa: E402
 import relay_bundle as B  # noqa: E402
+import spec as S  # noqa: E402
 
 NAME = "site-slurm2"
 STEP = f"{BQ}/testdata/bin/step.sh"  # 包里的
-FIX_PLUGINS = f"{BQ}/testdata/plugins"  # 包里的测试用插件（相对包）
-# 旧位置的转交（11/4 起由核心生成，切换前交的 Slurm 作业用）
-FWD = ('#!/bin/bash\n# taskq 生成的旧路径转交（切换前交的作业用）：scripts/taskq/queue/{0}\n'
-       '_new="$(dirname "$(readlink -f "${{BASH_SOURCE[0]}}")")/../taskq/queue/{0}"\n'
-       '[[ ${{BASH_SOURCE[0]}} != "$0" ]] && {{ source "$_new" "$@"; return; }}\nexec bash "$_new" "$@"\n')
+DROP = ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_ROOT", "TASKQ_STATE", "TASKQ_DB")
 
 
 def ok(msg):
     print(f"通过：{msg}")
 
 
+def bare_env(**kw):
+    """包里的命令的环境：去掉本机的配置、队列、数据目录（包按自己的 .taskq.toml 找配置和插件）。"""
+    e = {k: v for k, v in os.environ.items() if k not in DROP}
+    e.update(kw)
+    return e
+
+
 def run(cmd, env=None, **kw):
-    """包里的命令：不带本机的配置（TASKQ_CONFIG），用包里生成的 config/。"""
-    e = {k: v for k, v in os.environ.items()
-         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS")}
-    e.update(env or {})
-    return subprocess.run(cmd, capture_output=True, text=True, env=e, **kw)
+    return subprocess.run(cmd, capture_output=True, text=True, env=bare_env(**(env or {})), **kw)
 
 
 def test_source_files_from_commit():
     files = B.source_files("HEAD")
-    for f in (f"{BQ}/taskq.py", f"{BQ}/dicc_worker.sh", STEP, f"{BQ}/testdata/exps/demo/experiments.py",
+    for f in (f"{BQ}/taskq.py", f"{BQ}/worker_start.sh", f"{BQ}/consume.py", STEP, f"{BQ}/testdata/exps/demo/experiments.py",
               f"{BQ}/testdata/config/machines.py", f"{QR}/testdata/exps/demo/experiments.py"):
         assert f in files, f
     assert B._wanted("x/a.R", 10) and not B._wanted("x/big.json", B.SMALL_MAX + 1) and not B._wanted("x/__pycache__/a.py", 1)
     assert not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
     assert not any("__pycache__" in f for f in files) and all(len(files[f][0]) <= B.SMALL_MAX for f in files if f.endswith(B.SMALL))
-    (_, mode, oid, _, repo, _), = B._entries("HEAD", ["queue/testdata/bin/step.sh"], CORE)  # 核心的文件取自核心的仓库（11/4）
+    (_, mode, oid, _, repo, _), = B._entries("HEAD", ["queue/testdata/bin/step.sh"], CORE)  # 核心的文件取自核心的仓库
     head = subprocess.run(["git", "-C", repo, "cat-file", "blob", oid], capture_output=True).stdout
     assert head and files[STEP] == (head, mode == "100755")
     ok("从提交取文件：OUTPUTS[\"bundle\"] 下的代码（含 .R）和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
 
 
 def test_source_files_submodule(T):
-    """11/4：使用者的文件取自使用者仓库的提交（别的子模块进去取它钉的提交，核心那个子模块跳过）；核心的文件取自核心自己的仓库的 HEAD
+    """使用者的文件取自使用者仓库的提交（别的子模块进去取它钉的提交，核心那个子模块跳过）；核心的文件取自核心自己的仓库的 HEAD
     （不看使用者仓库钉的提交），放在包里的 BUNDLE_CORE/ 下。核心嵌在仓库里、在仓库外，取到的核心文件相同。"""
     env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
     BC = B.BC
@@ -140,7 +139,7 @@ def test_secrets():
     saved = B.source_files
     B.source_files = lambda *a: dict(saved(*a), **{"scripts/x.sh": (f"echo {tok}".encode(), False)})
     try:
-        B.contents(NAME, None)
+        B.contents(None)
         raise AssertionError("有钥匙应报错")
     except B.BundleError as e:
         assert "scripts/x.sh:1" in str(e) and tok not in str(e), e
@@ -151,137 +150,125 @@ def test_secrets():
 
 def test_bundle(T):
     R = os.path.join(T, "R")
-    bid, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R)
+    bid, path = B.build(None, out=os.path.join(R, "code"))
     assert path == os.path.join(R, "code", bid) and re.fullmatch(r"[0-9a-f]{16}", bid), bid
-    bid2, path2 = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R)
+    bid2, path2 = B.build(None, out=os.path.join(R, "code"))
     assert (bid2, path2) == (bid, path)
     assert not [n for n in os.listdir(os.path.join(R, "code")) if n.startswith(".")]
     ok("建包：包名是 16 位内容哈希，同样的内容再建一次用原来的包、不留临时目录")
 
-    files = sorted(os.path.relpath(os.path.join(d, f), path) for d, _, fs in os.walk(path) for f in fs)
+    files, links = set(), []
+    for d, ds, fs in os.walk(path):
+        links += [os.path.join(d, x) for x in ds + fs if os.path.islink(os.path.join(d, x))]
+        files |= {os.path.relpath(os.path.join(d, f), path) for f in fs}
+    want = B.contents(None)
+    assert files == set(want) and not links, (sorted(set(want) ^ files)[:20], links)
     src = B.source_files(None)
-    for f in ("config/machines.py", "config/policy.py", f"{BQ}/worker.sbatch", f"{BQ}/taskq.py", f"{BQ}/dicc_worker.sh",
-              f"{BQ}/testdata/bin/toy_train.sh", STEP, f"{BQ}/testdata/exps/demo/experiments.py", B.VERSION):
+    for f in B.RUNTIME:
+        if os.path.isfile(os.path.join(CORE, f)):
+            assert f"{B.BC}/{f}" in files, f"{f} 不在包里（没在 git 里跟踪？）"
+    for f in (f"{BQ}/site_ops.py", f"{BQ}/schema.py", f"{BQ}/worker.sbatch", f"{BQ}/cpu_worker.sbatch", f"{BQ}/worker_start.sh",
+              f"{BQ}/testdata/bin/toy_train.sh", STEP, f"{BQ}/testdata/exps/demo/experiments.py", B.VERSION, B.PROJECT_FILE):
         assert f in files, f
-    assert f"{BQ}/cpu_worker.sbatch" not in files, "这台没有 jobs.cpu"
-    for f in (STEP, f"{BQ}/testdata/bin/infer_task.sh", f"{BQ}/taskq.py"):
-        assert open(os.path.join(path, f), encoding="utf-8").read() == B.home_paths(src[f][0].decode(), R, f), f"{f} 和提交的不一样"
-        assert os.access(os.path.join(path, f), os.X_OK) == (src[f][1] or f.endswith(".sh")), f
-    assert open(os.path.join(path, STEP), "rb").read() == src[STEP][0]
-    for old in B.COMPAT:  # 旧位置的转交：核心生成，每个包都有
-        assert open(os.path.join(path, old)).read() == FWD.format(os.path.basename(old)) and os.access(os.path.join(path, old), os.X_OK), old
-        new = os.path.join(os.path.dirname(os.path.join(path, old)), "..", "taskq", "queue", os.path.basename(old))
-        assert os.path.realpath(new) == os.path.realpath(os.path.join(path, BQ, os.path.basename(old))) and os.path.isfile(new), new
-    for ln, tgt in B.LINKS.items():
-        assert os.readlink(os.path.join(path, ln)) == tgt and os.path.isfile(os.path.join(path, ln)), ln
+    for f, (raw, exe) in src.items():
+        assert open(os.path.join(path, f), "rb").read() == raw, f"{f} 和工作区的不一样"
+        assert os.access(os.path.join(path, f), os.X_OK) == (exe or f.endswith(".sh")), f
+    for f in ("machines.py", "policy.py"):
+        assert open(os.path.join(path, B.conf_path(f)), "rb").read() == open(os.path.join(cfg.config_dir(), f), "rb").read(), f
     sha = subprocess.run(["git", "-C", CORE, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     assert open(os.path.join(path, B.VERSION)).read() == sha + "\n"
-    assert ".local/state/taskq" in src[f"{BQ}/gpu_pad_start.sh"][0].decode()
-    gp = open(os.path.join(path, f"{BQ}/gpu_pad_start.sh"), encoding="utf-8").read()
-    assert ".local/state/taskq" not in gp and ".cache/taskq" not in gp, gp[:300]
-    ok("包里的文件：提交里的代码原样（step.sh、infer_task.sh 等不改），~/.local/state/taskq 换成根目录下的；旧位置的转交和原来的逐字相同、"
-       "指到包里的核心，start.sh、loop.sh 指向它们；VERSION 是核心的提交号")
+    plug = os.path.relpath(os.path.realpath(fixture.PLUGINS), os.path.realpath(REPO))
+    toml = open(os.path.join(path, B.PROJECT_FILE)).read()
+    assert toml == f'config = "{B.conf_rel()}"\nplugins = ["{plug}"]\n', toml
+    ok("包里的文件：工作区的代码、配置文件夹（machines.py、policy.py）原样，一个都不生成、不改写，"
+       "没有软链接、没有旧入口；RUNTIME 全在（含 site_ops.py）；VERSION 是核心的提交号；.taskq.toml 写配置文件夹和插件在包里的位置")
+    return bid, path
 
+
+def test_in_bundle(T, bid, path):
+    """包里的 taskq.py、mtab.py、site_ops.py：只靠 TASKQ_MACHINE、TASKQ_ROOT 和包里的 .taskq.toml。"""
+    R = os.path.dirname(os.path.dirname(path))
     os.symlink(bid, os.path.join(R, "code", "current"))
-    for d in ("data", "queue"):
-        os.makedirs(os.path.join(R, d))
     cur = os.path.join(R, "code", "current")
-    mp = os.path.join(cur, "config", "machines.py")
-    assert run(["python3", mp, "whoami"]).stdout.strip() == NAME
-    assert run(["python3", mp, "names", "slurm"]).stdout.split() == [NAME]
-    assert run(["python3", mp, "get", ".", "data"]).stdout.strip() == f"{R}/data"
-    e = B.relay_entry(None, NAME)  # 包按机器表的源码读（测试用的机器表在源码里读时 conda 是 /nonexistent/…）
-    assert run(["python3", mp, "get", ".", "conda"]).stdout.split() == list(e["conda"])
-    act = run(["python3", mp, "activate", "base"]).stdout
-    assert f"conda activate {e['envs']['base'][1]}" in act and e["conda"][0] in act
-    pol = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import mtab as M, policy; "
-               "print(int(bool(policy.STAGE_TMP.get(M.whoami()))), int(bool(M.MACHINES[M.whoami()].get('task_vars'))))",
-               os.path.join(cur, cfg.bundle_rel("sites"))], env=dict(TASKQ_CONFIG=os.path.join(cur, "config"))).stdout.split()
-    assert pol == ["1", "0"], pol
-    ok("生成的 machines.py、policy.py：只认得这个账号（按数据目录认出本机），环境、数据目录对；STAGE_TMP 开、没有 task_vars")
-    other = next(n for n in M.RELAY if n != NAME)
-    got = run(["python3", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import mtab as M\ntry:\n    M.machine(sys.argv[2])\n"
-               "except KeyError:\n    print('KeyError')", os.path.join(cur, cfg.bundle_rel("sites")), other], env=dict(TASKQ_CONFIG=os.path.join(cur, "config")))
-    assert got.stdout.strip() == "KeyError", got
-    got = run(["python3", mp])
-    assert got.returncode == 2 and "Traceback" not in got.stderr and "命令行" in open(mp).read(), got
-    got = run(["python3", mp, "get", ".", "no_such_field"])
-    assert got.returncode == 1 and "Traceback" not in got.stderr and "no_such_field" in got.stderr and NAME in got.stderr, got
-    ok("生成的 machines.py（只有数据，末尾转交给包里的 sites/mtab.py）：查别的机器是 KeyError（不是 NameError），"
-       "不带参数运行打印用法、退出码 2；没有的字段说清机器和字段、退出码 1")
+    os.makedirs(os.path.join(R, proto.ROOT["data"]))
+    os.makedirs(os.path.join(R, "queue"))
+    open(os.path.join(R, "queue", "tasks.jsonl"), "w").close()
+    env = dict(TASKQ_ROOT=R, TASKQ_MACHINE=NAME)
+    mp = os.path.join(cur, cfg.bundle_rel("sites"), "mtab.py")
+    assert run(["python3", mp, "whoami"], env).stdout.strip() == NAME
+    assert NAME in run(["python3", mp, "names", "slurm"], env).stdout.split()
+    got = run(["python3", mp, "get", ".", "no_such_field"], env)
+    assert got.returncode == 1 and "Traceback" not in got.stderr and "no_such_field" in got.stderr, got
+    ok("包里的 mtab.py：读包里原样的机器表，按 TASKQ_MACHINE 认出本机；没有的字段说清、退出码 1")
 
-    tq, cf = open(os.path.join(cur, BQ, "taskq.py")).read(), open(os.path.join(cur, BQ, "cfg.py")).read()
-    assert tq.split("\n")[:10] == src[f"{BQ}/taskq.py"][0].decode().split("\n")[:10]
-    assert not any(h in "\n".join(ln for ln in cf.split("\n") if ln.startswith("STATE_")) for h in ("~/.cache/taskq", "~/.local/state/taskq")) and f'STATE_HOME = "{R}/state/"' in cf, cf
-    sh = B.home_paths("#!/bin/bash\n# 队列在 ~/.cache/taskq/taskq\nQ=${Q:-$HOME/.cache/taskq/taskq}\n", R, "x.sh").split("\n")
-    assert sh[1] == "# 队列在 ~/.cache/taskq/taskq" and sh[2] == f"Q=${{Q:-{R}/queue}}", sh
-    sh = B.home_paths("Q=${Q:-$HOME/.local/state/taskq/taskq}\n", R, "x.sh")
-    assert sh == f"Q=${{Q:-{R}/queue}}\n", sh
-    ok("换家目录下的路径只换代码：taskq.py 开头的说明、shell 的注释行不换，cfg.py 的 STATE_HOME 等照常换")
+    tq = ["python3", os.path.join(cur, BQ, "taskq.py")]
 
-    sb = open(os.path.join(cur, f"{BQ}/worker.sbatch")).read().split("\n")
-    real = open(os.path.join(CORE, "queue/worker.sbatch")).read()
-    for ln in real.split("\n"):
-        if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem", "--partition", "--gres")):
-            assert ln in sb, ln
-    assert "#SBATCH --cpus-per-task=30" in sb and "#SBATCH --mem=60G" in sb, sb
-    assert "#SBATCH --partition=gpu-a" in sb and "#SBATCH --gres=gpu:a:1" in sb, sb  # 条目的 sbatch 覆盖模板（11/4）
-    assert not any(x.startswith("#SBATCH --job-name") for x in sb), sb
-    assert f"#SBATCH --output={R}/data/logs/workers/%x_%j.out" in sb
-    assert f"R={R}" in sb and 'REPO=$(readlink -f "$R/code/current")' in sb
-    assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED" in sb
-    assert sb[-2] == f'exec bash "$REPO/{BQ}/worker_start.sh"' and "git" not in "\n".join(sb)
-    assert run(["bash", "-n", os.path.join(cur, f"{BQ}/worker.sbatch")]).returncode == 0
-    fake = os.path.join(T, "fakeR")
-    os.makedirs(os.path.join(fake, "code", "b1", BQ))
-    top = "${BASH_SOURCE[0]}"
-    for _ in range(1 + len(BQ.split("/"))):  # worker_start.sh 往上到包的根
-        top = f'$(dirname "{top}")'
-    with open(os.path.join(fake, "code", "b1", BQ, "worker_start.sh"), "w") as f:
-        f.write(f'echo "$TASKQ_DIR|$TASKQ_GPU_PAD_SWITCH|{top}"\n')
-    os.symlink("b1", os.path.join(fake, "code", "current"))
-    body = "\n".join(sb).replace(f"R={R}", f"R={fake}")
-    out = run(["bash", "-c", body]).stdout.strip()
-    assert out == f"{fake}/queue|{fake}/queue/gpu_pad_DISABLED|{fake}/code/b1", out
-    ok("worker.sbatch：CPU、内存、作业名、输出位置按账号，其余资源和原来一样；开始时按 current 的实际包跑，队列和显存开关在根目录下")
-
-    env = {"TASKQ_DATA": f"{R}/data", "TASKQ_DIR": f"{R}/queue", "TASKQ_PLUGINS": os.path.join(cur, FIX_PLUGINS)}
-    tq = ["python3", os.path.join(cur, f"{BQ}/taskq.py")]
+    def status():
+        r = run(tq + ["status", "--json"], env)
+        assert r.returncode == 0, r
+        return json.loads(next(ln for ln in r.stdout.splitlines() if ln.startswith(proto.JSON_MARK))[len(proto.JSON_MARK):])
     key = "D999_abcdef/V_save/0"
     r = run(tq + ["add", "--nice", "0", "--recipe", "toy", "ds=D999_abcdef", "frag=0"], env)
     assert r.returncode == 0 and key in r.stdout, r
-    st = json.loads(next(ln for ln in run(tq + ["--json-status"], env).stdout.splitlines() if ln.startswith("@@JSON"))[6:])
-    assert [t["key"] for t in st["tasks"]] == [key] and st["tasks"][0]["state"] == "free", st
+    st = status()
+    assert st["version"] == proto.VERSION and [t["key"] for t in st["tasks"]] == [key] and st["tasks"][0]["state"] == "free", st
     assert st["tasks"][0]["spec"]["relay"] == "toy" and st["tasks"][0]["exp"] is None
     r = run(tq + ["next", "--worker", "123", "--envs", "base", "--device", "gpu"], env)
     assert r.returncode == 0, r
     lines = r.stdout.strip().split("\n")
     assert lines[0] == key and lines[1].startswith("toy ") and "ds=D999_abcdef" in lines[1], lines
+    assert os.listdir(os.path.join(R, "queue", "claims"))
     assert run(tq + ["next", "--worker", "124", "--envs", "base", "--device", "gpu"], env).returncode == 10
     assert run(tq + ["beat", "--worker", "123", key], env).returncode == 0
     assert run(tq + ["stop", key], env).returncode == 0
-    assert os.path.exists(f"{R}/queue/stopped/{key.replace('/', '__')}")
-    st = json.loads(next(ln for ln in run(tq + ["--json-status"], env).stdout.splitlines() if ln.startswith("@@JSON"))[6:])
-    assert st["tasks"][0]["state"] == "stopped", st["tasks"][0]["state"]
+    assert os.path.exists(os.path.join(R, "queue", "stopped", key.replace("/", "__")))
+    assert status()["tasks"][0]["state"] == "stopped"
     assert run(tq + ["release", "--worker", "123", key], env).returncode == 0
     assert run(tq + ["resume", key], env).returncode == 0
     assert run(tq + ["remove", key], env).returncode == 0
-    assert not open(f"{R}/queue/tasks.jsonl").read().strip()
-    r = run(tq + ["--json-status"], {"TASKQ_DATA": f"{R}/data"})
-    assert r.returncode == 0 and '"enabled": false' in r.stdout
-    ok("包里的 taskq.py：add → --json-status → next（0；再领 10）→ beat → stop → release → resume → remove；"
-       "不设 TASKQ_DIR 也用根目录下的 queue/")
-    return path
+    assert not open(os.path.join(R, "queue", "tasks.jsonl")).read().strip()
+    assert status()["enabled"] is False
+    ok("包里的 taskq.py：add（做法 toy 来自 .taskq.toml 写的插件）→ status --json → next（0；再领 10）→ beat → stop → release → "
+       "resume → remove；队列在 TASKQ_ROOT 下的 queue/")
+
+    ops = os.path.join(cur, BQ, "site_ops.py")
+
+    def op(what, data, **kw):
+        r = run(["python3", ops, what], dict(env, **kw), input=json.dumps(data))
+        out = [ln for ln in r.stdout.splitlines() if ln.startswith(proto.JSON_MARK)]
+        return r.returncode, json.loads(out[-1][len(proto.JSON_MARK):]) if out else None, r.stderr
+    rc, st, err = op("status", {})
+    assert rc == 0 and st["bundle"] == bid and st["taskq"]["tasks"] == [], (rc, err[-2000:])
+    assert op("states", {})[:2] == (0, {})
+    D = os.path.join(T, "store_data")
+    os.makedirs(D)
+    sp = S.resolve("toy", dict(ds="D999_abcdef", frag="0"))
+    o = S.outputs(sp)
+    sto = dict(TASKQ_MACHINE="hub")
+    rc, got, err = op("done", dict(data=D, items={key: dict(out=sp["out"], done=o["done"])}), **sto)
+    assert rc == 0 and got == {key: ["|".join(x) for x in o["done"]]}, (rc, got, err[-2000:])
+    for alts in o["done"]:
+        p = os.path.join(D, sp["out"], alts[0])
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w").close()
+    assert op("done", dict(data=D, items={key: dict(out=sp["out"], done=o["done"])}), **sto)[:2] == (0, {key: []})
+    rc, got, err = op("collect", dict(data=D, specs=[sp]), **sto)
+    assert rc == 0 and "tasks" in got, (rc, got, err[-2000:])
+    assert op("smoke", dict(data=D, recipe="toy", names={}), **sto)[:2] == (0, {})
+    rc, got, err = op("export", dict(data=D, spec=sp), **sto)
+    assert rc != 0 and "dataset.json" in err and not re.search(r"ModuleNotFoundError|ImportError", err), err[-2000:]
+    ok("包里的 site_ops.py：执行机的 status（包名是这个包）、states；store 的 done（按 done 的每一项数盘上的文件）、collect、"
+       "smoke、export（走到插件，缺的是数据不是模块）")
 
 
 def test_scope_and_id(T):
-    """11/4 起：包里只有执行机要用的调度文件（RUNTIME）加 OUTPUTS["bundle"] 减 bundle_skip；包名只按内容。
+    """包里只有执行机要用的调度文件（RUNTIME）加 OUTPUTS["bundle"] 减 bundle_skip；包名只按内容。
     这里把 bundle 换成 testdata（当 research 用），bundle_skip 换成 */bin/*、*/test_* 和 RUNTIME 里的 run_task.sh。"""
     saved = B.TOPS, B.SKIP
     B.TOPS, B.SKIP = (f"{QR}/testdata",), ("*/test_*", "*/bin/*", "*/run_task.sh")
     try:
         src = B.source_files(None)
-        files = B.contents(NAME, None, root=os.path.join(T, "S"))
+        files = B.contents(None)
         bid = B.bundle_id(files)
     finally:
         B.TOPS, B.SKIP = saved
@@ -289,12 +276,13 @@ def test_scope_and_id(T):
         if os.path.isfile(os.path.join(CORE, f)):
             assert f"{B.BC}/{f}" in src, f
     assert f"{BQ}/run_task.sh" in src, "RUNTIME 里的不受 bundle_skip 影响"
-    for f in (f"{BQ}/relay.py", f"{BQ}/advance.py", f"{BQ}/README.md",
+    for f in (f"{BQ}/relay.py", f"{BQ}/advance.py", f"{BQ}/relay_transfer.py", f"{BQ}/README.md",
               f"{BQ}/test_relay_bundle.py", STEP, f"{BQ}/testdata/bin/toy_train.sh"):
         assert f not in src, f
     assert not [f for f in src if f.startswith(B.BC + "/") and not f.startswith(f"{BQ}/testdata/") and f not in B.RUNTIME_B], src
     assert f"{QR}/testdata/exps/demo/experiments.py" in src
-    ok("包里的文件：RUNTIME 全在（bundle_skip 不管它们），hub 才用的（relay.py、advance.py）、说明、测试、bundle_skip 匹配的不在")
+    ok("包里的文件：RUNTIME 全在（bundle_skip 不管它们），hub 才用的（relay.py、advance.py、relay_transfer.py）、说明、测试、"
+       "bundle_skip 匹配的不在")
 
     def id_with(change):
         f = dict(files)
@@ -306,66 +294,14 @@ def test_scope_and_id(T):
     assert id_with(lambda f: None) == bid
     assert id_with(edit(f"{BQ}/run_task.sh")) != bid
     assert id_with(edit(f"{QR}/testdata/exps/demo/experiments.py")) != bid
+    assert id_with(edit(B.conf_path("machines.py"))) != bid, "配置原样带上：改了就换包"
     assert id_with(lambda f: f.__setitem__(f"{BQ}/run_task.sh", (f[f"{BQ}/run_task.sh"][0], False))) != bid
     assert id_with(lambda f: f.__setitem__(B.VERSION, ("0000000\n", False))) == bid, "核心的提交号不算进包名"
-    src_m = B.read_machines(None)
-    first = ast.get_docstring(ast.parse(src_m))
-    m = B.machine_entry(NAME, B.relay_entry(None, NAME), os.path.join(T, "S"), None)
-    a = B.gen_machines(src_m, NAME, m)
-    b = B.gen_machines(src_m.replace(first, first + "\n多一行说明", 1).replace("\n\n", "\n\n# 新加的整行注释\n", 1), NAME, m)
-    assert a == b and first not in a, a[:300]
-    ok("包名：只按内容（16 位），改执行机用的 run_task.sh、改 research 里的文件、改可执行位都换；"
-       "机器表开头的说明、整行注释、核心的提交号（VERSION）改了不换")
+    ok("包名：只按内容（16 位），改执行机用的 run_task.sh、改 research 里的文件、改配置、改可执行位都换；核心的提交号（VERSION）改了不换")
 
 
-def test_cpu_sbatch(T):
-    """jobs 里有 cpu 的 Slurm 执行机：另外生成 cpu_worker.sbatch（作业名、资源按 sbatch.cpu，WORKER_DEVICE=cpu）。"""
-    R = "~/st/abc"
-    entry = dict(jobs=("gpu", "cpu"), sbatch=dict(gpu=dict(cpus=30, mem="60G"), cpu=dict(cpus=8, mem="16G")))
-    files = B.contents(NAME, None, root=R, entry=entry)
-    sb = files[f"{BQ}/cpu_worker.sbatch"][0].split("\n")
-    real = open(os.path.join(CORE, "queue/cpu_worker.sbatch")).read()
-    for ln in real.split("\n"):
-        if ln.startswith("#SBATCH") and not any(o in ln for o in ("--output", "--job-name", "--cpus-per-task", "--mem")):
-            assert ln in sb, ln
-    assert not any(x.startswith("#SBATCH --job-name") for x in sb) and "#SBATCH --cpus-per-task=8" in sb and "#SBATCH --mem=16G" in sb, sb
-    up = "/".join([".."] * (2 + len(BQ.split("/"))))  # 在 <根>/code/current/<BQ> 交，往上到根目录
-    assert f"#SBATCH --output={up}/data/logs/workers/%x_%j.out" in sb and "R=~/st/abc" in sb, sb
-    assert "export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED WORKER_DEVICE=cpu" in sb
-    assert sb[-2] == f'exec bash "$REPO/{BQ}/worker_start.sh"' and "git" not in "\n".join(sb)
-    gsb = files[f"{BQ}/worker.sbatch"][0]
-    assert "#SBATCH --cpus-per-task=30" in gsb and "WORKER_DEVICE" not in gsb
-    old = B.contents(NAME, None, root=R, entry=dict(jobs=("gpu", "cpu"), sbatch=dict(cpus=30, mem="60G")))
-    assert "#SBATCH --cpus-per-task=30" in old[f"{BQ}/worker.sbatch"][0]
-    assert "#SBATCH --cpus-per-task=30" not in old[f"{BQ}/cpu_worker.sbatch"][0]
-    ok("cpu_worker.sbatch：jobs.cpu 有时生成，不带作业名，资源按 sbatch.cpu（老写法的 sbatch 只算 gpu），WORKER_DEVICE=cpu，入口 worker_start.sh")
-
-
-def test_pueue_site(T):
-    """pueue 的执行机（pueue-host 那样，10/31）：不生成 sbatch；slots、worker、组照抄。"""
-    R = os.path.join(T, "pueue_site")
-    entry = dict(scheduler="pueue", groups={"g1": (1, "1", {})}, slots=1, worker=dict(group="g1", id="w1"))
-    files = B.contents(NAME, None, root=R, entry=entry)
-    assert not [f for f in files if f.startswith(f"{BQ}/") and f.endswith(".sbatch")], sorted(files)
-    assert f"{BQ}/worker_start.sh" in files
-    _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=entry)
-    os.makedirs(os.path.join(R, "data"))
-    mp = os.path.join(path, "config", "machines.py")
-    assert run(["python3", mp, "get", ".", "slots"]).stdout.strip() == "1"
-    assert run(["python3", mp, "names", "pueue"]).stdout.split() == [NAME]
-    ok("pueue 的执行机：没有 worker.sbatch、cpu_worker.sbatch，slots、组照抄")
-
-    R1 = os.path.join(T, "site_pueue")
-    _, path = B.build("site-pueue", commit=None, out=os.path.join(R1, "code"), root=R1)
-    got = run(["python3", "-c", "import sys, json; sys.path.insert(0, sys.argv[1]); import machines, policy; "
-               "print(json.dumps([machines.MACHINES['site-pueue'].get('task_vars'), policy.STAGE_TMP]))", os.path.join(path, "config")])
-    assert json.loads(got.stdout) == [M.RELAY["site-pueue"]["task_vars"], {"site-pueue": False}], got
-    assert M.RELAY["site-pueue"]["task_vars"] == {"DEMO_FAST": "1", "DEMO_FAST_LOADER": "1"}
-    assert B.machine_entry("site-pueue", dict(M.RELAY["site-pueue"], task_unset=("X_JOB",)), R1)["task_unset"] == ("X_JOB",)
-    ok("生成的 machines.py 带上 RELAY 里写的 task_vars、task_unset（site-pueue），STAGE_TMP 按 stage_tmp")
-
-
-SMOKE = {"test_dicc_worker.sh": "1", "test_dicc_worker_stop.sh": "3 4b", "test_dicc_worker_code.sh": "6e"}
+SMOKE = {"test_worker.sh": "1", "test_worker_stop.sh": "3 4b", "test_worker_code.sh": "6e"}
+KEEP_FIXTURE = ("test_worker_code.sh",)  # 6e 自己拿核心再搭两个代码包（不带 .taskq.toml），配置、插件经 fixture.sh 设的 TASKQ_CONFIG、TASKQ_PLUGINS 找
 
 
 def checks_in(text, ids):
@@ -375,26 +311,25 @@ def checks_in(text, ids):
     return sum(len(re.findall(r"^check ", blocks[i], re.M)) for i in ids.split())
 
 
-def test_dicc_worker_in_bundle(T):
-    """包里的 dicc_worker.sh、run_task.sh、taskq.py 跑 test_dicc_worker*.sh 的几个情况（环境换成本机的，好真激活）：
-    两个位置领、训、交还（1），停止信号交还（3），CPU worker（4b），代码包换新（6e），够看出包里生成的 config/、改过的路径、
-    taskq.py 的调用和代码包都能用；别的情况测的是 worker 本身的逻辑，和打不打包无关，单独跑那几个文件。三个文件同时跑。"""
+def test_worker_in_bundle(T):
+    """包里的 worker.sbatch、worker_start.sh、consume.py、run_task.sh、taskq.py 跑 test_worker*.sh 的几个情况：
+    Slurm 作业的调用方式、领、训、交还（1），停止信号交还（3），CPU worker（4b），代码包换新（6e），够看出包里原样的配置、
+    .taskq.toml、taskq.py 的调用和代码包都能用；别的情况测的是 worker 本身的逻辑，和打不打包无关，单独跑那几个文件。三个文件同时跑。"""
     R = os.path.join(T, "R2")
-    me = M.MACHINES[M.whoami()]
-    _, path = B.build(NAME, commit=None, out=os.path.join(R, "code"), root=R, entry=dict(conda=me["conda"], envs=me["envs"]))
-    os.makedirs(os.path.join(R, "data"))
-    fx = 'source "$HERE/testdata/fixture.sh"'
-    e = {k: v for k, v in os.environ.items()
-         if k not in ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS")}
+    _, path = B.build(None, out=os.path.join(R, "code"))
+    fake = os.path.join(path, os.path.dirname(B.conf_rel()))  # 包里机器表的 FAKE（testdata/）
+    shutil.copytree(os.path.join(fixture.FIX, "venv"), os.path.join(fake, "venv"))  # 假的 venv（bin/activate 不是代码，不进包）
+    fx ='source "$HERE/testdata/fixture.sh"'
+    bare = 'PATH=$(python3 "$HERE/testdata/fixture.py" path "$PATH") || exit 1; export PATH'  # 不设 TASKQ_CONFIG、TASKQ_PLUGINS
     procs = {}
     for name, ids in SMOKE.items():
         test = open(os.path.join(HERE, name)).read()
-        assert "TASKQ_MACHINE=slurm-login " in test and fx in test, name
-        test = test.replace(fx, f'export TASKQ_CONFIG={shlex.quote(os.path.join(path, "config"))} TASKQ_PLUGINS=$HERE/testdata/plugins')  # 机器表用包里生成的 config/
+        assert fx in test, name
         dst = os.path.join(path, BQ, "in_bundle_" + name)
         with open(dst, "w") as f:
-            f.write(test.replace("TASKQ_MACHINE=slurm-login ", f"TASKQ_MACHINE={NAME} "))
-        p = subprocess.Popen(["bash", dst], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(e, WORKER_TEST_ONLY=ids))
+            f.write(test if name in KEEP_FIXTURE else test.replace(fx, bare))
+        p = subprocess.Popen(["bash", dst], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env=bare_env(WORKER_TEST_ONLY=ids))
         procs[name] = (checks_in(test, ids), p)
     total = 0
     for name, (want, p) in procs.items():
@@ -403,7 +338,23 @@ def test_dicc_worker_in_bundle(T):
         assert p.returncode == 0 and "全部通过" in out and not [ln for ln in out.splitlines() if ln.startswith("失败：")] and got == want, \
             f"{name}：{got}/{want}\n" + out[-3000:] + err[-2000:]
         total += got
-    ok(f"包里的 dicc_worker.sh 跑 test_dicc_worker*.sh 的几个情况（{'，'.join(f'{n} {i}' for n, i in SMOKE.items())}）：{total} 项全部通过")
+    ok(f"包里的 worker 跑 test_worker*.sh 的几个情况（{'，'.join(f'{n} {i}' for n, i in SMOKE.items())}）：{total} 项全部通过")
+
+
+def test_prune(T):
+    """hub 上建的包：留 keep（各执行机在用的、闸门挡着的）和最近的 proto.CODE_KEEP 个；建到一半的临时目录 1 天后删。"""
+    import time
+    out = os.path.join(T, "prune")
+    now = time.time()
+    names = [f"b{i}" for i in range(proto.CODE_KEEP + 3)]  # b0 最新
+    for i, d in enumerate(names + [".tmp_old", ".tmp_new"]):
+        os.makedirs(os.path.join(out, d))
+        t = now - 3 * 86400 if d == ".tmp_old" else now - 60 if d == ".tmp_new" else now - 3600 * i
+        os.utime(os.path.join(out, d), (t, t))
+    gone = B.prune({names[-1]}, out)
+    left = set(os.listdir(out))
+    assert sorted(gone) == sorted(names[proto.CODE_KEEP:-1]) and left == set(names[:proto.CODE_KEEP]) | {names[-1], ".tmp_new"}, (gone, left)
+    ok(f"hub 上的包：留在用的和最近的 {proto.CODE_KEEP} 个，别的删掉；建到一半的临时目录 1 天后删")
 
 
 def main():
@@ -412,11 +363,11 @@ def main():
         test_source_files_from_commit()
         test_secrets()
         test_source_files_submodule(T)
-        test_bundle(T)
+        bid, path = test_bundle(T)
+        test_in_bundle(T, bid, path)
         test_scope_and_id(T)
-        test_cpu_sbatch(T)
-        test_pueue_site(T)
-        test_dicc_worker_in_bundle(T)
+        test_worker_in_bundle(T)
+        test_prune(T)
     except BaseException:
         print(f"失败（文件在 {T}）")
         raise

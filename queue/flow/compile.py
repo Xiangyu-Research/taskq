@@ -1,93 +1,104 @@
-"""把现在的实验表（experiments.py 读的 EXPERIMENTS、FINAL）编译成规则和实例（2026-11-05）。
-先后照 advance.py 暗含的：
-  每个任务的步骤（after）：按顺序，每一步要源头任务和前面的每一步都做完；
-  实验一级的每一串（group_after）：每一步要实验的所有源头任务、串里前面的每一步、到这一步为止 needs 列的步骤（每个任务的）都做完；
-  FINAL：有 rerun_if_newer 的看列出的规则的所有实例（on_change=rerun），没有的不等谁。"""
+"""实验表（experiments.py 读的 EXPERIMENTS、FINAL）→ 实例和先后。
+先后只有两条：同一个任务里按顺序（源头 → after 的第一步 → 第二步 …）；输入（含通配）落在别的实例的产出里（相同、在里面、或包着它）
+就接在那个实例后面，不管属于哪个实验。不在任何产出里的输入是原始数据（raw）。
+核对（errors）：模板里不认识的名字、产出带通配、两个实例的产出重叠、输入落在自己的产出里、有环。"""
+import fnmatch
+import glob as G
 import itertools
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import common as C  # noqa: E402
 import experiments as E  # noqa: E402
 import spec as S  # noqa: E402
-from flow.model import EACH, GATHER, GLOBAL, SOURCE, Flow, Instance, Rule  # noqa: E402
-
-
-def fill(v, names):
-    return S.fill(v, names, keep=())
+from flow.model import EACH, GATHER, GLOBAL, SOURCE, Flow, Instance  # noqa: E402
 
 
 def norm(p):
-    return os.path.normpath(p.strip("/"))
+    return os.path.normpath(str(p).strip().strip("/"))
 
 
 def expand_inputs(paths, names, each=()):
-    """queue 的 inputs → 相对数据目录的路径；实验一级的里带 {<参数>}（each 的参数）的按 <参数>_list 的每个取值展开。"""
+    """输入的模板 → 相对数据目录的路径；实验一级的里带 {<参数>}（each 的参数，names 里没有它）的按 <参数>_list 的每个取值展开。"""
     out = []
     for p in paths:
         ks = [k for k in each if "{" + k + "}" in p and k not in names]
         if ks:
-            out += [fill(p, dict(names, **dict(zip(ks, vs))))
-                    for vs in itertools.product(*(names.get(f"{k}_list", "").split() for k in ks))]
+            out += [S.fill(p, dict(names, **dict(zip(ks, vs)))) for vs in itertools.product(*(names.get(f"{k}_list", "").split() for k in ks))]
         else:
-            out.append(fill(p, names))
-    return out
+            out.append(S.fill(p, names))
+    return [norm(p) for p in out]
 
 
-def rule_of(st, scope, rq=""):
-    need = st.get("needs") or ()
-    watch = tuple(st.get("rerun_if_newer") or ())
-    return Rule(name=st["name"], scope=scope, group=st.get("group", ""), cmd=st.get("cmd", ""), done=st.get("done"),
-                queue=st.get("queue"), needs=(need,) if isinstance(need, str) else tuple(need),
-                on_change="rerun" if watch else "", watch=watch, rq=st.get("rq", rq))
+class Outs:
+    """所有实例的产出，按路径的段建的树：match(输入) → 产出落在这个输入里或包着它的实例。"""
+    END = "\0"
+
+    def __init__(self):
+        self.root = {}
+
+    def add(self, path, iid):
+        n = self.root
+        for c in path.split("/"):
+            n = n.setdefault(c, {})
+        n.setdefault(self.END, []).append(iid)
+
+    def match(self, pat):
+        out, parts = set(), pat.split("/")
+
+        def everything(n):
+            for k, v in n.items():
+                if k == self.END:
+                    out.update(v)
+                else:
+                    everything(v)
+
+        def walk(n, i):
+            if self.END in n:  # 产出到这里为止：输入在它里面
+                out.update(n[self.END])
+            if i == len(parts):  # 输入到这里为止：产出在它里面
+                everything(n)
+                return
+            c = parts[i]
+            for k, v in n.items():  # 输入的这一段带通配时按它匹配树里的；树里的这一段带通配（fetch.extra 的 *.json）时反过来
+                if k != self.END and (fnmatch.fnmatchcase(k, c) if G.has_magic(c) else k == c or G.has_magic(k) and fnmatch.fnmatchcase(c, k)):
+                    walk(v, i + 1)
+        walk(self.root, 0)
+        return out
 
 
-def step_paths(st, names, each=()):
-    """步骤 → (产出, 标志, 输入)，都相对数据目录。产出 = queue 的 out、fetch.also 和 done 判断的路径。"""
-    outs, marker, ins = [], "", []
-    qd = st.get("queue") or {}
-    if qd.get("out"):
-        o = S.outputs(fill({k: qd.get(k) for k in ("out", "done", "fetch")}, names))
-        outs += o["outs"]
-    d = st.get("done")
-    if getattr(d, "path", None):
-        marker = norm(fill(d.path, names))
-        if not any(marker == o or marker.startswith(o + "/") for o in outs):
-            outs.append(marker)
-    if qd.get("inputs"):
-        ins = [norm(p) for p in expand_inputs(qd["inputs"], names, each)]
-    return outs, marker, ins
-
-
-def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python="{python}"):
-    """→ Flow。queue_tasks：总队列里的任务（taskq status --json 的 tasks），不属于实验表的有做法的也算源头任务。"""
+def build(exps=None, final=None, queue_tasks=()):
+    """→ Flow。queue_tasks：总队列里的任务（taskq status --json 的 tasks），不属于实验表、有做法的也算源头。"""
     if exps is None:
         exps, final = E.load()
-    rules, inst, errors = {}, {}, []
-
-    def add_rule(r):
-        old = rules.get(r.name)
-        if old and (old.scope != r.scope or old.cmd != r.cmd):
-            # 同名规则在不同实验里写法不同（如 prune 的 needs 多了 lprob）：规则按名字只留一条，差别记在实例的先后里
-            if old.scope != r.scope:
-                errors.append(f"规则 {r.name} 既是 {old.scope} 又是 {r.scope}")
-        rules.setdefault(r.name, r)
+    inst, errors = {}, []
 
     def add(i):
         if i.id in inst:
             errors.append(f"实例 id 重复：{i.id}")
         inst[i.id] = i
+        return i
 
     def source(key, exp, recipe, sp, lab):
-        add_rule(Rule(name=recipe, scope=SOURCE))
         o = S.outputs(sp)
-        outs = o["outs"]
-        shared = [norm(os.path.join(os.path.dirname(outs[0]), x)) for x in o["extra"]]
-        marker = norm(os.path.join(outs[0], o["done"][0][0])) if o["done"] else ""
-        i = Instance(id=key, rule=recipe, key=key, exp=exp or "", names=dict(sp.get("names") or {}), outputs=outs,
-                     shared=shared, marker=marker, spec=sp, lab=lab)
-        add(i)
-        return i
+        shared = [norm(os.path.join(os.path.dirname(o["outs"][0]), x)) for x in o["extra"]]
+        return add(Instance(id=key, scope=SOURCE, rule=recipe, exp=exp or "", names=dict(sp.get("names") or {}),
+                            outputs=[norm(x) for x in o["outs"]], shared=shared, spec=sp, lab=lab))
+
+    def step(scope, st, iid, exp, names, deps=(), each=(), **kw):
+        try:
+            outs = [norm(S.fill(x, names)) for x in st["out"]]
+            ins = expand_inputs(st["inputs"], names, each)
+            st = dict(st, **{k: [S.fill(x, names) for x in st[k]] for k in ("env", "done")})  # 和 cmd、out、inputs 一样是模板
+        except S.SpecError as e:
+            errors.append(f"{iid}：{e}")
+            return None
+        for o in outs:
+            if G.has_magic(o):
+                errors.append(f"{iid} 的产出 {o} 带通配（产出要写确定的路径）")
+        return add(Instance(id=iid, scope=scope, rule=st["name"], exp=exp, names=names, deps=list(deps), outputs=outs,
+                            inputs=ins, step=st, **kw))
 
     ids = {e["id"] for e in exps}
     table = {k: t for k, t in E.tasks().items() if t["exp"] in ids}
@@ -100,63 +111,74 @@ def compile_legacy(exps=None, final=None, queue_tasks=(), data="{data}", python=
             sp = q.get("spec") or E.resolve_task(q["recipe"], q.get("params") or {}, q.get("exp"))
         except S.SpecError:
             continue
-        source(q["key"], None, q["recipe"], sp, q["key"])
+        if not sp.get("step"):  # 步骤实例由下面按实验表推出来
+            source(q["key"], None, q["recipe"], sp, q["key"])
 
     for e in exps:
-        mine = [t for t in table.values() if t["exp"] == e["id"]]
-        by_rule = {}
-        for t in mine:
-            names = E.task_names(t, data, python)
-            prev = [t["key"]]
-            lab = E.label(e, t)
+        for t in (t for t in table.values() if t["exp"] == e["id"]):
+            names, lab, prev = E.task_names(t), E.label(e, t), [t["key"]]
             for st in E.steps_of(t, e):
-                add_rule(rule_of(st, EACH, e.get("rq", "")))
-                outs, marker, ins = step_paths(st, names)
-                qk = norm(fill(st["queue"]["key"], names)) if st.get("queue") else ""
-                i = Instance(id=f"{st['name']}:{lab}", rule=st["name"], key=t["key"], exp=e["id"], names=names,
-                             deps=list(prev),
-                             qk=qk, outputs=outs, inputs=ins, marker=marker, task=t["key"], step=st, lab=lab)
-                add(i)
-                by_rule.setdefault(st["name"], []).append(i.id)
-                prev.append(i.id)
-        if not e.get("group_after"):
-            continue
-        gnames = E.group_names(e, data, python)
-        heads = [t["key"] for t in mine]
-        for chain in e["group_after"]:
-            deps = list(heads)
-            for st in chain:
-                add_rule(rule_of(st, GATHER, e.get("rq", "")))
-                r = rule_of(st, GATHER)
-                for x in r.needs:
-                    if x not in by_rule:
-                        errors.append(f"{st['name']}:{e['id']} 要 {x} 都做完，但 {e['id']} 的每个任务没有 {x} 这一步")
-                    deps += by_rule.get(x, [])
-                outs, marker, ins = step_paths(st, gnames, e.get("each") or ())
-                qk = norm(fill(st["queue"]["key"], gnames)) if st.get("queue") else ""
-                i = Instance(id=f"{st['name']}:{e['id']}", rule=st["name"], key=e["id"], exp=e["id"], names=gnames,
-                             deps=list(dict.fromkeys(deps)), qk=qk, outputs=outs, inputs=ins, marker=marker,
-                             step=st, each=e.get("each") or {})
-                add(i)
-                deps = i.deps + [i.id]
+                i = step(EACH, st, f"{st['name']}/{lab}", e["id"], names, deps=prev, task=t["key"], lab=lab)
+                if i:
+                    prev = prev + [i.id]
+        if e.get("group_after"):
+            names = E.group_names(e)
+            for st in e["group_after"]:
+                step(GATHER, st, f"{st['name']}/{e['id']}", e["id"], names, each=e.get("each") or {}, lab=e["id"])
+    for st in final or []:
+        step(GLOBAL, st, st["name"], "", {}, lab=st["name"])
 
-    gathered = {}
+    outs, shared = Outs(), Outs()
     for i in inst.values():
-        gathered.setdefault(i.rule, []).append(i.id)
-    for f in final or []:
-        r = rule_of(f, GLOBAL)
-        add_rule(r)
-        names = dict(data=data, python=python)
-        outs, marker, ins = step_paths(f, names)
-        deps = [x for w in r.watch for x in gathered.get(w, []) if rules[inst[x].rule].scope == GATHER]
-        add(Instance(id=f["name"], rule=f["name"], key="all", names=names, deps=deps, outputs=outs, inputs=ins, marker=marker,
-                     step=f))
+        for o in i.outputs:
+            outs.add(o, i.id)
+        for o in i.shared:
+            shared.add(o, i.id)
+    errors += overlaps(inst)
+    for i in inst.values():
+        for p in i.inputs:
+            own = [o for o in i.outputs if C.under(p, o) or C.under(o, p)]
+            if own:
+                errors.append(f"{i.id} 的输入 {p} 落在自己的产出 {own[0]} 里（输入和产出不能重叠）")
+            src = outs.match(p) - {i.id}
+            if src:
+                i.deps += [d for d in inst if d in src and d not in i.deps]  # 按实验表的顺序
+            elif not shared.match(p):
+                i.raw.append(p)
+    return Flow(instances=inst, errors=errors + cycles(inst))
 
-    # done 判断的路径是别的实例产出的上级（如删单折概率图的那一步看整个预测目录）：算它改别人的产出，不归它
+
+def overlaps(inst):
+    """两个实例的产出相同、或一个在另一个里面 → [问题]。"""
+    owner, probs = {}, []
     for i in inst.values():
-        if i.marker and i.marker in i.outputs:
-            pre = i.marker + "/"
-            if any(o.startswith(pre) for j in inst.values() if j is not i for o in j.outputs):
-                i.outputs.remove(i.marker)
-                i.mutates.append(i.marker)
-    return Flow(rules=rules, instances=inst, errors=errors)
+        for o in i.outputs:
+            if o in owner and owner[o] != i.id:
+                probs.append(f"{o} 同时是 {owner[o]} 和 {i.id} 的产出")
+            owner.setdefault(o, i.id)
+    for o, iid in owner.items():
+        parts = o.split("/")
+        for n in range(1, len(parts)):
+            up = "/".join(parts[:n])
+            if up in owner and owner[up] != iid:
+                probs.append(f"{iid} 的产出 {o} 在 {owner[up]} 的产出 {up} 里（一个路径只归一个步骤）")
+    return probs
+
+
+def cycles(inst):
+    """先后有环 → [问题]（每个环报一次）。"""
+    state, probs = {}, []
+
+    def visit(n, path):
+        if state.get(n) == 1:
+            probs.append("先后有环：" + " → ".join(path[path.index(n):] + [n]))
+            return
+        if state.get(n) == 2 or n not in inst:
+            return
+        state[n] = 1
+        for d in inst[n].deps:
+            visit(d, path + [n])
+        state[n] = 2
+    for n in inst:
+        visit(n, [])
+    return probs

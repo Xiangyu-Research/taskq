@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""并发和中途失败（11/3）：锁的抢占、hub 的 pueue 读不到时 relay 只续约、GC 和 stage 抢 pin。
-跑法：python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin]（不带参数全跑，各条独立报告）
+"""并发和中途失败：锁的抢占、hub 的 pueue 读不到时 relay 只续约、清理和 stage 抢钉子、等锁的超时。
+跑法：python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin|central_timeout]（不带参数全跑，各条独立报告）
 全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
 import json
 import os
@@ -13,7 +13,6 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
-import cfg as _cfg  # noqa: E402  调度代码的根、使用者的仓库根
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
 import fixture  # noqa: E402
 TMP = fixture.tmpdir(prefix="test_review_conc_")
@@ -27,8 +26,6 @@ import common as C  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import mtab as M  # noqa: E402
 import relay  # noqa: E402
-import relay_remote as RM  # noqa: E402
-import relay_store as ST  # noqa: E402
 import relay_transfer as RT  # noqa: E402
 import taskq  # noqa: E402
 
@@ -86,7 +83,7 @@ def _lock_race(base):
 
 
 def test_lock_noowner():
-    """拿到锁、owner 没写上（盘满等）：退出时只删还是自己建的那个目录；锁已被别人抢走、重新建过的不删（11/5）。"""
+    """拿到锁、owner 没写上（盘满等）：退出时只删还是自己建的那个目录；锁已被别人抢走、重新建过的不删。"""
     _lock_noowner(taskq.TQ)
     if os.path.isdir("/var/tmp"):
         disk = fixture.tmpdir(prefix="test_races_", dir="/var/tmp")
@@ -156,8 +153,8 @@ def test_relay_err_fetch():
 
 
 def test_gc_pin():
-    """GC 读完 pins 以后 stage 才写 pin（stage 在 hub 的 pueue wait 组里跑，和健康检查里的 GC 并行）：
-    stage 的 MISSING_PY 已认为这个 blob 在、不再传，GC 照样删掉它 → 建视图时缺 blob。"""
+    """清理读完钉子以后 stage 才写钉子（stage 在 hub 的核心组里跑，和健康检查里的清理并行）：
+    stage 的 missing 已认为这个 blob 在、不再传，清理照样删掉它 → 建视图时缺 blob。清理删每个 blob 前再看一次钉子。"""
     R = os.path.join(TMP, "gcroot")
     h = "ab" + "0" * 62
     os.makedirs(os.path.join(R, "blobs", h[:2]))
@@ -169,22 +166,18 @@ def test_gc_pin():
     old = time.time() - 3 * 86400
     os.utime(blob, (old, old))
     pin = os.path.join(R, "state", "pins", "stage_k.json")
-    hook = (f"import os,json\n_w=os.walk\n_s=dict(n=0)\n"
-            f"def _walk(*a,**k):\n"
-            f"    if _s['n']==0:\n"
-            f"        _s['n']=1\n"
-            f"        json.dump([{h!r}],open({pin!r},'w'))\n"
-            f"    return _w(*a,**k)\n"
-            f"os.walk=_walk\n")
-    code = hook + "exec(compile(open(__import__('sys').argv.pop(1)).read(),'GC_PY','exec'))"
-    gc_file = os.path.join(TMP, "gc_py.py")
-    with open(gc_file, "w") as f:
-        f.write(RM.GC_PY)
-    repo = _cfg.REPO
-    r = subprocess.run([sys.executable, "-c", code, gc_file, R], cwd=repo, capture_output=True, text=True,
+    B = os.path.join(R, "blobs")
+    code = (f"import os,json,sys\nsys.path.insert(0,{HERE!r})\nimport site_ops\n_w=os.walk\n"
+            f"def _walk(top,*a,**k):\n"
+            f"    if os.path.realpath(top)==os.path.realpath({B!r}) and not os.path.exists({pin!r}):\n"
+            f"        json.dump([{h!r}],open({pin!r},'w'))\n"  # 清理读完钉子、开始挑 blob 时 stage 写了钉子
+            f"    return _w(top,*a,**k)\n"
+            f"os.walk=_walk\nsite_ops.main(['gc'])\n")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=dict(os.environ, TASKQ_ROOT=R),
                        input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["views/v"])))
     assert r.returncode == 0, r.stderr
-    assert os.path.exists(blob), (f"stage 在 GC 运行中写了 pin，GC 仍删了这个 blob：{r.stdout.strip()}")
+    assert os.path.exists(pin), "钩子没起作用"
+    assert os.path.exists(blob), (f"stage 在清理运行中写了钉子，清理仍删了这个 blob：{r.stdout.strip()}")
 
 
 def test_central_timeout():
@@ -193,10 +186,8 @@ def test_central_timeout():
     t = inspect.signature(taskq.central).parameters["timeout"].default
     assert t > wait + 30, f"central() 的超时 {t} 秒不比锁的最长等待 {wait} 秒长：锁被占着时调用方拿到 TimeoutExpired，而不是退出码"
     import advance
-    for f in (advance.taskq_add, advance.taskq_remove):
-        src = inspect.getsource(f)
-        t = eval(src.split("timeout=")[1].split(")")[0], vars(advance))
-        assert t > wait + 30, f"advance.{f.__name__} 的超时 {t} 秒不比锁的最长等待 {wait} 秒长"
+    assert "timeout=TQ_TIMEOUT" in inspect.getsource(advance.taskq_add)
+    assert advance.TQ_TIMEOUT > wait + 30, f"advance.TQ_TIMEOUT {advance.TQ_TIMEOUT} 秒不比锁的最长等待 {wait} 秒长"
 
 
 TESTS = dict(lock=test_lock, lock_noowner=test_lock_noowner, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,

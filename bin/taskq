@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""taskq：任务队列和调度的命令行（2026-11-04）。命令表和约定见 README.md。
+"""taskq：任务队列和调度的命令行。命令表和约定见 README.md。
 
 找项目（--project / TASKQ_PROJECT / 从当前目录往上找 .taskq.toml）要在 import 核心的模块之前：cfg.py 在 import 时读
 TASKQ_REPO、TASKQ_CONFIG。子命令在进程内调用各模块的 main(argv)；bash 脚本用 exec。
@@ -152,20 +152,19 @@ def cmd_status(argv, prog):
 
 def cmd_plan(argv, prog):
     import argparse
-    ap = argparse.ArgumentParser(prog=prog, description="只看：按时段开关、送任务（feed → relay）、训完以后（advance）这一轮会做什么")
+    ap = argparse.ArgumentParser(prog=prog, description="只看：训完以后（advance）、送任务（feed → relay）这一轮会做什么（顺序同健康检查）")
     ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看（默认就是）")
     ap.parse_args(argv)
     paths()
     import health as H
-    import shift
     import feed
     import advance
     from proto import alert_msg
     s = H.gather()
+    after = advance.describe(*advance.plan(s))
     ev, st = feed.run_all(s, dry=True)
-    parts = [("按时段开关（shift）", shift.run(s, dry=True) or ["不动"]),
-             ("送任务（feed → relay）", ev + [f"卡住：{alert_msg(v)}" for v in st.values()] or ["不动"]),
-             ("训完以后（advance）", advance.describe(*advance.plan(s)))]
+    parts = [("训完以后（advance）", after),
+             ("送任务（feed → relay）", ev + [f"卡住：{alert_msg(v)}" for v in st.values()] or ["不动"])]
     print("\n\n".join(f"== {t}\n" + "\n".join(lines) for t, lines in parts))
     return OK
 
@@ -248,7 +247,7 @@ SPEC_DOC = {
     "done": ("<做法> k=v… | --spec <JSON>", "训完了退出码 0，没训完 1，说明有问题 2，读不了数据目录 5"),
     "resolve": ("<做法> k=v…", "解析好的说明（JSON，一行）"),
     "lookup": ("<key>", "按 key 找任务（先查实验表，再查队列），打印说明（JSON）"),
-    "outputs": ("<key> [--sh]", "这个任务的输出（JSON）；--sh：给 archive_task.sh 的 shell 语句"),
+    "outputs": ("<key>|--spec <JSON> [--sh]", "这个任务的输出（JSON）；--sh：给 archive_task.sh 的 shell 语句"),
     "collect": ("--json < 输入.json", "本机的训练状态（跨版本读用）：输出 @@JSON 一行"),
 }
 
@@ -260,16 +259,16 @@ TREE = {
     "set": Cmd("改一个任务的参数", py("taskq", "set"), own_help=True),
     "nice": Cmd("改档位（先后）", py("taskq", "nice"), own_help=True),
     "show": Cmd("一个任务的完整说明和状态", py("taskq", "show"), own_help=True),
-    "log": Cmd("一个任务的每段训练（分段日志）、调度日志里提到它的行、hub 的任务记录", py("tasklog", prog="taskq log"), own_help=True),
+    "log": Cmd("一个任务的每段训练（分段日志）、事件日志里关于它的、hub 的任务记录", py("tasklog", prog="taskq log"), own_help=True),
     "status": Cmd("队列（--all：所有任务的状态、在哪台、进度、预计完成）", cmd_status, "[--all] [--json]",
                   "不带 --all：本机的队列（taskq.py status）；--json：@@JSON 一行。\n--all：各机器汇总的每个任务的状态"),
     "stop": Cmd("停止任务（在训的 30 秒内停下、交还，之后不再领）", py("taskq", "stop"), own_help=True),
     "resume": Cmd("撤销停止", py("taskq", "resume"), own_help=True),
     "rm": Cmd("删掉没人领着的任务", py("taskq", "rm"), own_help=True),
     # 调度
-    "tick": Cmd("健康检查一轮（真做：推送、按时段开关、送任务、排下一步）",
+    "tick": Cmd("健康检查一轮（真做：推送、排下一步、送任务）",
                 lambda argv, prog: script(os.path.join("monitor", "health.py"), argv, prog), own_help=True),
-    "plan": Cmd("只看：这一轮按时段开关、送任务、训完以后会做什么", cmd_plan, own_help=True),
+    "plan": Cmd("只看：这一轮训完以后排什么、送什么任务", cmd_plan, own_help=True),
     "boot": Cmd("开机（@reboot）：启动 pueued、放回被打断的任务", sh("queue/on_boot.sh"), "[--gpu-log]",
                 "--gpu-log：同时启动 GPU 使用记录（不给时按机器表的 gpu_log）"),
     # 执行机
@@ -286,13 +285,13 @@ TREE = {
         "lock": Cmd("把环境描述解成锁 <名>.<变体>.lock.json，文件下到 wheelhouse（不装进任何环境）", py("envlock", "lock", prog="taskq env"),
                     own_help=True),
     }),
-    "events": Cmd("the event log: what happened (--since --key --site --source --kind --grep, -f, --json)",
+    "events": Cmd("事件日志：发生过什么（--since --key --site --source --kind --grep、-f、--json）",
                   py("events", "events", prog="taskq"), own_help=True),
-    "note": Cmd("write a note into the event log (what went wrong, what was done)", py("events", "note", prog="taskq"), own_help=True),
-    "progress": Cmd("task progress over time ([--key K] [--since T] [--json])", py("events", "progress", prog="taskq"), own_help=True),
-    "notify": Cmd("push a message to the phone (ntfy) and log it as an event", py("push", prog="taskq"), own_help=True),
-    "problems": Cmd("what the last health check found ([--all] [--json])", py("notice", "problems", prog="taskq"), own_help=True),
-    "notice": Group("挂在健康检查上的提醒（进\"需要处理\"、推送一次，撤掉后消失）", {
+    "note": Cmd("往事件日志里记一条（出了什么事、做了什么）", py("events", "note", prog="taskq"), own_help=True),
+    "progress": Cmd("任务进度随时间的变化（[--key K] [--since T] [--json]）", py("events", "progress", prog="taskq"), own_help=True),
+    "notify": Cmd("推送一条消息到手机（ntfy），并记进事件日志", py("push", prog="taskq"), own_help=True),
+    "problems": Cmd("最近一次健康检查查到的问题（[--all] [--json]）", py("notice", "problems", prog="taskq"), own_help=True),
+    "notice": Group("挂在健康检查上的提醒（列在 taskq problems 里、不推送，撤掉后消失）", {
         "set": Cmd("挂上或改文字（<名字> [文字…]；不给文字时读标准输入）", py("notice", "set", prog="taskq notice"), own_help=True),
         "clear": Cmd("撤掉（<名字>…）", py("notice", "clear", prog="taskq notice"), own_help=True),
         "list": Cmd("挂着的（[--json]）", py("notice", "list", prog="taskq notice"), own_help=True),
@@ -317,12 +316,12 @@ TREE = {
     "tunnel": Group("经隧道传大批文件", {
         "rsync": Cmd("rsync 的替身：先经隧道传，再照原样跑 rsync", py("tunnel", "rsync", prog="taskq tunnel"),
                      "<rsync 的参数> <源> <目标>", help_in=rsync_help),
-        "push": Cmd("hub → 那边", py("tunnel", "push", prog="taskq tunnel"), "<机器> <hub 上的源目录> <那边的目标目录> <清单>",
+        "push": Cmd("本机 → 那边", py("tunnel", "push", prog="taskq tunnel"), "<机器> <本机的源目录> <那边的目标目录> <清单>",
                     "清单每行一个相对源目录的路径"),
-        "pull": Cmd("那边 → hub", py("tunnel", "pull", prog="taskq tunnel"), "<机器> <那边的源目录> <hub 上的目标目录> <清单>",
+        "pull": Cmd("那边 → 本机", py("tunnel", "pull", prog="taskq tunnel"), "<机器> <那边的源目录> <本机的目标目录> <清单>",
                     "清单每行“相对路径<TAB>字节数”"),
-        "push-dirs": Cmd("hub → 那边，整个子目录，传完核对", sh("sync/tunnel_push.sh"),
-                         "<机器> <hub 上的源目录> <那边的目标目录（相对 home）> <子目录>…",
+        "push-dirs": Cmd("本机 → 那边，整个子目录，传完核对", sh("sync/tunnel_push.sh"),
+                         "<机器> <本机的源目录> <那边的目标目录（相对 home）> <子目录>…",
                          "经 tunnel push 传；传之前在那边每个子目录放一个未完成标记，最后两边各算 MD5 逐个文件核对，一致才删标记。\n"
                          "那边已有、大小和修改时间相同的文件跳过，中断后重新运行接着传。会跑几十分钟，放在后台或 tmux 里"),
     }),
@@ -334,22 +333,16 @@ TREE = {
         "room": Cmd("让填充放到 floor、等它说好了（[--wait 秒]；没有填充时什么都不做）", py("consumers.gpu_pad", prog="taskq pad room"),
                     own_help=True, project=False),
     }),
-    "pueue-add": Cmd("往本机 pueue 的一个组加一次性任务（工作目录是代码副本）", sh("queue/q"),
-                     "<组> [pueue add 的选项] -- '<命令>'", "按机器表设好卡和组的环境变量；有 code 的机器先更新代码副本"),
+    "pueue-add": Cmd("往本机 pueue 的手动组（manual_groups）加一次性任务（工作目录是这台的 repo）", sh("queue/q"),
+                     "<组> [pueue add 的选项] -- '<命令>'", "按机器表设好卡和组的环境变量"),
     "pueue-status": Cmd("各 pueue 机器的队列（只看）", lambda argv, prog: script("queue/qs", argv, prog), own_help=True),
-    "snapshot": Cmd("按提交号的代码副本（拉取、建副本、切 current、删旧的）", sh("sync/snapshot.sh"), "<克隆>"),
     "who": Cmd("这个文件是哪个实例的产出", py("flow.cli", "who", prog="taskq"), own_help=True),
     "dag": Cmd("实例之间的先后（--dot 画图，--check 核对）", py("flow.cli", "dag", prog="taskq"), own_help=True),
-    "run": Cmd("包一层跑 hub 上的一步（记台账、查没声明的写、写心跳）", py("flow.cli", "run", prog="taskq"), own_help=True),
-    "adopt": Cmd("台账：现在做完的记成 adopted（只 stat）", py("flow.cli", "adopt", prog="taskq"), own_help=True),
-    "verify": Cmd("台账：做完的产出现在还对不对", py("flow.cli", "verify", prog="taskq"), own_help=True),
-    "accept": Cmd("台账：有意改过的产出按现在的样子重新记下", py("flow.cli", "accept", prog="taskq"), own_help=True),
-    "publish": Cmd("处理被冲突挡住的发布、接着做断了的发布", py("flow.cli", "publish", prog="taskq"), own_help=True),
     "check": Cmd("核对整个项目（配置、插件、实验表、所有任务）", py("check", prog="taskq check"), own_help=True),
-    "db": Group("the hub database", {
-        "migrate": Cmd("create it or apply pending migrations (hub only)", py("db", "migrate", prog="taskq db"), own_help=True),
-        "path": Cmd("where it is", py("db", "path", prog="taskq db"), own_help=True),
-        "version": Cmd("schema version on disk and in this code", py("db", "version", prog="taskq db"), own_help=True),
+    "db": Group("hub 的数据库", {
+        "migrate": Cmd("建库或做还没做的迁移（只在 hub 上）", py("db", "migrate", prog="taskq db"), own_help=True),
+        "path": Cmd("在哪", py("db", "path", prog="taskq db"), own_help=True),
+        "version": Cmd("盘上和这份代码的表结构版本", py("db", "version", prog="taskq db"), own_help=True),
     }),
     "path": Cmd("核心的位置：lib / api（queue/）、core（根）", cmd_path, "lib|api|core", project=False),
     "machines": Cmd("机器表（get、names、activate、show…）", cmd_machines, own_help=True),
@@ -358,6 +351,8 @@ TREE = {
         "version": Cmd("版本", cmd_version, project=False),
         "test": Cmd("跑核心的全部测试（各自的临时 HOME，同时跑几个，结果表）", py("run_tests", prog="taskq self test"),
                     own_help=True, project=False),
+        "migrate": Cmd("盘上的旧格式改成现在的（切换时跑一次；默认只列出，--apply 才改）", py("migrate", prog="taskq self migrate"),
+                       own_help=True),
     }),
     # 底层（不在首页）
     "worker": Group("worker 用的（参数、退出码冻结）", {
@@ -371,24 +366,22 @@ TREE = {
                   hidden=True),
     "internal": Group("调度自己排的步骤", {
         "stage": Cmd("传数据、加进执行机的队列（排不上退出码 75）", py("relay", "stage", prog="taskq internal"), own_help=True),
-        "fetch": Cmd("拉回做完的任务", py("relay", "fetch", prog="taskq internal"), own_help=True),
-        "import-logs": Cmd("import the old text logs into the event log (re-running adds nothing)", py("events", "import", prog="taskq internal"),
-                           own_help=True),
-        "engine-replay": Cmd("反事实回放：advance 和 flow 引擎各算一遍比较", py("flow.cli", "replay", prog="taskq internal"), own_help=True),
+        "fetch": Cmd("拉回做完的任务（落到 store）", py("relay", "fetch", prog="taskq internal"), own_help=True),
+        "archive": Cmd("store 上做完的结果备份到备份机", py("relay", "archive", prog="taskq internal"), own_help=True),
     }, hidden=True),
 }
 
 SECTIONS = [("队列", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "rm"]),
             ("调度", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
             ("执行机和实验", ["site", "env", "smoke", "exp"]),
-            ("流程和台账", ["who", "dag", "adopt", "verify", "accept", "publish"]),
-            ("其他", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "snapshot", "check", "db", "path", "machines", "self"])]
+            ("依赖", ["who", "dag"]),
+            ("其他", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "check", "db", "path", "machines", "self"])]
 
 
 def top_help():
     w = max(len(n) for _, ns in SECTIONS for n in ns) + 2
     lines = ["用法：taskq [--project 目录] <命令> [参数…]", "",
-             "任务队列和调度。项目：--project、TASKQ_PROJECT、从当前目录往上找 .taskq.toml，都没有时用 ~/.config/taskq/project 写的。", ""]
+             "任务队列和调度。项目：--project，或从当前目录往上找 .taskq.toml。", ""]
     for title, names in SECTIONS:
         lines.append(f"{title}：")
         lines += [f"  {n:{w}}{TREE[n].summary}" for n in names]
@@ -407,7 +400,7 @@ def unknown(name, choices, prog):
 
 
 def use_project(explicit):
-    """找到项目就导出 TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS；找不到时照旧（代码包里核心在 <包>/scripts/taskq，cfg.py 按这个布局认仓库）。"""
+    """找到项目就导出 TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS；找不到时不导出（代码包里核心在 <包>/scripts/taskq，cfg.py 按这个布局认仓库）。"""
     sys.path.insert(0, os.path.join(CORE, "queue"))
     import project
     root = project.find(explicit)
@@ -471,8 +464,7 @@ def main(argv):
         say(str(e))
         return USAGE
     if not has_config():
-        say("找不到项目：给 --project 目录、设 TASKQ_PROJECT，或在有 .taskq.toml 的目录（或它下面）运行；"
-            "本机常用的项目可以写进 ~/.config/taskq/project（一行，项目根目录）")
+        say("找不到项目：给 --project 目录，或在有 .taskq.toml 的目录（或它下面）运行")
         return USAGE
     try:
         return node.fn(rest, prog)

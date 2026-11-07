@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""示例项目（example/）的 README 里那几条命令照样能用（2026-11-04）：临时 HOME 里跑，不连别的机器。
+"""示例项目（example/）的 README 里那几条命令照样能用：临时 HOME 里跑，不连别的机器。
   python3 queue/test_example.py"""
 import os
 import shutil
@@ -36,13 +36,14 @@ try:
     ok("exp tasks：两个实验展开成 5 个任务", r.returncode == 0 and len(r.stdout.split("\n")) - 1 == 5)
     r = tq("add", "--exp", "small")
     ok("add --exp small：加了 2 个", r.returncode == 0 and r.stdout.count("加入：") == 2)
-    ok("队列在示例自己的状态文件夹里", os.path.isfile(os.path.join(HOME, ".cache", "taskq-example", "taskq", "tasks.jsonl")))
+    ok("队列在示例自己的状态文件夹里", os.path.isfile(os.path.join(HOME, ".local", "state", "taskq-example", "taskq", "tasks.jsonl")))
     r = tq("status")
     ok("status：2 个任务", r.returncode == 0 and "任务 2 个" in r.stdout and "count/small/1" in r.stdout)
     r = tq("show", "count/small/0")
     ok("show：命令按做法填好", r.returncode == 0 and "bash bin/count.sh 100 {data}/results/small/seed_0" in r.stdout)
     r = tq("plan")
-    ok("plan：执行机连不上，什么都不动", r.returncode == 0 and "连不上" in r.stdout and "没有要排的" in r.stdout)
+    ok("plan：执行机连不上、store 上还没有代码包（查不了结果），什么都不动",
+       r.returncode == 0 and "连不上" in r.stdout and "查不了结果" in r.stdout and "这次不排" in r.stdout)
     r = tq("rm", "count/small/0", "count/small/1")
     ok("rm：删掉", r.returncode == 0 and "任务 0 个" in tq("status").stdout)
     data = os.path.join(HOME, "taskq-example", "data", "results", "x")

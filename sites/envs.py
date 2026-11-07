@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按 <配置文件夹>/specs/<名>.yml 在一台机器上建环境（2026-10-31）：hub 生成一段 bash，交给那台机器在 CPU 上跑（Slurm：CPU 分区的
+"""按 <配置文件夹>/specs/<名>.yml 在一台机器上建环境：hub 生成一段 bash，交给那台机器在 CPU 上跑（Slurm：CPU 分区的
 srun；pueue 类：nice、看不到卡的普通进程），不占 GPU。
 
 描述的写法：
@@ -15,8 +15,9 @@ srun；pueue 类：nice、看不到卡的普通进程），不占 GPU。
 描述一改哈希就变：新版建在新目录里，建好检查过才换软链接、写 .ok，旧版留着，在跑的任务不受影响。
 .ok 的内容是哈希（一行）；.failed 是"<哈希> <时间> rc <退出码>"或"<哈希> <时间> nospace <要的字节> <剩的字节>"。
 
-有锁文件 <名>.<变体>.lock.json（11/5，sites/envlock.py 写）时不联网建：锁里的 conda 包、pip 包按 sha256 存在 hub 的
-wheelhouse（状态文件夹下的 proto.wheel(sha256)）；执行机先经 relay 的 ensure_blobs 放进根目录的 blobs（建的时候钉住，清理不删），
+有锁文件 <名>.<变体>.lock.json（sites/envlock.py 写）时不联网建：锁里的 conda 包、pip 包按 sha256 存在 hub 的
+wheelhouse（状态文件夹下的 proto.wheel(sha256)）；执行机先经 relay 的 ensure_blobs 由 hub 送进根目录的 blobs（hub 上跑 site_ops push，
+要有根目录和 transfer；建的时候钉住，清理不删），
 那边硬链接成原来的文件名，conda create --offline --file（@EXPLICIT）、pip install --no-index --require-hashes；hub 直接用 wheelhouse。
 建之前按锁里的大小查空间（包 × SPACE_X，加一份临时的；有 cap 的执行机按 cap 减已占的算），不够不建、写 .failed。
 """
@@ -24,7 +25,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 import time
 
@@ -110,11 +110,7 @@ def sh_path(p):
 
 
 def state_dir(m):
-    return m["root"].rstrip("/") + "/" + ROOT["envs_ok"] if m.get("root") else cfg.state("envs", expand=False)
-
-
-def code_dir(m):
-    return m["root"].rstrip("/") + "/" + ROOT["current"] if m.get("root") else (m.get("code") or m.get("repo"))
+    return m["root"].rstrip("/") + "/" + ROOT["envs_ok"]
 
 
 def base_activation(name, base):
@@ -136,7 +132,7 @@ def own_base(name, env, v):
 
 def spec_activation(name, env):
     """按描述建在 env_root 下的 env 的激活语句（不看机器条目：预建、锁里写了 base 时用）。"""
-    return "\n".join([DEACT, f"source {sh_path(M.env_root(M.machine(name)))}/{shlex.quote(env)}/.activate"])
+    return "\n".join([DEACT, f"source {sh_path(M.env_root(name))}/{shlex.quote(env)}/.activate"])
 
 
 def heredoc(tag, text):
@@ -223,7 +219,7 @@ def build_script(name, env, v=None, store=None):
     if lk and store is None:
         raise EnvError(f"{env} 有锁文件，要给放包的目录")
     chk = open(check_file(env), encoding="utf-8").read()
-    root, sd = sh_path(M.env_root(m)), sh_path(state_dir(m))
+    root, sd = sh_path(M.env_root(name)), sh_path(state_dir(m))
     conda = sh_path(m["conda"][0]) if m.get("conda") else None
     L = ["#!/bin/bash", "set -euo pipefail", "export CUDA_VISIBLE_DEVICES=", f"ROOT={root}", f"SD={sd}",
          f"N={shlex.quote(env)}", f"H={h}", 'P="$ROOT/$N-${H:0:12}"', "T=", 'mkdir -p "$ROOT" "$SD"',
@@ -272,7 +268,7 @@ def build_script(name, env, v=None, store=None):
               '--find-links "$T/wheels" -r "$T/req.txt"']
     elif not lk:
         L += online_lines(env, sp, v)
-    code = code_dir(m)
+    code = M.code(name)
     L += [f"python3 - {sh_path(code) if code else ''} {heredoc('CHECK_EOF', chk)}",
           'echo "$H" > "$P/.built"',
           'ln -sfn "$(basename "$P")" "$ROOT/.$N.new" && mv -T "$ROOT/.$N.new" "$ROOT/$N"',
@@ -327,58 +323,20 @@ def runner(name):
     return cmd, m.get("ssh")
 
 
-# 建之前（有锁时）：按要的空间查那边剩多少（有 cap、env_root 在根目录下的按 cap 减已占的算），够就写 .building，不够写 .failed；
-# clear：撤掉这次写的 .building（没开始建就停下时）
-MARK_PY = """import shutil,time
-E=os.path.expanduser(A['env_root'])
-SD=os.path.expanduser(A['sd'])
-n=A['env']
-os.makedirs(SD,exist_ok=True)
-if A['mode']=='clear':
-    p=os.path.join(SD,n+'.building')
-    try:
-        if open(p).read().split()[0]==A['hash']:
-            os.remove(p)
-    except (OSError,IndexError):
-        pass
-    json_out(dict(ok=True))
-    sys.exit(0)
-p=E
-while not os.path.isdir(p):
-    p=os.path.dirname(p)
-free=shutil.disk_usage(p).free
-if A.get('cap'):
-    used,_=usage(R)
-    free=min(free,max(0,int(A['cap']*1e9)-used))
-now=int(time.time())
-ok=free>=A['need']
-with open(os.path.join(SD,n+('.building' if ok else '.failed')),'w') as f:
-    f.write('%s %d\\n'%(A['hash'],now) if ok else '%s %d nospace %d %d\\n'%(A['hash'],now,A['need'],free))
-json_out(dict(ok=ok,free=free,need=A['need']))
-"""
-
-
-def mark(name, env, h, mode, need=0, run_py=None):
-    """在那台机器上跑 MARK_PY → dict(ok, free, need)。执行机经 relay 的 rpy；本机直接跑。"""
+def mark(name, env, h, mode, need=0, run_op=None):
+    """建之前（有锁时）在那台机器上跑 site_ops 的 env_mark → dict(ok, free, need)：按要的空间查那边剩多少（有 cap、env_root 在
+    根目录下的按 cap 减已占的算），够写 .building，不够写 .failed；clear：撤掉这次写的 .building。run_op：代替 relay_remote.op（测试用）。"""
     import relay_remote as RM
     m = M.machine(name)
-    cap = m.get("cap") if m.get("root") and M.env_root(m).startswith(m["root"].rstrip("/") + "/") else None
-    data = dict(env_root=M.env_root(m), sd=state_dir(m), env=env, hash=h, mode=mode, need=int(need), cap=cap)
-    code = RM.HEAD + RM.USAGE + MARK_PY
-    if run_py:
-        return run_py(name, code, data)
-    if name in M.RELAY:
-        return RM.rpy(name, code, data)
-    r = subprocess.run([sys.executable, "-c", code, os.path.expanduser(m.get("root") or M.env_root(m))], input=json.dumps(data),
-                       capture_output=True, text=True, timeout=600)
-    import spec as S
-    res = S.json_in(r.stdout)
-    if r.returncode or res is None:
-        raise EnvError(f"查 {name} 的空间出错：{(r.stderr or r.stdout).strip()[-300:]}")
-    return res
+    cap = m.get("cap") if m.get("root") and M.env_root(name).startswith(m["root"].rstrip("/") + "/") else None
+    data = dict(env_root=M.env_root(name), sd=state_dir(m), env=env, hash=h, mode=mode, need=int(need), cap=cap)
+    try:
+        return (run_op or RM.op)(name, "env_mark", data)
+    except RuntimeError as e:
+        raise EnvError(f"查 {name} 的空间出错：{e}") from None
 
 
-def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=print, run_py=None):
+def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=print, run_op=None):
     """在那台机器上建 env → (退出码, 输出的最后几行)。dry：只返回要跑的命令和脚本，不跑。v：变体（默认按机器条目）。
     有锁时：先查空间（不够 → 不建、写 .failed、退出码 1），执行机先把包放进那边的 blobs（钉住到建完；CPU 作业排不上 →
     EXIT["stage_later"]）。要 ssh 长连接的机器、长连接断着 → EnvError（不另起连接）。"""
@@ -386,9 +344,9 @@ def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=pri
     m = M.machine(name)
     v = v or variant_of(name, env)
     lk = load_lock(env, v)
-    relay = name in M.RELAY
+    relay = M.is_exec(name)
     if lk and m.get("ssh") and not relay:
-        raise EnvError(f"{env} 有锁文件，只在 hub 和执行机（RELAY）上建；{name} 两样都不是")
+        raise EnvError(f"{env} 有锁文件，只在 hub 和执行机上建；{name} 两样都不是")
     store = (RM.root(name) + "/" + ROOT["blobs"] if relay else wheelhouse()) if lk else None
     files = lock_files(lk) if lk else {}
     script = build_script(name, env, v, store)
@@ -407,7 +365,7 @@ def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=pri
         return rc, "\n".join((out + err).strip().splitlines()[-15:])
     if not lk:
         return go()
-    r = mark(name, env, h, "reserve", lock_need(lk), run_py)
+    r = mark(name, env, h, "reserve", lock_need(lk), run_op)
     if not r.get("ok"):
         return 1, f"{name} 空间不够，没建 {env}：要 {r['need'] / 1e9:.1f} GB，剩 {r['free'] / 1e9:.1f} GB"
     if not relay:
@@ -415,13 +373,13 @@ def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=pri
     import relay_transfer as RT
     try:
         with RT.pinned(name, f"env.{env}", files, say):
-            RT.ensure_blobs(name, files, say, what=f"{name} 的环境 {env}")
+            RT.ensure_blobs(name, {h: [None, os.path.getsize(p), p] for h, p in files.items()}, say, src=M.hub(), what=f"{name} 的环境 {env}")
             return go()
     except RM.NoSlot as e:
-        mark(name, env, h, "clear", run_py=run_py)
+        mark(name, env, h, "clear", run_op=run_op)
         return proto.EXIT["stage_later"], f"{e}；这次不建，下次检查再来"
     except (RT.RN.RelayError, RuntimeError, OSError) as e:
-        mark(name, env, h, "clear", run_py=run_py)
+        mark(name, env, h, "clear", run_op=run_op)
         raise EnvError(f"包没放到 {name}：{e}") from None
 
 
@@ -485,7 +443,7 @@ def read_rows(name, envs_, run=None):
         return None
     import common as C
     run = run or C.run
-    sh = f"ROOT={sh_path(M.env_root(m))}; SD={sh_path(state_dir(m))}\n" + STATUS_SH
+    sh = f"ROOT={sh_path(M.env_root(name))}; SD={sh_path(state_dir(m))}\n" + STATUS_SH
     cmd = f"bash -s -- {' '.join(shlex.quote(s) for s in envs_)}"
     rc, txt, _ = run(cmd, m.get("ssh"), 120, input=sh) if m.get("ssh") else run(["bash", "-s", "--", *envs_], None, 120, input=sh)
     return None if rc else rows_of(txt)

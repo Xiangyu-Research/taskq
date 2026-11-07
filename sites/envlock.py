@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""环境的锁（2026-11-05）：把 <specs>/<名>.yml 解成 <名>.<变体>.lock.json，记下每个 conda 包、pip 包的确切版本、网址、sha256，
+"""环境的锁：把 <specs>/<名>.yml 解成 <名>.<变体>.lock.json，记下每个 conda 包、pip 包的确切版本、网址、sha256，
 文件下载到状态文件夹的 wheelhouse/<sha256 前 2 位>/<sha256>。不往任何真的环境里装。说明见 queue/README.md 的"环境的锁"。
 
     taskq env lock <名> [--variant V]   锁一个描述的一个变体（默认 default）
@@ -28,6 +28,7 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
 import proto as P  # noqa: E402
+import common as C  # noqa: E402
 import envs as EV  # noqa: E402
 M = EV.M
 
@@ -68,14 +69,6 @@ def mm(ver):
 
 def cp(ver):
     return "cp" + "".join(ver.split(".")[:2])
-
-
-def sha256_file(p):
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
 
 
 def wheel_tags(fn):
@@ -147,7 +140,7 @@ class Locker:
                 except OSError as e:
                     if i == 2:
                         raise LockError(f"下载不了 {url}：{e}") from None
-            got = sha256_file(tmp)
+            got = C.sha256(tmp)
             if sha256 and got != sha256:
                 raise LockError(f"{url} 的 sha256 对不上：应为 {sha256}，下到的是 {got}")
             if md5 and not sha256:
@@ -167,12 +160,11 @@ class Locker:
 
     def store(self, src):
         """本地文件放进 wheelhouse → (sha256, 字节数)。"""
-        h = sha256_file(src)
+        h = C.sha256(src)
         dest = self.path(h)
         if not os.path.isfile(dest):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copyfile(src, dest + ".part")
-            os.replace(dest + ".part", dest)
+            C.atomic_copy(src, dest)
         return h, os.path.getsize(dest)
 
     def fetch_all(self, items):
@@ -292,9 +284,7 @@ class Locker:
             h, n = self.store(whl[0])
             b = dict(fn=fn, sha256=h, size=n, built_from=url, built_from_sha256=sh)
             os.makedirs(os.path.dirname(rec), exist_ok=True)
-            with open(rec + ".part", "w", encoding="utf-8") as f:
-                f.write(lock_text(b))
-            os.replace(rec + ".part", rec)
+            C.atomic_write(rec, lock_text(b))
         shutil.copyfile(self.path(b["sha256"]), os.path.join(fl, b["fn"]))
         return b
 
@@ -461,9 +451,7 @@ class Locker:
                             pip=self.version([self.python(full), "-m", "pip", "--version"]) if steps else None)
         out["created"] = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
         p = M.lock_path(env, variant)
-        with open(p + ".part", "w", encoding="utf-8") as f:
-            f.write(lock_text(out))
-        os.replace(p + ".part", p)
+        C.atomic_write(p, lock_text(out))
         return p, out
 
 
@@ -504,8 +492,8 @@ def targets():
     """--all：[(名, 变体)]，基础环境在前。非 venv：default 加机器条目里写的变体；venv：default 加条目里写的，pip 里有
     {torch_mm} / {abi} 时再加基础环境的每个变体。"""
     used = {}
-    for n in list(M.MACHINES) + [x for x in M.SITES if x not in M.MACHINES]:
-        for env, e in (M.machine(n).get("envs") or {}).items():
+    for n in M.MACHINES:
+        for env, e in (M.machine(n)["envs"] or {}).items():
             if M.is_spec(e):
                 used.setdefault(env, set()).add(EV.variant(e))
     names = spec_names()

@@ -1,133 +1,253 @@
 # taskq
 
-任务队列和调度：总队列在 hub（角色 `hub` 的那台机器，只统筹）上，执行机（Slurm 作业、pueue worker；hub 那台的卡和盘也可以是一台执行机，`SITES` 里 `ssh=None`）领任务、训练，训完以后拉回、按实验表排下一步。核心不认识具体模型，项目通过配置（机器表、`policy.py`、实验表）和插件接入。结构和各模块见 [`queue/README.md`](queue/README.md)。
+通用的任务调度：总队列在一台机器（hub）上，几台执行机（pueue 常驻 worker 的工作站、Slurm 集群）按机器表接进来，
+从总队列领任务、训练、交还。数据有一个家（store）：输入从 store 送到执行机，做完的结果拉回 store、需要时再备份到备份机，
+执行机的盘只用来中转。训完以后的步骤（推理、评估、汇总……）按实验表自动往下排。
+
+hub 上 cron 每 30 分钟跑一轮健康检查（`taskq tick`）：查各台机器、推送问题、排下一步、给各执行机派任务、补 worker、拉回结果。
+调度不认识具体的模型和训练器：一种任务怎么跑、要什么环境和数据、怎么算做完，都写在项目的做法（插件）和实验表里；
+一张卡训几个、什么时候让出显存，看运行时的实况（GPU 使用率、显存、失败记录）。
+
+一个项目只经三样东西用它：配置文件夹（`machines.py`、`policy.py`）、插件文件夹、命令行。
+机制、配置的字段和插件的写法见 [`queue/README.md`](queue/README.md)。
 
 ## 安装
 
 ```bash
-bash install.sh          # 克隆到 ~/.local/share/taskq（TASKQ_HOME），~/.local/bin/taskq 链到 bin/taskq；重复运行 = 更新
-taskq self update        # 拉 origin/main，失败重试 5 次，拉不到就留在原来的版本
+bash install.sh      # 在 taskq 的克隆里；不先克隆时 curl 下载 install.sh 交给 bash 的写法见 install.sh 开头
 ```
 
-只维护一个版本（GitHub 上的 main）。执行机上的作业用各自的代码包，不受更新影响。
+克隆到 `${TASKQ_HOME:-~/.local/share/taskq}`，`~/.local/bin/taskq` 链到它的 `bin/taskq`；`TASKQ_ORIGIN` 改克隆的来源。
+重复运行没关系：已经装了就更新（`taskq self update`，拉 `origin/main`）。
 
-## 项目
+要的东西：Python 3（核心只用标准库）、ssh；pueue 机器、hub、store 上要有 [pueue](https://github.com/Nukesor/pueue)
+（`queue/install_pueue.sh` 装）；执行机上要有 conda（机器表的 `conda`）。
+各台的 pueue 常驻进程、组和 hub 的 crontab 由 `taskq site setup [机器]` 建。
 
-`taskq` 先找项目：`--project 目录` > `TASKQ_PROJECT` > 从当前目录往上找 `.taskq.toml` > 本机的默认项目 `~/.config/taskq/project`（一行，项目根目录；只在前面都找不到时用，不会像环境变量那样传给子进程）：
+## 项目（`.taskq.toml`）
+
+项目根目录里放一个 `.taskq.toml`，写明配置和插件文件夹（相对项目根目录）：
 
 ```toml
-config = "config"      # machines.py、policy.py 所在的文件夹（相对这个文件）
-plugins = ["plugins"]  # 插件文件夹，可以有几个
+config = "config"        # machines.py、policy.py 所在的文件夹
+plugins = ["plugins"]    # 插件文件夹（recipes.py、relay_plugins.py、consumers.py、smoke.py、labels.py、readers/）
 ```
 
-找到后设 `TASKQ_REPO`、`TASKQ_CONFIG`、`TASKQ_PLUGINS`，再调用核心（bash 脚本也认这几个变量）。完整的例子见 [`example/`](example/)，各个文件的写法见 [`queue/README.md`](queue/README.md) 的"开关和配置"。
+找项目的顺序：`taskq --project <文件夹>`（经 `TASKQ_PROJECT` 传给子进程）> 从当前目录往上找 `.taskq.toml`。
+配置文件夹也可以由 `TASKQ_CONFIG` 指定。
+
+| 文件 | 写什么 |
+|---|---|
+| `<配置>/machines.py` | 机器表 `MACHINES`：一台物理机器一项，角色（hub、store、backup）、执行机的根目录和调度方式（pueue 的 worker、Slurm 的作业） |
+| `<配置>/policy.py` | 怎么用：自动的开关 `AUTO`、暂停 `PAUSE`、暂缓 `HOLD`、能去哪 `PLACE`、备几个 `READY`、Slurm 交几个 `SLURM`、项目的输出 `OUTPUTS` |
+| `<配置>/specs/<环境>.yml` | 执行机上按描述建的环境（`sites/envs.py`） |
+| `<插件>/recipes.py` | 做法：一种任务怎么跑、要什么环境和数据、怎么算做完 |
+| `OUTPUTS["experiments"]` 指的文件 | 实验表 `EXPERIMENTS`、`FINAL`：每个实验训什么、训完以后做哪些步骤 |
+
+字段表见 [`queue/README.md`](queue/README.md) 的"配置"，或 `taskq machines fields`。改完配置跑 `taskq check`。
 
 ## 命令
 
-| 命令 | 做什么 | 原来的入口 |
-|---|---|---|
-| **队列** | | |
-| `taskq add --exp <id> [--nice N] [--only k=v,…]`、`add --recipe <做法> k=v…`、`add --file <任务单>` | 加任务 | `taskq.py add` |
-| `taskq set <key> k=v…` | 改一个任务的参数 | `taskq.py set` |
-| `taskq nice --nice N <key>…` | 改档位 | `taskq.py set-nice` |
-| `taskq show [--json] <key>` | 一个任务的说明和状态 | `taskq.py show` |
-| `taskq log <key> [--data 目录] [--json]` | 一个任务的每段训练（分段日志的开头行：作业、机器、主机、第几段、环境、代码、开始；结束、退出码）、hub 上调度日志里提到它的行、hub 的任务记录（`queue/tasklog.py` 开头；JSON 字段 `proto.TASKLOG_*`） | — |
-| `taskq status [--json] [--internal]` | 本机的队列（冒烟任务只在 `--internal` 时列） | `taskq.py status` |
-| `taskq status --all [--json]` | 所有任务的状态、在哪台、进度、预计完成 | — |
-| `taskq stop [--why 原因] <key>…`、`taskq resume <key>…` | 停止、撤销停止 | `taskq.py stop`、`resume` |
-| `taskq rm <key>…` | 删掉没人领着的任务 | `taskq.py remove` |
-| **调度** | | |
-| `taskq tick [-n] [--test]` | 健康检查一轮（真做）；`-n` 只打印问题 | `monitor/health.py` |
-| `taskq plan` | 只看：按时段开关、送任务、训完以后这一轮会做什么 | `shift.py --dry-run`、`feed.py`、`relay.py`、`advance.py` |
-| `taskq boot [--gpu-log]` | 开机：启动 pueued、放回被打断的任务 | `queue/on_boot.sh` |
-| `taskq notice set <名字> [文字…]`、`notice clear <名字>…`、`notice list [--json]` | 挂在健康检查上的提醒：每条报一个问题 `notice:<名字>`（进"需要处理"，只列在 `taskq problems` 里，不推送手机），撤掉后消失 | `monitor/notice.py` |
-| `taskq notice ack <问题编号或前缀>…` | 确认健康检查报的"发生过的事"（如 `boot:<机器>` 重启），之后不再列出；一直存在的问题确认不掉，问题消失后确认记录跟着删 | `monitor/notice.py` |
-| **执行机** | | |
-| `taskq site status\|bundle\|resend <名字>` | 那边的队列；打包推过去；重新解析传过去的任务 | `relay.py status\|bundle\|resend` |
-| `taskq site env <机器> <环境> [-n]`、`taskq site envs <机器>` | 建环境；看环境的状态 | `sites/envs_cli.py`（11/4 前叫 `sites/site.py`） |
-| `taskq env lock <环境> [--variant V]`、`taskq env lock --all` | 把环境描述解成锁 `<环境>.<变体>.lock.json`，文件下到 wheelhouse（不装；`queue/README.md` 的"环境的锁"） | `sites/envlock.py` |
-| `taskq site setup [名字]` | pueue 常驻进程、组、crontab（和 hub 在同一台上的执行机：在本机做） | `queue/setup.sh` |
-| **实验** | | |
-| `taskq exp list`、`taskq exp tasks [--json]` | 实验、展开后的任务 | — |
-| `taskq exp steps [--exp ID…] [--key KEY…] [--level …] [--data 目录] [--done] [--needs]` | 实验表的步骤，命令按 `names` 填好；做完没有、`--stage needs` 列的输入（一行 JSON） | — |
-| `taskq exp env-of <模型文件夹>`、`taskq exp name-of <模型文件夹> <名字>…` | 训它用的环境；实验的 `names` | `experiments.py env-of\|name-of` |
-| **其他** | | |
-| `taskq tunnel rsync\|push\|pull …` | 经隧道传大批文件 | `sync/tunnel.py` |
-| `taskq tunnel push-dirs <机器> <源目录> <目标目录> <子目录>…` | 几个子目录整个传过去，带未完成标记，最后逐个文件核对 MD5 | `sync/tunnel_push.sh` |
-| `taskq gpu usage [目录] [--me 账号] [--days N] [--json]` | GPU 使用记录（`monitor/gpu_log.sh`）的汇总：各卡按钟点别人 / 自己 / 空闲、别人的每段使用、总时长（JSON 字段 `proto.GPU_USAGE_*`） | — |
-| `taskq pad room [--wait 秒]` | 作业里的命令自己要显存时：让显存填充放到 floor、等它说好了（同 worker 开训前的握手）；没有填充时什么都不做，没等到退出码 1 | — |
-| `taskq pueue-add <组> [选项] -- '<命令>'` | 往本机 pueue 加一次性任务 | `queue/q` |
-| `taskq pueue-status [机器…] [--json]` | 各 pueue 机器的队列（只看） | `queue/qs` |
-| `taskq snapshot <克隆>` | 按提交号的代码副本 | `sync/snapshot.sh` |
-| `taskq check` | 核对整个项目 | — |
-| `taskq path lib\|api\|core` | 核心的 `queue/`（插件 `import taskq_api` 用）、核心的根 | — |
-| `taskq machines …` | 机器表 | 配置文件夹里 `machines.py` 的命令行 |
-| `taskq machines show [机器…]` | 核心按机器表算出来的值：种类、worker、开 worker 的命令、根目录的写法、能用的环境、激活语句、收编来源、给任务加的语句，环境描述的哈希和变体（一行 JSON） | — |
-| `taskq spec export\|import --spec <JSON\|-> --root 目录 [--src 目录 --dst 目录]` | 中继插件送出的文件和视图；拉回核对、放进 `--dst`（一行 JSON） | `names.export\|import_` |
-| `taskq self update\|version`、`taskq --version` | 更新、版本（`VERSION` 文件，没有时 `git describe`） | — |
-| `taskq self test [-j N] [--out 目录] [--gpu] [文件或模式…]` | 跑核心的全部测试（见下面的"测试"） | — |
-| **底层**（不在 `taskq --help` 的首页，参数和退出码冻结） | | |
-| `taskq worker next\|beat\|release\|missing …` | worker 领任务、心跳、交还、缺输入 | `taskq.py next\|beat\|release\|missing` |
-| `taskq spec shell\|done\|resolve\|lookup\|outputs\|collect …` | 任务说明 | `spec.py` |
-| `taskq internal stage\|fetch <名字> <key>` | 调度自己排的传数据、拉回 | `relay.py stage\|fetch` |
+`taskq --help` 列出全部，`taskq <命令> --help`（或 `taskq help <命令>`）看一个命令。
+查看的命令只读；改队列的命令在 hub 上跑。带 `--json` 的命令输出一行 JSON（字段见 `queue/proto.py`）。
 
-`taskq help <命令>` 同 `taskq <命令> --help`。原来的脚本路径和参数照旧能用（在跑的作业、旧代码包还在调用）。
+<!-- commands -->
+
+**队列**
+
+| 命令 | 做什么 |
+|---|---|
+| `taskq add` | 加任务：实验表（--exp）、做法（--recipe）或任务单（--file） |
+| `taskq set` | 改一个任务的参数 |
+| `taskq nice` | 改档位（先后） |
+| `taskq show` | 一个任务的完整说明和状态 |
+| `taskq log` | 一个任务的每段训练（分段日志）、事件日志里关于它的、hub 的任务记录 |
+| `taskq status` | 队列（--all：所有任务的状态、在哪台、进度、预计完成） |
+| `taskq stop` | 停止任务（在训的 30 秒内停下、交还，之后不再领） |
+| `taskq resume` | 撤销停止 |
+| `taskq rm` | 删掉没人领着的任务 |
+
+**调度**
+
+| 命令 | 做什么 |
+|---|---|
+| `taskq tick` | 健康检查一轮（真做：推送、排下一步、送任务） |
+| `taskq plan` | 只看：这一轮训完以后排什么、送什么任务 |
+| `taskq boot` | 开机（@reboot）：启动 pueued、放回被打断的任务 |
+| `taskq problems` | 最近一次健康检查查到的问题（[--all] [--json]） |
+| `taskq notice set` | 挂上或改文字（<名字> [文字…]；不给文字时读标准输入） |
+| `taskq notice clear` | 撤掉（<名字>…） |
+| `taskq notice list` | 挂着的（[--json]） |
+| `taskq notice ack` | 确认健康检查报的"发生过的事"（如重启；<问题编号或前缀>…），之后不再列出 |
+| `taskq events` | 事件日志：发生过什么（--since --key --site --source --kind --grep、-f、--json） |
+| `taskq note` | 往事件日志里记一条（出了什么事、做了什么） |
+| `taskq progress` | 任务进度随时间的变化（[--key K] [--since T] [--json]） |
+| `taskq notify` | 推送一条消息到手机（ntfy），并记进事件日志 |
+
+**执行机和实验**
+
+| 命令 | 做什么 |
+|---|---|
+| `taskq site status` | 那边的队列 |
+| `taskq site bundle` | 打包、推过去、切换 current |
+| `taskq site resend` | 传过去的任务按现在的做法重新解析、换掉那边的说明 |
+| `taskq site env` | 在那台上建环境、跑检查 |
+| `taskq site envs` | 只看：那台每个环境的状态 |
+| `taskq site setup` | pueue 常驻进程、组、crontab（不给名字：本机） |
+| `taskq env lock` | 把环境描述解成锁 <名>.<变体>.lock.json，文件下到 wheelhouse（不装进任何环境） |
+| `taskq smoke status` | 各台的记录（[执行机] [--json]） |
+| `taskq smoke retry` | 没过的重新排（<执行机> [种类]） |
+| `taskq smoke adopt` | 分给各台的、训完交还的任务的种类记成过了（[--dry-run]） |
+| `taskq exp list` | 列出实验 |
+| `taskq exp tasks` | 展开后的任务（--json） |
+| `taskq exp env-of` | 模型文件夹 → 训它用的环境 |
+| `taskq exp name-of` | 模型文件夹 → 它所属实验的 names 里这几项（每行一个） |
+| `taskq exp steps` | 步骤，命令按 names 填好（--done 判断做完没有，--needs 列输入；JSON） |
+
+**依赖**
+
+| 命令 | 做什么 |
+|---|---|
+| `taskq who` | 这个文件是哪个实例的产出 |
+| `taskq dag` | 实例之间的先后（--dot 画图，--check 核对） |
+
+**其他**
+
+| 命令 | 做什么 |
+|---|---|
+| `taskq tunnel rsync` | rsync 的替身：先经隧道传，再照原样跑 rsync |
+| `taskq tunnel push` | 本机 → 那边 |
+| `taskq tunnel pull` | 那边 → 本机 |
+| `taskq tunnel push-dirs` | 本机 → 那边，整个子目录，传完核对 |
+| `taskq gpu usage` | 各卡按钟点被谁占着、别人的每段使用（[目录] [--me 账号] [--days N] [--json]） |
+| `taskq pad room` | 让填充放到 floor、等它说好了（[--wait 秒]；没有填充时什么都不做） |
+| `taskq pueue-add` | 往本机 pueue 的手动组（manual_groups）加一次性任务（工作目录是这台的 repo） |
+| `taskq pueue-status` | 各 pueue 机器的队列（只看） |
+| `taskq check` | 核对整个项目（配置、插件、实验表、所有任务） |
+| `taskq db migrate` | 建库或做还没做的迁移（只在 hub 上） |
+| `taskq db path` | 在哪 |
+| `taskq db version` | 盘上和这份代码的表结构版本 |
+| `taskq path` | 核心的位置：lib / api（queue/）、core（根） |
+| `taskq machines` | 机器表（get、names、activate、show…） |
+| `taskq self update` | 拉 origin/main（失败重试 5 次，拉不到就留在原来的版本） |
+| `taskq self version` | 版本 |
+| `taskq self test` | 跑核心的全部测试（各自的临时 HOME，同时跑几个，结果表） |
+| `taskq self migrate` | 盘上的旧格式改成现在的（切换时跑一次；默认只列出，--apply 才改） |
+
+**底层命令（worker、执行机上的程序、调度自己用；参数和退出码不改）**
+
+| 命令 | 做什么 |
+|---|---|
+| `taskq worker next` | 领一个任务 |
+| `taskq worker beat` | 心跳 |
+| `taskq worker release` | 交还 |
+| `taskq worker missing` | 缺输入，交还 |
+| `taskq spec shell` | 给 run_task.sh 的 shell 语句（按本机展开） |
+| `taskq spec done` | 训完了退出码 0，没训完 1，说明有问题 2，读不了数据目录 5 |
+| `taskq spec resolve` | 解析好的说明（JSON，一行） |
+| `taskq spec lookup` | 按 key 找任务（先查实验表，再查队列），打印说明（JSON） |
+| `taskq spec outputs` | 这个任务的输出（JSON）；--sh：给 archive_task.sh 的 shell 语句 |
+| `taskq spec collect` | 本机的训练状态（跨版本读用）：输出 @@JSON 一行 |
+| `taskq spec export` | 中继插件送出：要传的文件、视图、拉回的文件夹（JSON） |
+| `taskq spec import` | 中继插件拉回核对，放进 --dst（JSON） |
+| `taskq internal stage` | 传数据、加进执行机的队列（排不上退出码 75） |
+| `taskq internal fetch` | 拉回做完的任务（落到 store） |
+| `taskq internal archive` | store 上做完的结果备份到备份机 |
+
+<!-- /commands -->
 
 ## 测试
 
 ```bash
-taskq self test -j 4              # 全部：每个文件有自己的临时 HOME 和 TMPDIR，同时跑 4 个，上次慢的先跑
-taskq self test relay e2e         # 只跑路径里有这些字的（也可以写文件名、通配）
-taskq self test -l                # 只列出会跑哪些
+taskq self test              # 全部：queue/、sites/、sync/、monitor/ 下的 test_*.py、test_*.sh，同时跑几个（-j N，默认 4）
+taskq self test -l           # 只列出会跑哪些
+taskq self test relay spec   # 只跑名字或路径里带这些的（relay → test_relay*.py；可以用 * ?）
+taskq self test --gpu        # 也跑要真卡的（文件开头写着"# 要真卡"）
 ```
 
-跑的是 `queue/`、`sites/`、`sync/`、`monitor/` 下的 `test_*.py`、`test_*.sh`（`queue/run_tests.py`），用测试自己的固定配置（`queue/testdata/`），不读项目。结果表打在标准输出，同时写 `~/.cache/taskq-test/report.tsv`（`--out` 改位置），每个文件的输出在同一个文件夹的 `log_*.txt`；都通过（或跳过）退出码 0，否则 1。开头写了 `# 要真卡` 的（`test_gpu_pad_integration.sh`）只在 `--gpu` 时跑；测试缺东西时自己退出 77、打一行"跳过：原因"（`sites/test_e2e.py` 要 pueue 和带 numpy 的 Python），算跳过。每个文件最多跑 900 秒（`--timeout`）。
+每个文件在核心的根目录下跑，有自己的临时 HOME，环境只有 `PATH`、`LANG`、`HOME`、`TMPDIR`，只用固定配置 `queue/testdata/`，
+不读使用者项目。每个文件一行结果（结果、秒数、"通过："的项数、跳过的原因），同时写进 `~/.cache/taskq-test/report.tsv`，
+每个文件的输出在同一目录的 `log_<文件>.txt`。缺 numpy、pueue 等的测试退出 77，算跳过。退出码：0 都通过（或跳过），1 有没通过的，2 没有匹配的测试。
 
-改了哪个文件跑哪些测试（只改了几个文件时先跑这些，`taskq self test <模式…>`；同一个改动全套只跑一次）：
+改了哪个文件跑哪些（同一个改动最后再跑一次全套；`queue/proto.py`、`bin/taskq` 这类大家都用的，直接跑全套）：
 
+<!-- tests -->
 | 改了 | 跑 |
 |---|---|
-| `queue/taskq.py` | `test_taskq.py`（"worker 的调用方式"一组必须过：`next` / `beat` / `release` 的参数和退出码只加不改）、`test_dicc_worker*.sh`、`test_races.py` |
-| `consume.py`、`consumers/`、`dicc_worker.sh`、`worker_start.sh`、`worker.sbatch` | `test_consume.sh`、`test_dicc_worker.sh`、`test_dicc_worker_stop.sh`、`test_dicc_worker_code.sh`、`test_worker_stall.sh` |
-| `run_task.sh`、`recipes.py`、`spec.py`、`inputs.py` | `test_run_task.sh`、`test_spec.py`、`test_inputs.py` |
-| `archive_task.sh` | `test_archive_task.sh` |
-| `advance.py`、`steps.py`、`flow/`、`ledger.py`、`run.py` | `test_advance.py`、`test_engine.py`、`test_flow_compile.py`、`test_ledger.py`、`test_run.py`、`test_publish.py` |
-| `refill.py`、`feed.py`、`shift.py`、`smoke_gate.py` | `test_refill.py`、`test_feed.py`、`test_shift.py`、`test_smoke.py` |
-| `relay.py`、`relay_bundle.py`、`bundle_gate.py`、`relay_remote.py`、`relay_transfer.py` | `test_relay.py`、`test_relay_bundle.py`、`test_bundle_paths.py`、`test_bundle_gate.py` |
-| `relay_store.py` | `test_relay_store.py` |
-| `relay_plugins.py`、`sites/names.py` | `test_relay_plugins.py` |
-| `common.py`、`cfg.py`、`tasklog.py` | `test_common.py`、`test_cfg.py`、`test_tasklog.py` |
-| `sites/` | `sites/test_envs.py`、`sites/test_adapters.py`、`sites/test_envlock.py`、`sites/test_e2e.py` |
-| `monitor/` | `monitor/test_health.py`、`test_overview.py`、`test_probe.py`、`test_gpu_usage.py` |
-| `bin/taskq`、`project.py`、`check.py`、`experiments.py`、`cli_json.py` | `test_cli.py`、`test_check.py`、`test_experiments_cli.py`、`test_cli_json.py`、`test_example.py` |
-| `sync/` | `sync/test_tunnel.py` |
-| `gpu_pad*`、`consumers/gpu_pad.py` | `test_gpu_pad.py`、`test_gpu_pad_launcher.sh`、`test_pad_room.py`（有真卡时加 `--gpu` 跑 `test_gpu_pad_integration.sh`） |
-| `proto.py` | `test_protocol.py` |
-| 任何非测试文件的文字 | `test_core_clean.py` |
-
-新写传结果的路（新步骤、新执行机）时加"拷到一半"的测试；测试里替换掉的外部命令至少有一条真跑。测试只杀自己记下的 PID（`$!`、限定到测试目录的 `pgrep`），不用 `pkill -f` 通用匹配。
-
-GitHub 上每次推送跑 `.github/workflows/test.yml`：Python 3.12、装 numpy、pyyaml 和 pueue（`queue/install_pueue.sh`），跑 `taskq self test`，再核对示例项目。
+| `bin/taskq` | `test_cli.py`、`test_cli_json.py`、`test_readme.py` |
+| `README.md`、`queue/README.md`、`queue/schema.py` | `test_readme.py`、`test_check.py` |
+| `queue/proto.py` | `test_protocol.py`、`test_core_clean.py`，再全套 |
+| 核心的任何文件（不写具体项目、机器、路径） | `test_core_clean.py` |
+| `queue/cfg.py`、`queue/project.py`、`sites/mtab.py` | `test_cfg.py`、`test_common.py` |
+| `queue/common.py` | `test_common.py` |
+| `queue/check.py` | `test_check.py`、`test_example.py` |
+| `example/` | `test_example.py` |
+| `queue/taskq.py` | `test_taskq.py`、`test_races.py`、`test_worker.sh` |
+| `queue/consume.py`、`queue/consumers/`、`queue/worker_start.sh` | `test_consume.sh`、`test_worker.sh`、`test_worker_code.sh`、`test_worker_stall.sh`、`test_worker_stop.sh` |
+| `queue/run_task.sh`、`queue/inputs.py` | `test_run_task.sh`、`test_inputs.py` |
+| `queue/gpu_pad.py`、`queue/gpu_pad_start.sh` | `test_gpu_pad.py`、`test_pad_room.py`、`test_gpu_pad_launcher.sh`；有卡时 `test_gpu_pad_integration.sh`（`--gpu`） |
+| `queue/spec.py`、`queue/recipes.py` | `test_spec.py` |
+| `queue/experiments.py` | `test_experiments_cli.py`、`test_example.py` |
+| `queue/flow/` | `test_flow_compile.py`、`test_advance.py` |
+| `queue/advance.py` | `test_advance.py`、`test_smoke.py` |
+| `queue/feed.py` | `test_feed.py` |
+| `queue/refill.py` | `test_refill.py`、`test_relay.py` |
+| `queue/relay.py`、`queue/relay_remote.py`、`queue/relay_transfer.py` | `test_relay.py`、`test_races.py`、`test_bundle_paths.py` |
+| `queue/relay_store.py`、`queue/site_ops.py` | `test_relay_store.py`、`test_relay.py` |
+| `queue/relay_bundle.py` | `test_relay_bundle.py`、`test_bundle_paths.py` |
+| `queue/bundle_gate.py` | `test_bundle_gate.py` |
+| `queue/relay_plugins.py`、`sites/names.py` | `test_relay_plugins.py` |
+| `queue/smoke_gate.py` | `test_smoke.py` |
+| `queue/archive_task.sh` | `test_archive_task.sh` |
+| `queue/db.py`、`queue/events.py`、`queue/tasklog.py` | `test_db.py`、`test_tasklog.py` |
+| `queue/cli_json.py` | `test_cli_json.py` |
+| `queue/migrate.py` | `test_migrate.py` |
+| `sites/pueue.py`、`sites/slurm.py`、`sites/remote.py`、`queue/setup.sh`、`queue/worker.sbatch`、`queue/cpu_worker.sbatch` | `test_adapters.py`、`test_bundle_paths.py` |
+| `sites/envs.py`、`sites/envs_cli.py` | `test_envs.py` |
+| `sites/envlock.py` | `test_envlock.py` |
+| `sync/tunnel.py`、`sync/tunnel_push.sh` | `test_tunnel.py` |
+| `monitor/health.py`、`monitor/notice.py`、`monitor/plain.py`、`monitor/push.py` | `test_health.py`、`test_probe.py`、`test_db.py` |
+| `monitor/overview.py` | `test_overview.py` |
+| `monitor/gpu_usage.py`、`monitor/gpu_log.sh` | `test_gpu_usage.py` |
+| 跨几个模块的（派任务、送数据、训完、拉回一整轮） | `test_e2e.py` |
+<!-- /tests -->
 
 ## 示例项目
 
-[`example/`](example/)：一个最小的项目（机器表、`policy.py`、一个插件、实验表），执行机的主机名是假的。`taskq --project example check`、`status`、`plan` 等不用连别的机器，说明见 [`example/README.md`](example/README.md)。
+[`example/`](example/) 是一个最小的项目：一台 hub（本机，兼 store）、一台 pueue 执行机、一台 Slurm 执行机（主机名是假的，连不上），
+一种做法、两个实验，每个任务做完后跑一个步骤。只看的命令都不用连别的机器：
+
+```bash
+taskq --project example check
+taskq --project example exp tasks
+taskq --project example plan
+```
+
+每个字段都用到的写法见测试用的固定配置 [`queue/testdata/`](queue/testdata/)。
 
 ## 约定
 
-见 [`queue/README.md`](queue/README.md) 的"命令行"。退出码：
+- 只有 `main` 一个版本：推到 `main` 就是上线，hub 的 cron 下一轮 `taskq self update`；执行机的代码包下一轮自动重打、推过去，
+  在跑的 worker 空下来时换包。
+- 盘上的名字、时间常数、任务状态、退出码、字段表、报警格式、`TASKQ_*` 环境变量都只在 `queue/proto.py` 定义；改格式时旧状态的改写写进
+  `taskq self migrate`，在一次切换里做完（见 [`queue/README.md`](queue/README.md) 的"命令行和约定"）。
+- 带 `--json` 的命令输出一行 JSON，带 `version`，字段只加不改；hub 经 ssh 读回的命令（`taskq status --json`、`taskq spec collect --json`）
+  那一行以 `@@JSON ` 开头。
+- 不经切换就上线的改动不改 `taskq worker next/beat/release` 的参数和退出码（在跑的 worker、排着的 Slurm 作业在用）。
 
-| 退出码 | 意思 |
+退出码（`proto.EXIT`）：
+
+| 命令 | 退出码 |
 |---|---|
-| 0 | 成功 |
-| 1 | 出错（`spec done`：没训完；`run_task.sh`：训练命令出错） |
-| 2 | 用法错（参数不对、找不到项目；队列命令在不是 hub、本机又没有队列的机器上；`spec`、`run_task.sh`：任务说明或环境有问题） |
-| 3 | `rm`：不删（有人领着、分出去了、别的任务等它）；`run_task.sh`：命令正常结束但没训完 |
-| 4 | 找不到：执行机、机器、环境、任务 key、实验、模型文件夹不在表里或队列里（`rm`、`show`、`set`、`add --exp`、`exp …`、`machines …`、`site …`、`tunnel …`、`internal fetch`、`pueue-status`、`site setup`；`stop`、`nice` 冻结，照旧 1）；`run_task.sh`：缺输入 |
-| 5 | 读不了数据目录（`spec done`、`run_task.sh`） |
-| 10 / 11 / 12 / 13 | `worker next`：没有能领的 / 等排在前面刚停下的 / 队列暂停或读不了数据目录；`worker beat --strict`：领取已经不是自己的 |
-| 75 | `internal stage`：这次排不上，下次再传 |
-| 124 | 超时、起不来 |
-| 128 以上 | 被信号停掉（`run_task.sh` 收到 SIGTERM 是 143） |
-
-领域码的定义在 `queue/proto.py` 的 `EXIT`。
+| `taskq` 本身 | 0 好了；1 出错；2 用法错、找不到项目、不在 hub 上本机又没有队列；5 读不了数据目录（没建、盘没挂上） |
+| `taskq show`、`set`、`stop`、`nice`、`add --exp` | 4 队列里（或实验表里）没有这个（有几个 key 的：有一个不在就是 4） |
+| `taskq rm` | 0 删了；3 不删（有人领着、分出去了、别的任务等它）；4 一个都不在队列里 |
+| `taskq status` | 1 读不到队列 |
+| `taskq worker next` | 0 领到了；10 没有能领的；11 先等（给排在前面、刚停下的留位置）；12 暂停（整个队列 3 小时内失败 3 次，或读不了数据目录） |
+| `taskq worker beat --strict` | 13 有的领取已经不是自己的 |
+| `taskq worker missing` | 1 不是自己领着的 |
+| `queue/run_task.sh` | 0 训完；1 训练出错；2 说明或环境有问题；3 命令正常结束但没训完；4 缺输入（没开训）；5 读不了盘、判断不了训完没有；143 收到 SIGTERM |
+| `taskq spec done` | 0 做完了；1 没做完；2 说明有问题；5 读不了数据目录 |
+| `taskq internal stage` | 75 这次排不上，下次检查再传（不报） |
+| 调度跑的外部命令 | 124 超时或起不来 |
+| `taskq check` | 0 没有问题；1 有问题 |

@@ -15,8 +15,7 @@ if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${TASKQ_TEST_FAKEBIN:-
       && -n ${TASKQ_GPU_PAD_TARGET_MIB:-} && -n ${TASKQ_GPU_PAD_HIGH_MIB:-} ]] \
    && command -v nvidia-smi > /dev/null 2>&1; then
     _pad=${TASKQ_GPU_PAD_SCRIPT:-$_padhere/gpu_pad.py}
-    _switch=${TASKQ_GPU_PAD_SWITCH:-${TASKQ_STATE:+$TASKQ_STATE/gpu_pad/DISABLED}}
-    _switch=${_switch:-$HOME/.local/state/taskq/gpu_pad/DISABLED}
+    _switch=$(python3 "$_padhere/cfg.py" state gpu_pad/DISABLED)  # 执行机上在根目录的 queue/ 下（TASKQ_ROOT）
     if [[ -f $_pad && ! -e $_switch && -z ${TASKQ_GPU_PAD_STARTED:-} ]]; then
         export TASKQ_GPU_PAD_STARTED=1
         while IFS= read -r _l; do

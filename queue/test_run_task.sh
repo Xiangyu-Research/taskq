@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_task.sh 的测试（2026-10-18）：command 做法、临时数据目录，按测试用的机器表（testdata/config）激活假的环境，不用 GPU。
+# run_task.sh 的测试：command 做法、临时数据目录，按测试用的机器表（testdata/config）激活假的环境，不用 GPU。
 #   bash queue/test_run_task.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -35,7 +35,7 @@ $R toy ds=D101_alpha frag=0 variantt=x > /dev/null 2>&1; rc=$?
 check "参数写错：退出码 2" "(( rc == 2 ))"
 SP=$(python3 "$HERE/spec.py" resolve command key=toy/s 'cmd=touch {data}/toy/s/DONE' env=base out=toy/s 'done=["DONE"]')
 mkdir -p "$T/noplug"; TASKQ_PLUGINS=$T/noplug $R --spec "$SP" > /dev/null; rc=$?
-check "--spec：按 hub 解析好的说明跑，执行机上没有做法插件也行（11/4）" "(( rc == 0 )) && [[ -e $T/toy/s/DONE ]] && head -1 $T/logs/tasks/toy__s__test-1_part1.log | grep -q '任务=toy/s'"
+check "--spec：按 hub 解析好的说明跑，执行机上没有做法插件也行" "(( rc == 0 )) && [[ -e $T/toy/s/DONE ]] && head -1 $T/logs/tasks/toy__s__test-1_part1.log | grep -q '任务=toy/s'"
 $R --spec '{"key": "x"}' > /dev/null 2>&1; rc=$?
 check "--spec 说明缺字段：退出码 2" "(( rc == 2 ))"
 check "说明有问题：原因写进这个任务的分段日志（第一行照常）" "head -1 $T/logs/tasks/x__test-1_part1.log | grep -q '任务=x，' && grep -q '没开训：任务说明有问题：.' $T/logs/tasks/x__test-1_part1.log"
@@ -71,7 +71,7 @@ child=$(started $rp "sleep 300" | tr '\n' ' ')
 kill -TERM $rp; wait $rp; rc=$?
 for _ in $(seq 10); do ps -o args= -p ${child// /,}0 2> /dev/null | grep -q 'sleep 300' || break; sleep 0.1; done
 check "SIGTERM：退出码 143、训练进程一起停" "(( rc == 143 )) && [[ -n '$child' ]] && ! pgrep -P $rp > /dev/null && ! ps -o args= -p ${child// /,}0 2> /dev/null | grep -q 'sleep 300'"
-# 训练不理 SIGTERM（11/1）：run_task.sh 等 RUN_TASK_STOP_WAIT 秒后 SIGKILL 整个进程组，退出时训练已经不在
+# 训练不理 SIGTERM：run_task.sh 等 RUN_TASK_STOP_WAIT 秒后 SIGKILL 整个进程组，退出时训练已经不在
 RUN_TASK_STOP_WAIT=2 $R command key=toy/i "cmd=trap '' TERM; sleep 307 & wait; sleep 307" env=base out=toy/i 'done=["DONE"]' > /dev/null & rp=$!
 kids=$(started $rp "sleep 307" | tr '\n' ' ')
 kill -TERM $rp; wait $rp; rc=$?
@@ -111,18 +111,7 @@ check "卡上只有自己的进程（worker、显存填充）：不等" "(( rc =
 gpu 99 "99999999, 1000" 1000
 $G SLURM_JOB_ID=1 $R command key=toy/w5 'cmd=touch $TASKQ_DATA/toy/w5/DONE' env=base out=toy/w5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "Slurm 里不查卡" "(( rc == 0 )) && [[ ! -e $T/gpu/n ]]"
-# 查卡（gpu_free）时收到 TERM（11/14）：gpu_free 的 local pid 曾遮住训练进程号，停的是卡上列出的进程；没开训时什么都不停
-mkdir -p "$T/binh"
-printf '#!/bin/bash\ncase "$*" in *query-compute-apps*) cat %q; echo $$ > %q; exec sleep 30 ;; *query-gpu*) echo 10 ;; esac\nexit 0\n' "$T/gpu/hang_apps" "$T/gpu/hang_pid" > "$T/binh/nvidia-smi"; chmod +x "$T/binh/nvidia-smi"
-sleep 313 & victim=$!
-echo "$victim, 10" > "$T/gpu/hang_apps"; rm -f "$T/gpu/hang_pid"
-env PATH=$T/binh:$PATH CUDA_VISIBLE_DEVICES=0 $R command key=toy/w6 'cmd=touch $TASKQ_DATA/toy/w6/DONE' env=base out=toy/w6 'done=["DONE"]' > /dev/null & rp=$!
-for _ in $(seq 100); do [[ -s $T/gpu/hang_pid ]] && break; sleep 0.1; done; sleep 0.5
-kill -TERM $rp; wait $rp; rc=$?
-alive=0; kill -0 $victim 2> /dev/null && alive=1
-kill $victim $(cat "$T/gpu/hang_pid" 2> /dev/null) 2> /dev/null; wait $victim 2> /dev/null
-check "查卡时收到 TERM：退出码 143、命令没跑、卡上列出的进程没被停" "(( rc == 143 && alive == 1 )) && [[ -s $T/gpu/hang_pid && ! -e $T/toy/w6/DONE ]]"
-# 空满 TASK_GPU_IDLE 分钟才跑（11/2）：GPU 使用记录（gpu_log.sh 的格式）里最近有别人 → 不跑
+# 空满 TASK_GPU_IDLE 分钟才跑：GPU 使用记录（gpu_log.sh 的格式）里最近有别人 → 不跑
 mkdir -p "$T/gl"; GL="$T/gl/gpu_$(date +%Y-%m).csv"
 glrow() { echo "time,gpu,util_pct,mem_used_mib,mem_total_mib,user,pid,proc_mem_mib,program" > "$GL"; echo "$(date -d "-$1 min" '+%F %T'),$2,90,16000,32000,$3,123,16000,train.py" >> "$GL"; echo "$(date '+%F %T'),0,0,100,32000,,,," >> "$GL"; }
 I="$G GPU_LOG_DIR=$T/gl TASK_GPU_IDLE=60"
@@ -142,36 +131,33 @@ gpu 0 "" 0; glrow 10 0 someoneelse
 $G GPU_LOG_DIR=$T/gl $R command key=toy/q5 'cmd=touch $TASKQ_DATA/toy/q5/DONE' env=base out=toy/q5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "没设 TASK_GPU_IDLE：不看记录" "(( rc == 0 ))"
 
-# 机器表的 task_vars（11/2）：只在定义它的机器上导出给任务，已经设了（非空）的不改；task_unset（11/4）：任务的环境里去掉。
-# as_machine：本机当成 <名字> 的测试用机器表副本；带第二个参数时给这台加上 WS_TASK_VARS 和 task_unset=("DEMO_UNSET",)
-# （同 relay_bundle.py 把执行机的 task_vars、task_unset 拷进代码包里的机器表）
-as_machine() {
-    mkdir -p "$T/cfg_$1"; cp -r "$TASKQ_CONFIG/." "$T/cfg_$1/"
-    python3 - "$T/cfg_$1/machines.py" "$1" "$(hostname -s)" "$(dirname "$TASKQ_CONFIG")" "${2:-}" << 'PY'
+# 机器表的 task_vars：只在本机（TASKQ_MACHINE，代码包、worker 设的）这台导出给任务，已经设了（非空）的不改；task_unset：任务的环境里去掉。
+# 测试用的机器表里 site-pueue 有 task_vars（WS_TASK_VARS）；副本 cfg_tv 再给它加上 task_unset=("DEMO_UNSET",)
+mkdir -p "$T/cfg_tv"; cp -r "$TASKQ_CONFIG/." "$T/cfg_tv/"
+python3 - "$T/cfg_tv/machines.py" "$(dirname "$TASKQ_CONFIG")" << 'PY'
 import re, sys
-p, name, host, fx, tv = sys.argv[1:]
+p, fx = sys.argv[1:]
 s = open(p).read()
 s = re.sub(r"^FAKE = .*$", "FAKE = " + repr(fx), s, count=1, flags=re.M)
-s += f"for _n, _m in MACHINES.items():\n    _m['hostname'] = {re.escape(host)!r} if _n == {name!r} else r'(?!)'\n" + (f"MACHINES[{name!r}]['task_vars'] = WS_TASK_VARS\nMACHINES[{name!r}]['task_unset'] = ('DEMO_UNSET',)\n" if tv else "")
+s += "MACHINES['site-pueue']['task_unset'] = ('DEMO_UNSET',)\n"
 open(p, "w").write(s)
 PY
-    [[ $(TASKQ_CONFIG=$T/cfg_$1 python3 "$HERE/../sites/mtab.py" whoami) == "$1" ]]
-}
+is_machine() { [[ $(TASKQ_CONFIG=$T/cfg_tv TASKQ_MACHINE=$1 python3 "$HERE/../sites/mtab.py" whoami) == "$1" ]]; }
 VC='cmd=echo "${DEMO_FAST:-无}/${DEMO_FAST_LOADER:-无}" > $TASKQ_DATA/toy/v.vars; echo "${DEMO_UNSET:-无}" > $TASKQ_DATA/toy/v.unset; touch $TASKQ_DATA/toy/v/DONE'
-tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER DEMO_UNSET=job TASKQ_CONFIG=$T/cfg_$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }
-check "测试用的机器表副本：本机认成 pueue-host / hub / slurm-login" "as_machine pueue-host tv && as_machine hub && as_machine slurm-login"
-tvrun pueue-host; rc=$?
-check "pueue-host（代码包里有 task_vars）：导出给任务" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 1/1 ]]"
-check "pueue-host（代码包里有 task_unset）：worker 环境里设的，任务里去掉" "[[ \$(cat $T/toy/v.unset) == 无 ]]"
-tvrun pueue-host DEMO_FAST=0; rc=$?
-check "pueue-host：已经设了的不改，没设的照样导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 0/1 ]]"
+tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER DEMO_UNSET=job TASKQ_CONFIG=$T/cfg_tv TASKQ_MACHINE=$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }
+check "测试用的机器表副本：TASKQ_MACHINE 认成 site-pueue / hub / site-slurm" "is_machine site-pueue && is_machine hub && is_machine site-slurm"
+tvrun site-pueue; rc=$?
+check "site-pueue（机器表里有 task_vars）：导出给任务" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 1/1 ]]"
+check "site-pueue（机器表里有 task_unset）：worker 环境里设的，任务里去掉" "[[ \$(cat $T/toy/v.unset) == 无 ]]"
+tvrun site-pueue DEMO_FAST=0; rc=$?
+check "site-pueue：已经设了的不改，没设的照样导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 0/1 ]]"
 tvrun hub; rc=$?
 check "hub（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
 check "hub（没有 task_unset）：照样传给任务" "[[ \$(cat $T/toy/v.unset) == job ]]"
-tvrun slurm-login; rc=$?
-check "slurm-login（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+tvrun site-slurm; rc=$?
+check "site-slurm（没有 task_vars）：不导出" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
 
-# 任务的命令看得到核心（11/4）：TASKQ_LIB = 核心的 queue/，核心的 bin/ 在 PATH 最前面
+# 任务的命令看得到核心：TASKQ_LIB = 核心的 queue/，核心的 bin/ 在 PATH 最前面
 $R command key=toy/lib 'cmd=echo "$TASKQ_LIB|${PATH%%:*}" > $TASKQ_DATA/toy/lib.txt; touch $TASKQ_DATA/toy/lib/DONE' env=base out=toy/lib 'done=["DONE"]' > /dev/null; rc=$?
 check "任务的环境：TASKQ_LIB、PATH 前面是核心的 bin/" "(( rc == 0 )) && [[ \$(cat $T/toy/lib.txt) == \"$(cd "$HERE" && pwd)|$(cd "$HERE/.." && pwd)/bin\" ]]"
 

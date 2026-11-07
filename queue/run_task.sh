@@ -1,16 +1,16 @@
 #!/bin/bash
-# 跑一个训练任务（2026-10-18）：所有机器共用（执行机的 worker consume.py、手动跑）。
+# 跑一个训练任务：所有机器共用（执行机的 worker consume.py、手动跑）。
 #   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
-#   run_task.sh --spec <JSON>        按解析好的说明跑（执行机的队列里 hub 送来的，spec.py resolve 的格式；11/4）
+#   run_task.sh --spec <JSON>        按解析好的说明跑（执行机的队列里 hub 送来的，spec.py resolve 的格式）
 # 按任务说明（queue/spec.py，做法在 queue/recipes.py）：激活环境（机器表 machines.py 的 envs）、设环境变量、
 # 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART），第一行记作业、机器、
-# 任务、代码版本（taskq log、使用者的登记表读）。作业 = TASK_JOBTAG（worker 给：Slurm 里是作业号，pueue 执行机上是"主机名-时间"），否则"主机名-时间"。
+# 任务、代码版本（taskq log、使用者的登记表读）。作业 = TASK_JOBTAG（worker 给：Slurm 里是作业号，常驻 worker 是"worker id-时间"），否则"主机名-时间"。
 # 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
-# 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等（10/31）；worker 设了 TASKQ_ADMITTED=1 时不等（它领之前已看过卡，11/5）；
-# 设了 TASK_GPU_IDLE（分钟，机器表 machines.py 里组的环境变量）时，还要 GPU 使用记录（monitor/gpu_log.sh，位置见 proto.py 的 GPU_LOG_DIR）里最近这么久这张卡上没有别人（11/2）；
+# 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等；worker 设了 TASKQ_ADMITTED=1 时不等（它领之前已看过卡）；
+# 设了 TASK_GPU_IDLE（分钟，机器表 machines.py 里组的环境变量）时，还要 GPU 使用记录（monitor/gpu_log.sh，位置见 proto.py 的 GPU_LOG_DIR）里最近这么久这张卡上没有别人；
 # 训练出错隔 5 分钟重来，最多 3 次（worker 跑的只跑 1 次，由它交还队列）。
-# 退出码（queue/README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
-# 4 缺输入（data 里的文件不全，没开训，11/1）；5 读不了盘、判断不了训完没有（spec.py done 退出 5，11/4）；
+# 退出码（README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
+# 4 缺输入（inputs 里的文件不全，没开训）；5 读不了盘、判断不了训完没有（spec.py done 退出 5）；
 # ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
 # 说明、环境有问题（退出码 2）时原因也写进分段日志（key 取 worker 给的 TASK_KEY 或参数里的）。
 # 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练（8 秒没停下就强制停）再退出，下次从存档接着训。
@@ -20,8 +20,8 @@ eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不�
 CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 (( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v… 或 run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
-DATA=${TASKQ_DATA:-$(python3 "$CORE/sites/mtab.py" get . data)}
-[[ -n $DATA ]] || { echo "机器表（machines.py）里没有这台机器，先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
+DATA=$(python3 "$CORE/queue/cfg.py" data)
+[[ -n $DATA ]] || { echo "这里没有数据目录（不是 store、也不在执行机的根目录下跑），先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 export TASKQ_DATA=$DATA
 ts() { date '+%F %T'; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
@@ -63,7 +63,7 @@ POLL=${RUN_TASK_POLL:-300}        # 只给测试用
 GPU_POLL=${RUN_TASK_GPU_POLL:-60} # 只给测试用
 STOP_WAIT=${RUN_TASK_STOP_WAIT:-8} # 只给测试用
 
-gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算，10/19 起）
+gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算）
     [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
     local used mine=0 pid pm
     used=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-gpu=memory.used --format=csv,noheader,nounits 2> /dev/null | tr -d ' ')
@@ -103,11 +103,9 @@ wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1�
 }
 kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
 gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # 训练的进程组和它本身都不在了
-# 训练进程（进程组组长）。名字不能和函数里的局部变量重名：bash 是动态作用域，信号在函数里到时 on_term 看到的是那个函数的局部变量；
-# 原来叫 pid，和 gpu_free 读 nvidia-smi 的 pid 重名，测试里读到 1 时 on_term 给 1 号发信号，等于给账号的所有进程发（11/14 测试时把整个账号的进程都杀了）
-train_pid=
-on_term() {  # 先 SIGTERM 整个进程组，8 秒没停下就 SIGKILL（存档是原子写的），确认停下了才退出（11/1）
-    if [[ $train_pid =~ ^[0-9]+$ ]] && (( train_pid > 1 )); then
+pid=
+on_term() {  # 先 SIGTERM 整个进程组，8 秒没停下就 SIGKILL（存档是原子写的），确认停下了才退出
+    if [[ -n $pid ]]; then
         echo "$(ts) 收到停止信号，停训练"
         kill -TERM -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid"
         for _ in $(seq "$STOP_WAIT"); do gone "$train_pid" && break; sleep 1; done
@@ -125,15 +123,12 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$TASK_KEY，第 $PART 段，环境 $TASK_ENV，代码 $COMMIT，$(ts)" >> "$LOG"
 echo "$(ts) 开始：$TASK_KEY（环境 $TASK_ENV，日志 $LOG）"
-# 输入（任务说明的 data）：开训前查全没有，不全退出码 4；STAGE_TMP 开着、任务的 res.local_inputs 时在节点本地盘建私有视图，
-# 后台拷过去（queue/inputs.py，11/1）。命令从 TASK_INPUTS_ROOT 读输入（和数据目录一样的相对路径）
+# 输入（任务说明的 inputs）：开训前查全没有，不全退出码 4；有节点本地的暂存目录（TASKQ_STAGE_ROOT，消费者的 slurm 插件给）、任务的 res.local_inputs 时在那里建私有视图，
+# 后台拷过去（queue/inputs.py）。命令从 TASK_INPUTS_ROOT 读输入（和数据目录一样的相对路径）
 TASK_INPUTS_ROOT=$DATA CPID=
 if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
-    if [[ ${TASK_LOCAL:-0} == 1 && -n ${TASKQ_STAGE_ROOT:-}${SLURM_JOB_ID:-} ]]; then
-        ST=${TASKQ_STAGE_TMP:-$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import cfg; M = cfg.mtab(); import policy; print(int(bool(policy.STAGE_TMP.get(M.whoami()))))" 2> /dev/null || echo 0)}
-        [[ $ST == 1 ]] && LROOT=${TASKQ_STAGE_ROOT:-${TMPDIR:-/tmp}/$TQ_STAGE_DIR_PREFIX${SLURM_JOB_ID:-}}  # 消费者的 slurm 插件给的；旧 worker 按作业号
-    fi
+    [[ ${TASK_LOCAL:-0} == 1 && -n ${TASKQ_STAGE_ROOT:-} ]] && LROOT=$TASKQ_STAGE_ROOT
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?
     if (( rc == TQ_EXIT_RUN_MISSING )); then
         echo "$(ts) 不开训：$(tail -n 1 "$LOG")"
@@ -153,7 +148,7 @@ export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
     [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # 消费者领之前已经看过卡
-    # 自己一个进程组，停的时候整组停；任务的命令用核心的库（TASKQ_LIB）和命令（bin/ 在 PATH 最前面，11/4）
+    # 自己一个进程组，停的时候整组停；任务的命令用核心的库（TASKQ_LIB）和命令（bin/ 在 PATH 最前面）
     ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
     train_pid=$!
     wait "$train_pid"; rc=$?; train_pid=

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""relay_store.py 的清理（gc）的测试（2026-10-31）：在临时目录造一个假根目录，本地跑 GC_PY（同 relay_remote.rpy 的调用方式），剩余用 free 参数假装。
+"""relay_store.py 的清理（gc）的测试：在临时目录造一个假根目录，本地跑 site_ops.py gc（同 relay_remote.op 的调用方式），剩余用 free 参数假装。
     python3 queue/test_relay_store.py
 """
+import hashlib
 import json
 import os
 import shutil
@@ -29,10 +30,19 @@ def ok(msg):
     print(f"通过：{msg}")
 
 
+SITE_OPS = os.path.join(HERE, "site_ops.py")
+
+
+def H(name):
+    """测试里的块名（aa1、dd1 …）→ 它的 sha256 名字（blobs 里只认 64 位十六进制的）。"""
+    return hashlib.sha256(name.encode()).hexdigest()
+
+
 def local_rpy(root):
-    def rpy(name, code, data=None, timeout=600):
-        r = subprocess.run([sys.executable, "-c", code, root], input=json.dumps(data), capture_output=True, text=True,
-                           cwd=REPO, timeout=timeout)
+    """本机跑 site_ops.py 的操作，根目录是 root（同 relay_remote.op）。"""
+    def rpy(name, what, data=None, timeout=600):
+        r = subprocess.run([sys.executable, SITE_OPS, what], input=json.dumps(data), capture_output=True, text=True,
+                           cwd=REPO, timeout=timeout, env=dict(os.environ, TASKQ_ROOT=root))
         res = S.json_in(r.stdout)
         if r.returncode or res is None:
             raise RuntimeError(r.stderr[-500:])
@@ -40,8 +50,9 @@ def local_rpy(root):
     return rpy
 
 
-def blob(R, h, size):
-    p = os.path.join(R, "blobs", h[:2], h)
+def blob(R, name, size, suffix=""):
+    h = H(name)
+    p = os.path.join(R, "blobs", h[:2], h + suffix)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "wb") as f:
         f.truncate(size)
@@ -84,7 +95,8 @@ def build(tmp):
     return R, outside
 
 
-def exists(R, h):
+def exists(R, name):
+    h = H(name)
     return os.path.exists(os.path.join(R, "blobs", h[:2], h))
 
 
@@ -123,8 +135,8 @@ def main():
         R, _ = build(fixture.tmpdir(dir=tmp))
         os.makedirs(os.path.join(R, "state", "pins"))
         with open(os.path.join(R, "state", "pins", "t__a.json"), "w") as f:
-            json.dump(["dd1"], f)
-        part = blob(R, "gg1.tunnelpart", 4000)
+            json.dump([H("dd1")], f)
+        part = blob(R, "gg1", 4000, ".tunnelpart")
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert exists(R, "dd1") and os.path.exists(part) and not exists(R, "bb1"), r
         os.utime(os.path.join(R, "state", "pins", "t__a.json"), (1000, 1000))
@@ -133,7 +145,7 @@ def main():
         assert not exists(R, "dd1") and not os.path.exists(part), r
         ok("正在传的任务钉住的块、传到一半的临时文件不删；钉住记录过了 12 小时、临时文件放了一天以上就不再认")
 
-        # blobs 在另一个盘、有 blob_cap（11/6）：删 blob 只看 blob_free，删视图看两边任一边；删 blob 不算进根目录的剩余
+        # blobs 在另一个盘、有 blob_cap：删 blob 只看 blob_free，删视图看两边任一边；删 blob 不算进根目录的剩余
         R, _ = build(fixture.tmpdir(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=5000 / GB, free=200 * GB, blob_free=0)
         assert r["removed_views"] == ["prepared/ds_old"] and not exists(R, "dd1"), r
@@ -172,29 +184,12 @@ def main():
         os.symlink(R, link)
         pre = os.path.join(R, "data", "prepared", "ds_keep", "PlanM_full", "c1.prob")
         os.remove(pre)
-        os.symlink(os.path.join(link, "blobs", "aa", "aa1"), pre)
+        os.symlink(os.path.join(link, "blobs", H("aa1")[:2], H("aa1")), pre)
         r = G.gc("x", keep, local_rpy(link), soft_gb=1.0, free=0)
         assert exists(R, "aa1") and exists(R, "ee1") and not exists(R, "dd1"), r
         ok("根目录经软链接到达时，在用的 blob 也不删")
 
-        # 同一个盘上的另一台执行机（site-pueue2 / site-pueue）：两边的 blobs 互相硬链接收编
-        R, _ = build(fixture.tmpdir(dir=tmp))
-        sib = fixture.tmpdir(dir=tmp)
-        for h in ("gg1", "hh1", "ii1"):
-            os.makedirs(os.path.join(sib, "blobs", h[:2]), exist_ok=True)
-        g = blob(R, "gg1", 100)
-        os.link(g, os.path.join(sib, "blobs", "gg", "gg1"))
-        h_ = blob(R, "hh1", 100)
-        os.link(h_, os.path.join(tmp, "old", "hh1_copy"))
-        i_ = blob(R, "ii1", 100)
-        os.link(i_, os.path.join(sib, "blobs", "ii", "ii1"))
-        os.symlink(i_, os.path.join(R, "data", "prepared", "ds_keep", "PlanM_full", "c9.prob"))
-        r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0, siblings=[sib])
-        assert not exists(R, "gg1") and os.path.exists(os.path.join(sib, "blobs", "gg", "gg1")), r
-        assert exists(R, "hh1") and exists(R, "ii1") and r.get("unlinked") == 1, r
-        ok("还不够时：自己不用、另一个链接在同一个盘上别的执行机 blobs 里的，只删自己这个链接；老目录的硬链接、自己在用的不碰")
-
-        # 变异审查（11/3）：keep 是视图里更深的一层（或更上的一层）时，包含它的视图 / 它下面的视图也不删
+        # keep 是视图里更深的一层（或更上的一层）时，包含它的视图 / 它下面的视图也不删
         R, _ = build(fixture.tmpdir(dir=tmp))
         D = os.path.join(R, "data")
         os.makedirs(os.path.join(D, "in/up/sub"))
@@ -207,7 +202,7 @@ def main():
         assert os.path.isdir(os.path.join(D, "prepared/ds_keep")), r
         ok("keep 是视图下面一层或上面一层：那个视图也不删")
 
-        # Slurm（11/4）：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
+        # Slurm：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
         R, _ = build(fixture.tmpdir(dir=tmp))
         scr = fixture.tmpdir(dir=tmp)
         os.rmdir(scr)
@@ -215,29 +210,31 @@ def main():
         os.symlink(scr, os.path.join(R, "blobs"))
         os.makedirs(os.path.join(R, "state", "pins"))
         with open(os.path.join(R, "state", "pins", "t__a.json"), "w") as f:
-            json.dump(["ee1"], f)
+            json.dump([H("ee1")], f)
         os.remove(os.path.join(R, "data", "results", "ds_keep", "frag_0", "uses_ee1"))
-        stray = [os.path.join(scr, "notes.txt"), os.path.join(scr, "dd", "x1"), os.path.join(scr, "dd", "sub", "dd2")]
+        d2 = H("dd1")[:2]
+        stray = [os.path.join(scr, "notes.txt"), os.path.join(scr, d2, "x1"), os.path.join(scr, d2, "sub", H("dd2"))]
         for p_ in stray:
             os.makedirs(os.path.dirname(p_), exist_ok=True)
             open(p_, "wb").write(b"z" * 100)
             os.utime(p_, (1, 1))
-        os.symlink(outside, os.path.join(scr, "dd", "dd9"))
+        os.symlink(outside, os.path.join(scr, d2, H("dd9")))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert not exists(R, "dd1") and not exists(R, "bb1") and r["removed_blobs"] == 2, r
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1"), r
         assert all(os.path.exists(p_) for p_ in stray) and os.path.getsize(outside) == 500, r
         ok("块目录是指到别的盘的软链接：照常删没人用、没钉住的块；在用的、钉住的、硬链接的、不按哈希放的、链接的目标不碰")
 
-        # 删视图和建视图（VIEW_PY）拿同一把锁（11/4）
+        # 删视图和建视图（site_ops 的 view）拿同一把锁
         import fcntl
         import time
         R, _ = build(fixture.tmpdir(dir=tmp))
         os.makedirs(os.path.join(R, "state"))
         lk = open(os.path.join(R, "state", "view.lock"), "w")
         fcntl.flock(lk, fcntl.LOCK_EX)
-        p = subprocess.Popen([sys.executable, "-c", G.RM.GC_PY, R], cwd=REPO, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        p.stdin.write(json.dumps(dict(soft_gb=1e-6, keep=keep, free=0, views=[], scan=["prepared"], siblings=[])))
+        p = subprocess.Popen([sys.executable, SITE_OPS, "gc"], cwd=REPO, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                             env=dict(os.environ, TASKQ_ROOT=R))
+        p.stdin.write(json.dumps(dict(soft_gb=1e-6, keep=keep, free=0, views=[], scan=["prepared"])))
         p.stdin.close()
         time.sleep(1)
         held = p.poll() is None and os.path.isdir(os.path.join(R, "data", "prepared", "ds_old"))
@@ -262,19 +259,19 @@ def main():
 
 
 def gc_envs(tmp):
-    """建环境期间（11/5）：用到的 wheel / conda 包钉在 pins/env.<环境>.json，清理不删；建好的环境（R/envs）清理从来不碰。"""
+    """建环境期间：用到的 wheel / conda 包钉在 pins/env.<环境>.json，清理不删；建好的环境（R/envs）清理从来不碰。"""
     R = os.path.join(tmp, "Renv")
     os.makedirs(os.path.join(R, "data", "prepared"))
-    h1, h2 = "a1" + "0" * 62, "b2" + "0" * 62
-    for h in (h1, h2):
-        os.utime(blob(R, h, GB // 100), (1000, 1000))
+    h1, h2 = H("a1"), H("b2")
+    for n in ("a1", "b2"):
+        os.utime(blob(R, n, GB // 100), (1000, 1000))
     envd = os.path.join(R, "envs", "base")
     os.makedirs(os.path.join(envd, "lib"))
     for f in ("lib/big.so", ".ok"):
         with open(os.path.join(envd, f), "wb") as fh:
             fh.truncate(GB // 50)
         os.utime(os.path.join(envd, f), (1000, 1000))
-    local_rpy(R)("x", G.RM.PIN_PY, dict(key=proto.safe("env.base"), hashes=[h1]))
+    local_rpy(R)("x", "pin", dict(key=proto.safe("env.base"), hashes=[h1]))
     r = G.gc("x", [], local_rpy(R), soft_gb=1e-6, free=0)
     assert os.path.exists(os.path.join(R, "blobs", h1[:2], h1)) and not os.path.exists(os.path.join(R, "blobs", h2[:2], h2)), r
     assert sorted(os.listdir(envd)) == [".ok", "lib"] and os.path.getsize(os.path.join(envd, "lib", "big.so")) == GB // 50, r
@@ -282,13 +279,13 @@ def gc_envs(tmp):
 
 
 def gc_pins_read_once(tmp):
-    """删每个块前都看 pins：pins 没变时不重新读（11/5：几百个块、几十个 pin 时 GC 很慢）；钉住的照样不删。"""
+    """删每个块前都看 pins：pins 没变时不重新读（几百个块、几十个 pin 时 GC 很慢）；钉住的照样不删。"""
     import time
     R = os.path.join(tmp, "Rpins")
     os.makedirs(os.path.join(R, "data", "prepared"))
-    hs = [f"{i:02x}" + "0" * 62 for i in range(200)]
-    for h in hs:
-        os.utime(blob(R, h, 10), (1000, 1000))
+    hs = [H(f"p{i}") for i in range(200)]
+    for i in range(200):
+        os.utime(blob(R, f"p{i}", 10), (1000, 1000))
     pd = os.path.join(R, "state", "pins")
     os.makedirs(pd)
     for i in range(20):
@@ -299,12 +296,9 @@ def gc_pins_read_once(tmp):
     hook = ("import json\n_l=json.load\n_n=[0]\n"
             "def _load(*a,**k):\n    _n[0]+=1\n    return _l(*a,**k)\n"
             "json.load=_load\nimport atexit,sys\natexit.register(lambda: sys.stderr.write('LOADS=%d\\n'%_n[0]))\n"
-            "exec(compile(open(sys.argv.pop(1)).read(),'GC_PY','exec'))")
-    gc_file = os.path.join(tmp, "gc_py.py")
-    with open(gc_file, "w") as f:
-        f.write(G.RM.GC_PY)
-    r = subprocess.run([sys.executable, "-c", hook, gc_file, R], cwd=REPO, capture_output=True, text=True,
-                       input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["prepared"], siblings=[])))
+            "import runpy\nsys.argv=[sys.argv[1],'gc']\nrunpy.run_path(sys.argv[0],run_name='__main__')")
+    r = subprocess.run([sys.executable, "-c", hook, SITE_OPS], cwd=REPO, capture_output=True, text=True, env=dict(os.environ, TASKQ_ROOT=R),
+                       input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["prepared"])))
     assert r.returncode == 0, r.stderr
     loads = int(r.stderr.split("LOADS=")[1].split()[0])
     left = [h for h in hs if os.path.exists(os.path.join(R, "blobs", h[:2], h))]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""协议只在 proto.py 定义（11/4）：核心里别处不再手写 proto 里的名字；TASKQ_* 都登记在 proto.ENV；proto 只用标准库、能单独跑。"""
+"""协议只在 proto.py 定义：核心里别处不再手写 proto 里的名字；TASKQ_* 都登记在 proto.ENV；proto 只用标准库、能单独跑。"""
 import ast
 import os
 import re
@@ -57,17 +57,14 @@ def code_lines(p):
 
 # proto 里的名字 → 在别处手写算违规的写法
 LITERALS = {
-    "phd_stage_": r"phd_stage_",
     "taskq_stage_": r"taskq_stage_",
     "/tmp/gpu_pad_": r"/tmp/gpu_pad_",
     "@@JSON": r"@@JSON",
     "gpu_pad_DISABLED": r"gpu_pad_DISABLED",
     "view.lock": r"view\.lock",
-    "state/pins": r"""state/pins|['"]pins['"]""",
+    "state/pins": r"""state/pins|['"]state['"],\s*['"]pins['"]""",  # 按 proto.ROOT 的键（sub(R, "pins")）取的不算
     ".incomplete": r"\.incomplete",
     "MANIFEST.json": r"MANIFEST\.json",
-    ".infer_done": r"\.infer_done",
-    "ARCHIVED": r"""['"]ARCHIVED['"]""",
     "code/current": r"code/current",
     ".relay_in": r"\.relay_in",
     "gpu_log.pid": r"gpu_log\.pid",

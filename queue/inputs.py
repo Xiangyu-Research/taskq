@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-"""任务的输入（2026-11-01）：开训前查全没有；执行机允许时在节点本地盘建一份这个任务私有的视图，开训后在后台拷过去。
+"""任务的输入：开训前查全没有；执行机允许时在节点本地盘建一份这个任务私有的视图，开训后在后台把 blob 拷过去。
 
   inputs.py prepare <数据目录> <任务文件名> <本地根目录或空> <输入>...
       查每个输入（文件或文件夹；链接要指得到文件；文件夹里任一层有 .incomplete = 建到一半，读不了也算缺）。不全 → 退出码 4，标准错误里写缺几个、举几个例子。
       给了本地根目录时：在 <根>/views/<任务文件名>/ 下照数据目录的相对路径建一份只有链接的树，指向原处的文件（已经拷到本地的指本地），
       要拷的写进 <根>/views/<任务文件名>.todo.json，打印这份视图的根；没给时打印数据目录。命令从打印的目录读（$TASK_INPUTS_ROOT）。
-      先删本节点上自己的、作业已经结束的本地副本（<前缀><作业号>，前缀见 proto.STAGE_PREFIXES）。
+      先删本节点上自己的、作业已经结束的本地副本（<根的上一级>/<proto.STAGE_DIR_PREFIX><作业号>）。
   inputs.py copy <本地根目录> <任务文件名>
-      照清单把文件拷到 <根>/blobs/（本节点别的作业已有的硬链接过来），拷完核对（文件名是 sha256 的按内容，其他按大小），
-      再替换视图里对应的链接（新建链接再 rename 盖过去）：换之前读原处，换之后读本地。拷完至少还剩 STAGE_KEEP_GB（默认 300）GB
+      照清单把 blob 拷到 <根>/blobs/（布局同执行机，proto.blob；本节点别的作业已有的硬链接过来），边拷边核对 sha256，
+      再把视图里对应的链接换过去：换之前读原处，换之后读本地。拷完至少还剩 STAGE_KEEP_GB（默认 300）GB
       （能从本节点别的作业硬链接来的不算），不够就不拷。本节点的拷贝排队（一把锁），一个查完拷完下一个再查。核对不上、拷不了的留着读原处。
+只拷 blob（真实路径是执行机 blobs 里的 <h2>/<h>，按内容认）；别的文件（执行机自己做出的产出）读原处。
 退出码：0 好了；4 缺输入；其他 = 出错（run_task.sh 照旧读原处）。
 """
-import contextlib
 import fcntl
 import glob
-import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -27,13 +25,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import proto  # noqa: E402
+import common as C  # noqa: E402
+import site_ops as SO  # noqa: E402
 
 MISSING = proto.EXIT["run_missing"]
 PAR = int(os.environ.get("STAGE_PAR", 16))
 KEEP_GB = float(os.environ.get("STAGE_KEEP_GB", 300))
-HEX = re.compile(r"[0-9a-f]{64}")
-PREFIXES = proto.STAGE_PREFIXES  # 认目录时新旧前缀都认（旧的 11/8 以后删）
-PARTIAL = ".partial."
 
 
 def entries(data, inp):
@@ -66,18 +63,17 @@ def entries(data, inp):
 
 
 def look(p):
-    """→ (大小, 真实路径, 改动时间 ns, inode)；指不到文件 → None。"""
+    """→ (大小, 真实路径, sha256 或 None)；指不到文件 → None。sha256：真实路径是 blob（<h2>/<h>）时的 h。"""
     try:
         st = os.stat(p)
     except OSError:
         return None
-    return (st.st_size, os.path.realpath(p), st.st_mtime_ns, st.st_ino) if os.path.isfile(p) else None
-
-
-def blob_id(real, size, mtime=0, ino=0):
-    """sha256 名的文件按名字；其余按路径、大小、改动时间和 inode（同一路径内容换了不复用旧副本，11/1）。"""
-    b = os.path.basename(real)
-    return b if HEX.fullmatch(b) else "p" + hashlib.sha1(f"{real}\0{size}\0{mtime}\0{ino}".encode()).hexdigest()
+    if not os.path.isfile(p):
+        return None
+    real = os.path.realpath(p)
+    h = os.path.basename(real)
+    is_blob = SO.HASH_RE.fullmatch(h) and os.path.basename(os.path.dirname(real)) == h[:2]
+    return st.st_size, real, h if is_blob else None
 
 
 def live_jobs():
@@ -94,28 +90,28 @@ def live_jobs():
     return {x.split("_")[0] for x in r.stdout.split()}
 
 
+def jobs_dirs(root):
+    """本节点上（同一个上一级文件夹里）各作业的本地副本 → {作业号: 文件夹}。"""
+    out = {}
+    for d in glob.glob(os.path.join(os.path.dirname(root), proto.STAGE_DIR_PREFIX + "*")):
+        j = os.path.basename(d)[len(proto.STAGE_DIR_PREFIX):]
+        if j.isdigit() and os.path.isdir(d):
+            out[j] = d
+    return out
+
+
 def clean_old(root):
     live = live_jobs()
     if live is None:
         return
-    for pre in PREFIXES:
-        for d in glob.glob(os.path.join(os.path.dirname(root), pre + "*")):
-            j = os.path.basename(d)[len(pre):]
-            try:
-                mine = os.stat(d).st_uid == os.getuid()
-            except OSError:
-                continue
-            if d != root and j.isdigit() and j not in live and mine:
-                print(f"删掉已结束作业 {j} 的本地副本 {d}", file=sys.stderr)
-                shutil.rmtree(d, ignore_errors=True)
-
-
-def put_link(p, target):
-    tmp = p + ".taskq_tmp"
-    if os.path.lexists(tmp):
-        os.remove(tmp)
-    os.symlink(target, tmp)
-    os.replace(tmp, p)
+    for j, d in jobs_dirs(root).items():
+        try:
+            mine = os.stat(d).st_uid == os.getuid()
+        except OSError:
+            continue
+        if d != root and j not in live and mine:
+            print(f"删掉已结束作业 {j} 的本地副本 {d}", file=sys.stderr)
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def prepare(data, key, root, inputs):
@@ -137,23 +133,19 @@ def prepare(data, key, root, inputs):
     root = os.path.abspath(root)
     clean_old(root)
     view = os.path.join(root, "views", key)
-    blobs = os.path.join(root, "blobs")
     shutil.rmtree(view, ignore_errors=True)
-    os.makedirs(blobs, exist_ok=True)
     todo = []
-    for (rel, _), (size, real, mtime, ino) in zip(found, info):
-        bid = blob_id(real, size, mtime, ino)
-        local = os.path.join(blobs, bid)
+    for (rel, _), (size, real, h) in zip(found, info):
         p = os.path.join(view, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        if os.path.isfile(local) and os.path.getsize(local) == size:
+        local = os.path.join(root, proto.blob(h)) if h else None
+        if local and _size(local) == size:
             os.symlink(local, p)
         else:
             os.symlink(real, p)
-            todo.append([rel, real, size, bid])
-    with open(view + ".todo.json.tmp", "w") as f:
-        json.dump(todo, f)
-    os.replace(view + ".todo.json.tmp", view + ".todo.json")
+            if h:
+                todo.append([rel, real, size, h])
+    C.atomic_write(view + ".todo.json", json.dumps(todo))
     print(view)
     return 0
 
@@ -168,57 +160,30 @@ def alive(pid):
     return True
 
 
-def copy_one(src, dst, size, check):
-    """src → dst（先写 dst.partial.<pid>，核对后改名）→ 说明（出错时）或 None。"""
-    tmp = f"{dst}{PARTIAL}{os.getpid()}"
-    h = hashlib.sha256() if check else None
-    try:
-        with open(src, "rb") as fi, open(tmp, "wb") as fo:
-            for b in iter(lambda: fi.read(1 << 22), b""):
-                fo.write(b)
-                if h:
-                    h.update(b)
-        got = os.path.getsize(tmp)
-        if got != size:
-            raise OSError(f"大小 {got}，应为 {size}")
-        if h and h.hexdigest() != os.path.basename(dst):
-            raise OSError("内容和文件名的 sha256 对不上")
-        os.replace(tmp, dst)
-        return None
-    except OSError as e:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return f"{os.path.basename(src)}：{e}"
-
-
 def copy(root, key):
     t0 = time.time()
     root = os.path.abspath(root)
     view = os.path.join(root, "views", key)
-    blobs = os.path.join(root, "blobs")
     todo = json.load(open(view + ".todo.json"))
-    for p in glob.glob(os.path.join(blobs, "*" + PARTIAL + "*")):  # 被停掉的拷贝留下的
+    for p in glob.glob(os.path.join(root, "blobs", "*", "*" + proto.TMP)):  # 被停掉的拷贝留下的（<h>.<进程号>.tmp）
         try:
-            if not alive(int(p.rsplit(".", 1)[1])):
+            if not alive(int(p.rsplit(".", 2)[1])):
                 os.remove(p)
-        except (ValueError, OSError):
+        except (ValueError, IndexError, OSError):
             pass
     by = {}
-    for rel, real, size, bid in todo:
-        by.setdefault(bid, [real, size, []])[2].append(rel)
-    others = [d for pre in PREFIXES for d in glob.glob(os.path.join(os.path.dirname(root), pre + "*", "blobs")) if d != blobs]
-    with contextlib.ExitStack() as locks:  # 本节点的拷贝一个一个来（11/4）；新旧前缀的锁按固定顺序都拿（旧的 11/8 以后删）
-        for pre in reversed(PREFIXES):
-            fcntl.flock(locks.enter_context(open(os.path.join(os.path.dirname(root), f".{pre}{os.getuid()}.lock"), "a")), fcntl.LOCK_EX)
-        need = sum(size for bid, (_, size, _) in by.items()
-                   if not os.path.isfile(os.path.join(blobs, bid)) and not any(_size(os.path.join(o, bid)) == size for o in others))
+    for rel, real, size, h in todo:
+        by.setdefault(h, [real, size, []])[2].append(rel)
+    others = [d for d in jobs_dirs(root).values() if d != root]
+    with open(os.path.join(os.path.dirname(root), f".{proto.STAGE_DIR_PREFIX}{os.getuid()}.lock"), "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)  # 本节点的拷贝一个一个来：查空间和拷贝之间别的拷贝不插进来
+        need = sum(size for h, (_, size, _) in by.items()
+                   if _size(os.path.join(root, proto.blob(h))) != size and not any(_size(os.path.join(o, proto.blob(h))) == size for o in others))
         free = shutil.disk_usage(root).free
         if free - need < KEEP_GB * 1024 ** 3:
             print(f"本地盘剩 {free / 1024 ** 3:.0f} GB，拷 {need / 1024 ** 3:.0f} GB 后不到 {KEEP_GB:.0f} GB，不拷，读原处")
             return 0
-        return _copy(view, blobs, by, others, t0)
+        return _copy(root, view, by, others, t0)
 
 
 def _size(p):
@@ -228,37 +193,29 @@ def _size(p):
         return None
 
 
-def _copy(view, blobs, by, others, t0):
+def _copy(root, view, by, others, t0):
     n = dict(copied=0, linked=0, had=0, bytes=0)
     bad = []
 
     def one(item):
-        bid, (real, size, rels) = item
-        dst = os.path.join(blobs, bid)
-        with open(dst + ".lock", "a") as lk:
-            fcntl.flock(lk, fcntl.LOCK_EX)
-            if os.path.isfile(dst) and os.path.getsize(dst) == size:
-                n["had"] += 1
-            else:
-                for o in others:
-                    q = os.path.join(o, bid)
-                    try:
-                        if os.path.getsize(q) == size:
-                            os.link(q, dst + ".taskq_tmp")
-                            os.replace(dst + ".taskq_tmp", dst)
-                            n["linked"] += 1
-                            break
-                    except OSError:
-                        continue
+        h, (real, size, rels) = item
+        dst = os.path.join(root, proto.blob(h))
+        if _size(dst) == size:
+            n["had"] += 1
+        else:
+            src = next((q for q in (os.path.join(o, proto.blob(h)) for o in others) if _size(q) == size), None)
+            try:
+                if src and C.atomic_copy(src, dst, link=True, size=size):
+                    n["linked"] += 1
                 else:
-                    err = copy_one(real, dst, size, bool(HEX.fullmatch(bid)))
-                    if err:
-                        bad.append(err)
-                        return
+                    C.atomic_copy(real, dst, size=size, sha=h)
                     n["copied"] += 1
                     n["bytes"] += size
+            except OSError as e:
+                bad.append(f"{os.path.basename(rels[0])}：{e}")
+                return
         for rel in rels:
-            put_link(os.path.join(view, rel), dst)
+            C.atomic_link(dst, os.path.join(view, rel))
     with ThreadPoolExecutor(min(PAR, 8)) as ex:
         list(ex.map(one, sorted(by.items(), key=lambda x: x[1][2][0])))
     print(f"{time.strftime('%F %T')} 输入拷到本地 {view}：{len(by) - len(bad)}/{len(by)} 个文件（新拷 {n['copied']} 个 "

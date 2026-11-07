@@ -1,21 +1,21 @@
 #!/bin/bash
-# 大批数据从 hub 传到别的机器（ssh 单路慢、经 VPN 的 ssh 和别的传输一起跑时会被挤住时用）：
-# 经 hub 的 Cloudflare 隧道，由 sync/tunnel.py push 传（那边下载；机器表有 transfer_job 的在 CPU 节点上下载）。数据会经过 Cloudflare。
+# 大批数据从本机传到别的机器（ssh 单路慢、经 VPN 的 ssh 和别的传输一起跑时会被挤住时用）：
+# 经本机的 Cloudflare 隧道，由 sync/tunnel.py push 传（那边下载；机器表有 transfer_job 的在 CPU 节点上下载）。数据会经过 Cloudflare。
 #
-# 在 hub 上运行（会跑几十分钟，放在 tmux 里或后台）：
-#   taskq tunnel push-dirs <机器> <hub 上的源目录> <那边的目标目录（相对 home）> <子目录>...
+# 在源数据所在的机器上运行（会跑几十分钟，放在 tmux 里或后台）：
+#   taskq tunnel push-dirs <机器> <本机的源目录> <那边的目标目录（相对 home）> <子目录>...
 # 例（几个数据集的输入）：
 #   taskq tunnel push-dirs gpubox ~/data/raw data/raw setA/images setB/images
 #
 # 做法和安全措施（传输本身的见 sync/tunnel.py）：
-# - 软链接在 hub 上解析，那边存成真实文件。那边已经存在、大小和修改时间相同的文件跳过，所以中断后重新运行会接着传。
+# - 软链接在本机解析，那边存成真实文件。那边已经存在、大小和修改时间相同的文件跳过，所以中断后重新运行会接着传。
 # - 最后两边各算 MD5 逐个文件核对（顺着软链接读），列出不一致的文件。
 # - 传之前在那边每个子目录里放一个 .incomplete，核对一致后才删：中途出错留下的半份数据，refill.py 不会当成"数据在"。
 set -euo pipefail
 
 PROG=${TASKQ_PROG:-tunnel_push.sh}
 unset TASKQ_PROG
-USAGE="用法：$PROG <机器> <hub 上的源目录> <那边的目标目录（相对 home）> <子目录>..."
+USAGE="用法：$PROG <机器> <本机的源目录> <那边的目标目录（相对 home）> <子目录>..."
 [[ ${1:-} == -h || ${1:-} == --help ]] && { echo "$USAGE"; exit 0; }
 (( $# >= 4 )) || { echo "$USAGE" >&2; exit 2; }
 HOST=$1 SRC=$2 DEST=$3

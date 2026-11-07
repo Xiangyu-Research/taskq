@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Hub database (db.py) and event log (events.py): never created by readers, refused on a network filesystem, spool when it
-cannot be written, concurrent writers, a newer schema opens read-only, re-running an import adds nothing, progress rows only on
-change, the sha256 cache.
+cannot be written, concurrent writers, a newer schema opens read-only, TEXT_LOGS sources also get a text line, progress rows only on
+change, no sha256 cache in the hub database (it is on the store: site_ops.hashes).
 
     python3 queue/test_db.py
 """
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -35,7 +36,7 @@ ok("readers never create it: connect() and connect(ro=True) → None, no file", 
    and not os.path.exists(os.path.dirname(P)))
 EV.add("relay", "x happened")
 ok("events.add without a database: nothing written, no spool (executors)", not os.path.exists(P) and not os.path.exists(EV.spool_path()))
-ok("legacy text log still written", "x happened" in open(os.environ["RELAY_LOG"]).read())
+ok("TEXT_LOGS source: also a plain line in its text log", "x happened" in open(os.environ["RELAY_LOG"]).read())
 
 real = D.fstype
 D.fstype = lambda p: "nfs4"
@@ -74,20 +75,6 @@ ps = [subprocess.Popen([sys.executable, "-c", code, str(i)], env=os.environ) for
 rcs = [p.wait(timeout=120) for p in ps]
 ok("4 processes × 50 rows at once: all there, no spool", rcs == [0] * 4 and len(EV.query(db, grep="^w[0-9]-")) == 200
    and not os.path.exists(EV.spool_path()))
-
-# idempotent import
-lg = os.path.join(T, "old.log")
-open(lg, "w").write("2026-11-01 09:00:00 a demo/b/0\n  more of a\n2026-11-01 09:00:00 a demo/b/0\n2026-11-01 10:00:00 b\n")
-n1 = EV.import_file(db, "relay", lg)
-n2 = EV.import_file(db, "relay", lg)
-imp = EV.query(db, since=EV.when("2026-11-01"), until=EV.when("2026-11-02"))
-ok("import: same line twice kept twice, continuation joined; re-running adds nothing",
-   len(imp) == 3 and imp[0]["msg"] == "a demo/b/0\n  more of a" and n2 == 0 and n1 == 3)
-EV._insert(db, [EV._row("feed", "live", t=EV.when("2026-11-03 12:00") + 0.7)])
-open(lg, "w").write("2026-11-03 11:59:59 old\n  cont\n2026-11-03 12:00:00 live\n  cont of live\n2026-11-03 12:05:00 later\n")
-n3 = EV.import_file(db, "feed", lg)
-ok("import: lines from the first live event's second on are left out (already written live)",
-   n3 == 1 and [x["msg"] for x in EV.query(db, source="feed", since=EV.when("2026-11-03"), until=EV.when("2026-11-04"))] == ["old\n  cont", "live"])
 
 # notes
 r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "--key", "demo/c/1", "--kind", "fix",
@@ -128,15 +115,23 @@ n3 = EV.snapshot(db, [dict(key="k1", state="running", progress=0.2, site="s"), d
 ok("progress: a row only when state, progress or site changed", (n1, n2, n3) == (2, 0, 1)
    and [r["progress"] for r in EV.progress_rows(db, key="k1")] == [0.1, 0.2])
 
-# sha256 cache
-import relay_store as ST  # noqa: E402
+# the sha256 cache is on the store (site_ops.hashes), not in the hub database
+ok("schema 2: no hash table in the hub database",
+   db.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='hash'").fetchone()[0] == 0)
+import site_ops as SO  # noqa: E402
+R = os.path.join(T, "store_root")
 f = os.path.join(T, "blob.dat")
 open(f, "wb").write(b"abc")
-ST.HASHES = os.path.join(T, "hashes.json")
-json.dump({"/gone|1|1": "deadbeef"}, open(ST.HASHES, "w"))
-h = ST.sha256s([f])[f]
-ok("sha256s: right hash, cached in the database, old JSON cache taken over", h.startswith("ba7816bf")
-   and db.execute("SELECT count(*) FROM hash").fetchone()[0] == 2 and os.path.exists(ST.HASHES + ".migrated"))
+h = SO.hashes(R, [f])[f]
+HD = SO.sub(R, "hashes")
+rows = lambda: sqlite3.connect(HD).execute("SELECT k, sha FROM hash").fetchall()  # noqa: E731
+ok("site_ops.hashes: right hash, cached in the root's state/hashes.db keyed by path, size, mtime",
+   h.startswith("ba7816bf") and HD == os.path.join(R, "state", "hashes.db") and len(rows()) == 1 and rows()[0][1] == h)
+with sqlite3.connect(HD) as c:
+    c.execute("UPDATE hash SET sha='cached'")
+ok("site_ops.hashes: an unchanged file is not read again", SO.hashes(R, [f])[f] == "cached")
+open(f, "wb").write(b"abcd")
+ok("site_ops.hashes: a changed file (size, mtime) is hashed again", SO.hashes(R, [f])[f].startswith("88d4266f") and len(rows()) == 2)
 
 # newer schema → read-only
 db.execute(f"PRAGMA user_version={D.VERSION + 1}")

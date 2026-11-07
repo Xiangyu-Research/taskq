@@ -1,12 +1,13 @@
-"""配置、插件、状态在哪（2026-11-02）：TASKQ_CONFIG（machines.py、policy.py 所在的文件夹）、TASKQ_PLUGINS（做法、中继插件、
-进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）。说明见 queue/README.md 的"开关和配置"。
+"""配置、插件、状态在哪：TASKQ_CONFIG（machines.py、policy.py 所在的文件夹）、TASKQ_PLUGINS（做法、中继插件、
+进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）、TASKQ_ROOT（执行机上的进程：这台的根目录）。说明见 queue/README.md 的"开关和配置"。
 
     import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import policy；机器表用 cfg.mtab()（sites/mtab.py）
     cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连，元组的元组每项一行；没有时为空）
     cfg.py state [名字…]             本机的状态文件夹（或其中的路径，~ 展开）
+    cfg.py data                      这个进程的数据目录（data_dir；没有时为空）
     cfg.py log <名字>                日志文件 <名字>.log 的位置（~ 展开）
 
-插件（11/4）：TASKQ_PLUGINS 的每个文件夹里按文件名找，每类插件只取下面这些名字（KINDS），别的名字（辅助函数、import 进来的）
+插件：TASKQ_PLUGINS 的每个文件夹里按文件名找，每类插件只取下面这些名字（KINDS），别的名字（辅助函数、import 进来的）
 不进核心；一个也没导出时报错。插件里要用核心的东西只 import taskq_api（taskq_api.py），不 import 核心的其他模块。
   recipes.py         RECIPES  {做法名: 做法}（字段见 recipes.py 开头）
                      HOOKS    {钩子名: 函数}（可省；有哪些钩子见 recipes.py 的 HOOKS）
@@ -15,7 +16,7 @@
                      VIEW_ROOTS  [建视图的文件夹]（可省）
   consumers.py       CONSUMERS  {插件名: 消费者插件}（钩子见 consume.py、queue/README.md 的"消费者"）
   smoke.py           SMOKE  {做法名: dict(by=[参数名], params={…}, vars={…})}（冒烟闸门，见 smoke_gate.py）
-  labels.py          STEPS  {步骤名: 中文名}（推送、进度报告的白话，monitor/plain.py；实验表步骤的 zh 优先）
+  labels.py          STEPS  {步骤名: 中文名}（推送、进度报告的白话，monitor/plain.py）
                      QUIET  [进度报告里不列的步骤]（可省）
                      PLAN_TITLES  函数() → {分析编号: 标题}（可省；pueue 标签 <编号> 或 <编号>_… 说成"分析 <编号> <标题>"）
   readers/*.py       PROGRESS、INFO、TRAINED（spec.py 读；只用标准库，经 ssh 送到别的机器上跑）
@@ -74,11 +75,8 @@ def local(*parts):
     return os.path.join(CORE, *parts)
 
 
-# 状态文件夹：TASKQ_STATE > policy.py 的 OUTPUTS["state"] > 下面的默认（11/4；11/6 从 ~/.cache/taskq 改到 ~/.local/state/taskq）。代码包里 relay_bundle.py 把这几个字面量换成
-# 根目录下的（STATE_PLACES 的 → queue/，其余 → state/），键同 proto.STATE_IN_ROOT
-STATE_HOME = "~/.local/state/taskq/"
-STATE_PLACES = {"taskq": "~/.local/state/taskq/taskq", "gpu_pad/DISABLED": "~/.local/state/taskq/gpu_pad/DISABLED"}
-STATE_HOME_OLD = "~/.cache/taskq/"  # 11/6 前的默认（~/.cache 会被当缓存整个删掉，改到 ~/.local/state）；代码包照样把这种写法换成根目录下的
+# 状态文件夹：TASKQ_STATE > TASKQ_ROOT（执行机上的进程：根目录下，任务队列在 queue/，其余在 state/，proto.STATE_IN_ROOT）
+# > policy.py 的 OUTPUTS["state"]（没写时取 schema.OUTPUT_FIELDS 的默认）
 
 
 _PROJECT = []
@@ -118,9 +116,13 @@ def use_config():
     return d
 
 
-def outputs(key, default=None):
-    """policy.py 的 OUTPUTS[key]；配置文件夹里没有 policy.py → default。写明的配置文件夹不在、policy.py 读不了 → 报错（11/5：
-    不悄悄用默认的状态文件夹）。"""
+def outputs(key):
+    """policy.py 的 OUTPUTS[key]；没写、配置文件夹里没有 policy.py → schema.OUTPUT_FIELDS 的默认（不认识的 key → KeyError）。
+    写明的配置文件夹不在、policy.py 读不了 → 报错（不悄悄用默认的状态文件夹）。"""
+    from schema import OUTPUT_FIELDS
+    if key not in OUTPUT_FIELDS:
+        raise KeyError(f"OUTPUTS 没有字段 {key}（有：{'、'.join(OUTPUT_FIELDS)}）")
+    default = OUTPUT_FIELDS[key][1]
     d = config_dir()
     if d not in sys.path:
         sys.path.insert(0, d)
@@ -136,26 +138,47 @@ def outputs(key, default=None):
 
 
 def state_home():
-    """配置的状态文件夹（不展开 ~，以 / 结尾）：OUTPUTS["state"]，没写时 STATE_HOME。"""
-    h = outputs("state")
-    return (h.rstrip("/") + "/") if h else STATE_HOME
+    """配置的状态文件夹（不展开 ~，以 / 结尾）：OUTPUTS["state"]。"""
+    return outputs("state").rstrip("/") + "/"
 
 
 def state(*parts, expand=True):
+    """状态文件夹里的路径（见上面状态文件夹的说明）。"""
     rel = "/".join(parts)
-    base = os.environ.get("TASKQ_STATE")
-    home = None if base else outputs("state")
-    if base or home:
-        p = (base or home).rstrip("/") + ("/" + rel if rel else ("" if base else "/"))
+    base, root = os.environ.get("TASKQ_STATE"), os.environ.get("TASKQ_ROOT")
+    if root and not base:
+        if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from proto import ROOT, STATE_IN_ROOT
+        r = root.rstrip("/")
+        p = next((f"{r}/{v}{rel[len(k):]}" for k, v in STATE_IN_ROOT.items() if rel == k or rel.startswith(k + "/")),
+                 f"{r}/{ROOT['state']}/{rel}")
     else:
-        p = next((v + rel[len(k):] for k, v in STATE_PLACES.items() if rel == k or rel.startswith(k + "/")), STATE_HOME + rel)
+        p = (base or state_home()).rstrip("/") + "/" + rel
     return os.path.expanduser(p) if expand else p
+
+
+def data_dir():
+    """这个进程的数据目录（展开 ~）：TASKQ_DATA（run_task.sh 给任务的命令设）> TASKQ_ROOT 下的 data（执行机上的进程）
+    > 本机是 store 时 store 的数据目录；都没有 → ""。"""
+    v = os.environ.get("TASKQ_DATA")
+    if v:
+        return os.path.expanduser(v)
+    root = os.environ.get("TASKQ_ROOT")
+    if root:
+        if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from proto import ROOT
+        return os.path.expanduser(f"{root.rstrip('/')}/{ROOT['data']}")
+    M = mtab()
+    me = M.whoami()
+    return M.expand(M.machine(me)["data"]) if me and M.machine(me).get("data") else ""
 
 
 def log(name):
     """日志文件 <name>.log：环境变量 <NAME>_LOG（给测试用）> OUTPUTS["logs"] 文件夹 > 家目录。"""
     v = os.environ.get(name.upper() + "_LOG")
-    return os.path.expanduser(v or os.path.join(outputs("logs") or "~", name + ".log"))
+    return os.path.expanduser(v or os.path.join(outputs("logs"), name + ".log"))
 
 
 def env(name, default=None):
@@ -185,7 +208,7 @@ KINDS = {
 
 
 def plugins(name):
-    """各插件文件夹里的 <name>.py → [模块]。插件文件夹要是绝对路径；写明的（TASKQ_PLUGINS、.taskq.toml）不在 → 报错（11/5）。"""
+    """各插件文件夹里的 <name>.py → [模块]。插件文件夹要是绝对路径；写明的（TASKQ_PLUGINS、.taskq.toml）不在 → 报错。"""
     mods = []
     named = os.environ.get("TASKQ_PLUGINS") is not None or project_conf() is not None
     for i, d in enumerate(plugin_dirs()):
@@ -244,11 +267,16 @@ if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["state"]:
         print(state(*a[1:]))
+    elif a == ["data"]:
+        print(data_dir())
     elif a[:1] == ["log"] and len(a) == 2:
         print(log(a[1]))
     elif a[:1] == ["get"] and len(a) == 2:
-        v = outputs(a[1])
-        if isinstance(v, (tuple, list)):  # 元组用空格连；元组的元组每项一行（11/4）
+        try:
+            v = outputs(a[1])
+        except KeyError as e:
+            sys.exit(f"cfg.py get：{e.args[0]}")
+        if isinstance(v, (tuple, list)):  # 元组用空格连；元组的元组每项一行
             seq = (tuple, list)
             print(("\n" if any(isinstance(x, seq) for x in v) else " ").join(" ".join(map(str, x)) if isinstance(x, seq) else str(x) for x in v))
         else:

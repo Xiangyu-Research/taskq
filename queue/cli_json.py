@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""只读的 JSON 命令（2026-11-04）：使用者的测试、脚本经命令行读核心按配置算出来的值，不 import 核心的模块。
+"""只读的 JSON 命令：使用者的测试、脚本经命令行读核心按配置算出来的值，不 import 核心的模块。
 输出一行 JSON（带 version，字段见 proto 的 MSHOW_*、EXP_STEPS_*、RELAY_*，只加不改）；--json 可写可不写。
 
   taskq machines show [名…] [--json]
-      每台机器：种类、worker、开 worker 的命令、根目录的 shell 写法、能用的环境、激活语句、收编来源、给任务加的语句；
+      每台机器：角色、是不是执行机、暂停没有、种类、worker、开 worker 的命令、pueue 组、根目录的 shell 写法、能用的环境、
+      激活语句、给任务加的语句；
       还有环境描述（<配置文件夹>/specs/*.yml）的哈希、base、torch 变体
-  taskq exp steps [--exp ID…] [--key KEY…] [--level task|group|final…] [--data 目录] [--python P] [--done] [--needs] [--json]
-      实验表的步骤，命令按 names 填好（data 默认本机的数据目录，没有时留 {data}；python 默认 hub 的 python）。
-      --done：在 --data 下判断做完没有；--needs：命令带 --stage 的真跑一次 --stage needs（TASKQ_DATA = --data）
+  taskq exp steps [--exp ID…] [--key KEY…] [--level task|group|final…] [--data 目录] [--done] [--needs] [--json]
+      实验表的步骤（flow/compile.py 的实例）：命令按 names 填好，产出、声明的输入（data 默认本机的数据目录，没有时留 {data}）。
+      --done：在 --data 下判断做完没有（site_ops.done_missing）；--needs：写了 inputs_cmd 的真跑一次（TASKQ_DATA = --data）
   taskq spec export --spec <JSON|-> --root <目录> [--json]
       中继插件送出：要传的文件、视图、拉回的文件夹（只读 --root）
   taskq spec import --spec <JSON|-> --src <目录> --dst <目录> --root <目录> [--json]
@@ -45,16 +46,13 @@ def machine_json(n):
     import remote as R
     import spec as S
     M = cfg.mtab()
-    sites = getattr(M, "SITES", {})
     m = M.machine(n)
-    workers = {k: M.worker_of(n, k) for k in M.KINDS}
-    cmds = {}
-    if n in sites and m.get("scheduler") == "pueue" and m.get("root"):
-        cmds = {k: PQ.worker_cmd(n, k) for k in M.kinds(n)}
-    return dict(name=n, table="SITES" if n in sites else "MACHINES", label=m.get("label"), scheduler=m.get("scheduler"),
-                roles=list(m.get("roles") or ()), relay=n in M.RELAY, kinds=list(M.kinds(n)), workers=workers, worker_cmds=cmds,
-                root=m.get("root"), root_q=R.q(m["root"]) if m.get("root") else None, ready_envs=sorted(M.ready_envs(n)),
-                activate={e: M.activate(n, e) for e in m.get("envs") or {}}, adopt=M.adopt_sources(n), task_sh=S.machine_vars(m))
+    ws = M.workers(n)
+    cmds = {w["id"]: PQ.worker_cmd(n, w) for w in ws if w["group"]} if m["scheduler"] == "pueue" and m["root"] else {}
+    return dict(name=n, label=m["label"], scheduler=m["scheduler"], roles=list(M.roles(n)), executor=M.is_exec(n),
+                paused=M.paused(n), kinds=list(M.kinds(n)), workers=ws, worker_cmds=cmds, groups=M.groups(n),
+                root=m["root"], root_q=R.q(m["root"]) if m["root"] else None, ready_envs=sorted(M.ready_envs(n)),
+                activate={e: M.activate(n, e) for e in m["envs"] or {}}, task_sh=S.machine_vars(m))
 
 
 def spec_json(env):
@@ -70,12 +68,12 @@ def spec_json(env):
 
 def machines_show(argv):
     ap = argparse.ArgumentParser(prog="taskq machines show", description="核心按机器表算出来的值（一行 JSON，proto.MSHOW_*）")
-    ap.add_argument("names", nargs="*", metavar="名", help="只看这几台（默认 MACHINES 和 SITES 的全部）")
+    ap.add_argument("names", nargs="*", metavar="名", help="只看这几台（默认机器表的全部）")
     ap.add_argument("--json", action="store_true", help="一行 JSON（默认就是）")
     a = ap.parse_args(argv)
     import glob
     M = cfg.mtab()
-    every = list(M.MACHINES) + [n for n in getattr(M, "SITES", {}) if n not in M.MACHINES]
+    every = list(M.MACHINES)
     bad = [n for n in a.names if n not in every]
     if bad:
         return _fail(f"机器表里没有 {'、'.join(bad)}（有：{'、'.join(every)}）", proto.EXIT["gone"])
@@ -89,102 +87,80 @@ def machines_show(argv):
 LEVELS = ("task", "group", "final")
 
 
-def _python():
-    import advance as A
-    try:
-        return A.python()
-    except (KeyError, TypeError, ValueError):  # hub 没有 conda
-        return sys.executable
-
-
 def exp_steps(argv):
     ap = argparse.ArgumentParser(prog="taskq exp steps", description="实验表的步骤，命令按 names 填好（一行 JSON，proto.EXP_STEPS_*）")
     ap.add_argument("--exp", nargs="+", metavar="ID", help="只列这几个实验的（FINAL 的不列）")
     ap.add_argument("--key", nargs="+", metavar="KEY", help="每个任务的步骤只列这几个任务的（实验一级、FINAL 的不列）")
     ap.add_argument("--level", nargs="+", choices=LEVELS, help="只列这几级：task（每个任务）、group（实验一级）、final")
-    ap.add_argument("--data", help="names 的 data（默认本机的数据目录，没有时留 {data}）")
-    ap.add_argument("--python", help="names 的 python（默认 hub 的 python）")
-    ap.add_argument("--done", action="store_true", help="在 --data 下判断每个步骤做完没有（done.ok）")
-    ap.add_argument("--needs", action="store_true", help="命令带 --stage 的真跑一次 --stage needs，列出输入")
+    ap.add_argument("--data", help="命令里的 {data}（默认本机的数据目录，没有时留 {data}）")
+    ap.add_argument("--done", action="store_true", help="在 --data 下判断每个步骤做完没有（第一个产出下 done 的文件都在）")
+    ap.add_argument("--needs", action="store_true", help="写了 inputs_cmd 的步骤真跑一次，列出它打印的输入")
     ap.add_argument("--json", action="store_true", help="一行 JSON（默认就是）")
     a = ap.parse_args(argv)
     import experiments as E
     import spec as S
+    from flow import compile as FC
+    from flow.model import EACH, GATHER, GLOBAL
     data = a.data or S.local_data()
     if (a.done or a.needs) and not data:
         return _fail("--done、--needs 要知道数据目录：给 --data，或设 TASKQ_DATA")
     data = os.path.abspath(os.path.expanduser(data)) if data else "{data}"
-    py = a.python or _python()
     levels = set(a.level or LEVELS)
     if a.key:
         levels &= {"task"}
+    level = {EACH: "task", GATHER: "group", GLOBAL: "final"}
     try:
-        exps, final = E.load()
         bad = [x for x in a.exp or [] if E.experiment(x) is None]
         bad += [k for k in a.key or [] if k not in E.tasks()]
         if bad:
             return _fail(f"实验表里没有 {'、'.join(bad)}", proto.EXIT["gone"])
-        rows = []  # (行, 步骤)
-        if "task" in levels:
-            for k, t in E.tasks().items():
-                if (a.exp and t["exp"] not in a.exp) or (a.key and k not in a.key):
-                    continue
-                names = E.task_names(t, data, py)
-                for st in E.steps_of(t):
-                    rows.append((dict(level="task", exp=t["exp"], key=k, name=st["name"], group=st.get("group")), st, names))
-        if "group" in levels:
-            for e in exps:
-                if (a.exp and e["id"] not in a.exp) or not e.get("group_after"):
-                    continue
-                names = E.group_names(e, data, py)
-                for c in e["group_after"]:
-                    for st in c:
-                        rows.append((dict(level="group", exp=e["id"], key=None, name=st["name"], group=st.get("group")), st, names))
-        if "final" in levels and not a.exp:
-            for f in final:
-                rows.append((dict(level="final", exp=None, key=None, name=f["name"], group=f.get("group")), f, dict(data=data, python=py)))
+        flow = FC.build()
     except S.SpecError as err:
         return _fail(str(err))
-    out = [step_row(row, st, names, a.done, data) for row, st, names in rows]
+    out = []
+    for i in flow.instances.values():
+        lv = level.get(i.scope)
+        if lv not in levels or (a.exp and i.exp not in a.exp) or (a.key and i.task not in a.key):
+            continue
+        out.append(step_row(i, lv, a.done, data))
     if a.needs:
-        need_rows(out, data)
-    _line(dict(version=proto.VERSION, data=data, python=py, steps=out))
+        need_rows(out, [flow.instances[r["id"]] for r in out], data)
+    _line(dict(version=proto.VERSION, data=data, steps=out, errors=flow.errors))
     return 0
 
 
-def step_row(row, st, names, done, data):
-    import experiments as E
+def _fill_data(text, names, data):
     import spec as S
-    row.update(cmd=None, names=E.jsonable(names), done=None, needs=None, error=None)
+    return S.fill(S.fill(text, names), dict(data=data, repo=cfg.REPO), keep=())
+
+
+def step_row(i, lv, done, data):
+    import experiments as E
+    import site_ops as SO
+    st = i.step
+    row = dict(level=lv, exp=i.exp or None, key=i.task or None, id=i.id, name=st["name"], cmd=None, names=E.jsonable(i.names),
+               out=list(i.outputs), inputs=list(i.inputs), done=None, needs=None, error=None)
     try:
-        row["cmd"] = S.fill(st["cmd"], names, keep=())
+        row["cmd"] = _fill_data(st["cmd"], i.names, data)
     except Exception as e:  # noqa: BLE001
         row["error"] = f"cmd 填不上：{e}"
     if done:
-        try:
-            row["done"] = bool(st["done"].ok(data, names))
-        except Exception as e:  # noqa: BLE001
-            row["error"] = f"done.ok 出错：{type(e).__name__}: {e}"
+        row["done"] = not SO.done_missing(data, i.outputs[0], [d.split("|") for d in st["done"]])
     return row
 
 
-def need_rows(rows, data):
-    import advance as A
-    todo = [r for r in rows if r["cmd"] and "--stage" in r["cmd"]]
-    old = os.environ.get("TASKQ_DATA")
-    os.environ["TASKQ_DATA"] = data
-    try:
-        with ThreadPoolExecutor(8) as ex:
-            got = list(ex.map(lambda r: A.step_needs(r["cmd"]), todo))
-    finally:
-        if old is None:
-            os.environ.pop("TASKQ_DATA", None)
-        else:
-            os.environ["TASKQ_DATA"] = old
-    for r, g in zip(todo, got):
-        r["needs"] = g
-        if g is None:
-            r["error"] = A.no_needs(r["cmd"])
+def need_rows(rows, insts, data):
+    """写了 inputs_cmd 的步骤：真跑一次（spec.listed_inputs，{data} = data），needs = 它打印的输入。"""
+    import spec as S
+
+    def one(x):
+        r, i = x
+        try:
+            r["needs"] = S.listed_inputs(S.fill(i.step["inputs_cmd"], i.names), data, i.step.get("vars"))
+        except Exception as e:  # noqa: BLE001
+            r["error"] = str(e)
+    with ThreadPoolExecutor(8) as ex:
+        list(ex.map(one, [(r, i) for r, i in zip(rows, insts) if i.step.get("inputs_cmd")]))
 
 
 # ---------------- taskq spec export / import ----------------
