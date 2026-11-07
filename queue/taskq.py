@@ -10,7 +10,8 @@
 任务说明决定，这里不认识具体模型。属于实验表（使用者的 experiments.py）的任务记下实验 id。
 
 队列目录（总队列和执行机上的一样）：
-  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params}；执行机的队列另有 spec（hub 解析好的说明，11/4）
+  tasks.jsonl   任务，每行一个：{order, nice（档位，越小越先）, key, exp, recipe, params, added（加进来的时间，11/7 起）}；
+                执行机的队列另有 spec（hub 解析好的说明，11/4）
   claims/<key>  正在训的任务（mkdir 原子领取）：info 里是 worker（Slurm 作业号等）、主机、领取和最近一次心跳的时间、token
                 （心跳 20 分钟不更新算过期）；总队列里是 assigned（分给哪台执行机，不过期）
   failures/<key> 训练失败的记录，失败 2 次的不再领（健康检查提醒）；整个队列 3 小时内失败 3 次就暂停领任务
@@ -18,7 +19,8 @@
   skips/<key>   某台机器训不了的任务（release --skip）：这台机器不再领它，别的机器照常领；不算失败
   inputs/<key>  缺输入（11/1）：worker 开训前查到输入不全（run_task.sh 退出码 4），交还并记在这里；不再领它，等补齐输入的一方
                 （relay.py 补传）taskq.py input-ok 撤掉。不算失败
-  released/<key> 最近一次交还的时间：交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
+  released/<key> 最近一次交还："<时间> <worker> <原因>"（proto.RELEASE_WHY：普通交还 / 失败 / 训不了 / 缺输入）：
+                交还之后训练日志没再更新的，马上可以领（不用等 15 分钟）
   stopped/<key> 停止的任务（taskq.py stop，10/30）：不再领；在训的 worker 每 5 秒看一次，30 秒内停下、交还。
   ENABLED       总开关：没有这个文件时，排队的 worker 作业开始后直接结束（queue/worker_start.sh）
   lock          改队列时的锁（mkdir）
@@ -132,7 +134,7 @@ def write_tasks(tasks, path=None):
     tmp = f"{path}.tmp{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
-            rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec"}
+            rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec" and (k != "added" or t.get(k) is not None)}
             if t.get("spec"):
                 rec["spec"] = t["spec"]  # 执行机的队列：hub 解析好的说明（11/4）
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -311,11 +313,24 @@ def input_info(key):
         return None
 
 
-def released_at(key):
+def released_info(key):
+    """最近一次交还 → (时间, worker, 原因)；没有 → None。11/7 前写的没有原因：原因是 None。"""
     try:
-        return float(open(os.path.join(TQ, Q["released"], safe(key))).read().split()[0])
+        f = open(os.path.join(TQ, Q["released"], safe(key))).read().split()
+        return float(f[0]), (f[1:2] or [None])[0], (f[2:3] or [None])[0]
     except (OSError, ValueError, IndexError):
         return None
+
+
+def released_at(key):
+    r = released_info(key)
+    return r and r[0]
+
+
+def _mark_released(key, worker, why):
+    os.makedirs(os.path.join(TQ, Q["released"]), exist_ok=True)
+    with open(os.path.join(TQ, Q["released"], safe(key)), "w") as f:
+        f.write(f"{time.time()} {worker} {proto.RELEASE_WHY[why]}\n")
 
 
 def recent_failures(window=PAUSE_WINDOW):
@@ -461,21 +476,34 @@ def _claim(a, pick):
 
 def has_progress(t, root):
     """这个任务在这台机器上做了一半（11/7）：同一档里先领，交还、收编来的不排在没开始的后面。训练、推理、别的步骤一样：
-    输出目录里有存档（说明的 resume），或者这台的数据目录里有它的分段日志（开跑过、被停 / 到时限 / 卡住交还）且没有失败记录。"""
+    输出目录里有存档（说明的 resume），或者这台的数据目录里有它加进队列以后的分段日志（开跑过、被停 / 到时限 / 卡住交还），
+    没有失败记录，最近一次交还也不是因为缺输入、训不了（重做的任务：以前那次的日志早于 added，不算）。"""
     s = spec_of(t)
     try:
         if s and s.get("resume") and S.resumable(s, S.out_dir(s, root)):
             return True
     except (OSError, KeyError, TypeError, ValueError):
         pass
-    return ran_here(root, t["key"]) and failures(t["key"]) == 0
+    rel = released_info(t["key"])
+    if rel and rel[2] in (proto.RELEASE_WHY["missing"], proto.RELEASE_WHY["skip"]):
+        return False
+    return failures(t["key"]) == 0 and ran_here(root, t["key"], since=t.get("added"))
 
 
-def ran_here(root, key):
-    """这台的数据目录里有没有这个任务的分段日志（任何作业、任何一段；key a/b 不算 a/b/c 的）。"""
+def ran_here(root, key, since=None):
+    """这台的数据目录里有没有这个任务的分段日志（任何作业、任何一段；key a/b 不算 a/b/c 的）；
+    since：只算这之后写过的（mtime），没有就都算（11/7 前加的任务）。"""
     pre = os.path.join(root, proto.TASK_LOGS, f"{safe(key)}{proto.SAFE}")
-    return any(proto.SAFE not in os.path.basename(p)[len(os.path.basename(pre)):]
-               for w in proto.LOG_PARTS for p in glob.glob(f"{glob.escape(pre)}*_{w}*.log"))
+    for w in proto.LOG_PARTS:
+        for p in glob.glob(f"{glob.escape(pre)}*_{w}*.log"):
+            if proto.SAFE in os.path.basename(p)[len(os.path.basename(pre)):]:
+                continue
+            try:
+                if since is None or os.path.getmtime(p) >= float(since):
+                    return True
+            except (OSError, TypeError, ValueError):
+                continue
+    return False
 
 
 def run_args(t):
@@ -594,9 +622,7 @@ def _release(a, key):
         with open(os.path.join(TQ, Q["failures"], safe(key)), "a") as f:
             f.write(f"{time.strftime('%F %T')}\t作业 {a.worker}\t{a.failed}\n")
     if owns(ci, a):
-        os.makedirs(os.path.join(TQ, Q["released"]), exist_ok=True)
-        with open(os.path.join(TQ, Q["released"], safe(key)), "w") as f:
-            f.write(f"{time.time()} {a.worker}\n")
+        _mark_released(key, a.worker, "failed" if a.failed else "skip" if a.skip else "back")
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -614,9 +640,7 @@ def _missing(a):
     os.makedirs(os.path.join(TQ, Q["inputs"]), exist_ok=True)
     with open(os.path.join(TQ, Q["inputs"], safe(a.key)), "w", encoding="utf-8") as f:
         f.write(f"{time.time()}\t{a.worker}\t{(a.why or '').replace(chr(9), ' ').replace(chr(10), ' ')}\n")
-    os.makedirs(os.path.join(TQ, Q["released"]), exist_ok=True)
-    with open(os.path.join(TQ, Q["released"], safe(a.key)), "w") as f:
-        f.write(f"{time.time()} {a.worker}\n")
+    _mark_released(a.key, a.worker, "missing")
     shutil.rmtree(os.path.join(TQ, Q["claims"], safe(a.key)), ignore_errors=True)
     return 0
 
@@ -723,6 +747,8 @@ def _insert(new, nice, update_only=False):
                         print(f"在训，out / done 变了，先不换（下次 resend 再换）：{s['key']}", file=sys.stderr)
                         continue
                     old.update(spec=t["spec"], recipe=t["recipe"], params=t["params"])
+                    if was and (was["out"], was["done"]) != (s["out"], s["done"]):
+                        old["added"] = time.time()  # 换了输出：以前的日志不算这次做了一半
                     print(f"换了说明：{s['key']}")
                 elif not t.get("spec") and not t.get("exp") and _differs(spec_of(old), s):  # --recipe、--file 加的撞名（11/4）
                     print(f"已有同名、说明不一样的任务，没加：{s['key']}（已有 {old.get('recipe')} {json.dumps(old.get('params'), ensure_ascii=False)}）", file=sys.stderr)
@@ -731,7 +757,7 @@ def _insert(new, nice, update_only=False):
                     print(f"已有，跳过：{s['key']}")
                 continue
             order += 1
-            tasks.append(dict(t, key=s["key"], order=order, nice=nice))
+            tasks.append(dict(t, key=s["key"], order=order, nice=nice, added=time.time()))
             have[s["key"]] = tasks[-1]
             print(f"加入：{nice:>5} {s['key']}（{t['recipe']}，环境 {','.join(S.envs_of(s))}）")
         write_tasks(tasks)

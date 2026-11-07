@@ -44,7 +44,7 @@ QUEUE = dict(
     failures="failures",
     skips="skips",
     inputs="inputs",          # 缺输入
-    released="released",      # 最近一次交还的时间
+    released="released",      # 最近一次交还："<时间> <worker> <原因>"（原因见 RELEASE_WHY，11/7 前的只有前两项）
     stopped="stopped",        # stopped/<safe key>：停止的任务，在训的 worker 每 5 秒看一次
     enabled="ENABLED",        # 总开关：排着的 worker 开始时没有它就结束（worker_start.sh）
     lock="lock",
@@ -162,7 +162,12 @@ EXIT = dict(
 STATUS_FIELDS = ("spec", "state", "note", "worker", "host", "since", "assigned", "input_since", "beat", "log_age",
                  "task_log_age", "out_age", "failures", "skipped_by", "progress")  # progress：这台上做了一半（taskq.has_progress，11/7）
 STATUS_TOP = ("enabled", "tasks", "recent_failures", "paused", "recent_skips")
-TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec")  # tasks.jsonl 的一行
+TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec", "added")  # tasks.jsonl 的一行；added：加进这个队列的时间（11/7 起，旧的没有）
+# released/<key> 的第三项：为什么交还（taskq.py 按 release 的参数记，worker 的调用方式不变）
+RELEASE_WHY = dict(back="back",        # 普通交还：被停、到时限、卡住、这一轮不训了
+                   failed="failed",    # release --failed
+                   skip="skip",        # release --skip：这台训不了
+                   missing="missing")  # missing：缺输入
 COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume", "oldlogs")  # spec.collect 要的说明字段
 COLLECT_TOP = ("tasks", "seglogs", "stuck", "errors")  # spec.collect 的结果
 COLLECT_TASK = ("runs", "final", "archived", "dice", "debug", "resumable")  # 每个任务

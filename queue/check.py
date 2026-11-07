@@ -381,6 +381,7 @@ def _steps(exps, final):
 
 
 def check_experiments(r):
+    import advance as A
     import experiments as E
     import spec as S
     M = cfg.mtab()
@@ -415,7 +416,11 @@ def check_experiments(r):
         if miss:
             r.bad(g, f"{where} 缺 {miss}")
             continue
-        if st["group"] not in hub_groups:
+        try:  # 只往任务队列送的步骤（PLACE 里没有 hub 的组）不在 hub 上跑，group 不用是 hub 的组（11/7）
+            on_hub = not st.get("queue") or any(t["kind"] == "hub" for t in A.targets(st["name"], st["group"]))
+        except ValueError:
+            on_hub = True  # PLACE 写错了由 policy 那组报
+        if on_hub and st["group"] not in hub_groups:
             r.bad(g, f"{where} 的 group {st['group']!r} 不是 hub 的 pueue 组（{sorted(hub_groups)}）")
         if not callable(getattr(st["done"], "ok", None)):
             r.bad(g, f"{where} 的 done 没有 ok(root, names)")

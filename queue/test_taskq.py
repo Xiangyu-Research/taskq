@@ -1108,5 +1108,50 @@ got = [tqp("next", "--worker", f"s{i}", "--envs", "stats")[1].split("\n")[0] for
 check("next：没有 resume 的步骤跑过、交还的同一档先领；失败过的、只有子 key 日志的照加的先后",
       got == ["s/half", "s/new", "s/bad", "s/half/sub"])
 
+# 重做的任务（11/7）：加进队列以前的日志不算做了一半；加进来以后写过的算。交还记下原因；缺输入交还的不提前
+def slog(k, age=0):
+    f = os.path.join(LOGS, k.replace("/", "__") + "__host-1107_part1.log")
+    open(f, "a").close()
+    os.utime(f, (time.time() - age, time.time() - age))
+
+
+tqp("add", "--nice", "70", "--spec-stdin", stdin=json.dumps([sspec("r/old"), sspec("r/new")]))
+rec = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQP, "tasks.jsonl"))}
+slog("r/old", age=3600)
+slog("r/new")
+check("add：新任务记下加进来的时间（added）", all(abs(rec[k].get("added", 0) - time.time()) < 60 for k in ("r/old", "r/new")))
+got = [tqp("next", "--worker", f"r{i}", "--envs", "stats")[1].split("\n")[0] for i in range(2)]
+check("next：重做的任务（日志早于 added）不提前，加进来以后跑过的提前", got == ["r/new", "r/old"])
+who = {k: f"r{i}" for i, k in enumerate(got)}
+tqp("release", "--worker", who.get("r/new", "r0"), "r/new")
+tqp("release", "--worker", who.get("r/old", "r1"), "--failed", "退出码 1", "r/old")
+
+
+def rel(k):
+    try:
+        return open(os.path.join(TQP, "released", taskq.safe(k))).read().split()
+    except OSError:
+        return []
+
+
+check("release：released/<key> 记下原因（普通交还 back、失败 failed）",
+      rel("r/new")[2:] == ["back"] and rel("r/old")[2:] == ["failed"])
+tqp("add", "--nice", "60", "--spec-stdin", stdin=json.dumps([sspec("m/plain"), sspec("m/miss")]))
+rc, out = tqp("next", "--worker", "m0", "--envs", "stats")
+rc2, out2 = tqp("next", "--worker", "m1", "--envs", "stats")
+slog("m/miss")
+tqp("missing", "--worker", "m1", "--why", "缺 x", "m/miss")
+tqp("release", "--worker", "m0", "m/plain")
+tqp("input-ok", "m/miss")
+got = [tqp("next", "--worker", f"m{i}", "--envs", "stats")[1].split("\n")[0] for i in (2, 3)]
+check("missing：记原因 missing；缺输入交还的（有日志）不算做了一半，照加的先后",
+      out.startswith("m/plain\n") and out2.startswith("m/miss\n") and rel("m/miss")[2:] == ["missing"] and got == ["m/plain", "m/miss"])
+with open(os.path.join(TQP, "released", taskq.safe("m/plain")), "w") as f:
+    f.write("1700000000.5 old-worker\n")
+tq_orig, taskq.TQ = taskq.TQ, TQP
+check("released_info：11/7 前只有时间和 worker 的照读（原因 None）",
+      taskq.released_info("m/plain") == (1700000000.5, "old-worker", None) and taskq.released_at("m/plain") == 1700000000.5)
+taskq.TQ = tq_orig
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

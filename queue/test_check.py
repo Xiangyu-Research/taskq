@@ -101,6 +101,19 @@ ok("步骤缺 done、nice 类型不对", f"步骤 {st0['name']} 缺 ['done']" in
 ok("命令里不认识的名字", "{nosuch}" in msgs)
 exps[:], final[:] = saved
 ok("改回来以后没有问题", not K.run(only=["experiments", "steps"]).problems)
+import policy  # noqa: E402
+PL = policy.PLACE
+# 只往任务队列送的步骤（PLACE 没有 hub 的组）group 不用是 hub 的组；会在 hub 上跑的（没写 PLACE、或没有 queue）要是（11/7）
+qst = next(st for e in exps for st in e.get("after") or [] if st.get("queue") and st["name"] in PL
+           and not any(x.startswith("hub:") for x in PL[st["name"]]))
+hst = next(st for e in exps for st in e.get("after") or [] if st["name"] not in PL)
+for st in (qst, hst):
+    st["group"], st["_g"] = "nosuch", st["group"]
+msgs = "\n".join(m for _, m in K.run(only=["experiments"]).problems)
+ok("步骤的 group：只送任务队列的不用是 hub 的组，在 hub 上跑的要是",
+   f"步骤 {hst['name']} 的 group 'nosuch'" in msgs and f"步骤 {qst['name']} 的 group" not in msgs)
+for st in (qst, hst):
+    st["group"] = st.pop("_g")
 
 # 冒烟定义（11/5）：函数出错、环境参数没写进 by、产出不在 {smoke} 文件夹下，都按任务报出来
 DEF = dict(by=["variant", "env"], params=dict(ds="SMOKE", frag="0", model="smoke/{smoke}"), vars={})
