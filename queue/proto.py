@@ -160,7 +160,7 @@ EXIT = dict(
 # ---------------- 字段表 ----------------
 # taskq.local_status() 每个任务（tasks.jsonl 的一行之外）
 STATUS_FIELDS = ("spec", "state", "note", "worker", "host", "since", "assigned", "input_since", "beat", "log_age",
-                 "task_log_age", "out_age", "failures", "skipped_by")
+                 "task_log_age", "out_age", "failures", "skipped_by", "progress")  # progress：这台上做了一半（taskq.has_progress，11/7）
 STATUS_TOP = ("enabled", "tasks", "recent_failures", "paused", "recent_skips")
 TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec")  # tasks.jsonl 的一行
 COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume", "oldlogs")  # spec.collect 要的说明字段
@@ -277,6 +277,10 @@ ENV["TASKQ_SITE"] = ("run", "执行机的名字（sites/pueue.py 的 worker 命�
 ENV["TASKQ_ADMITTED"] = ("run", "1 = 消费者领之前已经查过卡空不空（gpu_idle 插件），run_task.sh 不再等卡")
 ENV["TASKQ_STAGE_ROOT"] = ("run", "节点本地的暂存目录（消费者的 slurm 插件设）；run_task.sh 有它才把输入拷到本地，没有时看 SLURM_JOB_ID")
 ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state>/taskq.db")
+# 本机执行机（SITES 里 ssh=None，和 hub 在同一台机器上，11/7）：hub 的进程带着的这些变量不传给它（同 ssh 到别处时那边本来没有），
+# 否则那边的 worker、taskq.py 会用 hub 的配置、数据目录和队列。relay_remote.site_argv、sites/pueue.py 的 worker 命令去掉它们
+HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_DATA", "TASKQ_DIR", "TASKQ_STATE",
+                "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_TASKS", "TASKQ_LAST", "RELAY_DIR")
 ENV["TASKQ_TEST_NOW"] = ("test", "放着一个时刻（epoch 秒）的文件：window 插件当作现在")
 # gpu_pad.py 的参数（tune），默认值在 gpu_pad.py 的命令行
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",

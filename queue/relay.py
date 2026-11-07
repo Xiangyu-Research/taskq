@@ -167,8 +167,7 @@ def deploy(name, bid, path):
            f"ls -1t | grep -vx {cur} | grep -v '\\.tmp' | tail -n +4 | "
            f"while read -r d; do [ \"$d\" = {b} ] && continue; case \"$busy\" in *\"/{ROOT['code']}/$d/\"*) continue;; esac; "
            "find \"$d\" -maxdepth 0 -mtime +4 -exec rm -rf {} +; done; fi")
-    r2 = subprocess.run(RM.ssh_argv() + [RM.conf(name)["ssh"], C.remote_timeout(f"bash -c {shlex.quote(cmd)}", 600)], input=tar,
-                        capture_output=True, timeout=600)
+    r2 = subprocess.run(RM.site_argv(name, cmd, 600), input=tar, capture_output=True, timeout=600)
     if r2.returncode:
         raise RuntimeError(f"推代码包 {bid} 到 {RM.conf(name)['label']} 出错：{r2.stderr.decode(errors='replace')[-300:]}")
 
@@ -196,10 +195,7 @@ def box_task(s, step, key, since=0):
     return last
 
 
-def progress(f):
-    """训完、有做完的轮数，或者有存档（任务说明的 resume）→ 有进度。"""
-    return bool(f) and bool(f.get("final") or f.get("resumable")
-                            or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
+progress = refill.site_progress  # 一个任务在一台执行机上有没有进度（11/7 起合到 refill）
 
 
 def smoke_step(name, mtq, t, a, k, now):
@@ -444,7 +440,7 @@ def fill(s, name, rs, st, acts, stuck=None, notes=None):
             have[kind(t)] = have.get(kind(t), 0) + 1
             held.append(t)
     ready = {p for k in keys.values() for p in k.get("data") or []}
-    cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"), kinds=kinds)
+    cands = [t for t in refill.candidates(s, name, mtq, ready, rs.get("envs_ok"), kinds=kinds, held=held_by(name, rs, st))
              if relayable(refill.info(mtq, t["key"]))]
     sg = SG.Gate(name, rs, mtq)
     for t in cands:  # 冒烟闸门（smoke_gate.py）：每种没过的排冒烟、报警；领的时候再按这一轮已经领的核对一次（canary 一次只送一个）
@@ -748,8 +744,20 @@ def site_view(name, rs, st):
         if a:
             f = (rs.get("tasks") or {}).get(real) or {}
             out[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
-                             resumable=f.get("resumable"), debug=f.get("debug") or {})
+                             resumable=f.get("resumable"), ran=a.get("progress"), debug=f.get("debug") or {})
     return out
+
+
+def held_by(name, rs, st):
+    """各执行机上做了一半的任务 → {key: [执行机]}（refill.holders）：这台用刚读到的，别的用上次检查写的 status.json；
+    暂停检查、AUTO 关着、不在 RELAY 里的执行机不算（它的任务放开给别的，从头做；11/7）。"""
+    try:
+        allst = json.load(open(STATUS))
+    except (OSError, ValueError):
+        allst = {}
+    views = {n: (d or {}).get("tasks") or {} for n, d in allst.items()}
+    views[name] = site_view(name, rs, st)
+    return refill.holders(views, lambda n: n in M.RELAY and n not in P.OFFLINE and bool(P.AUTO.get(n)))
 
 
 def write_status(name, rs, st):

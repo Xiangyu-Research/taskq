@@ -1091,5 +1091,22 @@ rc2, out2 = tqp("next", "--worker", "p4", "--envs", "stats")
 check("next：更靠前的档（没有存档的新任务）仍然先领，有存档的只在同一档里提前",
       rc == 0 and out.startswith("p/urgent\n") and rc2 == 0 and out2.startswith("p/new2\n"))
 
+# 推理之类没写 resume 的：这台跑过（有分段日志）、交还的同一档先领；失败过的不提前；a/b 的日志不算 a/b/c 的（11/7）
+def sspec(key):
+    return S.sendable(S.resolve("command", dict(key=key, cmd="true", env="stats", out=f"s/{key}", done="DONE")))
+
+
+tqp("add", "--nice", "80", "--spec-stdin", stdin=json.dumps([sspec("s/new"), sspec("s/half"), sspec("s/bad"), sspec("s/half/sub")]))
+LOGS = os.path.join(DATA, "logs/tasks")
+os.makedirs(LOGS, exist_ok=True)
+for k in ("s/half", "s/bad"):
+    open(os.path.join(LOGS, k.replace("/", "__") + "__host-1107_part1.log"), "w").close()
+os.makedirs(os.path.join(TQP, "failures"), exist_ok=True)
+with open(os.path.join(TQP, "failures", "s__bad"), "w") as f:
+    f.write("2026-11-07 10:00:00\t作业 p0\t退出码 1\n")
+got = [tqp("next", "--worker", f"s{i}", "--envs", "stats")[1].split("\n")[0] for i in range(4)]
+check("next：没有 resume 的步骤跑过、交还的同一档先领；失败过的、只有子 key 日志的照加的先后",
+      got == ["s/half", "s/new", "s/bad", "s/half/sub"])
+
 print("\n全部通过" if ok else "\n有失败")
 sys.exit(0 if ok else 1)

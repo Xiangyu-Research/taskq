@@ -61,8 +61,17 @@ def master_down(m):
         ssh_argv()[:1] + ["-O", "check", m["ssh"]], capture_output=True, timeout=30).returncode != 0
 
 
+def site_argv(name, cmd, timeout=300):
+    """在执行机上跑一条 shell 命令的参数表：经 ssh（那边也限时，common.remote_timeout）；本机执行机（ssh=None，11/7）在家目录里
+    本机跑，去掉 hub 才有的变量（proto.HUB_ONLY_ENV），和 ssh 登录过去时一样。"""
+    host = conf(name)["ssh"]
+    if host is None:
+        return ["env", *[a for v in proto.HUB_ONLY_ENV for a in ("-u", v)], "bash", "-c", f"cd ~ && {cmd}"]
+    return ssh_argv() + [host, C.remote_timeout(f"bash -c {shlex.quote(cmd)}", timeout)]
+
+
 def rsh(name, cmd, input=None, timeout=300):
-    return C.run(cmd, conf(name)["ssh"], timeout, input=input, ssh=ssh_argv())
+    return C.run(site_argv(name, cmd, timeout), None, timeout, input=input)
 
 
 def prefix(name):

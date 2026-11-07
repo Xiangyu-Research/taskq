@@ -460,14 +460,22 @@ def _claim(a, pick):
 
 
 def has_progress(t, root):
-    """这台机器上这个任务的输出目录里有没有存档（说明的 resume）：同一档里有存档的先领，接着训到一半的（交还、收编来的）不排在没开始的后面（11/7）。"""
+    """这个任务在这台机器上做了一半（11/7）：同一档里先领，交还、收编来的不排在没开始的后面。训练、推理、别的步骤一样：
+    输出目录里有存档（说明的 resume），或者这台的数据目录里有它的分段日志（开跑过、被停 / 到时限 / 卡住交还）且没有失败记录。"""
     s = spec_of(t)
-    if not s or not s.get("resume"):
-        return False
     try:
-        return S.resumable(s, S.out_dir(s, root))
+        if s and s.get("resume") and S.resumable(s, S.out_dir(s, root)):
+            return True
     except (OSError, KeyError, TypeError, ValueError):
-        return False
+        pass
+    return ran_here(root, t["key"]) and failures(t["key"]) == 0
+
+
+def ran_here(root, key):
+    """这台的数据目录里有没有这个任务的分段日志（任何作业、任何一段；key a/b 不算 a/b/c 的）。"""
+    pre = os.path.join(root, proto.TASK_LOGS, f"{safe(key)}{proto.SAFE}")
+    return any(proto.SAFE not in os.path.basename(p)[len(os.path.basename(pre)):]
+               for w in proto.LOG_PARTS for p in glob.glob(f"{glob.escape(pre)}*_{w}*.log"))
 
 
 def run_args(t):
@@ -1010,7 +1018,7 @@ def local_status():
                         beat=ci.get("beat"), log_age=S.log_age(s, root) if s else None,
                         task_log_age=task_log_age(root, t["key"], ci.get("worker"), ci.get("log")),
                         out_age=out_age(s, root) if s and st == "claimed" else None, failures=failures(t["key"]),
-                        skipped_by=sorted({w for _, w, _ in skips(t["key"])})))
+                        skipped_by=sorted({w for _, w, _ in skips(t["key"])}), progress=has_progress(t, root)))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
     return dict(enabled=os.path.exists(os.path.join(TQ, Q["enabled"])), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,

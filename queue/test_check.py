@@ -57,6 +57,10 @@ edit("policy.py", 'AUTO = {"advance": True,', 'AUTO = {"advance": True, "nosuch"
 edit("machines.py", 'worker=dict(group="gpu1", id="w7e2837")', 'worker=dict(group="gpuX", id="w7e2837")')
 edit("machines.py", '"alt": ("venv", FAKE + "/venv/alt", "base"),', '"alt": ("venv", FAKE + "/venv/alt", "nobase"),')
 edit("machines.py", r'r"https://[a-z0-9-]+\.trycloudflare\.com"', 'r"https://[a-z"')
+edit("machines.py", "RELAY = {k: v", 'SITES["loc1"] = dict(label="L1", hostname=r"(?!)", ssh=None, scheduler="pueue", root="/data/others/DEMO_DATA/q", '
+     'roles=("train",), groups={"gpu0": (1, "0", {})}, worker=dict(group="gpu0", id="wl1"), slots=1)\n'
+     'SITES["loc2"] = dict(SITES["loc1"], root="/tmp/loc2", groups={"gpu": (1, "0", {})}, worker=dict(group="gpu", id="wl2"))\n'
+     "RELAY = {k: v")
 edit("specs/alt.yml", "pip: []", 'pip: ["pkg{bogus}"]')
 edit("specs/alt2.check.py", "import sys", "def (")
 rc, out, err = run("--quick", env={"TASKQ_CONFIG": cfgdir})
@@ -64,6 +68,9 @@ ok("改坏的配置：退出码 1", rc == 1)
 ok("PLACE 写错：说出哪一项、能写什么", "'pueue-host:gpu0'" in err and "能写的" in err)
 ok("READY 负数、AUTO 不认识的机器", "READY['site-slurm2']" in err and "nosuch" in err)
 ok("pueue 执行机的 worker 组不在 groups 里", "SITES['site-pueue']" in err and "gpuX" in err)
+ok("本机执行机（ssh=None）：最多一个、根目录不能在 hub 的数据目录里、worker 的组要在 hub 这台的 groups 里（11/7）",
+   "['loc1', 'loc2']" in err and "SITES['loc1'] 的 root" in err and "SITES['loc1'] 的 gpu worker 的组 'gpu0'" in err
+   and "SITES['loc2'] 的 root" not in err and "SITES['loc2'] 的 gpu worker" not in err)
 ok("venv 的底子不在 envs 里", "nobase" in err)
 ok("hub 的 quick 第二项不是正则", "hub 的 quick 第二项不是正则" in err)
 ok("环境描述的 pip 里有不认识的占位、check.py 编译不过（11/4）", "{'bogus'}" not in err and "['bogus']" in err and "环境描述 alt2：SyntaxError" in err)

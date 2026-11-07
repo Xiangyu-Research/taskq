@@ -89,7 +89,7 @@ def setup():
     os.makedirs(taskq.TQ, exist_ok=True)
     open(os.path.join(taskq.TQ, proto.QUEUE["enabled"]), "w").close()
     open(taskq.tasks_path(), "w").close()
-    relay.refill.candidates = lambda s, name, mtq, ready, envs_ok, kinds=None: [
+    relay.refill.candidates = lambda s, name, mtq, ready, envs_ok, kinds=None, held=None: [
         t for t in mtq["tasks"] if t["state"] == proto.S_FREE and M.serves(name, (t.get("spec") or {}).get("machines"))]
     relay.relayable = lambda i: True
     relay.refill.data_gb = lambda paths: 1.0

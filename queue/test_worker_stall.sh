@@ -21,6 +21,7 @@ check "第一次卡住：只交还，不记失败" '[[ ! -e $TASKQ_DIR/failures/
 
 # 停不下来的（run_task.sh 退出了、训练还在，11/4）：空出位置训别的，接着心跳，真停下了才交还；还在时不退出
 reset
+rm -rf "$TASKQ_DATA/logs/tasks"   # 上面训过 t/b 的分段日志会让它算做了一半、先领（11/7）
 table << EOT
 t/z base
 t/b base

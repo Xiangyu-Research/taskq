@@ -217,7 +217,7 @@ def test_fill(new, old):
     K2, K3 = "job/f2", "job/f3"
     cands = [mtask(K2, TMPL, "free", None, nice=3), mtask(K3, CMD, "free", None, nice=4)]
     saved = relay.refill.candidates, relay.relayable, relay.refill.data_gb, relay.P.READY.get(NAME)
-    relay.refill.candidates = lambda s, name, mtq, ready, envs_ok, kinds=None: [t for t in mtq["tasks"] if not t["worker"]]
+    relay.refill.candidates = lambda s, name, mtq, ready, envs_ok, kinds=None, held=None: [t for t in mtq["tasks"] if not t["worker"]]
     relay.relayable = lambda i: True
     relay.refill.data_gb = lambda paths: 1.0
     relay.P.READY[NAME] = 2

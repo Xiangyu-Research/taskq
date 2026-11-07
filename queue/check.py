@@ -122,6 +122,20 @@ def check_machines(r):
             r.bad(g, f"{where} 的 budget 第二项 {m['budget'][1]} GB 不小于 cap {m['cap']} GB，什么都放不下")
         if m.get("relay") and m.get("blob_cap") and m.get("budget") and m["budget"][1] >= m["blob_cap"]:
             r.bad(g, f"{where} 的 budget 第二项 {m['budget'][1]} GB 不小于 blob_cap {m['blob_cap']} GB，什么都放不下")
+    local = sorted(n for n, m in sites.items() if m.get("ssh") is None)  # 和 hub 在同一台上的执行机（11/7）
+    if len(local) > 1:
+        r.bad(g, f"SITES 里 ssh=None（和 hub 在同一台上）的执行机最多一个，现在 {local}")
+    hub = M.MACHINES.get(hubs[0]) if len(hubs) == 1 else None
+    for n in local if hub else ():
+        m, where = sites[n], f"SITES[{n!r}]"
+        real = lambda p: os.path.realpath(os.path.expanduser(p))  # noqa: E731
+        if m.get("root") and hub.get("data") and (real(m["root"]) + "/").startswith(real(hub["data"]).rstrip("/") + "/"):
+            r.bad(g, f"{where} 的 root {m['root']} 在 hub 的数据目录 {hub['data']} 里面：执行机的数据要和 hub 的分开")
+        for kind in M.kinds(n):
+            w = M.worker_of(n, kind)
+            if m.get("scheduler") == "pueue" and isinstance(w, dict) and w.get("group") not in (hub.get("groups") or {}):
+                r.bad(g, f"{where} 的 {kind} worker 的组 {w.get('group')!r} 不在 hub 这台（MACHINES[{hubs[0]!r}]）的 groups 里："
+                         f"同一台的 pueue 组由那条建（taskq site setup）")
     names = [sites[n].get("job_names") or "pair" for n in sites if sites[n].get("scheduler") == "slurm"]
     dup = sorted({x for x in names if names.count(x) > 1})
     if dup:

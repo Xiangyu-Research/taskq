@@ -109,7 +109,9 @@ def machine_of_jobtag(tag):
         return labels[0] if len(labels) == 1 else (pre or "Slurm")
     for m in MACHINES.values():
         if m["scheduler"] != "slurm" and re.match(m["hostname"], tag):
-            return m["label"]
+            # 和 hub 在同一台上的执行机（SITES 里 ssh=None，11/7）：这台跑的任务都算它的（hub 只统筹，不跑任务）
+            local = [s for s in SITES.values() if s.get("ssh") is None and s["scheduler"] != "slurm"] if "hub" in (m.get("roles") or ()) else []
+            return local[0]["label"] if len(local) == 1 else m["label"]
     return tag
 
 

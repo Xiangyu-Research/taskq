@@ -508,6 +508,48 @@ def run_remote(host, mode, plan, serve, total, site=None):
         ssh(host, f"rm -rf {wd}", check=False)
 
 
+def home_path(p):
+    """那边的路径（~ 开头、绝对，或相对 home）→ 绝对路径。"""
+    return os.path.join(os.path.expanduser("~"), os.path.expanduser(p))
+
+
+def local_copy(src, dst, rels, link=False):
+    """和 hub 在同一台机器上的执行机（ssh 是 None）：不开隧道，直接在本机拷 src/<rel> → dst/<rel>。
+    先写到同目录的 .tunnelpart、核对大小（push 另核 MD5）、带上修改时间和权限，再改名；已有、大小和修改时间都一样的不再拷。
+    link（push）：先试硬链接（blob 按内容命名、不改，和收编一样），不在一个盘上再拷、核对 MD5。返回没拷成的（已删掉半个）。"""
+    bad = []
+    for r in rels:
+        a, b = os.path.join(src, r), os.path.join(dst, r)
+        part = b + ".tunnelpart"
+        try:
+            st = os.stat(a)
+            if os.path.isfile(b) and os.stat(b).st_size == st.st_size and os.stat(b).st_mtime_ns == st.st_mtime_ns:
+                continue
+            os.makedirs(os.path.dirname(b), exist_ok=True)
+            if os.path.lexists(part):
+                os.unlink(part)
+            try:
+                if not link:
+                    raise OSError
+                os.link(os.path.realpath(a), part)
+                linked = True
+            except OSError:
+                shutil.copy2(a, part)
+                linked = False
+            if os.path.getsize(part) != st.st_size:
+                raise IOError(f"只拷到 {os.path.getsize(part)} / {st.st_size} 字节")
+            if link and not linked and md5_of(part) != md5_of(a):
+                raise IOError("MD5 对不上")
+            os.replace(part, b)
+        except OSError as e:
+            log(f"失败 {r}：{e}")
+            bad.append(r)
+        finally:
+            if os.path.lexists(part):
+                os.unlink(part)
+    return bad
+
+
 def push(host, src, dst, rels, site=None):
     """hub 的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
     返回最后还对不上、已删掉的文件。site：执行机的名字（relay_of）。"""
@@ -516,6 +558,9 @@ def push(host, src, dst, rels, site=None):
         st = os.stat(os.path.join(src, r))
         files[r] = (st.st_size, st.st_mtime_ns, st.st_mode & 0o7777)
     total = sum(v[0] for v in files.values())
+    if host is None:
+        log(f"本机拷 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {dst}")
+        return local_copy(src, home_path(dst), rels, link=True)
     lk = take_lock(host)
     serve = Session(files, src=src)
     try:
@@ -556,6 +601,9 @@ def pull(host, src, dst, items, site=None):
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
     os.makedirs(dst, exist_ok=True)
+    if host is None:
+        log(f"本机从 {src} 拷 {len(files)} 个文件、{total / 1e9:.2f} GB")
+        return local_copy(home_path(src), dst, list(files))
     lk = take_lock(host)
     serve = Session(files, dst=dst)
     try:
@@ -608,7 +656,7 @@ def retry(f, what):
 
 
 def remote_fetch(plan):
-    root = os.path.expanduser(plan["root"]) if plan["root"].startswith("~") else os.path.join(os.path.expanduser("~"), plan["root"])
+    root = home_path(plan["root"])
     out = open("results.tsv", "a")
     lock = threading.Lock()
     bad = os.environ.get("TUNNEL_TEST_BADMD5")
@@ -652,7 +700,7 @@ def remote_fetch(plan):
 
 
 def remote_send(plan):
-    root = os.path.expanduser(plan["root"]) if plan["root"].startswith("~") else os.path.join(os.path.expanduser("~"), plan["root"])
+    root = home_path(plan["root"])
     base = urllib.parse.urlsplit(plan["base"])
     chunk = plan["chunk"]
     bad = os.environ.get("TUNNEL_TEST_BADMD5")
@@ -834,7 +882,7 @@ def main(argv):
         except KeyError:
             print(f"{prog}：机器表里没有 {a[0]}", file=sys.stderr)
             return EXIT["gone"]
-        if not host:
+        if not host and not site:  # 和 hub 在同一台上的执行机（ssh 是 None）本机拷
             print(f"{prog}：{a[0]} 没有 ssh，传不过去", file=sys.stderr)
             return 2
         try:

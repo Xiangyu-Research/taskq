@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """执行机全流程测试（2026-10-31）：本机模拟一台 pueue 类执行机（site-pueue 的条目，根目录、conda、pueue 都换成临时的），走一遍
-建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理。
+建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理；最后一台和 hub 在同一台上的执行机（ssh=None）不经假的 ssh 再走一遍。
 完全隔离：执行机根目录、hub 的数据目录、总队列都在临时目录里；pueue 是自己起的 pueued（自己的配置和 socket），结束时只停它；
 ssh 换成本机的 bash -c，不连任何机器；不改机器表（条目在进程里替换）。
 跑法：python3 sites/test_e2e.py（hub 上；E2E_TMP=<目录> 指定临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
@@ -65,6 +65,16 @@ os.environ.update(
 os.makedirs(os.environ["TASKQ_DIR"])
 open(os.path.join(os.environ["TASKQ_DIR"], "ENABLED"), "w").close()
 
+# 配置的副本，多一个和 hub 在同一台上的执行机 site-local（ssh=None，11/7）：它不经假的 ssh，命令、拷贝都在本机
+CONF = os.path.join(T, "config")
+shutil.copytree(os.environ["TASKQ_CONFIG"], CONF, ignore=shutil.ignore_patterns("__pycache__"))
+_mp = os.path.join(CONF, "machines.py")
+_src = re.sub(r"(?m)^FAKE = .*$", f"FAKE = {os.path.join(CORE, 'queue', 'testdata')!r}", open(_mp, encoding="utf-8").read())
+_src = _src.replace("SITES = {\n", 'SITES = {\n    "site-local": dict(label="本机", hostname=r"(?!)", ssh=None, scheduler="pueue", root="/nonexistent", '
+                    'conda=(FAKE_CONDA, "w0"), envs={"base": ("conda", "w0")}, roles=("train",), groups={"gpul": (1, None, {})}, '
+                    'worker=dict(group="gpul", id="wloc"), slots=1, pueue="~/.local/bin/pueue", budget=(0, 0), stage_tmp=False, relay=True),\n', 1)
+open(_mp, "w", encoding="utf-8").write(_src)
+os.environ["TASKQ_CONFIG"] = CONF
 cfg.use_config()
 for d in (cfg.rel("queue"), cfg.rel("sync"), cfg.rel("monitor"), cfg.rel("sites")):
     sys.path.insert(0, os.path.join(REPO, d))
@@ -560,6 +570,71 @@ def step_shift():
          K6 not in keys0() and not os.path.exists(os.path.join(RLINK0, "data", a0["params"]["out"])), keys0())
 
 
+# ---------------- 和 hub 在同一台上的执行机（site-local，ssh=None，11/7）：不用假的 ssh、不开隧道，走同一套流程 ----------------
+NAMEL = "site-local"
+RLINKL = tempfile.mktemp(prefix="e2e_rl_", dir="/tmp")
+K7 = "guest/e2e/t7"
+
+
+def keysl():
+    return ST.keys_of(ST.load_state(), NAMEL)
+
+
+def step_local():
+    os.makedirs(os.path.join(T, "rl"))
+    os.symlink(os.path.join(T, "rl"), RLINKL)
+    rc, out = pq("group", "add", "gpul")
+    assert rc == 0, out
+    el = dict(ENTRY, groups={"gpul": (1, None, {})}, worker=dict(group="gpul", id="wloc"), env_root=RLINKL + "/envs")
+    cl = dict(M.SITES[NAMEL], root=RLINKL, adopt=None, budget=(0, 0), transfer_job=None, **el)
+    M.SITES[NAMEL] = M.RELAY[NAMEL] = cl
+    P.AUTO.update({NAMEL: True, NAME: False, NAME0: False})
+    P.READY[NAMEL] = 1
+    step("本机执行机的作业名（主机名-时间）算它的，不算 hub 的", M.machine_of_jobtag(socket.gethostname().split(".")[0] + "-1107") == "本机")
+    import tunnel
+    real_session = tunnel.Session
+
+    def no_tunnel(*a, **k):
+        raise AssertionError("本机执行机开了隧道")
+    tunnel.Session = no_tunnel
+    try:
+        bid, path = RB.build(NAMEL, None, os.path.join(T, "bundlesl"), root=RLINKL, entry=el)
+        relay.deploy(NAMEL, bid, path)
+        ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({bundle_key(NAMEL, relay.BUNDLE_REF): bid}))
+        rs = relay.remote_status(NAMEL)
+        step("本机执行机：代码包在本机放好，那边的队列是它自己的（不是 hub 的）",
+             rs is not None and rs["bundle"] == bid and rs["taskq"]["tasks"] == [], rs)
+        rc, out = E.build(NAMEL, "toy")  # 不给 run：按机器表（ssh=None）在本机跑
+        step("本机执行机：按描述建环境（建在它自己的根目录下）", rc == 0 and os.path.isfile(os.path.join(RLINKL, "state/envs/toy.ok")), out)
+        out_t7 = "{data}/guest/e2e/r/t7"
+        sheet = dict(key=K7, owner="alice", env="toy", inputs=["guest/e2e/code", "guest/e2e/d2"],
+                     cmd=f"mkdir -p {out_t7} && env > {out_t7}/env.txt && python3 {{data}}/guest/e2e/code/toy.py --data {{data}}/guest/e2e/d2 --out {out_t7}",
+                     out="guest/e2e/r/t7", done=["DONE"], progress="progress_json", resume=["ckpt_*.json"], log="train.log",
+                     res={"gpus": 1}, nice=50)
+        wb(os.path.join(T, "job7.json"), json.dumps([sheet], ensure_ascii=False))
+        central(f"add --file {T}/job7.json")
+        check(NAMEL)
+        t7 = hub_tasks()[K7]
+        blobs = [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(RLINKL, "blobs")) for f in fs]
+        step("本机执行机领了 t7，数据硬链接进它的 blobs（同一个盘，不拷、不开隧道）",
+             t7["worker"] == NAMEL and K7 in keysl() and blobs and all(os.stat(b).st_nlink >= 2 for b in blobs), (t7, blobs, LOG[-8:]))
+        wait(lambda: hub_tasks()[K7]["state"] == "done", 300, "本机执行机做完 t7、拉回", every=2, act=lambda: check(NAMEL))
+    finally:
+        tunnel.Session = real_session
+    out = os.path.join(BD, "guest/e2e/r/t7")
+    res = json.load(open(os.path.join(out, "result.json")))
+    step("t7 拉回：结果对", res["text"] == text_of(2) and res["total"] == 3 * sum(text_of(2).encode()), res)
+    env = dict(ln.split("=", 1) for ln in open(os.path.join(out, "env.txt")).read().splitlines() if "=" in ln)
+    import proto
+    leaked = {v: env[v] for v in proto.HUB_ONLY_ENV if os.environ.get(v) and env.get(v) == os.environ[v]}
+    data = os.path.realpath(env.get("TASKQ_DATA", ""))
+    step("本机执行机的任务环境里没有 hub 的配置、数据目录、队列；TASKQ_DATA 是它自己的 <根目录>/data",
+         not leaked and data == os.path.realpath(os.path.join(RLINKL, "data")), (leaked, env.get("TASKQ_DATA")))
+    check(NAMEL)
+    step("总队列做完以后，本机执行机上 t7 的结果删了", K7 not in keysl() and not os.path.exists(os.path.join(RLINKL, "data/guest/e2e/r/t7")),
+         keysl())
+
+
 def cleanup():
     if DAEMON is not None:
         pq("kill", "--all")
@@ -579,8 +654,9 @@ def cleanup():
                 pass
     if not os.environ.get("E2E_KEEP"):
         os.remove(RLINK)
-        if os.path.islink(RLINK0):
-            os.remove(RLINK0)
+        for ln in (RLINK0, RLINKL):
+            if os.path.islink(ln):
+                os.remove(ln)
         shutil.rmtree(T, ignore_errors=True)
 
 
@@ -608,6 +684,7 @@ def main():
         step_finish()
         step_gc()
         step_shift()
+        step_local()
         print("真的训练做法的小任务：跳过（换名、拉回见 queue/test_relay.py）")
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:

@@ -127,6 +127,20 @@ lq = [dict(tq(K_EV, -100, 2), spec=dict(ev_spec, env=["base", "stats"])),
       dict(tq(K_EV + "b", -100, 3), spec=dict(ev_spec, key=K_EV + "b", env=["base", "没有的环境"]))]
 ok("candidates：env 是列表时每个环境都要备好",
    [t["key"] for t in R.candidates(snap(), "site-slurm", snap(queue=lq)["taskq"]["hub"], set(), kinds=("cpu",))] == [K_EV])
+# 做了一半的（11/7）：同一档里先分；进度在别的执行机上的只给那台或能收编它的，那台停用时放开
+hq = [dict(tq(k, 50, i + 1), spec=dict(key=k, env="base")) for i, k in enumerate(("h/a", "h/b", "h/c", "h/d"))]
+held = R.holders({"site-pueue2": {"h/c": {"ran": True}}, "site-slurm": {"h/b": {"resumable": True}, "h/d": {"ran": False}},
+                  "site-slurm2": {"h/a": {"runs": [{"epochs_done": 3}]}}}, lambda n: n != "site-slurm2")
+ok("holders：只算有进度、现在能用的执行机", held == {"h/c": ["site-pueue2"], "h/b": ["site-slurm"]})
+hsnap = snap(queue=hq)
+ok("candidates：能收编那台（site-pueue ← site-pueue2）的先领它的；别台的不领；停用的那台的放开",
+   [t["key"] for t in R.candidates(hsnap, "site-pueue", hsnap["taskq"]["hub"], set(), held=held)] == ["h/c", "h/a", "h/d"])
+ok("candidates：自己做了一半的排在同一档最前面",
+   [t["key"] for t in R.candidates(hsnap, "site-slurm", hsnap["taskq"]["hub"], set(), held=held)] == ["h/b", "h/a", "h/d"])
+ok("candidates：档位仍优先", [t["key"] for t in R.candidates(
+    snap(queue=[dict(hq[1], nice=60), hq[3]]), "site-slurm", snap(queue=[dict(hq[1], nice=60), hq[3]])["taskq"]["hub"], set(), held=held)]
+   == ["h/d", "h/b"])
+ok("site_progress：那边报的 ran 算进度，空的不算", R.site_progress({"ran": True}) and not R.site_progress({}) and not R.site_progress(None))
 R.SL.P.SLURM = {"site-slurm": dict(gpu={"long": ("3-00:00:00", 2)}, cpu=("normal", "08:00:00", 1))}
 probe = R.SL.probe("site-slurm")
 ok("查作业数用 policy.py 的 QOS、CPU worker 按交的脚本认",

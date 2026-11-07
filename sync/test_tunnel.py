@@ -304,5 +304,40 @@ for _ in range(100):
     time.sleep(0.1)
 ok("没有会话后服务空闲几秒（TUNNEL_IDLE）自己退出", not tunnel.alive(pid) and not [f for f in os.listdir(SRV) if f.endswith((".json", ".out"))])
 
+# 本机执行机（ssh 是 None）：不开隧道、不拿锁，直接在本机拷
+lsrc, ldst = os.path.join(T, "lsrc"), os.path.join(T, "lhome_dst")
+make(lsrc, FILES)
+os.chmod(os.path.join(lsrc, "a/b/y.bin"), 0o600)
+bad = tunnel.push(None, lsrc, ldst, list(FILES))
+ok("本机 push：一致、保留权限、同盘的硬链接过去、没有 .tunnelpart", not bad and same(lsrc, ldst, FILES)
+   and os.stat(os.path.join(ldst, "a/b/y.bin")).st_mode & 0o777 == 0o600
+   and os.stat(os.path.join(ldst, "a/x.bin")).st_ino == os.stat(os.path.join(lsrc, "a/x.bin")).st_ino
+   and not any(p.endswith(".tunnelpart") for p in tree(ldst)))
+lpull = os.path.join(T, "lpull")
+bad = tunnel.pull(None, lsrc, lpull, [(r, n) for r, n in FILES.items()])
+ok("本机 pull：一致（拷过来，不是硬链接）", not bad and same(lsrc, lpull, FILES)
+   and os.stat(os.path.join(lpull, "a/x.bin")).st_ino != os.stat(os.path.join(lsrc, "a/x.bin")).st_ino)
+
+real_copy = tunnel.shutil.copy2
+
+
+def half_copy(a, b):  # 拷到一半被打断：写了一半、出错
+    with open(a, "rb") as f, open(b, "wb") as g:
+        g.write(f.read(os.path.getsize(a) // 2))
+    raise OSError("测试：拷到一半")
+
+
+shutil.rmtree(lpull)
+os.makedirs(os.path.join(lpull, "a"))
+open(os.path.join(lpull, "a/x.bin.tunnelpart"), "wb").write(b"old")  # 上次被杀留下的半个
+tunnel.shutil.copy2 = half_copy
+bad = tunnel.pull(None, lsrc, lpull, [("a/x.bin", FILES["a/x.bin"]), ("top.pth", FILES["top.pth"])])
+tunnel.shutil.copy2 = real_copy
+ok("本机拷到一半：报没拷成（调用方不算做完）、目标没有半个文件、.tunnelpart 删了", sorted(bad) == ["a/x.bin", "top.pth"]
+   and not os.path.exists(os.path.join(lpull, "a/x.bin")) and not os.path.exists(os.path.join(lpull, "top.pth"))
+   and not any(p.endswith(".tunnelpart") for p in tree(lpull)))
+bad = tunnel.pull(None, lsrc, lpull, [("a/x.bin", FILES["a/x.bin"]), ("top.pth", FILES["top.pth"])])
+ok("本机拷到一半后再拷：补齐", not bad and same(lsrc, lpull, ["a/x.bin", "top.pth"]))
+
 print(f"\n{len(FAILS)} 项失败" if FAILS else "\n全部通过")
 sys.exit(1 if FAILS else 0)

@@ -1,6 +1,6 @@
 # taskq
 
-任务队列和调度：总队列在 hub（角色 `hub` 的那台机器）上，执行机（Slurm 作业、pueue worker）领任务、训练，训完以后拉回、按实验表排下一步。核心不认识具体模型，项目通过配置（机器表、`policy.py`、实验表）和插件接入。结构和各模块见 [`queue/README.md`](queue/README.md)。
+任务队列和调度：总队列在 hub（角色 `hub` 的那台机器，只统筹）上，执行机（Slurm 作业、pueue worker；hub 那台的卡和盘也可以是一台执行机，`SITES` 里 `ssh=None`）领任务、训练，训完以后拉回、按实验表排下一步。核心不认识具体模型，项目通过配置（机器表、`policy.py`、实验表）和插件接入。结构和各模块见 [`queue/README.md`](queue/README.md)。
 
 ## 安装
 
@@ -46,7 +46,7 @@ plugins = ["plugins"]  # 插件文件夹，可以有几个
 | `taskq site status\|bundle\|resend <名字>` | 那边的队列；打包推过去；重新解析传过去的任务 | `relay.py status\|bundle\|resend` |
 | `taskq site env <机器> <环境> [-n]`、`taskq site envs <机器>` | 建环境；看环境的状态 | `sites/envs_cli.py`（11/4 前叫 `sites/site.py`） |
 | `taskq env lock <环境> [--variant V]`、`taskq env lock --all` | 把环境描述解成锁 `<环境>.<变体>.lock.json`，文件下到 wheelhouse（不装；`queue/README.md` 的"环境的锁"） | `sites/envlock.py` |
-| `taskq site setup [名字]` | pueue 常驻进程、组、crontab | `queue/setup.sh` |
+| `taskq site setup [名字]` | pueue 常驻进程、组、crontab（和 hub 在同一台上的执行机：在本机做） | `queue/setup.sh` |
 | **实验** | | |
 | `taskq exp list`、`taskq exp tasks [--json]` | 实验、展开后的任务 | — |
 | `taskq exp steps [--exp ID…] [--key KEY…] [--level …] [--data 目录] [--done] [--needs]` | 实验表的步骤，命令按 `names` 填好；做完没有、`--stage needs` 列的输入（一行 JSON） | — |

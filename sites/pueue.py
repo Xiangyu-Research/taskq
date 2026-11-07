@@ -49,12 +49,13 @@ def busy_cmd():
 def worker_cmd(name, kind="gpu"):
     """开 worker 的 pueue add 命令。整条 bash -c 作为一个参数：pueue 把 -- 后面的参数用空格拼起来交给 sh（ccb0ba6）。
     前面加 exec：pueue 的子进程就是 worker 本身。不加时 sh 收到 pueue kill 的 SIGTERM 先退出，pueue 马上记为结束，
-    worker 还在停训练、交还任务（11/3）。"""
+    worker 还在停训练、交还任务（11/3）。pueue add 带上的是加任务那边的环境：先去掉 hub 自己的变量（proto.HUB_ONLY_ENV），
+    和 hub 在同一台上的执行机（ssh 是 None）的 worker 不会把 hub 的数据目录、配置当成自己的（11/7）。"""
     c, w = R.conf(name), M.worker_of(name, kind)
     gpu = c["groups"][w["group"]][1]
     env = f"TASKQ_SITE={name} WORKER_ID={w['id']} WORKER_DEVICE={kind} CUDA_VISIBLE_DEVICES={gpu or ''}" + (f" TASKQ_CPUS={w['cpus']}" if w.get("cpus") else "")
     env += "".join(f" {k}={shlex.quote(str(v))}" for k, v in (c["groups"][w["group"]][2] or {}).items())  # 组的环境变量（如 TASK_GPU_IDLE）
-    run = (f'R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/{ROOT["current"]}"); export TASKQ_DIR="$R/{ROOT["queue"]}" {env}; '
+    run = (f'unset {" ".join(proto.HUB_ONLY_ENV)}; R={R.q(c["root"].rstrip("/"))}; REPO=$(readlink -f "$R/{ROOT["current"]}"); export TASKQ_DIR="$R/{ROOT["queue"]}" {env}; '
            f'exec bash "$REPO/{cfg.bundle_rel("queue", "worker_start.sh")}"')
     return f"{c['pueue']} add -g {w['group']} -l {proto.WORKER_LABEL}{w['id']} -- {shlex.quote('exec bash -c ' + shlex.quote(run))}"
 

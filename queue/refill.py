@@ -78,27 +78,51 @@ def progress(s, key, host=None):
                if host in (None, h))
 
 
+def site_progress(f):
+    """执行机上一个任务的情况（relay.site_view / status.json 的 tasks[key]）→ 有没有进度：训完、有做完的轮数、有存档（说明的 resume），
+    或者那边说做了一半（ran：跑过、交还、没失败，taskq.has_progress；11/7，旧代码包不报）。"""
+    return bool(f) and bool(f.get("final") or f.get("resumable") or f.get("ran")
+                            or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
+
+
+def holders(views, usable):
+    """各执行机的任务情况 {执行机: {key: site_view 的一项}} → {key: [有进度、现在能用的执行机]}（usable(名字)：在 RELAY、没暂停检查、AUTO 开着）。"""
+    out = {}
+    for name, tasks in views.items():
+        if usable(name):
+            for key, f in (tasks or {}).items():
+                if site_progress(f):
+                    out.setdefault(key, []).append(name)
+    return out
+
+
 def data_of(tq, key):
     return info(tq, key)["spec"].get("data") or []
 
 
-def rank(tq, t, ready):
-    """领的先后：（档位，缺不缺数据，先后）。同一档里数据已经在这台机器上的先领（马上能训）。"""
-    return (t["nice"], any(p not in ready for p in data_of(tq, t["key"])), t["order"])
+def rank(tq, t, ready, held=None):
+    """领的先后：（档位，做没做过一半，缺不缺数据，先后）。同一档里在某台执行机上做了一半的先领（11/7），再是数据已经在这台机器上的（马上能训）。"""
+    return (t["nice"], t["key"] not in (held or {}), any(p not in ready for p in data_of(tq, t["key"])), t["order"])
 
 
-def candidates(s, name, tq, ready, oks=None, kinds=("gpu",)):
+def candidates(s, name, tq, ready, oks=None, kinds=("gpu",), held=None):
     """这台机器能领的任务，按领的先后排：free、没标成有问题、环境都就绪、没限定在别的机器、种类（device）在 kinds 里、
-    任何机器上都没有进度、这台机器没跳过。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（machines.py 的 ready_envs）。"""
+    hub 看得到的机器（MACHINES）上都没有进度、这台机器没跳过。oks：那边建好、检查过的按描述建的环境 {名: 描述的哈希}（machines.py 的 ready_envs）。
+    held（holders 的结果）：在别的执行机上做了一半的只给那台（或能收编它的，如同一个盘上的两台），那台停用时才放开（11/7）。"""
     envs = M.ready_envs(name, oks)
+    mine = {name} | {x["site"] for x in M.adopt_sources(name) if x["site"]}
+
+    def theirs(key):
+        hs = (held or {}).get(key)
+        return bool(hs) and not mine & set(hs)
 
     def env_ok(sp):
         return bool(S.envs_of(sp)) and set(S.envs_of(sp)) <= envs
     cands = [t for t in tq["tasks"] if t["state"] == S_FREE and not t.get("bad") and env_ok(info(tq, t["key"])["spec"])
              and M.serves(name, info(tq, t["key"])["spec"].get("machines"))
              and info(tq, t["key"])["spec"].get("device", "gpu") in kinds
-             and not progress(s, t["key"]) and name not in t.get("skipped_by", [])]
-    return sorted(cands, key=lambda t: rank(tq, t, ready))
+             and not progress(s, t["key"]) and name not in t.get("skipped_by", []) and not theirs(t["key"])]
+    return sorted(cands, key=lambda t: rank(tq, t, ready, held))
 
 
 def next_pick(tq, cands, ready, free, hard, exclude=(), moving=()):

@@ -154,8 +154,9 @@ def site_tasks(name):
 
 
 def has_progress(f):
-    return bool(f) and (f.get("state") in (S_CLAIMED, S_BUSY) or bool(f.get("final")) or bool(f.get("resumable"))
-                        or any((r.get("epochs_done") or 0) > 0 for r in f.get("runs") or []))
+    """在训的，或者有进度（refill.site_progress）。"""
+    import refill
+    return bool(f) and (f.get("state") in (S_CLAIMED, S_BUSY) or refill.site_progress(f))
 
 
 def stop_group(host, g, pueue, wait=False):

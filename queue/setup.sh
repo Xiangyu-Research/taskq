@@ -1,7 +1,8 @@
 #!/bin/bash
 # 在 pueue 机器（配置文件夹里 machines.py 的 scheduler=pueue 的）上启动 pueue 的常驻进程、建组、写 crontab（2026-10-16），重复运行没关系。
 #   taskq site setup           在这台上（即 bash queue/setup.sh）
-#   taskq site setup <名字>    在 hub 上替别的机器做：按完整的表算好组、gpu_log，ssh 过去跑那边代码目录里的 setup.sh（11/4）
+#   taskq site setup <名字>    在 hub 上替别的机器做：按完整的表算好组、gpu_log，ssh 过去跑那边代码目录里的 setup.sh（11/4）；
+#                              和 hub 在同一台上的执行机（ssh=None）就在这台上做（11/7）
 # 组按机器表 machines.py 建；表里没有、也没有任务的组删掉（只有执行机自己那份的代码包里不删）。
 # crontab（没开 linger 的机器用不了 systemd 用户服务，都用 cron）：
 #   所有 pueue 机器：@reboot on_boot.sh（启动 pueued、放回重启时被打断的任务；gpu_log 的加 --gpu-log），从代码包、仓库的克隆或装好的 taskq（taskq boot）跑
@@ -19,6 +20,8 @@ unset TASKQ_PROG
 rc=0
 [[ -z ${1:-} ]] || $M get "$1" label > /dev/null 2>&1 || rc=$?
 (( rc != TQ_EXIT_GONE )) || { echo "$PROG：机器表里没有 $1" >&2; exit "$rc"; }
+# 和 hub 在同一台上的执行机（SITES 里 ssh=None，11/7）：它的 pueue 组在这台的条目里，就是在这台上做
+[[ -n ${1:-} && -z $($M get "$1" ssh 2> /dev/null) && -n $($M get "$1" root 2> /dev/null) ]] && set --
 if [[ -n ${1:-} && $1 != "$($M whoami 2> /dev/null)" ]]; then
     # 代码包（表里有 code）：核心在包里的 BUNDLE_CORE；仓库的克隆（只有 repo）：和这边同一布局
     ssh=$($M get "$1" ssh) code=$($M get "$1" code) sub=/$TQ_BUNDLE_CORE

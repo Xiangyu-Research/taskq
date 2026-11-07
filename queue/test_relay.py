@@ -953,6 +953,38 @@ def test_fresh_site():
     print("通过：读不到状态、那边是旧包（旧包跑不了新的状态程序）→ 试一次换包再读；已是新包、连不上 → 不部署，这次当连不上")
 
 
+def test_held_by():
+    """做了一半的任务认回原来那台（11/7）：这台用刚读到的状态，别的用 status.json；那台暂停检查、AUTO 关着、不在 RELAY 里时放开。"""
+    other = next(n for n in relay.M.RELAY if n != NAME)
+    keep_view, auto, off = relay.site_view, dict(relay.P.AUTO), dict(relay.P.OFFLINE)
+    old = open(relay.STATUS).read() if os.path.exists(relay.STATUS) else None
+    try:
+        os.makedirs(os.path.dirname(relay.STATUS), exist_ok=True)
+        json.dump({other: {"tasks": {"h/x": {"resumable": True}, "h/y": {}}}, NAME: {"tasks": {"h/old": {"ran": True}}},
+                   "gone-site": {"tasks": {"h/z": {"ran": True}}}}, open(relay.STATUS, "w"))
+        relay.site_view = lambda n, rs, st: {"h/me": {"ran": True}}
+        relay.P.AUTO.update({NAME: True, other: True})
+        relay.P.OFFLINE.pop(other, None)
+        h = relay.held_by(NAME, {}, {})
+        assert h == {"h/x": [other], "h/me": [NAME]}, h
+        relay.P.AUTO[other] = False
+        assert relay.held_by(NAME, {}, {}) == {"h/me": [NAME]}
+        relay.P.AUTO[other] = True
+        relay.P.OFFLINE[other] = "测试"
+        assert relay.held_by(NAME, {}, {}) == {"h/me": [NAME]}
+    finally:
+        relay.site_view = keep_view
+        relay.P.AUTO.clear()
+        relay.P.AUTO.update(auto)
+        relay.P.OFFLINE.clear()
+        relay.P.OFFLINE.update(off)
+        if old is None:
+            os.remove(relay.STATUS)
+        else:
+            open(relay.STATUS, "w").write(old)
+    ok("做了一半的任务认回原来那台：这台用刚读到的（不用旧的 status.json），别的执行机 AUTO 关着、暂停检查、不在 RELAY 里时放开")
+
+
 def test_auto_off():
     """AUTO 关着（11/2）：不传、不重传、不让那边接着训、不领新的、不交作业；训完的照常拉回。"""
     keep = {k: getattr(relay, k) for k in ("remote_status", "current_bundle", "write_status", "plan", "fill", "topup", "log", "execute",
@@ -1569,6 +1601,7 @@ if __name__ == "__main__":
     test_refcount()
     test_fresh_site()
     test_auto_off()
+    test_held_by()
     test_plan()
     test_pueue_worker()
     test_slurm_topup_ready()
