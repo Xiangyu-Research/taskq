@@ -191,18 +191,18 @@ def english_failures(Q, say, dry):
         say(f"{d}: {n} failure records rewritten to English")
 
 
-def merge_root(R, O, say, dry):
-    """Merge old root O into R: move part logs and worker logs; hardlink blobs on the same disk (other disks: leave them, transfer when needed)."""
+def merge_root(R, old_root, say, dry):
+    """Merge old root into R: move part logs and worker logs; hardlink blobs on the same disk (other disks: leave them, transfer when needed)."""
     import taskq
-    old = taskq.read_tasks(os.path.join(O, proto.ROOT["queue"], proto.QUEUE["tasks"]))
+    old = taskq.read_tasks(os.path.join(old_root, proto.ROOT["queue"], proto.QUEUE["tasks"]))
     if old:
-        raise Stop(f"{O} still has {len(old)} task(s) in its queue ({old[0]['key']} ...): let them finish or release them elsewhere first")
+        raise Stop(f"{old_root} still has {len(old)} task(s) in its queue ({old[0]['key']} ...): let them finish or release them elsewhere first")
     for sub in (proto.TASK_LOGS, proto.WORKER_LOGS):
-        src = os.path.join(O, proto.ROOT["data"], sub)
+        src = os.path.join(old_root, proto.ROOT["data"], sub)
         n = sum(move(os.path.join(src, f), os.path.join(R, proto.ROOT["data"], sub, f), say, dry)
                 for f in (sorted(os.listdir(src)) if os.path.isdir(src) else []))
         say(f"{src} -> {R}: moved {n} files")
-    ob, rb = os.path.join(O, proto.ROOT["blobs"]), os.path.join(R, proto.ROOT["blobs"])
+    ob, rb = os.path.join(old_root, proto.ROOT["blobs"]), os.path.join(R, proto.ROOT["blobs"])
     if not os.path.isdir(ob):
         return
     if os.stat(ob).st_dev != os.stat(rb if os.path.isdir(rb) else R).st_dev:
@@ -304,8 +304,8 @@ def op_root(A):
     log, dry, keys = [], A["dry"], A["keys"]
     R = os.path.expanduser(os.environ["TASKQ_ROOT"]).rstrip("/")
     me = M.whoami()
-    for O in A["merge"]:
-        merge_root(R, os.path.expanduser(O), log.append, dry)
+    for old_root in A["merge"]:
+        merge_root(R, os.path.expanduser(old_root), log.append, dry)
     if M.is_exec(me):
         fix_queue(cfg.state("taskq"), keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"], A["drop"])
     D = os.path.join(R, proto.ROOT["data"])

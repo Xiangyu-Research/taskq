@@ -138,22 +138,34 @@ p, logs = pad_of(b, settle=100)
 t = [1000.0]
 G.time.time = lambda: t[0]
 p.changed[0] = t[0]
-b.training[0] = 5000; p.step()
+b.training[0] = 5000
+p.step()
 ok("training just started: pad to floor at once, not target", at_floor(b.used()))
 lv = b.live[0]
-t[0] += 60; b.training[0] = 20000; p.step()
+t[0] += 60
+b.training[0] = 20000
+p.step()
 ok("memory still growing after 60 seconds: add no more", b.live[0] == lv and any("waiting for it to settle" in x for x in [p._decide(0, b.used(), 81920, False, t[0])[0]]))
-t[0] += 60; b.training[0] = 20500; p.step()
+t[0] += 60
+b.training[0] = 20500
+p.step()
 ok("another 60 seconds, change < 1GiB but only 60 seconds since the last big change: add no more", b.live[0] == lv)
-t[0] += 50; p.step()
+t[0] += 50
+p.step()
 ok("stable for 110 seconds: training memory is already above 55GB; add no more", b.used() >= 55000 and b.live[0] == lv)
-t[0] += 10; b.training[0] = 22500; p.step()
+t[0] += 10
+b.training[0] = 22500
+p.step()
 ok("training grows another 2GB (below high): neither release nor add", b.live[0] == lv)
-t[0] += 200; b.training[0] = 3000; p.step()
+t[0] += 200
+b.training[0] = 3000
+p.step()
 ok("a training ended and memory dropped: pad back to floor at once, do not wait to settle", b.used() >= 42000)
-t[0] += 10; p.step()
+t[0] += 10
+p.step()
 ok("after waiting to settle, not yet at 55GB", not filled(b.used()))
-t[0] += 110; p.step()
+t[0] += 110
+p.step()
 ok("stable for 120 seconds: pad to 55GB", filled(b.used()))
 G.time.time = time.time
 
@@ -170,42 +182,61 @@ with tempfile.TemporaryDirectory() as d:
     ok("no new-training signal yet: no <base>.ready", not os.path.exists(base + ".ready"))
     open(base + ".start", "w").close()
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
-    t[0] += 10; p.step()
+    t[0] += 10
+    p.step()
     ok("new-training signal: drop to floor (42GB) only, not below", at_floor(b.used()) and any("new training starting" in x for x in logs))
     ok("writes <base>.ready after making room", open(base + ".ready").read().strip() == str(t[0] - 5))
     ok("leaves about 39GB for the new training", 81920 - b.used() >= 38000)
     lv = b.live[0]
-    t[0] += 50; b.training[0] = 18000; p.step()
+    t[0] += 50
+    b.training[0] = 18000
+    p.step()
     ok("new training started but not stable: add nothing", b.live[0] == lv)
-    t[0] += 110; p.step()
+    t[0] += 110
+    p.step()
     ok("new training stable: pad to 55GB", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
-    t[0] += 10; p.step()
+    t[0] += 10
+    p.step()
     ok("7b second signal: drop to floor", at_floor(b.used()))
-    t[0] += 300; p.step()
+    t[0] += 300
+    p.step()
     ok("7b training memory did not grow (new training not up): past settle, still not padded to target", at_floor(b.used()) and any("waiting for the new training" in x for x in [p._decide(0, b.used(), 81920, False, t[0])[0]]))
-    t[0] += 300; b.training[0] = 30000; p.step()
+    t[0] += 300
+    b.training[0] = 30000
+    p.step()
     ok("7b new training started: wait for it to settle", not filled(b.used()) and b.used() >= 42000)
-    t[0] += 110; p.step()
+    t[0] += 110
+    p.step()
     ok("7b padded after it settles", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
-    t[0] += 10; p.step()
-    t[0] += 950; p.step()
+    t[0] += 10
+    p.step()
+    t[0] += 950
+    p.step()
     ok("7b waited start_hold (900 seconds) and the new training did not start: pad as usual", filled(b.used()))
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
-    t[0] += 10; p.step()
-    t[0] += 10; b.training[0] = 1000; p.step()
+    t[0] += 10
+    p.step()
+    t[0] += 10
+    b.training[0] = 1000
+    p.step()
     ok("7c old training ended, new one not up: memory stays at or above floor", b.used() >= 42000)
-    t[0] += 60; b.training[0] = 20000; p.step()
+    t[0] += 60
+    b.training[0] = 20000
+    p.step()
     ok("7c new training grows: release what is above high or keep it, never below floor", 42000 <= b.used() <= 62000)
-    t[0] += 110; p.step()
+    t[0] += 110
+    p.step()
     ok("7c new training after the old one ended: after settling, above 55GB and below high", 55000 <= b.used() <= 62000)
     b.training[0] = 50000
     p._release(0, 0, reason="test")
     os.remove(base + ".ready")
-    t[0] += 200; p.step()
+    t[0] += 200
+    p.step()
     os.utime(base + ".start", (t[0] + 5, t[0] + 5))
-    t[0] += 10; p.step()
+    t[0] += 10
+    p.step()
     ok("7d signal when training alone is above floor: nothing to release, still writes ready", os.path.exists(base + ".ready") and b.live[0] == 0)
     G.time.time = time.time
 

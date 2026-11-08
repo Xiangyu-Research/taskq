@@ -35,7 +35,7 @@ def ok(cond, what):
 
 
 F = FC.build()
-I = F.instances
+inst = F.instances
 G = Graph(F)
 EXPS, FINAL = E.load()
 TASKS = E.tasks()
@@ -53,9 +53,9 @@ for e in EXPS:
         want[f"{st['name']}/{e['id']}"] = GATHER
 for st in FINAL:
     want[st["name"]] = GLOBAL
-ok({k: i.scope for k, i in I.items()} == want, f"extra instances {sorted(set(I) - set(want))[:5]}, missing {sorted(set(want) - set(I))[:5]}")
-ok(all(i.key == i.id for i in I.values()), "the instance id is the hub queue key")
-eds = sorted(i.id for i in I.values() if i.rule == "edit")
+ok({k: i.scope for k, i in inst.items()} == want, f"extra instances {sorted(set(inst) - set(want))[:5]}, missing {sorted(set(want) - set(inst))[:5]}")
+ok(all(i.key == i.id for i in inst.values()), "the instance id is the hub queue key")
+eds = sorted(i.id for i in inst.values() if i.rule == "edit")
 ok(eds == ["edit/arch_s_f0"], f"a step with only={{frag: [0]}} must have only frag 0 instances: {eds}")
 try:
     E.check_fields("x", type("M", (), dict(EXPERIMENTS=[dict(id="x", recipe="toy", each=dict(frag=["0"]),
@@ -64,8 +64,8 @@ try:
 except S.SpecError:
     pass
 t0 = next(t for t in TASKS.values() if t["exp"] == "t0" and t["each"]["frag"] == "0")
-src = I[t0["key"]]
-inf, ev, lp = I["infer/t0_f0"], I["eval/t0_f0"], I["lprob/t0_f0"]
+src = inst[t0["key"]]
+inf, ev, lp = inst["infer/t0_f0"], inst["eval/t0_f0"], inst["lprob/t0_f0"]
 ok(src.outputs == [os.path.normpath(o) for o in S.outputs(t0["spec"])["outs"]] and src.spec is t0["spec"], "source outputs come from spec.outputs")
 ok(inf.outputs == ["preds/" + t0["spec"]["names"]["model"] + "/frag_0"], f"step outputs have templates filled: {inf.outputs}")
 ok(inf.task == t0["key"] and inf.lab == "t0_f0", "per-task steps record their task")
@@ -74,26 +74,26 @@ ok(inf.task == t0["key"] and inf.lab == "t0_f0", "per-task steps record their ta
 ok(inf.deps == [t0["key"]], f"inference follows training: {inf.deps}")
 ok(ev.deps == [t0["key"], "infer/t0_f0"], f"eval follows training and inference (in order within the task): {ev.deps}")
 ok(set(lp.deps) == {t0["key"], "infer/t0_f0", "eval/t0_f0"}, f"lprob: order + inputs (eval's report): {lp.deps}")
-ens = I["ens/t0"]
+ens = inst["ens/t0"]
 ok(ens.deps == [f"infer/t0_f{k}" for k in range(5)], f"experiment-level inputs expand over each value and follow each part's inference: {ens.deps}")
 ok(len([p for p in ens.inputs if p.startswith("preds/")]) == 5, "ens inputs expand to 5 parts")
-ok(set(I["paired/t3b"].deps) == {"ens/t0", "oof/t3b"}, f"across experiments: paired/t3b follows ens/t0: {I['paired/t3b'].deps}")
-ok(set(I["t18cmp/t18b"].deps) == {"ens/t18", "ens/t18b"}, f"across experiments: t18cmp: {I['t18cmp/t18b'].deps}")
-ca = I["compare_all"]
-want_ca = {i.id for i in I.values() if i.rule in ("paired", "ens")}
+ok(set(inst["paired/t3b"].deps) == {"ens/t0", "oof/t3b"}, f"across experiments: paired/t3b follows ens/t0: {inst['paired/t3b'].deps}")
+ok(set(inst["t18cmp/t18b"].deps) == {"ens/t18", "ens/t18b"}, f"across experiments: t18cmp: {inst['t18cmp/t18b'].deps}")
+ca = inst["compare_all"]
+want_ca = {i.id for i in inst.values() if i.rule in ("paired", "ens")}
 ok(set(ca.deps) == want_ca, f"FINAL's wildcard input follows every matching output: extra {set(ca.deps) - want_ca}, missing {want_ca - set(ca.deps)}")
-ok(set(I["p2cmp/t3b"].deps) == {"p2/t3b"}, f"p2cmp follows p2 in the same experiment: {I['p2cmp/t3b'].deps}")
-ok(set(I["oof/t3b"].deps) >= {f"eval/t3b_f{k}" for k in range(5)}, "oof follows each part's eval")
-raw = sorted({p for i in I.values() for p in i.raw})
+ok(set(inst["p2cmp/t3b"].deps) == {"p2/t3b"}, f"p2cmp follows p2 in the same experiment: {inst['p2cmp/t3b'].deps}")
+ok(set(inst["oof/t3b"].deps) >= {f"eval/t3b_f{k}" for k in range(5)}, "oof follows each part's eval")
+raw = sorted({p for i in inst.values() for p in i.raw})
 ok("raw/holdout/A/inputs" in inf.raw and "raw/labels/*/*-lab.dat" in ev.raw, f"raw data: {inf.raw} {ev.raw}")
 ok(not any(p.startswith(("results/", "preds/", "demo/analysis/")) for p in raw), f"outputs and training-shared json are not raw data: {raw}")
 ok(src.shared and all(p.endswith("*.json") for p in src.shared), f"training's fetch.extra is shared: {src.shared}")
 
 # topological order: every instance comes after its deps; upstream and downstream are inverses
 pos = {n: k for k, n in enumerate(G.order())}
-ok(len(pos) == len(I) and all(pos[d] < pos[n] for n, i in I.items() for d in i.deps), "topological order")
+ok(len(pos) == len(inst) and all(pos[d] < pos[n] for n, i in inst.items() for d in i.deps), "topological order")
 rng = random.Random(5)
-for n in rng.sample(list(I), 40):
+for n in rng.sample(list(inst), 40):
     ok(all(n in G.descendants(a) for a in G.ancestors(n)), f"{n} is missing from its ancestors' descendants")
 ok(G.ancestors("compare_all") >= {t0["key"], "infer/t0_f0", "ens/t0", "paired/t3b", "oof/t3b"}, "compare_all's upstream")
 ok("eval/t0_f0" in G.descendants("infer/t0_f0") and "compare_all" in G.descendants(t0["key"]), "downstream")
@@ -181,5 +181,5 @@ ok(any("cycle in the order" in p for p in compiled(loop)), "a cycle")
 ok(FC.cycles({"a": Instance("a", EACH, "r", deps=["b"]), "b": Instance("b", EACH, "r", deps=["a"])}) == ["cycle in the order: a -> b -> a"],
    "cycles: each cycle once")
 
-print("\n".join(fails) if fails else f"flow compile: {len(I)} instances, all fine")
+print("\n".join(fails) if fails else f"flow compile: {len(inst)} instances, all fine")
 sys.exit(1 if fails else 0)

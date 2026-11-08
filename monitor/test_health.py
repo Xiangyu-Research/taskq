@@ -364,8 +364,8 @@ ok("pushed once it lasted long enough", len(out) == 1 and "Cannot read the statu
 B = {f"code:{PH}": dict(msg="g", level="normal", kind="state", after=0), f"gpulog:{PH}": dict(msg="l", level="normal", kind="state", after=0)}
 out = run(B, datetime(2026, 10, 17, 10, 30))
 ok("several in one round: one message", len(out) == 1 and " (2 items)" in out[0][0] and out[0][1].count("\n- ") == 1)
-I = {f"idle:{PH}:gpu1": dict(msg="only running jobs left", level="info", kind="state", after=0)}
-ok("info level is not pushed", run(I, datetime(2026, 10, 17, 11, 0)) == [])
+INFOS = {f"idle:{PH}:gpu1": dict(msg="only running jobs left", level="info", kind="state", after=0)}
+ok("info level is not pushed", run(INFOS, datetime(2026, 10, 17, 11, 0)) == [])
 N = {"notice:board": dict(msg="board waiting for confirmation", level="normal", kind="state", after=0)}
 ok("notices are not pushed, only listed under problems", run(N, datetime(2026, 10, 17, 11, 30)) == []
    and "notice:board" in NT.problems(_wdb)[0])
