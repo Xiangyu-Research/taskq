@@ -113,7 +113,7 @@ waitfor 20 'grep -q "没有能领的任务" $T/w6e.out'
 ln -sfn b "$T/code/current"
 waitfor 20 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "代码包换了：空闲时 exec 新包的 worker_start.sh 接着跑，不退出等重开" '[[ $rc == 0 ]] && grep -q "换成新代码 b 接着跑" $T/w6e.out && grep -q "新包的 start site-pueue-gpu1" $T/w6e.out'
-check "代码包：worker、任务日志记的代码版本是包名（不是"未知+改动"）" 'grep -q "，代码 a$" $T/w6e.out && grep -q "^end .* t/k" $T/train.log && head -1 $TASKQ_DATA/logs/tasks/t__k__*_part1.log | grep -q "，代码 a，"'
+check "代码包：worker、任务日志记的代码版本是包名（不是"未知+改动"）" 'grep -q "代码 a$" $T/w6e.out && grep -q "^end .* t/k" $T/train.log && head -1 $TASKQ_DATA/logs/tasks/t__k__*_part1.log | grep -q ", code a,"'
 check "代码包：worker 在用的包更新了时间戳（清理只删 4 天没动过的）" '[[ -n $(find "$T/code/a" -maxdepth 0 -mtime -1) ]]'
 fi
 

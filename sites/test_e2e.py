@@ -730,9 +730,9 @@ def step_two_workers():
     res = json.load(open(os.path.join(HD, "guest/e2e/r/t6/result.json")))
     step("t6：1 号卡的 worker 从第 2 轮的存档接着做，结果对", res["start"] == 2 and res["total"] == 3 * sum(text_of(1).encode()), res)
     segs = sorted(f for f in os.listdir(os.path.join(HD, proto.TASK_LOGS)) if f.startswith(proto.safe(K6) + proto.SAFE))
-    # 每段开头一行"作业 <作业>_<段> @ 主机，任务=<key>，…"；同一分钟里开的两段作业名相同，写进同一个文件
+    # each part starts with "job <job>_<part> @ host, task=<key>, ..."; two parts started in the same minute share a job name and file
     heads = [ln for f in segs for ln in open(os.path.join(HD, proto.TASK_LOGS, f), errors="replace").read().splitlines()
-             if ln.startswith("作业 ") and f"任务={K6}，" in ln]
+             if ln.startswith("job ") and f"task={K6}," in ln]
     step("t6 两个 worker 的两段都记在拉回的分段日志里", len(heads) >= 2, (segs, heads))
     later = [j for j in jobs(PQH) if j[1] == w0 and j[0] > jid]
     step("时段结束以后没再开 0 号卡的 worker", not later, later)

@@ -41,7 +41,7 @@ def prog(final=False, epochs=100, end=NOW, total=1000):
 
 keys = [t["key"] for t in S.all_tasks()]
 A, B, C = keys[0], keys[1], keys[2]
-seg_first = "开始：代码 abc1234，hub"
+seg_first = "job 77_1 @ hub, task=x, part 1, env base, code abc1234, 2026-11-01 10:00:00"
 s = dict(now=NOW, ok={"hub": True, "site-pueue": False}, why={"site-pueue": "连不上"},
          gpus={"hub": [dict(gpu=0, uuid="u", util=90, mem=1000, apps=[])]},
          src={"hub": {"tasks": {A: prog(epochs=200), B: prog(final=True, epochs=1000)},

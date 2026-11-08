@@ -214,7 +214,7 @@ _home, _data = fixture.tmpdir(), fixture.tmpdir()
 _py = os.path.join(fixture.store_bundle(os.path.join(_home, "demo_root")), "bin")
 _seg = H.proto.task_log(MEN0, "77")
 os.makedirs(os.path.dirname(os.path.join(_data, _seg)))
-open(os.path.join(_data, _seg), "w").write("开始：代码 abc1234\n")
+open(os.path.join(_data, _seg), "w").write("job h_1 @ hub, task=k, part 1, env base, code abc1234, 2026-11-01 10:00:00\n")
 _env, _mdata, _rpy = os.environ["HOME"], H.M.MACHINES["hub"]["data"], H.RM.py
 os.environ["HOME"], H.M.MACHINES["hub"]["data"], H.RM.py = _home, _data, lambda name: os.path.join(_py, "python3")
 try:

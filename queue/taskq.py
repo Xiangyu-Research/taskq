@@ -609,7 +609,7 @@ def _release(a, key):
     if a.failed:
         os.makedirs(os.path.join(TQ, Q["failures"]), exist_ok=True)
         with open(os.path.join(TQ, Q["failures"], safe(key)), "a") as f:
-            f.write(f"{time.strftime('%F %T')}\t作业 {a.worker}\t{' '.join(a.failed.split())}\t{code_mine()}\n")
+            f.write(proto.FAIL_LINE_FMT % (time.strftime('%F %T'), a.worker, ' '.join(a.failed.split()), code_mine()) + "\n")
     if owns(ci, a):
         _mark_released(key, a.worker, "failed" if a.failed else "skip" if a.skip else "back")
         shutil.rmtree(d, ignore_errors=True)

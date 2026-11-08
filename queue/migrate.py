@@ -12,6 +12,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -19,15 +20,28 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import proto  # noqa: E402
+import common as C  # noqa: E402
 
 safe = proto.safe
-OLD_CODE = "before-migrate"  # 切换前的失败记录的代码包一栏（不是任何在用的包，换包后不再算数，taskq.fail_lines）
-PER_KEY = ("claims", "failures", "skips", "inputs", "released", "stopped")  # 队列里按任务名放的记录（proto.QUEUE）
-OLD_PART = "_seg"  # 旧的分段日志名 <safe key>__<作业>_seg<段>.log
+OLD_CODE = "before-migrate"  # bundle field of failure records from before the cutover (not a bundle in use, so it no longer counts after the switch, taskq.fail_lines)
+PER_KEY = ("claims", "failures", "skips", "inputs", "released", "stopped")  # per-task records in a queue (proto.QUEUE)
+OLD_PART = "_seg"  # old part log name <safe key>__<job>_seg<part>.log
+
+# old on-disk text (only this rewrite step reads it; no reader keeps accepting it)
+OLD_TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+OLD_HEAD = re.compile(r"^作业 (\S+) @ ([^，]+)，任务=([^，]*)，第 (\d+) 段，环境 ([^，]*)，代码 ([^，]*)，" + OLD_TS + r"$")
+OLD_ENDED = re.compile(r"^" + OLD_TS + r" 命令结束（退出码 (-?\d+)），(.*)$")
+OLD_NOT_STARTED = re.compile(r"^" + OLD_TS + r" 没开训：(.*)$")
+OLD_GPU_GIVEUP_SEEN = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 被别人占着（空着，别人 (.+?) 还在用，要空满 (\d+) 分钟），等了 (\d+) 分钟还没空出来，不跑$")
+OLD_GPU_GIVEUP = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 被别人占着，等了 (\d+) 分钟还没空出来，不跑$")
+OLD_GPU_WAIT_SEEN = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 空着，别人 (.+?) 还在用，空满 (\d+) 分钟再跑（已等 (\d+) 分钟）$")
+OLD_GPU_WAIT = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 被别人占着，等它空出来（已等 (\d+) 分钟(?:，最多 (\d+) 分钟)?）$")
+OLD_STALL_MSG = re.compile(r"^( \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})：日志和结果文件夹 (\d+) 分钟没有变化，作业 (\S+) 停掉它$")
+OLD_FAIL_JOB = "作业 "
 
 
 class Stop(Exception):
-    """有不能自动处理的情况：不改任何东西，列出原因。"""
+    """A situation that cannot be handled automatically: change nothing, list why."""
 
 
 # ---------------- 在一台机器上（代码包里，经 relay_remote.op 跑） ----------------
@@ -66,7 +80,114 @@ def rename_logs(D, keys, say, dry):
         if nf:
             n += move(os.path.join(d, f), os.path.join(d, nf), say, dry)
     if n:
-        say(f"{d}：{n} 个分段日志改名")
+        say(f"{d}: renamed {n} part logs")
+
+
+def english_line(ln):
+    """One part log line in the old Chinese format -> English; anything else unchanged (line ending kept)."""
+    s = ln.rstrip("\r\n")
+    eol = ln[len(s):]
+    m = OLD_HEAD.match(s)
+    if m:
+        job, host, key, part, env, code, ts = m.groups()
+        return proto.LOG_HEAD_FMT % (job, host, key, part, env, code, ts) + eol
+    if s.startswith("训完"):
+        return proto.DONE_LINE + s[len("训完"):] + eol
+    if s.startswith("当作卡住"):
+        rest = s[len("当作卡住"):]
+        m = OLD_STALL_MSG.match(rest)
+        if m:
+            rest = f"{m.group(1)}: log and output dir unchanged for {m.group(2)} minutes, job {m.group(3)} stopped it"
+        else:
+            rest = rest.replace("：", ": ", 1)
+        return proto.STALL_LINE + rest + eol
+    m = OLD_ENDED.match(s)
+    if m:
+        ts, rc, rest = m.groups()
+        if rest.startswith("读不了盘"):
+            rest = "disk unreadable, cannot tell whether training finished"
+        else:
+            r = re.match(r"^没训完（第 (\d+) 次）$", rest)
+            if r:
+                rest = f"not done (attempt {r.group(1)})"
+        return f"{ts} " + proto.LOG_ENDED_FMT % (rc, rest) + eol
+    m = OLD_NOT_STARTED.match(s)
+    if m:
+        ts, why = m.groups()
+        if why.startswith("读不了盘"):
+            why = "disk unreadable, cannot tell whether training finished"
+        else:
+            r = re.match(r"^这台机器没有环境 (\S+)(?:（机器表 machines.py）)?$", why)
+            if r:
+                why = f"this machine has no env {r.group(1)} (machine table machines.py)"
+            elif why.startswith("任务说明有问题："):
+                why = "bad task spec: " + why[len("任务说明有问题："):]
+        return f"{ts} " + proto.LOG_NOT_STARTED_FMT % why + eol
+    m = OLD_GPU_GIVEUP_SEEN.match(s)
+    if m:
+        ts, gpu, seen, idle, waited = m.groups()
+        extra = f" (free, someone {seen} still using it, needs {idle} minutes free), waited {waited} minutes"
+        return f"{ts} " + proto.LOG_GPU_BUSY_FMT % (gpu, extra) + eol
+    m = OLD_GPU_GIVEUP.match(s)
+    if m:
+        ts, gpu, waited = m.groups()
+        return f"{ts} " + proto.LOG_GPU_BUSY_FMT % (gpu, f", waited {waited} minutes") + eol
+    m = OLD_GPU_WAIT_SEEN.match(s)
+    if m:
+        ts, gpu, seen, idle, waited = m.groups()
+        return f"{ts} GPU {gpu} free, but someone {seen} still used it; waiting {idle} minutes of quiet (waited {waited} minutes)" + eol
+    m = OLD_GPU_WAIT.match(s)
+    if m:
+        ts, gpu, waited, most = m.groups()
+        return f"{ts} GPU {gpu} busy, waiting for it (waited {waited} minutes{', at most ' + most + ' minutes' if most else ''})" + eol
+    return ln
+
+
+def english_logs(D, say, dry):
+    """Rewrite part logs under <D>/logs/tasks from the old Chinese format to English. Idempotent; only matching lines change."""
+    d = os.path.join(D, proto.TASK_LOGS)
+    n = 0
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        p = os.path.join(d, f)
+        if not f.endswith(".log") or not os.path.isfile(p):
+            continue
+        with open(p, encoding="utf-8", errors="surrogateescape") as fh:
+            old = fh.read()
+        new = "".join(english_line(ln) for ln in old.splitlines(keepends=True))
+        if new != old:
+            n += 1
+            if not dry:
+                C.atomic_write(p, new)
+    if n:
+        say(f"{d}: {n} part logs rewritten to English")
+
+
+def english_failures(Q, say, dry):
+    """Rewrite failure records <time>\\tjob <worker>\\t<reason>\\t<bundle> from the old job field. Idempotent."""
+    d = os.path.join(Q, proto.QUEUE["failures"])
+    n = 0
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        p = os.path.join(d, f)
+        if not os.path.isfile(p):
+            continue
+        with open(p, encoding="utf-8", errors="surrogateescape") as fh:
+            old = fh.read()
+        out = []
+        for ln in old.splitlines(keepends=True):
+            s = ln.rstrip("\r\n")
+            eol = ln[len(s):]
+            x = s.split("\t")
+            if len(x) > 1 and x[1].startswith(OLD_FAIL_JOB):
+                x[1] = "job " + x[1][len(OLD_FAIL_JOB):]
+                ln = "\t".join(x) + eol
+            out.append(ln)
+        new = "".join(out)
+        if new != old:
+            n += 1
+            if not dry:
+                C.atomic_write(p, new)
+    if n:
+        say(f"{d}: {n} failure records rewritten to English")
 
 
 def merge_root(R, O, say, dry):
@@ -165,9 +286,10 @@ def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
         lines = open(p, encoding="utf-8").readlines()
         keep = [ln for ln in lines if len(ln.split("\t")) > 1 and ln.split("\t")[1] in workers]
         if len(keep) != len(lines):
-            say(f"  {p}：去掉 {len(lines) - len(keep)} 条已经没有的 worker 的跳过记录")
+            say(f"  {p}: drop {len(lines) - len(keep)} skip records of workers that no longer exist")
             if not dry:
                 (open(p, "w", encoding="utf-8").writelines(keep) if keep else os.remove(p))
+    english_failures(Q, say, dry)
 
 
 def op_root(A):
@@ -187,6 +309,7 @@ def op_root(A):
     D = os.path.join(R, proto.ROOT["data"])
     for d in [D] + [os.path.expanduser(x) for x in A["data"]]:
         rename_logs(d, keys, log.append, dry)
+        english_logs(d, log.append, dry)
     pins = os.path.join(R, proto.ROOT["pins"])
     for old in keys:
         p = os.path.join(pins, safe(old) + ".json")

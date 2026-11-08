@@ -15,6 +15,7 @@ hub 这一半由本文件 --run 起一个进程跑 migrate.main（进程里把�
 """
 import hashlib
 import json
+import re
 import shutil
 import os
 import sqlite3
@@ -132,8 +133,77 @@ ok("log_rename：前缀对上、后面作业名里有 __ 的（别的任务 infe
    and MG.log_rename("infer__base__piece_0__job_part1.log", {"infer/base": "zz/new"}) is None)
 ok("log_rename：_seg 后面不是段号、不是 .log 的不动",
    MG.log_rename("a__job_segx.log", {}) is None and MG.log_rename("a__job_seg1.txt", {}) is None)
-ok("log_rename：作业名里本来有 _seg 的只改最后一个",
+ok("log_rename: a job name that already has _seg only gets the last one changed",
    MG.log_rename("a__j_seg_seg2.log", {}) == "a__j_seg_part2.log")
+
+# ---------------- English rewrite of old part logs and failure records ----------------
+EL = os.path.join(T, "english")
+ED = os.path.join(EL, "data")
+out, say = [], [].append
+
+
+def old_head(job, part, key, env="base", code="abc1234", t="2026-11-01 10:00:00"):
+    return f"作业 {job}_{part} @ node1，任务={key}，第 {part} 段，环境 {env}，代码 {code}，{t}\n"
+
+
+CASES = {
+    "done": "done/key",
+    "gpu": "gpu/key",
+    "failed": "failed/key",
+    "not_started": "not_started/key",
+    "unreadable": "unreadable/key",
+    "stalled": "stalled/key",
+}
+write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('done/key')}__j_2_part1.log"),
+      old_head("j", 2, "done/key") + "训完 2026-11-01 11:00:00\n")
+write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('gpu/key')}__j_1_part1.log"),
+      old_head("j", 1, "gpu/key") + "2026-11-01 10:02:00 卡 0 被别人占着，等了 30 分钟还没空出来，不跑\n")
+write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('failed/key')}__j_1_part1.log"),
+      old_head("j", 1, "failed/key") + "2026-11-01 10:03:00 命令结束（退出码 1），没训完（第 1 次）\n")
+write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('not_started/key')}__j_1_part1.log"),
+      old_head("j", 1, "not_started/key") + "2026-11-01 10:04:00 没开训：这台机器没有环境 x\n")
+write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('unreadable/key')}__j_1_part1.log"),
+      old_head("j", 1, "unreadable/key") + "2026-11-01 10:05:00 命令结束（退出码 1），读不了盘，判断不了训完没有\n")
+write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('stalled/key')}__w_1_part1.log"),
+      old_head("w", 1, "stalled/key")
+      + "当作卡住 2026-11-01 11:00:00：日志和结果文件夹 30 分钟没有变化，作业 w 停掉它\n")
+MG.english_logs(ED, say, False)
+import tasklog as TL  # noqa: E402
+st = {k: TL.parse(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe(CASES[k])}__"
+                               f"{'w' if k == 'stalled' else 'j'}_1_part1.log"), CASES[k])[0]
+      for k in CASES if k != "done"}
+st["done"] = TL.parse(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('done/key')}__j_2_part1.log"), "done/key")[0]
+ok("english_logs: migrated logs parse to the same states, exit codes and part number",
+   {k: a["state"] for k, a in st.items()} == {"done": "done", "gpu": "gpu_busy", "failed": "failed", "not_started": "not_started",
+                                               "unreadable": "unreadable", "stalled": "stalled"}
+   and st["done"]["part"] == 2 and st["failed"]["exit"] == 1
+   and st["not_started"]["note"] == "this machine has no env x (machine table machines.py)"
+   and st["stalled"]["note"] == "log and output dir unchanged for 30 minutes, job w stopped it")
+ok("english_logs: no Chinese left in the migrated logs",
+   not any(re.search(r"[\u4e00-\u9fff]", read(os.path.join(ED, proto.TASK_LOGS, f))) for f in os.listdir(os.path.join(ED, proto.TASK_LOGS))))
+BEFORE = {f: read(os.path.join(ED, proto.TASK_LOGS, f)) for f in os.listdir(os.path.join(ED, proto.TASK_LOGS))}
+out2, say2 = [], [].append
+MG.english_logs(ED, say2, False)
+ok("english_logs: a second run changes nothing and reports nothing",
+   {f: read(os.path.join(ED, proto.TASK_LOGS, f)) for f in os.listdir(os.path.join(ED, proto.TASK_LOGS))} == BEFORE and not out2)
+HALF = write(os.path.join(ED, proto.TASK_LOGS, "half__j_part1.log"),
+             old_head("j", 1, "half/key") + "DONE 2026-11-01 11:00:00\n" + "2026-11-01 11:01:00 命令结束（退出码 0），没训完（第 1 次）\n")
+MG.english_logs(ED, say2, False)
+ok("english_logs: a half-rewritten log comes out fully new",
+   read(HALF) == (proto.LOG_HEAD_FMT % ("j_1", "node1", "half/key", 1, "base", "abc1234", "2026-11-01 10:00:00") + "\n"
+                  + "DONE 2026-11-01 11:00:00\n" + "2026-11-01 11:01:00 command ended (exit 0), not done (attempt 1)\n"))
+
+FQ = os.path.join(EL, "queue")
+write(os.path.join(FQ, proto.QUEUE["failures"], proto.safe("k/a")),
+      "2026-11-01 10:00:00\t作业 1\tboom\tA\n2026-11-01 10:01:00\tjob 2\tboom\tB\n")
+MG.english_failures(FQ, say2, False)
+import taskq  # noqa: E402
+KEEP_TQ = taskq.TQ
+taskq.TQ = FQ
+ok("english_failures: old job field rewritten, new line kept, fail_lines counts both",
+   read(os.path.join(FQ, proto.QUEUE["failures"], proto.safe("k/a")))
+   == "2026-11-01 10:00:00\tjob 1\tboom\tA\n2026-11-01 10:01:00\tjob 2\tboom\tB\n" and taskq.failures("k/a") == 2)
+taskq.TQ = KEEP_TQ
 
 # ---------------- merge_root：目标还没有 blobs/ ----------------
 MR, MO = os.path.join(T, "mr", "new"), os.path.join(T, "mr", "old")
@@ -242,7 +312,9 @@ write(os.path.join(L1, f"{sf(INF)}__lab0-gpu_seg1.log"), "a")
 write(os.path.join(L1, f"{sf(INF)}__j2_part1.log"), "old")
 write(os.path.join(L1, f"{sf(NINF)}__j2_part1.log"), "new")  # 目标已有：不覆盖
 write(os.path.join(L1, f"{sf(SRC)}__j_seg2.log"), "b")
-write(os.path.join(L1, f"{sf(INF)}__x__j_part1.log"), "c")  # 作业名里有 __：别的任务的
+write(os.path.join(L1, f"{sf(INF)}__x__j_part1.log"),
+      "作业 j_1 @ node1，任务=other/key，第 1 段，环境 base，代码 abc1234，2026-11-01 10:00:00\n"
+      "2026-11-01 10:00:01 开始\n训完 2026-11-01 11:00:00\n")  # 作业名里有 __：别的任务的
 write(os.path.join(R1, proto.blob(H1)), "ckpt")
 write(os.path.join(D1, VIEW, "dataset.json"), "{}")
 os.makedirs(os.path.join(D1, VIEW, "frag_0"))
@@ -325,8 +397,8 @@ ok(f"不加 --apply：退出码 0，盘上一个字节都不变（{d[:5]} {err.s
 ok("列出：丢掉的旧任务和原因（对不上的、和别的对上同一个实例的）",
    f"丢掉 {GONE}：实验表里没有产出是它的步骤" in out and f"丢掉 {DUP}：和别的任务对上同一个步骤实例 {NINF}" in out)
 ok("列出：各台做什么（改名的分段日志、目标已有留着的、并根目录、去掉的跳过记录、删的钉住记录）",
-   "个分段日志改名" in out and "留着" in out and f"{OLD1}/{proto.ROOT['data']}/{proto.TASK_LOGS} → {R1}" in out
-   and "已经没有的 worker 的跳过记录" in out and "删钉住记录" in out)
+   "part logs" in out and "留着" in out and f"{OLD1}/{proto.ROOT['data']}/{proto.TASK_LOGS} → {R1}" in out
+   and "skip records of workers that no longer exist" in out and "删钉住记录" in out)
 ok("列出：冒烟记录、状态目录里删的、sha256 缓存，最后说没改",
    "冒烟记录：['lab0', 'lab1', 'site-slurm'] → ['site-pueue', 'site-slurm']" in out
    and all(f"删 {p}" in out for p in JUNK) and not any(f"删 {p}" in out for p in KEEP)
@@ -383,7 +455,7 @@ ok("交还：按新任务名、机器改名、两段的补原因 back，三段�
    and read(os.path.join(TQ, Q["released"], sf(SRC))) == f"1700000001.0 site-slurm {proto.RELEASE_WHY['failed']}\n"
    and not os.path.exists(os.path.join(TQ, Q["released"], sf(EV))))
 ok("失败记录：按新任务名，第 2 段（作业 <机器>）里的机器名改了",
-   read(os.path.join(TQ, Q["failures"], sf(NINF))) == "2026-11-01 10:00:00\t作业 site-pueue\tboom\tbefore-migrate\n")
+   read(os.path.join(TQ, Q["failures"], sf(NINF))) == "2026-11-01 10:00:00\tjob site-pueue\tboom\tbefore-migrate\n")
 ok("跳过记录：机器名改了",
    read(os.path.join(TQ, Q["skips"], sf(SRC))) == "2026-11-01 10:00:00\tsite-pueue\t放不下\n2026-11-01 11:00:00\tsite-slurm\t放不下\n")
 ok("缺输入、停止记录：按新任务名",
@@ -442,6 +514,10 @@ ok(f"site-pueue 的分段日志：改名、_seg → _part；作业名里有 __ �
    sorted(os.listdir(L1)) == sorted([f"{sf(NINF)}__lab0-gpu_part1.log", f"{sf(INF)}__j2_part1.log", f"{sf(NINF)}__j2_part1.log",
                                      f"{sf(SRC)}__j_part2.log", f"{sf(INF)}__x__j_part1.log", f"{sf(NEV)}__lab1-gpu_part1.log"])
    and read(os.path.join(L1, f"{sf(NINF)}__j2_part1.log")) == "new" and read(os.path.join(L1, f"{sf(INF)}__j2_part1.log")) == "old")
+ok("old part logs on an executor are rewritten to English",
+   read(os.path.join(L1, f"{sf(INF)}__x__j_part1.log"))
+   == "job j_1 @ node1, task=other/key, part 1, env base, code abc1234, 2026-11-01 10:00:00\n"
+      "2026-11-01 10:00:01 开始\nDONE 2026-11-01 11:00:00\n")
 ok("并根目录：旧根目录的分段日志、worker 日志搬过来；site-pueue 已有同名的留在旧根目录",
    read(os.path.join(L1, f"{sf(NEV)}__lab1-gpu_part1.log")) == "d"
    and read(os.path.join(D1, proto.WORKER_LOGS, "w_9.out")) == "e"
@@ -483,7 +559,7 @@ rc, out, err = run("--apply", *REN, *MERGE)
 d = diff(t2, tree())
 ok(f"再跑一次 --apply：退出码 0，盘上不再变（{d[:5]} {(err or '').strip()[-300:]}）", rc == 0 and d == [])
 ok("再跑一次：没有改名、丢掉的；名字没变的记录不列成\"留着\"（只剩旧根目录里那个同名的）",
-   "0 个改成步骤实例的名字，丢掉 0 个" in out and "个分段日志改名" not in out
+   "0 个改成步骤实例的名字，丢掉 0 个" in out and "part logs" not in out
    and [ln for ln in out.splitlines() if "留着" in ln and LO not in ln] == [])
 
 print("全部通过" if not fails else f"{fails} 项失败")

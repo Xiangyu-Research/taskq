@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""一个任务的经过：每段训练（run_task.sh 的分段日志）、事件日志里关于它的、hub 的任务记录。
+"""One task's history: each training part (run_task.sh's part logs), event log rows about it, and hub task records.
 
-    taskq log <key> [--data 目录] [--json]
+    taskq log <key> [--data DIR] [--json]
 
-段：<数据目录>/logs/tasks/<safe key>__<作业>_part<段>.log里每个开头行（proto.LOG_HEAD）算一段：作业、机器
-（按作业名认）、主机、第几段、环境、代码、开始；后面的行里认结束（proto.TASKLOG_STATES）：训完、命令结束和退出码、没开训、
-等不到卡、被当作卡住；都没有时日志 FRESH_LOG 内更新过算还在跑，否则算没有结束的记录。path 是日志的完整路径，日志里别的内容
-（任务自己的输出）由使用者自己读。
-数据目录：--data，没给时 cfg.data_dir()。hub 上执行机训的段在拉回以后才有（拉回带着这个任务的
-分段日志）；还在执行机上的看 taskq status --all --json 的 parts，或在那边 taskq log --data <根目录>/data。
-事件日志（hub 的数据库）和任务记录（tasks.json）只在 hub 上有，别的机器上是空的。
---json：一行 JSON，字段见 proto 的 TASKLOG_*。
+Parts: each header line (proto.LOG_HEAD) in <data dir>/logs/tasks/<safe key>__<job>_part<part>.log is one part: job, machine
+(by job name), host, part number, env, code, start; later lines give the end (proto.TASKLOG_STATES): done, command ended and
+exit code, not started, GPU never free, stopped as stalled; with none, a log updated within FRESH_LOG is still running,
+otherwise it has no end record. path is the log's full path; other content in the log (the task's own output) is the user's
+to read.
+Data dir: --data, else cfg.data_dir(). On the hub, parts trained on executors appear only after the fetch (the fetch brings
+this task's part logs); for parts still on an executor see taskq status --all --json's parts, or taskq log --data
+<root>/data there.
+The event log (hub database) and task records (tasks.json) exist only on the hub; elsewhere they are empty.
+--json: one JSON line, fields in proto's TASKLOG_*.
 """
 import argparse
 import glob
@@ -28,9 +30,10 @@ import proto  # noqa: E402
 HEAD = re.compile(proto.LOG_HEAD)
 TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 LINE_TS = re.compile(r"^" + TS + r"(?:\.\d+)?:? ?(.*)$")
-ENDED = re.compile(r"^" + TS + r" 命令结束（退出码 (-?\d+)），(.*)$")
-NOT_STARTED = re.compile(r"^" + TS + r" 没开训：(.*)$")
-GPU_BUSY = re.compile(r"^" + TS + r" 卡 \S+ 被别人占着.*不跑$")
+ENDED = re.compile(r"^" + TS + r" " + proto.LOG_ENDED_RE + r"$")
+NOT_STARTED = re.compile(r"^" + TS + r" " + proto.LOG_NOT_STARTED_RE + r"$")
+GPU_BUSY = re.compile(r"^" + TS + r" " + proto.LOG_GPU_BUSY_RE + r"$")
+STALLED = re.compile(r"^" + re.escape(proto.STALL_LINE) + r" " + TS + r":? ?(.*)$")
 
 
 def data_dir(arg=None):
@@ -50,7 +53,7 @@ def machine_of(job):
 
 
 def log_files(key, data):
-    """这个任务的分段日志（不含 key 更长的别的任务的：前缀后面不再有 SAFE）。"""
+    """This task's part logs (not another task's with a longer key: no SAFE after the prefix)."""
     pre = proto.safe(key) + proto.SAFE
     d = os.path.join(data, proto.TASK_LOGS)
     out = [p for p in glob.glob(os.path.join(glob.escape(d), glob.escape(pre) + "*.log"))
@@ -59,7 +62,7 @@ def log_files(key, data):
 
 
 def parse(path, key, now=None):
-    """一个分段日志 → [段]（proto.TASKLOG_ATTEMPT）。"""
+    """One part log -> [parts] (proto.TASKLOG_ATTEMPT)."""
     out, cur = [], None
     with open(path, errors="replace") as f:
         for ln in f:
@@ -83,13 +86,13 @@ def parse(path, key, now=None):
             if ln.startswith(proto.DONE_LINE):
                 t = re.search(TS, ln)
                 cur.update(state="done", end=t.group(1) if t else cur["last"], exit=0)
-            elif ln.startswith(proto.STALL_LINE):
-                t = re.search(TS, ln)
-                cur.update(state="stalled", end=t.group(1) if t else cur["last"], note=ln.split("：", 1)[-1].strip())
+            elif STALLED.match(ln):
+                m = STALLED.match(ln)
+                cur.update(state="stalled", end=m.group(1), note=m.group(2))
             elif ENDED.match(ln):
                 m = ENDED.match(ln)
                 rc, rest = int(m.group(2)), m.group(3)
-                st = "unreadable" if rest.startswith("读不了盘") else ("not_done" if rc == 0 else "failed")
+                st = "unreadable" if rest.startswith(proto.LOG_UNREADABLE) else ("not_done" if rc == 0 else "failed")
                 cur.update(state=st, end=m.group(1), exit=rc)
             elif NOT_STARTED.match(ln):
                 m = NOT_STARTED.match(ln)
@@ -145,22 +148,22 @@ def collect(key, data, now=None):
 
 
 def show(r):
-    print(f"任务 {r['key']}（数据目录 {r['data'] or '不知道'}）：{len(r['attempts'])} 段")
+    print(f"task {r['key']} (data dir {r['data'] or 'unknown'}): {len(r['attempts'])} parts")
     for a in r["attempts"]:
         res = proto.TASKLOG_STATES.get(a["state"], a["state"])
         if a["exit"] not in (None, 0):
-            res += f"（退出码 {a['exit']}）"
+            res += f" (exit {a['exit']})"
         if a["note"]:
-            res += f"：{a['note']}"
+            res += f": {a['note']}"
         where = a["machine"] if a["machine"] and a["machine"] != a["job"] else ""
-        print(f"  第 {a['part']} 段  作业 {a['job']}{f'（{where}）' if where else ''} @ {a['host']}  {a['start']} → {a['end'] or a['last']}  "
-              f"{res}  环境 {a['env']}  代码 {a['code']}")
+        print(f"  part {a['part']}  job {a['job']}{f' ({where})' if where else ''} @ {a['host']}  {a['start']} -> {a['end'] or a['last']}  "
+              f"{res}  env {a['env']}  code {a['code']}")
     if r["events"]:
-        print(f"\n事件日志里关于它的 {len(r['events'])} 条：")
+        print(f"\n{len(r['events'])} event log rows about it:")
         for e in r["events"]:
             print(f"  {e['time'] or '':19}  {e['log']:8} {e['text']}")
     if r["records"]:
-        print(f"\nhub 的任务记录 {len(r['records'])} 条：")
+        print(f"\n{len(r['records'])} hub task records:")
         for x in r["records"]:
             when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(x["added"])) if isinstance(x.get("added"), (int, float)) else ""
             rest = {k: v for k, v in x.items() if k not in ("key", "added", "machine", "step", "label")}
@@ -168,14 +171,14 @@ def show(r):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="一个任务的每段训练、事件日志里关于它的、hub 的任务记录")
+    ap = argparse.ArgumentParser(description="One task's training parts, event log rows about it, and hub task records")
     ap.add_argument("key")
-    ap.add_argument("--data", help="数据目录（默认 cfg.data_dir()）")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（proto 的 TASKLOG_*）")
+    ap.add_argument("--data", help="data dir (default cfg.data_dir())")
+    ap.add_argument("--json", action="store_true", help="one JSON line (proto's TASKLOG_*)")
     a = ap.parse_args(argv)
     data = data_dir(a.data)
     if a.data and not os.path.isdir(data):
-        print(f"taskq log：没有数据目录 {data}", file=sys.stderr)
+        print(f"taskq log: no data dir {data}", file=sys.stderr)
         return 2
     r = collect(a.key, data)
     if a.json:

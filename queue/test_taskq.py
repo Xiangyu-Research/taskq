@@ -150,8 +150,8 @@ os.makedirs(os.path.join(TQC, "failures"))
 os.makedirs(os.path.join(RC, "code", "B", "scripts", "taskq", "queue"))
 os.symlink("B", os.path.join(RC, "code", "current"))
 now_c = time.strftime("%F %T")
-open(os.path.join(TQC, "failures", "k__a"), "w").write(f"{now_c}\t作业 1\tx\tA\n{now_c}\t作业 2\tx\tA\n")
-open(os.path.join(TQC, "failures", "k__b"), "w").write(f"{now_c}\t作业 3\tx\tB\n{now_c}\t作业 4\tx\t\n")
+open(os.path.join(TQC, "failures", "k__a"), "w").write(f"{now_c}\tjob 1\tx\tA\n{now_c}\tjob 2\tx\tA\n")
+open(os.path.join(TQC, "failures", "k__b"), "w").write(f"{now_c}\tjob 3\tx\tB\n{now_c}\tjob 4\tx\t\n")
 keep = taskq.TQ, taskq.HERE, os.environ.get("TASKQ_ROOT")
 taskq.TQ = TQC
 check("不在执行机的根目录里：失败全算", taskq.recent_failures() == 4 and taskq.failures("k/a") == 2)
@@ -488,7 +488,7 @@ write_jsonl(os.path.join(TQ4, "tasks.jsonl"), [(i, 0, k) for i, k in enumerate(k
 os.makedirs(os.path.join(TQ4, "failures"))
 for k in ks4[:2]:
     with open(os.path.join(TQ4, "failures", taskq.safe(k)), "w") as f:
-        f.write(f"{time.strftime('%F %T')}\t作业 1\tx\t\n" * 2)
+        f.write(f"{time.strftime('%F %T')}\tjob 1\tx\t\n" * 2)
 
 
 def tq4(*args, root=D4):
@@ -924,7 +924,7 @@ rc, out = tqx("release", "--worker", "w1", "--token", tok, "x/a", "--failed", "�
 check("迟到的 release --failed（领取已经没了）：不记失败，说一句", rc == 0 and not os.path.exists(xp("failures", "x/a")) and "不记失败" in out)
 
 now_s = time.strftime("%F %T")
-for sub, line in (("failures", f"{now_s}\t作业 1\tx\t\n"), ("inputs", f"{time.time()}\tW\tx\n"), ("released", f"{time.time()} W\n"),
+for sub, line in (("failures", f"{now_s}\tjob 1\tx\t\n"), ("inputs", f"{time.time()}\tW\tx\n"), ("released", f"{time.time()} W\n"),
                   ("skips", f"{now_s}\tw\t放不下\n")):
     os.makedirs(os.path.join(TQX, sub), exist_ok=True)
     open(xp(sub, "x/b"), "w").write(line)
@@ -1083,7 +1083,7 @@ for k in ("s/half", "s/bad"):
     open(os.path.join(LOGS, k.replace("/", "__") + "__host-1107_part1.log"), "w").close()
 os.makedirs(os.path.join(TQP, "failures"), exist_ok=True)
 with open(os.path.join(TQP, "failures", "s__bad"), "w") as f:
-    f.write("2026-11-07 10:00:00\t作业 p0\t退出码 1\t\n")
+    f.write("2026-11-07 10:00:00\tjob p0\t退出码 1\t\n")
 got = [tqp("next", "--worker", f"s{i}", "--envs", "stats")[1].split("\n")[0] for i in range(4)]
 check("next：没有 resume 的步骤跑过、交还的同一档先领；失败过的、只有子 key 日志的照加的先后",
       got == ["s/half", "s/new", "s/bad", "s/half/sub"])

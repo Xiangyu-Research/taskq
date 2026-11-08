@@ -167,7 +167,7 @@ rm -f "$T/unreadable"
 reset
 touch "$T/badspec"
 FAKE_SHELL2=$T/badspec SLURM_JOB_ID=900210 TASKQ_SLOTS=1 timeout 60 bash "$T/core/queue/worker_start.sh" > "$T/w2r.out" 2>&1
-check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退出码 2：没开训：任务说明有问题：spec.py：不认识的 {nosuch}" $TASKQ_DIR/failures/t__u'
+check "退出码 2：失败原因带上分段日志里的原因" 'grep -q "退出码 2：not started: bad task spec: spec.py：不认识的 {nosuch}" $TASKQ_DIR/failures/t__u'
 rm -f "$T/badspec"
 fi
 

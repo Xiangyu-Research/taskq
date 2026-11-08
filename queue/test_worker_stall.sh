@@ -17,7 +17,7 @@ EOT
 (TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/a timeout 40 bash "$HERE/worker_start.sh") > "$T/w.out" 2>&1
 check "pueue worker：卡住的 t/a 被停掉、交还" 'grep -q "t/a 的日志和结果文件夹 .*当作卡住" $T/w.out && grep -q "^term t/a" $T/train.log'
 check "pueue worker：卡住后接着训 t/b" 'grep -q "end .* t/b" $T/train.log'
-check "第一次卡住：只交还，不记失败" '[[ ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "^当作卡住" $TASKQ_DATA/logs/tasks/t__a__*_part1.log'
+check "第一次卡住：只交还，不记失败" '[[ ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "^STALLED" $TASKQ_DATA/logs/tasks/t__a__*_part1.log'
 
 # 停不下来的（run_task.sh 退出了、训练还在）：空出位置训别的，接着心跳，真停下了才交还；还在时不退出
 reset

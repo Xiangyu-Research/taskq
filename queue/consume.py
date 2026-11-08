@@ -742,7 +742,7 @@ class Worker:
             say(f"{r.key} 的日志和结果文件夹 {q // 60} 分钟没有变化，当作卡住：停掉、交还，领下一个")
             try:
                 with open(self.task_log(r), "a") as f:
-                    f.write(f"{proto.STALL_LINE} {ts()}：日志和结果文件夹 {q // 60} 分钟没有变化，作业 {self.W} 停掉它\n")
+                    f.write(f"{proto.STALL_LINE} {ts()}: log and output dir unchanged for {q // 60} minutes, job {self.W} stopped it\n")
             except OSError:
                 pass
             r.stalled, r.why = now, "stall"

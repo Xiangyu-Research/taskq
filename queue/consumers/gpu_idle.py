@@ -1,5 +1,6 @@
-"""等卡空（常驻的 worker，CUDA_VISIBLE_DEVICES 一张卡）：卡上没有别人的进程、别人占的显存 ≤ 500 MiB，并且 GPU 使用记录里
-最近 TASK_GPU_IDLE 分钟这张卡上没有别人，才去领任务；不放行就不领，空等时记一句（状态变了或每 30 分钟）。"""
+"""Wait for a free GPU (resident worker, CUDA_VISIBLE_DEVICES is one GPU): claim only when no one else's processes are on it, others'
+memory is <= 500 MiB, and the GPU usage records show no one else on it for the last TASK_GPU_IDLE minutes; otherwise do not claim and
+log a line while waiting (when the state changes, or every 30 minutes)."""
 import os
 import subprocess
 import time
@@ -13,7 +14,7 @@ def active(w):
 
 
 def setup(w):
-    w.gpu_wait = None  # (状态, 开始等的时刻, 上次记的时刻)
+    w.gpu_wait = None  # (state, waiting since, last logged)
 
 
 def admit(w):
@@ -33,12 +34,12 @@ def admit(w):
     if st != state or now - said >= 1800:
         waited = int((now - since) // 60)
         if state == "seen":
-            w.say(f"卡 {cvd} 空着，别人 {seen} 还在用，空满 {idle_min} 分钟再跑（已等 {waited} 分钟）")
+            w.say(f"GPU {cvd} free, but someone {seen} still used it; waiting {idle_min} minutes of quiet (waited {waited} minutes)")
         else:
-            w.say(f"卡 {cvd} 被别人占着，等它空出来（已等 {waited} 分钟）")
+            w.say(f"GPU {cvd} busy, waiting for it (waited {waited} minutes)")
         said = now
     w.gpu_wait = (state, since, said)
-    return "卡被别人占着" if state == "busy" else f"别人 {seen} 用过卡"
+    return "GPU busy" if state == "busy" else f"someone {seen} used the GPU"
 
 
 def _smi(cvd, *q):
@@ -50,7 +51,7 @@ def _smi(cvd, *q):
 
 
 def gpu_free(cvd):
-    """卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算）。"""
+    """No one else's processes on the GPU, others' memory <= 500 MiB (our own account's processes do not count)."""
     used = _smi(cvd, "--query-gpu=memory.used", "--format=csv,noheader,nounits").split("\n")[0].strip()
     mine = 0
     for ln in _smi(cvd, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits").split("\n"):
@@ -67,7 +68,8 @@ def gpu_free(cvd):
 
 
 def gpu_seen(cvd, idle_min):
-    """GPU 使用记录里最近 idle_min 分钟这张卡上别人最后一次出现的时刻（"%F %T"）；没有 → None。没有记录文件 → 只看现在。"""
+    """Last time someone else appeared on this GPU in the last idle_min minutes of GPU usage records ("%F %T"); None when never. No
+    records -> only look now."""
     if not idle_min or idle_min == "0":
         return None
     d = os.environ.get("GPU_LOG_DIR") or os.path.expanduser(proto.GPU_LOG_DIR)

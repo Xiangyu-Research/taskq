@@ -121,7 +121,7 @@ waitfor 20 'grep -q "卡 1 空着，别人 .* 还在用，空满 60 分钟再跑
 sleep 4
 check "别人刚用过卡：不领、也不因为空闲退出" 'kill -0 $wpid && [[ ! -s $T/train.log && $(nclaims) == 0 ]]'
 : > "$f"; touch "$T/busy"
-waitfor 20 'grep -q "卡 1 被别人占着，等它空出来" $T/widle.out'
+waitfor 20 'grep -q "GPU 1 busy, waiting for it" $T/widle.out'
 check "卡被别人的进程占着：不领" '[[ ! -s $T/train.log && $(nclaims) == 0 ]]'
 rm -f "$T/busy"
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
@@ -130,9 +130,9 @@ touch "$T/busy"
 run() { TASK_JOBTAG=x TASK_KEY=t/r CUDA_VISIBLE_DEVICES=1 RUN_TASK_GPU_POLL=1 PATH=$T/bini:$PATH \
     timeout 8 bash "$HERE/run_task.sh" command key=t/r "cmd=bash $T/fake_train.sh t/r" env=base out=runs/t/r 'done=["DONE"]' device=gpu > "$T/rt.out" 2>&1; }
 run; rc=$?
-check "run_task.sh 手动跑：卡被占着就等" '[[ $rc == 124 ]] && grep -q "卡 1 被别人占着" $T/rt.out'
+check "run_task.sh 手动跑：卡被占着就等" '[[ $rc == 124 ]] && grep -q "GPU 1 busy" $T/rt.out'
 TASKQ_ADMITTED=1 run; rc=$?
-check "run_task.sh 由消费者开（TASKQ_ADMITTED=1）：不再等卡" '[[ $rc == 0 ]] && ! grep -q "卡 1 被别人占着" $T/rt.out && grep -q "^end .* t/r" $T/train.log'
+check "run_task.sh 由消费者开（TASKQ_ADMITTED=1）：不再等卡" '[[ $rc == 0 ]] && ! grep -q "GPU 1 busy" $T/rt.out && grep -q "^end .* t/r" $T/train.log'
 fi
 
 # slurm. Slurm 作业：作业号当名字，按核数和内存定同时几个，时限查不到之后再查，本地暂存目录交给 run_task.sh，结束时删掉

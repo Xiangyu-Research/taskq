@@ -1,124 +1,124 @@
 #!/usr/bin/env python3
-"""调度的协议：跨脚本、跨机器共用的名字、目录布局、格式、常数、退出码和字段，都只在这里定义。
-盘上的格式改了，同一次切换里写进 taskq self migrate（改写盘上的旧格式），所有执行机一起换代码包。
+"""Scheduler protocol: names, directory layout, formats, constants, exit codes and fields shared across scripts and machines live only here.
+When an on-disk format changes, add the rewrite of the old format to taskq self migrate in the same cutover; every executor switches bundles together.
 
-只用标准库、不 import 别的调度文件（执行机上的 site_ops.py、bash 脚本经 proto.py sh 都读它）。
-  python3 proto.py sh     给 bash 的赋值语句（eval "$(python3 proto.py sh)"），名字是 TQ_<大写>
-  python3 proto.py json   全部协议（JSON）
+Standard library only, no imports of other scheduler files (site_ops.py on executors and bash scripts read it via proto.py sh).
+  python3 proto.py sh     assignments for bash (eval "$(python3 proto.py sh)"), names are TQ_<UPPER>
+  python3 proto.py json   the whole protocol (JSON)
 """
 import json
 import sys
 
-VERSION = 1  # 跨版本的命令（status --json、collect --json）输出里带上；字段只加不改，改了才加 1
+VERSION = 1  # included in cross-version command output (status --json, collect --json); fields are add-only, bump only when changed
 
-# ---------------- 执行机根目录 R（机器表 machines.py 的 root；relay.py 建，代码包里的 worker 用） ----------------
+# ---------------- executor root R (the root in the machine table machines.py; relay.py creates it, the bundle's worker uses it) ----------------
 ROOT = dict(
-    code="code",                 # 代码包 code/<包名>（relay_bundle.py，名字是内容哈希）
-    current="code/current",      # 在用的代码包（软链接；排着的作业开始时才解析）
-    queue="queue",               # 执行机的任务队列（TASKQ_DIR）
-    blobs="blobs",               # 数据文件，按 sha256 存
-    data="data",                 # 各任务的视图（TASKQ_DATA）
-    state="state",               # relay 的记账
-    pins="state/pins",           # 正在传、视图还没建好的任务钉住的 blob（relay.py stage 写，relay_store.py gc 不删）
-    envs_ok="state/envs",        # 环境装好了的标志 <环境>.ok（sites/envs.py）
-    hashes="state/hashes.db",    # store 上数据文件的 sha256 缓存（按路径、大小、修改时间；site_ops.hashes）
-    view_lock="state/view.lock",  # 建视图、删视图的锁
-    deploy_lock="state/deploy.lock",  # 推代码包的锁（relay.py deploy）
-    tmp="tmp",                   # 传到一半的临时文件
-    envs="envs",                 # 执行机上装的环境（conda、venv）
+    code="code",                 # bundle code/<bundle> (relay_bundle.py, the name is a content hash)
+    current="code/current",      # bundle in use (symlink; resolved when a queued job starts)
+    queue="queue",               # the executor's task queue (TASKQ_DIR)
+    blobs="blobs",               # data files, stored by sha256
+    data="data",                 # views of each task (TASKQ_DATA)
+    state="state",               # relay bookkeeping
+    pins="state/pins",           # blobs pinned by tasks being transferred or whose view is not ready (relay.py stage writes, relay_store.py gc keeps)
+    envs_ok="state/envs",        # marker that an env is built <env>.ok (sites/envs.py)
+    hashes="state/hashes.db",    # sha256 cache of data files on the store (by path, size, mtime; site_ops.hashes)
+    view_lock="state/view.lock",  # lock for creating and removing views
+    deploy_lock="state/deploy.lock",  # lock for pushing bundles (relay.py deploy)
+    tmp="tmp",                   # temp files for half-transferred files
+    envs="envs",                 # envs installed on the executor (conda, venv)
 )
-# 代码包里调度核心的位置（相对包的根）：排着的 Slurm 作业开始时、worker 命令都按这个位置找启动脚本
+# where the scheduler core sits inside a bundle (relative to the bundle root): queued Slurm jobs and worker commands find the launcher there
 BUNDLE_CORE = "scripts/taskq"
-IO_GROUP = "taskq"  # pueue 机器、hub、store 上核心自己的组（传数据、拉回、归档；同时跑不限），sites/mtab.groups 建
-WORKER_LABEL = "worker:"  # pueue 执行机上 worker 任务的标签前缀：worker:<id>（sites/pueue.py）
-MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/logs/workers")  # relay.py 第一次建根目录时建的
+IO_GROUP = "taskq"  # the core's own group on pueue machines, the hub and the store (transfers, fetches, archives, unbounded concurrency), sites/mtab.groups creates it
+WORKER_LABEL = "worker:"  # label prefix for worker tasks on pueue executors: worker:<id> (sites/pueue.py)
+MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/logs/workers")  # created when relay.py first makes the root
 
 
 def blob(h):
-    """sha256 → 根目录下的相对路径（blob 只有这一种布局：执行机的 blobs、节点本地盘的缓存都是）。"""
+    """sha256 -> relative path under the root (one blob layout: executor blobs and node-local caches alike)."""
     return f"blobs/{h[:2]}/{h}"
 
 
-BLOB_STAT = ".st"       # blobs/<h2>/<h>.st：收进来、核对过 sha256 时 blob 的"大小 修改时间(ns)"；对不上（硬链接的源头被原地改过）→ 丢掉重收
-PIN_TTL = 12 * 3600     # 钉住的 blob（state/pins/<key>.json）这么久没更新就不算钉着
-TMP_KEEP = 24 * 3600    # blobs 里带点的临时文件（传到一半）这么久内不清理
-TMP = ".tmp"            # 写到一半的文件的结尾（common.tmp_of：<名字>.<进程号>.tmp），写完再改名
-OUT_GB = 10             # 任务说明没写 out_gb 时，挑执行机时给它的产出（存档、结果）留的 GB（refill.choose）
+BLOB_STAT = ".st"       # blobs/<h2>/<h>.st: "size mtime(ns)" of a blob when ingested and sha256-checked; mismatch (hardlink source changed in place) -> drop and ingest again
+PIN_TTL = 12 * 3600     # a pinned blob (state/pins/<key>.json) no longer counts as pinned after this long without an update
+TMP_KEEP = 24 * 3600    # temp files with a dot in blobs (half-transferred) are kept this long
+TMP = ".tmp"            # suffix of half-written files (common.tmp_of: <name>.<pid>.tmp), renamed when done
+OUT_GB = 10             # GB reserved for a task's outputs (archive, results) when choosing an executor and the spec has no out_gb (refill.choose)
 
 
-# ---------------- 队列目录（总队列和执行机的一样，taskq.py） ----------------
+# ---------------- queue dirs (the hub queue and executors use the same layout, taskq.py) ----------------
 QUEUE = dict(
-    tasks="tasks.jsonl",      # 每行一个任务
+    tasks="tasks.jsonl",      # one task per line
     claims="claims",          # claims/<safe key>/info
     failures="failures",
     skips="skips",
-    inputs="inputs",          # 缺输入
-    released="released",      # 最近一次交还："<时间> <worker> <原因>"（原因见 RELEASE_WHY）
-    stopped="stopped",        # stopped/<safe key>：停止的任务，在训的 worker 每 5 秒看一次
-    enabled="ENABLED",        # 总开关：排着的 worker 开始时没有它就结束（worker_start.sh）
+    inputs="inputs",          # missing inputs
+    released="released",      # last release: "<time> <worker> <why>" (see RELEASE_WHY)
+    stopped="stopped",        # stopped/<safe key>: stopped tasks; running workers check every 5 seconds
+    enabled="ENABLED",        # master switch: a queued worker exits at start when it is absent (worker_start.sh)
     lock="lock",
-    gpu_pad_off="gpu_pad_DISABLED",  # 执行机的显存填充总开关（cfg.state("gpu_pad/DISABLED")，STATE_IN_ROOT）
+    gpu_pad_off="gpu_pad_DISABLED",  # executor's GPU pad master switch (cfg.state("gpu_pad/DISABLED"), STATE_IN_ROOT)
 )
 CLAIM_INFO = "info"
-# claims/<key>/info 的字段：worker 领的（执行机的队列）/ 总队列分给执行机的
-CLAIM_FIELDS = ("worker", "host", "since", "beat", "token", "log")  # log：分段日志名里的作业名（next --log-tag；没有时同 worker）
+# fields of claims/<key>/info: claimed by a worker (executor queue) / assigned by the hub queue to an executor
+CLAIM_FIELDS = ("worker", "host", "since", "beat", "token", "log")  # log: job name in the part log (next --log-tag; same as worker when absent)
 ASSIGN_FIELDS = ("worker", "host", "since", "beat", "assigned")
 
-# ---------------- 执行机上的进程（设了 TASKQ_ROOT）的状态在根目录里的位置（cfg.state；其余在 state/ 下） ----------------
-STATE_IN_ROOT = {"taskq": ROOT["queue"], "gpu_pad/DISABLED": ROOT["queue"] + "/" + QUEUE["gpu_pad_off"]}  # 其余 → state/
+# ---------------- state of processes on an executor (TASKQ_ROOT) inside the root (cfg.state; the rest is under state/) ----------------
+STATE_IN_ROOT = {"taskq": ROOT["queue"], "gpu_pad/DISABLED": ROOT["queue"] + "/" + QUEUE["gpu_pad_off"]}  # everything else -> state/
 
-# ---------------- 标志文件 ----------------
-INCOMPLETE = ".incomplete"     # 文件夹建到一半（tunnel_push.sh、relay 建视图）；任一层有就算缺
-MANIFEST = "MANIFEST.json"     # 拉回的结果：最后拷，有它才算拉完（relay_transfer.py）
-RELAY_INBOX = ".relay_in"      # store 数据目录下拉回到一半的结果 .relay_in/<safe key>（site_ops.py pull）
-STAGE_DIR_PREFIX = "taskq_stage_"  # 节点本地盘上的输入副本 $TMPDIR/taskq_stage_<作业号>（inputs.py、run_task.sh、consumers/slurm.py）
-GPU_PAD_BASE = "/tmp/gpu_pad_"  # 显存填充和 worker 的握手 /tmp/gpu_pad_<作业号>{.mib,.ready,.start}
+# ---------------- marker files ----------------
+INCOMPLETE = ".incomplete"     # a dir half created (tunnel_push.sh, relay making a view); any level means missing
+MANIFEST = "MANIFEST.json"     # fetched result: written last, only present when the fetch is complete (relay_transfer.py)
+RELAY_INBOX = ".relay_in"      # half-fetched results in the store data dir .relay_in/<safe key> (site_ops.py pull)
+STAGE_DIR_PREFIX = "taskq_stage_"  # input copy on node-local disk $TMPDIR/taskq_stage_<job> (inputs.py, run_task.sh, consumers/slurm.py)
+GPU_PAD_BASE = "/tmp/gpu_pad_"  # GPU pad and worker handshake /tmp/gpu_pad_<job>{.mib,.ready,.start}
 GPU_PAD_FILES = (".mib", ".ready", ".start")
 
-# ---------------- 日志 ----------------
-TASK_LOGS = "logs/tasks"       # 数据目录下：分段日志 <safe key>__<作业>_part<段>.log
-WORKER_LOGS = "logs/workers"   # worker、显存填充、Slurm 的 %x_%j.out
+# ---------------- logs ----------------
+TASK_LOGS = "logs/tasks"       # under the data dir: part logs <safe key>__<job>_part<part>.log
+WORKER_LOGS = "logs/workers"   # workers, GPU pad, Slurm's %x_%j.out
 LOG_PART = "part"
-DONE_LINE = "训完"             # 分段日志里以它开头的行 = 训完（run_task.sh 写，spec.py 认）
-STALL_LINE = "当作卡住"        # 分段日志里以它开头的行 = 被 worker 当作卡住停掉（consume.py 写、数）
+DONE_LINE = "DONE"             # a part log line starting with it = done (run_task.sh writes, spec.py reads)
+STALL_LINE = "STALLED"         # a part log line starting with it = stopped by the worker as stalled (consume.py writes and counts)
 
-# ---------------- GPU 使用记录（monitor/gpu_log.sh 写；run_task.sh 的 TASK_GPU_IDLE、健康检查读） ----------------
-GPU_LOG_DIR = "~/gpu_usage"      # 环境变量 GPU_LOG_DIR 可以改
-GPU_LOG_FILE = "gpu_%Y-%m.csv"   # 每月一个（strftime）
-GPU_LOG_PID = "gpu_log.pid"      # GPU_LOG_DIR 里：在跑的那个 gpu_log.sh 的进程号，它跑着时一直锁着（flock）；on_boot.sh 看锁决定开不开
+# ---------------- GPU usage records (monitor/gpu_log.sh writes; run_task.sh's TASK_GPU_IDLE and the health check read) ----------------
+GPU_LOG_DIR = "~/gpu_usage"      # override with GPU_LOG_DIR
+GPU_LOG_FILE = "gpu_%Y-%m.csv"   # one per month (strftime)
+GPU_LOG_PID = "gpu_log.pid"      # in GPU_LOG_DIR: pid of the running gpu_log.sh, locked (flock) while it runs; on_boot.sh checks the lock
 
-# ---------------- key → 文件名 ----------------
+# ---------------- key -> filename ----------------
 SAFE = "__"
 
 
 def safe(key):
-    """key → 文件名（领取记录、停止、分段日志）。"""
+    """key -> filename (claim records, stops, part logs)."""
     return key.replace("/", SAFE)
 
 
 def task_log(key, job, part=1, kind="part"):
-    """分段日志相对数据目录的路径。"""
+    """Path of a part log relative to the data dir."""
     return f"{TASK_LOGS}/{safe(key)}{SAFE}{job}_{kind}{part}.log"
 
 
-# ---------------- 经 ssh 读回的 JSON ----------------
-JSON_MARK = "@@JSON "  # 只认以它开头的那一行（spec.json_out / json_in）
+# ---------------- JSON read back over ssh ----------------
+JSON_MARK = "@@JSON "  # only the line starting with it is read (spec.json_out / json_in)
 
-# ---------------- 时间（秒） ----------------
-STALE_BEAT = 20 * 60   # 领取的心跳这么久没续算过期
-FRESH_LOG = 15 * 60    # 分段日志这么久内更新过，算还在训（不领）
-HALF_CLAIM = 5 * 60    # 只建了目录、没有 info 的领取，这么久后算过期
-BEAT = 5 * 60          # worker 心跳间隔
-# 旧代码包的清理（relay.deploy 清根目录的 code/，relay_bundle.prune 清 hub 上建的包）
-CODE_KEEP = 3                # 除了在用的，再留最近的几个包
-CODE_KEEP_S = 4 * 86400      # 根目录 code/ 下这么久内碰过的包不删（在跑的 worker 每圈碰自己的包）
-CODE_CLAIM_SLACK = 3600      # 还领着的任务里最早的领取前这么久起碰过的包也不删：换包后接着跑的任务还在用领取时那个包
+# ---------------- time (seconds) ----------------
+STALE_BEAT = 20 * 60   # a claim whose heartbeat has not been renewed for this long is stale
+FRESH_LOG = 15 * 60    # a part log updated within this long counts as still running (not claimed)
+HALF_CLAIM = 5 * 60    # a claim with only a dir and no info is stale after this long
+BEAT = 5 * 60          # worker heartbeat interval
+# old bundle cleanup (relay.deploy cleans the root's code/, relay_bundle.prune cleans bundles built on the hub)
+CODE_KEEP = 3                # keep the most recent bundles besides the one in use
+CODE_KEEP_S = 4 * 86400      # bundles under the root's code/ touched within this long are kept (running workers touch theirs every round)
+CODE_CLAIM_SLACK = 3600      # also keep bundles touched since this long before the earliest claim among tasks still claimed: a task that keeps running after a switch still uses its claim's bundle
 
 
 def claim_alive(info, made, now, log_age=None, stale=None, fresh=None, half=None):
-    """一个执行机队列里的领取还活着吗（taskq.py 和 hub 上读那边的 relay_remote.py 都用这一条）。
-    info：claims/<key>/info 的内容（读不到 = None）；made：目录的修改时间；log_age：分段日志多久没更新（秒）。
-    stale、fresh、half：代替 STALE_BEAT、FRESH_LOG、HALF_CLAIM（taskq.py 的测试用环境变量改）。"""
+    """Is a claim in an executor queue still alive (shared by taskq.py and the hub reading it through relay_remote.py)?
+    info: contents of claims/<key>/info (None when unreadable); made: dir mtime; log_age: seconds since the part log last changed.
+    stale, fresh, half: override STALE_BEAT, FRESH_LOG, HALF_CLAIM (taskq.py tests change them through env vars)."""
     if info is None:
         return now - made <= (HALF_CLAIM if half is None else half)
     if info.get("assigned"):
@@ -128,96 +128,96 @@ def claim_alive(info, made, now, log_age=None, stale=None, fresh=None, half=None
     return log_age is not None and log_age < (FRESH_LOG if fresh is None else fresh)
 
 
-# ---------------- 任务的状态（taskq.py state()，local_status 的 state） ----------------
+# ---------------- task states (taskq.py state(), local_status state) ----------------
 STATES = dict(
-    free="能领",
-    claimed="有人领着（或分给了执行机）",
-    busy="没人领着，但训练日志 15 分钟内更新过",
-    stale="领取过期",
-    failed="失败 2 次",
-    input="缺输入",
-    stopped="停止",
-    bad="说明解析不了",
-    done="训完",
+    free="claimable",
+    claimed="claimed (or assigned to an executor)",
+    busy="unclaimed, but its training log changed within 15 minutes",
+    stale="claim expired",
+    failed="failed twice",
+    input="missing inputs",
+    stopped="stopped",
+    bad="spec cannot be parsed",
+    done="done",
 )
 S_FREE, S_CLAIMED, S_BUSY, S_STALE = "free", "claimed", "busy", "stale"
 S_FAILED, S_INPUT, S_STOPPED, S_BAD, S_DONE = "failed", "input", "stopped", "bad", "done"
 assert {S_FREE, S_CLAIMED, S_BUSY, S_STALE, S_FAILED, S_INPUT, S_STOPPED, S_BAD, S_DONE} == set(STATES)
-UNCLAIMED = (S_FREE, S_STALE)  # 没人领着、可以领的
-# 分给执行机、hub 先不送过去的原因（relay 的状态 held 的 why；queue/bundle_gate.py）
-HELD = dict(bundle="bundle-incompatible")  # 那台在用的代码包跑不了这个说明
+UNCLAIMED = (S_FREE, S_STALE)  # unclaimed and claimable
+# why the hub holds a task assigned to an executor (the relay state's held why; queue/bundle_gate.py)
+HELD = dict(bundle="bundle-incompatible")  # the bundle in use there cannot run this spec
 
-# ---------------- 退出码 ----------------
+# ---------------- exit codes ----------------
 EXIT = dict(
     # taskq.py
-    next_ok=0, nothing=10, wait=11, paused=12, lost=13,  # next / beat --strict；12 也表示读不了数据目录
+    next_ok=0, nothing=10, wait=11, paused=12, lost=13,  # next / beat --strict; 12 also means the data dir is unreadable
     refused=3, gone=4,                                   # remove
-    no_queue=2,                                          # 不在 hub、本机又没有队列
+    no_queue=2,                                          # not on the hub and no local queue
     # run_task.sh
     run_done=0, run_failed=1, run_bad=2, run_not_done=3, run_missing=4, run_unreadable=5, run_term=143,
     # spec.py done
     done_yes=0, done_no=1, done_bad=2, done_unreadable=5,
     # relay.py stage
     stage_later=75,
-    # common.run：超时、起不来
+    # common.run: timeout, failed to start
     timeout=124,
 )
 
-# ---------------- 字段表 ----------------
-# taskq.local_status() 每个任务（tasks.jsonl 的一行之外）
+# ---------------- field tables ----------------
+# taskq.local_status() per task (beyond a line of tasks.jsonl)
 STATUS_FIELDS = ("spec", "state", "note", "worker", "host", "since", "assigned", "input_since", "beat", "log_age",
-                 "task_log_age", "out_age", "failures", "skipped_by", "progress")  # progress：这台上做了一半（taskq.has_progress）
+                 "task_log_age", "out_age", "failures", "skipped_by", "progress")  # progress: half-done on this machine (taskq.has_progress)
 STATUS_TOP = ("enabled", "tasks", "recent_failures", "paused", "recent_skips")
-TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec", "added")  # tasks.jsonl 的一行；added：加进这个队列的时间
-# released/<key> 的第三项：为什么交还（taskq.py 按 release 的参数记，worker 的调用方式不变）
-RELEASE_WHY = dict(back="back",        # 普通交还：被停、到时限、卡住、这一轮不训了
+TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec", "added")  # a line of tasks.jsonl; added: when it entered this queue
+# third item of released/<key>: why it was released (taskq.py records it from release's arguments; worker calls do not change)
+RELEASE_WHY = dict(back="back",        # normal release: stopped, time limit, stalled, not training this round
                    failed="failed",    # release --failed
-                   skip="skip",        # release --skip：这台训不了
-                   missing="missing")  # missing：缺输入
-COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume")  # spec.collect 要的说明字段
-COLLECT_TOP = ("tasks", "seglogs", "stuck", "errors")  # spec.collect 的结果
-COLLECT_TASK = ("runs", "final", "metrics", "debug", "resumable")  # 每个任务
+                   skip="skip",        # release --skip: this machine cannot run it
+                   missing="missing")  # missing: missing inputs
+COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume")  # spec fields spec.collect wants
+COLLECT_TOP = ("tasks", "seglogs", "stuck", "errors")  # result of spec.collect
+COLLECT_TASK = ("runs", "final", "metrics", "debug", "resumable")  # per task
 SEGLOG_FIELDS = ("name", "first", "trained")
-LOG_HEAD_CODE = r"代码 (\S+?)，"  # 分段日志第一行（run_task.sh 写）里代码提交号的写法（正则）
+LOG_HEAD_CODE = r"code (\S+?),"  # how the code commit appears in the first part log line (run_task.sh writes; regex)
 
-# experiments.py list --json / tasks --json：一行 JSON，可调用的对象写成名字，别的对象写成 {"type": 类名, 属性…}
-EXP_LIST_TOP = ("version", "experiments", "final")      # experiments：实验表的条目（experiments.EXP_FIELDS 的字段）；final：FINAL 的步骤
+# experiments.py list --json / tasks --json: one JSON line, callable objects by name, other objects as {"type": class name, attributes…}
+EXP_LIST_TOP = ("version", "experiments", "final")      # experiments: experiment table entries (experiments.EXP_FIELDS); final: FINAL steps
 EXP_TASKS_TOP = ("version", "tasks")
-EXP_TASK_FIELDS = ("key", "exp", "recipe", "params", "each", "short", "label", "names", "spec")  # label：hub pueue 标签里的任务名
-# cli_json.py（taskq exp steps）：flow/compile.py 的实例里每个任务的步骤（task）、实验一级的（group）、FINAL（final），命令按 names 填好
-EXP_STEPS_TOP = ("version", "data", "steps", "errors")  # errors：实验表推实例时的问题（flow.errors）
-# id：实例 id；out：产出（第一个是主目录）；inputs：声明的输入（展开好的）；done：--done 时第一个产出下 done 的文件都在没有；
-# needs：--needs 时 inputs_cmd 打印的输入；没要、没写时 null
+EXP_TASK_FIELDS = ("key", "exp", "recipe", "params", "each", "short", "label", "names", "spec")  # label: task name in the hub pueue label
+# cli_json.py (taskq exp steps): each task's steps in flow/compile.py instances (task), experiment level (group), FINAL (final), command filled from names
+EXP_STEPS_TOP = ("version", "data", "steps", "errors")  # errors: problems pushing the experiment table to instances (flow.errors)
+# id: instance id; out: outputs (the first is the main dir); inputs: declared inputs (expanded); done: with --done, whether done files are present under the first output;
+# needs: with --needs, inputs printed by inputs_cmd; null when not asked or absent
 EXP_STEP_FIELDS = ("level", "exp", "key", "id", "name", "cmd", "names", "out", "inputs", "done", "needs", "error")
 
-# cli_json.py（taskq machines show）：核心按机器表算出来的值
+# cli_json.py (taskq machines show): values the core computes from the machine table
 MSHOW_TOP = ("version", "hub", "machines", "specs")
 MSHOW_MACHINE = ("name", "label", "scheduler", "roles", "executor", "paused", "kinds", "workers", "worker_cmds", "groups", "root",
                  "root_q", "ready_envs", "activate", "task_sh")
-# workers：mtab.workers 的列表；worker_cmds：{worker id: 开它的 pueue add 命令}（pueue 执行机）；groups：{组名: [同时跑几个, 卡号, 环境变量]}；
-# paused：PAUSE 里现在暂停的原因或 null；ready_envs：不看建好的标志就能用的环境；task_sh：spec shell 在这台加的语句
-MSHOW_SPEC = ("hash", "base", "torch", "error")  # torch：{变体: index_url}；error：描述读不了时的原因，没问题时 null
+# workers: mtab.workers list; worker_cmds: {worker id: pueue add command to start it} (pueue executors); groups: {group: [slots, GPUs, env]};
+# paused: current pause reason in PAUSE or null; ready_envs: envs usable without a built marker; task_sh: statements spec shell adds on this machine
+MSHOW_SPEC = ("hash", "base", "torch", "error")  # torch: {variant: index_url}; error: why the description is unreadable, null when fine
 
-# cli_json.py（taskq spec export / import）：中继插件送出、拉回核对
-RELAY_EXPORT_TOP = ("version", "plugin", "params", "files", "texts", "views", "outs", "cleanup", "logs")  # logs：分段日志的文件名前缀
+# cli_json.py (taskq spec export / import): sent by relay plugins, checked on fetch
+RELAY_EXPORT_TOP = ("version", "plugin", "params", "files", "texts", "views", "outs", "cleanup", "logs")  # logs: part log filename prefixes
 RELAY_IMPORT_TOP = ("version", "written")
 
-# overview.py --json：登记表这类汇总要的全部状态，一行 JSON
+# overview.py --json: all state a summary like the ledger needs, one JSON line
 OVERVIEW_TOP = ("version", "now", "hub", "data", "queue", "sources", "machines", "tasks", "health", "code")
-OVERVIEW_QUEUE_TOP = ("enabled", "readable")               # 总队列开着没、读到没
-OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # 收集到训练状态的地方；kind：machine（gather 收集的）/ relay（relay.py 的 status.json）
-OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus：[{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
-OVERVIEW_PUEUE = ("groups", "tasks", "error")              # tasks 每个：qs --json 的字段，加 start_ts、end_ts（秒）、about（plain.label：[实验, 做了什么, 简称] 或 null）
+OVERVIEW_QUEUE_TOP = ("enabled", "readable")               # hub queue enabled, readable
+OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # where training state was collected; kind: machine (gather) / relay (relay.py status.json)
+OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus: [{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
+OVERVIEW_PUEUE = ("groups", "tasks", "error")              # each task: qs --json fields plus start_ts, end_ts (seconds), about (plain.label: [experiment, what, short] or null)
 OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
                  "eta", "parts", "commits")
-OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank：总队列里没做完的任务中排第几（1 起）
+OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank: position among unfinished tasks in the hub queue (1-based)
 OVERVIEW_COPY = ("where", "source", "final", "epochs", "start", "last", "runs", "metrics", "debug", "resumable")
-OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # 分段日志：作业、第几段、哪台机器、至少做完一轮没、代码提交号
-OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain：推送用的白话（plain.problem）
-TOTAL_INFO = "num_epochs"  # 进度读法 INFO 里"一共几轮"的键（runs 里没有 total 时用；overview 的 total、progress、eta）
+OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part log: job, part number, machine, at least one round done, code commit
+OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain: push text in plain words (plain.problem)
+TOTAL_INFO = "num_epochs"  # key in INFO for "total rounds" (used when runs have no total; overview total, progress, eta)
 
-# ---------------- 报警（health.py 的问题编号；plain.py 按 kind 说白话） ----------------
-# 编号 = kind:<参数>…，参数按下面的顺序用 ":" 连起来；同一编号的问题只推一次
+# ---------------- alerts (problem ids in health.py; plain.py explains them by kind) ----------------
+# id = kind:<args>…, args joined with ":" in the order below; a problem with the same id is pushed once
 ALERTS = dict(
     down=("machine",), unread=("machine",), readerr=("machine",), collect=("machine",), code=("machine",), taskq=("machine",),
     tqoff=("machine",), tqblocked=("key",), tqroom=("key",), pueued=("machine",), pueue=("machine", "id", "end"),
@@ -233,7 +233,7 @@ def alert_id(kind, *args):
     return ":".join([kind] + [str(a) for a in args if a not in (None, "")])
 
 
-# 问题的值：说明文字（str），或 dict(msg=说明, data={…}, after=持续几分钟才报)（plain.py 读 data，不从文字里抠）
+# a problem's value: message text (str), or dict(msg=text, data={…}, after=minutes before reporting) (plain.py reads data, never parses text)
 def alert(msg, after=0, **data):
     v = dict(msg=msg, data=data) if data else {"msg": msg}
     if after:
@@ -249,147 +249,161 @@ def alert_data(v):
     return (v.get("data") or {}) if isinstance(v, dict) else {}
 
 
-# ---------------- 环境变量（TASKQ_*）：谁设、什么意思；kind = run（生产里会设）/ tune（阈值，生产不设、用默认）/ test（只给测试） ----------------
+# ---------------- env vars (TASKQ_*): who sets them, what they mean; kind = run (set in production) / tune (threshold, default in production) / test (tests only) ----------------
 ENV = dict(
-    TASKQ_DATA=("run", "这个进程的数据目录（run_task.sh、worker_start.sh 按 cfg.data_dir 设给任务的命令）；没设时 cfg.data_dir 按 TASKQ_ROOT、store 的 data 算"),
-    TASKQ_ROOT=("run", "执行机上的进程：这台的根目录（pueue 的 worker 命令、worker.sbatch、relay_remote.prefix 设）；队列、状态、数据目录由它算（cfg.state、cfg.data_dir）"),
-    TASKQ_DIR=("test", "队列目录（测试用）；没设时 cfg.state('taskq')"),
-    TASKQ_CONFIG=("run", "配置文件夹（machines.py、policy.py）；没设时用使用者仓库 .taskq.toml 的 config，没有 .taskq.toml 时用 <仓库>/config（cfg.py）"),
-    TASKQ_PLUGINS=("run", "插件文件夹；没设时用使用者仓库 .taskq.toml 的 plugins（cfg.py）"),
-    TASKQ_STATE=("run", "状态文件夹的根；没设时用配置里的（cfg.py）"),
-    TASKQ_REPO=("run", "使用者的仓库根；没设时：核心嵌在 <仓库>/scripts/taskq 里就是 <仓库>，否则按 project.py 找项目，找不到是核心本身"),
-    TASKQ_PROJECT=("run", "使用者的项目根（有 .taskq.toml）；没设时从当前目录往上找（project.py）"),
-    TASKQ_HOME=("run", "install.sh 把 taskq 克隆到哪里（默认 ~/.local/share/taskq）"),
-    TASKQ_ORIGIN=("run", "install.sh 从哪里克隆（默认 GitHub 上的仓库）"),
-    TASKQ_CPUS=("run", "Slurm 外的 worker 最多用几个核（pueue 的 worker 命令按 machines.py 的 cpus 设）"),
-    TASKQ_GPU_PAD=("run", "0 = 这个作业不开显存填充（自己推理、分析的脚本设）"),
-    TASKQ_GPU_PAD_STARTED=("run", "显存填充已经开了（gpu_pad_start.sh 设，免得重复开）"),
-    TASKQ_LIB=("run", "调度核心的 queue/ 文件夹（run_task.sh 给任务的命令设，同时把核心的 bin/ 加在 PATH 前面）"),
-    TASKQ_ENVS=("run", "worker 能领的环境（逗号分隔）；没设时看 machines.py 的 envs"),
-    TASKQ_PROG=("run", "bin/taskq 转给 bash 脚本时的命令名（如 taskq boot），脚本的用法、出错里用；脚本读完就 unset"),
-    TASKQ_TASK_DONE=("run", "hub 核心组（IO_GROUP：传数据、拉回、归档、建环境）的任务做完后 kick 健康检查时设成它的标签（refill.then_check）"),
-    TASKQ_SLOTS=("tune", "一个 worker 最多同时训几个；Slurm 里按核数和内存（2 或 1），Slurm 外看 machines.py 的 slots"),
-    TASKQ_MACHINE=("run", "本机是机器表里的哪台（pueue 的 worker 命令、worker.sbatch、relay_remote.prefix 设）；没设时按主机名认唯一匹配的那台"),
-    TASKQ_HEAD_CMD=("test", "代替读代码版本的命令"),
-    TASKQ_GPU_PAD_SCRIPT=("test", "代替 gpu_pad.py"),
-    TASKQ_GPU_PAD_BASE=("test", "代替 /tmp/gpu_pad_<作业号>"),
-    TASKQ_TEST_FAKEBIN=("test", "假命令所在的文件夹"),
-    TASKQ_LAST=("test", "代替状态目录的 last"),
-    TASKQ_TASKS=("test", "代替状态目录的 tasks.json（任务记录）"),
-    TASKQ_LOCK_WAIT=("test", "等锁时每次重试的间隔（秒，默认 0.5）"),
-    TASKQ_STALE_BEAT=("test", "代替 STALE_BEAT"),
-    TASKQ_FRESH_LOG=("test", "代替 FRESH_LOG"),
+    TASKQ_DATA=("run", "this process's data dir (run_task.sh, worker_start.sh set it from cfg.data_dir for the task's command); when unset cfg.data_dir derives it from TASKQ_ROOT or the store's data"),
+    TASKQ_ROOT=("run", "process on an executor: this machine's root (set by pueue worker commands, worker.sbatch, relay_remote.prefix); queue, state and data dir derive from it (cfg.state, cfg.data_dir)"),
+    TASKQ_DIR=("test", "queue dir (tests only); when unset cfg.state('taskq')"),
+    TASKQ_CONFIG=("run", "config dir (machines.py, policy.py); when unset the user repo's .taskq.toml config, or <repo>/config without .taskq.toml (cfg.py)"),
+    TASKQ_PLUGINS=("run", "plugins dir; when unset the user repo's .taskq.toml plugins (cfg.py)"),
+    TASKQ_STATE=("run", "root of the state dir; when unset the one from config (cfg.py)"),
+    TASKQ_REPO=("run", "the user's repo root; when unset: <repo> if the core is embedded in <repo>/scripts/taskq, otherwise project.py finds the project, else the core itself"),
+    TASKQ_PROJECT=("run", "the user's project root (with .taskq.toml); when unset searches upward from the current dir (project.py)"),
+    TASKQ_HOME=("run", "where install.sh clones taskq (default ~/.local/share/taskq)"),
+    TASKQ_ORIGIN=("run", "where install.sh clones from (default the GitHub repo)"),
+    TASKQ_CPUS=("run", "max cores for a worker outside Slurm (pueue worker commands set it from machines.py's cpus)"),
+    TASKQ_GPU_PAD=("run", "0 = no GPU pad for this job (set by inference and analysis scripts)"),
+    TASKQ_GPU_PAD_STARTED=("run", "GPU pad already started (set by gpu_pad_start.sh to avoid starting twice)"),
+    TASKQ_LIB=("run", "the scheduler core's queue/ dir (run_task.sh sets it for the task's command and puts the core's bin/ first on PATH)"),
+    TASKQ_ENVS=("run", "envs a worker may claim (comma separated); when unset machines.py's envs"),
+    TASKQ_PROG=("run", "command name bin/taskq passes to bash scripts (such as taskq boot), used in usage and errors; scripts unset it after reading"),
+    TASKQ_TASK_DONE=("run", "set to its label when a task in the hub core group (IO_GROUP: transfer, fetch, archive, env build) finishes, to kick a health check (refill.then_check)"),
+    TASKQ_SLOTS=("tune", "max concurrent training tasks per worker; in Slurm by cores and memory (2 or 1), outside Slurm from machines.py slots"),
+    TASKQ_MACHINE=("run", "which machine in the machine table this is (set by pueue worker commands, worker.sbatch, relay_remote.prefix); when unset the unique hostname match"),
+    TASKQ_HEAD_CMD=("test", "replaces the command that reads the code version"),
+    TASKQ_GPU_PAD_SCRIPT=("test", "replaces gpu_pad.py"),
+    TASKQ_GPU_PAD_BASE=("test", "replaces /tmp/gpu_pad_<job>"),
+    TASKQ_TEST_FAKEBIN=("test", "dir holding fake commands"),
+    TASKQ_LAST=("test", "replaces the state dir's last"),
+    TASKQ_TASKS=("test", "replaces the state dir's tasks.json (task records)"),
+    TASKQ_LOCK_WAIT=("test", "retry interval while waiting for a lock (seconds, default 0.5)"),
+    TASKQ_STALE_BEAT=("test", "replaces STALE_BEAT"),
+    TASKQ_FRESH_LOG=("test", "replaces FRESH_LOG"),
 )
-# 消费者（consume.py）的阈值（tune），默认值在 consume.py 的 Worker.__init__
+# consumer (consume.py) thresholds (tune), defaults in consume.py's Worker.__init__
 for _k in ("ADD_AFTER", "UTIL_MAX", "MIN_LEFT", "PATIENCE", "ERR_MAX", "IDLE_MAX", "IDLE_POLL", "IDLE_EXIT", "EARLY_FAIL",
-           "FAIL_WINDOW", "FAIL_RETRY", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
-    ENV["TASKQ_" + _k] = ("tune", "consume.py 的阈值，默认值在 Worker.__init__")
-# 消费者换代码包：旧进程把手上的任务写成 JSON 放进 TASKQ_HANDOFF，exec 新包的 worker_start.sh，新进程接着管
-HANDOFF = 1                # 交接格式的版本；新进程只认同一版本，认不了的不接（领取过期后别人能领）
-HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks", "idle_since")  # idle_since（11/11）：手上空着的起点，换包后接着算 IDLE_EXIT；没有 → 从换包时算
+           "FAIL_WINDOW", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
+    ENV["TASKQ_" + _k] = ("tune", "consume.py threshold, default in Worker.__init__")
+# consumer bundle switch: the old process writes its tasks as JSON into TASKQ_HANDOFF and execs the new bundle's worker_start.sh, which takes over
+HANDOFF = 1                # handoff format version; a new process accepts only the same version, otherwise the claim expires and someone else can take it
+HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks")
 HANDOFF_TASK = ("pid", "key", "token", "started", "outdir", "safe", "jtag", "stalled", "why", "sid", "zomb", "ended")
-ENV["TASKQ_HANDOFF"] = ("run", "换代码包时旧的消费者交给新的：手上的任务（JSON，字段见 HANDOFF_TOP / HANDOFF_TASK）；worker_start.sh 见到它不再查总开关")
-ENV["TASKQ_ADMITTED"] = ("run", "1 = 消费者领之前已经查过卡空不空（gpu_idle 插件），run_task.sh 不再等卡")
-ENV["TASKQ_STAGE_ROOT"] = ("run", "节点本地的暂存目录（消费者的 slurm 插件设）；run_task.sh 只在有它时把输入拷到本地")
-ENV["TASKQ_DB"] = ("run", "hub 的数据库文件（db.py）；默认 <状态文件夹>/taskq.db")
-# 本机执行机（machines.py 里 ssh=None、兼 hub 的执行机）：hub 的进程带着的这些变量不传给它（同 ssh 到别处时那边本来没有），
-# 否则那边的 worker、taskq.py 会用 hub 的配置、数据目录和队列。relay_remote.site_argv、sites/pueue.py 的 worker 命令去掉它们
+ENV["TASKQ_HANDOFF"] = ("run", "tasks handed by the old consumer to the new one on a bundle switch (JSON, fields in HANDOFF_TOP / HANDOFF_TASK); worker_start.sh skips the master switch when set")
+ENV["TASKQ_ADMITTED"] = ("run", "1 = the consumer checked the GPU before claiming (gpu_idle plugin); run_task.sh no longer waits for it")
+ENV["TASKQ_STAGE_ROOT"] = ("run", "node-local staging root (set by the consumer's slurm plugin); run_task.sh copies inputs there only when set")
+ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state dir>/taskq.db")
+# local executor (a machine in machines.py with ssh=None that is also the hub): the hub process's own variables are not passed to it (as when
+# sshing elsewhere), otherwise its worker and taskq.py would use the hub's config, data dir and queue. relay_remote.site_argv and sites/pueue.py worker commands strip them
 HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_DATA", "TASKQ_DIR", "TASKQ_STATE",
                 "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_TASKS", "TASKQ_LAST")
-ENV["TASKQ_TEST_NOW"] = ("test", "放着一个时刻（epoch 秒）的文件：window 插件当作现在")
-# gpu_pad.py 的参数（tune），默认值在 gpu_pad.py 的命令行
+ENV["TASKQ_TEST_NOW"] = ("test", "a file holding a time (epoch seconds): the window plugin treats it as now")
+# gpu_pad.py arguments (tune), defaults on its command line
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
            "SETTLE", "START_HOLD", "RETRY_DELAY", "MAX_FAILS", "RESET_AFTER"):
-    ENV["TASKQ_GPU_PAD_" + _k] = ("tune", "gpu_pad.py 的参数，默认值在它的命令行")
+    ENV["TASKQ_GPU_PAD_" + _k] = ("tune", "gpu_pad.py argument, default on its command line")
 
 
-# 项目挂的提醒（taskq notice，monitor/notice.py）：在 hub 的数据库里；每条报一个问题 notice:<名字>
+# project notices (taskq notice, monitor/notice.py): in the hub database; each reports one problem notice:<name>
 NOTICE_NAME = r"[A-Za-z0-9_-]+"
 NOTICE_TOP = ("version", "notices")  # taskq notice list --json
-NOTICE_FIELDS = ("name", "text", "since", "at")  # since：最后一次挂上的时间（%Y-%m-%d %H:%M:%S）
+NOTICE_FIELDS = ("name", "text", "since", "at")  # since: when it was last posted (%Y-%m-%d %H:%M:%S)
 ALERTS["notice"] = ("name",)
-AUTO_SWITCHES = {  # policy.AUTO 的开关
-    "advance": "按实验表把训完以后的步骤加进总队列",
-    "envs": "执行机的 spec 环境按锁定文件建、换（True，或 {机器: [环境 或 (环境, 变体)]} 另外预建的，sites/envs.py）",
-    "revive": "pueued 没了时健康检查自动恢复",
-    "smoke": "执行机第一次训某种任务、环境换过以后先跑冒烟任务",
+AUTO_SWITCHES = {  # policy.AUTO switches
+    "advance": "add downstream steps of finished training to the hub queue from the experiment table",
+    "envs": "build and switch executors' spec envs from lock files (True, or {machine: [env or (env, variant)]} for extra prebuilt ones, sites/envs.py)",
+    "revive": "health check restores pueued when it is gone",
+    "smoke": "run a smoke task the first time an executor trains a kind, and after an env switch",
 }
-PUEUE_SEEN = "pueue_seen.json"  # 健康检查的状态文件夹下，{pueue 机器: {t: 最后一次查到 pueued 在的时间戳, running: [那时开着的组]}}（revive 用）
+PUEUE_SEEN = "pueue_seen.json"  # in the health check's state dir: {pueue machine: {t: last time pueued was seen, running: [groups running then]}} (for revive)
 
-# ---------------- 冒烟（smoke_gate.py） ----------------
-SMOKE_PREFIX = "_smoke/"   # 冒烟任务的 key：_smoke/<执行机>/<种类 id>-<时间>-<随机>（{smoke} = <执行机>-<种类 id>-<时间>-<随机>）
-SMOKE_DIR = "smoke"        # 总队列里：smoke/<执行机>.json，每种任务在那台机器上过没过
-SMOKE = ("ok", "failed", "queued")  # 记录的 state
-SMOKE_SRC = ("smoke", "real", "adopted")  # 记录的 src：冒烟任务、真任务训完、taskq smoke adopt
-SMOKE_NICE = -1000         # 冒烟任务的档位（排在最前）
-ALERTS["smoke"] = ("machine", "kind")  # 冒烟没过（kind = 种类 id）
+# ---------------- smoke (smoke_gate.py) ----------------
+SMOKE_PREFIX = "_smoke/"   # smoke task key: _smoke/<executor>/<kind id>-<time>-<random> ({smoke} = <executor>-<kind id>-<time>-<random>)
+SMOKE_DIR = "smoke"        # in the hub queue: smoke/<executor>.json, whether each kind passed on that machine
+SMOKE = ("ok", "failed", "queued")  # recorded state
+SMOKE_SRC = ("smoke", "real", "adopted")  # recorded src: smoke task, real task done, taskq smoke adopt
+SMOKE_NICE = -1000         # smoke task nice (runs first)
+ALERTS["smoke"] = ("machine", "kind")  # smoke failed (kind = kind id)
 
 
 def is_smoke(key):
     return str(key or "").startswith(SMOKE_PREFIX)
-ENV_BUILD = "env_build"    # 给执行机建环境的任务的步骤名（任务记录、pueue 标签 env_build:<机器>:<环境>）：在 hub 的核心组（IO_GROUP）排，环境建在那台执行机上
+ENV_BUILD = "env_build"    # step name of a task that builds an env for an executor (task record, pueue label env_build:<machine>:<env>): queued in the hub core group (IO_GROUP), env built on that executor
 
-# ---------------- 环境的锁（sites/envlock.py） ----------------
-WHEELHOUSE = "wheelhouse"      # 状态文件夹下：锁里的每个文件 wheelhouse/<sha256 前 2 位>/<sha256>
-LOCK_SUFFIX = ".lock.json"     # 环境描述旁边的锁 <名>.<变体>.lock.json
+# ---------------- env locks (sites/envlock.py) ----------------
+WHEELHOUSE = "wheelhouse"      # under the state dir: each locked file wheelhouse/<first 2 of sha256>/<sha256>
+LOCK_SUFFIX = ".lock.json"     # lock next to an env description <name>.<variant>.lock.json
 LOCK_FORMAT = 1
 LOCK_TOP = ("format", "name", "variant", "spec_sha256", "platform", "base", "conda", "pip", "tools", "created")
 LOCK_CONDA = ("name", "version", "build", "channel", "subdir", "url", "fn", "size", "md5", "sha256")
-LOCK_PIP = ("name", "version", "url", "fn", "size", "sha256", "no_deps")  # 本地建的纯 Python wheel：url 为 null，built_from 是源码包的网址
-LOCK_UNHASHED = ("created",)   # 算哈希时去掉的键（描述的哈希、base 的 lock_sha256）
+LOCK_PIP = ("name", "version", "url", "fn", "size", "sha256", "no_deps")  # pure-Python wheel built locally: url is null, built_from is the source archive URL
+LOCK_UNHASHED = ("created",)   # keys removed when hashing (the description's hash, base's lock_sha256)
 
 
 def wheel(h):
-    """sha256 → 状态文件夹下的相对路径。"""
+    """sha256 -> relative path under the state dir."""
     return f"{WHEELHOUSE}/{h[:2]}/{h}"
 
 
-# ---------------- 一个任务的经过（taskq log，queue/tasklog.py） ----------------
-# 分段日志里每段开头那一行（run_task.sh 写）：作业_段 @ 主机，任务=key，第 N 段，环境 E，代码 C，开始时刻
-LOG_HEAD = r"作业 (\S+) @ ([^，]+)，任务=([^，]*)，第 (\d+) 段，环境 ([^，]*)，代码 ([^，]*)，(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+# ---------------- one task's history (taskq log, queue/tasklog.py) ----------------
+# first line of each part in a part log (run_task.sh writes): job_part @ host, task=key, part N, env E, code C, start time
+LOG_HEAD_FMT = "job %s @ %s, task=%s, part %s, env %s, code %s, %s"  # printf format: job, host, key, part, env, code, start
+LOG_HEAD = r"job (\S+) @ ([^,]+), task=([^,]*), part (\d+), env ([^,]*), code ([^,]*), (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+# lines after the header (tasklog.py reads):
+LOG_ENDED_FMT = "command ended (exit %s), %s"  # command, exit code, rest
+LOG_ENDED_RE = r"command ended \(exit (-?\d+)\), (.*)"
+LOG_NOT_STARTED_FMT = "not started: %s"
+LOG_NOT_STARTED_RE = r"not started: (.*)"
+LOG_GPU_BUSY_FMT = "GPU %s busy%s, not running"
+LOG_GPU_BUSY_RE = r"GPU \S+ busy.*not running"
+LOG_UNREADABLE = "disk unreadable"           # prefix of the ENDED rest when the data dir cannot be read
 TASKLOG_TOP = ("version", "key", "data", "attempts", "events", "records")
 TASKLOG_ATTEMPT = ("file", "path", "job", "machine", "host", "part", "env", "code", "start", "end", "last", "state", "exit", "note")
-TASKLOG_EVENT = ("log", "time", "text")  # records：hub 的任务记录（tasks.json）里这个 key 的条目，原样
+TASKLOG_EVENT = ("log", "time", "text")  # records: this key's entry in the hub's task records (tasks.json), as is
 TASKLOG_STATES = dict(
-    done="训完",
-    not_done="命令正常结束，没训完",
-    failed="命令出错（exit 是退出码）",
-    unreadable="读不了盘，判断不了训完没有",
-    not_started="没开训（note 是原因）",
-    gpu_busy="卡被别人占着，等不到",
-    stalled="被 worker 当作卡住停掉",
-    running="日志 FRESH_LOG 内更新过，还在跑",
-    ended="没有结束的记录（被停掉、交还或作业结束）",
+    done="done",
+    not_done="command exited normally but training did not finish",
+    failed="command failed (exit is the exit code)",
+    unreadable="disk unreadable, cannot tell whether training finished",
+    not_started="did not start (note is the reason)",
+    gpu_busy="GPU was busy, gave up waiting",
+    stalled="stopped by the worker as stalled",
+    running="log updated within FRESH_LOG, still running",
+    ended="no end record (stopped, released or the job ended)",
 )
 
-# ---------------- GPU 使用记录的汇总（taskq gpu usage，monitor/gpu_usage.py） ----------------
-GPU_USAGE_TOP = ("version", "dir", "me", "days", "from", "to", "hours", "spans", "totals")  # hours：{weekday|weekend: [GPU_USAGE_HOUR]}
-GPU_USAGE_HOUR = ("gpu", "hour", "n", "other", "me", "idle")  # n：这个钟点的记录数；other、me、idle：其中别人在用、只有自己、空着的个数
-GPU_USAGE_SPAN = ("gpu", "user", "start", "end", "hours", "max_mem_mib", "programs")  # 别人的每段使用
+# failure record line failures/<key> (taskq.py writes and reads): time, job, reason, bundle that ran it
+FAIL_LINE_FMT = "%s\tjob %s\t%s\t%s"
+
+# ---------------- GPU usage summary (taskq gpu usage, monitor/gpu_usage.py) ----------------
+GPU_USAGE_TOP = ("version", "dir", "me", "days", "from", "to", "hours", "spans", "totals")  # hours: {weekday|weekend: [GPU_USAGE_HOUR]}
+GPU_USAGE_HOUR = ("gpu", "hour", "n", "other", "me", "idle")  # n: records at this hour; other, me, idle: how many had someone else, only me, idle
+GPU_USAGE_SPAN = ("gpu", "user", "start", "end", "hours", "max_mem_mib", "programs")  # each use by someone else
 GPU_USAGE_TOTAL = ("gpu", "user", "hours")
 
 
-# ---------------- hub 的数据库和事件记录（queue/db.py、queue/events.py） ----------------
-DB = "taskq.db"  # 在状态文件夹下
-# 状态文件夹（cfg.state）第一层的名字：taskq self migrate 删掉不在这里的（旧版本留下的）
+# ---------------- hub database and event log (queue/db.py, queue/events.py) ----------------
+DB = "taskq.db"  # under the state dir
+# names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tasks.json", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
                WHEELHOUSE, "envlock", DB)
-EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json，一行一个
-# 来源 → 纯文字日志的名字（cfg.log；"health" 即 health.log）：这几个来源的事件同时写一行进去，方便 tail
+EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
+# source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
 TEXT_LOGS = {"relay": "relay", "feed": "feed", "advance": "advance", "health": "health"}
 PROGRESS_TOP = ("version", "rows")  # taskq progress --json
-PROGRESS_FIELDS = ("time", "t", "key", "state", "progress", "site", "data")  # 状态、进度或所在机器变一次记一行
-PROBLEMS_TOP = ("version", "checked", "problems")  # taskq problems --json；每个问题的字段见 OVERVIEW_PROBLEM
+PROGRESS_FIELDS = ("time", "t", "key", "state", "progress", "site", "data")  # a row whenever state, progress or machine changes
+PROBLEMS_TOP = ("version", "checked", "problems")  # taskq problems --json; each problem's fields in OVERVIEW_PROBLEM
 
 
-# ---------------- 给 bash ----------------
+# ---------------- for bash ----------------
 def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_DIR_PREFIX": STAGE_DIR_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
            "TQ_WORKER_LOGS": WORKER_LOGS, "TQ_STALL_LINE": STALL_LINE, "TQ_DONE_LINE": DONE_LINE, "TQ_JSON_MARK": JSON_MARK,
            "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT,
            "TQ_GPU_LOG_DIR": GPU_LOG_DIR, "TQ_GPU_LOG_FILE": GPU_LOG_FILE, "TQ_GPU_LOG_PID": GPU_LOG_PID,
-           "TQ_BUNDLE_CORE": BUNDLE_CORE}
-    out.update({f"TQ_GPU_PAD_{x[1:].upper()}": x for x in GPU_PAD_FILES})  # TQ_GPU_PAD_MIB、_READY、_START
+           "TQ_BUNDLE_CORE": BUNDLE_CORE,
+           "TQ_LOG_HEAD_FMT": LOG_HEAD_FMT, "TQ_LOG_ENDED_FMT": LOG_ENDED_FMT, "TQ_LOG_NOT_STARTED_FMT": LOG_NOT_STARTED_FMT,
+           "TQ_LOG_GPU_BUSY_FMT": LOG_GPU_BUSY_FMT, "TQ_LOG_UNREADABLE": LOG_UNREADABLE}
+    out.update({f"TQ_GPU_PAD_{x[1:].upper()}": x for x in GPU_PAD_FILES})  # TQ_GPU_PAD_MIB, _READY, _START
     out["TQ_LOG_PART"] = LOG_PART
     out.update({f"TQ_ROOT_{k.upper()}": v for k, v in ROOT.items()})
     out.update({f"TQ_Q_{k.upper()}": v for k, v in QUEUE.items()})

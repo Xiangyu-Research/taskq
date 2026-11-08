@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """sync/tunnel.py 的测试：在本机模拟"那边"（假的 ssh 在本地 HOME 下跑命令），服务开在 127.0.0.1。在 hub 上跑。"""
 import atexit
+import json
 import os
 import shutil
 import signal
@@ -230,6 +231,26 @@ ok("机器按名字查（site-slurm、site-slurm2 主机名相同）：给 site 
    tunnel.entry("fake-slurm-login", site="site-slurm2") == tunnel.machines().machine("site-slurm2")
    and tunnel.entry("fake-pueue-host") == tunnel.machines().machine("site-pueue")
    and tunnel.entry("no-such-host") == {})
+
+# transfer log protocol: the remote side prints "at <host>: download|upload", "complete" and "failed <path>: ..."; the hub reads them back
+wdp = os.path.join(T, "proto_wd")
+os.makedirs(wdp)
+with open(os.path.join(wdp, "log"), "w") as f:
+    f.write("at node1: download\ncomplete\nfailed a/x: test\n")
+st = subprocess.run(["bash", "-c", tunnel.status_cmd(wdp)], env=ENV, capture_output=True, text=True).stdout.splitlines()
+ok("transfer status reads back the remote 'at' line", st[-1] == "at node1: download")
+planp = os.path.join(T, "proto_plan.json")
+with open(planp, "w") as f:
+    json.dump(dict(root=T, base="http://127.0.0.1:1", files=[["a/x", 1, 1, 420]], npar=1, chunk=1 << 20), f)
+r = subprocess.run([sys.executable, os.path.join(HERE, "tunnel.py"), "_fetch", planp],
+                   env=dict(ENV, TUNNEL_TEST_DROP="a/x"), cwd=T, capture_output=True, text=True)
+ok("_fetch prints at/complete/failed in English", r.returncode == 0 and r.stdout.startswith(f"at {os.uname().nodename}: download\n")
+   and "failed a/x: test" in r.stdout and r.stdout.rstrip().endswith("complete"))
+with open(planp, "w") as f:
+    json.dump(dict(root=T, base="http://127.0.0.1:1", files=[], npar=1, chunk=1 << 20), f)
+r = subprocess.run([sys.executable, os.path.join(HERE, "tunnel.py"), "_send", planp], env=ENV, cwd=T, capture_output=True, text=True)
+ok("_send prints at/complete in English", r.returncode == 0 and r.stdout.startswith(f"at {os.uname().nodename}: upload\n")
+   and r.stdout.rstrip().endswith("complete"))
 
 # 不同机器同时传、同一台排队、服务挂了照常（假的 ssh 每条命令慢 0.5 秒，一次传输要几秒）
 SLOW = dict(ENV, TUNNEL_TEST_SSH_SLEEP="0.5")

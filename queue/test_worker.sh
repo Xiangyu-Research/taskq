@@ -28,7 +28,7 @@ check "按任务说明换环境：alt 用 venv（基于 conda 的 base0），bas
       'grep -q "^start .* t/b alt base0 " $T/train.log && grep -q "^start .* t/c 无 base0 " $T/train.log'
 check "每个训练分到的 CPU 传给任务（TASK_CPUS）" 'grep -q "cpus=[0-9]" $T/train.log'
 check "领取记录都交还了" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
-check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $TASKQ_DATA/logs/tasks/t__a__900101_part1.log ]] && head -1 $TASKQ_DATA/logs/tasks/t__a__900101_part1.log | grep -q "^作业 900101_1 @ .*任务=t/a"'
+check "分段日志按任务名、作业号写在 logs/tasks/" '[[ -f $TASKQ_DATA/logs/tasks/t__a__900101_part1.log ]] && head -1 $TASKQ_DATA/logs/tasks/t__a__900101_part1.log | grep -q "^job 900101_1 @ .*task=t/a"'
 fi
 
 # 1b. 本机没有的环境（x2 只在 hub 上）不领

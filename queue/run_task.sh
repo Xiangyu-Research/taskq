@@ -1,40 +1,43 @@
 #!/bin/bash
-# 跑一个训练任务：所有机器共用（执行机的 worker consume.py、手动跑）。
-#   run_task.sh <做法> k=v…          （如 run_task.sh command key=demo/a 'cmd=python3 train.py' env=<环境> out=demo/a done=DONE）
-#   run_task.sh --spec <JSON>        按解析好的说明跑（执行机的队列里 hub 送来的，spec.py resolve 的格式）
-# 按任务说明（queue/spec.py，做法在 queue/recipes.py）：激活环境（机器表 machines.py 的 envs）、设环境变量、
-# 在仓库根目录跑命令。命令的输出写进分段日志 <数据目录>/logs/tasks/<key>__<作业>_part<段>.log（段号 TASK_PART），第一行记作业、机器、
-# 任务、代码版本（taskq log、使用者的登记表读）。作业 = TASK_JOBTAG（worker 给：Slurm 里是作业号，常驻 worker 是"worker id-时间"），否则"主机名-时间"。
-# 不在 Slurm 里、并且设了 CUDA_VISIBLE_DEVICES（pueue 的 GPU 组）时，卡被别人占着就等，每分钟看一次；任务的 res.wait_gpu
-# 给了分钟数时最多等这么久，等不到算出错（退出码 1），没给就一直等；worker 设了 TASKQ_ADMITTED=1 时不等（它领之前已看过卡）；
-# 设了 TASK_GPU_IDLE（分钟，机器表 machines.py 里组的环境变量）时，还要 GPU 使用记录（monitor/gpu_log.sh，位置见 proto.py 的 GPU_LOG_DIR）里最近这么久这张卡上没有别人；
-# 训练出错隔 5 分钟重来，最多 3 次（worker 跑的只跑 1 次，由它交还队列）。
-# 退出码（README.md 的"约定"）：0 训完；3 命令正常结束但没训完；2 任务说明或环境有问题；1 训练出错（命令的退出码记在分段日志）；
-# 4 缺输入（inputs 里的文件不全，没开训）；5 读不了盘、判断不了训完没有（spec.py done 退出 5）；
-# ≥128 被信号停掉（自己收到 SIGTERM 是 143，训练命令被杀原样传出）。
-# 说明、环境有问题（退出码 2）时原因也写进分段日志（key 取 worker 给的 TASK_KEY 或参数里的）。
-# 停这个任务用 SIGTERM（pueue kill -s SIGTERM）：先停训练（8 秒没停下就强制停）再退出，下次从存档接着训。
+# Run one training task: shared by all machines (an executor's worker consume.py, or manually).
+#   run_task.sh <recipe> k=v...   (e.g. run_task.sh command key=demo/a 'cmd=python3 train.py' env=<env> out=demo/a done=DONE)
+#   run_task.sh --spec <JSON>     run a resolved spec (sent to an executor queue by the hub, the format spec.py resolve makes)
+# From the task spec (queue/spec.py, recipes in queue/recipes.py): activate the env (machine table machines.py's envs), set env vars,
+# run the command at the repo root. Command output goes to the part log <data dir>/logs/tasks/<key>__<job>_part<part>.log (part number
+# TASK_PART); the first line records job, machine, task and code version (read by taskq log and the user's ledger). Job = TASK_JOBTAG
+# (worker sets it: the job id in Slurm, "worker id-time" for a resident worker), else "hostname-time".
+# Outside Slurm, with CUDA_VISIBLE_DEVICES set (pueue GPU group), wait while the GPU is busy, checking every minute; with the task's
+# res.wait_gpu minutes, wait at most that long and then fail (exit 1), otherwise wait forever; with TASKQ_ADMITTED=1 set by the worker,
+# do not wait (it checked the GPU before claiming); with TASK_GPU_IDLE (minutes, a group env var in machines.py), also require that the
+# GPU usage records (monitor/gpu_log.sh, location in proto.py's GPU_LOG_DIR) show no one else on this GPU for that long.
+# Retry a failed training after 5 minutes, up to 3 times (a worker runs it once and releases the task to the queue).
+# Exit codes (README.md's "conventions"): 0 done; 3 command exited normally but training did not finish; 2 bad spec or env; 1 training
+# failed (the command's exit code is in the part log); 4 missing inputs (not all files in inputs, did not start); 5 disk unreadable,
+# cannot tell whether training finished (spec.py done exits 5); >=128 stopped by a signal (SIGTERM to itself is 143, the training
+# command's kill propagates as is).
+# A spec or env problem (exit 2) also writes the reason to the part log (key from the worker's TASK_KEY or the arguments).
+# Stop the task with SIGTERM (pueue kill -s SIGTERM): stop training first (force after 8 seconds) and then exit; next time it resumes from the checkpoint.
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "读不了 $HERE/proto.py" >&2; exit 2; }  # 共用的名字和退出码 TQ_*
-CORE=$(cd "$HERE/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "cannot read $HERE/proto.py" >&2; exit 2; }  # shared names and exit codes TQ_*
+CORE=$(cd "$HERE/.." && pwd)  # scheduler core root; the user's repo root REPO (TASKQ_REPO, else like cfg.py)
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
-(( $# >= 1 )) || { echo "用法：run_task.sh <做法> k=v… 或 run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
+(( $# >= 1 )) || { echo "usage: run_task.sh <recipe> k=v... or run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 DATA=$(python3 "$CORE/queue/cfg.py" data)
-[[ -n $DATA ]] || { echo "这里没有数据目录（不是 store、也不在执行机的根目录下跑），先 export TASKQ_DATA=<数据目录>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
+[[ -n $DATA ]] || { echo "no data dir here (not the store, and not running under an executor root); export TASKQ_DATA=<data dir>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 export TASKQ_DATA=$DATA
 ts() { date '+%F %T'; }
 JOBTAG=${TASK_JOBTAG:-$(hostname -s)-$(date +%Y%m%d%H%M)}
 PART=${TASK_PART:-1}
 if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f "$REPO")" ]]; then
-    COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo 未知)
+    COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2> /dev/null || echo unknown)
     CODE_DIRS=$(python3 "$HERE/cfg.py" get code_dirs 2> /dev/null)
-    [[ -z $CODE_DIRS ]] || git -C "$REPO" diff --quiet HEAD -- $CODE_DIRS 2> /dev/null || COMMIT="$COMMIT+改动"
+    [[ -z $CODE_DIRS ]] || git -C "$REPO" diff --quiet HEAD -- $CODE_DIRS 2> /dev/null || COMMIT="$COMMIT+dirty"
 else
-    COMMIT=$(basename "$(readlink -f "$REPO")")  # 代码包（relay_bundle.py）：包名是内容哈希（16 位）
+    COMMIT=$(basename "$(readlink -f "$REPO")")  # bundle (relay_bundle.py): the name is a content hash (16 chars)
 fi
 ARGS=("$@")
-early() {  # 开训前就停下：原因写到标准错误和这个任务的分段日志
+early() {  # stop before training: write the reason to stderr and this task's part log
     echo "$1" >&2
     local k=${TASK_KEY:-}
     [[ -n $k ]] || k=$(python3 -c 'import json, sys
@@ -42,28 +45,28 @@ a = sys.argv[1:]
 print(json.loads(a[1]).get("key") or "" if a[0] == "--spec" else next((x[4:] for x in a[1:] if x.startswith("key=")), ""))' "${ARGS[@]}" 2> /dev/null)
     [[ -n $k ]] || return 0
     mkdir -p "$DATA/$TQ_TASK_LOGS" 2> /dev/null
-    { echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$k，第 $PART 段，环境 ${TASK_ENV:-未知}，代码 $COMMIT，$(ts)"
-      echo "$(ts) 没开训：$1"; } 2> /dev/null >> "$DATA/$TQ_TASK_LOGS/${TASK_SAFE:-${k//\//$TQ_SAFE}}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log"
+    { printf "$TQ_LOG_HEAD_FMT\n" "${JOBTAG}_${PART}" "$(hostname -s)" "$k" "$PART" "${TASK_ENV:-unknown}" "$COMMIT" "$(ts)"
+      printf "$(ts) $TQ_LOG_NOT_STARTED_FMT\n" "$1"; } 2> /dev/null >> "$DATA/$TQ_TASK_LOGS/${TASK_SAFE:-${k//\//$TQ_SAFE}}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log"
 }
 if ! SH=$(python3 "$HERE/spec.py" shell "$@" 2> /dev/null); then
-    early "任务说明有问题：$(python3 "$HERE/spec.py" shell "$@" 2>&1 > /dev/null | tail -n 1)"; exit "$TQ_EXIT_RUN_BAD"
+    early "bad task spec: $(python3 "$HERE/spec.py" shell "$@" 2>&1 > /dev/null | tail -n 1)"; exit "$TQ_EXIT_RUN_BAD"
 fi
 eval "$SH"
 done_() { python3 "$HERE/spec.py" done "$@"; }
 done_ "$@"; rc=$?
-(( rc == TQ_EXIT_DONE_YES )) && { echo "$(ts) 已经训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"; }
-(( rc == TQ_EXIT_DONE_UNREADABLE )) && { early "读不了盘，判断不了训完没有"; exit "$TQ_EXIT_RUN_UNREADABLE"; }
-ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "这台机器没有环境 $TASK_ENV（机器表 machines.py）"; exit "$TQ_EXIT_RUN_BAD"; }
+(( rc == TQ_EXIT_DONE_YES )) && { echo "$(ts) already done: $TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"; }
+(( rc == TQ_EXIT_DONE_UNREADABLE )) && { early "disk unreadable, cannot tell whether training finished"; exit "$TQ_EXIT_RUN_UNREADABLE"; }
+ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "this machine has no env $TASK_ENV (machine table machines.py)"; exit "$TQ_EXIT_RUN_BAD"; }
 mkdir -p "$DATA/$TQ_TASK_LOGS" "$TASK_OUT"
 LOG=$DATA/$TQ_TASK_LOGS/${TASK_SAFE}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log
 TRIES=3
-[[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # Slurm 里、worker 跑的（设了 TASK_JOBTAG）只试一次，失败交给 worker
-TRIES=${RUN_TASK_TRIES:-$TRIES}   # 只给测试用
-POLL=${RUN_TASK_POLL:-300}        # 只给测试用
-GPU_POLL=${RUN_TASK_GPU_POLL:-60} # 只给测试用
-STOP_WAIT=${RUN_TASK_STOP_WAIT:-8} # 只给测试用
+[[ -n ${SLURM_JOB_ID:-}${TASK_JOBTAG:-} ]] && TRIES=1  # in Slurm and run by a worker (TASK_JOBTAG set) try once, the worker handles failure
+TRIES=${RUN_TASK_TRIES:-$TRIES}   # tests only
+POLL=${RUN_TASK_POLL:-300}        # tests only
+GPU_POLL=${RUN_TASK_GPU_POLL:-60} # tests only
+STOP_WAIT=${RUN_TASK_STOP_WAIT:-8} # tests only
 
-gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（自己账号的进程不算）
+gpu_free() {  # no one else's processes on the GPU, others' memory <= 500 MiB (our own account's processes do not count)
     [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
     local used mine=0 pid pm
     used=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-gpu=memory.used --format=csv,noheader,nounits 2> /dev/null | tr -d ' ')
@@ -74,7 +77,7 @@ gpu_free() {  # 卡上没有别人的进程、别人占的显存 ≤ 500 MiB（�
     done < <(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2> /dev/null)
     (( ${used:-0} - mine <= 500 ))
 }
-gpu_quiet() {  # GPU 使用记录里最近 TASK_GPU_IDLE 分钟这张卡上没有别人；有 → 最后一次见到的时间记在 GPU_SEEN。没有记录文件 → 只看现在
+gpu_quiet() {  # no one else on this GPU in the last TASK_GPU_IDLE minutes of GPU usage records; if there is, GPU_SEEN gets the last time. No log files -> only look now
     GPU_SEEN=
     [[ -z ${TASK_GPU_IDLE:-} || ${TASK_GPU_IDLE} == 0 || -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
     local dir=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}} since files f
@@ -85,80 +88,83 @@ gpu_quiet() {  # GPU 使用记录里最近 TASK_GPU_IDLE 分钟这张卡上没�
         awk -F, -v s="$since" -v g="$CUDA_VISIBLE_DEVICES" -v me="$(id -un)" '$1 >= s && $2 == g && $6 != "" && $6 != me {t = $1} END {print t}')
     [[ -z $GPU_SEEN ]]
 }
-wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1。每次看都往任务日志写一行（worker 按日志判断卡没卡住）
-    local waited=0
+wait_gpu() {  # GPU free -> 0; still busy after TASK_WAIT_GPU minutes -> 1. Every check writes a line to the task log (the worker uses the log to spot stalls)
+    local waited=0 extra
     while GPU_SEEN=; ! { gpu_free && gpu_quiet; }; do
         if [[ -n ${TASK_WAIT_GPU:-} ]] && (( waited >= TASK_WAIT_GPU * 60 )); then
-            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着${GPU_SEEN:+（空着，别人 $GPU_SEEN 还在用，要空满 $TASK_GPU_IDLE 分钟）}，等了 $TASK_WAIT_GPU 分钟还没空出来，不跑" | tee -a "$LOG"
+            extra=", waited $TASK_WAIT_GPU minutes"
+            [[ -z ${GPU_SEEN:-} ]] || extra=" (free, someone $GPU_SEEN still using it, needs $TASK_GPU_IDLE minutes free), waited $TASK_WAIT_GPU minutes"
+            printf "$(ts) $TQ_LOG_GPU_BUSY_FMT\n" "$CUDA_VISIBLE_DEVICES" "$extra" | tee -a "$LOG"
             return 1
         fi
         if [[ -n ${GPU_SEEN:-} ]]; then
-            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 空着，别人 $GPU_SEEN 还在用，空满 $TASK_GPU_IDLE 分钟再跑（已等 $(( waited / 60 )) 分钟）" | tee -a "$LOG"
+            echo "$(ts) GPU $CUDA_VISIBLE_DEVICES free, but someone $GPU_SEEN still used it; waiting $TASK_GPU_IDLE minutes of quiet (waited $(( waited / 60 )) minutes)" | tee -a "$LOG"
         else
-            echo "$(ts) 卡 $CUDA_VISIBLE_DEVICES 被别人占着，等它空出来（已等 $(( waited / 60 )) 分钟${TASK_WAIT_GPU:+，最多 $TASK_WAIT_GPU 分钟}）" | tee -a "$LOG"
+            echo "$(ts) GPU $CUDA_VISIBLE_DEVICES busy, waiting for it (waited $(( waited / 60 )) minutes${TASK_WAIT_GPU:+, at most $TASK_WAIT_GPU minutes})" | tee -a "$LOG"
         fi
         sleep "$GPU_POLL" & wait $!
         waited=$(( waited + GPU_POLL ))
     done
 }
 kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
-gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # 训练的进程组和它本身都不在了
+gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # neither the training process group nor the process itself remains
 pid=
-on_term() {  # 先 SIGTERM 整个进程组，8 秒没停下就 SIGKILL（存档是原子写的），确认停下了才退出
+on_term() {  # SIGTERM the whole process group, SIGKILL after 8 seconds (checkpoints are written atomically), exit once it is gone
     if [[ -n $pid ]]; then
-        echo "$(ts) 收到停止信号，停训练"
-        kill -TERM -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid"
-        for _ in $(seq "$STOP_WAIT"); do gone "$train_pid" && break; sleep 1; done
-        if ! gone "$train_pid"; then
-            echo "$(ts) 训练 $STOP_WAIT 秒没停下，强制停" | tee -a "$LOG"
-            kill -KILL -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid" KILL
-            for _ in 1 2 3; do gone "$train_pid" && break; sleep 1; done
+        echo "$(ts) got stop signal, stopping training"
+        kill -TERM -- -"$pid" 2> /dev/null; kill_tree "$pid"
+        for _ in $(seq "$STOP_WAIT"); do gone "$pid" && break; sleep 1; done
+        if ! gone "$pid"; then
+            echo "$(ts) training did not stop within $STOP_WAIT seconds, forcing" | tee -a "$LOG"
+            kill -KILL -- -"$pid" 2> /dev/null; kill_tree "$pid" KILL
+            for _ in 1 2 3; do gone "$pid" && break; sleep 1; done
         fi
-        gone "$train_pid" || echo "$(ts) 训练进程强制停之后还在（多半卡在读写上）" | tee -a "$LOG"
+        gone "$pid" || echo "$(ts) training process still there after the force kill (likely stuck in I/O)" | tee -a "$LOG"
     fi
     exit "$TQ_EXIT_RUN_TERM"
 }
 trap on_term TERM INT
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
-echo "作业 ${JOBTAG}_${PART} @ $(hostname -s)，任务=$TASK_KEY，第 $PART 段，环境 $TASK_ENV，代码 $COMMIT，$(ts)" >> "$LOG"
-echo "$(ts) 开始：$TASK_KEY（环境 $TASK_ENV，日志 $LOG）"
-# 输入（任务说明的 inputs）：开训前查全没有，不全退出码 4；有节点本地的暂存目录（TASKQ_STAGE_ROOT，消费者的 slurm 插件给）、任务的 res.local_inputs 时在那里建私有视图，
-# 后台拷过去（queue/inputs.py）。命令从 TASK_INPUTS_ROOT 读输入（和数据目录一样的相对路径）
+printf "$TQ_LOG_HEAD_FMT\n" "${JOBTAG}_${PART}" "$(hostname -s)" "$TASK_KEY" "$PART" "$TASK_ENV" "$COMMIT" "$(ts)" >> "$LOG"
+echo "$(ts) start: $TASK_KEY (env $TASK_ENV, log $LOG)"
+# Inputs (the spec's inputs): check they are all there before starting, exit 4 when not; with a node-local staging dir (TASKQ_STAGE_ROOT,
+# from the consumer's slurm plugin) and the task's res.local_inputs, build a private view there and copy in the background
+# (queue/inputs.py). The command reads inputs from TASK_INPUTS_ROOT (same relative paths as the data dir)
 TASK_INPUTS_ROOT=$DATA CPID=
 if (( ${#TASK_INPUTS[@]} )); then
     LROOT=
     [[ ${TASK_LOCAL:-0} == 1 && -n ${TASKQ_STAGE_ROOT:-} ]] && LROOT=$TASKQ_STAGE_ROOT
     V=$(python3 "$HERE/inputs.py" prepare "$DATA" "$TASK_SAFE" "$LROOT" "${TASK_INPUTS[@]}" 2>> "$LOG"); rc=$?
     if (( rc == TQ_EXIT_RUN_MISSING )); then
-        echo "$(ts) 不开训：$(tail -n 1 "$LOG")"
+        echo "$(ts) not starting: $(tail -n 1 "$LOG")"
         exit "$TQ_EXIT_RUN_MISSING"
     elif (( rc == 0 )) && [[ -n $V ]]; then
         TASK_INPUTS_ROOT=$V
         if [[ $V != "$DATA" ]]; then
             python3 "$HERE/inputs.py" copy "$LROOT" "$TASK_SAFE" >> "$LOG" 2>&1 &
             CPID=$!
-            echo "$(ts) 输入读 $V（后台拷到本地盘）" | tee -a "$LOG"
+            echo "$(ts) inputs read from $V (copying to local disk in the background)" | tee -a "$LOG"
         fi
     else
-        echo "$(ts) 输入没查成（退出码 $rc），照旧读 $DATA" | tee -a "$LOG"
+        echo "$(ts) input check failed (exit $rc), reading $DATA as usual" | tee -a "$LOG"
     fi
 fi
 export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
-    [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # 消费者领之前已经看过卡
-    # 自己一个进程组，停的时候整组停；任务的命令用核心的库（TASKQ_LIB）和命令（bin/ 在 PATH 最前面）
+    [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # the consumer checked the GPU before claiming
+    # own process group so a stop takes the whole group; the task's command gets the core's library (TASKQ_LIB) and commands (bin/ first on PATH)
     ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
     train_pid=$!
     wait "$train_pid"; rc=$?; train_pid=
     done_ "$@"; drc=$?
     if (( drc == TQ_EXIT_DONE_YES )); then
-        echo "$TQ_DONE_LINE $(ts)" >> "$LOG"; echo "$(ts) 训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"
+        echo "$TQ_DONE_LINE $(ts)" >> "$LOG"; echo "$(ts) done: $TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"
     elif (( drc == TQ_EXIT_DONE_UNREADABLE )); then
-        echo "$(ts) 命令结束（退出码 $rc），读不了盘，判断不了训完没有" | tee -a "$LOG"; exit "$TQ_EXIT_RUN_UNREADABLE"
+        printf "$(ts) $TQ_LOG_ENDED_FMT\n" "$rc" "$TQ_LOG_UNREADABLE, cannot tell whether training finished" | tee -a "$LOG"; exit "$TQ_EXIT_RUN_UNREADABLE"
     fi
-    echo "$(ts) 命令结束（退出码 $rc），没训完（第 $try 次）" | tee -a "$LOG"
+    printf "$(ts) $TQ_LOG_ENDED_FMT\n" "$rc" "not done (attempt $try)" | tee -a "$LOG"
     (( rc == 0 )) && exit "$TQ_EXIT_RUN_NOT_DONE"
     (( try >= TRIES )) && exit $(( rc >= 128 ? rc : TQ_EXIT_RUN_FAILED ))
     sleep "$POLL" & wait $!

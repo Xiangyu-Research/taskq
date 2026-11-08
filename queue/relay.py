@@ -616,14 +616,14 @@ def topup(name, rs, run=None):
             if any(j[2] != "Done" for j in mine):
                 why.append(f"{w['id']} 在")
             elif mine and mine[-1][3] not in ("Success", "Killed"):
-                why.append(f"上一个 {w['id']}（pueue 任务 {mine[-1][0]}）失败了（{mine[-1][3]}）")
+                why.append(f"previous {w['id']} (pueue task {mine[-1][0]}) failed ({mine[-1][3]})")
             elif not M.working(name, w):
                 why.append(f"{w['id']} 不在时段里")
             elif not refill.unclaimed(rs["taskq"], w["kind"]):
                 why.append(f"那边没有备好、没人领的{' ' + kname(w['kind']) if kname(w['kind']) else ''}任务给 {w['id']}")  # worker 空闲 30 分钟自己退出，有了再开
             else:
                 subs.append(("pueue", w))
-        return subs, "；".join(why)
+        return subs, "; ".join(why)
     conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
     if not conf_:
         return [], "policy.py 的 SLURM 里没有它"
@@ -972,8 +972,8 @@ def finish(s, name, c, more, why, snotes, dry):
     if snotes and not dry and C.changed(f"smoke_{name}", snotes):
         log(snotes)
     subs, swhy = (topup(name, rs) if rs is not None else ([], "连不上"))
-    for part in swhy.split("；"):
-        w = next((w for w in M.workers(name) if part.startswith(f"上一个 {w['id']}（")), None)
+    for part in swhy.split("; "):
+        w = next((w for w in M.workers(name) if part.startswith(f"previous {w['id']} (")), None)
         if w:
             stuck[alert_id("site", name, "worker", w["id"])] = alert(f"{L} {part}；看那边的 pueue log，处理后 pueue remove 那个任务（下次检查重开）",
                                                                      worker=w["id"], start=False)

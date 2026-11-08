@@ -438,7 +438,7 @@ def take_lock(host):
 def status_cmd(wd):
     """那边的传输：done / run / dead，再加最近一行"在 …"。进程没了时再看一次 done（刚写完 done 就退出的不算 dead）。"""
     return (f"cd {wd} && if [ -e done ]; then echo done; elif pgrep -f '[b]ash {wd}/run.sh' > /dev/null; then echo run; "
-            f"elif [ -e done ]; then echo done; else echo dead; fi; grep '^在 ' log 2> /dev/null | tail -1")
+            f"elif [ -e done ]; then echo done; else echo dead; fi; grep '^at ' log 2> /dev/null | tail -1")
 
 
 def run_remote(host, mode, plan, serve, total, site=None):
@@ -462,7 +462,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
         sys.path.insert(0, os.path.join(CORE, "sites"))
         import slurm  # 作业名每次随机
         run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname(m.get('job_names'))} {pyx} {script} {mode} plan.json >> log 2>&1")
-    run.append(f"grep -q '^完成' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
+    run.append(f"grep -q '^complete' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
     ssh(host, f"cat > {wd}/run.sh", input="\n".join(run) + "\n")
     serve.ensure()
@@ -494,7 +494,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
             if wait < POLL:
                 continue
             log(f"已传 {serve.moved / 1e9:.1f} / {total / 1e9:.1f} GB，平均 {serve.moved / 1e6 / dt:.1f} MB/s")
-        out = ssh(host, f"cat {wd}/results.tsv 2> /dev/null || true; echo ===; grep '^失败' {wd}/log || true")
+        out = ssh(host, f"cat {wd}/results.tsv 2> /dev/null || true; echo ===; grep '^failed' {wd}/log || true")
         res, fails = out.split("===\n", 1)
         for ln in fails.splitlines():
             log(ln)
@@ -644,7 +644,7 @@ def retry(f, what):
         except Exception as e:
             err = e
             time.sleep(10 * (i + 1))
-    print(f"失败 {what}：{getattr(err, 'stderr', '') or err}", flush=True)
+    print(f"failed {what}: {getattr(err, 'stderr', '') or err}", flush=True)
     return None
 
 
@@ -659,7 +659,7 @@ def remote_fetch(plan):
         rel, size, mtime, mode = item
         p = os.path.join(root, rel)
         if rel in drop:
-            print(f"失败 {rel}：测试", flush=True)
+            print(f"failed {rel}: test", flush=True)
             return
         if os.path.isfile(p) and os.stat(p).st_size == size and os.stat(p).st_mtime_ns == mtime:
             digest = md5_of(p)
@@ -689,7 +689,7 @@ def remote_fetch(plan):
 
     with ThreadPoolExecutor(plan.get("npar", NPAR)) as ex:
         list(ex.map(one, plan["files"]))
-    print("完成", flush=True)
+    print("complete", flush=True)
 
 
 def remote_send(plan):
@@ -735,7 +735,7 @@ def remote_send(plan):
         rel, size = item
         p = os.path.join(root, rel)
         if rel in drop:
-            print(f"失败 {rel}：测试", flush=True)
+            print(f"failed {rel}: test", flush=True)
             return
         try:
             st = os.stat(p)
@@ -755,11 +755,11 @@ def remote_send(plan):
             if req("POST", urllib.parse.quote(rel) + "?" + q)[0] != 200:
                 raise IOError("本机的校验和对不上")
         except Exception as e:
-            print(f"失败 {rel}：{e}", flush=True)
+            print(f"failed {rel}: {e}", flush=True)
 
     with ThreadPoolExecutor(plan.get("npar", NPAR)) as ex:
         list(ex.map(one, plan["files"]))
-    print("完成", flush=True)
+    print("complete", flush=True)
 
 
 # ---------------- rsync 的替身 ----------------
@@ -862,7 +862,7 @@ def main(argv):
     if cmd == "_serve" and len(a) == 2:
         return serve_main(*a)
     if cmd in ("_fetch", "_send"):
-        print(f"在 {os.uname().nodename} 上{'下载' if cmd == '_fetch' else '上传'}", flush=True)
+        print(f"at {os.uname().nodename}: {'download' if cmd == '_fetch' else 'upload'}", flush=True)
         plan = json.load(open(a[0]))
         (remote_fetch if cmd == "_fetch" else remote_send)(plan)
         return 0

@@ -33,7 +33,7 @@ class NoSlot(RuntimeError):
     """CPU 作业这次排不上。"""
 
 
-ERR_LINE = re.compile(r"(?:[\w.]*(?:Error|Exception)\b|错误|[\w.-]+: (?:error|错误))")  # 错误行的开头：异常名（Traceback 的最后一行）、"错误"、"<程序>: error"
+ERR_LINE = re.compile(r"(?:[\w.]*(?:Error|Exception)\b|错误|[\w.-]+: (?:error|错误))")  # start of an error line: exception name (last line of a Traceback), the Chinese word for error, "<program>: error"; the Chinese alternative stays because other programs print it, not our format
 
 
 def err_tail(text, n=300, own=()):
