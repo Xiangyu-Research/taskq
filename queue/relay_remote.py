@@ -29,6 +29,14 @@ class NoSlot(RuntimeError):
     """The CPU job could not be scheduled this time."""
 
 
+class OldBundle(RuntimeError):
+    """The bundle in use on that machine has no such script or operation (it is older than this core)."""
+
+    def __init__(self, bundle, script, what):
+        self.bundle = bundle
+        super().__init__(f"the bundle {bundle or 'in use'} on that machine has no {script} {what}")
+
+
 ERR_LINE = re.compile(r"(?:[\w.]*(?:Error|Exception)\b|错误|[\w.-]+: (?:error|错误))")  # start of an error line: exception name (last line of a Traceback), the Chinese word for error, "<program>: error"; the Chinese alternative stays because other programs print it, not our format
 
 
@@ -83,11 +91,12 @@ def rsh(name, cmd, input=None, timeout=300):
     return C.run(site_argv(name, cmd, timeout), None, timeout, input=input)
 
 
-def prefix(name):
+def prefix(name, guard=None):
     """Prefix for remote commands: enter the bundle and set TASKQ_ROOT and TASKQ_MACHINE (the queue, state and data dir are
-    derived from them in cfg.py)."""
+    derived from them in cfg.py). guard: a shell test run before that (fails the command when it fails)."""
     r = R.q(root(name))
-    return f"cd {r}/{proto.ROOT['current']} && TASKQ_ROOT={r} TASKQ_MACHINE={shlex.quote(name)}"
+    return (f"cd {r}/{proto.ROOT['current']} && " + (f"{guard} && " if guard else "")
+            + f"TASKQ_ROOT={r} TASKQ_MACHINE={shlex.quote(name)}")
 
 
 def rtq(name, args, timeout=180, input=None):
@@ -134,17 +143,29 @@ def run_lines(argv, input, timeout, say):
 
 def op(name, what, data=None, timeout=600, job=None, say=None, script="site_ops.py"):
     """Run one site_ops.py operation in the bundle in use on that machine (data as JSON on stdin) → its result.
-    Failure → RuntimeError. Local machines (ssh=None) run the bundle in their own root too, same as remote ones.
+    Failure → RuntimeError; the bundle there has no such script or operation → OldBundle. Local machines (ssh=None) run the
+    bundle in their own root too, same as remote ones.
     job: Slurm srun args (machines.py transfer_job) to run on a CPU node; no slot → NoSlot.
     say: if given, pass remote progress (stderr) to it line by line while running.
     script: another script under queue/ in the bundle with the same calling convention (migrate.py root)."""
     m = conf(name)
-    cmd = f"{prefix(name)} {py(name)} {cfg.bundle_rel('queue', script)} {what}"
+    sh = cfg.bundle_rel("queue", script)
+    check_op = ("import ast, sys\n"
+                "p, op = sys.argv[1], 'op_' + sys.argv[2]\n"
+                "t = ast.parse(open(p).read())\n"
+                "sys.exit(0 if any(isinstance(n, ast.FunctionDef) and n.name == op for n in t.body) else 1)")
+    guard = f"[ -f {shlex.quote(sh)} ]"
+    if script == "site_ops.py":
+        guard = f"{{ {guard} && python3 -c {shlex.quote(check_op)} {shlex.quote(sh)} {shlex.quote(what)}; }}"
+    guard += f" || {{ basename \"$(readlink -f .)\"; exit {proto.EXIT['old_bundle']}; }}"
+    cmd = f"{prefix(name, guard)} {py(name)} {sh} {what}"
     if job:
         cmd = f"srun -I{JOB_WAIT} {job} -J {SL.jobname(m.get('job_names'))} bash -c {shlex.quote(cmd)}"
         timeout += JOB_WAIT
     argv, inp = site_argv(name, cmd, timeout), json.dumps(data)
     rc, out, err = run_lines(argv, inp, timeout, say) if say else C.run(argv, None, timeout, input=inp)
+    if rc == proto.EXIT["old_bundle"]:
+        raise OldBundle(out.strip().splitlines()[-1] if out.strip() else "", script, what)
     if job and rc and S.json_in(out) is None and any(x in err for x in ("Unable to allocate", "Immediate", "revoked")):
         raise NoSlot(f"no CPU job slot on {m['label']}: {err_tail(err, 200)}")
     res = S.json_in(out)

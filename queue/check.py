@@ -536,6 +536,11 @@ def check_smoke(r, k, sp, seen):
         return
     try:
         d = SG.definition(sp["recipe"], SG.real_params(sp))
+    except SG.StoreOldBundle as e:
+        if "store-old-bundle" not in seen:  # one note per check run, not one per recipe
+            seen["store-old-bundle"] = True
+            r.note("tasks", str(e))
+        return
     except SG.StoreError as e:
         seen["store", sp["recipe"]] = True
         r.bad("tasks", f"smoke definition for recipe {sp['recipe']} was not checked to the end (from {k}): {e}")

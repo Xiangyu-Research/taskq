@@ -159,6 +159,8 @@ EXIT = dict(
     done_yes=0, done_no=1, done_bad=2, done_unreadable=5,
     # relay.py stage
     stage_later=75,
+    # relay_remote.op: the bundle in use on that machine has no such script or operation (older bundle)
+    old_bundle=66,
     # common.run: timeout, failed to start
     timeout=124,
 )

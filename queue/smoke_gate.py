@@ -50,6 +50,14 @@ class StoreError(DefError):
     """The store failed while evaluating a definition (unreachable, wrong bundle); unrelated to any task."""
 
 
+class StoreOldBundle(StoreError):
+    """The store's bundle is older than this core (no site_ops script or operation)."""
+
+    def __init__(self, bundle):
+        self.bundle = bundle
+        super().__init__(f"the store's bundle {bundle or 'in use'} is older than this core; store-side smoke evaluation skipped")
+
+
 def real_params(sp):
     """Real task parameters passed to functions in a smoke definition: the spec's names plus its expanded inputs (the smoke task takes only some of them)."""
     return dict(sp.get("names") or {}, inputs=list(sp.get("inputs") or []))
@@ -71,6 +79,8 @@ def definition(recipe, names=None):
     if any(callable(d.get(f)) for f in ("params", "vars")):  # functions read the data dir: evaluate on the store (site_ops smoke)
         try:
             got = RM.store_op("smoke", dict(recipe=recipe, names=dict(names or {})))
+        except RM.OldBundle as e:
+            raise StoreOldBundle(e.bundle) from None
         except RuntimeError as e:
             raise StoreError(f"evaluating the smoke definition on the store failed: {str(e)[-300:]}") from None
         for f, why in (got.pop("error", None) or {}).items():

@@ -173,6 +173,41 @@ for d in ("D101_alpha", "D103_alpha_one", "D111_beta", "D116_gamma"):
 rc, out, err = run("--only", "raw", env={"TASKQ_CONFIG": rawc})
 ok("raw: all there -> pass", rc == 0 and "ERROR [" not in err)
 
+# a store whose bundle is older than this core (no site_ops.py): a note, not a problem; a store whose site_ops.py raises: a problem
+def old_store(script=None):
+    root = os.path.join(fixture.tmpdir(), "oldroot")
+    conda = fixture.store_bundle(root)
+    cur = os.path.join(root, "code", "current")
+    old = os.path.join(root, "code", "old0000000000000")
+    shutil.copytree(cur, old, symlinks=True)
+    os.remove(os.path.join(old, "scripts", "taskq"))
+    os.makedirs(os.path.join(old, "scripts", "taskq", "queue"))
+    if script is not None:
+        with open(os.path.join(old, "scripts", "taskq", "queue", "site_ops.py"), "w", encoding="utf-8") as f:
+            f.write(script)
+    shutil.rmtree(cur)
+    os.symlink(old, cur)
+    data = fixture.tmpdir()
+    conf = os.path.join(fixture.tmpdir(), "config")
+    shutil.copytree(os.environ["TASKQ_CONFIG"], conf, ignore=shutil.ignore_patterns("__pycache__"))
+    edit("machines.py", 'root="~/demo_root", data="/data/others/DEMO_DATA", conda=(FAKE_CONDA, "base0")',
+         f'root={root!r}, data={data!r}, conda=({conda!r}, "base0")', d=conf)
+    plug = os.path.join(fixture.tmpdir(), "plugins")
+    shutil.copytree(os.environ["TASKQ_PLUGINS"], plug, ignore=shutil.ignore_patterns("__pycache__"))
+    with open(os.path.join(plug, "smoke.py"), "w", encoding="utf-8") as f:
+        f.write('SMOKE = {"toy": dict(by=["variant"], params=lambda tp, data: dict(ds="SMOKE", frag="0"))}\n')
+    return run("--quick", env={"TASKQ_CONFIG": conf, "TASKQ_PLUGINS": plug})
+
+
+rc, out, err = old_store()
+notes = [ln for ln in err.splitlines() if "older than this core" in ln]
+ok("a store bundle older than the core: a note once per check run, no problem, exit 0",
+   rc == 0 and "ERROR [" not in err and len(notes) == 1 and "NOTE  [tasks]" in notes[0]
+   and "store-side smoke evaluation skipped" in notes[0])
+rc, out, err = old_store('def op_smoke(A):\n    raise RuntimeError("store side failed")\n\n\nop_smoke(None)\n')
+ok("the same store with a site_ops.py that raises: still a problem",
+   rc == 1 and "ERROR [tasks]" in err and "was not checked to the end" in err and "store side failed" in err)
+
 # broken experiment tables (edit cached experiments and order in-process)
 import check as K  # noqa: E402
 import experiments as E  # noqa: E402
