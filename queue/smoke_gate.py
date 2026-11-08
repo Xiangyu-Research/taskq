@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""冒烟闸门：一种任务（做法 + 插件 smoke.py 里 by 列的参数 + 环境）第一次送到一台执行机之前，先在那台上跑一个小的冒烟任务，
-过了才送真的。说明见 queue/README.md 的"冒烟"。
+"""Smoke gate: before a kind of task (recipe + the parameters listed in the plugin's smoke.py by + env) is first sent to
+an executor, run a small smoke task there and send the real one only after it passes. See "smoke" in queue/README.md.
 
-    taskq smoke status [执行机] [--json]   各台的记录
-    taskq smoke retry <执行机> [种类]      没过的重新排（种类：完整的种类名或 12 位 id）
-    taskq smoke adopt [--dry-run]          现在分给各台的、各台训完交还的任务的种类记成过了（已经在跑的不再冒烟）
+    taskq smoke status [executor] [--json]   records per executor
+    taskq smoke retry <executor> [kind]      queue failed kinds again (kind: full kind name or 12-char id)
+    taskq smoke adopt [--dry-run]            mark kinds now assigned to executors and finished there as passed
 """
 import argparse
 import contextlib
@@ -43,42 +43,42 @@ def on():
 
 
 class DefError(Exception):
-    """定义里的函数出错（这种记成没过）。"""
+    """A function in a smoke definition failed (recorded as failed)."""
 
 
 class StoreError(DefError):
-    """在 store 上算定义时 store 那边出错（连不上、代码包不对），和哪个任务无关。"""
+    """The store failed while evaluating a definition (unreachable, wrong bundle); unrelated to any task."""
 
 
 def real_params(sp):
-    """交给冒烟定义里的函数的真任务参数：说明的 names，加上它的 inputs（要传的输入，展开后的；冒烟任务按需带上其中的一部分）。"""
+    """Real task parameters passed to functions in a smoke definition: the spec's names plus its expanded inputs (the smoke task takes only some of them)."""
     return dict(sp.get("names") or {}, inputs=list(sp.get("inputs") or []))
 
 
 def definition(recipe, names=None):
-    """做法的冒烟定义 → dict(by, params, vars)；params、vars 是函数 f(真任务的参数 real_params, store 的数据目录) 时在 store 上算出来
-    （出错 → DefError）。没有定义 → None；写法不对 → ValueError。"""
+    """A recipe's smoke definition -> dict(by, params, vars); params and vars are evaluated on the store when they are a
+    function f(real task parameters, store data dir) (error -> DefError). No definition -> None; bad shape -> ValueError."""
     d = SMOKE.get(recipe)
     if d is None:
         return None
     if not isinstance(d, dict) or set(d) - set(FIELDS):
-        raise ValueError(f"smoke.py 的 {recipe} 只能有 {'、'.join(FIELDS)}：{d!r}")
+        raise ValueError(f"smoke.py {recipe} may only have {', '.join(FIELDS)}: {d!r}")
     by = d.get("by") or []
     if not isinstance(by, list) or not all(isinstance(x, str) for x in by):
-        raise ValueError(f"smoke.py 的 {recipe} 的 by 要是参数名的列表")
+        raise ValueError(f"smoke.py {recipe} by must be a list of parameter names")
     out = dict(by=by)
     got = {}
-    if any(callable(d.get(f)) for f in ("params", "vars")):  # 函数要读数据目录：在 store 上算（site_ops smoke）
+    if any(callable(d.get(f)) for f in ("params", "vars")):  # functions read the data dir: evaluate on the store (site_ops smoke)
         try:
             got = RM.store_op("smoke", dict(recipe=recipe, names=dict(names or {})))
         except RuntimeError as e:
-            raise StoreError(f"在 store 上算冒烟定义出错：{str(e)[-300:]}") from None
+            raise StoreError(f"evaluating the smoke definition on the store failed: {str(e)[-300:]}") from None
         for f, why in (got.pop("error", None) or {}).items():
-            raise DefError(f"{f}()：{why}")
+            raise DefError(f"{f}(): {why}")
     for f in ("params", "vars"):
         v = got[f] if callable(d.get(f)) else d.get(f) or {}
         if not isinstance(v, dict):
-            raise ValueError(f"smoke.py 的 {recipe} 的 {f} 要是字典，或返回字典的函数：{v!r}")
+            raise ValueError(f"smoke.py {recipe} {f} must be a dict or a function returning one: {v!r}")
         out[f] = dict(v)
     return out
 
@@ -88,8 +88,8 @@ def h12(x):
 
 
 def env_id(site, sp):
-    """这台上这个说明的环境 → id：spec 条目按描述加这台用的变体的锁（和那边建好后 .ok 里写的同一个哈希，不看那边读没读到），
-    conda / venv 条目按条目本身。"""
+    """The spec's envs on this executor -> id: spec entries hash the variant this executor uses (the same hash the
+    built .ok has there, whether or not that side has read it); conda / venv entries hash the entry itself."""
     envs = (M.machine(site).get("envs") or {})
     out = []
     for e in S.envs_of(sp):
@@ -100,9 +100,10 @@ def env_id(site, sp):
 
 
 def mark(site, sp):
-    """说明 → dict(kind, kid, env, defn, canary)。kind = 做法 + by 的参数值 + 冒烟任务换成的参数（不含带 {smoke} 的）+ 环境名：
-    同一 by 的任务冒烟换成的数据不同（如通道不同）时是两种，各测各的、各记各的（算成一种的话两边会互相改写记录、来回重排）。
-    没有冒烟定义的做法是 canary。"""
+    """Spec -> dict(kind, kid, env, defn, canary). kind = recipe + the values of by parameters + parameters the smoke task
+    swaps in (without {smoke}) + env name: tasks with the same by but different swapped data (different channel, say) are
+    two kinds, tested and recorded separately (as one kind they would overwrite each other's records and requeue back and
+    forth). A recipe with no smoke definition is a canary."""
     rec = sp.get("recipe")
     names = sp.get("names") or {}
     err = None
@@ -118,7 +119,7 @@ def mark(site, sp):
                 canary=d is None and err is None, recipe=rec, defs=d, error=err)
 
 
-# ---------------- 记录 ----------------
+# ---------------- records ----------------
 def path(site):
     return os.path.join(taskq.TQ, proto.SMOKE_DIR, f"{site}.json")
 
@@ -131,7 +132,7 @@ def load(site):
         return {}
 
 
-_HELD = set()  # 这个进程已经拿着锁的执行机（enqueue 里再记录时不重复拿：同一进程开两次 flock 会自己等自己）
+_HELD = set()  # executors this process already holds the lock for (update inside enqueue must not flock again: a second flock in the same process waits for itself)
 
 
 @contextlib.contextmanager
@@ -158,7 +159,8 @@ def update(site, fn):
 
 
 def queue_keys(mtq=None):
-    """总队列里现在有的 key：这一轮开始时读的（mtq）加上现在盘上的（别的检查在这一轮开始以后加的冒烟也算）。"""
+    """Keys in the queue now: those read at the start of the round (mtq) plus those on disk (smoke tests another check
+    added after this round started also count)."""
     keys = master_keys(mtq)
     if taskq.have_queue():
         keys |= {t["key"] for t in taskq.read_tasks()}
@@ -166,7 +168,7 @@ def queue_keys(mtq=None):
 
 
 def pending(r, m, keys):
-    """这个种类已经排了冒烟、还在总队列里 → True。"""
+    """This kind already has a smoke test queued and still in the queue -> True."""
     return fresh(r, m) and r.get("state") == QUEUED and r.get("key") in keys
 
 
@@ -179,7 +181,8 @@ def master_keys(mtq):
 
 
 class Gate:
-    """relay.fill 用：verdict(key, sp) → None（送）或原因（这次不送）。要排的冒烟在 ops()，报警在 alerts，开关关着时的影子在 notes。"""
+    """Used by relay.fill: verdict(key, sp) -> None (send) or why not (do not send this time). Smoke tests to queue are in
+    ops(), alerts in alerts, the shadow when the switch is off in notes."""
 
     def __init__(self, site, rs, mtq, live=None, now=None):
         self.site, self.mtq, self.now = site, mtq or {}, now or time.time()
@@ -223,11 +226,11 @@ class Gate:
 
     @property
     def notes(self):
-        """开关关着时的影子：会排哪些冒烟、会挡下几个任务。"""
+        """The shadow when the switch is off: which smoke tests would be queued and how many tasks would be held back."""
         if self.live or not (self.want or self.would):
             return []
-        out = [f"（冒烟开关没开）{self.site} 会排冒烟：{'、'.join(sorted(self.want)) or '无'}；会挡下 {len(self.would)} 个任务"
-               + (f"（{'、'.join(sorted(self.would)[:3])}{' …' if len(self.would) > 3 else ''}）" if self.would else "")]
+        out = [f"(smoke switch off) {self.site} would queue smoke tests: {', '.join(sorted(self.want)) or 'none'}; would hold back {len(self.would)} tasks"
+               + (f" ({', '.join(sorted(self.would)[:3])}{' ...' if len(self.would) > 3 else ''})" if self.would else "")]
         return out
 
     def verdict(self, key, sp):
@@ -238,39 +241,39 @@ class Gate:
         except ValueError as e:
             if self.live:
                 self.alerts[alert_id("smoke", self.site, h12(str(sp.get("recipe"))))] = alert(
-                    f"{self.site} 的冒烟定义写错了：{e}", machine=self.site, kind=str(sp.get("recipe")), why=str(e), key=key)
-            return self._hold(key, f"冒烟定义写错了：{e}")
+                    f"bad smoke definition for {self.site}: {e}", machine=self.site, kind=str(sp.get("recipe")), why=str(e), key=key)
+            return self._hold(key, f"bad smoke definition: {e}")
         r = self.recs.get(m["kind"])
         if fresh(r, m) and r.get("state") == OK:
             return None
         if m["error"]:
-            why = f"冒烟定义的函数出错：{m['error']}"
+            why = f"smoke definition function failed: {m['error']}"
             if self.live:
                 self.alerts[alert_id("smoke", self.site, m["kid"])] = alert(
-                    f"{self.site} 上 {m['kind']} 冒烟没过：{why}", machine=self.site, kind=m["kind"], why=why, key=key)
+                    f"{self.site}: {m['kind']} smoke test failed: {why}", machine=self.site, kind=m["kind"], why=why, key=key)
                 if not (fresh(r, m) and r.get("state") == FAILED):
                     self.fails[m["kind"]] = dict(m=m, why=why)
             return self._hold(key, why)
         if m["canary"]:
             n = self.inflight(m["kind"])
-            return self._hold(key, f"{m['kind']} 在这台上还没成功过，先只送一个（已有 {n} 个）") if n else None
+            return self._hold(key, f"{m['kind']} has never succeeded on this executor, sending one first ({n} in flight)") if n else None
         if pending(r, m, self.queue_keys()):
             if self.live and self.now - (r.get("t") or self.now) > QUEUED_ALERT_S:
-                self.alerts[alert_id("smoke", self.site, m["kid"])] = dict(alert(
-                    f"{self.site} 上 {m['kind']} 的冒烟 {r['key']} 排了 {(self.now - r['t']) / 3600:.0f} 小时还没做完",
-                    machine=self.site, kind=m["kind"], why="还没做完", key=r["key"]), level="info")  # 在排队，不是故障：只记不推（11/12）
-            return self._hold(key, f"等冒烟 {r.get('key')}")
+                self.alerts[alert_id("smoke", self.site, m["kid"])] = alert(
+                    f"{self.site}: smoke task {r['key']} for {m['kind']} has been queued for {(self.now - r['t']) / 3600:.0f} h and is not done",
+                    machine=self.site, kind=m["kind"], why="not done yet", key=r["key"])
+            return self._hold(key, f"waiting for smoke {r.get('key')}")
         if fresh(r, m) and r.get("state") == FAILED and (not self.bundle or r.get("bundle") == self.bundle):
             if self.live:
                 self.alerts[alert_id("smoke", self.site, m["kid"])] = alert(
-                    f"{self.site} 上 {m['kind']} 冒烟没过：{r.get('why')}（taskq smoke retry {self.site} {m['kid']}）",
+                    f"{self.site}: {m['kind']} smoke test failed: {r.get('why')} (taskq smoke retry {self.site} {m['kid']})",
                     machine=self.site, kind=m["kind"], why=r.get("why"), key=r.get("key"))
-            return self._hold(key, f"冒烟没过：{r.get('why')}")
+            return self._hold(key, f"smoke test failed: {r.get('why')}")
         self.want.setdefault(m["kind"], dict(sp=sp, m=m))
-        return self._hold(key, f"先排 {m['kind']} 的冒烟")
+        return self._hold(key, f"queueing the {m['kind']} smoke test first")
 
     def ops(self):
-        """→ [dict(op="smoke_add", …)]：每种要冒烟的排一个，每次一个新的名字（{smoke}）。"""
+        """-> [dict(op="smoke_add", ...)]: one smoke test per kind, each with a new name ({smoke})."""
         if not self.live:
             return []
         out = [dict(op="smoke_fail", key=f"{proto.SMOKE_PREFIX}{self.site}/{f['m']['kid']}", mark=f["m"], why=f["why"])
@@ -307,13 +310,14 @@ def record(site, m, **kw):
 
 
 def enqueue(site, op):
-    """smoke_add → (加上了没有, 说明)。解析不了、环境和真任务不一样、加不进总队列的记成没过。
-    这个种类已经有排着的冒烟（同时跑的另一次检查刚加的）→ (None, 说明)，不再加（两次检查同时跑时不重复加）。"""
+    """smoke_add -> (whether it was added, explanation). Unparseable, env differs from the real task, or cannot be added
+    to the queue: recorded as failed. This kind already has a queued smoke test (another check added it at the same
+    time) -> (None, explanation), do not add another (two checks running at once do not add twice)."""
     m = op["mark"]
-    with locked(site):  # 查和加之间别的检查插不进来
+    with locked(site):  # another check cannot slip in between the check and the add
         r = load(site).get(m["kind"])
         if pending(r, m, queue_keys()):
-            return None, f"{site} 上 {m['kind']} 已经排了冒烟 {r['key']}，不再加"
+            return None, f"{site}: {m['kind']} already has smoke task {r['key']} queued, not adding another"
         return _enqueue(site, op, m)
 
 
@@ -321,20 +325,20 @@ def _enqueue(site, op, m):
     try:
         sp = S.resolve(op["recipe"], op["params"])
         if S.envs_of(sp) != op["envs"]:
-            raise S.SpecError(f"冒烟任务的环境 {S.envs_of(sp)} 和真任务的 {op['envs']} 不一样（把环境参数加进 by）")
+            raise S.SpecError(f"smoke task env {S.envs_of(sp)} differs from the real task's {op['envs']} (add the env parameter to by)")
     except S.SpecError as e:
-        record(site, m, state=FAILED, src="smoke", key=op["key"], bundle=op.get("bundle"), why=f"解析不了：{e}"[:300])
-        return False, f"{site} 上 {m['kind']} 的冒烟解析不了：{e}"
+        record(site, m, state=FAILED, src="smoke", key=op["key"], bundle=op.get("bundle"), why=f"cannot resolve: {e}"[:300])
+        return False, f"{site}: cannot resolve the {m['kind']} smoke task: {e}"
     rc, out, err = taskq.central(["add", f"--nice={proto.SMOKE_NICE}", "--recipe"] + S.kv_args(op["recipe"], op["params"]))
     if rc:
-        record(site, m, state=FAILED, src="smoke", key=op["key"], bundle=op.get("bundle"), why=f"加不进去：{(out + err).strip()[-200:]}")
-        return False, f"{site} 上 {m['kind']} 的冒烟加不进总队列：{(out + err).strip()[-150:]}"
+        record(site, m, state=FAILED, src="smoke", key=op["key"], bundle=op.get("bundle"), why=f"cannot add: {(out + err).strip()[-200:]}")
+        return False, f"{site}: cannot add the {m['kind']} smoke task to the queue: {(out + err).strip()[-150:]}"
     record(site, m, state=QUEUED, src="smoke", key=op["key"], bundle=op.get("bundle"), why="")
-    return True, f"{site} 排了 {m['kind']} 的冒烟 {op['key']}"
+    return True, f"{site}: queued the {m['kind']} smoke task {op['key']}"
 
 
 def finished(site, key):
-    """这个冒烟任务的记录已经有结果（ok / failed）→ True。"""
+    """This smoke task's record already has a result (ok / failed) -> True."""
     return any(r.get("key") == key and r.get("state") in (OK, FAILED) for r in load(site).values())
 
 
@@ -348,7 +352,8 @@ def finish(site, key, ok, why=""):
 
 
 def smoke_dirs(sp, sid):
-    """冒烟任务在那边占的、名字里有 sid 的最上一级文件夹（相对数据目录，至少两级）：out 和 vars 里 {data}/… 的路径。"""
+    """Top-level dirs the smoke task occupies on that side whose name contains sid (relative to the data dir, at least
+    two levels): paths in out and in vars values starting with {data}/."""
     cands = [sp.get("out") or ""] + [v[len("{data}/"):] for v in (sp.get("vars") or {}).values()
                                     if isinstance(v, str) and v.startswith("{data}/")]
     out = set()
@@ -361,12 +366,12 @@ def smoke_dirs(sp, sid):
 
 
 def sid_of(key):
-    """_smoke/<执行机>/<id>-<时间> → <执行机>-<id>-<时间>（{smoke}）。"""
+    """_smoke/<executor>/<id>-<time> -> <executor>-<id>-<time> ({smoke})."""
     return key[len(proto.SMOKE_PREFIX):].replace("/", "-", 1)
 
 
 def real_done(site, m):
-    """真任务在这台上训完：这种记成过了（src=real）。"""
+    """The real task finished on this executor: mark this kind passed (src=real)."""
     def fn(recs):
         r = recs.get(m["kind"])
         if fresh(r, m) and r.get("state") == OK:
@@ -377,7 +382,7 @@ def real_done(site, m):
 
 
 def passed(site, key):
-    """shift 交班：key 这种任务在 site 上过了冒烟（开关关着 → True）。"""
+    """Whether this kind of task passed the smoke gate on site (switch off -> True)."""
     if not on():
         return True
     if is_smoke(key):
@@ -404,7 +409,7 @@ def retry(site, kind=None):
 
 
 def adopt(dry=False):
-    """现在分给各台的、各台训完交还的任务 → 那台的这种记成过了（src=adopted）。→ [(执行机, 种类)]（新记的）。"""
+    """Tasks now assigned to executors and finished there -> mark that executor's kind passed (src=adopted). -> [(executor, kind)] (newly recorded)."""
     st = taskq.local_status()
     got = {}
     for t in st["tasks"]:
@@ -432,38 +437,38 @@ def adopt(dry=False):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="taskq smoke", description="冒烟闸门的记录")
+    ap = argparse.ArgumentParser(prog="taskq smoke", description="Smoke gate records")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("status", help="各台的记录")
+    p = sub.add_parser("status", help="records per executor")
     p.add_argument("site", nargs="?")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("retry", help="没过的重新排")
+    p = sub.add_parser("retry", help="queue failed kinds again")
     p.add_argument("site")
     p.add_argument("kind", nargs="?")
-    p = sub.add_parser("adopt", help="分给各台的、训完交还的任务的种类记成过了")
+    p = sub.add_parser("adopt", help="mark kinds assigned to executors and finished there as passed")
     p.add_argument("-n", "--dry-run", action="store_true")
     a = ap.parse_args(argv)
     if getattr(a, "site", None) and a.site not in M.executors():
-        print(f"没有执行机 {a.site}（有：{'、'.join(M.executors())}）", file=sys.stderr)
+        print(f"no executor {a.site} (have: {', '.join(M.executors())})", file=sys.stderr)
         return proto.EXIT["gone"]
     if a.cmd == "status":
         allr = {s: load(s) for s in ([a.site] if a.site else M.executors())}
         if a.json:
             S.json_out(dict(version=proto.VERSION, on=on(), sites=allr))
             return 0
-        print(f"冒烟闸门{'开着' if on() else '关着（只记进 relay.log）'}")
+        print(f"smoke gate {'on' if on() else 'off (only relay.log)'}")
         for s, recs in allr.items():
-            print(f"{s}：{len(recs)} 种")
+            print(f"{s}: {len(recs)} kinds")
             for k, r in sorted(recs.items()):
                 when = time.strftime("%m-%d %H:%M", time.localtime(r.get("t") or 0))
                 print(f"  {h12(k)} {r.get('state'):<7} {r.get('src'):<8} {when}  {k}" + (f"  {r['why']}" if r.get("why") else ""))
         return 0
     if a.cmd == "retry":
         gone = retry(a.site, a.kind)
-        print(f"{a.site}：{len(gone)} 种没过的去掉了记录，下次检查重新排冒烟" + (f"（{'、'.join(gone)}）" if gone else ""))
+        print(f"{a.site}: dropped records for {len(gone)} failed kinds, smoke will be queued again next check" + (f" ({', '.join(gone)})" if gone else ""))
         return 0
     new = adopt(a.dry_run)
-    print(("会记" if a.dry_run else "记了") + f" {len(new)} 种" + "".join(f"\n  {s}：{k}" for s, k in new))
+    print(("would mark" if a.dry_run else "marked") + f" {len(new)} kinds" + "".join(f"\n  {s}: {k}" for s, k in new))
     return 0
 
 

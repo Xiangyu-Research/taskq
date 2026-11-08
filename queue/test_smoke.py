@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""smoke_gate.py 的测试：没有记录 → 排冒烟、挡下真任务；冒烟过了 → 送；没过 → 挡下、报 smoke；环境、定义、代码包变了或
-taskq smoke retry 后重排；真任务训完记成过了；adopt 重复跑不多记；没有定义的做法一次只送一个；冒烟任务不拉回、从总队列里去掉、
-清理那边的文件夹；status、all_tasks、advance、flow 看不见冒烟任务；开关关着只记影子；每次一个新文件夹；定义里的函数在 store 上算。
-总队列是临时目录里真的（taskq.py 子进程），不连别的机器。
+"""Tests for smoke_gate.py: no record -> queue a smoke task, hold the real task back; passed -> send; failed -> hold back
+and report smoke; an env, definition or bundle change, or taskq smoke retry, queues it again; a real task done marks the
+kind passed; adopt is idempotent; a recipe with no definition sends one task at a time; smoke tasks are not fetched, are
+removed from the queue, and their dirs are cleaned up there; status, all_tasks, advance and flow do not show smoke tasks;
+with the switch off only the shadow is logged; every smoke task gets a new dir; functions in definitions run on the store.
+The queue is real, in a temp dir (taskq.py subprocess), and no other machine is contacted.
     python3 queue/test_smoke.py
 """
 import os
@@ -70,7 +72,7 @@ def RS(*ts, bundle=None, oks=None):
 
 
 def fill(s=None, rs=None):
-    """只有这一台时的派任务（relay.assign）→ (这台的动作, 没领的原因, 报警, 影子)。"""
+    """Sending with only this executor (relay.assign) -> (actions for it, why nothing was claimed, alerts, shadow)."""
     stuck, notes = {}, {}
     out, why = relay.assign(s or S0(), {NAME: dict(rs=rs or RS(), st={})}, stuck, notes)
     return out.get(NAME, []), why.get(NAME), stuck, notes.get(NAME, [])
@@ -105,7 +107,7 @@ def test_enqueue_pass():
     assert a["key"].startswith(f"_smoke/{NAME}/") and sid.startswith(f"{NAME}-") and a["params"]["variant"] == "V_save", a
     assert a["params"]["model"] == f"smoke/{sid}" and a["params"]["vars"]["DEMO_RESULTS"] == f"{{data}}/smoke/{sid}/results", a
     assert a["params"]["machines"] == [NAME], a
-    ok("没有记录 → 排一个冒烟（by 的参数取真任务的，{smoke} 换成这次的名字，只给这台），真任务这次不领")
+    ok("no record -> queue one smoke task (by parameters from the real task, {smoke} replaced by this run's name, only for this executor); the real task is not claimed this time")
     msgs = run(more)
     K = a["key"]
     t = next(t for t in mtq()["tasks"] if t["key"] == K)
@@ -113,15 +115,15 @@ def test_enqueue_pass():
     assert ADDS and ADDS[-1][2] == "relay_stage" and ADDS[-1][3] == K, ADDS
     r = SG.load(NAME)
     assert len(r) == 1 and list(r.values())[0]["state"] == "queued" and list(r.values())[0]["key"] == K, r
-    ok("smoke_add：加进总队列（档位 -1000）、分给这台、排传数据；记成 queued")
+    ok("smoke_add: added to the queue (nice -1000), assigned to this executor, stage queued; recorded as queued")
     more, why, stuck, _ = fill()
     assert not kinds_of(more, "take") and not kinds_of(more, "smoke_add"), more
-    ok("冒烟还在做 → 真任务照样挡着，不再排第二个")
+    ok("smoke task still running -> the real task stays held, no second smoke task")
     st = {"keys": {NAME: {K: dict(outs=[t["spec"]["out"]], views=[], inputs=[], cleanup=[t["spec"]["out"]])}}}
     acts, stuck = relay.plan(S0(), NAME, RS(dict(key=K, state="done", worker=None, nice=proto.SMOKE_NICE)), st)
     assert [x["op"] for x in acts] == ["beat", "smoke_rec", "drop", "smoke_end"] and not stuck, acts
     assert acts[2]["cleanup"] == [f"results/smoke/{sid}", f"smoke/{sid}"], acts[2]
-    ok("那边做完 → 记结果、删那边的（连同名字里有 {smoke} 的文件夹），不拉回、不归档")
+    ok("done on that side -> record the result, delete it there (including dirs whose name has {smoke}), no fetch, no archive")
     ST.update_state(lambda x: x.update(st))
     dropped = []
     saved = relay.RT.drop_remote
@@ -134,10 +136,10 @@ def test_enqueue_pass():
     assert K not in {t["key"] for t in mtq()["tasks"]}, mtq()
     assert not os.path.exists(os.path.join(taskq.TQ, proto.QUEUE["claims"], proto.safe(K)))
     assert list(SG.load(NAME).values())[0]["state"] == "ok"
-    ok("smoke_end：从总队列里去掉（领取、记录一起删）；记成 ok")
+    ok("smoke_end: removed from the queue (claim and record too); recorded as ok")
     more, why, stuck, _ = fill()
     assert [a["key"] for a in kinds_of(more, "take")] == [T] and not kinds_of(more, "smoke_add"), more
-    ok("冒烟过了 → 真任务送过去")
+    ok("smoke passed -> send the real task")
     return T
 
 
@@ -148,7 +150,7 @@ def test_fail_retry():
     K = kinds_of(more, "smoke_add")[0]["key"]
     st = {"keys": {NAME: {K: dict(outs=[], views=[], inputs=[], cleanup=[])}}}
     relay.smoke_tail = lambda name, rk: "Traceback: boom"
-    acts, _ = relay.plan(S0(), NAME, RS(dict(key=K, state="failed", worker=None, nice=-1000, note="失败 3 次")), st)
+    acts, _ = relay.plan(S0(), NAME, RS(dict(key=K, state="failed", worker=None, nice=-1000, note="failed 3 times")), st)
     acts = [a for a in acts if a["key"] == K]
     assert [x["op"] for x in acts] == ["beat", "smoke_rec", "drop", "smoke_end"] and acts[1]["ok"] is False, acts
     ST.update_state(lambda x: x.update(st))
@@ -160,14 +162,15 @@ def test_fail_retry():
         relay.RT.drop_remote = saved
     m = SG.mark(NAME, next(t for t in mtq()["tasks"] if t["key"] == T)["spec"])
     r = SG.load(NAME)[m["kind"]]
-    assert r["state"] == "failed" and "boom" in r["why"] and "失败 3 次" in r["why"], r
+    assert r["state"] == "failed" and "boom" in r["why"] and "failed 3 times" in r["why"], r
     more, why, stuck, _ = fill()
     assert T not in [a["key"] for a in more] and not kinds_of(more, "smoke_add"), more
     assert list(stuck) == [f"smoke:{NAME}:{m['kid']}"], stuck
     import plain
-    assert "冒烟没过" in plain.problem(list(stuck)[0], dict(msg=proto.alert_msg(list(stuck.values())[0]),
-                                                           data=proto.alert_data(list(stuck.values())[0]))), stuck
-    ok("冒烟没过 → 记 failed（带那边日志的尾巴）、真任务挡着、报 smoke:<执行机>:<种类 id>（白话说清哪种没过）")
+    msg = plain.problem(list(stuck)[0], dict(msg=proto.alert_msg(list(stuck.values())[0]),
+                                              data=proto.alert_data(list(stuck.values())[0])))
+    assert "toy" in msg and "V_fail" in msg, msg
+    ok("smoke failed -> record failed (with the tail of that side's log), hold the real task, report smoke:<executor>:<kind id> (plain words name the kind)")
     m0 = M.MACHINES[NAME]["envs"]["base"]
     M.MACHINES[NAME]["envs"]["base"] = ("conda", "pt-new")
     try:
@@ -175,17 +178,17 @@ def test_fail_retry():
         assert len(kinds_of(more, "smoke_add")) == 1, more
     finally:
         M.MACHINES[NAME]["envs"]["base"] = m0
-    ok("环境变了 → 重新冒烟")
+    ok("env changed -> smoke again")
     SG.SMOKE["toy"] = dict(DEF, params=dict(DEF["params"], cfg="lite"))
     try:
         more, *_ = fill()
         assert len(kinds_of(more, "smoke_add")) == 1 and kinds_of(more, "smoke_add")[0]["params"]["cfg"] == "lite", more
     finally:
         SG.SMOKE["toy"] = DEF
-    ok("冒烟定义变了 → 重新冒烟")
+    ok("smoke definition changed -> smoke again")
     more, *_ = fill(rs=RS(bundle="newbundle"))
     assert len(kinds_of(more, "smoke_add")) == 1, more
-    ok("代码包换了 → 没过的重新冒烟")
+    ok("bundle changed -> failed kinds smoke again")
     more, *_ = fill()
     assert not kinds_of(more, "smoke_add")
     assert SG.main(["retry", NAME, m["kid"]]) == 0 and m["kind"] not in SG.load(NAME)
@@ -200,7 +203,7 @@ def test_fail_retry():
     g.want[m["kind"]] = dict(sp=next(t for t in mtq()["tasks"] if t["key"] == T)["spec"], m=m)
     k2 = g.ops()[0]["key"]
     assert k1 != k2 and SG.sid_of(k1) != SG.sid_of(k2) and adds2
-    ok("taskq smoke retry → 去掉没过的记录、重排；每次冒烟一个新名字（新的文件夹）")
+    ok("taskq smoke retry -> drop the failed record and queue again; every smoke task gets a new name (a new dir)")
 
 
 def test_real_adopt():
@@ -216,7 +219,7 @@ def test_real_adopt():
     run(real)
     r = SG.load(NAME)[real[0]["mark"]["kind"]]
     assert r["state"] == "ok" and r["src"] == "real", r
-    ok("真任务在这台训完 → 这种记成过了（src=real）")
+    ok("the real task finished on this executor -> the kind is recorded as passed (src=real)")
     T2 = add("D4", "0", variant="V_adopt")
     central("take", "--worker", NAME, "--assign", T2)
     new = SG.adopt(dry=True)
@@ -225,13 +228,13 @@ def test_real_adopt():
     new = SG.adopt()
     assert new and SG.adopt() == [], new
     assert any(r.get("src") == "adopted" for r in SG.load(NAME).values())
-    ok("adopt：分给各台的任务的种类记成过了（--dry-run 不写），再跑一次不多记")
+    ok("adopt: mark kinds assigned to executors as passed (--dry-run writes nothing), a second run adds nothing")
     central("release", "--worker", NAME, T2)
     central("release", "--worker", NAME, T)
 
 
 def test_env_variant():
-    """环境编号只按描述加这台的变体算（不看那边的 .ok）；冒烟过了以后真任务训完不改写记录。"""
+    """The env id hashes the variant this executor uses (not that side's .ok); once smoke passed, a real task finishing does not rewrite the record."""
     T = add("D8", "0", variant="V_env")
     sp = next(t for t in mtq()["tasks"] if t["key"] == T)["spec"]
     e0, h0, v0 = M.MACHINES[NAME]["envs"]["base"], M.spec_hash, M.spec_variant
@@ -249,11 +252,11 @@ def test_env_variant():
         assert SG.Gate(NAME, RS(oks={"base": "base-gpu2"}), mtq(), live=True).verdict(T, sp) is None
     finally:
         M.MACHINES[NAME]["envs"]["base"], M.spec_hash, M.spec_variant = e0, h0, v0
-    ok("环境编号按描述加这台的变体算，不看那边的 .ok 读没读到；冒烟过了 → 真任务训完不改写、不再排冒烟")
+    ok("env id hashes the variant this executor uses, not whether that side's .ok was read; smoke passed -> a real task finishing does not rewrite it, no more smoke")
 
 
 def test_canary():
-    for t in mtq()["tasks"]:  # 前面领着的都交还（canary 的种类只按做法和环境算）
+    for t in mtq()["tasks"]:  # release what earlier tests claimed (a canary's kind only depends on recipe and env)
         if t.get("assigned") == NAME:
             central("release", "--worker", NAME, t["key"])
         if proto.is_smoke(t["key"]):
@@ -268,7 +271,7 @@ def test_canary():
         central("take", "--worker", NAME, "--assign", took[0])
         more, *_ = fill()
         assert not kinds_of(more, "take"), more
-        ok("没有冒烟定义的做法（canary）：一次只送一个，在做的那个没完时别的挡着")
+        ok("a recipe with no smoke definition (canary): send one at a time, others held back while it runs")
         s = S0()
         for t in s["taskq"][HUB]["tasks"]:
             if t["key"] == took[0]:
@@ -279,7 +282,7 @@ def test_canary():
         central("rm", took[0])
         more, *_ = fill()
         assert {T1, T2} <= {a["key"] for a in kinds_of(more, "take")}, more
-        ok("canary 训完一个以后不再限")
+        ok("after one canary task finished, no more limit")
     finally:
         SG.SMOKE["toy"] = DEF
         relay.P.READY[NAME] = 2
@@ -296,11 +299,11 @@ def test_hidden():
     assert K in {t["key"] for t in q}
     assert K not in {t["key"] for t in S.all_tasks(q)}
     out = central("status")
-    assert K not in out and "冒烟 1 个" in out, out
+    assert K not in out and "taskq smoke status" in out, out
     keys = lambda *a: {t["key"] for t in S.json_in(central("status", "--json", *a))["tasks"]}  # noqa: E731
     assert K not in keys() and K in keys("--internal") and keys() | {K} == keys("--internal")
     out = central("status", "--internal")
-    assert K in out and "冒烟" not in out.splitlines()[-1], out
+    assert K in out and "smoke" not in out.splitlines()[-1], out
     import flow.compile as FC
     fl = FC.build(queue_tasks=q)
     assert fl.instances and K not in str(fl.instances), fl
@@ -311,11 +314,11 @@ def test_hidden():
     import overview
     o = overview.build(dict(s, now=None, ok={}, src={}), relay={})
     assert K not in {t["key"] for t in o["tasks"]}
-    ok("冒烟任务：taskq status 的文字和 --json、all_tasks（登记表、看板）、overview、advance、flow 都看不见（status --internal 才列）")
+    ok("smoke tasks are invisible in taskq status text and --json, all_tasks (registry, board), overview, advance and flow (only status --internal lists them)")
     rs = RS(dict(key=K, state="claimed", worker="w", nice=-1000, beat=9e18))
     acts, _ = relay.plan(S0(), NAME, rs, {"keys": {NAME: {K: dict(outs=[])}}})
     assert [a["op"] for a in acts if a["key"] == K] == ["beat"], acts
-    ok("冒烟在训 → 只续约")
+    ok("smoke task running -> only heartbeat")
     return K
 
 
@@ -326,14 +329,14 @@ def test_off():
         T = add("D8", "0", variant="V_off")
         more, why, stuck, notes = fill()
         assert T in [a["key"] for a in kinds_of(more, "take")] and not kinds_of(more, "smoke_add") and not stuck, more
-        assert notes and "会排冒烟" in notes[0] and "V_off" in notes[0], notes
+        assert notes and "would queue smoke" in notes[0] and "V_off" in notes[0], notes
         before = os.path.getsize(os.environ["RELAY_LOG"]) if os.path.exists(os.environ["RELAY_LOG"]) else 0
         relay.log(notes)
         assert os.path.getsize(os.environ["RELAY_LOG"]) > before
     finally:
         relay.P.AUTO["smoke"] = True
         relay.P.READY[NAME] = 2
-    ok("开关关着：照常送，只把会排的冒烟、会挡下的任务记进 relay.log")
+    ok("switch off: send as usual, only log the smoke tasks it would queue and the tasks it would hold back to relay.log")
 
 
 def test_plugin_table():
@@ -347,12 +350,12 @@ def test_plugin_table():
             pass
         finally:
             SG.SMOKE.pop("bad")
-    ok("插件表 SMOKE：只认 by、params、vars；by 是参数名的列表")
+    ok("plugin table SMOKE: only by, params, vars; by is a list of parameter names")
 
 
 def store_smoke(what, data):
-    """store 上的 smoke 操作（site_ops.op_smoke）在这个进程里跑：定义用这个测试改过的 SG.SMOKE，store 的数据目录是 TASKQ_DATA
-    （真在 store 上跑一次的在 test_check）。"""
+    """The store's smoke operation (site_ops.op_smoke) run in this process: definitions come from SG.SMOKE as modified by
+    this test, the store's data dir is TASKQ_DATA (a real run on the store is in test_check)."""
     import site_ops
     assert what == "smoke", what
     ext = cfg.extend
@@ -390,14 +393,14 @@ def test_callable():
         assert SG.Gate(NAME, RS(), mtq(), live=True).verdict("D9X/V_call/0", sp) is None
         SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: dict(DEF["params"], ds="SMOKE_Y"))
         assert SG.mark(NAME, sp)["defn"] != m["defn"]
-        assert SG.Gate(NAME, RS(), mtq(), live=True).verdict("D9X/V_call/0", sp), "函数的结果变了要重新冒烟"
-        ok("params、vars 可以是函数 f(真任务的参数, store 的数据目录)：换成的数据不同是两种、各记各的；定义的 id 按算出来的结果，结果变了重新冒烟")
+        assert SG.Gate(NAME, RS(), mtq(), live=True).verdict("D9X/V_call/0", sp), "a changed function result needs a new smoke test"
+        ok("params and vars may be functions f(real task parameters, store data dir): different swapped data are two kinds recorded separately; the definition id follows the computed result, a changed result smokes again")
 
         got = {}
         SG.SMOKE["toy"] = dict(DEF, params=lambda tp, data: got.update(tp) or dict(DEF["params"]))
         SG.mark(NAME, sp)
         assert got.get("inputs") == list(sp.get("inputs") or []) and "inputs" not in (sp.get("names") or {}), got
-        ok("冒烟定义的函数拿到真任务的 inputs（冒烟要带上的输入从这里取）")
+        ok("functions in a smoke definition get the real task's inputs (the smoke task takes the inputs it needs from there)")
 
         def boom(tp, data):
             raise KeyError("no labels")
@@ -420,11 +423,11 @@ def test_callable():
     finally:
         SG.SMOKE["toy"] = DEF
         SG.RM.store_op = saved
-    ok("函数出错 → 这种记成没过（why = 异常）、报 smoke、这一轮照常；修好（结果变了）后重新冒烟")
+    ok("function error -> record the kind as failed (why = the exception), report smoke, carry on this round; after a fix (changed result) smoke again")
 
 
 def test_race():
-    """两次检查同时跑：后一次的总队列是前一次加冒烟之前读的，不能再排一个。"""
+    """Two checks running at once: the later one read the queue before the earlier one added the smoke task, so it must not add another."""
     add("D8", "0", variant="V_race")
     stale = S0()
     more, *_ = fill(stale)
@@ -438,14 +441,14 @@ def test_race():
     assert smokes() == [a[0]["key"]], smokes()
     more, *_ = fill(stale)
     assert not [x for x in more if x["key"] == "D8/V_race/0" or x.get("params", {}).get("variant") == "V_race"], more
-    ok("后一次检查读的总队列里还没有这个冒烟：照样看成已经排了，不再排、真任务照样挡着")
+    ok("the later check's queue snapshot predates this smoke task: it still counts as queued, adds none, and the real task stays held")
     k2 = a[0]["key"] + "x"
     dup = dict(a[0], key=k2, params=dict(a[0]["params"], key=k2))
     got, msg = SG.enqueue(NAME, dup)
-    assert got is None and "已经排了" in msg and smokes() == [a[0]["key"]], (got, msg, smokes())
+    assert got is None and "already has smoke task" in msg and smokes() == [a[0]["key"]], (got, msg, smokes())
     msgs = run([dup])
     assert smokes() == [a[0]["key"]] and SG.load(NAME)[a[0]["mark"]["kind"]]["key"] == a[0]["key"], (msgs, smokes())
-    ok("两次检查都决定要排：后加的那次发现已经排了，不加、不领、不报警，记录还指着先加的那个")
+    ok("both checks decided to queue one: the later add finds it already queued, adds none, claims none, raises no alert, and the record still points at the first one")
 
 
 def main():
@@ -463,7 +466,7 @@ def main():
         test_race()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
-    print("全部通过")
+    print("all passed")
 
 
 if __name__ == "__main__":

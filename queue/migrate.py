@@ -1,13 +1,14 @@
-"""taskq self migrate：把盘上的旧格式改成现在的。改格式的版本切换时跑一次（先停 cron 的健康检查、各执行机交还在训的任务、
-推好新代码、各台换上新包），重复跑没关系。默认只列出要做的事，--apply 才做。
-  taskq self migrate [--apply] [--rename 旧名=新名 …] [--merge 旧名=旧根目录 …]
-    --rename  旧的机器名（记账、领取、冒烟记录里的）→ 机器表里的名字；几个旧名可以并成一台
-    --merge   这个旧名的执行机根目录并进它新名那一台的根目录（同一台物理机器上原来分开的根目录）：分段日志搬过去，
-              blob 同一个盘的硬链接过去；旧根目录的队列里要已经没有任务，旧根目录本身不删（最后列出删它的命令）
-hub 上：总队列（按步骤实例的新任务名改名、参数换成现在算出来的、补 added、交还记录补原因、机器改名）、relay 的记账
-（机器改名、补视图链接）、冒烟记录、状态目录里不再用的文件、配置里的旧东西。
-各执行机和 store 上：经 relay_remote.op 跑那台代码包里的 `migrate.py root`（队列按新任务名改名、说明换成 hub 按现在的做法
-解析的（added 不动）；分段日志按新任务名改名，旧的分段日志名 _seg<段> 改成 _part<段>；并根目录；读视图里的链接）。"""
+"""taskq self migrate: rewrite on-disk state from the old format to the current one, once per cutover; safe to re-run.
+By default it only lists what it would do, --apply does it.
+
+    taskq self migrate [--apply] [--rename old=new ...] [--merge old=old-root ...]
+      --rename  old machine names (ledger, claims, smoke records) -> names in the machine table; several old names may merge
+      --merge   merge an old root into its new machine's root (same physical machine: move part logs, hardlink blobs on
+                the same disk; the old queue must be empty; the old root itself is kept, the delete command is printed)
+The hub side rewrites the queue, the relay ledger, smoke records, unused state-dir files and old config entries. Executors
+and the store run `migrate.py root` from their bundle through relay_remote.op: rename tasks and part logs, replace specs,
+merge roots, collect view links.
+"""
 import argparse
 import glob
 import json
@@ -44,9 +45,9 @@ class Stop(Exception):
     """A situation that cannot be handled automatically: change nothing, list why."""
 
 
-# ---------------- 在一台机器上（代码包里，经 relay_remote.op 跑） ----------------
+# ---------------- on one machine (inside the bundle, run through relay_remote.op) ----------------
 def log_rename(name, keys):
-    """分段日志的文件名 → 新名字（不用改 → None）。<safe key>__<作业>_part<段>.log：作业名里没有 "__"。"""
+    """Part log file name -> new name (None when unchanged). <safe key>__<job>_part<part>.log: a job name never contains "__"."""
     new = name
     if OLD_PART in new:
         i = new.rfind(OLD_PART)
@@ -62,9 +63,9 @@ def log_rename(name, keys):
 
 
 def move(src, dst, say, dry):
-    """src → dst（dst 已有 → 不动，记一条）。"""
+    """src -> dst (dst exists -> leave it alone and say so)."""
     if os.path.lexists(dst):
-        say(f"  留着 {src}（{dst} 已有）")
+        say(f"  kept {src} ({dst} exists)")
         return False
     if not dry:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -191,21 +192,21 @@ def english_failures(Q, say, dry):
 
 
 def merge_root(R, O, say, dry):
-    """旧根目录 O 并进 R：分段日志、worker 日志搬过来；blob 同一个盘的硬链接过来（不同盘的不管，要用时再传）。"""
+    """Merge old root O into R: move part logs and worker logs; hardlink blobs on the same disk (other disks: leave them, transfer when needed)."""
     import taskq
     old = taskq.read_tasks(os.path.join(O, proto.ROOT["queue"], proto.QUEUE["tasks"]))
     if old:
-        raise Stop(f"{O} 的队列里还有 {len(old)} 个任务（{old[0]['key']} …）：先让它们做完或交还到别处")
+        raise Stop(f"{O} still has {len(old)} task(s) in its queue ({old[0]['key']} ...): let them finish or release them elsewhere first")
     for sub in (proto.TASK_LOGS, proto.WORKER_LOGS):
         src = os.path.join(O, proto.ROOT["data"], sub)
         n = sum(move(os.path.join(src, f), os.path.join(R, proto.ROOT["data"], sub, f), say, dry)
                 for f in (sorted(os.listdir(src)) if os.path.isdir(src) else []))
-        say(f"{src} → {R}：搬 {n} 个文件")
+        say(f"{src} -> {R}: moved {n} files")
     ob, rb = os.path.join(O, proto.ROOT["blobs"]), os.path.join(R, proto.ROOT["blobs"])
     if not os.path.isdir(ob):
         return
     if os.stat(ob).st_dev != os.stat(rb if os.path.isdir(rb) else R).st_dev:
-        say(f"{ob} 和 {rb} 不在同一个盘：blob 不搬（要用时再传）")
+        say(f"{ob} and {rb} are on different disks: blobs not moved (transfer them when needed)")
         return
     n = 0
     for p in glob.glob(os.path.join(ob, "??", "*")):
@@ -215,11 +216,11 @@ def merge_root(R, O, say, dry):
                 os.makedirs(os.path.dirname(q), exist_ok=True)
                 os.link(p, q)
             n += 1
-    say(f"{ob} → {rb}：硬链接 {n} 个 blob（含 {proto.BLOB_STAT}）")
+    say(f"{ob} -> {rb}: hardlinked {n} blobs (including {proto.BLOB_STAT})")
 
 
 def view_links(R, D, views):
-    """视图里指向 blob 的软链接 → {相对数据目录的路径: sha256}（relay 记账里的 links）。"""
+    """Symlinks in views pointing at blobs -> {path relative to the data dir: sha256} (links in the relay ledger)."""
     blobs = os.path.realpath(os.path.join(R, proto.ROOT["blobs"]))
     out = {}
     for v in views:
@@ -233,13 +234,14 @@ def view_links(R, D, views):
 
 
 def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
-    """队列目录 Q：任务改名、补 added、换成 specs {新任务名: 新说明} 里的说明；drop 里的旧任务连同记录删掉；按任务名放的记录
-    跟着改名；交还记录补原因；skips 只留现在还有的 worker 的。"""
+    """Queue dir Q: rename tasks, fill in added, replace specs from specs {new task name: new spec}; delete tasks in drop
+    with their records; rename per-task-name records; add the reason to release records; keep only skips of workers
+    that still exist."""
     import taskq
     tp = os.path.join(Q, proto.QUEUE["tasks"])
     busy = os.listdir(os.path.join(Q, proto.QUEUE["claims"])) if os.path.isdir(os.path.join(Q, proto.QUEUE["claims"])) else []
     if busy and workers is not None:
-        raise Stop(f"{Q} 还有 {len(busy)} 个领着的任务（{busy[0]} …）：先交还（taskq stop 或停 worker）")
+        raise Stop(f"{Q} still has {len(busy)} claimed tasks ({busy[0]} ...): release them first (taskq stop or stop the worker)")
     drop = set(drop)
     tasks = taskq.read_tasks(tp)
     gone = [t["key"] for t in tasks if t["key"] in drop]
@@ -255,17 +257,17 @@ def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
         if t.get("added") is None:
             t["added"] = 0
         if t["key"] in specs:
-            t["spec"] = specs[t["key"]]  # 直接写新说明（不经 resend：那会把换了输出的当成重做，重算 added）
+            t["spec"] = specs[t["key"]]  # write the new spec directly (not via resend: that would treat a changed output as a redo and recompute added)
             m += 1
     if not dry:
         taskq.write_tasks(tasks, tp)
-    say(f"{tp}：{len(tasks)} 个任务，{n} 个改名，{m} 个换成新说明" + "".join(f"\n  删 {k}（总队列里丢掉了）" for k in gone))
+    say(f"{tp}: {len(tasks)} tasks, {n} renamed, {m} given a new spec" + "".join(f"\n  drop {k} (gone from the queue)" for k in gone))
     for d in PER_KEY:
         base = os.path.join(Q, proto.QUEUE[d])
         for k in sorted(drop):
             p = os.path.join(base, safe(k))
             if os.path.lexists(p):
-                say(f"  删 {p}")
+                say(f"  drop {p}")
                 if not dry:
                     shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
         for old, nk in keys.items():
@@ -276,7 +278,7 @@ def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
         p = os.path.join(rd, f)
         x = open(p).read().split()
         if len(x) == 2:
-            say(f"  {p}：补原因 {proto.RELEASE_WHY['back']}")
+            say(f"  {p}: add reason {proto.RELEASE_WHY['back']}")
             if not dry:
                 with open(p, "w") as fh:
                     fh.write(f"{x[0]} {x[1]} {proto.RELEASE_WHY['back']}\n")
@@ -293,9 +295,9 @@ def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
 
 
 def op_root(A):
-    """在这台（TASKQ_ROOT 是它的根目录）：A = dict(dry, keys {旧任务名: 新的}, merge [旧根目录], views {任务名: [视图]},
-    data [另外的数据目录], specs {新任务名: 按现在的做法解析的说明}, drop [总队列里丢掉的旧任务名])
-    → dict(log [做了什么], links {任务名: {相对路径: sha256}})。"""
+    """On this machine (TASKQ_ROOT is its root): A = dict(dry, keys {old task name: new}, merge [old root], views {task
+    name: [views]}, data [extra data dirs], specs {new task name: spec resolved with the current recipes}, drop [old task
+    names gone from the queue]) -> dict(log [what was done], links {task name: {relative path: sha256}})."""
     import cfg
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
     import mtab as M
@@ -314,7 +316,7 @@ def op_root(A):
     for old in keys:
         p = os.path.join(pins, safe(old) + ".json")
         if os.path.exists(p):
-            log.append(f"删钉住记录 {p}（视图建好前才有，换了名字的任务下次传时重钉）")
+            log.append(f"drop pin record {p} (only exists before the view is built; a renamed task is pinned again on its next transfer)")
             if not dry:
                 os.remove(p)
     return dict(log=log, links={k: view_links(R, D, v) for k, v in A["views"].items()})
@@ -322,7 +324,7 @@ def op_root(A):
 
 def root_main(argv):
     if argv != ["root"]:
-        sys.exit("用法：migrate.py root（参数是标准输入上的 JSON）")
+        sys.exit("usage: migrate.py root (parameters are JSON on stdin)")
     out, sys.stdout = sys.stdout, sys.stderr
     try:
         res = op_root(json.load(sys.stdin))
@@ -333,24 +335,25 @@ def root_main(argv):
     print(proto.JSON_MARK + json.dumps(res, ensure_ascii=False), flush=True)
 
 
-# ---------------- hub 上 ----------------
+# ---------------- on the hub ----------------
 def parse_pairs(xs, what):
     out = {}
     for x in xs:
         if "=" not in x:
-            raise SystemExit(f"taskq self migrate：{what} 要写成 旧=新：{x}")
+            raise SystemExit(f"taskq self migrate: {what} must be old=new: {x}")
         a, b = x.split("=", 1)
         out[a] = b
     return out
 
 
 def key_map(tasks):
-    """总队列里做法 command 的任务 → 现在实验表的步骤实例（按产出 out 对上）：({旧名: 新名}, {新名: 参数}, [(旧名, 为什么丢掉)])。"""
+    """Queue tasks with recipe command -> current experiment-table step instances (matched by output out): ({old: new},
+    {new: params}, [(old, why dropped)])."""
     import advance
     from flow.compile import build
     flow = build(queue_tasks=[t for t in tasks if t["recipe"] != "command"])
     if flow.errors:
-        raise Stop("实验表的步骤有问题：" + "；".join(flow.errors[:5]))
+        raise Stop("bad steps in the experiment table: " + "; ".join(flow.errors[:5]))
     by_out = {}
     for i in flow.instances.values():
         if i.step:
@@ -361,18 +364,18 @@ def key_map(tasks):
             continue
         hit = by_out.get(os.path.normpath(str(t["params"].get("out", "")).replace("{data}/", "")), [])
         if len(hit) != 1:
-            drop.append((t["key"], "实验表里没有产出是它的步骤" if not hit else f"产出对上 {len(hit)} 个步骤实例"))
+            drop.append((t["key"], "no step in the experiment table has this output" if not hit else f"output matches {len(hit)} step instances"))
             continue
         i = hit[0]
         if i.id in params:
-            drop.append((t["key"], f"和别的任务对上同一个步骤实例 {i.id}"))
+            drop.append((t["key"], f"same step instance {i.id} as another task"))
             continue
         keys[t["key"]], params[i.id] = i.id, advance.queue_params(i)
     return keys, params, drop
 
 
 def renamed_params(params):
-    """任务的参数：旧的 data（任务说明的输入，哪种做法都一样）改叫 inputs；现在参数不能叫 data（spec.BUILTIN）。"""
+    """Task parameters: old data (the spec's inputs, the same in every recipe) becomes inputs; parameters may no longer be called data (spec.BUILTIN)."""
     if "data" not in params:
         return params
     p = dict(params)
@@ -381,7 +384,7 @@ def renamed_params(params):
 
 
 def plan_hub(ren):
-    """总队列 → (新的任务表, {旧名: 新名}, [丢掉的 (旧名, 为什么)], [要说的])。"""
+    """Queue -> (new task list, {old: new}, [(dropped old, why)], [lines to say])."""
     import experiments as E
     import taskq
     tasks = taskq.read_tasks()
@@ -403,15 +406,16 @@ def plan_hub(ren):
         try:
             E.resolve_task(t["recipe"], t["params"], t.get("exp"))
         except Exception as e:  # noqa: BLE001
-            raise Stop(f"{t['key']} 按现在的做法解析不了：{e}")
+            raise Stop(f"{t['key']} cannot be resolved with the current recipes: {e}")
         new.append(t)
-    say.append(f"总队列：{len(tasks)} 个任务，{sum(o != n for o, n in keys.items())} 个改成步骤实例的名字，丢掉 {len(drop)} 个")
-    say += [f"  丢掉 {k}：{why}" for k, why in drop]
+    say.append(f"Queue: {len(tasks)} tasks, {sum(o != n for o, n in keys.items())} renamed to step instance names, {len(drop)} dropped")
+    say += [f"  dropped {k}: {why}" for k, why in drop]
     return new, keys, drop, say
 
 
 def fix_hub_queue(Q, tasks, keys, drop, ren, say, dry):
-    """总队列：写新任务表；按任务名的记录改名，丢掉的任务的记录删掉；领取、交还、失败、跳过里的机器名改名；交还记录补原因。"""
+    """Hub queue: write the new task list; rename per-task-name records and delete those of dropped tasks; rename machines
+    in claims, releases, failures and skips; add the reason to release records."""
     import taskq
     if not dry:
         taskq.write_tasks(tasks, os.path.join(Q, proto.QUEUE["tasks"]))
@@ -436,21 +440,21 @@ def fix_hub_queue(Q, tasks, keys, drop, ren, say, dry):
             out = []
             for ln in lines:
                 x = ln.split(sep)
-                if len(x) > 1:  # 第 2 段的最后一个词是机器名（failures 的是"作业 <机器>"）
+                if len(x) > 1:  # the last word of field 2 is the machine name (for failures: "job <machine>")
                     w = x[1].split(" ")
                     w[-1] = ren.get(w[-1], w[-1])
                     x[1] = " ".join(w)
-                if d == "failures" and len(x) == 3:  # 加上跑它的代码包：切换前的包都不再是在用的，记成 OLD_CODE
+                if d == "failures" and len(x) == 3:  # add the bundle that ran it: bundles from before the cutover are no longer in use, record OLD_CODE
                     x.append(OLD_CODE)
                 out.append(sep.join(x))
             if out != lines and not dry:
                 with open(p, "w", encoding="utf-8") as fh:
                     fh.write("\n".join(out) + "\n")
-    say(f"{Q}：领取、交还、失败、跳过里的机器名按 {ren or '（没有改名）'} 改；失败记录补上代码包一栏")
+    say(f"{Q}: machine names in claims, releases, failures and skips updated per {ren or '(no renames)'}; failure records given a bundle column")
 
 
 def fix_smoke(Q, ren, say, dry):
-    """冒烟记录 smoke/<机器>.json：改名；几台并成一台时每种取最新的。"""
+    """Smoke records smoke/<machine>.json: rename; when several machines merge, keep the newest record per kind."""
     d = os.path.join(Q, proto.SMOKE_DIR)
     if not os.path.isdir(d):
         return
@@ -465,7 +469,7 @@ def fix_smoke(Q, ren, say, dry):
         for k, r in recs.items():
             if k not in to or (r.get("t") or 0) > (to[k].get("t") or 0):
                 to[k] = r
-    say(f"冒烟记录：{sorted(os.path.basename(f)[:-5] for f in glob.glob(os.path.join(d, '*.json')))} → {sorted(merged)}")
+    say(f"Smoke records: {sorted(os.path.basename(f)[:-5] for f in glob.glob(os.path.join(d, '*.json')))} -> {sorted(merged)}")
     if dry:
         return
     for f in glob.glob(os.path.join(d, "*.json")) + glob.glob(os.path.join(d, "*.json.lock")):
@@ -476,20 +480,21 @@ def fix_smoke(Q, ren, say, dry):
 
 
 def fix_relay(st, keys, params, ren, links, merged, drop, say):
-    """relay 的记账 state.json（就地改 st）：机器改名、任务改名、做法参数换新、去掉 unq、补 links；并掉的旧根目录的记录、
-    总队列里丢掉的任务的记录丢掉；代码包闸门挡下的（held，按旧包记的）清掉，换包后重新判断。"""
+    """Relay ledger state.json (edited in place): rename machines and tasks, replace recipe parameters, drop unq, fill in
+    links; drop records of merged old roots and of tasks gone from the queue; clear bundle-gate holds (held, recorded
+    under the old bundle) so the new bundle is judged afresh."""
     out = {}
     for old, recs in (st.get("keys") or {}).items():
         if old in merged:
-            say(f"relay 记账：丢掉 {old} 的 {len(recs)} 条（根目录并进了 {ren.get(old, old)}，队列已空）")
+            say(f"relay ledger: dropping {len(recs)} records of {old} (root merged into {ren.get(old, old)}, queue empty)")
             continue
         to = out.setdefault(ren.get(old, old), {})
         for k, r in recs.items():
             if k in drop:
-                say(f"relay 记账：丢掉 {old} 的 {k}（总队列里丢掉了）")
+                say(f"relay ledger: dropping {old} {k} (gone from the queue)")
                 continue
             r = {x: v for x, v in r.items() if x != "unq"}
-            if "data" in r:  # 旧记账：inputs 是放过去的文件、data 是说明里的输入
+            if "data" in r:  # old ledger: inputs were the files placed there, data was the spec's inputs
                 r["placed"], r["inputs"] = r.pop("inputs", []), r.pop("data")
             nk = keys.get(k, k)
             r["params"] = params[nk] if nk in params else renamed_params(r.get("params") or {})
@@ -509,11 +514,12 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
         st[f] = v
     st.pop("bundle_for", None)
     st.pop("held", None)
-    say(f"relay 记账：{ {n: len(r) for n, r in out.items()} } 条；代码包按现在的提交重打")
+    say(f"relay ledger: { {n: len(r) for n, r in out.items()} } records; bundles will be rebuilt from the current commit")
 
 
 def leftovers(home):
-    """状态目录第一层不在 proto.STATE_NAMES 里的 → 删；relay/、health/ 里旧版本留下的备份、迁移前的文件也删。"""
+    """First-level entries in the state dir not in proto.STATE_NAMES -> delete; also old backups left by earlier versions
+    in relay/, health/ and files from before a migration."""
     out = [os.path.join(home, f) for f in sorted(os.listdir(home))
            if not any(f == n or f.startswith((n + ".", n + "-")) for n in proto.STATE_NAMES)]
     for sub in ("relay", "health"):
@@ -522,17 +528,18 @@ def leftovers(home):
             if f.endswith(".migrated") or ".bak" in f or f in ("old", "status.json") or f.startswith("push_"):
                 out.append(os.path.join(d, f))
     last = os.path.join(home, "last")
-    out += sorted(glob.glob(os.path.join(last, "*")))  # "和上次一样就不写日志"的记录：清空只会多记一次
+    out += sorted(glob.glob(os.path.join(last, "*")))  # "skip a repeat" records: clearing them only logs one extra line
     return out
 
 
 def move_health_log(home, say, dry):
-    """健康检查的纯文字日志以前在状态目录的 health/ 里，现在和别的纯文字日志一样在 cfg.log 那里：接到那边的后面。"""
+    """Append the health check's plain-text log from its old <state dir>/health/ location to cfg.log, where the other
+    plain-text logs live."""
     import cfg
     src, dst = os.path.join(home, "health", "health.log"), cfg.log("health")
     if not os.path.isfile(src) or os.path.abspath(src) == os.path.abspath(dst):
         return
-    say(f"{src} 接到 {dst} 后面")
+    say(f"appending {src} to {dst}")
     if not dry:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(src, "rb") as f, open(dst, "ab") as g:
@@ -541,7 +548,7 @@ def move_health_log(home, say, dry):
 
 
 def copy_hashes(say, dry):
-    """hub 数据库里旧的 sha256 缓存 → store 根目录的 state/hashes.db（store 在本机时；路径只在那台有意义）。"""
+    """Old sha256 cache in the hub database -> <store root>/state/hashes.db (only when the store is local; the path only makes sense there)."""
     import sqlite3
     import db as DB
     import mtab as M
@@ -557,10 +564,10 @@ def copy_hashes(say, dry):
         src.close()
     s = M.store()
     if M.machine(s)["ssh"] is not None:
-        say(f"数据库里的 {len(rows)} 条 sha256 缓存不搬（store {s} 不在本机，那边第一次用时重算）")
+        say(f"not moving {len(rows)} sha256 cache rows from the database (store {s} is not local, it will recompute on first use)")
         return
     to = os.path.join(os.path.expanduser(M.machine(s)["root"]), proto.ROOT["hashes"])
-    say(f"数据库里的 {len(rows)} 条 sha256 缓存 → {to}")
+    say(f"{len(rows)} sha256 cache rows from the database -> {to}")
     if dry:
         return
     os.makedirs(os.path.dirname(to), exist_ok=True)
@@ -569,7 +576,7 @@ def copy_hashes(say, dry):
         d.execute("CREATE TABLE IF NOT EXISTS hash(k TEXT PRIMARY KEY, sha TEXT NOT NULL)")
         d.executemany("INSERT OR IGNORE INTO hash(k, sha) VALUES(?, ?)", rows)
     d.close()
-    db = DB.connect(create=True)  # 跑数据库的迁移（去掉 hash 表）
+    db = DB.connect(create=True)  # run the database migration (drops the hash table)
     db.close()
 
 
@@ -580,7 +587,7 @@ def root_args(name, keys, merge, ren, views, dry, specs, drop):
 
 
 def new_specs(st):
-    """relay 记账（已改名）→ {执行机: {任务名: 按现在的做法解析、送得出去的说明}}；解析不了 → Stop。"""
+    """Relay ledger (already renamed) -> {executor: {task name: sendable spec resolved with the current recipes}}; cannot resolve -> Stop."""
     import relay_store as ST
     import spec as S
     out = {}
@@ -589,7 +596,7 @@ def new_specs(st):
             try:
                 out.setdefault(name, {})[k] = S.sendable(S.resolve(r["recipe"], r["params"]))
             except S.SpecError as e:
-                raise Stop(f"{k}（{name}）按现在的做法解析不了：{e}")
+                raise Stop(f"{k} ({name}) cannot be resolved with the current recipes: {e}")
     return out
 
 
@@ -597,9 +604,9 @@ def main(argv):
     if argv[:1] == ["root"]:
         return root_main(argv)
     ap = argparse.ArgumentParser(prog="taskq self migrate", description=__doc__.split("\n")[0])
-    ap.add_argument("--apply", action="store_true", help="真的改（默认只列出要做的事）")
-    ap.add_argument("--rename", nargs="*", default=[], metavar="旧名=新名")
-    ap.add_argument("--merge", nargs="*", default=[], metavar="旧名=旧根目录")
+    ap.add_argument("--apply", action="store_true", help="really change things (default: only list what would be done)")
+    ap.add_argument("--rename", nargs="*", default=[], metavar="old=new")
+    ap.add_argument("--merge", nargs="*", default=[], metavar="old=old-root")
     a = ap.parse_args(argv)
     import cfg
     cfg.use_config()
@@ -615,18 +622,18 @@ def main(argv):
     seen |= {os.path.basename(f)[:-5] for f in glob.glob(os.path.join(taskq.TQ, proto.SMOKE_DIR, "*.json"))}
     unknown = sorted(n for n in seen if ren.get(n, n) not in M.MACHINES)
     if unknown:
-        sys.exit(f"taskq self migrate：记账里的 {'、'.join(unknown)} 不在机器表里，用 --rename 旧名=新名 指明是哪台")
+        sys.exit(f"taskq self migrate: {', '.join(unknown)} in the ledger is not in the machine table, use --rename old=new to say which machine it is")
     bad = [o for o in merge if ren.get(o, o) not in M.MACHINES or not M.is_exec(ren.get(o, o))]
     if bad:
-        sys.exit(f"taskq self migrate：--merge 的 {'、'.join(bad)} 改名后不是机器表里的执行机")
+        sys.exit(f"taskq self migrate: {', '.join(bad)} in --merge is not an executor in the machine table after renaming")
     roots = [n for n in M.MACHINES if M.MACHINES[n].get("root")]
 
     def on(name, args, after):
-        """在那台的新代码包里跑 migrate.py root；连不上、没换包、出错 → Stop（说清楚改到哪了）。"""
+        """Run migrate.py root in that machine's new bundle; unreachable, old bundle or error -> Stop (saying how far it got)."""
         try:
             return RM.op(name, "root", args, timeout=3600, script="migrate.py")
         except RuntimeError as e:
-            raise Stop(f"{e}（先 taskq site bundle {name} 换上新代码包、确认连得上；{after}）")
+            raise Stop(f"{e} (install the new bundle first with taskq site bundle {name}, check it is reachable; {after})")
     try:
         with taskq.Lock():
             tasks, keys, dropped, notes = plan_hub(ren)
@@ -640,30 +647,30 @@ def main(argv):
                         if not r.get("links"):
                             views.setdefault(ren.get(old, old), {})[keys.get(k, k)] = r.get("views") or []
             links = {}
-            for name in roots:  # 先在各台只看不改：有不能自动处理的就什么都不改
-                res = on(name, root_args(name, keys, merge, ren, views.get(name, {}), True, {}, drop), "什么都还没改")
+            for name in roots:  # look only, change nothing on any machine until all of them can be handled
+                res = on(name, root_args(name, keys, merge, ren, views.get(name, {}), True, {}, drop), "nothing has been changed yet")
                 if res.get("stop"):
-                    raise Stop(f"{RM.conf(name)['label']}：{res['stop']}")
+                    raise Stop(f"{RM.conf(name)['label']}: {res['stop']}")
                 links[name] = res["links"]
                 say(f"== {RM.conf(name)['label']}" + "".join("\n  " + ln for ln in res["log"]))
             params = {t["key"]: t["params"] for t in tasks if t["key"] in keys.values()}
             fix_relay(st, keys, params, ren, links, set(merge), set(drop), say)
             specs = new_specs(st)
-            say(f"执行机队列里的说明按现在的做法换掉：{sum(map(len, specs.values()))} 个")
+            say(f"Specs in executor queues replaced with the current recipes: {sum(map(len, specs.values()))}")
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, say, True)
             fix_smoke(taskq.TQ, ren, say, True)
             home = cfg.state().rstrip("/")
             move_health_log(home, say, True)
             junk = leftovers(home)
-            say(f"状态目录 {home} 里不再用的：{len(junk)} 项" + "".join(f"\n  删 {p}" for p in junk))
+            say(f"Unused items in state dir {home}: {len(junk)}" + "".join(f"\n  drop {p}" for p in junk))
             copy_hashes(say, True)
             if not a.apply:
-                say("（只列出，没改；确认后加 --apply）")
+                say("(listed only, nothing changed; add --apply when ready)")
                 return 0
             for name in roots:
-                res = on(name, root_args(name, keys, merge, ren, {}, False, specs, drop), "这台之前的几台已经改了，处理好后再跑一次")
+                res = on(name, root_args(name, keys, merge, ren, {}, False, specs, drop), "machines before this one are already changed, fix this and run again")
                 if res.get("stop"):
-                    raise Stop(f"{RM.conf(name)['label']}：{res['stop']}（这台之前的几台已经改了，处理好后再跑一次）")
+                    raise Stop(f"{RM.conf(name)['label']}: {res['stop']} (machines before this one are already changed, fix this and run again)")
             ST.update_state(lambda x: (x.clear(), x.update(st)))
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, quiet, False)
             fix_smoke(taskq.TQ, ren, quiet, False)
@@ -672,11 +679,11 @@ def main(argv):
             for p in junk:
                 shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
     except Stop as e:
-        print(f"taskq self migrate：{e}", file=sys.stderr)
+        print(f"taskq self migrate: {e}", file=sys.stderr)
         return 1
     for o, r in merge.items():
-        say(f"旧根目录 {r}（{o}）没删；确认 {ren.get(o, o)} 一切正常后在那台上删：rm -rf {r}")
-    say(f"迁移完成（{time.strftime('%F %T')}）")
+        say(f"old root {r} ({o}) not deleted; once {ren.get(o, o)} looks fine, delete it on that machine: rm -rf {r}")
+    say(f"migration complete ({time.strftime('%F %T')})")
     return 0
 
 

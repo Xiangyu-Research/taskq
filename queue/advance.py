@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""训完以后的步骤（实验表的 after、group_after、FINAL）怎么往前走：hub 上的健康检查每轮调用 run。
+"""Downstream steps (a step's after, group_after, FINAL) on the hub: each health check calls run.
 
-先后由 flow/compile.py 从实验表推出（同一个任务里按顺序，加上"输入落在别的实例的产出里"）。每轮：
-  1. 在 store 上看每个实例做完没有（done 的文件都在；结果还在拉回的不算）；
-  2. 先要做完的都做完了、自己还没做完、不在总队列里的，加进总队列（做法 command，key = 实例 id，step = 步骤名）；
-     放到哪台执行机在派任务时由 refill.choose 定（policy.py 的 PLACE），这里不定；
-  3. rerun=True 的步骤：输入里有比它的 done 文件新的，删掉 done 文件（在 store 上）、重新排；
-  4. temp：用到它的实例都做完了（结果都在 store 上），在 store 上删掉这些中间产物，记进事件。
-HOLD 对上的实例不排；policy.py 的 AUTO["advance"] 是 False 时只写"会排什么"，不改任何东西。
+The order comes from flow/compile.py. Each round: queue instances whose dependencies are done; rerun a step when an input
+is newer than its done file; delete temp files once every user is done and fetched. HOLD is skipped; with policy.py
+AUTO["advance"] false only what would be queued is written.
 
-    python3 queue/advance.py      看现在会排什么（不改任何东西；taskq plan 连同送任务一起看）
+    python3 queue/advance.py      show what would be queued (changes nothing; taskq plan also shows sending)
 """
 import fnmatch
 import os
@@ -17,7 +13,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of the scheduling code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
@@ -35,12 +31,12 @@ from flow import compile as FC  # noqa: E402
 from flow.graph import Graph  # noqa: E402
 from flow.model import SOURCE  # noqa: E402
 
-NOTES = []  # 这次"为什么没排"的说明（写进 ~/advance.log，不报成问题）
-TQ_TIMEOUT = 420  # 比队列锁的最长等待（300 秒）长：等不到锁时拿到退出码，不是超时
+NOTES = []  # why nothing was queued this round (written to ~/advance.log, not reported as a problem)
+TQ_TIMEOUT = 420  # longer than the longest queue-lock wait (300 s): a lock timeout returns an exit code, not a timeout
 
 
 def done_items(inst):
-    """实例 → store 上 done 操作的一项：dict(out=主目录, done=[[备选, …], …])。"""
+    """Instance -> one store done item: dict(out=main dir, done=[[alternative, ...], ...])."""
     if inst.scope == SOURCE:
         o = S.outputs(inst.spec)
         return dict(out=o["outs"][0], done=o["done"])
@@ -48,7 +44,7 @@ def done_items(inst):
 
 
 def fetching(s):
-    """结果正在拉回 store 的任务 key（hub 的 pueue 里在跑的 relay_fetch）：拉完以前不算做完。"""
+    """Keys of tasks whose results are being fetched into the store (relay_fetch running in the hub pueue): not done until fetched."""
     hub = M.hub()
     out = set()
     for t in (s.get("pueue", {}).get(hub) or {}).get("tasks") or []:
@@ -59,12 +55,12 @@ def fetching(s):
 
 
 def done_files(i):
-    """步骤实例 done 的每个备选（相对数据目录）。"""
+    """Every done alternative of a step instance (relative to the data dir)."""
     return [f"{i.outputs[0]}/{a}" for d in i.step["done"] for a in d.split("|")]
 
 
 def queue_params(i):
-    """步骤实例 → 加进总队列的参数（做法 command）。{data} 留给执行机展开。"""
+    """Step instance -> parameters for the queue (recipe command). {data} is left for the executor to expand."""
     st = i.step
     p = dict(key=i.id, step=st["name"], cmd=S.fill(st["cmd"], i.names), env=st["env"] if len(st["env"]) > 1 else st["env"][0],
              out=i.outputs[0], done=list(st["done"]), inputs=list(i.inputs), relay=st["relay"], device=st["device"],
@@ -79,7 +75,7 @@ def queue_params(i):
 
 
 def plan(s):
-    """→ (要做的 [dict(op=add|rerun|temp, id, …)], 卡住的 {问题编号: 说明})。"""
+    """-> (todo [dict(op=add|rerun|temp, id, ...)], stuck {problem id: explanation})."""
     NOTES.clear()
     hub = M.hub()
     mq = (s.get("taskq") or {}).get(hub)
@@ -87,8 +83,8 @@ def plan(s):
         return [], {}
     flow = FC.build(queue_tasks=mq["tasks"])
     if flow.errors:
-        more = f"（另有 {len(flow.errors) - 5} 处）" if len(flow.errors) > 5 else ""
-        return [], {alert_id("advance", "flow"): "实验表的步骤有问题，这次一个都没排：" + "；".join(flow.errors[:5]) + more}
+        more = f" (and {len(flow.errors) - 5} more)" if len(flow.errors) > 5 else ""
+        return [], {alert_id("advance", "flow"): "The experiment table has bad steps, so nothing was queued this time: " + "; ".join(flow.errors[:5]) + more}
     g = Graph(flow)
     inst = flow.instances
     queued = {t["key"]: t for t in mq["tasks"]}
@@ -96,9 +92,9 @@ def plan(s):
     try:
         miss = RM.store_op("done", dict(items={k: done_items(i) for k, i in inst.items()}))
     except RuntimeError as e:
-        return [], {alert_id("advance", "store"): f"store 上查不了结果（{e}），这次不排"}
+        return [], {alert_id("advance", "store"): f"cannot check results on the store ({e}), not queueing this round"}
     done = {k for k, m in miss.items() if not m and k not in moving}
-    reruns = {}  # 实例 id → 要删的 done 文件
+    reruns = {}  # instance id -> done files to delete
     cand = [i for i in inst.values() if i.step and i.step["rerun"] and i.id in done
             and (queued.get(i.id) or {}).get("state") in (None, proto.S_DONE)]
     if cand:
@@ -107,7 +103,7 @@ def plan(s):
             pr = RM.store_op("probe", dict(pats=sorted({p for i in cand for p in i.inputs + files[i.id]})))
         except RuntimeError as e:
             pr = {}
-            NOTES.append(f"store 上查不了修改时间（{e}），这次不看要不要重做")
+            NOTES.append(f"cannot check modification times on the store ({e}), not checking for reruns this round")
         newest = lambda ps: max((pr[p]["newest"] or 0 for p in ps if p in pr), default=0)  # noqa: E731
         for i in cand:
             if pr and newest(i.inputs) > newest(files[i.id]) and g.ancestors(i.id) <= done:
@@ -119,12 +115,12 @@ def plan(s):
         if i.scope == SOURCE or k in done:
             continue
         wait = [d for d in i.deps if d not in done]
-        if wait or k in moving:  # 结果正在拉回的：不算做完，也不重排
+        if wait or k in moving:  # results still being fetched: not done, do not queue again
             continue
         if k in queued and k not in reruns:
             continue
         if any(fnmatch.fnmatch(k, pat) for pat in P.HOLD):
-            NOTES.append(f"{k}：HOLD，先不排")
+            NOTES.append(f"{k}: HOLD, not queueing")
             continue
         if k in reruns:
             todo.append(dict(op="rerun", id=k, files=reruns[k]))
@@ -140,14 +136,14 @@ def plan(s):
 
 
 def taskq_add(nice, params):
-    """加进总队列（hub 上本地的 taskq.py）→ (退出码, 输出)。"""
+    """Add to the queue (local taskq.py on the hub) -> (exit code, output)."""
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", str(nice), "--recipe",
                         *S.kv_args("command", params)], cwd=cfg.REPO, capture_output=True, text=True, timeout=TQ_TIMEOUT)
     return r.returncode, (r.stdout + r.stderr).strip()
 
 
 def run(s, dry=False, tq=None, store=None):
-    """health.py 调用 → (这次做了的说明列表（只看不做时是"会…"）, 卡住的 {问题编号: 说明})。"""
+    """Called by health.py -> (list of what was done ("would ..." when only looking), stuck {problem id: explanation})."""
     tq = tq or taskq_add
     store = store or RM.store_op
     todo, stuck = plan(s)
@@ -155,83 +151,83 @@ def run(s, dry=False, tq=None, store=None):
     did, lines = [], []
     for t in todo:
         if t["op"] == "rerun":
-            what = f"{t['id']}：删掉 store 上的 done 文件重做（{', '.join(t['files'])}）"
+            what = f"{t['id']}: delete the done files on the store and redo ({', '.join(t['files'])})"
             if live:
                 try:
                     store("rm", dict(pats=t["files"]))
-                    lines.append(f"重做 {what}")
+                    lines.append(f"redid {what}")
                 except RuntimeError as e:
-                    stuck[alert_id("advance", "rerun", t["id"])] = f"{t['id']}：删 done 文件出错（{e}）"
+                    stuck[alert_id("advance", "rerun", t["id"])] = f"{t['id']}: deleting done files failed ({e})"
             else:
-                lines.append(f"会重做 {what}")
+                lines.append(f"would redo {what}")
             continue
         if t["op"] == "temp":
-            what = f"{t['id']} 的中间产物 {', '.join(t['pats'])}"
+            what = f"temp files of {t['id']}: {', '.join(t['pats'])}"
             if live:
                 try:
                     r = store("rm", dict(pats=t["pats"]))
                     if r["n"]:
-                        lines.append(f"删了 {what}：{r['n']} 个，{r['bytes'] / 1e9:.1f} GB")
+                        lines.append(f"deleted {what}: {r['n']} files, {r['bytes'] / 1e9:.1f} GB")
                 except RuntimeError as e:
-                    stuck[alert_id("advance", "temp", t["id"])] = f"删 {what} 出错（{e}）"
+                    stuck[alert_id("advance", "temp", t["id"])] = f"deleting {what} failed ({e})"
             else:
-                lines.append(f"会删 {what}")
+                lines.append(f"would delete {what}")
             continue
         if t["queued"]:
-            continue  # 重做的：已经在总队列里，删了 done 文件就又能领
-        what = f"{t['id']}（档位 {t['nice']}）：{t['params']['cmd']}"
+            continue  # a redo already in the queue can be claimed again once the done files are gone
+        what = f"{t['id']} (nice {t['nice']}): {t['params']['cmd']}"
         if live:
             rc, out = tq(t["nice"], t["params"])
             if rc == 0:
                 did.append(t["id"])
-                lines.append(f"排了 {what}")
+                lines.append(f"queued {what}")
             else:
-                lines.append(f"出错 {t['id']}：{out[-200:]}")
-                stuck[alert_id("advance", "add", t["id"])] = f"{t['id']}：加进总队列出错（{out[-200:]}）"
+                lines.append(f"error {t['id']}: {out[-200:]}")
+                stuck[alert_id("advance", "add", t["id"])] = f"{t['id']}: adding to the queue failed ({out[-200:]})"
         else:
-            did.append(f"会排 {t['id']}")
-            lines.append(f"会排 {what}")
-    lines += [f"没排 {x}" for x in NOTES]
+            did.append(f"would queue {t['id']}")
+            lines.append(f"would queue {what}")
+    lines += [f"not queued: {x}" for x in NOTES]
     if not dry:
         log(lines, stuck, live)
     return did, stuck
 
 
 def log(lines, stuck, live):
-    """写 ~/advance.log：和上次一样（同样的"会排"、"没排"、卡住）就不重复写。"""
-    acted = ("排了", "重做", "删了")
+    """Write ~/advance.log: skip a repeat of the last lines (same "would queue", "not queued", stuck)."""
+    acted = ("queued ", "redid ", "deleted ")
     cur = dict(lines=[ln for ln in lines if not ln.startswith(acted)], stuck=sorted(stuck))
     out = [ln for ln in lines if ln.startswith(acted)]
     if C.changed("advance", cur):
-        out += cur["lines"] + [f"卡住 {stuck[k]}" for k in cur["stuck"]]
+        out += cur["lines"] + [f"stuck {stuck[k]}" for k in cur["stuck"]]
         if not out:
-            out = ["没有要排的"]
+            out = ["nothing to queue"]
     if out:
         import events
         events.lines("advance", out, kind=None if live else "dry")
 
 
 def describe(todo, stuck):
-    """plan() 的结果 → 给人看的行。"""
+    """plan() result -> lines for people."""
     out = []
     for t in todo:
         if t["op"] == "add" and not t["queued"]:
-            out.append(f"会排 {t['id']:36} 档位 {t['nice']:<5} {t['params']['cmd']}")
+            out.append(f"would queue {t['id']:36} nice {t['nice']:<5} {t['params']['cmd']}")
         elif t["op"] == "rerun":
-            out.append(f"会重做 {t['id']:34} 删掉 {', '.join(t['files'])}")
+            out.append(f"would redo {t['id']:34} delete {', '.join(t['files'])}")
         elif t["op"] == "temp":
-            out.append(f"会删 {t['id']:36} 的中间产物 {', '.join(t['pats'])}")
-    out += [f"没排 {x}" for x in NOTES]
-    out += [f"卡住 {alert_msg(v)}" for v in stuck.values()]
+            out.append(f"would delete temp files of {t['id']:36}: {', '.join(t['pats'])}")
+    out += [f"not queued: {x}" for x in NOTES]
+    out += [f"stuck: {alert_msg(v)}" for v in stuck.values()]
     if not out:
-        out.append("没有要排的")
+        out.append("nothing to queue")
     return out
 
 
 def main(argv=None):
     import argparse
-    ap = argparse.ArgumentParser(description="训完以后的步骤：只看现在会排什么（真排由健康检查调用 run）")
-    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看（默认就是）")
+    ap = argparse.ArgumentParser(description="Downstream steps: show what would be queued (the health check calls run to queue for real)")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="only look (the default)")
     ap.parse_args(argv)
     import health as H  # noqa: E402
     print("\n".join(describe(*plan(H.gather()))))
