@@ -21,6 +21,10 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           git config --global user.name ci
           git config --global user.email ci@example.invalid
+      - name: lint
+        run: |
+          pip install ruff==0.14.14
+          ruff check .
       - name: tests
         run: python3 bin/taskq self test -j 4 --out "$RUNNER_TEMP/taskq-test"
       - name: example project
