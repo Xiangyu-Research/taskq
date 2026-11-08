@@ -331,6 +331,18 @@ def is_smoke(key):
     return str(key or "").startswith(SMOKE_PREFIX)
 ENV_BUILD = "env_build"    # step name of a task that builds an env for an executor (task record, pueue label env_build:<machine>:<env>): queued in the hub core group (IO_GROUP), env built on that executor
 
+# ---------------- env build states (sites/envs.py classify writes them; relay.py and monitor/plain.py compare; they reach status --json) ----------------
+ENV_STATE = dict(
+    ok="ok",
+    failed="check failed",
+    nospace="no space",
+    building="building",
+    stopped="building (may have stopped)",
+    changed="spec changed",
+    missing="not built",
+    not_spec="not spec-built",
+)
+
 # ---------------- env locks (sites/envlock.py) ----------------
 WHEELHOUSE = "wheelhouse"      # under the state dir: each locked file wheelhouse/<first 2 of sha256>/<sha256>
 LOCK_SUFFIX = ".lock.json"     # lock next to an env description <name>.<variant>.lock.json

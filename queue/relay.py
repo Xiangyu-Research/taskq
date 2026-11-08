@@ -850,7 +850,7 @@ def env_builds(s, name, rows, now, dry, stuck):
     if on:
         for env, msg in probs:
             stuck[alert_id("site", name, "env", env)] = alert(msg[:1500], machine=name, sub="env", key=env, state=st.get(env))
-    nb = EV.next_build(want, st, rows, now, skip={k for k, _ in probs if st.get(k) not in ("check failed", "no space")})
+    nb = EV.next_build(want, st, rows, now, skip={k for k, _ in probs if st.get(k) not in (proto.ENV_STATE["failed"], proto.ENV_STATE["nospace"])})
     if nb is None:
         return []
     env, v = nb

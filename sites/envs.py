@@ -18,6 +18,7 @@ import cfg  # noqa: E402
 REPO = cfg.REPO  # the user's repo root
 cfg.use_config()
 import proto  # noqa: E402
+from proto import ENV_STATE as ES  # noqa: E402
 from proto import ROOT  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 import mtab as M  # noqa: E402
@@ -406,23 +407,22 @@ def rows_of(txt):
 
 
 def classify(rows, want, now):
-    """{env: the remote marker files} + {env: variant} → {env: state}. States: ok, spec changed, not built, check failed,
-    no space, building, building (may have stopped)."""
+    """{env: the remote marker files} + {env: variant} → {env: state} (values in proto.ENV_STATE)."""
     out = {}
     for k, v in want.items():
         r = rows.get(k) or {}
         h, bd, fl = vhash(k, v), (r.get("building") or "").split(), (r.get("failed") or "").split()
         if bd:
             age = now - int(bd[1]) if len(bd) > 1 and bd[1].isdigit() else 0
-            out[k] = "building" if age < STALE_S else "building (may have stopped)"
+            out[k] = ES["building"] if age < STALE_S else ES["stopped"]
         elif (r.get("ok") or "").strip() == h and r.get("active"):
-            out[k] = "ok"
+            out[k] = ES["ok"]
         elif fl and fl[0] == h:
-            out[k] = "no space" if len(fl) > 2 and fl[2] == "nospace" else "check failed"
+            out[k] = ES["nospace"] if len(fl) > 2 and fl[2] == "nospace" else ES["failed"]
         elif r.get("ok"):
-            out[k] = "spec changed"
+            out[k] = ES["changed"]
         else:
-            out[k] = "not built"
+            out[k] = ES["missing"]
     return out
 
 
@@ -446,7 +446,7 @@ def states(name, run=None):
     """→ {env: state}, read only. conda / venv entries: not spec-built. Unreachable → None."""
     m = M.machine(name)
     envs = m.get("envs") or {}
-    out = {k: "not spec-built" for k, e in envs.items() if not M.is_spec(e)}
+    out = {k: ES["not_spec"] for k, e in envs.items() if not M.is_spec(e)}
     want = {k: M.spec_variant(name, k) for k, e in envs.items() if M.is_spec(e)}
     if not want:
         return out
@@ -459,7 +459,7 @@ def states(name, run=None):
 
 def oks_of(states_, name):
     """name's states() → ready_envs' {env: hash} (only ok ones)."""
-    return {k: M.spec_hash(k, M.spec_variant(name, k)) for k, v in (states_ or {}).items() if v == "ok"}
+    return {k: M.spec_hash(k, M.spec_variant(name, k)) for k, v in (states_ or {}).items() if v == ES["ok"]}
 
 
 # ---------------- automatic builds (the hub's health check calls this through relay.py) ----------------
@@ -490,13 +490,13 @@ def next_build(want, st, rows, now, skip=()):
     wait until the base env is ok; a failed check is not rebuilt automatically (only a spec change, hence a new hash,
     does that); a build skipped for lack of space is retried after RETRY_S; skip (cannot build, e.g. wheelhouse missing
     packages) is not built."""
-    if any(s == "building" for s in st.values()):
+    if any(s == ES["building"] for s in st.values()):
         return None
     for k, v in want.items():
         s = st.get(k)
-        if s in ("ok", "check failed") or k in skip:
+        if s in (ES["ok"], ES["failed"]) or k in skip:
             continue
-        if s == "no space":
+        if s == ES["nospace"]:
             fl = ((rows.get(k) or {}).get("failed") or "").split()
             if len(fl) > 1 and fl[1].isdigit() and now - int(fl[1]) < RETRY_S:
                 continue
@@ -504,7 +504,7 @@ def next_build(want, st, rows, now, skip=()):
             b = load(k).get("base")
         except Exception:  # noqa: BLE001
             continue
-        if b in want and st.get(b) != "ok":
+        if b in want and st.get(b) != ES["ok"]:
             continue
         return k, v
     return None
@@ -516,14 +516,14 @@ def problems(name, want, st, rows):
     out = []
     for k, v in want.items():
         r = rows.get(k) or {}
-        if st.get(k) == "check failed":
+        if st.get(k) == ES["failed"]:
             tail = "\n".join((r.get("log") or "").strip().splitlines()[-8:])
             out.append((k, f"building env {k} ({v}) on {name} failed: {(r.get('failed') or '').strip()}" + (f"\n{tail}" if tail else "")))
-        elif st.get(k) == "no space":
+        elif st.get(k) == ES["nospace"]:
             fl = (r.get("failed") or "").split()
             gb = lambda x: f"{int(x) / 1e9:.1f} GB" if x.isdigit() else x  # noqa: E731
             out.append((k, f"{name} has no space, did not build env {k} ({v})" + (f": needs {gb(fl[3])}, {gb(fl[4])} free" if len(fl) > 4 else "")))
-        if st.get(k) != "ok":
+        if st.get(k) != ES["ok"]:
             try:
                 load(k)
                 lk = load_lock(k, v)

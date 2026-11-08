@@ -72,6 +72,13 @@ LITERALS = {
     # dir names written by hand when joining paths (lookups such as Q["claims"] and task state values such as "stopped" do not count)
     "stopped/": r"""stopped/|/stopped\b|join\([^)]*(?<!\[)['"]stopped['"]""",
     "claims/": r"""claims/|/claims\b|join\([^)]*(?<!\[)['"]claims['"]""",
+    # env build states (proto.ENV_STATE; "ok" is too common and "building" is also a marker suffix)
+    "check failed": r"""['"]check failed['"]""",
+    "no space": r"""['"]no space['"]""",
+    "building (may have stopped)": r"""['"]building \(may have stopped\)['"]""",
+    "spec changed": r"""['"]spec changed['"]""",
+    "not built": r"""['"]not built['"]""",
+    "not spec-built": r"""['"]not spec-built['"]""",
 }
 # places the migration has not reached yet: (file relative to CORE, name). Only shrinks
 KNOWN = set()

@@ -196,7 +196,7 @@ def problem(pid, p):
             site, sub, key = L(part[1]), part[2], ":".join(part[3:])
             if sub == "down":
                 return f"Cannot read {site}, so it is unknown whether the jobs assigned to it are still running"
-            if sub == "env" and d.get("state") == "no space":  # state string from sites/envs.py; keep the two in sync
+            if sub == "env" and d.get("state") == proto.ENV_STATE["nospace"]:
                 return f"{site} is out of space; env {key} was not built, so tasks using it are not sent there; it retries after space is freed"
             if sub == "env" and key:
                 return f"Cannot build env {key} on {site}; tasks using it are not sent there, check the env build log"
