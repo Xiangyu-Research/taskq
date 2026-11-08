@@ -22,7 +22,15 @@ import slurm as SL  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
 
-NOROOM = "no room"  # Site.fit reasons start with it when space is short (choose uses it to fill noroom)
+class Why:
+    """Why an executor did not take a task: kind for decisions, text for display (as it reads in messages)."""
+    __slots__ = ("kind", "text")
+
+    def __init__(self, kind, text):
+        self.kind, self.text = kind, text
+
+    def __str__(self):
+        return self.text
 
 _ENTRY = cfg.outputs("entry")  # main loop entry point (relative to the hub repo; policy.py OUTPUTS)
 KICK = _ENTRY and (_ENTRY if _ENTRY.startswith(("/", "~")) else M.MACHINES[M.hub()]["repo"] + "/" + _ENTRY)  # kick and the timer share one lock; wait at most 5 minutes
@@ -108,33 +116,33 @@ class Site:
         self.take, self.swaps = [], []  # tasks taken this round; [(yielded, swapped in)]
 
     def fit(self, t, sp, sizes, planned):
-        """Can t go to this executor -> None (yes, and record it) or why not. sizes {input: GB or None}; planned {disk:
+        """Can t go to this executor -> None (yes, and record it) or Why (why not). sizes {input: GB or None}; planned {disk:
         GB already planned this round}; space reserved for yielded tasks is added back."""
         k = kind_of(sp)
         if k not in self.room:
-            return f"no {k} worker"
+            return Why("worker", f"no {k} worker")
         envs = S.envs_of(sp)
         if not envs or not set(envs) <= self.envs:
-            return f"env {', '.join(sorted(set(envs) - self.envs)) or '(not set)'} not ready"
+            return Why("env", f"env {', '.join(sorted(set(envs) - self.envs)) or '(not set)'} not ready")
         swap = None
         if t["nice"] >= 0 and self.room[k] <= 0:
             swap = next((x for x in self.idle.get(k, []) if x["nice"] > t["nice"]), None)
             if swap is None:
-                return "full"
+                return Why("full", "full")
         send = [p for p in sp.get("inputs") or [] if p not in self.ready]
         if any(sizes.get(p) is None for p in send):
-            return f"input not on the store: {next(p for p in send if sizes.get(p) is None)}"
+            return Why("input", f"input not on the store: {next(p for p in send if sizes.get(p) is None)}")
         gb, out = sum(sizes[p] for p in send), out_gb(sp)
         back = swap["out"] if swap else 0.0
         same = self.blob[0] == self.root[0]
         left = self.root[1] - planned.get(self.root[0], 0.0) + back - out - (gb if same else 0.0)
         bleft = left if same else self.blob[1] - planned.get(self.blob[0], 0.0) - gb
         if min(left, bleft) < self.keep:
-            return (f"{NOROOM} (after {gb:.0f} GB input and {out:.0f} GB output, {min(left, bleft) + self.keep:.0f} GB left, "
-                    f"need to keep {self.keep:.0f} GB)")
+            return Why("noroom", f"no room (after {gb:.0f} GB input and {out:.0f} GB output, {min(left, bleft) + self.keep:.0f} GB left, "
+                                  f"need to keep {self.keep:.0f} GB)")
         why = self.block(t["key"], sp) if self.block else None
         if why:
-            return why
+            return Why("block", why)
         planned[self.root[0]] = planned.get(self.root[0], 0.0) - back + out + (gb if same else 0.0)
         if not same:
             planned[self.blob[0]] = planned.get(self.blob[0], 0.0) + gb
@@ -188,8 +196,8 @@ def choose(tasks, sites, specs, held=None, sizes=None):
             fails.append((n, r))
         else:
             why[t["key"]] = "; ".join(f"{n}: {r}" for n, r in fails)
-            by_site[t["key"]] = fails
-            if all(r.startswith(NOROOM) for _, r in fails):
+            by_site[t["key"]] = [(n, str(r)) for n, r in fails]
+            if all(r.kind == "noroom" for _, r in fails):
                 noroom.append(t["key"])
     return dict(why=why, by_site=by_site, nowhere=nowhere, noroom=noroom)
 

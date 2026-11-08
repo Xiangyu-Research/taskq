@@ -163,14 +163,17 @@ got, res = pick([ctq("g/1", inputs=["in/c"]), ctq("g/2", order=2, inputs=["in/d"
                 [site("site-pueue", dict(gpu=5), root=disk, keep=15), site("site-slurm", dict(gpu=5), root=disk, keep=15)],
                 sizes={"in/c": 20.0, "in/d": 20.0})
 ok("space: the first fits (50-20-10>=15), the second on the same disk fits nowhere (recorded in noroom: relay reports tqroom; merely full is not recorded)",
-   got == {"g/1": "site-pueue"} and R.NOROOM in res["why"]["g/2"]
-   and f"site-slurm: {R.NOROOM}" in res["why"]["g/2"] and res["noroom"] == ["g/2"])
+   got == {"g/1": "site-pueue"} and "no room" in res["why"]["g/2"]
+   and "site-slurm: no room" in res["why"]["g/2"] and res["noroom"] == ["g/2"])
 got, _ = pick([ctq("g/3", inputs=["in/c"], out_gb=1)], [site("site-pueue", dict(gpu=1), root=(("a", 1), 30.0), keep=5)],
               sizes={"in/c": 20.0})
 ok("space: the spec's out_gb is used when set", got == {"g/3": "site-pueue"})
 got, res = pick([ctq("g/4", inputs=["in/c"], out_gb=1)],
                 [site("site-pueue", dict(gpu=1), root=(("a", 1), 100.0), blob=(("a", 2), 10.0), keep=5)], sizes={"in/c": 20.0})
-ok("space: when blobs are on another disk, inputs are charged to blobs", got == {} and R.NOROOM in res["why"]["g/4"])
+ok("space: when blobs are on another disk, inputs are charged to blobs", got == {} and "no room" in res["why"]["g/4"])
+w = site("site-pueue", dict(gpu=1), root=(("a", 1), 20.0), keep=15).fit(ctq("z/1"), dict(device="gpu", env="base"), {}, {})
+ok("space: fit returns a structured reason (kind noroom, the text unchanged for display)", w is not None and w.kind == "noroom"
+   and str(w).startswith("no room (after "))
 idle = {"gpu": [dict(key="old/1", nice=100, out=10.0), dict(key="old/2", nice=100, out=10.0)]}
 sp_ = site("site-pueue", dict(gpu=0), idle=idle)
 got, res = pick([ctq("w/1", nice=50), ctq("w/2", nice=50, order=2)], [sp_])
