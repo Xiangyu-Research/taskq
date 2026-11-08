@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""GPU pad: reserve GPU memory for this Slurm GPU job so other jobs see the GPU as occupied; it does not train.
+
+    python3 gpu_pad.py --floor-mib N --target-mib N --high-mib N
+"""
 import argparse
 import os
 import signal
@@ -15,7 +19,7 @@ except ImportError:
     tcfg = None
 import proto  # noqa: E402
 
-MIB_F, READY_F, START_F = proto.GPU_PAD_FILES  # 和 worker 握手的文件 <base>.mib、.ready、.start
+MIB_F, READY_F, START_F = proto.GPU_PAD_FILES  # handshake files with the worker: <base>.mib, .ready, .start
 
 MIB = 1024 * 1024
 STABLE_TOL_MIB = 1024
@@ -84,7 +88,7 @@ class TorchBackend:
     def __init__(self, device=None):
         import torch
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA 不可用")
+            raise RuntimeError("CUDA is not available")
         self.torch = torch
         self.device = device
 
@@ -104,7 +108,7 @@ class TorchBackend:
         cmd = ["nvidia-smi", "-i", self.uuid(dev), *args]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
-            raise RuntimeError((r.stderr or r.stdout).strip() or f"nvidia-smi 退出码 {r.returncode}")
+            raise RuntimeError((r.stderr or r.stdout).strip() or f"nvidia-smi exit code {r.returncode}")
         return r.stdout.strip()
 
     def mem(self, dev):
@@ -153,9 +157,9 @@ class Pad:
         self.stopped = False
         self._steps = 0
         self.initial_ppid = os.getppid()
-        self.log(f"启动：job={os.environ.get('SLURM_JOB_ID', '')} host={socket.gethostname()} pid={os.getpid()} "
+        self.log(f"start: job={os.environ.get('SLURM_JOB_ID', '')} host={socket.gethostname()} pid={os.getpid()} "
                  f"floor={cfg.floor_mib}MiB target={cfg.target_mib}MiB high={cfg.high_mib}MiB settle={cfg.settle:g}s start_hold={cfg.start_hold:g}s "
-                 f"min_train={cfg.min_train_mib}MiB base={cfg.base or '（无）'} devices={self.devices} "
+                 f"min_train={cfg.min_train_mib}MiB base={cfg.base or '(none)'} devices={self.devices} "
                  f"switch={cfg.switch} parent={cfg.parent_pid} supervisor={cfg.supervisor_pid} dry_run={cfg.dry_run}")
 
     def _start_mtime(self):
@@ -208,16 +212,16 @@ class Pad:
         try:
             used, total, fallback = self.b.mem(dev)
         except Exception as e:
-            self.log(f"dev {dev}: 读取显存失败（{e}）")
+            self.log(f"dev {dev}: cannot read GPU memory ({e})")
             return
         if total < self.c.min_total_mib:
             if dev not in self.skip_total:
-                self.log(f"dev {dev}: total={total}MiB < {self.c.min_total_mib}MiB，不是 80GB A100，不填充")
+                self.log(f"dev {dev}: total={total}MiB < {self.c.min_total_mib}MiB, not an 80GB A100; not padding")
                 self.skip_total.add(dev)
             return
         state, used = self._decide(dev, used, total, fallback, now)
         if now - self.last_heartbeat[dev] >= HEARTBEAT:
-            self.log(f"心跳 dev {dev}: used={used}MiB total={total}MiB pad={self.b.pad_mib(dev)}MiB {state}")
+            self.log(f"heartbeat dev {dev}: used={used}MiB total={total}MiB pad={self.b.pad_mib(dev)}MiB {state}")
             self.last_heartbeat[dev] = now
 
     def _decide(self, dev, used, total, fallback, now):
@@ -231,7 +235,7 @@ class Pad:
         if train < self.c.min_train_mib:
             if used < floor:
                 used = self._allocate(dev, floor, used, total)
-            return f"没有在训的（train={train}MiB），保持 floor", used
+            return f"no training (train={train}MiB); holding floor", used
         state = f"train={train}MiB"
         waiting = False
         if dev in self.wait_new:
@@ -247,32 +251,32 @@ class Pad:
         if used < floor:
             used = self._allocate(dev, floor, used, total)
         if waiting:
-            return f"{state}，等新训练起来（之前 {self.wait_new[dev][0]}MiB）", used
+            return f"{state}, waiting for the new training to start (was {self.wait_new[dev][0]}MiB)", used
         if now - self.changed[dev] < self.c.settle:
-            return f"{state}，训练显存还在变，等稳定", used
+            return f"{state}, training memory still changing; waiting for it to settle", used
         if used < target:
             used = self._allocate(dev, target, used, total)
         return state, used
 
     def _allocate(self, dev, target, used, total):
         if self.c.dry_run:
-            self.log(f"dry-run dev {dev}: used={used} target={target}，会补 {target - used}MiB")
+            self.log(f"dry-run dev {dev}: used={used} target={target}, would add {target - used}MiB")
             return used
         while used < target:
             if time.time() < self.next_try[dev]:
                 return used
             mib = self.c.chunk_mib
             if total - used - mib < self.c.min_free_mib:
-                self.log(f"dev {dev}: 再补 {mib}MiB 会少于 min_free={self.c.min_free_mib}MiB，停")
+                self.log(f"dev {dev}: adding {mib}MiB would leave less than min_free={self.c.min_free_mib}MiB; stopping")
                 return used
             try:
                 self.chunks[dev].append((self.b.alloc(dev, mib), mib))
             except Exception as e:
-                self.log(f"dev {dev}: 分配 {mib}MiB 失败（{e}），60 秒后再试")
+                self.log(f"dev {dev}: failed to allocate {mib}MiB ({e}); retrying in 60 seconds")
                 self.next_try[dev] = time.time() + 60
                 return used
             used += mib
-            self.log(f"dev {dev}: 补 {mib}MiB，pad={self.b.pad_mib(dev)}MiB")
+            self.log(f"dev {dev}: added {mib}MiB, pad={self.b.pad_mib(dev)}MiB")
         return used
 
     def _release(self, dev, limit, reason="", used=None, keep_limit=False):
@@ -298,22 +302,22 @@ class Pad:
             freed += mib
             n += 1
         self.b.empty_cache(dev)
-        self.log(f"dev {dev}: {reason}，释放 {freed}MiB（{n} 块），pad={self.b.pad_mib(dev)}MiB")
+        self.log(f"dev {dev}: {reason}; released {freed}MiB ({n} chunks), pad={self.b.pad_mib(dev)}MiB")
         return None if used is None else used - freed
 
     def step(self):
         if self.switch_on():
-            self.log("DISABLED 开关存在，释放并退出")
+            self.log("DISABLED switch present; releasing and exiting")
             return False
         if self.parent_gone():
-            self.log("父进程或 supervisor 已退出，释放并退出")
+            self.log("parent or supervisor exited; releasing and exiting")
             return False
         now = time.time()
         st = self._start_mtime()
         if st > self.seen_start:
             self.seen_start = st
             for dev in self.devices:
-                self._release(dev, self.c.floor_mib, reason="要开始新训练，放到 floor", keep_limit=True)
+                self._release(dev, self.c.floor_mib, reason="new training starting; dropping to floor", keep_limit=True)
                 self.changed[dev] = now
                 self.wait_new[dev] = (self.train_ref[dev], now)
             self._write_ready()
@@ -336,13 +340,13 @@ class Pad:
             pass
         finally:
             for dev in self.devices:
-                self._release(dev, 0, reason="退出")
+                self._release(dev, 0, reason="exit")
             self._write_mib()
-            self.log("结束")
+            self.log("finished")
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Slurm GPU 作业的显存填充（只占显存，不训练）；三个阈值由机器表的 gpu_pad 或环境变量给")
+    p = argparse.ArgumentParser(description="GPU pad for a Slurm GPU job (holds GPU memory only, does not train); the three thresholds come from the machine table's gpu_pad or env vars")
     p.add_argument("--floor-mib", type=int, default=env_int("FLOOR_MIB", None))
     p.add_argument("--target-mib", type=int, default=env_int("TARGET_MIB", None))
     p.add_argument("--high-mib", type=int, default=env_int("HIGH_MIB", None))
@@ -363,31 +367,31 @@ def parse_args(argv=None):
     p.add_argument("--device", type=int, default=None)
     a = p.parse_args(argv)
     if None in (a.floor_mib, a.target_mib, a.high_mib):
-        p.error("要给 floor-mib、target-mib、high-mib（机器表的 gpu_pad，或 TASKQ_GPU_PAD_FLOOR_MIB / TARGET_MIB / HIGH_MIB）")
+        p.error("set floor-mib, target-mib and high-mib (the machine table's gpu_pad, or TASKQ_GPU_PAD_FLOOR_MIB / TARGET_MIB / HIGH_MIB)")
     if not 0 < a.floor_mib <= a.target_mib <= a.high_mib:
-        p.error("要求 0 < floor-mib <= target-mib <= high-mib")
+        p.error("require 0 < floor-mib <= target-mib <= high-mib")
     if a.chunk_mib <= 0 or a.interval < 0:
-        p.error("chunk-mib 要 > 0，interval 要 >= 0")
+        p.error("chunk-mib must be > 0 and interval >= 0")
     return a
 
 
 def main(argv=None):
     a = parse_args(argv)
     if a.dry_run:
-        log("dry-run：只读显存，不分配")
+        log("dry-run: read GPU memory only, do not allocate")
     try:
         backend = TorchBackend(device=a.device)
     except Exception as e:
-        log(f"初始化 GPU 失败：{e}")
+        log(f"failed to initialize GPU: {e}")
         return 1
     if backend.device_count() <= 0:
-        log("没有可见的 GPU")
+        log("no visible GPU")
         return 1
     if not visible_devices_ok(os.environ.get("CUDA_VISIBLE_DEVICES"), backend.device_count()):
-        log("没有 CUDA_VISIBLE_DEVICES 但看到多张卡，拒绝运行（可能碰到别人的卡）")
+        log("no CUDA_VISIBLE_DEVICES but several GPUs visible; refusing to run (might touch someone else's GPU)")
         return 1
     if a.device is not None and a.device >= backend.device_count():
-        log(f"--device {a.device} 超出可见卡数 {backend.device_count()}")
+        log(f"--device {a.device} is beyond the {backend.device_count()} visible GPUs")
         return 1
     cfg = Config(floor_mib=a.floor_mib, target_mib=a.target_mib, high_mib=a.high_mib, chunk_mib=a.chunk_mib,
                  interval=a.interval, settle=a.settle, start_hold=a.start_hold, min_free_mib=a.min_free_mib,

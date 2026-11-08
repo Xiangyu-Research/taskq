@@ -1,4 +1,4 @@
-"""Slurm 作业里的 worker：作业号当 worker 名，按分到的 CPU 和内存定同时训几个，时限，本地暂存目录，空闲 IDLE_MAX 秒退出。"""
+"""Worker in a Slurm job: the job id is the worker name, slots come from the CPUs and memory allocated, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
 import os
 import re
 import shutil
@@ -18,8 +18,8 @@ def setup(w):
     w.mem_mb = int(e.get("SLURM_MEM_PER_NODE") or 0) or int(e.get("SLURM_MEM_PER_CPU") or 0) * w.ncpu
     big = w.ncpu >= 24 and (w.mem_mb == 0 or w.mem_mb >= 56 * 1024)
     w.slots = int(e.get("TASKQ_SLOTS") or (2 if big else 1))
-    w.term_rc, w.term_why = 143, "多半是到时限"
-    w.end_text = "查不到，之后再查"
+    w.term_rc, w.term_why = 143, "likely the time limit"
+    w.end_text = "not known yet, checking later"
     w.get_end = end_time
     w.stage_root = os.path.join(e.get("TMPDIR") or "/tmp", proto.STAGE_DIR_PREFIX + w.W)
     w.said = set()
@@ -27,7 +27,7 @@ def setup(w):
 
 
 def end_time(w):
-    """作业的结束时刻（epoch 秒）；查不到 → 0，之后每轮再查。"""
+    """Job end time (epoch seconds); unknown → 0, checked again each round."""
     e = os.environ
     ids = [w.W] + ([f"{e['SLURM_ARRAY_JOB_ID']}_{e.get('SLURM_ARRAY_TASK_ID', '')}"] if e.get("SLURM_ARRAY_JOB_ID") else [])
     for i in ids:
@@ -50,26 +50,26 @@ def env(w, env):
 
 
 def idle(w, why, now, since, err_since):
-    """手上没有在训的：到了该结束的时候 → None，否则 → 隔多久再看。"""
+    """Nothing running: None when it is time to end, else how long to wait before checking again."""
     if w.idle_mark != since:
         w.idle_mark, w.said = since, set()
     m = lambda s: int(s // 60)  # noqa: E731
     if w.own >= w.MAX_OWN_FAIL:
-        w.say("本作业失败太多次，作业结束")
+        w.say("too many failures on this job; ending the job")
     elif w.left() <= w.MIN_LEFT:
-        w.say(f"离时限不到 {m(w.MIN_LEFT)} 分钟，作业结束")
+        w.say(f"less than {m(w.MIN_LEFT)} minutes left; ending the job")
     elif why == "nothing" and w.device == "cpu":
-        w.say("没有在训的，也没有能领的任务，作业结束")
+        w.say("nothing running and no claimable tasks; ending the job")
     elif why == "nothing" and now - since >= w.IDLE_MAX:
-        w.say(f"空等 {m(now - since)} 分钟没有能领的任务，作业结束、把卡还回去")
+        w.say(f"waited {m(now - since)} minutes with no claimable tasks; ending the job and giving the GPU back")
     elif why == "error" and now - err_since >= w.ERR_MAX:
-        w.say(f"队列连续出错 {m(now - err_since)} 分钟（{w.err}），结束作业、把卡还回去")
+        w.say(f"queue kept failing for {m(now - err_since)} minutes ({w.err}); ending the job and giving the GPU back")
     elif now - since >= w.IDLE_MAX:
-        w.say(f"手上没有在训的已经 {m(now - since)} 分钟（{w.blocked if why == 'admit' else why or ''}），结束作业、把卡还回去（有的集群 GPU 使用率长时间偏低会取消作业）")
+        w.say(f"nothing running for {m(now - since)} minutes ({w.blocked if why == 'admit' else why or ''}); ending the job and giving the GPU back (some clusters cancel jobs whose GPU utilization stays low)")
     else:
-        msg = {"nothing": f"没有能领的任务，空着等，每 {w.POLL} 秒再看，最多 {m(w.IDLE_MAX)} 分钟",
-               "paused": f"队列暂停领任务（3 小时内失败太多次），空着等，最多 {m(w.IDLE_MAX)} 分钟",
-               "wait": f"排在前面的任务刚停下，等它（最多到开始后 {m(w.PATIENCE)} 分钟）"}.get(why)
+        msg = {"nothing": f"no claimable tasks; waiting, checking every {w.POLL} seconds, at most {m(w.IDLE_MAX)} minutes",
+               "paused": f"the queue is paused (too many failures within 3 hours); waiting, at most {m(w.IDLE_MAX)} minutes",
+               "wait": f"a task ahead just stopped; waiting for it (at most {m(w.PATIENCE)} minutes after start)"}.get(why)
         if msg and why not in w.said:
             w.say(msg)
             w.said.add(why)

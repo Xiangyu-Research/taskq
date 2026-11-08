@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""任务队列的消费者（worker）：从队列领任务、开 run_task.sh、收退出码、心跳、停、交还。
-不同执行机的差别（Slurm、pueue 常驻、显存填充、一张卡几个、等卡空、时段）在插件 queue/consumers/ 和使用者的 consumers.py 里。
-说明见 queue/README.md 的"消费者"。
+"""Task queue consumer (worker): claim tasks from the queue, start run_task.sh, collect exit codes, heartbeat, stop and release.
+Differences between executors (Slurm, resident pueue, GPU pad, several per GPU, waiting for a free GPU, hours window) live in the plugins under queue/consumers/ and in the user's consumers.py; see the consumer section in queue/README.md.
 
-    python3 consume.py              （worker_start.sh → 这里）
-    python3 consume.py --selftest   换代码包前在新包里跑：import、脚本语法、交接格式都没问题时退出 0
+    python3 consume.py              (worker_start.sh → here)
+    python3 consume.py --selftest   run in a new bundle before switching: exit 0 when imports, script syntax and the handoff format are fine
 """
 import importlib.util
 import json
@@ -59,7 +58,7 @@ def out_of(cmd, timeout=60, any_rc=False, **kw):
 
 
 def pstat(pid):
-    """→ (状态, ppid, 进程组, 会话)；没有这个进程 → None。"""
+    """→ (state, ppid, process group, session); None when there is no such process."""
     try:
         with open(f"/proc/{pid}/stat") as f:
             s = f.read()
@@ -82,7 +81,7 @@ def session_alive(sid):
 
 
 def tree(pid):
-    """pid 和它的子孙，叶子在前。"""
+    """pid and its descendants, leaves first."""
     kids = {}
     for p, st in procs():
         kids.setdefault(st[1], []).append(p)
@@ -114,7 +113,7 @@ def load(path, name):
 
 
 def plugin_list():
-    """→ [(名字, 插件)]：核心的 consumers/ 按 BUILTIN 的顺序，再接使用者的 CONSUMERS。"""
+    """→ [(name, plugin)]: the core consumers/ in BUILTIN order, then the user's CONSUMERS."""
     out = [(n, load(os.path.join(HERE, "consumers", n + ".py"), "taskq_consumer_" + n)) for n in BUILTIN]
     ns = {"CONSUMERS": {}}
     cfg.extend(ns, "consumers")
@@ -126,7 +125,7 @@ def hook(p, name):
 
 
 class Run:
-    """一个 run_task.sh 和它开的训练。"""
+    """A run_task.sh and the training it started."""
 
     def __init__(self, pid, key, proc=None, started=None, outdir="", safe="", jtag="", stalled=None, why="", sid=None):
         self.pid, self.key, self.proc = pid, key, proc
@@ -154,7 +153,7 @@ class Worker:
             self.ncpu = os.cpu_count() or 1
         self.mem_mb = 0
         self.slots = None
-        self.end, self.end_text, self.get_end = 0, "无", None
+        self.end, self.end_text, self.get_end = 0, "none", None
         self.nvsel = []
         self.tag_each = False
         self.restart_on_change = False
@@ -193,7 +192,7 @@ class Worker:
         try:
             cands = plugin_list()
         except Exception as e:  # noqa: BLE001
-            say(f"!! 读不了消费者插件（{e}），只用核心的")
+            say(f"!! cannot read consumer plugins ({e}); using the core ones only")
             cands = [(n, load(os.path.join(HERE, "consumers", n + ".py"), "taskq_consumer_" + n)) for n in BUILTIN]
         for name, p in cands:
             a = hook(p, "active")
@@ -203,7 +202,7 @@ class Worker:
                 if s:
                     s(self)
         if not self.W:
-            print("要设 WORKER_ID（配置文件夹里 machines.py 的 worker）", file=sys.stderr)
+            print("set WORKER_ID (a worker in machines.py in the config dir)", file=sys.stderr)
             sys.exit(1)
         if self.slots is None or self.device == "cpu":
             self.slots = 1
@@ -219,7 +218,7 @@ class Worker:
             self.touch_repo()
         self.adopt()
 
-    # ---------- 机器表、代码 ----------
+    # ---------- machine table, code ----------
     def mget(self, field):
         try:
             if self._m is None:
@@ -231,7 +230,7 @@ class Worker:
     def code_name(self):
         top = (out_of(["git", "-C", self.repo, "rev-parse", "--show-toplevel"]) or "").strip()
         if top and top == os.path.realpath(self.repo):
-            c = (out_of(["git", "-C", self.repo, "rev-parse", "--short", "HEAD"]) or "").strip() or "未知"
+            c = (out_of(["git", "-C", self.repo, "rev-parse", "--short", "HEAD"]) or "").strip() or "unknown"
             try:
                 d = cfg.outputs("code_dirs")
             except Exception:  # noqa: BLE001
@@ -239,7 +238,7 @@ class Worker:
             d = [d] if isinstance(d, str) else list(d or [])
             if d and subprocess.run(["git", "-C", self.repo, "diff", "--quiet", "HEAD", "--", *d],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-                c += "+改动"
+                c += "+dirty"
             return c
         return os.path.basename(os.path.realpath(self.repo))
 
@@ -284,7 +283,7 @@ class Worker:
         except OSError:
             pass
 
-    # ---------- 插件 ----------
+    # ---------- plugins ----------
     def each(self, name):
         for _, p in self.plugins:
             f = hook(p, name)
@@ -300,7 +299,7 @@ class Worker:
     def left(self):
         return 999999 if not self.end else self.end - time.time()
 
-    # ---------- 队列 ----------
+    # ---------- queue ----------
     def tq(self, c, key, *args, quiet=False):
         tok = self.tok.get(key)
         cmd = [PY, TASKQ, c, "--worker", self.W, *(["--token", tok] if tok else []), key, *args]
@@ -328,7 +327,7 @@ class Worker:
         self.fail_at.append(time.time())
         self.own_fails()
         if self.own >= self.MAX_OWN_FAIL:
-            say(f"本作业 {self.FAIL_WINDOW // 60} 分钟内已有 {self.own} 个任务开始不久就失败，不再领新任务（多半是这个节点或环境有问题）")
+            say(f"{self.own} tasks failed shortly after starting on this job within {self.FAIL_WINDOW // 60} minutes; not claiming new ones (likely a problem on this node or its env)")
 
     def task_log(self, r):
         return os.path.join(self.data, proto.TASK_LOGS, f"{r.safe}{proto.SAFE}{r.jtag or self.W}_{proto.LOG_PART}1.log")
@@ -347,14 +346,14 @@ class Worker:
 
     def release_stalled(self, key, n, ran):
         if n >= self.STALL_FAILS:
-            say(f"{key} 一周内第 {n} 次卡住，记一次失败")
-            self.fail(key, f"卡住（一周内第 {n} 次）", ran)
+            say(f"{key} stalled again this week ({n} times); recording a failure")
+            self.fail(key, f"stalled ({n} times this week)", ran)
         else:
             self.tq("release", key)
             self.retry_later(key)
 
     def quiet_since(self, r):
-        """任务的日志和结果文件夹多少秒没有变化；读不了 → None。"""
+        """Seconds since the task's log or output dir last changed; unreadable → None."""
         now = int(time.time())
         m = (out_of(["timeout", "20", "stat", "-c", "%Y", self.task_log(r)]) or "").strip()
         if not m.isdigit():
@@ -367,9 +366,9 @@ class Worker:
             return None
         return 0 if hit.strip() else age
 
-    # ---------- 进程 ----------
+    # ---------- processes ----------
     def ended(self, r):
-        """run_task.sh 退出了没有（退出码记在 r.rc；交接时被别的进程收走了 → None）。"""
+        """Whether run_task.sh exited (exit code in r.rc; None when another process reaped it during a handoff)."""
         if r.ended:
             return True
         if r.proc is not None:
@@ -404,7 +403,7 @@ class Worker:
         return not self.ended(r) or session_alive(r.sid)
 
     def stop_tree(self, r, sig=signal.SIGTERM):
-        """先发给训练的进程组和会话，再按进程树补发给 run_task.sh 和不在会话里的。"""
+        """Signal the training's process group and session first, then run_task.sh and anything outside the session along the process tree."""
         if not r.ended:
             self.sid_of(r)
         if isinstance(r.sid, int) and r.sid > 1:  # killpg(1) 就是 kill(-1)：账号的所有进程
@@ -429,9 +428,9 @@ class Worker:
                 continue
             if not self.alive(r):
                 if self.tq("release", r.key, "--lock-wait", "5") != 0:
-                    say(f"{r.key} 没交还成（拿不到队列的锁），领取过期后别人能领")
+                    say(f"{r.key} not released (cannot get the queue lock); once the claim expires someone else can take it")
             else:
-                say(f"{r.key} 强制停之后还在，不交还（领取过期后才能被别人领）")
+                say(f"{r.key} still running after the force kill; not releasing (someone else can take it only after the claim expires)")
 
     def finish(self):
         self.mon_stop.set()
@@ -439,10 +438,10 @@ class Worker:
             try:
                 f(self)
             except Exception as e:  # noqa: BLE001
-                say(f"!! 插件收尾出错：{e}")
+                say(f"!! plugin cleanup failed: {e}")
 
     def shutdown(self, msg, rc):
-        """停下手上所有的、确认停下的交还，然后退出 rc。"""
+        """Stop everything running, release what is confirmed stopped, then exit rc."""
         if self.stopping:
             return
         self.stopping = True
@@ -456,7 +455,7 @@ class Worker:
                 break
             time.sleep(1)
         if self.any_alive():
-            say(f"{self.TERM_WAIT} 秒没停下，强制停")
+            say(f"did not stop within {self.TERM_WAIT} seconds; forcing")
             for r in self.all_runs():
                 if self.alive(r):
                     self.stop_tree(r, signal.SIGKILL)
@@ -470,22 +469,22 @@ class Worker:
         os._exit(rc)
 
     def on_signal(self, *_):
-        self.shutdown(f"收到停止信号（{self.term_why}），停训练、交还任务", self.term_rc)
+        self.shutdown(f"got stop signal ({self.term_why}); stopping training and releasing tasks", self.term_rc)
 
-    # ---------- 停止某个任务（taskq.py stop） ----------
+    # ---------- stop a task (taskq.py stop) ----------
     def check_stops(self):
         n = False
         for pid, r in list(self.runs.items()):
             if r.stalled or not os.path.exists(os.path.join(self.qdir, proto.QUEUE["stopped"], proto.safe(r.key))):
                 continue
-            say(f"{r.key} 被停止（taskq.py stop），停训练、交还")
+            say(f"{r.key} stopped (taskq.py stop); stopping training and releasing")
             self.stop_tree(r)
             for _ in range(int(self.STOP_WAIT)):
                 if not self.alive(r):
                     break
                 time.sleep(1)
             if self.alive(r):
-                say(f"{r.key} {self.STOP_WAIT} 秒没停下，强制停")
+                say(f"{r.key} did not stop within {self.STOP_WAIT} seconds; forcing")
                 self.stop_tree(r, signal.SIGKILL)
                 time.sleep(1)
             if not self.alive(r):
@@ -493,7 +492,7 @@ class Worker:
                 del self.runs[pid]
                 n = True
             else:
-                say(f"{r.key} 强制停之后还在，按停不下来处理")
+                say(f"{r.key} still running after the force kill; treating it as unstoppable")
                 r.stalled, r.why = r.stalled or time.time(), "stop"
         return n
 
@@ -508,7 +507,7 @@ class Worker:
             time.sleep(min(d, self.STOP_POLL))
         self.check_stops()
 
-    # ---------- GPU 记录 ----------
+    # ---------- GPU records ----------
     def nvsmi(self, *q, timeout=60):
         return out_of(["nvidia-smi", *self.nvsel, *q], timeout=timeout)
 
@@ -522,13 +521,13 @@ class Worker:
                 pass
             self.mon_stop.wait(60)
 
-    # ---------- 开训 ----------
+    # ---------- starting training ----------
     def can_add(self):
-        """→ (能不能再领一个, 挡住的原因)；手上有训练时原因记在 why_not。"""
+        """→ (whether another task can be claimed, what blocks it); with training running the reason goes to why_not."""
         n = len(self.runs)
         self.why_not = ""
         if n >= self.slots:
-            self.why_not = f"已经 {n} 个"
+            self.why_not = f"already {n} running"
             return False, self.why_not
         for f in self.each("admit"):
             why = f(self)
@@ -560,7 +559,7 @@ class Worker:
         r = Run(proc.pid, key, proc=proc, outdir=vals.get("TASK_OUT", ""), safe=vals.get("TASK_SAFE"), jtag=jt)
         self.runs[proc.pid] = r
         self.changed = int(time.time())
-        say(f"开训 {key}（pid {proc.pid}：run_task.sh {args}）")
+        say(f"started {key} (pid {proc.pid}: run_task.sh {args})")
 
     def claim(self, jt):
         now = time.time()
@@ -579,7 +578,7 @@ class Worker:
             return 127, "", str(e)
         return p.returncode, p.stdout, p.stderr
 
-    # ---------- 换代码包 ----------
+    # ---------- bundle switch ----------
     def handoff(self):
         tasks = [dict(pid=r.pid, key=r.key, token=self.tok.get(r.key) or None, started=r.started, outdir=r.outdir, safe=r.safe,
                       jtag=r.jtag, stalled=r.stalled, why=r.why, sid=r.sid, zomb=z, ended=r.ended)
@@ -593,9 +592,9 @@ class Worker:
             try:
                 d = json.loads(h)
                 if d.get("v") != proto.HANDOFF:
-                    raise ValueError(f"版本 {d.get('v')}")
+                    raise ValueError(f"version {d.get('v')}")
             except ValueError as e:
-                say(f"!! 交接的内容读不了（{e}），在训的没接上，领取过期后别人能领")
+                say(f"!! cannot read the handoff ({e}); running tasks were not adopted, and once their claim expires someone else can take them")
                 d = {}
             self.t0 = int(d.get("t0") or self.t0)
             self.changed = int(d.get("changed") or self.changed)
@@ -614,10 +613,10 @@ class Worker:
                     self.tok[r.key] = t["token"]
                 if t.get("zomb"):
                     self.zomb[r.pid] = r
-                    say(f"接着跟停不下来的 {r.key}（pid {r.pid}）")
+                    say(f"following unstoppable {r.key} (pid {r.pid})")
                 else:
                     self.runs[r.pid] = r
-                    say(f"接着管 {r.key}（pid {r.pid}）")
+                    say(f"taking over {r.key} (pid {r.pid})")
 
     def selftest(self, core):
         try:
@@ -626,10 +625,10 @@ class Worker:
         except (OSError, subprocess.SubprocessError) as e:
             return False, str(e)
         last = (r.stdout.strip().split("\n") or [""])[-1][:300]
-        return r.returncode == 0, last or f"退出码 {r.returncode}"
+        return r.returncode == 0, last or f"exit code {r.returncode}"
 
     def switch(self, head):
-        """代码包换了：在新包里自检，过了就 exec 新包的 worker_start.sh，手上的交给新进程；换不了 → False。"""
+        """The bundle changed: selftest the new bundle, exec its worker_start.sh when it passes and hand over the running tasks; False when it cannot switch."""
         core = self.new_core()
         if not core:
             return False
@@ -637,23 +636,23 @@ class Worker:
         env = dict(os.environ)
         ok, why = self.selftest(core)
         if not ok:
-            say(f"新代码包 {name} 自检没过（{why}），留在 {self.commit}")
+            say(f"new bundle {name} failed its selftest ({why}); staying on {self.commit}")
             self.bad.add(head)
             return False
         env["TASKQ_HANDOFF"] = json.dumps(self.handoff(), ensure_ascii=False)
-        say("代码更新了")
+        say("code updated")
         n = len(self.runs)
-        say(f"换成新代码 {name} 接着跑" + (f"（在训的 {n} 个交给新代码接着管）" if n else ""))
+        say(f"switching to new code {name} and continuing" + (f" ({n} running handed to the new code)" if n else ""))
         self.mon_stop.set()
         sys.stdout.flush()
         try:
             os.execvpe("bash", ["bash", os.path.join(core, "queue", "worker_start.sh")], env)
         except OSError as e:
-            say(f"!! 换不成新代码（{e}），留在 {self.commit}")
+            say(f"!! cannot switch to new code ({e}); staying on {self.commit}")
             self.bad.add(head)
         return False
 
-    # ---------- 主循环 ----------
+    # ---------- main loop ----------
     def reap(self, now):
         for pid, r in list(self.runs.items()):
             if not self.ended(r):
@@ -665,70 +664,70 @@ class Worker:
             ran = now - r.started
             del self.runs[pid]
             if r.why == "lost":
-                say(f"{key} 已停下（领取已经不是本作业的，不交还）")
+                say(f"{key} stopped (the claim is no longer this job's; not releasing)")
             elif r.why == "stall":
-                say(f"卡住的 {key} 已停下，交还，本作业不再领它")
+                say(f"stalled {key} stopped; releasing, this job will not claim it again")
                 self.release_stalled(key, self.stalls(r.safe), ran)
             elif r.stalled:
-                say(f"{key} 已停下，交还")
+                say(f"{key} stopped; releasing")
                 self.tq("release", key)
             elif rc is not None and rc > 128 and session_alive(r.sid) or rc is None and session_alive(r.sid):
-                say(f"{key} 的 run_task.sh 被停掉（退出码 {'没收到' if rc is None else rc}），训练还在：停掉它，停下了再交还（不算失败），本作业不再领它")
+                say(f"{key}'s run_task.sh was stopped (exit code {'not received' if rc is None else rc}) but training is still running: stopping it and releasing once it stops (not a failure); this job will not claim it again")
                 subprocess.run(["pkill", "-TERM", "-s", str(r.sid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 r.why = "killed"
                 self.zomb[pid] = r
                 self.exclude(key)
             elif rc is None:
-                say(f"{key} 换代码时已经结束，退出码没收到：交还（不算失败）")
+                say(f"{key} ended during the code switch and its exit code was not received: releasing (not a failure)")
                 self.tq("release", key)
             elif rc == X["run_done"]:
-                say(f"训完 {key}")
+                say(f"done {key}")
                 self.tq("release", key)
             elif rc == X["run_missing"]:
-                say(f"{key} 缺输入，没开训，交还，记为缺输入（不算失败，补齐前不再领）")
-                if self.tq("missing", key, "--why", f"作业 {self.W} 开训前查到") != 0:
+                say(f"{key} has missing inputs and did not start; releasing and recording missing inputs (not a failure, not claimed until they are there)")
+                if self.tq("missing", key, "--why", f"job {self.W} checked before start") != 0:
                     self.tq("release", key)
                 self.exclude(key)
             elif rc == X["run_unreadable"]:
-                say(f"{key} 读不了盘、判断不了训完没有，交还（不算失败），本作业 10 分钟后再领")
+                say(f"{key}: disk unreadable, cannot tell whether training finished; releasing (not a failure), this job will claim it again in 10 minutes")
                 self.tq("release", key)
                 self.later[key] = time.time() + 600
             elif rc == X["run_not_done"]:
-                say(f"{key} 命令正常结束，但没有训完的文件，交还并记一次失败")
-                self.fail(key, "退出码 0 但没训完", ran)
+                say(f"{key} command ended normally but training is not done; releasing and recording a failure")
+                self.fail(key, "exit code 0 but not done", ran)
             elif rc == X["run_term"]:
-                say(f"{key} 被外部停掉（run_task.sh 收到停止信号），训练已停下：交还（不算失败），本作业不再领它")
+                say(f"{key} stopped from outside (run_task.sh got a stop signal) and training has stopped: releasing (not a failure); this job will not claim it again")
                 self.tq("release", key)
                 self.exclude(key)
             else:
-                say(f"{key} 训练失败（run_task.sh 退出码 {rc}），交还并记一次失败")
+                say(f"{key} training failed (run_task.sh exit code {rc}); releasing and recording a failure")
                 extra = ""
                 if rc == X["run_bad"]:
                     try:
                         with open(self.task_log(r), errors="replace") as f:
                             last = (f.read().rstrip("\n").split("\n") or [""])[-1]
-                        extra = ("：" + re.sub(r"^[-0-9: ]*", "", last))[:300] if last else ""
+                        extra = (": " + re.sub(r"^[-0-9: ]*", "", last))[:300] if last else ""
                     except OSError:
                         pass
-                self.fail(key, f"退出码 {rc}{extra}", ran)
+                self.fail(key, f"exit code {rc}{extra}", ran)
         for pid, r in list(self.zomb.items()):
             if self.alive(r):
                 continue
             del self.zomb[pid]
             if r.why == "lost":
-                say(f"停不下来的 {r.key} 终于停下了（领取已经不是本作业的，不交还）")
+                say(f"unstoppable {r.key} finally stopped (the claim is no longer this job's; not releasing)")
             elif r.why == "stall":
-                say(f"停不下来的 {r.key} 终于停下了，交还")
+                say(f"unstoppable {r.key} finally stopped; releasing")
                 self.release_stalled(r.key, self.stalls(r.safe), 0)
             else:
-                say(f"停不下来的 {r.key} 终于停下了，交还")
+                say(f"unstoppable {r.key} finally stopped; releasing")
                 self.tq("release", r.key)
 
     def watch_stalls(self, now):
         for pid, r in list(self.runs.items()):
             if r.stalled:
                 if now - r.stalled >= self.GIVEUP:
-                    say(f"{r.key} 停了 {self.GIVEUP} 秒还没停下（多半卡在读写上），先领别的；接着心跳，停下了再交还")
+                    say(f"{r.key} has not stopped for {self.GIVEUP} seconds (likely stuck in I/O); claiming other tasks for now, still heartbeating, releasing once it stops")
                     self.exclude(r.key)
                     self.zomb[pid] = self.runs.pop(pid)
                 elif now - r.stalled >= self.GIVEUP // 3:
@@ -739,7 +738,7 @@ class Worker:
             q = self.quiet_since(r)
             if q is None or q < self.STALL_MAX:
                 continue
-            say(f"{r.key} 的日志和结果文件夹 {q // 60} 分钟没有变化，当作卡住：停掉、交还，领下一个")
+            say(f"{r.key}: log and output dir unchanged for {q // 60} minutes; treating it as stalled: stopping, releasing, claiming the next")
             try:
                 with open(self.task_log(r), "a") as f:
                     f.write(f"{proto.STALL_LINE} {ts()}: log and output dir unchanged for {q // 60} minutes, job {self.W} stopped it\n")
@@ -754,7 +753,7 @@ class Worker:
                 continue
             if self.tq("beat", r.key, "--strict", quiet=True) != X["lost"]:
                 continue
-            say(f"{r.key} 的领取已经不是本作业的（过期后被别人接管，或者已经没了），停掉这个训练，不交还")
+            say(f"{r.key}: claim is no longer this job's (taken over after expiry, or gone); stopping this training and not releasing")
             r.why = "lost"
             self.exclude(r.key)
             if r.pid in self.zomb or r.stalled:
@@ -768,15 +767,15 @@ class Worker:
         if self.get_end:
             self.end = self.get_end(self) or 0
         lim = time.strftime("%F %T", time.localtime(self.end)) if self.end else self.end_text
-        say(f"任务队列 worker（{self.device}）：作业 {self.W} @ {self.host}，最多同时 {self.slots} 个，CPU {self.ncpu}，"
-            f"内存 {self.mem_mb}M（每个训练 {self.task_cpus} 个 CPU）， 环境 {self.envs}，时限 {lim}，代码 {self.commit}")
+        say(f"task queue worker ({self.device}): job {self.W} @ {self.host}, at most {self.slots} at once, CPU {self.ncpu}, "
+            f"memory {self.mem_mb}M ({self.task_cpus} CPUs per training), envs {self.envs}, time limit {lim}, code {self.commit}")
         self.mon_stop = threading.Event()
         self.gpu_gb = None
         if self.device == "gpu":
             sys.stdout.flush()
             try:
                 subprocess.run(["nvidia-smi", *self.nvsel, "--query-gpu=index,name,memory.total", "--format=csv,noheader"],
-                               stderr=subprocess.DEVNULL, timeout=60)  # 卡的型号打在日志里
+                               stderr=subprocess.DEVNULL, timeout=60)  # record the GPU model in the log
             except (OSError, subprocess.SubprocessError):
                 pass
             threading.Thread(target=self.monitor, daemon=True).start()
@@ -817,7 +816,7 @@ class Worker:
                     changed = self.code_changed(head)
                     break
                 tried = True
-                jt = f"{self.W}-{time.strftime('%Y%m%d%H%M%S')}" if self.tag_each else self.W  # 同一台几个 worker 同一分钟开训也不撞
+                jt = f"{self.W}-{time.strftime('%Y%m%d%H%M%S')}" if self.tag_each else self.W  # several workers on one machine starting in the same minute do not collide
                 rc, out, err = self.claim(jt)
                 if rc == X["next_ok"]:
                     err_since = 0
@@ -830,13 +829,13 @@ class Worker:
                 self.err = (err.strip().split("\n") or [""])[-1]
                 if not err_since:
                     err_since = now
-                    say(f"队列出错（taskq.py 退出码 {rc}：{self.err}），之后每轮再试")
+                    say(f"queue error (taskq.py exit code {rc}: {self.err}); retrying every round")
                 why = "error"
                 break
             if not tried:
                 err_since = 0
             if self.why_not and self.why_not != last_why:
-                say(f"先不再加训练：{self.why_not}")
+                say(f"not adding more training: {self.why_not}")
             last_why = self.why_not
             if self.runs:
                 self.idle_since = 0
@@ -847,7 +846,7 @@ class Worker:
                         self.switch(head)
                         changed = self.code_changed(head)
                     elif self.restart_on_change and not self.zomb:
-                        say("代码更新了")
+                        say("code updated")
                         restart = True
                         break
                 f = next(self.each("idle"), None)
@@ -860,7 +859,7 @@ class Worker:
         self.let_go()
         self.finish()
         if restart:
-            say("退出，由 relay.py 用新代码重开")
+            say("exiting; relay.py restarts it with the new code")
         sys.stdout.flush()
         return 0
 
@@ -881,7 +880,7 @@ def selftest():
     w.runs, w.zomb = {1: Run(1, "a/b", sid=2, why="stall")}, {}
     h = json.loads(json.dumps(w.handoff()))
     assert set(h) == set(proto.HANDOFF_TOP) and set(h["tasks"][0]) == set(proto.HANDOFF_TASK) and h["tasks"][0]["token"] == "t"
-    print("自检通过")
+    print("selftest passed")
     return 0
 
 
@@ -890,7 +889,7 @@ def main(argv):
         try:
             return selftest()
         except Exception as e:  # noqa: BLE001
-            print(f"自检没过：{type(e).__name__}: {e}")
+            print(f"selftest failed: {type(e).__name__}: {e}")
             return 1
     return Worker().run()
 

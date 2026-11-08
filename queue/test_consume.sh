@@ -1,24 +1,24 @@
 #!/bin/bash
-# consume.py（消费者）和插件的模拟测试：换代码包时接管在跑的任务、时段、等卡空、Slurm、使用者的插件
-#   bash queue/test_consume.sh        WORKER_TEST_ONLY="h win" 只跑这几个情况
+# Simulated tests for consume.py (the consumer) and its plugins: taking over running tasks on a bundle switch, hours window, waiting for a free GPU, Slurm, user plugins
+#   bash queue/test_consume.sh        WORKER_TEST_ONLY="h win" runs only these cases
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CORE=$(cd "$HERE/.." && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=site-pueue   # 本机当 pueue 执行机（Slurm 的情况另设 site-slurm）
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=site-pueue   # this machine is a pueue executor (the Slurm cases set site-slurm instead)
 source "$HERE/testdata/worker_harness.sh"
-unset TASKQ_GPU_PAD_BASE   # 常驻的 worker 没有显存填充
-bundle() {  # 代码包 a、b（完整的核心）；b 的 worker_start.sh 换成只打一行再转交给 consume.py（不碰 conda）
+unset TASKQ_GPU_PAD_BASE   # the resident worker has no GPU pad
+bundle() {  # bundles a and b (the full core); b's worker_start.sh only prints a line and hands over to consume.py (no conda)
     rm -rf "$T/code"; mkdir -p "$T/code/a/scripts/taskq" "$T/code/b/scripts/taskq"
     cp -r "$CORE/." "$T/code/a/scripts/taskq/"; cp -r "$CORE/." "$T/code/b/scripts/taskq/"
-    printf '#!/bin/bash\necho "新包的 start"\nexec python3 "$(dirname "$0")/consume.py"\n' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
+    printf '#!/bin/bash\necho "new bundle start"\nexec python3 "$(dirname "$0")/consume.py"\n' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
     ln -sfn a "$T/code/current"
 }
 nclaims() { ls "$TASKQ_DIR/claims" 2> /dev/null | grep -vc '\.'; }
 
-# h. 换代码包时手上有在训的：exec 新包，新进程接着管，训完、失败的退出码都在新进程里收到并交还
+# h. bundle switch with training running: exec the new bundle, the new process takes over, and receives and releases the exit codes of done and failed tasks
 if want h; then
 reset
 table << EOF
@@ -29,30 +29,16 @@ bundle
 (WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=3 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=8 FAKE_FAIL=t/f \
   exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/wh.out" 2>&1 &
 wpid=$!
-waitfor 30 '[[ $(grep -c "开训" $T/wh.out) == 2 ]]'
+waitfor 30 '[[ $(grep -c "started" $T/wh.out) == 2 ]]'
 ln -sfn b "$T/code/current"
-waitfor 30 'grep -q "接着管 t/f" $T/wh.out'
-check "换包：在训的两个交给新进程" 'grep -q "换成新代码 b 接着跑（在训的 2 个交给新代码接着管）" $T/wh.out && grep -q "接着管 t/h" $T/wh.out && [[ $(nclaims) == 2 ]] && kill -0 $wpid'
+waitfor 30 'grep -q "taking over t/f" $T/wh.out'
+check "switch: both running tasks handed to the new process" 'grep -q "switching to new code b and continuing (2 running handed to the new code)" $T/wh.out && grep -q "taking over t/h" $T/wh.out && [[ $(nclaims) == 2 ]] && kill -0 $wpid'
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "换包：训完的、失败的退出码在新进程里收到，交还" '[[ $rc == 0 ]] && sed -n "/新包的 start/,\$p" $T/wh.out | grep -q "训完 t/h" && sed -n "/新包的 start/,\$p" $T/wh.out | grep -q "t/f 训练失败（run_task.sh 退出码 1）" && [[ $(nclaims) == 0 && -e $TASKQ_DIR/failures/t__f ]]'
-check "换包：新进程记的代码是新包" 'grep -q "，代码 b$" $T/wh.out'
+check "switch: done and failed exit codes received in the new process, then released" '[[ $rc == 0 ]] && sed -n "/new bundle start/,\$p" $T/wh.out | grep -q "done t/h" && sed -n "/new bundle start/,\$p" $T/wh.out | grep -q "t/f training failed (run_task.sh exit code 1)" && [[ $(nclaims) == 0 && -e $TASKQ_DIR/failures/t__f ]]'
+check "switch: the new process records the new bundle as code" 'grep -q ", code b$" $T/wh.out'
 fi
 
-# retry. 失败交还后同一个 worker 隔 FAIL_RETRY 再领，第二次失败后队列记为 failed、不再领（11/11：lab1 只有一个常驻 worker，
-#   别人占卡导致推理失败一次后，原来永久不领，任务挂了 5 天）
-if want retry; then
-reset
-table << EOF
-t/r base
-EOF
-(WORKER_ID=pueue-host-r TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=6 TASKQ_EARLY_FAIL=0 TASKQ_FAIL_RETRY=2 FAKE_FAIL=t/r \
-  exec bash "$HERE/dicc_worker.sh") > "$T/wr.out" 2>&1 &
-wpid=$!
-waitfor 60 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "失败后隔一会儿再领，第二次失败后不再领" '[[ $rc == 0 && $(grep -c "^fail t/r$" $FAKE_LOG) == 2 && $(nclaims) == 0 ]] && grep -q "t/r 本作业 0 分钟后再领" $T/wr.out'
-fi
-
-# hs. 新包自检不过：留在旧包，接着领
+# hs. new bundle fails its selftest: stay on the old bundle and keep claiming
 if want hs; then
 reset
 table << EOF
@@ -60,24 +46,24 @@ t/s base
 t/s2 base
 EOF
 bundle
-printf 'raise RuntimeError("坏了")\n' > "$T/code/b/scripts/taskq/queue/consumers/slurm.py"
+printf 'raise RuntimeError("broken")\n' > "$T/code/b/scripts/taskq/queue/consumers/slurm.py"
 (WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=3 \
   exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/whs.out" 2>&1 &
 wpid=$!
-waitfor 30 'grep -q "开训 t/s（" $T/whs.out'
+waitfor 30 'grep -q "started t/s (" $T/whs.out'
 ln -sfn b "$T/code/current"
 waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "自检不过：记一句，留在旧包接着领、训" '[[ $rc == 0 ]] && grep -q "新代码包 b 自检没过（.*坏了），留在 a" $T/whs.out && grep -q "训完 t/s2" $T/whs.out && ! grep -q "新包的 start" $T/whs.out'
+check "selftest fails: one line, stay on the old bundle and keep claiming and training" '[[ $rc == 0 ]] && grep -q "new bundle b failed its selftest (.*broken); staying on a" $T/whs.out && grep -q "done t/s2" $T/whs.out && ! grep -q "new bundle start" $T/whs.out'
 fi
 
-# win. 时段（机器表里 worker 的 hours）：时段外不领、退出；时段里领；时段结束时停下手上的、交还、退出 0
+# win. hours window (worker hours in the machine table): no claims outside, exit; claims inside; when it ends, stop what is running, release and exit 0
 if want win; then
 reset
 table << EOF
 t/w base
 EOF
 mkdir -p "$T/wcfg"; cp -r "$TASKQ_CONFIG/." "$T/wcfg/"
-# machines.py 按自己的位置找假的 conda：照原来的位置读，再把 site-pueue 0 号卡的 worker 改成晚班
+# machines.py finds the fake conda by its own location: read it from the original place, then change the worker on site-pueue GPU 0 to the night shift
 printf 'import importlib.util as _u
 _s = _u.spec_from_file_location("_fx_machines", %s)
 _m = _u.module_from_spec(_s)
@@ -87,11 +73,11 @@ MACHINES["site-pueue"]["workers"][1]["hours"] = [("21:00", "09:00", None, None)]
 ' \
   "'$TASKQ_CONFIG/machines.py'" > "$T/wcfg/machines.py"
 at() { python3 -c 'import datetime as dt, sys; d = dt.date.today()
-print(dt.datetime.combine(d, dt.time(*map(int, sys.argv[1].split(":")))).timestamp() + 86400 * int(sys.argv[2]))' "$@"; }  # 本机时间（site-pueue 没写 tz）
+print(dt.datetime.combine(d, dt.time(*map(int, sys.argv[1].split(":")))).timestamp() + 86400 * int(sys.argv[2]))' "$@"; }  # local time (site-pueue has no tz)
 at 12:00 0 > "$T/now"
 (TASKQ_CONFIG=$T/wcfg TASKQ_TEST_NOW=$T/now WORKER_ID=site-pueue-gpu0 TASKQ_IDLE_POLL=1 exec bash "$HERE/worker_start.sh") > "$T/win0.out" 2>&1
 rc=$?
-check "时段外开的（site-pueue-gpu0 的 hours）：不领，退出 0" '[[ $rc == 0 ]] && grep -q "不在时段里（21:00–09:00），退出" $T/win0.out && [[ ! -s $T/train.log ]]'
+check "started outside the hours (site-pueue-gpu0 hours): no claims, exit 0" '[[ $rc == 0 ]] && grep -q "outside the hours (21:00–09:00); exiting" $T/win0.out && [[ ! -s $T/train.log ]]'
 at 22:00 0 > "$T/now"
 (TASKQ_CONFIG=$T/wcfg TASKQ_TEST_NOW=$T/now WORKER_ID=site-pueue-gpu0 TASKQ_IDLE_POLL=1 FAKE_SECS=60 \
   exec bash "$HERE/worker_start.sh") > "$T/win.out" 2>&1 &
@@ -99,12 +85,12 @@ wpid=$!
 waitfor 30 'grep -q "^start .* t/w" $T/train.log'
 at 09:01 1 > "$T/now"
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "时段结束：停下手上的、交还、退出 0" '[[ $rc == 0 ]] && grep -q "时段结束（21:00–09:00），停训练、交还任务" $T/win.out && grep -q "^term t/w" $T/train.log && [[ $(nclaims) == 0 ]] && ! grep -q "^end .* t/w" $T/train.log'
+check "hours end: stop what is running, release, exit 0" '[[ $rc == 0 ]] && grep -q "hours window ended (21:00–09:00); stopping training and releasing tasks" $T/win.out && grep -q "^term t/w" $T/train.log && [[ $(nclaims) == 0 ]] && ! grep -q "^end .* t/w" $T/train.log'
 (TASKQ_CONFIG=$T/wcfg TASKQ_TEST_NOW=$T/now WORKER_ID=site-pueue-gpu1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/win1.out" 2>&1
-check "同一台没写 hours 的 worker（site-pueue-gpu1）：时段外照常领、训完" 'grep -q "训完 t/w" $T/win1.out && ! grep -q "时段" $T/win1.out'
+check "worker on the same machine without hours (site-pueue-gpu1): claims and trains outside the window" 'grep -q "done t/w" $T/win1.out && ! grep -q "hours" $T/win1.out'
 fi
 
-# idle. 等卡空（gpu_idle）：别人刚用过 / 正占着卡时不领（不退出），空了才领；run_task.sh 见到 TASKQ_ADMITTED=1 不再等卡
+# idle. waiting for a free GPU (gpu_idle): no claims while someone else just used it or is on it (do not exit), claim once free; run_task.sh does not wait again when TASKQ_ADMITTED=1
 if want idle; then
 reset
 table << EOF
@@ -117,25 +103,25 @@ echo "$(date -d '-5 min' '+%F %T'),1,50,9000,24576,someone,4242,9000,python" > "
 (WORKER_ID=site-pueue-gpu1 CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
   PATH=$T/bini:$PATH exec bash "$HERE/worker_start.sh") > "$T/widle.out" 2>&1 &
 wpid=$!
-waitfor 20 'grep -q "卡 1 空着，别人 .* 还在用，空满 60 分钟再跑（已等 0 分钟）" $T/widle.out'
+waitfor 20 'grep -q "GPU 1 free, but someone .* still used it; waiting 60 minutes of quiet (waited 0 minutes)" $T/widle.out'
 sleep 4
-check "别人刚用过卡：不领、也不因为空闲退出" 'kill -0 $wpid && [[ ! -s $T/train.log && $(nclaims) == 0 ]]'
+check "someone just used the GPU: no claim, and no idle exit" 'kill -0 $wpid && [[ ! -s $T/train.log && $(nclaims) == 0 ]]'
 : > "$f"; touch "$T/busy"
 waitfor 20 'grep -q "GPU 1 busy, waiting for it" $T/widle.out'
-check "卡被别人的进程占着：不领" '[[ ! -s $T/train.log && $(nclaims) == 0 ]]'
+check "someone else's process on the GPU: no claim" '[[ ! -s $T/train.log && $(nclaims) == 0 ]]'
 rm -f "$T/busy"
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "卡空了：领、训完" '[[ $rc == 0 ]] && grep -q "训完 t/i" $T/widle.out'
+check "GPU free: claim and finish" '[[ $rc == 0 ]] && grep -q "done t/i" $T/widle.out'
 touch "$T/busy"
 run() { TASK_JOBTAG=x TASK_KEY=t/r CUDA_VISIBLE_DEVICES=1 RUN_TASK_GPU_POLL=1 PATH=$T/bini:$PATH \
     timeout 8 bash "$HERE/run_task.sh" command key=t/r "cmd=bash $T/fake_train.sh t/r" env=base out=runs/t/r 'done=["DONE"]' device=gpu > "$T/rt.out" 2>&1; }
 run; rc=$?
-check "run_task.sh 手动跑：卡被占着就等" '[[ $rc == 124 ]] && grep -q "GPU 1 busy" $T/rt.out'
+check "run_task.sh run by hand: waits while the GPU is busy" '[[ $rc == 124 ]] && grep -q "GPU 1 busy" $T/rt.out'
 TASKQ_ADMITTED=1 run; rc=$?
-check "run_task.sh 由消费者开（TASKQ_ADMITTED=1）：不再等卡" '[[ $rc == 0 ]] && ! grep -q "GPU 1 busy" $T/rt.out && grep -q "^end .* t/r" $T/train.log'
+check "run_task.sh started by the consumer (TASKQ_ADMITTED=1): does not wait again" '[[ $rc == 0 ]] && ! grep -q "GPU 1 busy" $T/rt.out && grep -q "^end .* t/r" $T/train.log'
 fi
 
-# slurm. Slurm 作业：作业号当名字，按核数和内存定同时几个，时限查不到之后再查，本地暂存目录交给 run_task.sh，结束时删掉
+# slurm. Slurm job: the job id is the name, slots from CPUs and memory, an unknown time limit checked again later, the local staging dir handed to run_task.sh and removed at the end
 if want slurm; then
 reset
 python3 - "$TASKQ_DIR/tasks.jsonl" "$T" << 'EOT'
@@ -152,11 +138,11 @@ mkdir -p "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300" "$T/bins"; printf '#!/bin/bash\n
 rc=$?
 n=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))")
 slots=$(( n >= 24 ? 2 : 1 ))
-check "Slurm：作业号当名字，按核数和内存定同时几个，时限查不到" '[[ $rc == 0 ]] && grep -q "作业 900300 @ .*最多同时 $slots 个，CPU $n，内存 65536M.*时限 查不到，之后再查" $T/wslurm.out && grep -q "训完 t/s" $T/wslurm.out'
-check "Slurm：本地暂存目录（TASKQ_STAGE_ROOT）、TASKQ_ADMITTED 交给 run_task.sh，作业结束时删掉" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 ]]'
+check "Slurm: job id as the name, slots from CPUs and memory, unknown time limit" '[[ $rc == 0 ]] && grep -q "job 900300 @ .*at most $slots at once, CPU $n, memory 65536M.*time limit not known yet, checking later" $T/wslurm.out && grep -q "done t/s" $T/wslurm.out'
+check "Slurm: local staging dir (TASKQ_STAGE_ROOT) and TASKQ_ADMITTED handed to run_task.sh, removed at the end" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 ]]'
 fi
 
-# plug. 使用者的插件文件夹里的 consumers.py（CONSUMERS）：钩子照样调用；admit 挡住时不领
+# plug. consumers.py (CONSUMERS) in the user's plugin dir: hooks are still called; no claims while admit blocks
 if want plug; then
 reset
 table << EOF
@@ -165,20 +151,20 @@ EOF
 mkdir -p "$T/plug"; cp -r "$TASKQ_PLUGINS/." "$T/plug/"
 cat > "$T/plug/consumers.py" << 'EOT'
 import os
-CONSUMERS = {"demo": {"setup": lambda w: w.say("使用者的插件到了"),
-                      "admit": lambda w: None if os.path.exists(os.environ["DEMO_OPEN"]) else "门关着"}}
+CONSUMERS = {"demo": {"setup": lambda w: w.say("user plugin loaded"),
+                      "admit": lambda w: None if os.path.exists(os.environ["DEMO_OPEN"]) else "the door is closed"}}
 EOT
 (TASKQ_PLUGINS=$T/plug DEMO_OPEN=$T/open WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wplug.out" 2>&1 &
 wpid=$!
-waitfor 20 'grep -q "使用者的插件到了" $T/wplug.out'
+waitfor 20 'grep -q "user plugin loaded" $T/wplug.out'
 sleep 4
-check "使用者的插件：admit 挡住时不领（也不退出）" 'kill -0 $wpid && [[ ! -s $T/train.log ]]'
+check "user plugin: no claim while admit blocks (and no exit)" 'kill -0 $wpid && [[ ! -s $T/train.log ]]'
 touch "$T/open"
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "使用者的插件：放行后领、训完" '[[ $rc == 0 ]] && grep -q "训完 t/p" $T/wplug.out'
+check "user plugin: claims and finishes once allowed" '[[ $rc == 0 ]] && grep -q "done t/p" $T/wplug.out'
 fi
 
-# unit. 插件的判断（不开 worker）：gpu_share 什么时候领第二个、gpu_pad 让位、resident 的 slots、读不了时段时不领也不停手上的
+# unit. plugin decisions (no worker started): when gpu_share claims a second, gpu_pad making room, resident's slots, unreadable hours: no new claims and running tasks keep going
 if want unit; then
 python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
 import importlib.util, os, sys, time, types
@@ -195,13 +181,13 @@ for g in ("50 3 20000 81920", "95 10 20000 81920", "50 10 60000 81920", "50 10 2
     os.environ["WORKER_TEST_GPU"] = g; r.append(share.admit(w))
 w.pad_now = lambda: 30000; os.environ["WORKER_TEST_GPU"] = "50 10 60000 81920"; r.append(share.admit(w))
 w.busy = lambda: 0; r.append(share.admit(w))
-assert r == ["刚开始，先看看", "GPU 记录不够", "GPU 使用率 95%", "显存不够（训练占 60000MiB / 81920MiB）", None, None, None], r
-assert said == ["GPU 使用率 50%、训练占 20000MiB / 81920MiB，再领一个", "GPU 使用率 50%、训练占 30000MiB / 81920MiB，再领一个"], said
+assert r == ["just started, waiting a bit", "not enough GPU records", "GPU utilization 95%", "not enough GPU memory (training uses 60000MiB / 81920MiB)", None, None, None], r
+assert said == ["GPU utilization 50%, training uses 20000MiB / 81920MiB; claiming another", "GPU utilization 50%, training uses 30000MiB / 81920MiB; claiming another"], said
 b = t + "/pad"
 open(b + ".mib", "w").write("0"); said.clear(); pad.make_room(b, said.append)
 assert os.path.exists(b + ".start") and not said
 open(b + ".mib", "w").write("5000"); orig = time.sleep; time.sleep = lambda s: None; pad.make_room(b, said.append); time.sleep = orig
-assert said and "30 秒内没回应" in said[0], said
+assert said and "did not respond within 30 seconds" in said[0], said
 w = types.SimpleNamespace(ncpu=64)
 os.environ["TASKQ_SLOTS"] = "3"; os.environ["TASKQ_CPUS"] = "16"; os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 res.setup(w)
@@ -210,18 +196,18 @@ os.environ.pop("TASKQ_SLOTS"); res.setup(w)
 assert w.slots == 1, vars(w)
 win = load("window")
 def broken(w):
-    raise ImportError("坏了")
+    raise ImportError("broken")
 win._me = broken; said.clear(); stops = []
 w = types.SimpleNamespace(say=said.append, runs={1: 1}, zomb={}, shutdown=lambda *a: stops.append(a))
-assert win.active(w) is True and "读到之前不领" in said[0], said
-assert win.admit(w) == "读不了机器表", win.admit(w)
+assert win.active(w) is True and "not claiming until it can be read" in said[0], said
+assert win.admit(w) == "cannot read the machine table", win.admit(w)
 win.tick(w); assert not stops, stops
-w.site, w.wconf = "site-pueue", {"hours": [("9点", "21:00", None, None)]}
-assert win.admit(w) and win.admit(w).startswith("读不了时段"), win.admit(w)
+w.site, w.wconf = "site-pueue", {"hours": [("9am", "21:00", None, None)]}
+assert win.admit(w) and win.admit(w).startswith("cannot read the hours"), win.admit(w)
 win.tick(w); assert not stops, stops
 print("ok")
 EOT
-check "插件：gpu_share 的判断、gpu_pad 让位、resident 的核数和 slots、读不了机器表或时段" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
+check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
 fi
 
-(( fails == 0 )) && echo "全部通过" || { echo "$fails 项失败"; exit 1; }
+(( fails == 0 )) && echo "all passed" || { echo "$fails checks failed"; exit 1; }

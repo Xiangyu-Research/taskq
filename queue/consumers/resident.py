@@ -1,5 +1,5 @@
-"""常驻的 worker（pueue 组里，不在 Slurm 里）：WORKER_ID 当名字，最多用 TASKQ_CPUS 个核，同时训 TASKQ_SLOTS 个（机器表 worker 的 slots），
-每次开训另起分段日志的作业名；领不到、出错、失败太多都不马上退出，手上没有在训的满 IDLE_EXIT 秒才退出（退出码 0）。"""
+"""Resident worker (in a pueue group, not in Slurm): WORKER_ID is the name, uses at most TASKQ_CPUS cores, runs TASKQ_SLOTS trainings at once (the machine table worker's slots), with a job name per start for the part log.
+No claims, errors or too many failures do not exit at once; it exits 0 only after IDLE_EXIT seconds with nothing running."""
 import os
 
 
@@ -30,15 +30,15 @@ def idle(w, why, now, since, err_since):
     if w.zomb:
         msg = "zomb"
     if msg not in ("own", "zomb", "admit") and now - since >= w.IDLE_EXIT:
-        w.say(f"手上没有在训的已经 {int((now - since) // 60)} 分钟，退出（有备好的任务时下次检查再开）")
+        w.say(f"nothing running for {int((now - since) // 60)} minutes; exiting (the next check starts it again when there are tasks ready)")
         return None
     if msg != w.said_idle:
-        text = {"zomb": f"还有停不下来的训练（{' '.join(r.key for r in w.zomb.values())}），等它停下（接着心跳），先不退出",
-                "own": f"本 worker {w.FAIL_WINDOW // 60} 分钟内有 {w.own} 个任务开始不久就失败，先不领，过了时间窗再领",
-                "nothing": f"没有能领的任务，每 {w.IDLE_POLL} 秒再看",
-                "error": f"没有能领的任务，每 {w.IDLE_POLL} 秒再看",
-                "paused": "队列暂停领任务（3 小时内失败太多次），空着等",
-                "wait": f"排在前面的任务刚停下，等它（最多到开始后 {w.PATIENCE // 60} 分钟）"}.get(msg)
+        text = {"zomb": f"unstoppable training still running ({' '.join(r.key for r in w.zomb.values())}); waiting for it to stop (still heartbeating), not exiting yet",
+                "own": f"this worker had {w.own} tasks fail shortly after starting within {w.FAIL_WINDOW // 60} minutes; not claiming until the window passes",
+                "nothing": f"no claimable tasks; checking again every {w.IDLE_POLL} seconds",
+                "error": f"no claimable tasks; checking again every {w.IDLE_POLL} seconds",
+                "paused": "the queue is paused (too many failures within 3 hours); waiting",
+                "wait": f"a task ahead just stopped; waiting for it (at most {w.PATIENCE // 60} minutes after start)"}.get(msg)
         if text:
             w.say(text)
         w.said_idle = msg

@@ -1,5 +1,5 @@
 #!/bin/bash
-# needs-gpu：显存填充在本机 0 号卡上的实际行为（taskq self test --gpu 才跑；没有 nvidia-smi 或 torch 时自己跳过）
+# needs-gpu: real GPU pad behavior on GPU 0 of this machine (runs only with taskq self test --gpu; skips itself without nvidia-smi or torch)
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 CORE=$(dirname "$HERE")
@@ -31,7 +31,7 @@ stop_train() { [[ -n ${TRAINPID:-} ]] && kill "$TRAINPID" 2> /dev/null; TRAINPID
 start_train() { python3 "$T/pad/fake_train.py" 2000 & TRAINPID=$!; sleep 6; }
 trap cleanup EXIT
 
-command -v nvidia-smi > /dev/null || { echo "这台机器没有 nvidia-smi，跳过"; exit 0; }
+command -v nvidia-smi > /dev/null || { echo "no nvidia-smi on this machine; skipping"; exit 0; }
 foreign() {
     local ours p
     ours=" $(our_pids | tr '\n' ' ') "
@@ -41,15 +41,15 @@ foreign() {
 }
 for _ in $(seq 24); do F=$(foreign); [[ -z $F ]] && break; sleep 5; done
 if [[ -n $F ]]; then
-    echo "GPU 上有别的 CUDA 进程（PID $(echo $F)，可能在推理）；跳过集成测试"
+    echo "another CUDA process is on the GPU (PID $(echo $F), maybe inference); skipping the integration test"
     exit 0
 fi
 read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda 2> /dev/null) || true
 if [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
     source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate "$CONDA_ENV" || { echo "conda 环境 $CONDA_ENV 激活失败，跳过"; exit 0; }
+    conda activate "$CONDA_ENV" || { echo "failed to activate conda env $CONDA_ENV; skipping"; exit 0; }
 fi
-python3 -c "import torch" 2> /dev/null || { echo "python3 没有 torch（机器表的 conda：${CONDA_BASE:-没有} ${CONDA_ENV:-}），跳过"; exit 0; }
+python3 -c "import torch" 2> /dev/null || { echo "python3 has no torch (machine table conda: ${CONDA_BASE:-none} ${CONDA_ENV:-}); skipping"; exit 0; }
 used() { nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' '; }
 pad_gone() { ! pgrep -f "$T/pad/gpu_pad.py" > /dev/null; }
 filled() { test "$(used)" -ge 7000; }
@@ -70,7 +70,7 @@ BASE=$(used)
 WATCH=$!
 aborted() {
     if [[ -f $T/abort ]]; then
-        echo "中止：测试中途 GPU 上出现了别的 CUDA 进程（PID $(cat "$T/abort" | tr '\n' ' ')），已停掉 pad；结果不算，之后再跑"
+        echo "aborted: another CUDA process appeared on the GPU during the test (PID $(cat "$T/abort" | tr '\n' ' ')); the pad was stopped; results do not count, run again later"
         exit 0
     fi
 }
@@ -95,36 +95,36 @@ PADLOG=$TASKQ_DATA/logs/workers/gpu_pad_999001.log
 source "$HERE/gpu_pad_start.sh"
 SUP=$!
 sleep 4
-check "pad 启动且只启动一个" test -f "$PADLOG"
-check "日志里有 target=8000、settle=4s" bash -c "grep -q 'target=8000' '$PADLOG' && grep -q 'settle=4s' '$PADLOG'"
+check "pad starts, only one" test -f "$PADLOG"
+check "log has target=8000 and settle=4s" bash -c "grep -q 'target=8000' '$PADLOG' && grep -q 'settle=4s' '$PADLOG'"
 aborted
-check "还没有训练时先填到 floor 5000（现在 $(used)MiB）" test "$(used)" -ge 5000 -a "$(used)" -le 5600
+check "pads to floor 5000 before training starts (now $(used)MiB)" test "$(used)" -ge 5000 -a "$(used)" -le 5600
 start_train
 sleep 4
 U=$(used)
 aborted
-check "训练稳定后补到约 8GB（现在 ${U}MiB）" test "$U" -ge 7000
-check "没有把卡占满" test "$U" -le 10000
-check "<base>.mib 写了 pad 的大小" bash -c "test \$(cat '$T/padsig.mib') -ge 4000"
+check "padded to about 8GB after training settles (now ${U}MiB)" test "$U" -ge 7000
+check "does not fill the GPU" test "$U" -le 10000
+check "<base>.mib holds the pad size" bash -c "test \$(cat '$T/padsig.mib') -ge 4000"
 
 touch "$T/padsig.start"
 sleep 2
 U=$(used)
 aborted
-check "收到新训练信号后只放到 floor 5000（现在 ${U}MiB）" test "$U" -ge 5000 -a "$U" -le 5600
-check "放好后写 <base>.ready" test -f "$T/padsig.ready"
+check "new-training signal drops it to floor 5000 only (now ${U}MiB)" test "$U" -ge 5000 -a "$U" -le 5600
+check "writes <base>.ready after making room" test -f "$T/padsig.ready"
 sleep 2
 U=$(used)
-check "新训练没起来、start_hold 没到：不补到 target（现在 ${U}MiB）" test "$U" -ge 5000 -a "$U" -le 5600
+check "new training did not start and start_hold has not passed: not padded to target (now ${U}MiB)" test "$U" -ge 5000 -a "$U" -le 5600
 sleep 6
 aborted
-check "等满 start_hold 后又补上（现在 $(used)MiB）" test "$(used)" -ge 7000
+check "padded again after start_hold passes (now $(used)MiB)" test "$(used)" -ge 7000
 
 stop_train
 sleep 2
 aborted
 U=$(used)
-check "训练结束后不放掉，显存不低于 floor（现在 ${U}MiB）" test "$U" -ge 5000 -a "$U" -le 8300
+check "training ended: does not release, memory stays at or above floor (now ${U}MiB)" test "$U" -ge 5000 -a "$U" -le 8300
 
 start_train; sleep 4
 touch "$T/switch"
@@ -132,9 +132,9 @@ sleep 3
 stop_train
 U=$(used)
 aborted
-check "DISABLED 后释放、缓存也还了（现在 ${U}MiB，开始时 ${BASE}MiB）" test "$U" -le $(( BASE + 300 ))
+check "DISABLED releases and returns the cache (now ${U}MiB, at start ${BASE}MiB)" test "$U" -le $(( BASE + 300 ))
 wait_for 15 pad_gone
-check "DISABLED 后 pad 退出" pad_gone
+check "pad exits after DISABLED" pad_gone
 kill "$SUP" 2> /dev/null; SUP=
 
 rm -f "$T/switch"
@@ -142,14 +142,14 @@ unset TASKQ_GPU_PAD_STARTED
 export SLURM_JOB_ID=999002 TASKQ_GPU_PAD=0
 source "$HERE/gpu_pad_start.sh"
 sleep 2
-check "TASKQ_GPU_PAD=0 不启动" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999002.log"
+check "TASKQ_GPU_PAD=0 does not start" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999002.log"
 unset TASKQ_GPU_PAD TASKQ_GPU_PAD_STARTED
 
 touch "$T/switch"
 export SLURM_JOB_ID=999003
 source "$HERE/gpu_pad_start.sh"
 sleep 2
-check "DISABLED 开关在启动前生效" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999003.log"
+check "DISABLED switch takes effect before startup" test ! -e "$TASKQ_DATA/logs/workers/gpu_pad_999003.log"
 rm -f "$T/switch"
 unset TASKQ_GPU_PAD_STARTED
 
@@ -165,16 +165,16 @@ wait_for 30 filled
 PL=$TASKQ_DATA/logs/workers/gpu_pad_999005.log
 U=$(used)
 aborted
-check "父进程测试：pad 先补到约 8GB（现在 ${U}MiB）" test "$U" -ge 7000
+check "parent test: pad first pads to about 8GB (now ${U}MiB)" test "$U" -ge 7000
 kill "$PARENT" 2> /dev/null
 sleep 3
 stop_train
 U=$(used)
 aborted
-check "父进程退出后释放（现在 ${U}MiB，开始时 ${BASE}MiB）" test "$U" -le $(( BASE + 300 ))
+check "released after the parent exits (now ${U}MiB, at start ${BASE}MiB)" test "$U" -le $(( BASE + 300 ))
 wait_for 15 parent_done
-check "父进程退出后日志有说明" grep -q '父进程' "$PL"
-check "父进程退出后 pad 和 supervisor 都不在了" parent_done
+check "log explains the parent exit" grep -q 'parent or supervisor' "$PL"
+check "pad and supervisor are both gone after the parent exits" parent_done
 
 aborted
-if (( fails == 0 )); then echo "全部通过"; else echo "$fails 项失败"; exit 1; fi
+if (( fails == 0 )); then echo "all passed"; else echo "$fails checks failed"; exit 1; fi

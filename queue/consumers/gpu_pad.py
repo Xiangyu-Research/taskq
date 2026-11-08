@@ -1,4 +1,4 @@
-"""显存填充（queue/gpu_pad.py）：开训前让出显存，算还空多少显存时扣掉它占的。"""
+"""GPU pad (queue/gpu_pad.py): make room before starting; its share is subtracted when computing free GPU memory."""
 import os
 import sys
 import time
@@ -22,7 +22,7 @@ def before_start(w):
 
 
 def pad_now(base):
-    """填充现在占的 MiB；<base>.mib 超过 60 秒没更新（填充不在了）→ 0。"""
+    """MiB the pad currently holds; 0 when <base>.mib has not been updated for 60 seconds (the pad is gone)."""
     try:
         v = open(base + MIB).read().strip()
         fresh = time.time() - os.stat(base + MIB).st_mtime <= 60
@@ -32,7 +32,7 @@ def pad_now(base):
 
 
 def make_room(base, say, wait=30):
-    """让填充放到 floor，最多等 wait 秒 → 放好了（或没有填充）True，没等到 False。"""
+    """Let the pad drop to floor, waiting at most wait seconds → True when room is made (or there is no pad), False on timeout."""
     if not os.path.isfile(base + MIB):
         return True
     try:
@@ -45,7 +45,7 @@ def make_room(base, say, wait=30):
         if os.path.exists(base + READY) or _read(base + MIB) == "0":
             return True
         time.sleep(1)
-    say(f"显存填充 {int(wait)} 秒内没回应（{base}{MIB} = {_read(base + MIB)}），照样开始")
+    say(f"GPU pad did not respond within {int(wait)} seconds ({base}{MIB} = {_read(base + MIB)}); starting anyway")
     return False
 
 
@@ -57,18 +57,18 @@ def _read(p):
 
 
 def env_base():
-    """这个作业的握手文件前缀：TASKQ_GPU_PAD_BASE，没有时按 SLURM_JOB_ID；都没有 → None。"""
+    """Handshake file prefix for this job: TASKQ_GPU_PAD_BASE, else SLURM_JOB_ID; neither → None."""
     b = os.environ.get("TASKQ_GPU_PAD_BASE")
     j = os.environ.get("SLURM_JOB_ID")
     return b or (proto.GPU_PAD_BASE + j if j else None)
 
 
 def main(argv):
-    """taskq pad room [--wait 秒]：作业里的命令自己要显存时，先让填充放到 floor、等它说好了。
-    没有在跑的填充（不在 Slurm 作业里、没有 <base>.mib、或它 60 秒没更新）什么都不做，退出码 0；没等到退出码 1。"""
+    """taskq pad room [--wait sec]: when a job's command needs GPU memory itself, first let the pad drop to floor and wait until it is ready.
+    With no running pad (not in a Slurm job, no <base>.mib, or not updated for 60 seconds) do nothing and exit 0; exit 1 when it did not respond in time."""
     import argparse
-    ap = argparse.ArgumentParser(description="让这个作业的显存填充放到 floor，等它说好了")
-    ap.add_argument("--wait", type=float, default=30, help="最多等几秒（默认 30）")
+    ap = argparse.ArgumentParser(description="let this job's GPU pad drop to floor and wait until it is ready")
+    ap.add_argument("--wait", type=float, default=30, help="seconds to wait at most (default 30)")
     a = ap.parse_args(argv)
     base = env_base()
     try:
@@ -77,5 +77,5 @@ def main(argv):
         alive = False
     if not alive:
         return 0
-    say = lambda m: print(f"taskq pad：{m}", file=sys.stderr)  # noqa: E731
+    say = lambda m: print(f"taskq pad: {m}", file=sys.stderr)  # noqa: E731
     return 0 if make_room(base, say, a.wait) else 1

@@ -1,4 +1,4 @@
-"""一张卡训第二个：最近一个开训 ADD_AFTER 秒以后，近 10 条记录的 GPU 平均使用率低于 UTIL_MAX、还空着一半显存（填充占的算空），再领一个。"""
+"""A second training on one GPU: once ADD_AFTER seconds have passed since the last start, the last 10 records show average GPU utilization below UTIL_MAX and half the memory is free (the pad's share counts as free), claim another."""
 import os
 import re
 import subprocess
@@ -15,21 +15,21 @@ def admit(w):
     if not n:
         return None
     if time.time() - w.changed < w.ADD_AFTER:
-        return "刚开始，先看看"
+        return "just started, waiting a bit"
     util, cnt, used, total = gpu_stats(w.gpucsv, w.nvsel)
     pad = w.pad_now()
     if not (cnt >= 5 and total > 0):
-        return "GPU 记录不够"
+        return "not enough GPU records"
     if util >= w.UTIL_MAX:
-        return f"GPU 使用率 {util}%"
+        return f"GPU utilization {util}%"
     if total - used + pad < total // 2:
-        return f"显存不够（训练占 {used - pad}MiB / {total}MiB）"
-    w.say(f"GPU 使用率 {util}%、训练占 {used - pad}MiB / {total}MiB，再领一个")
+        return f"not enough GPU memory (training uses {used - pad}MiB / {total}MiB)"
+    w.say(f"GPU utilization {util}%, training uses {used - pad}MiB / {total}MiB; claiming another")
     return None
 
 
 def gpu_stats(csv, nvsel=()):
-    """→ (近 10 条的平均使用率, 条数, 显存已用, 总量)（MiB）。"""
+    """→ (average utilization of the last 10 records, count, memory used, total) in MiB."""
     t = os.environ.get("WORKER_TEST_GPU")
     if t:
         return tuple(int(x) for x in t.split()[:4])

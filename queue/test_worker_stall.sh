@@ -1,13 +1,13 @@
 #!/bin/bash
-# 不在 Slurm 里（pueue 常驻 worker，worker_start.sh → consume.py）的卡住检测：日志名是主机名-时间，不是 WORKER_ID
-# 假训练卡住不动：worker 停掉它、交还，接着训下一个；不用 Slurm、不用 GPU。
+# Stall detection outside Slurm (resident pueue worker, worker_start.sh → consume.py): the log name is host-time, not WORKER_ID;
+# fake training hangs: the worker stops it, releases it and trains the next; no Slurm, no GPU.
 #   bash queue/test_worker_stall.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'rm -rf "${T:?}"' EXIT
-export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=site-pueue WORKER_ID=site-pueue-gpu1   # 本机当 pueue 执行机，1 号卡的 worker
+export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=site-pueue WORKER_ID=site-pueue-gpu1   # this machine is a pueue executor, worker on GPU 1
 source "$HERE/testdata/worker_harness.sh"
 reset
 table << EOT
@@ -15,39 +15,39 @@ t/a base
 t/b base
 EOT
 (TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/a timeout 40 bash "$HERE/worker_start.sh") > "$T/w.out" 2>&1
-check "pueue worker：卡住的 t/a 被停掉、交还" 'grep -q "t/a 的日志和结果文件夹 .*当作卡住" $T/w.out && grep -q "^term t/a" $T/train.log'
-check "pueue worker：卡住后接着训 t/b" 'grep -q "end .* t/b" $T/train.log'
-check "第一次卡住：只交还，不记失败" '[[ ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "^STALLED" $TASKQ_DATA/logs/tasks/t__a__*_part1.log'
+check "pueue worker: stalled t/a is stopped and released" 'grep -q "t/a: log and output dir unchanged for .*treating it as stalled" $T/w.out && grep -q "^term t/a" $T/train.log'
+check "pueue worker: trains t/b after the stall" 'grep -q "end .* t/b" $T/train.log'
+check "first stall: release only, no failure" '[[ ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "^STALLED" $TASKQ_DATA/logs/tasks/t__a__*_part1.log'
 
-# 停不下来的（run_task.sh 退出了、训练还在）：空出位置训别的，接着心跳，真停下了才交还；还在时不退出
+# unstoppable (run_task.sh exited, training still running): free the slot for other tasks, keep heartbeating, release only once it really stops; do not exit while it runs
 reset
-rm -rf "$TASKQ_DATA/logs/tasks"   # 上面训过 t/b 的分段日志会让它算做了一半、先领
+rm -rf "$TASKQ_DATA/logs/tasks"   # the part log from t/b above would make it count as half-done and claim it first
 table << EOT
 t/z base
 t/b base
 EOT
-mkdir -p "$T/binz"; printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"   # 会话级的强制停不起作用
+mkdir -p "$T/binz"; printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"   # makes the session-wide force kill a no-op
 (TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
   FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$HERE/worker_start.sh") > "$T/wz.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^end .* t/b" $T/train.log'
 sleep 3
 beat=$(python3 -c 'import json, sys, time; print(int(time.time() - json.load(open(sys.argv[1]))["beat"]))' "$TASKQ_DIR/claims/t__z/info" 2> /dev/null)
-check "停不下来的：空出位置训完 t/b，worker 不退出" 'kill -0 $wpid && grep -q "t/z 停了 3 秒还没停下" $T/wz.out && grep -q "还有停不下来的训练" $T/wz.out'
-check "停不下来的：接着心跳，不交还（领取 $beat 秒前心跳）" '[[ -n $beat ]] && (( beat <= 3 ))'
+check "unstoppable: frees the slot to finish t/b, worker does not exit" 'kill -0 $wpid && grep -q "t/z has not stopped for 3 seconds" $T/wz.out && grep -q "unstoppable training" $T/wz.out'
+check "unstoppable: keeps heartbeating, no release (claim heartbeat $beat seconds ago)" '[[ -n $beat ]] && (( beat <= 3 ))'
 waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
-check "停不下来的停下后：交还、不记失败，worker 再退出" '[[ $rc == 0 ]] && grep -q "停不下来的 t/z 终于停下了，交还" $T/wz.out && [[ ! -e $TASKQ_DIR/claims/t__z && ! -e $TASKQ_DIR/failures/t__z ]]'
+check "unstoppable task stops: release, no failure, then the worker exits" '[[ $rc == 0 ]] && grep -q "unstoppable t/z finally stopped; releasing" $T/wz.out && [[ ! -e $TASKQ_DIR/claims/t__z && ! -e $TASKQ_DIR/failures/t__z ]]'
 [[ -s $FAKE_LOG.escape ]] && kill "$(cat "$FAKE_LOG.escape")" 2> /dev/null
 
-# 一周内第 2 次卡住：记一次失败
+# second stall within a week: record one failure
 reset
 table << EOT
 t/z base
 EOT
 (TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/z timeout 40 bash "$HERE/worker_start.sh") > "$T/wz2.out" 2>&1
-check "第 2 次卡住：记一次失败" 'grep -q "一周内第 2 次卡住，记一次失败" $T/wz2.out && grep -q "卡住（一周内第 2 次）" $TASKQ_DIR/failures/t__z'
+check "second stall: record one failure" 'grep -q "stalled again this week (2 times); recording a failure" $T/wz2.out && grep -q "stalled (2 times this week)" $TASKQ_DIR/failures/t__z'
 
-# 心跳时领取已经不是自己的：停掉训练，不交还、不记失败
+# heartbeat finds the claim is no longer ours: stop the training, no release, no failure
 reset
 table << EOT
 t/l base
@@ -57,6 +57,6 @@ wpid=$!
 waitfor 30 'grep -q "^start .* t/l" $T/train.log'
 python3 -c 'import json, sys; p = sys.argv[1]; c = json.load(open(p)); c["worker"] = "other"; json.dump(c, open(p, "w"))' "$TASKQ_DIR/claims/t__l/info"
 waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid
-check "领取被接管：停掉训练，不交还、不记失败" 'grep -q "t/l 的领取已经不是本作业的" $T/wl.out && grep -q "^term t/l" $T/train.log && grep -q "\"other\"" $TASKQ_DIR/claims/t__l/info && [[ ! -e $TASKQ_DIR/failures/t__l ]]'
+check "claim taken over: stop the training, no release, no failure" 'grep -q "t/l: claim is no longer" $T/wl.out && grep -q "^term t/l" $T/train.log && grep -q "\"other\"" $TASKQ_DIR/claims/t__l/info && [[ ! -e $TASKQ_DIR/failures/t__l ]]'
 
-(( fails == 0 )) && echo 全部通过 || { echo "失败 $fails 项"; exit 1; }
+(( fails == 0 )) && echo "all passed" || { echo "$fails checks failed"; exit 1; }
