@@ -179,7 +179,7 @@ st["done"] = TL.parse(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('done/key'
 ok("english_logs: migrated logs parse to the same states, exit codes and part number",
    {k: a["state"] for k, a in st.items()} == {"done": "done", "gpu": "gpu_busy", "failed": "failed", "not_started": "not_started",
                                                "unreadable": "unreadable", "stalled": "stalled"}
-   and st["done"]["part"] == 2 and st["failed"]["exit"] == 1
+   and st["done"]["part"] == 2 and st["done"]["code"] == "abc1234" and st["failed"]["exit"] == 1
    and st["not_started"]["note"] == "this machine has no env x (machine table machines.py)"
    and st["stalled"]["note"] == "log and output dir unchanged for 30 minutes, job w stopped it")
 ok("english_logs: no Chinese left in the migrated logs",
