@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
-"""全部状态的汇总：总队列、各机器（health.gather，只读）、每个任务进度最新的那份、分段日志、健康检查记下的问题，
-给登记表这类汇总用，使用者那边不再 import 核心的内部函数。
+"""Summary of everything: hub queue, machines (health.gather, read-only), best copy per task, part logs, problems.
 
-    python3 monitor/overview.py [--json] [--no-remote]     --no-remote：只看本机
+    python3 monitor/overview.py [--json] [--no-remote]     --no-remote: only this machine
 
---json 打印一行 JSON，字段只加不改（proto.OVERVIEW_*）：
-  version、now、hub、data（hub 的数据目录）、queue（enabled、readable）、
-  sources：收集到训练状态的地方，按机器表的顺序，之后是执行机（relay.py 记下的、2 小时以内的）
-  machines：机器表里 gather 看过的机器（gpus、pueue 的组和任务）
-  tasks：实验表里的任务（按表的顺序），加上总队列里有、表里没有的；每个任务见 OVERVIEW_TASK
-  health：健康检查记下的问题（checked、problems）；code：各机器的代码提交号（gather 的 code）
-每个任务：
-  queue    总队列里的情况（OVERVIEW_TASK_QUEUE；rank = 没做完的任务里排第几）；不在队列里 → null
-  copy     几处都有时取训完的、做完的轮数最多、更新最晚的那份（OVERVIEW_COPY；where 是机器的 label）；哪里都没有 → null
-  total    一共几轮：runs 里的 total，没有时进度读法 INFO 的 proto.TOTAL_INFO；不知道 → null
-  progress 训完 = 1，否则 做完的轮数 / total（不超过 1）；不知道 → null
-  eta      还在训的：按最近 3 小时的速度推算训完的时刻（%Y-%m-%d %H:%M）；算不出 → null
-  parts    这个任务的分段日志（OVERVIEW_PART，同一作业的同一段只算一次）；commits：各段记的代码提交号（去重，按出现顺序）
+--json prints one line of JSON with fields per proto.OVERVIEW_* (add-only). Each task: queue, copy, total, progress, eta, parts.
 """
 import argparse
 import json
@@ -38,7 +25,7 @@ import plain as PL  # noqa: E402
 import spec as S  # noqa: E402
 
 M = H.M
-RELAY_FRESH = 2 * 3600  # relay.py 记下的执行机状态这么久以内的才算
+RELAY_FRESH = 2 * 3600  # executor state recorded by relay.py counts for this long
 
 
 def relay_status_file():
@@ -46,7 +33,7 @@ def relay_status_file():
 
 
 def relay_sources(now_ts):
-    """relay.py 每次检查记下的执行机上各任务的进度 → {label: dict(name, time, tasks, seglogs)}（2 小时以内的）。"""
+    """Executor progress recorded by relay.py on each check -> {label: dict(name, time, tasks, seglogs)} (within 2 hours)."""
     try:
         st = json.load(open(relay_status_file()))
     except (OSError, ValueError):
@@ -65,7 +52,7 @@ def machine_of(job):
 
 
 def best_copy(sources, key):
-    """几处的同一个任务：训完的、做完的轮数最多、更新最晚的那份（一样时取前面的）→ (label, 内容) 或 (None, None)。"""
+    """The same task in several places: the finished one, then most rounds done, then last update (first wins on a tie) -> (label, content) or (None, None)."""
     best, where = None, None
     for lab, data in sources.items():
         f = (data.get("tasks") or {}).get(key)
@@ -79,7 +66,7 @@ def best_copy(sources, key):
 
 
 def parts_of(seglogs, key, sp):
-    """这个任务的分段日志：<safe key>__<作业>_part<n>.log。"""
+    """Part logs of a task: <safe key>__<job>_part<n>.log."""
     prefixes = [proto.safe(key) + proto.SAFE]
     kinds = proto.LOG_PART
     seen, out = set(), []
@@ -114,11 +101,11 @@ def pueue_view(d):
 
 
 def about(label):
-    """pueue 标签 → plain.label 的 [实验, 做了什么, 简称]（中间步骤 → None）；认不出 → ["其他", 标签, None]。"""
+    """pueue label -> plain.label's [experiment, what, short] (intermediate step -> None); unknown -> ["Other", label, None]."""
     try:
         r = PL.label(label or "")
     except Exception:  # noqa: BLE001
-        return ["其他", label or "", None]
+        return ["Other", label or "", None]
     return list(r) if r else None
 
 
@@ -129,7 +116,7 @@ def health_view():
 
 
 def build(s, relay=None):
-    """gather() 的结果 → 汇总（proto.OVERVIEW_TOP）。relay：执行机的进度（默认读 relay.py 的 status.json）。"""
+    """gather() result -> summary (proto.OVERVIEW_TOP). relay: executor progress (default: relay.py's status.json)."""
     now = s.get("now") or datetime.now()
     hub = M.hub()
     L = lambda n: (M.MACHINES.get(n) or {}).get("label", n)  # noqa: E731
@@ -181,27 +168,27 @@ def build(s, relay=None):
 
 
 def text(o):
-    """给人看的：每台机器一行、每个任务一行。"""
-    lines = [f"{o['now']}，hub {o['hub']}，总队列{'开着' if o['queue']['enabled'] else '关着' if o['queue']['readable'] else '读不到'}"]
+    """For people: one line per machine, one per task."""
+    lines = [f"{o['now']}, hub {o['hub']}, hub queue {'enabled' if o['queue']['enabled'] else 'disabled' if o['queue']['readable'] else 'unreadable'}"]
     for m in o["machines"]:
-        g = "、".join(f"{x['gpu']}号卡 {x['util']}%" for x in m["gpus"]) or "-"
-        lines.append(f"  {m['label']:<10} {'连得上' if m['ok'] else '连不上 ' + (m['why'] or '')}  {g}")
-    lines.append(f"{'key':<44} {'状态':<8} {'进度':>5}  {'在哪':<10} 预计训完")
+        g = ", ".join(f"GPU {x['gpu']} {x['util']}%" for x in m["gpus"]) or "-"
+        lines.append(f"  {m['label']:<10} {'reachable' if m['ok'] else 'unreachable ' + (m['why'] or '')}  {g}")
+    lines.append(f"{'key':<44} {'state':<8} {'progress':>8}  {'where':<10} eta")
     for t in o["tasks"]:
         st = (t["queue"] or {}).get("state") or "-"
         p = f"{100 * t['progress']:.0f}%" if t["progress"] is not None else "-"
-        lines.append(f"{t['key']:<44} {st:<8} {p:>5}  {(t['copy'] or {}).get('where') or '-':<10} {t['eta'] or ''}")
+        lines.append(f"{t['key']:<44} {st:<8} {p:>8}  {(t['copy'] or {}).get('where') or '-':<10} {t['eta'] or ''}")
     ps = [p for p in o["health"]["problems"] if p.get("active")]
     if ps:
-        lines.append(f"问题（{len(ps)}）：")
-        lines += [f"  {p['id']}：{p['msg']}" for p in ps]
+        lines.append(f"Problems ({len(ps)}):")
+        lines += [f"  {p['id']}: {p['msg']}" for p in ps]
     return "\n".join(lines)
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="总队列、各机器、每个任务的状态汇总（只读）")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（字段见 proto.OVERVIEW_*）")
-    ap.add_argument("--no-remote", action="store_true", help="只看本机，不连别的机器")
+    ap = argparse.ArgumentParser(description="Summary of the hub queue, machines and each task (read-only)")
+    ap.add_argument("--json", action="store_true", help="one line of JSON (fields per proto.OVERVIEW_*)")
+    ap.add_argument("--no-remote", action="store_true", help="only this machine, do not connect to others")
     a = ap.parse_args(argv)
     o = build(H.gather(remote=not a.no_remote))
     if a.json:

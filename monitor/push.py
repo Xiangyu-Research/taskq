@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""推送到手机（ntfy）上配置好的频道；每条推送也记成一条事件（source notify）。
+"""Push to the channel configured for the phone (ntfy); each push is also logged as an event (source notify).
 
-    taskq notify [--title T] [--priority P] [--tags X] [--kind K] [--data JSON] <文字…>   （不给文字时从标准输入读）
+    taskq notify [--title T] [--priority P] [--tags X] [--kind K] [--data JSON] <text...>   (reads stdin when no text)
 
-频道名：放在 policy.py OUTPUTS["topic"] 指的文件里，默认 ~/.config/taskq/ntfy_topic（不进仓库）。
-标题前缀：OUTPUTS["name"]（默认 taskq）。
+Channel name: in the file policy.py OUTPUTS["topic"] points to, default ~/.config/taskq/ntfy_topic (not in the repo).
+Title prefix: OUTPUTS["name"] (default taskq).
 """
 import argparse
 import json
@@ -27,25 +27,25 @@ def name():
 
 def push(msg, title=None, priority="default", tags=""):
     topic = open(topic_file()).read().strip()
-    q = urllib.parse.urlencode({"title": title or f"{name()} 作业", "priority": priority, "tags": tags})
+    q = urllib.parse.urlencode({"title": title or f"{name()} job", "priority": priority, "tags": tags})
     req = urllib.request.Request(f"https://ntfy.sh/{topic}?{q}", data=msg.encode(), method="POST")
     urllib.request.urlopen(req, timeout=30).read()
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="taskq notify", description="推送一条消息到手机（ntfy），并记进事件日志")
-    ap.add_argument("text", nargs="*", help="消息（不给时从标准输入读）")
-    ap.add_argument("--title", help="默认 '<name> 作业'")
-    ap.add_argument("--priority", default="default", help="ntfy 的优先级：min、low、default、high、urgent")
-    ap.add_argument("--tags", default="", help="ntfy 的标签，逗号分隔")
-    ap.add_argument("--kind", help="记成哪种事件（kind；默认不填）")
-    ap.add_argument("--data", help="和事件一起存的 JSON 对象（例如下一次报告要拿来比的数）")
+    ap = argparse.ArgumentParser(prog="taskq notify", description="Push a message to the phone (ntfy) and log it in the event log")
+    ap.add_argument("text", nargs="*", help="message (reads stdin when omitted)")
+    ap.add_argument("--title", help="default '<name> job'")
+    ap.add_argument("--priority", default="default", help="ntfy priority: min, low, default, high, urgent")
+    ap.add_argument("--tags", default="", help="ntfy tags, comma separated")
+    ap.add_argument("--kind", help="event kind to log it as (optional)")
+    ap.add_argument("--data", help="JSON object stored with the event (e.g. numbers the next report compares against)")
     a = ap.parse_args(argv)
     text = " ".join(a.text).strip()
     if not a.text and not sys.stdin.isatty():
         text = sys.stdin.read().strip()
     if not text:
-        print("taskq notify: 没有文字", file=sys.stderr)
+        print("taskq notify: no text", file=sys.stderr)
         return 2
     try:
         extra = json.loads(a.data) if a.data else {}
@@ -55,10 +55,10 @@ def main(argv):
     try:
         push(text, title=a.title, priority=a.priority, tags=a.tags)
     except OSError as e:
-        print(f"taskq notify: 推送失败：{e}", file=sys.stderr)
+        print(f"taskq notify: push failed: {e}", file=sys.stderr)
         return 1
     import events
-    events.add("notify", text, kind=a.kind, data=dict(extra, title=a.title or f"{name()} 作业", priority=a.priority))
+    events.add("notify", text, kind=a.kind, data=dict(extra, title=a.title or f"{name()} job", priority=a.priority))
     return 0
 
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""健康检查的问题、提醒和确认，存在 hub 的数据库里（queue/db.py）。
+"""Problems, notices and acknowledgements from the health check, stored in the hub database (queue/db.py).
 
-    taskq problems [--all] [--json]           最近一次健康检查查到的问题
-    taskq notice set <名字> [--at T] [文字…]  挂上提醒（不给文字时读标准输入）；--at：到那时才开始报
-    taskq notice clear <名字>…                撤掉提醒（没有的不算错）
-    taskq notice list [--json]                挂着的提醒，包括还在等 --at 的
-    taskq notice ack <问题编号或前缀>…        确认"发生过的事"这类问题（kind=event，如 boot:<机器>）
+    taskq problems [--all] [--json]           problems found by the last health check
+    taskq notice set <name> [--at T] [text...]  add a notice (reads stdin when no text); --at: start reporting then
+    taskq notice clear <name>...              remove notices (a missing one is not an error)
+    taskq notice list [--json]                active notices, including those still waiting for --at
+    taskq notice ack <problem id or prefix>...  acknowledge event problems (kind=event, e.g. boot:<machine>)
 
-健康检查把每条到了时候的提醒报成问题 notice:<名字>，直到撤掉。持续的问题（盘满、连不上）不能确认，解决了就消失。
-名字只用字母、数字、_ 和 -。
+The health check reports each due notice as problem notice:<name> until it is cleared. Ongoing problems (disk full,
+unreachable) cannot be acknowledged; they disappear once solved. Names use only letters, digits, _ and -.
 """
 import argparse
 import json
@@ -26,20 +26,20 @@ TF = "%Y-%m-%d %H:%M:%S"
 
 
 def open_db(write=True):
-    """hub 的数据库 → 连接或 None。write=True 时没有就建。"""
+    """Hub database -> connection, or None. write=True creates it when missing."""
     return D.connect(create=write, ro=not write)
 
 
-# ---------------- 问题 ----------------
+# ---------------- problems ----------------
 def problems(db):
-    """→ ({编号: 问题 dict}, 最近一次检查的时间或 None)。"""
+    """-> ({id: problem dict}, time of the last check or None)."""
     if not D.has(db, "problem"):
         return {}, None
     return {pid: json.loads(b) for pid, b in db.execute("SELECT id, body FROM problem")}, D.get_meta(db, "checked")
 
 
 def save_problems(db, cur, checked):
-    """换掉问题列表（确认过的已经去掉了）。"""
+    """Replace the problem list (acknowledged ones already removed)."""
     with D.tx(db):
         db.execute("DELETE FROM problem")
         db.executemany("INSERT INTO problem(id, body) VALUES(?, ?)", [(k, json.dumps(v, ensure_ascii=False)) for k, v in cur.items()])
@@ -47,7 +47,7 @@ def save_problems(db, cur, checked):
 
 
 def prune_acks(db, raised):
-    """这次检查根本不再报的问题，删掉它们的确认（确认过的问题还在报，只是不列出）。"""
+    """Drop acks of problems no longer raised (an acked problem still raised is just not listed)."""
     with D.tx(db):
         for pid in [k for k in acked(db) if k not in raised]:
             db.execute("DELETE FROM ack WHERE id=?", (pid,))
@@ -58,7 +58,7 @@ def acked(db):
 
 
 def ack(db, prefixes):
-    """上次检查的问题里，编号以 prefixes 之一开头、kind=event 的 → 确认。→ (确认了的编号, 没确认的)。"""
+    """Of the last check's problems, ack those whose id starts with one of prefixes and kind=event. -> (acked ids, rejected)."""
     probs, _ = problems(db)
     got, bad = [], []
     now = time.strftime(TF)
@@ -67,20 +67,20 @@ def ack(db, prefixes):
             hit = [k for k in probs if k.startswith(pre)]
             ev = [k for k in hit if probs[k].get("kind") == "event"]
             if not ev:
-                bad.append(pre + ("（持续的问题：解决了就消失）" if hit else "（没有这个问题）"))
+                bad.append(pre + (" (ongoing problem: it goes away when solved)" if hit else " (no such problem)"))
             for k in ev:
                 db.execute("INSERT INTO ack(id, t) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET t=excluded.t", (k, now))
                 got.append(k)
     return got, bad
 
 
-# ---------------- 提醒 ----------------
+# ---------------- notices ----------------
 def valid(name):
     return bool(re.fullmatch(proto.NOTICE_NAME, name or ""))
 
 
 def notices(db, due_only=True, now=None):
-    """→ 按名字排的 {名字: dict(text, since, at)}；due_only 时去掉 --at 还没到的。"""
+    """-> {name: dict(text, since, at)} sorted by name; due_only drops those whose --at is not here yet."""
     if not D.has(db, "notice"):
         return {}
     now = now or time.strftime(TF)
@@ -100,9 +100,9 @@ def drop(db, name):
         return db.execute("DELETE FROM notice WHERE name=?", (name,)).rowcount > 0
 
 
-# ---------------- 命令行 ----------------
+# ---------------- command line ----------------
 def problem_rows(probs, everything=False):
-    """→ [proto.OVERVIEW_PROBLEM dict]，带白话说明；默认只要现在算数的。"""
+    """-> [proto.OVERVIEW_PROBLEM dict] with plain wording; by default only active ones."""
     sys.path.insert(0, HERE)
     try:
         import plain as PL
@@ -121,9 +121,9 @@ def problem_rows(probs, everything=False):
 
 
 def cmd_problems(argv):
-    ap = argparse.ArgumentParser(prog="taskq problems", description="最近一次健康检查查到的问题")
-    ap.add_argument("--all", action="store_true", help="也列 info 和还没报的（在等持续够久）")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（proto.PROBLEMS_TOP；每个问题 proto.OVERVIEW_PROBLEM）")
+    ap = argparse.ArgumentParser(prog="taskq problems", description="Problems found by the last health check")
+    ap.add_argument("--all", action="store_true", help="also list info problems and those not reported yet (waiting for after)")
+    ap.add_argument("--json", action="store_true", help="one line of JSON (proto.PROBLEMS_TOP; each problem proto.OVERVIEW_PROBLEM)")
     a = ap.parse_args(argv)
     db = open_db(write=False)
     probs, checked = problems(db) if db else ({}, None)
@@ -131,31 +131,31 @@ def cmd_problems(argv):
     if a.json:
         print(json.dumps(dict(version=proto.VERSION, checked=checked, problems=rows), ensure_ascii=False))
         return 0
-    print(f"健康检查 {checked or '还没跑过'}：{len(rows)} 个问题")
+    print(f"Health check {checked or 'not run yet'}: {len(rows)} problems")
     for r in rows:
-        print(f"  [{r['level']}] {r['id']}（从 {r['first']} 起）\n      {r['plain'] or r['msg']}")
+        print(f"  [{r['level']}] {r['id']} (since {r['first']})\n      {r['plain'] or r['msg']}")
     return 0
 
 
 def main(argv):
     if argv[:1] == ["problems"]:
         return cmd_problems(argv[1:])
-    ap = argparse.ArgumentParser(prog="taskq notice", description="挂在健康检查上的提醒")
+    ap = argparse.ArgumentParser(prog="taskq notice", description="Notices reported by the health check")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("set", help="挂上提醒或改它的文字")
+    p = sub.add_parser("set", help="add a notice or change its text")
     p.add_argument("name")
-    p.add_argument("text", nargs="*", help="文字（不给时从标准输入读）")
-    p.add_argument("--at", help="到那时才开始报（YYYY-MM-DD[ HH:MM]，或 2h / 3d 以后）")
-    p = sub.add_parser("clear", help="撤掉提醒")
+    p.add_argument("text", nargs="*", help="text (reads stdin when omitted)")
+    p.add_argument("--at", help="start reporting then (YYYY-MM-DD[ HH:MM], or in 2h / 3d)")
+    p = sub.add_parser("clear", help="remove notices")
     p.add_argument("names", nargs="+")
-    p = sub.add_parser("ack", help='确认"发生过的事"这类问题（如重启），之后不再列出')
-    p.add_argument("ids", nargs="+", metavar="ID", help="问题编号或前缀（如 boot:hub）")
-    p = sub.add_parser("list", help="挂着的提醒")
-    p.add_argument("--json", action="store_true", help="一行 JSON（proto.NOTICE_TOP、NOTICE_FIELDS）")
+    p = sub.add_parser("ack", help='acknowledge event problems (such as a reboot); they are not listed after that')
+    p.add_argument("ids", nargs="+", metavar="ID", help="problem id or prefix (e.g. boot:hub)")
+    p = sub.add_parser("list", help="active notices")
+    p.add_argument("--json", action="store_true", help="one line of JSON (proto.NOTICE_TOP, NOTICE_FIELDS)")
     a = ap.parse_args(argv)
     bad = [n for n in ([a.name] if a.cmd == "set" else a.names if a.cmd == "clear" else []) if not valid(n)]
     if bad:
-        print(f"名字只能用字母、数字、_ 和 -：{'、'.join(bad)}", file=sys.stderr)
+        print(f"Names may use only letters, digits, _ and -: {', '.join(bad)}", file=sys.stderr)
         return 2
     if a.cmd == "list":
         db = open_db(write=False)
@@ -164,16 +164,16 @@ def main(argv):
             print(json.dumps(dict(version=proto.VERSION, notices=[dict(name=n, **v) for n, v in got.items()]), ensure_ascii=False))
             return 0
         for n, v in got.items():
-            print(f"{n}（{v['since']}{'，从 ' + v['at'] + ' 起' if v['at'] else ''}）：{v['text']}")
+            print(f"{n} ({v['since']}{', from ' + v['at'] if v['at'] else ''}): {v['text']}")
         if not got:
-            print("没有提醒")
+            print("No notices")
         return 0
     if a.cmd == "set":
         text = " ".join(a.text).strip()
         if not a.text and not sys.stdin.isatty():
             text = sys.stdin.read().strip()
         if not text:
-            print("要给文字（参数或标准输入）", file=sys.stderr)
+            print("Need text (argument or stdin)", file=sys.stderr)
             return 2
         at = None
         if a.at:
@@ -185,21 +185,21 @@ def main(argv):
                 return 2
     db = open_db()
     if db is None or not D.writable(db):
-        print(f"taskq: 写不了 {D.path()} 的数据库（在网络文件系统上，或是更新的 taskq 建的）", file=sys.stderr)
+        print(f"taskq: cannot write the database at {D.path()} (on a network file system, or created by a newer taskq)", file=sys.stderr)
         return 1
     if a.cmd == "set":
         put(db, a.name, text, at)
-        print(f"挂上了 {a.name}{'，从 ' + at + ' 起' if at else ''}：{text}")
+        print(f"Set {a.name}{', from ' + at if at else ''}: {text}")
         return 0
     if a.cmd == "ack":
         got, rej = ack(db, a.ids)
         for k in got:
-            print(f"已确认 {k}（从下一轮健康检查起不再列出）")
+            print(f"Acknowledged {k} (not listed from the next health check on)")
         for b in rej:
-            print(f"没确认：{b}", file=sys.stderr)
+            print(f"Not acknowledged: {b}", file=sys.stderr)
         return 0 if got else 1
     for n in a.names:
-        print(f"撤掉了 {n}" if drop(db, n) else f"没有这个提醒：{n}")
+        print(f"Cleared {n}" if drop(db, n) else f"No such notice: {n}")
     return 0
 
 
