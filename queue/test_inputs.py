@@ -20,7 +20,7 @@ ok_all = True
 
 def ok(name, cond):
     global ok_all
-    print(("通过：" if cond else "失败：") + name)
+    print(("PASS:" if cond else "FAIL:") + name)
     ok_all &= bool(cond)
 
 

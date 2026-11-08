@@ -12,7 +12,7 @@ trap 'stop_pads; rm -rf "${T:?}"' EXIT
 SWITCH=$(TASKQ_ROOT=$T/root python3 "$HERE/cfg.py" state gpu_pad/DISABLED)  # 执行机的总开关：根目录的 queue/ 下
 fails=0
 check() {
-    if "${@:2}"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi
+    if "${@:2}"; then echo "PASS:$1"; else echo "FAIL:$1"; fails=$((fails + 1)); fi
 }
 
 mkdir -p "$T/bin" "$T/nobin" "$T/bt"

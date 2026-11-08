@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""并发和中途失败：锁的抢占、hub 的 pueue 读不到时 relay 只续约、清理和 stage 抢钉子、等锁的超时。
+"""并发和中途FAIL:锁的抢占、hub 的 pueue 读不到时 relay 只续约、清理和 stage 抢钉子、等锁的超时。
 跑法：python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin|central_timeout]（不带参数全跑，各条独立报告）
 全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
 import json
@@ -199,10 +199,10 @@ if __name__ == "__main__":
     for n in names:
         try:
             TESTS[n]()
-            print(f"通过：{n}")
+            print(f"PASS:{n}")
         except AssertionError as e:
             bad += 1
-            print(f"失败：{n}：{e}")
+            print(f"FAIL:{n}：{e}")
         except Exception:  # noqa: BLE001
             bad += 1
             print(f"出错：{n}")

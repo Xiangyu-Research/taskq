@@ -42,7 +42,7 @@ TMPL = dict(CMD, params=dict(CMD["params"], note="{other}"))  # params 里留着
 
 
 def ok(msg):
-    print(f"通过：{msg}")
+    print(f"PASS:{msg}")
 
 
 def have(commit):
@@ -80,7 +80,7 @@ def test_check(new, old):
     assert err and "spec.py shell" in err, err
     ok(f"现在的包：总队列会送的 {len(specs)} 个说明和 command 做法都放行；说明里有它不认识的资源 → 挡下")
     if old is None:
-        print(f"跳过：没有提交 {OLD}（浅克隆）")
+        print(f"SKIP:没有提交 {OLD}（浅克隆）")
         return
     err = BG.check(CMD, old)
     assert err and "spec.py shell" in err, err

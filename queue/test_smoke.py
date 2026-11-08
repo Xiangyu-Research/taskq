@@ -42,7 +42,7 @@ ADDS = []
 
 
 def ok(msg):
-    print(f"通过：{msg}")
+    print(f"PASS:{msg}")
 
 
 def central(*args):

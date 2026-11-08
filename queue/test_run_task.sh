@@ -10,7 +10,7 @@ export TASKQ_DATA=$T RUN_TASK_POLL=1 TASK_JOBTAG=test-1
 unset TASK_PART
 unset CUDA_VISIBLE_DEVICES SLURM_JOB_ID
 ok=1
-check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; ok=0; fi; }
+check() { if eval "$2"; then echo "PASS:$1"; else echo "FAIL:$1"; ok=0; fi; }
 R="bash $HERE/run_task.sh"
 
 $R command key=toy/a 'cmd=echo "conda=${CONDA_DEFAULT_ENV:-无} venv=${DEMO_ACTIVE_VENV:-无}"; touch $TASKQ_DATA/toy/a/DONE' env=base out=toy/a 'done=["DONE"]' > "$T/o1"; rc=$?
@@ -103,7 +103,7 @@ gpu 99 "$OTHER, 1000" 0
 $G $R command key=toy/w3 'cmd=touch $TASKQ_DATA/toy/w3/DONE' env=base out=toy/w3 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "等满 wait_gpu 还被占：退出码 1、命令没跑、日志写原因" "(( rc == 1 )) && [[ ! -e $T/toy/w3/DONE ]] && grep -q '还没空出来，不跑' $T/logs/tasks/toy__w3__test-1_part1.log"
 else
-echo "跳过：本机看不到别的用户的进程，等卡的三项不测"
+echo "SKIP:本机看不到别的用户的进程，等卡的三项不测"
 fi
 gpu 99 "$$, 3000" 3000
 $G $R command key=toy/w4 'cmd=touch $TASKQ_DATA/toy/w4/DONE' env=base out=toy/w4 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?

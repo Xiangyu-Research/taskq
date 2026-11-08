@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""跑核心的全部测试：queue/、sites/、sync/、monitor/ 下的 test_*.py、test_*.sh，同时跑 -j 个文件，上次慢的先跑。
+"""Run every core test: test_*.py and test_*.sh under queue/, sites/, sync/ and monitor/, -j files at a time, slowest first.
 
-    taskq self test [-j N] [--out 目录] [--timeout 秒] [--gpu] [-l] [文件或模式…]
-    python3 queue/run_tests.py …（同上）
+    taskq self test [-j N] [--out DIR] [--timeout SECONDS] [--gpu] [-l] [FILE or PATTERN...]
+    python3 queue/run_tests.py ... (same)
 
-每个文件在核心的根目录下跑，有自己的临时 HOME 和短的 TMPDIR（unix socket 的路径有长度限制），环境只有 PATH、LANG、HOME、TMPDIR
-（不继承 TASKQ_*，测试用自己的固定配置 queue/testdata/）。临时 HOME 里链着本机的 conda（miniforge3 等）、~/envs/* 和 .gitconfig。
-模式：文件的路径或文件名，可以用 * ?，也可以是路径的一部分（relay → test_relay*.py）。
+Each file runs at the core root with its own temp HOME and a short TMPDIR (unix socket paths have a length limit); the
+environment holds only PATH, LANG, HOME and TMPDIR (no TASKQ_*; tests use their own fixed config in queue/testdata/).
+The temp HOME links this machine's conda (miniforge3 etc.), ~/envs/* and .gitconfig.
+Patterns: a file path or name, with * and ?, or part of a path (relay -> test_relay*.py).
 
-  跳过：文件开头几行有"# 要真卡"的（--gpu 才跑）；测试自己退出码 77（缺 numpy、pueue 等，原因是输出里"跳过："那一行）。
-  结果：每个文件一行（测试、结果、秒、项数：输出里"通过："开头的行加 unittest 的 Ran N tests、备注：跳过的原因、写进 HOME 的东西）打在标准输出，同时写 <目录>/report.tsv，
-        每个文件的输出在 <目录>/log_<文件>.txt。默认目录 ~/.cache/taskq-test。
-  退出码：0 都通过（或跳过），1 有没通过的，2 用法错（没有匹配的测试）。
+  Skip: files whose first lines say "# needs-gpu" (only with --gpu); a test exiting 77 (missing numpy, pueue etc.;
+        the reason is its "SKIP:" line).
+  Result: one line per file (test, result, seconds, count: lines starting "PASS:" plus unittest's Ran N tests, note:
+        skip reason, things written to HOME) on stdout and in <dir>/report.tsv; each file's output in
+        <dir>/log_<file>.txt. Default dir ~/.cache/taskq-test.
+  Exit code: 0 all pass (or skip), 1 some failed, 2 usage error (no matching tests).
 """
 import argparse
 import fnmatch
@@ -27,10 +30,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = ("queue", "sites", "sync", "monitor")
-SKIP = 77  # 测试自己说跳过（automake 的写法）
-GPU_MARK = re.compile(r"^#\s*要真卡")
+SKIP = 77  # the test says it skips (automake style)
+GPU_MARK = re.compile(r"^#\s*needs-gpu")
 OUT = "~/.cache/taskq-test"
-PASS, SKIPPED = "通过", "跳过"
+PASS, SKIPPED = "PASS", "SKIP"
 
 
 def discover():
@@ -54,7 +57,7 @@ def needs_gpu(t):
 
 
 def make_home(home):
-    """临时 HOME：拷 .gitconfig，链本机的 conda 和 ~/envs/* 下的每个环境（测试新建的留在临时 HOME）→ 建好时有的名字。"""
+    """Temp HOME: copy .gitconfig, link the machine's conda and each env under ~/envs/* (envs a test creates stay in the temp HOME)."""
     os.makedirs(home)
     real = os.path.expanduser("~")
     if os.path.isfile(os.path.join(real, ".gitconfig")):
@@ -70,7 +73,7 @@ def make_home(home):
 
 
 def short_base():
-    """放临时 HOME、TMPDIR 的文件夹：路径要短（unix socket 的路径最长 107 字节），/tmp 能写就放 /tmp。"""
+    """Dir for temp HOMEs and TMPDIRs: keep the path short (unix socket paths max out at 107 bytes); /tmp if writable."""
     for d in ("/tmp", tempfile.gettempdir()):
         if os.path.isdir(d) and os.access(d, os.W_OK):
             return tempfile.mkdtemp(prefix="tqt", dir=d)
@@ -78,7 +81,7 @@ def short_base():
 
 
 def env_path():
-    """本 Python 所在的文件夹在前（子进程的 python3 和跑测试的是同一个），再是系统的，再是 pueue 所在的。"""
+    """This Python's dir first (child python3 is the one running tests), then the system dirs, then pueue's."""
     parts = [os.path.dirname(sys.executable), "/usr/local/bin", "/usr/bin", "/bin"]
     pq = shutil.which("pueue") or (os.path.expanduser("~/.local/bin/pueue") if os.access(os.path.expanduser("~/.local/bin/pueue"), os.X_OK) else None)
     if pq:
@@ -92,8 +95,8 @@ def env_path():
 
 def skip_reason(log):
     lines = [ln.strip() for ln in open(log, encoding="utf-8", errors="replace").read().splitlines() if ln.strip()]
-    hit = [ln for ln in lines if ln.startswith("跳过：")]
-    return (hit[-1][3:] if hit else lines[-1] if lines else "没说原因")
+    hit = [ln for ln in lines if ln.startswith("SKIP:")]
+    return (hit[-1][5:] if hit else lines[-1] if lines else "no reason given")
 
 
 def stop_group(p):
@@ -115,9 +118,9 @@ def log_name(t):
 
 
 def run_one(t, i, a, out, base, env):
-    """→ (测试, 结果, 秒, 项, 备注)"""
+    """-> (test, result, seconds, count, note)"""
     if not a.gpu and needs_gpu(t):
-        return t, SKIPPED, 0, 0, "要真卡（--gpu 才跑）"
+        return t, SKIPPED, 0, 0, "needs a real GPU (only with --gpu)"
     home, tmp = os.path.join(base, str(i), "h"), os.path.join(base, str(i), "t")
     made = make_home(home)
     os.makedirs(tmp)
@@ -131,17 +134,17 @@ def run_one(t, i, a, out, base, env):
             rc = p.wait(a.timeout)
         except subprocess.TimeoutExpired:
             rc = None
-        stop_group(p)  # 超时的整组停掉；正常结束的，测试留下的后台进程也停掉
+        stop_group(p)  # stop the whole group on timeout, and any background processes a finished test left behind
     sec = int(time.time() - s)
     with open(log, encoding="utf-8", errors="replace") as lf:
         text = lf.read()
-    ran = re.search(r"^Ran (\d+) tests?\b", text, re.M)  # unittest 写的测试
-    n = sum(ln.lstrip().startswith("通过：") for ln in text.splitlines()) + (int(ran.group(1)) if ran else 0)
+    ran = re.search(r"^Ran (\d+) tests?\b", text, re.M)  # unittest tests
+    n = sum(ln.lstrip().startswith("PASS:") for ln in text.splitlines()) + (int(ran.group(1)) if ran else 0)
     wrote = sorted(set(os.listdir(home)) - made)
-    note = ("写了 HOME：" + " ".join(wrote)) if wrote else ""
+    note = ("wrote HOME: " + " ".join(wrote)) if wrote else ""
     if rc == SKIP:
         return t, SKIPPED, sec, n, skip_reason(log)
-    res = PASS if rc == 0 else f"超时（{a.timeout} 秒）" if rc is None else f"失败（{rc}）"
+    res = PASS if rc == 0 else f"timeout ({a.timeout}s)" if rc is None else f"failed ({rc})"
     return t, res, sec, n, note
 
 
@@ -156,10 +159,10 @@ def last_seconds(rep):
 
 
 def table(rows):
-    head = ("测试", "结果", "秒", "项", "备注")
+    head = ("test", "result", "sec", "n", "note")
     cells = [head] + [tuple(map(str, r)) for r in rows]
 
-    def width(s):  # 中文字符占两格
+    def width(s):  # wide characters take two cells
         return sum(2 if ord(c) > 0x2e7f else 1 for c in s)
     w = [max(width(r[k]) for r in cells) for k in range(4)]
     return "\n".join(("  ".join(r[k] + " " * (w[k] - width(r[k])) for k in range(4)) + "  " + r[4]).rstrip() for r in cells)
@@ -168,25 +171,25 @@ def table(rows):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog="\n\n".join(__doc__.split("\n\n")[2:]))
-    ap.add_argument("tests", nargs="*", metavar="文件或模式", help="只跑这些（默认全部）")
-    ap.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), help="同时跑几个文件（默认 4，不超过核数）")
-    ap.add_argument("--out", default=OUT, help=f"结果和日志放哪（默认 {OUT}）")
-    ap.add_argument("--timeout", type=int, default=900, help="每个文件最多跑几秒（默认 900）")
-    ap.add_argument("--gpu", action="store_true", help="也跑要真卡的（# 要真卡）")
-    ap.add_argument("-l", "--list", action="store_true", help="只列出会跑哪些，不跑")
-    ap.add_argument("--keep", action="store_true", help="留下临时 HOME 和 TMPDIR（默认跑完删掉）")
+    ap.add_argument("tests", nargs="*", metavar="FILE or PATTERN", help="only run these (default: all)")
+    ap.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1), help="files at a time (default 4, at most the CPU count)")
+    ap.add_argument("--out", default=OUT, help=f"where results and logs go (default {OUT})")
+    ap.add_argument("--timeout", type=int, default=900, help="max seconds per file (default 900)")
+    ap.add_argument("--gpu", action="store_true", help="also run tests that need a real GPU (# needs-gpu)")
+    ap.add_argument("-l", "--list", action="store_true", help="only list what would run")
+    ap.add_argument("--keep", action="store_true", help="keep the temp HOMEs and TMPDIRs (default: remove)")
     a = ap.parse_args(argv)
     tests = pick(discover(), a.tests)
     if not tests:
-        print(f"run_tests：没有匹配的测试：{' '.join(a.tests)}", file=sys.stderr)
+        print(f"run_tests: no matching tests: {' '.join(a.tests)}", file=sys.stderr)
         return 2
     if a.list:
-        print("\n".join(t + ("\t要真卡" if needs_gpu(t) else "") for t in tests))
+        print("\n".join(t + ("\tneeds-gpu" if needs_gpu(t) else "") for t in tests))
         return 0
     out = os.path.abspath(os.path.expanduser(a.out))
     os.makedirs(out, exist_ok=True)
     have = {log_name(t) for t in discover()}
-    for f in os.listdir(out):  # 已经删掉的测试留下的日志
+    for f in os.listdir(out):  # logs left by tests that no longer exist
         if f.startswith("log_") and f.endswith(".txt") and f not in have:
             os.remove(os.path.join(out, f))
     rep = os.path.join(out, "report.tsv")
@@ -195,26 +198,26 @@ def main(argv=None):
     env = {"PATH": env_path(), "LANG": "C.UTF-8"}
     order = sorted(tests, key=lambda t: (-last.get(t, 0), t))
     rows, t0 = {}, time.time()
-    print(f"run_tests：{len(tests)} 个文件，同时跑 {max(1, a.jobs)} 个；日志在 {out}", file=sys.stderr)
+    print(f"run_tests: {len(tests)} files, {max(1, a.jobs)} at a time; logs in {out}", file=sys.stderr)
     try:
         with ThreadPoolExecutor(max(1, a.jobs)) as ex:
             futs = [ex.submit(run_one, t, i, a, out, base, env) for i, t in enumerate(order)]
             for fut in as_completed(futs):
                 r = fut.result()
                 rows[r[0]] = r
-                print(f"  {r[1]}  {r[0]}（{r[2]} 秒）" + (f"：{r[4]}" if r[1] == SKIPPED else ""), file=sys.stderr, flush=True)
+                print(f"  {r[1]}  {r[0]} ({r[2]}s)" + (f": {r[4]}" if r[1] == SKIPPED else ""), file=sys.stderr, flush=True)
     finally:
         if not a.keep:
             shutil.rmtree(base, ignore_errors=True)
     done = [rows[t] for t in tests]
     with open(rep, "w", encoding="utf-8") as f:
-        f.write("测试\t结果\t秒\t项\t备注\n")
+        f.write("test\tresult\tsec\tn\tnote\n")
         f.writelines("\t".join(map(str, r)) + "\n" for r in done)
     bad = [r for r in done if r[1] not in (PASS, SKIPPED)]
     skipped = sum(r[1] == SKIPPED for r in done)
     print(table(done))
-    print(f"\n{len(done)} 个文件：{len(done) - len(bad) - skipped} 个通过，{skipped} 个跳过，{len(bad)} 个没通过；"
-          f"用时 {int(time.time() - t0)} 秒；结果表 {rep}" + (f"；临时文件 {base}" if a.keep else ""))
+    print(f"\n{len(done)} files: {len(done) - len(bad) - skipped} pass, {skipped} skip, {len(bad)} fail; "
+          f"{int(time.time() - t0)}s; report {rep}" + (f"; temp files {base}" if a.keep else ""))
     return 1 if bad else 0
 
 

@@ -80,7 +80,7 @@ def child():
     refill.q("hub", f"-g {proto.IO_GROUP} -- true", run=lambda c, ssh: got.append(c) or (0, "1"))
     qp = cfg.local("queue", "q")
     assert f" && {qp} -g {proto.IO_GROUP}" in got[0] and os.path.isfile(qp), got
-    print(f"通过：{cfg.CORE_REL}：送到执行机、store 的命令（taskq.py、site_ops.py、交作业、pueue worker）只用 {BC}/…、不带 ..；"
+    print(f"PASS:{cfg.CORE_REL}：送到执行机、store 的命令（taskq.py、site_ops.py、交作业、pueue worker）只用 {BC}/…、不带 ..；"
           "hub 上的命令用核心的绝对路径")
 
 
@@ -100,7 +100,7 @@ def main():
             r = subprocess.run([sys.executable, os.path.join(here, "test_bundle_paths.py"), "--child"], env=env, capture_output=True,
                                text=True, cwd=T)
             assert r.returncode == 0, f"{what}：\n{r.stdout}\n{r.stderr[-3000:]}"
-            print(r.stdout.strip().replace("通过：", f"通过：（{what}）"))  # run_tests 数"通过："开头的行
+            print(r.stdout.strip().replace("PASS:", f"PASS:（{what}）"))  # run_tests 数"PASS:"开头的行
     print("全部通过")
 
 

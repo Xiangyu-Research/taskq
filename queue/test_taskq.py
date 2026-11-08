@@ -31,7 +31,7 @@ ok = True
 
 def check(name, cond):
     global ok
-    print(("通过：" if cond else "失败：") + name)
+    print(("PASS:" if cond else "FAIL:") + name)
     ok &= bool(cond)
 
 
@@ -502,7 +502,7 @@ check("next：数据目录读不了时不领（退出码 12，报原因）", rc 
 rc, out, err = tq4("take", "--worker", "pueue-host", "--assign", ks4[2], root=os.path.join(T, "nosuch"))
 check("take：数据目录读不了时不领", rc == 10 and "读不了" in out and not os.path.exists(os.path.join(TQ4, "claims", taskq.safe(ks4[2]))))
 rc, out, err = tq4("next", "--worker", "801", "--envs", ALL)
-check("最近 4 次失败：暂停", rc == 12)
+check("最近 4 次FAIL:暂停", rc == 12)
 
 # ---------------- 领取只建了目录、info 没写上（领的进程在中间被杀） ----------------
 TQ5, D5 = os.path.join(T, "taskq5"), os.path.join(T, "data5")

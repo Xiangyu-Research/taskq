@@ -27,7 +27,7 @@ GB = 10 ** 9
 
 
 def ok(msg):
-    print(f"通过：{msg}")
+    print(f"PASS:{msg}")
 
 
 SITE_OPS = os.path.join(HERE, "site_ops.py")

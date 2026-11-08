@@ -25,7 +25,7 @@ for f in CLEAN:
         m = WORDS.search(line)
         if m:
             bad.append(f"{f}:{i}: {m.group(0)}")
-print("\n".join(bad) if bad else f"通过：{len(CLEAN)} 个文件都没有领域词")
+print("\n".join(bad) if bad else f"PASS:{len(CLEAN)} 个文件都没有领域词")
 
 # 核心（testdata 外）不直接用使用者的路径、仓库
 HOST = re.compile(r"scripts/monitor|Xiangyu-Research/PhD|\.cache/phd|/work/PhD")
@@ -36,7 +36,7 @@ for f in CLEAN:
     n = sum(len(HOST.findall(line)) for line in open(os.path.join(ROOT, f), encoding="utf-8", errors="replace"))
     if n:
         seen[f] = n
-print("\n".join(f"用了使用者的路径：{p}：{n} 处" for p, n in sorted(seen.items())) or "通过：核心里没有使用者的路径")
+print("\n".join(f"用了使用者的路径：{p}：{n} 处" for p, n in sorted(seen.items())) or "PASS:核心里没有使用者的路径")
 
 # 核心的非测试文件（test_* 和 testdata 外）不写日期："（11/4）""10/31 起""2026-11-04"这类标注只说明了什么时候改的，
 # 注释、说明只写现在是什么、为什么。月/日只认 1–12 / 1–31、前后不挨着字母数字和 / . : -（路径、版本号、比例不算）
@@ -52,5 +52,5 @@ for f in CLEAN:
         m = DATE.search(line)
         if m:
             dated.append(f"{f}:{i}: {m.group(0)}")
-print("\n".join(f"写了日期：{h}" for h in dated) or "通过：核心的非测试文件里没有日期")
+print("\n".join(f"写了日期：{h}" for h in dated) or "PASS:核心的非测试文件里没有日期")
 sys.exit(1 if bad or seen or dated else 0)

@@ -20,7 +20,7 @@ r = subprocess.run(["bash", "-s"], input=script, capture_output=True, text=True,
 assert health.probe_ok(r.returncode, r.stdout), (r.returncode, r.stdout)
 lines = dict(ln.split("|", 1) for ln in r.stdout.splitlines() if "|" in ln)
 assert lines["DISK"].strip().isdigit() and "GPULOG" in lines, r.stdout
-print("通过：实跑：连得上，盘剩多少、GPU 记录那几行都在")
+print("PASS:实跑：连得上，盘剩多少、GPU 记录那几行都在")
 assert not health.probe_ok(0, "") and not health.probe_ok(255, r.stdout) and not health.probe_ok(0, "DISK|1\n")
-print("通过：输出被截断（没有 BOOT 那行）、ssh 失败：算没读到")
+print("PASS:输出被截断（没有 BOOT 那行）、ssh FAIL:算没读到")
 print("全部通过")

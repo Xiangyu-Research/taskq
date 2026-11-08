@@ -62,7 +62,7 @@ FAILS = []
 
 
 def ok(name, cond):
-    print(("通过：" if cond else "没通过：") + name)
+    print(("PASS:" if cond else "没PASS:") + name)
     if not cond:
         FAILS.append(name)
 

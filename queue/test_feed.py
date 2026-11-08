@@ -20,7 +20,7 @@ fails = 0
 
 def ok(msg, cond):
     global fails
-    print(("通过：" if cond else "失败：") + msg)
+    print(("PASS:" if cond else "FAIL:") + msg)
     fails += not cond
 
 

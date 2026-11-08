@@ -93,7 +93,7 @@ assert relay.taskq.queue_host() == Q
 
 
 def ok(msg):
-    print("通过：" + msg)
+    print("PASS:" + msg)
 
 
 @contextlib.contextmanager
@@ -355,7 +355,7 @@ def test_plan():
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, stuck
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "claimed", "123"), paused=True), st)
     assert f"site:{NAME}:fail" in stuck, stuck
-    ok("那边失败：没有进度 → 交还（--skip）并删掉；有进度、bad → 保留、报 site:<名字>:fail:<key>；那边暂停 → site:<名字>:fail")
+    ok("那边FAIL:没有进度 → 交还（--skip）并删掉；有进度、bad → 保留、报 site:<名字>:fail:<key>；那边暂停 → site:<名字>:fail")
 
     ri = dict(rtask(A, "input"), input_since=5000.0)
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(ri), st)
@@ -378,7 +378,7 @@ def test_plan():
     ok("那边缺输入 → 在 hub 的核心组排补传（stage --no-add：只补缺的、撤掉标记）；在补 → 等；补传出错 → 报；标记之前的旧任务不算")
 
     def fail_add(*a, **k):
-        raise RuntimeError("hub 上加任务失败：git fetch 出错")
+        raise RuntimeError("hub 上加任务FAIL:git fetch 出错")
     st_ = {}
     msgs = relay.execute(NAME, [dict(op="restage", key=K), dict(op="fetch", key=K)], S0([mtask(K)]), run_add=fail_add, stuck=st_)
     assert set(st_) == {f"relayadd:{NAME}:relay_stage:{K}", f"relayadd:{NAME}:relay_fetch:{K}"} and len(msgs) == 2 and all("出错" in m for m in msgs), (st_, msgs)
@@ -1063,7 +1063,7 @@ def test_status_blob_cap():
     B0 = os.path.join(RROOT, "blobs")
     shm = other_disk(RROOT)
     if not shm:
-        print("跳过：没有另一个盘可用（/dev/shm）")
+        print("SKIP:没有另一个盘可用（/dev/shm）")
         return
     arg = dict(sched="pueue", pueue="/bin/false", cap=None)
     saved = B0 + ".save"
@@ -1429,7 +1429,7 @@ def test_ingest():
     R2 = fixture.tmpdir(dir=T, prefix="ing2_")
     shm = other_disk(R2)
     if not shm:
-        print("跳过：没有另一个盘可用（/dev/shm）")
+        print("SKIP:没有另一个盘可用（/dev/shm）")
         return
     try:
         os.symlink(shm, os.path.join(R2, "blobs"))

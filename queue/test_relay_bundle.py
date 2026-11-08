@@ -35,7 +35,7 @@ DROP = ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGI
 
 
 def ok(msg):
-    print(f"通过：{msg}")
+    print(f"PASS:{msg}")
 
 
 def bare_env(**kw):
@@ -334,8 +334,8 @@ def test_worker_in_bundle(T):
     total = 0
     for name, (want, p) in procs.items():
         out, err = p.communicate(timeout=900)
-        got = out.count("通过：")
-        assert p.returncode == 0 and "全部通过" in out and not [ln for ln in out.splitlines() if ln.startswith("失败：")] and got == want, \
+        got = out.count("PASS:")
+        assert p.returncode == 0 and "全部通过" in out and not [ln for ln in out.splitlines() if ln.startswith("FAIL:")] and got == want, \
             f"{name}：{got}/{want}\n" + out[-3000:] + err[-2000:]
         total += got
     ok(f"包里的 worker 跑 test_worker*.sh 的几个情况（{'，'.join(f'{n} {i}' for n, i in SMOKE.items())}）：{total} 项全部通过")

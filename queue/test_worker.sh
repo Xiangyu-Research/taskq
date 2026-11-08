@@ -121,7 +121,7 @@ kill $padpid 2> /dev/null
 check "显存填充只放到 floor（不到 0）：等它写 ready 后才开始训练，旧的 ready 不算" '[[ -f $T/pad.released ]] && awk -v r=$(cat $T/pad.released) "/^start/ {exit !(\$2 >= r)}" $T/train.log && ! grep -q "没回应" $T/w2c2.out'
 fi
 
-# 2d. 训练失败：交还、记一次失败，本作业不再领它
+# 2d. 训练FAIL:交还、记一次失败，本作业不再领它
 if want 2d; then
 reset
 table << EOF
@@ -129,7 +129,7 @@ t/a base
 t/b base
 EOF
 SLURM_JOB_ID=900109 FAKE_FAIL=t/a TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2d.out" 2>&1
-check "训练失败：记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
+check "训练FAIL:记一次失败、接着领下一个" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
 fi
 
 # 2d2. 缺输入（run_task.sh 退出码 4）：交还、记为缺输入，不算失败，接着领下一个

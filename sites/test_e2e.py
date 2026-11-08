@@ -55,7 +55,7 @@ def runner():
     """两种布局各起一个子进程同时跑，跑完按布局打印各自的输出。"""
     why = missing()
     if why:
-        print(f"跳过：{why}")
+        print(f"SKIP:{why}")
         return 77  # run_tests.py：跳过
     ps = {n: subprocess.Popen([sys.executable, os.path.abspath(__file__)], env=dict(os.environ, E2E_LAYOUT=n),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for n in LAYOUTS}
@@ -254,7 +254,7 @@ open(f"{a.out}/DONE", "w").close()
 def step(msg, cond, why="", fatal=True):
     if not cond and callable(why):  # 贵的说明只在失败时算
         why = why()
-    print(("通过：" if cond else "失败：") + msg + ("" if cond else f"（{why}）"), flush=True)
+    print(("PASS:" if cond else "FAIL:") + msg + ("" if cond else f"（{why}）"), flush=True)
     if not cond:
         FAILS.append(msg)
         if fatal:
@@ -874,7 +874,7 @@ def main():
         main_together() if LAYOUT == "together" else main_store()
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:
-            print(f"失败：{type(e).__name__}: {e}")
+            print(f"FAIL:{type(e).__name__}: {e}")
             traceback.print_exc(file=sys.stdout)
             FAILS.append(str(e))
         print("--- 最近的检查说明 ---\n" + "\n".join(LOG[-30:]))

@@ -26,7 +26,7 @@ CORE = os.path.dirname(HERE)
 
 
 def ok(msg):
-    print(f"通过：{msg}")
+    print(f"PASS:{msg}")
 
 
 class Fake:

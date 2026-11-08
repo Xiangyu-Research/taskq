@@ -30,7 +30,7 @@ def ok(cond, what):
     if not cond:
         fails.append(what)
     else:
-        print(f"通过：{what}")
+        print(f"PASS:{what}")
 
 
 F = FC.build()

@@ -7,7 +7,7 @@ source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)
 trap 'chmod -R u+w "${T:?}" 2> /dev/null; rm -rf "${T:?}"' EXIT
 ok=1
-check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; ok=0; fi; }
+check() { if eval "$2"; then echo "PASS:$1"; else echo "FAIL:$1"; ok=0; fi; }
 
 mkdir -p "$T/config" "$T/bin" "$T/home"
 cp -r "$TASKQ_CONFIG/." "$T/config/"
@@ -97,7 +97,7 @@ check "备份机上有半份同名文件：补齐，核对一致，退出 0" "((
 
 world; half; echo error > "$T/fail"
 A > "$T/o4" 2>&1; rc=$?
-check "半份同名文件补传失败：退出非 0" "(( rc != 0 ))"
+check "半份同名文件补传FAIL:退出非 0" "(( rc != 0 ))"
 
 world; half; rm "$T/bk/$OUT/check/val.dat"; echo silent > "$T/fail"
 A > "$T/o5" 2>&1; rc=$?

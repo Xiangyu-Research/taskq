@@ -56,7 +56,7 @@ EOT
 export FAKE_CHAIN=$T/chain.sh
 export FAKE_LOG=$T/train.log
 fails=0
-check() { if eval "$2"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi; }
+check() { if eval "$2"; then echo "PASS:$1"; else echo "FAIL:$1"; fails=$((fails + 1)); fi; }
 waitfor() { local i; for i in $(seq "$1"); do eval "$2" && return 0; sleep 1; done; return 1; }
 want() { [[ -z ${WORKER_TEST_ONLY:-} || " $WORKER_TEST_ONLY " == *" $1 "* ]]; }
 table() {  # 每行：任务名 环境 [device]

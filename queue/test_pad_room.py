@@ -24,7 +24,7 @@ fails = 0
 
 def ok(what, cond, got=None):
     global fails
-    print(("通过：" if cond else "失败：") + what + ("" if cond or got is None else f"（得到 {got!r}）"))
+    print(("PASS:" if cond else "FAIL:") + what + ("" if cond or got is None else f"（得到 {got!r}）"))
     fails += 0 if cond else 1
 
 

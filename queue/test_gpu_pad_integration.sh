@@ -1,5 +1,5 @@
 #!/bin/bash
-# 要真卡：显存填充在本机 0 号卡上的实际行为（taskq self test --gpu 才跑；没有 nvidia-smi 或 torch 时自己跳过）
+# needs-gpu：显存填充在本机 0 号卡上的实际行为（taskq self test --gpu 才跑；没有 nvidia-smi 或 torch 时自己跳过）
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 CORE=$(dirname "$HERE")
@@ -7,7 +7,7 @@ export HERE
 T=$(mktemp -d)
 export T
 fails=0
-check() { if "${@:2}"; then echo "通过：$1"; else echo "失败：$1"; fails=$((fails + 1)); fi; }
+check() { if "${@:2}"; then echo "PASS:$1"; else echo "FAIL:$1"; fails=$((fails + 1)); fi; }
 cleanup() {
     [[ -n ${WATCH:-} ]] && kill "$WATCH" 2> /dev/null
     [[ -n ${TRAINPID:-} ]] && kill "$TRAINPID" 2> /dev/null

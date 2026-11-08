@@ -28,7 +28,7 @@ PP = "prepared/"
 
 def ok(what, cond):
     global fails
-    print(("通过：" if cond else "失败：") + what)
+    print(("PASS:" if cond else "FAIL:") + what)
     fails += 0 if cond else 1
 
 
@@ -139,7 +139,7 @@ got, res = pick(four, [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(
 ok("空位不够：剩下的这轮不派，说清每台为什么", len(got) == 2 and set(res["why"]) == {"c/2", "c/3"}
    and "site-pueue：排满了" in res["why"]["c/2"] and "site-slurm：排满了" in res["why"]["c/2"] and res["noroom"] == [])
 got, res = pick([ctq("s/1", skipped_by=["site-pueue"])], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))])
-ok("被一台跳过：转去能去的别台", got == {"s/1": "site-slurm"})
+ok("被一台SKIP:转去能去的别台", got == {"s/1": "site-slurm"})
 got, res = pick([ctq("s/2", skipped_by=["site-pueue", "site-slurm", "site-slurm2"])], [site("site-pueue", dict(gpu=1))])
 ok("能去的都跳过了：不派，记进 nowhere（relay 报警）", got == {} and res["nowhere"] == ["s/2"])
 got, res = pick([ctq("s/3", step="p1", skipped_by=["site-slurm"])], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))])

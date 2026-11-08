@@ -19,7 +19,7 @@ t/c base
 EOF
 export FAKE_FAIL="t/a t/b"
 SLURM_JOB_ID=900201 TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e1.out" 2>&1
-check "两个任务开始不久就失败：作业不再领第三个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && ! grep -q "start .* t/c" $T/train.log && grep -q "开始不久就失败" $T/w2e1.out'
+check "两个任务开始不久就FAIL:作业不再领第三个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && ! grep -q "start .* t/c" $T/train.log && grep -q "开始不久就失败" $T/w2e1.out'
 reset
 SLURM_JOB_ID=900202 TASKQ_SLOTS=1 TASKQ_EARLY_FAIL=0 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e2.out" 2>&1
 check "跑了一段时间才失败的：记在任务上，作业照常领下一个" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && [[ -f $TASKQ_DIR/failures/t__a && -f $TASKQ_DIR/failures/t__b ]]'

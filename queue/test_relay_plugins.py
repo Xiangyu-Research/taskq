@@ -44,7 +44,7 @@ def wb(p, data):
 
 
 def ok(msg):
-    print("通过：" + msg)
+    print("PASS:" + msg)
 
 
 def fails(fn, *a, has=""):
