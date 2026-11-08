@@ -1,6 +1,7 @@
 #!/bin/bash
-# 示例的"训练"：数到 N，每 10 步存档（ckpt.json）、写进度（PROGRESS.json），重跑从存档接着数，数完写 DONE。
-#   bash bin/count.sh <N> <结果文件夹>
+# Example "training": count to N, checkpoint every 10 steps (ckpt.json), write progress (PROGRESS.json), resume from the checkpoint,
+# write DONE when finished.
+#   bash bin/count.sh <N> <result dir>
 set -euo pipefail
 N=$1 OUT=$2
 mkdir -p "$OUT"

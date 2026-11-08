@@ -1,5 +1,5 @@
-"""示例的实验表：做法 count（plugins/recipes.py），每个实验按 seed 展开成几个任务，每个任务数完后写摘要（summary 步骤）。
-字段见 queue/schema.py 的 EXP_FIELDS、STEP_FIELDS。"""
+"""Example experiment table: recipe count (plugins/recipes.py); each experiment expands by seed into several tasks, and each task
+writes a summary after counting (the summary step). Fields in queue/schema.py's EXP_FIELDS, STEP_FIELDS."""
 
 SUMMARY = dict(name="summary", env="base", device="cpu",
                cmd="bash bin/summary.sh {data}/results/{name}/seed_{seed} {data}/summaries/{name}/seed_{seed}",
@@ -12,6 +12,6 @@ def _x(id, label, n, seeds, nice):
 
 
 EXPERIMENTS = [
-    _x("small", "数到 100", 100, [0, 1], nice=0),
-    _x("large", "数到 10000", 10000, [0, 1, 2], nice=10),
+    _x("small", "count to 100", 100, [0, 1], nice=0),
+    _x("large", "count to 10000", 10000, [0, 1, 2], nice=10),
 ]

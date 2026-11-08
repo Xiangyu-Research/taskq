@@ -1,30 +1,31 @@
-# 示例项目
+# Example project
 
-一个最小的使用者项目：怎么写 `.taskq.toml`、机器表、`policy.py`、插件和实验表。
+A minimal user project: how to write `.taskq.toml`, a machine table, `policy.py`, plugins and an experiment table.
 
-| 文件 | 内容 |
+| file | contents |
 |---|---|
-| `.taskq.toml` | 配置和插件的位置 |
-| `config/machines.py` | 三台机器：`hub`（本机，兼 store）、pueue 执行机 `gpubox`（一个 GPU worker、一个 CPU worker）、Slurm 执行机 `cluster`（两台执行机的主机名是假的，连不上） |
-| `config/policy.py` | 自动的部分都关着；`summary` 步骤只放 `gpubox`；状态放在 `~/.local/state/taskq-example/`，不碰别的项目 |
-| `plugins/recipes.py` | 做法 `count`：数到 `n`，存档、进度、训完的标志（`bin/count.sh`） |
-| `exps/count/experiments.py` | 两个实验，按 `seed` 展开成 5 个任务，每个任务做完后跑 `summary` 步骤（`bin/summary.sh`，纯 CPU） |
+| `.taskq.toml` | where config and plugins are |
+| `config/machines.py` | three machines: `hub` (this machine, also the store), pueue executor `gpubox` (one GPU worker, one CPU worker), Slurm executor `cluster` (both executors have fake hostnames and cannot be reached) |
+| `config/policy.py` | all automatic parts off; the `summary` step only goes to `gpubox`; state in `~/.local/state/taskq-example/` so other projects are untouched |
+| `plugins/recipes.py` | recipe `count`: count to `n`, with checkpoint, progress and a done marker (`bin/count.sh`) |
+| `exps/count/experiments.py` | two experiments expanded by `seed` into 5 tasks; each task runs a `summary` step afterwards (`bin/summary.sh`, pure CPU) |
 
-每个字段都用到的写法见测试用的固定配置 [`../queue/testdata/`](../queue/testdata/)，字段表见 [`../queue/README.md`](../queue/README.md) 的"开关和配置"。
+The fixed test config [`../queue/testdata/`](../queue/testdata/) shows every field in use; field tables are in
+[`../queue/README.md`](../queue/README.md)'s "Switches and config".
 
-## 试一试
+## Try it
 
-在仓库根目录跑（在 `example/` 里跑时可以不写 `--project example`），都不用连别的机器：
+Run from the repo root (`--project example` may be omitted inside `example/`); none of these contact another machine:
 
 ```bash
-mkdir -p ~/taskq-example/data                     # store 的数据目录（config/machines.py 里 hub 的 data）
-taskq --project example check                     # 核对配置、插件、实验表、每个任务和步骤、执行机的代码包
-taskq --project example exp list                  # 实验
-taskq --project example exp tasks                 # 展开后的任务
-taskq --project example add --exp small           # 加进总队列（~/.local/state/taskq-example/taskq）
-taskq --project example status                    # 总队列
-taskq --project example show count/small/0        # 一个任务会怎么跑
-taskq --project example site bundle hub           # 给 hub 的根目录（~/taskq-example/root）推代码包：store 的操作从它跑
-taskq --project example plan                      # 这一轮会做什么：两台执行机连不上，什么都不送
+mkdir -p ~/taskq-example/data                     # the store's data dir (hub's data in config/machines.py)
+taskq --project example check                     # check config, plugins, experiment table, every task and step, executor bundles
+taskq --project example exp list                  # experiments
+taskq --project example exp tasks                 # expanded tasks
+taskq --project example add --exp small           # add to the hub queue (~/.local/state/taskq-example/taskq)
+taskq --project example status                    # hub queue
+taskq --project example show count/small/0        # how one task would run
+taskq --project example site bundle hub           # push a bundle to the hub's root (~/taskq-example/root): store ops run from it
+taskq --project example plan                      # what this round would do: both executors unreachable, nothing sent
 taskq --project example rm count/small/0 count/small/1
 ```

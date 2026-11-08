@@ -1,5 +1,5 @@
-"""示例的做法 count：数到 n，每 10 步存一次档、写进度，数完写 DONE（bin/count.sh）。字段见 queue/schema.py 的 RECIPE_FIELDS
-（没写的取默认值）。"""
+"""Example recipe count: count to n, checkpoint and write progress every 10 steps, write DONE when finished (bin/count.sh). Fields
+in queue/schema.py's RECIPE_FIELDS (unset ones take defaults)."""
 from taskq_api import REQUIRED
 
 RECIPES = {

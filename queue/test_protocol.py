@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""协议只在 proto.py 定义：核心里别处不再手写 proto 里的名字；TASKQ_* 都登记在 proto.ENV；proto 只用标准库、能单独跑。"""
+"""The protocol is defined only in proto.py: no other core file hard-codes proto names; every TASKQ_* is registered in proto.ENV;
+proto uses the standard library only and runs standalone."""
 import ast
 import os
 import re
@@ -32,7 +33,7 @@ def core_files():
 
 
 def code_lines(p):
-    """去掉注释和文档字符串以后的行：(行号, 文字)。"""
+    """Lines after removing comments and docstrings: (line number, text)."""
     src = read(p)
     if not p.endswith(".py"):
         for i, ln in enumerate(src.splitlines(), 1):
@@ -55,24 +56,24 @@ def code_lines(p):
         yield i, re.sub(r"\s#\s.*$", "", ln)
 
 
-# proto 里的名字 → 在别处手写算违规的写法
+# proto names -> patterns that are violations when written elsewhere
 LITERALS = {
     "taskq_stage_": r"taskq_stage_",
     "/tmp/gpu_pad_": r"/tmp/gpu_pad_",
     "@@JSON": r"@@JSON",
     "gpu_pad_DISABLED": r"gpu_pad_DISABLED",
     "view.lock": r"view\.lock",
-    "state/pins": r"""state/pins|['"]state['"],\s*['"]pins['"]""",  # 按 proto.ROOT 的键（sub(R, "pins")）取的不算
+    "state/pins": r"""state/pins|['"]state['"],\s*['"]pins['"]""",  # reading it as a proto.ROOT key (sub(R, "pins")) does not count
     ".incomplete": r"\.incomplete",
     "MANIFEST.json": r"MANIFEST\.json",
     "code/current": r"code/current",
     ".relay_in": r"\.relay_in",
     "gpu_log.pid": r"gpu_log\.pid",
-    # 目录名：拼路径时手写的（Q["claims"] 这种查表、任务状态的取值 "stopped" 不算）
+    # dir names written by hand when joining paths (lookups such as Q["claims"] and task state values such as "stopped" do not count)
     "stopped/": r"""stopped/|/stopped\b|join\([^)]*(?<!\[)['"]stopped['"]""",
     "claims/": r"""claims/|/claims\b|join\([^)]*(?<!\[)['"]claims['"]""",
 }
-# 迁移还没做完的地方：(文件相对 CORE, 名字)。只减不加
+# places the migration has not reached yet: (file relative to CORE, name). Only shrinks
 KNOWN = set()
 
 
@@ -111,9 +112,9 @@ class NoCopies(unittest.TestCase):
         for p in core_files():
             for v in re.findall(r"TASKQ_[A-Z][A-Z_]*[A-Z]", read(p)):
                 seen.setdefault(v, os.path.relpath(p, CORE))
-        prefixes = {"TASKQ_GPU_PAD"}  # gpu_pad.py 按前缀拼参数名
+        prefixes = {"TASKQ_GPU_PAD"}  # gpu_pad.py builds parameter names from the prefix
         missing = {v: f for v, f in seen.items() if v not in proto.ENV and v not in prefixes}
-        self.assertEqual(missing, {}, "TASKQ_* 要登记在 proto.ENV")
+        self.assertEqual(missing, {}, "TASKQ_* must be registered in proto.ENV")
 
     def test_no_handwritten_literals(self):
         bad = []
@@ -123,7 +124,7 @@ class NoCopies(unittest.TestCase):
                 for name, pat in LITERALS.items():
                     if (rel, name) not in KNOWN and re.search(pat, ln):
                         bad.append(f"{rel}:{i} {name}: {ln.strip()[:100]}")
-        self.assertEqual(bad, [], "这些名字只在 proto.py 定义")
+        self.assertEqual(bad, [], "these names are defined only in proto.py")
 
     def test_known_still_needed(self):
         left = set()
@@ -133,7 +134,7 @@ class NoCopies(unittest.TestCase):
                 for name, pat in LITERALS.items():
                     if (rel, name) in KNOWN and re.search(pat, ln):
                         left.add((rel, name))
-        self.assertEqual(KNOWN - left, set(), "已经改好的从 KNOWN 里删掉")
+        self.assertEqual(KNOWN - left, set(), "remove fixed entries from KNOWN")
 
 
 if __name__ == "__main__":

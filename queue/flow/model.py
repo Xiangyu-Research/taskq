@@ -32,5 +32,5 @@ class Instance:
 
 @dataclass
 class Flow:
-    instances: dict             # id → Instance（按实验表的顺序）
+    instances: dict             # id -> Instance (in experiment table order)
     errors: list = field(default_factory=list)

@@ -1,5 +1,5 @@
-"""示例的"怎么用"（字段见 queue/schema.py，taskq machines fields）：自动的部分都关着，plan 只打印会做什么。
-完整的写法见 queue/testdata/config/policy.py。
+"""Example "how to use it" (fields in queue/schema.py, taskq machines fields): all automatic parts off, plan only prints what it
+would do. The full form is in queue/testdata/config/policy.py.
 """
 AUTO = dict(advance=False, envs=False, revive=False, smoke=False)
 
@@ -7,7 +7,7 @@ PAUSE = {}
 
 HOLD = []
 
-PLACE = {  # 没写的步骤和做法 = "any"（有这种 worker 的执行机都行）
+PLACE = {  # steps and recipes not listed = "any" (any executor with that worker kind)
     "summary": ["gpubox"],
 }
 
@@ -18,8 +18,8 @@ SLURM = {
 READY = {"gpubox": 1, "cluster": 2}
 
 OUTPUTS = dict(
-    state="~/.local/state/taskq-example/",  # 总队列、记录都在这下面，不碰别的项目
+    state="~/.local/state/taskq-example/",  # hub queue and records live here, other projects untouched
     experiments="exps/*/experiments.py",
-    bundle=("bin", "exps", "plugins"),     # 执行机的代码包里带的项目文件夹
+    bundle=("bin", "exps", "plugins"),     # project dirs carried in executor bundles
     name="Example",
 )
