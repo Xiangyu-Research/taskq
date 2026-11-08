@@ -111,12 +111,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 bk = next(b for b in M.backups() if b != M.hub())
-P.PAUSE = {bk: (None, "停机")}
-ok("backup_down: backup paused (PAUSE without deadline) -> reason", C.backup_down() == f"{bk} is paused (停机)")
-P.PAUSE = {bk: ("2000-01-01 00:00", "停机")}
+P.PAUSE = {bk: (None, "maintenance")}
+ok("backup_down: backup paused (PAUSE without deadline) -> reason", C.backup_down() == f"{bk} is paused (maintenance)")
+P.PAUSE = {bk: ("2000-01-01 00:00", "maintenance")}
 ok("backup_down: PAUSE deadline passed -> not paused", C.backup_down() is None)
-P.PAUSE = {bk: ("2999-01-01 00:00", "停机")}
-ok("backup_down: PAUSE deadline not reached -> reason", C.backup_down() == f"{bk} is paused (停机)")
+P.PAUSE = {bk: ("2999-01-01 00:00", "maintenance")}
+ok("backup_down: PAUSE deadline not reached -> reason", C.backup_down() == f"{bk} is paused (maintenance)")
 P.PAUSE = {}
 ok("backup_down: unreachable this time -> reason; usable -> None", C.backup_down({bk: False}) == f"{bk} is unreachable this time"
    and C.backup_down({bk: True}) is None and C.backup_down() is None)

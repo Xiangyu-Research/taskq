@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""relay_store.py 的清理（gc）的测试：在临时目录造一个假根目录，本地跑 site_ops.py gc（同 relay_remote.op 的调用方式），剩余用 free 参数假装。
+"""Tests for relay_store.py cleanup (gc): build a fake root in a temp dir, run site_ops.py gc locally (as relay_remote.op
+calls it), and fake free space with the free argument.
     python3 queue/test_relay_store.py
 """
 import hashlib
@@ -10,10 +11,10 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of the scheduler code
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg as _cfg  # noqa: E402
-REPO = _cfg.REPO  # 使用者的仓库根（cfg.py）
+REPO = _cfg.REPO  # project repo root (cfg.py)
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
@@ -34,12 +35,12 @@ SITE_OPS = os.path.join(HERE, "site_ops.py")
 
 
 def H(name):
-    """测试里的块名（aa1、dd1 …）→ 它的 sha256 名字（blobs 里只认 64 位十六进制的）。"""
+    """Test blob name (aa1, dd1, ...) → its sha256 name (blobs only accept 64 lowercase hex chars)."""
     return hashlib.sha256(name.encode()).hexdigest()
 
 
 def local_rpy(root):
-    """本机跑 site_ops.py 的操作，根目录是 root（同 relay_remote.op）。"""
+    """Run a site_ops.py operation locally with root as the root (same as relay_remote.op)."""
     def rpy(name, what, data=None, timeout=600):
         r = subprocess.run([sys.executable, SITE_OPS, what], input=json.dumps(data), capture_output=True, text=True,
                            cwd=REPO, timeout=timeout, env=dict(os.environ, TASKQ_ROOT=root))
@@ -60,8 +61,9 @@ def blob(R, name, size, suffix=""):
 
 
 def build(tmp):
-    """→ (R, 外面的文件)。视图 ds_keep（指 aa1）、ds_old（指 bb1、cc1(硬链接)、带一个 2000 字节的缓存文件和一个指向 R 外面的链接）；
-    blob dd1、ee1 没人指（dd1 更旧）；ff1 有硬链接在老目录。"""
+    """→ (R, a file outside). Views ds_keep (points at aa1) and ds_old (points at bb1, cc1 (hard-linked), holds a 2000-byte
+    cache file and a link to a file outside R); blobs dd1 and ee1 are unreferenced (dd1 is older); ff1 has a hard link in an
+    old dir."""
     R = os.path.join(tmp, "R")
     outside = os.path.join(tmp, "old", "x.prob")
     os.makedirs(os.path.dirname(outside))
@@ -109,28 +111,28 @@ def main():
         r = G.gc("x", keep, rpy, soft_gb=100, free=200 * GB)
         assert r["freed"] == 0 and not r["removed_views"] and r["removed_blobs"] == 0, r
         assert os.path.isdir(os.path.join(R, "data", "prepared", "ds_old"))
-        ok("剩余高于软线：什么都不动")
+        ok("free space above the soft limit: change nothing")
 
-        soft = 1e-6  # 1000 字节
+        soft = 1e-6  # 1000 bytes
         r = G.gc("x", keep, rpy, soft_gb=soft, free=0)
         assert r["removed_views"] == ["prepared/ds_old"], r
         assert os.path.isdir(os.path.join(R, "data", "prepared", "ds_keep"))
         assert not os.path.exists(os.path.join(R, "data", "prepared", "ds_old"))
-        assert r["freed"] == 2002 + 0 and r["removed_blobs"] == 0, r  # 缓存 2000 + dataset.json 2；视图删完已到软线
+        assert r["freed"] == 2002 + 0 and r["removed_blobs"] == 0, r  # cache 2000 + dataset.json 2; removing views is already above the soft limit
         assert all(exists(R, h) for h in ("aa1", "bb1", "cc1", "dd1", "ee1", "ff1"))
         assert os.path.getsize(outside) == 500
-        ok("低于软线先删不在 keep 里的视图（不跟着软链接删目标），够了就不删 blob")
+        ok("below the soft limit, remove views not in keep first (never follow links to delete targets); stop before removing blobs")
 
         R, outside = build(fixture.tmpdir(dir=tmp))
         rpy = local_rpy(R)
         r = G.gc("x", keep, rpy, soft_gb=5000 / GB, free=0)
         assert r["removed_views"] == ["prepared/ds_old"], r
         assert not exists(R, "dd1") and exists(R, "bb1"), r
-        assert exists(R, "aa1") and exists(R, "ee1"), "在用的 blob 不删"
-        assert exists(R, "cc1") and exists(R, "ff1"), "nlink > 1 的不删"
+        assert exists(R, "aa1") and exists(R, "ee1"), "blobs in use are kept"
+        assert exists(R, "cc1") and exists(R, "ff1"), "nlink > 1 is kept"
         assert os.path.getsize(outside) == 500
         assert r["freed"] == 2002 + 3000 and r["removed_blobs"] == 1, r
-        ok("再删没人指的 blob，最旧的先删，在用的和硬链接收编的不碰，R 外面的不碰")
+        ok("then remove unreferenced blobs, oldest first; keep ones in use or hard-linked elsewhere, and never touch outside R")
 
         R, _ = build(fixture.tmpdir(dir=tmp))
         os.makedirs(os.path.join(R, "state", "pins"))
@@ -143,25 +145,25 @@ def main():
         os.utime(part, (1000, 1000))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert not exists(R, "dd1") and not os.path.exists(part), r
-        ok("正在传的任务钉住的块、传到一半的临时文件不删；钉住记录过了 12 小时、临时文件放了一天以上就不再认")
+        ok("keep blobs pinned by a staging task and half-transferred temp files; stop honouring pins after 12 hours and temp files after a day")
 
-        # blobs 在另一个盘、有 blob_cap：删 blob 只看 blob_free，删视图看两边任一边；删 blob 不算进根目录的剩余
+        # blobs on another disk with blob_cap: removing blobs looks only at blob_free, removing views at either side; removed blobs do not add to root free space
         R, _ = build(fixture.tmpdir(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=5000 / GB, free=200 * GB, blob_free=0)
         assert r["removed_views"] == ["prepared/ds_old"] and not exists(R, "dd1"), r
         assert r["free"] == 200 * GB + 2002 and r["blob_free"] == r["freed"] - 2002 and r["removed_blobs"] >= 1, r
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1"), r
-        ok("有 blob_free：blobs 那边剩不到软线 → 删视图和没人指的 blob，根目录的剩余不加删掉的 blob")
+        ok("with blob_free: blob side below the soft limit → remove views and unreferenced blobs; root free space does not include removed blobs")
         R, _ = build(fixture.tmpdir(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=5000 / GB, free=0, blob_free=200 * GB)
         assert r["removed_views"] == ["prepared/ds_old"] and r["removed_blobs"] == 0 and exists(R, "dd1"), r
-        ok("有 blob_free：只有根目录剩不到软线 → 删视图，blob 不删（删了也不给根目录腾地方）")
+        ok("with blob_free: only root is below the soft limit → remove views, keep blobs (removing them would not free root space)")
 
         R, _ = build(fixture.tmpdir(dir=tmp))
         r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=0)
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1")
         assert not exists(R, "bb1") and not exists(R, "dd1") and r["removed_blobs"] == 2
-        ok("释放不到软线时删光能删的就停，不碰在用的")
+        ok("when the soft limit cannot be reached, remove what can be removed and stop; keep ones in use")
 
         R, _ = build(fixture.tmpdir(dir=tmp))
         D = os.path.join(R, "data")
@@ -175,9 +177,9 @@ def main():
         assert not os.path.exists(os.path.join(D, "in/aaa")) and os.path.exists(os.path.join(D, "in/bbb/f.dat"))
         assert os.path.exists(os.path.join(D, "in/ccc/f.dat")) and os.path.isdir(os.path.join(D, "models/a/td"))
         assert os.path.isdir(os.path.dirname(R)) and os.path.isdir(os.path.join(D, "in"))
-        ok("登记过的任务视图也清理：keep 里的、正在建的（.incomplete）不删，那边已经没有的报出来让登记表去掉，越界的、只有一层的不认")
+        ok("registered task views are cleaned too: keep ones in keep and half-built ones (.incomplete); report views already gone so the registry drops them; reject out-of-bounds and single-level paths")
 
-        # 根目录经软链接到达（视图里的软链接指向软链接的路径）：在用的 blob 照样认得出来
+        # root reached through a symlink (view links point at the symlink path): blobs in use are still recognized
         real = fixture.tmpdir(dir=tmp)
         R, _ = build(real)
         link = os.path.join(tmp, "Rlink")
@@ -187,9 +189,9 @@ def main():
         os.symlink(os.path.join(link, "blobs", H("aa1")[:2], H("aa1")), pre)
         r = G.gc("x", keep, local_rpy(link), soft_gb=1.0, free=0)
         assert exists(R, "aa1") and exists(R, "ee1") and not exists(R, "dd1"), r
-        ok("根目录经软链接到达时，在用的 blob 也不删")
+        ok("blobs in use are kept when the root is reached through a symlink")
 
-        # keep 是视图里更深的一层（或更上的一层）时，包含它的视图 / 它下面的视图也不删
+        # when keep is a deeper (or higher) level in a view, neither that view nor views under it are removed
         R, _ = build(fixture.tmpdir(dir=tmp))
         D = os.path.join(R, "data")
         os.makedirs(os.path.join(D, "in/up/sub"))
@@ -200,9 +202,9 @@ def main():
         assert "prepared/ds_old" in r["removed_views"] and "prepared/ds_keep" not in r["removed_views"], r
         r = G.gc("x", ["prepared"], local_rpy(R), soft_gb=1e-6, free=0)
         assert os.path.isdir(os.path.join(D, "prepared/ds_keep")), r
-        ok("keep 是视图下面一层或上面一层：那个视图也不删")
+        ok("keep is a level below or above a view: that view is kept")
 
-        # Slurm：R/blobs 是指到别的盘（/scr）的软链接：照常按预算删没人用、没钉住的块；块目录外的、不按哈希放的、链接不碰
+        # Slurm: R/blobs is a symlink to another disk (/scr): remove unreferenced, unpinned blobs per the budget as usual; never touch things outside the blob dirs, not named by hash, or links
         R, _ = build(fixture.tmpdir(dir=tmp))
         scr = fixture.tmpdir(dir=tmp)
         os.rmdir(scr)
@@ -223,9 +225,9 @@ def main():
         assert not exists(R, "dd1") and not exists(R, "bb1") and r["removed_blobs"] == 2, r
         assert exists(R, "aa1") and exists(R, "ee1") and exists(R, "cc1") and exists(R, "ff1"), r
         assert all(os.path.exists(p_) for p_ in stray) and os.path.getsize(outside) == 500, r
-        ok("块目录是指到别的盘的软链接：照常删没人用、没钉住的块；在用的、钉住的、硬链接的、不按哈希放的、链接的目标不碰")
+        ok("blob dir is a symlink to another disk: remove unreferenced, unpinned blobs as usual; keep ones in use, pinned or hard-linked, and never touch non-hash names or link targets")
 
-        # 删视图和建视图（site_ops 的 view）拿同一把锁
+        # removing views and building views (site_ops view) take the same lock
         import fcntl
         import time
         R, _ = build(fixture.tmpdir(dir=tmp))
@@ -242,7 +244,7 @@ def main():
         lk.close()
         p.wait(timeout=60)
         assert held and p.returncode == 0 and not os.path.exists(os.path.join(R, "data", "prepared", "ds_old")), held
-        ok("清理删视图时等建视图的锁（view.lock）")
+        ok("cleanup waits for the view lock (view.lock) when removing views")
 
         gc_pins_read_once(tmp)
         gc_envs(tmp)
@@ -252,14 +254,15 @@ def main():
             assert G.gc("site-slurm2", keep, lambda *a, **k: 1 / 0) is None
         finally:
             G.budget = b0
-        ok("没有 budget 的机器不清理")
+        ok("machines without budget are not cleaned")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("全部通过")
+    print("all passed")
 
 
 def gc_envs(tmp):
-    """建环境期间：用到的 wheel / conda 包钉在 pins/env.<环境>.json，清理不删；建好的环境（R/envs）清理从来不碰。"""
+    """While an env is being built: wheels and conda packages it uses are pinned in pins/env.<env>.json and kept; built envs
+    under R/envs are never touched by cleanup."""
     R = os.path.join(tmp, "Renv")
     os.makedirs(os.path.join(R, "data", "prepared"))
     h1, h2 = H("a1"), H("b2")
@@ -275,11 +278,12 @@ def gc_envs(tmp):
     r = G.gc("x", [], local_rpy(R), soft_gb=1e-6, free=0)
     assert os.path.exists(os.path.join(R, "blobs", h1[:2], h1)) and not os.path.exists(os.path.join(R, "blobs", h2[:2], h2)), r
     assert sorted(os.listdir(envd)) == [".ok", "lib"] and os.path.getsize(os.path.join(envd, "lib", "big.so")) == GB // 50, r
-    ok("GC：建环境钉住的块不删、没钉的照删；R/envs 下建好的环境（再大、再旧）不碰")
+    ok("GC: blobs pinned by an env build are kept, unpinned ones removed; built envs under R/envs (however large or old) are never touched")
 
 
 def gc_pins_read_once(tmp):
-    """删每个块前都看 pins：pins 没变时不重新读（几百个块、几十个 pin 时 GC 很慢）；钉住的照样不删。"""
+    """Check pins before removing each blob: do not reread when pins did not change (GC is slow with hundreds of blobs and
+    dozens of pins); pinned ones are still kept."""
     import time
     R = os.path.join(tmp, "Rpins")
     os.makedirs(os.path.join(R, "data", "prepared"))
@@ -303,8 +307,8 @@ def gc_pins_read_once(tmp):
     loads = int(r.stderr.split("LOADS=")[1].split()[0])
     left = [h for h in hs if os.path.exists(os.path.join(R, "blobs", h[:2], h))]
     assert left == hs[0:100:5], left
-    assert loads <= 3 * 20, f"读了 {loads} 次 pin（20 个 pin、删 180 个块）"
-    ok("GC：pins 没变时不重新读，钉住的照样不删")
+    assert loads <= 3 * 20, f"read pins {loads} times (20 pins, 180 blobs removed)"
+    ok("GC: pins are not reread when unchanged, and pinned blobs are still kept")
 
 
 if __name__ == "__main__":

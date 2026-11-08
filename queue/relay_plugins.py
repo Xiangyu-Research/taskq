@@ -1,22 +1,19 @@
-"""送到执行机的任务按做法（recipes.py 的 relay 字段）挑插件（任务都用真名）：插件列出任务要用的 store 上的文件，
-拉回后核对结果。路径在两边一样（相对数据目录），文件内容不改。通用的 path 插件和统一的入口见 sites/names.py。
-
-插件在 TASKQ_PLUGINS 各文件夹的 relay_plugins.py 里（导出什么见 cfg.py 开头），加载时合进 PLUGINS、ACCEPTS、VIEW_ROOTS；
-插件要用的 RelayError、expand、sha256 从 taskq_api.py 取。
-每个插件一对函数：
-  export(spec, root) → dict(files=[(相对路径, store 上的真实文件)], views=[视图文件夹], cleanup=[…]（可省，默认 = 结果文件夹）)
-  check(spec, src, root)：src 下是拉回的文件（真的相对路径），对不上时报 RelayError"""
+"""Plugins for tasks sent to executors, chosen by recipe (the relay field in recipes.py): a plugin lists the files a task needs
+from the store and verifies fetched results. Paths are the same on both sides (relative to the data dir) and contents never
+change; the generic path plugin and shared entry point are in sites/names.py.
+Plugins load from relay_plugins.py in each TASKQ_PLUGINS dir (exports at the top of cfg.py) and merge into PLUGINS, ACCEPTS and
+VIEW_ROOTS; RelayError, expand and sha256 come from taskq_api.py."""
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of the scheduler code
 sys.path.insert(0, HERE)
-from taskq_api import RelayError, expand, sha256, walk  # noqa: E402,F401  （names.py 等经这里用）
+from taskq_api import RelayError, expand, sha256, walk  # noqa: E402,F401  (used through here by names.py and others)
 
 PLUGINS = {}
-ACCEPTS = {}  # 插件能不能送这个任务（按参数；不在这里的都能送）
-VIEW_ROOTS = []  # 训练插件建视图的文件夹：relay_store.gc 除了登记过的视图，还清理这下面没人用的
+ACCEPTS = {}  # whether a plugin can send this task (by params; plugins not listed can send anything)
+VIEW_ROOTS = []  # dirs where training plugins build views: relay_store.gc also removes unused ones under here, besides registered views
 
 import cfg  # noqa: E402
 

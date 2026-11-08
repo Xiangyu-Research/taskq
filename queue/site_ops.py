@@ -1,35 +1,11 @@
 #!/usr/bin/env python3
-"""在执行机、store 上跑的操作：hub 经 relay_remote.op 调用，跑那台根目录里的代码包（本机的也一样）。
+"""Operations run on an executor or the store: the hub calls them through relay_remote.op, running the bundle in that
+machine's root (local machines too). Root R is TASKQ_ROOT; store operations also get the data dir (data). Operations import
+only what they need, and progress goes to stderr.
 
-    python3 site_ops.py <操作>      参数是标准输入上的一个 JSON，结果是以 proto.JSON_MARK 开头的一行；出错 → 退出码非 0、错误在 stderr
-
-根目录 R 是环境变量 TASKQ_ROOT（布局见 proto.ROOT）；store 的操作另给数据目录（参数里的 data）。
-执行机的操作只 import proto、common（都只用标准库）；送、拉、按说明解析的操作用到时再 import names、spec、mtab、tunnel（mods）。
-操作里打印的进度在 stderr。
-
-执行机的根目录：
-  status   队列、各任务的情况、剩余空间、环境、代码包
-  states   队列里各任务的状态
-  missing  blobs 里没有（或核对不上）的哈希
-  pin      钉住 / 放开一个任务要用的 blob（清理不删）
-  ingest   把同一个盘上已有的文件硬链接进 blobs（sha256 对得上才收）
-  view     建一个任务的视图：输入是指向 blob 的软链接，从不盖掉真文件
-  list     列一个任务要拉回的产出（和"做完没有"用同一条规则）
-  drop     删一个任务的视图、产出、分段日志
-  gc       空间不够时删不用的视图、blob
-  env_mark 建环境前查空间、写标志
-store 的数据目录：
-  done     各实例的 done 文件缺哪些
-  probe    各通配匹配几个文件、最新的修改时间、占多大（硬链接只算一次）
-  rm       删中间产物（temp 的通配）
-  export   按说明列出送一个任务要的文件、算 sha256（缓存在 R/state/hashes.db）
-  pull     从执行机拉回一个任务的产出、核对、放进数据目录（标志最后放）
-  collect  各任务在数据目录里的情况（spec.py collect）
-  facts    总队列各任务的结果和日志（spec.facts；hub 按它判断做完、在训、做了一半）
-  smoke    冒烟定义里的函数（要读数据目录的）算出来
-  archive  一个任务的结果备份到备份机（archive_task.sh）
-有文件要送的机器（store；有锁的环境时 hub 的 wheelhouse）：
-  push     把文件放进执行机的 blobs（同一台本机拷、硬链接，别的经隧道）
+    python3 site_ops.py <op>    args are one JSON object on stdin; the result is one line starting with proto.JSON_MARK;
+                                on failure: non-zero exit, error on stderr. Operations: status, states, missing, pin, ingest,
+                                view, list, drop, gc, env_mark, done, probe, rm, export, pull, collect, facts, smoke, archive, push
 """
 import base64
 import fcntl
@@ -54,13 +30,13 @@ HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class Bad(Exception):
-    """参数不对、状态不对：报给 hub，不当作连不上。"""
+    """Bad arguments or state: report to the hub instead of treating it as unreachable."""
 
 
 def root():
     r = os.environ.get("TASKQ_ROOT")
     if not r:
-        raise Bad("没有 TASKQ_ROOT")
+        raise Bad("TASKQ_ROOT is not set")
     return os.path.realpath(os.path.expanduser(r))
 
 
@@ -69,15 +45,15 @@ def sub(R, k):
 
 
 def rel_ok(r, depth=1):
-    """数据目录下的相对路径：不能是绝对路径、不能有 ..、至少 depth 级。"""
+    """A path relative to the data dir: not absolute, no .., at least depth levels."""
     r = os.path.normpath(r)
     if r.startswith("/") or ".." in r.split("/") or len(r.split("/")) < depth:
-        raise Bad(f"路径不对：{r}")
+        raise Bad(f"bad path: {r}")
     return r
 
 
 def exists(p):
-    """路径在（软链接解开以后也在）。"""
+    """The path exists (also after following symlinks)."""
     try:
         os.stat(p)
         return True
@@ -86,8 +62,8 @@ def exists(p):
 
 
 def done_missing(D, out, done):
-    """out（相对数据目录）下 done 的每一项（[备选, …]）都至少有一个在 → []；否则缺的那几项（每项写成 a|b）。
-    "做完没有"只有这一条：执行机上 list、store 上 done 都用它。"""
+    """Each item in done ([alternative, ...]), under out (relative to the data dir), has at least one match → []; otherwise
+    the missing items (written as a|b). This is the only done rule: both list on an executor and done on the store use it."""
     return ["|".join(alts) for alts in done if not any(exists(os.path.join(D, out, a)) for a in alts)]
 
 
@@ -110,13 +86,14 @@ def stamp(p):
 
 
 def record(R, h):
-    """记下 blob 现在的大小和修改时间（刚核对过 sha256）。"""
+    """Record the blob's current size and mtime (its sha256 was just verified)."""
     C.atomic_write(blob_path(R, h) + proto.BLOB_STAT, stamp(blob_path(R, h)))
 
 
 def blob_ok(R, h):
-    """blob 在、内容还是 h：大小、修改时间和记下的一样；没有记录的（经隧道传来的）算一次 sha256 再记。
-    对不上（硬链接的源头被原地改过、传坏了）→ 删掉 blob 和记录（源头不动），返回 False。"""
+    """The blob exists and still matches h: size and mtime equal the recorded values; without a record (came over the tunnel)
+    compute sha256 once and record it. On a mismatch (a hard-link source was modified in place, or a bad transfer) remove the
+    blob and its record (the source is left alone) and return False."""
     p = blob_path(R, h)
     if not os.path.isfile(p):
         return False
@@ -132,7 +109,7 @@ def blob_ok(R, h):
     for x in (p, p + proto.BLOB_STAT):
         if os.path.lexists(x):
             os.remove(x)
-    print(f"blob {h[:12]} 和收进来时不一样，丢掉重收", file=sys.stderr)
+    print(f"blob {h[:12]} changed since ingest, dropping it to re-ingest", file=sys.stderr)
     return False
 
 
@@ -152,7 +129,8 @@ def op_pin(A):
 
 
 def op_ingest(A):
-    """files {h: [相对路径, 大小]}，srcs：找的数据目录。同一个盘（st_dev）、大小和 sha256 都对得上 → 硬链接进 blobs、记下。"""
+    """files {h: [relative path, size]}, srcs: data dirs to look in. Same disk (st_dev), matching size and sha256 → hard link
+    into blobs and record it."""
     R = root()
     B = sub(R, "blobs")
     bdev = os.stat(B if os.path.isdir(B) else R).st_dev
@@ -181,20 +159,21 @@ def op_ingest(A):
     return got
 
 
-# ---------------- 视图 ----------------
+# ---------------- views ----------------
 
 
 def op_view(A):
-    """views：这个任务的视图文件夹；links {相对路径: h}；texts {相对路径: base64}；clean：要清掉旧链接的文件夹（默认 views）。
-    输入的位置已经是真文件时：就是那个 blob 本身（同一个 inode，同盘收进来的前一步产出）→ 不动；否则报错，不盖：
-    那个位置所在的视图留着 .incomplete（不算建好，清理也不删它下面的真文件），别的视图照常建好、去掉 .incomplete。"""
+    """views: this task's view dirs; links {relative path: h}; texts {relative path: base64}; clean: dirs whose stale links
+    should be removed (default views). When the input path already holds a real file: if it is the blob itself (same inode,
+    output of a previous step ingested on the same disk) leave it; otherwise fail without overwriting: that view keeps
+    .incomplete (not built; cleanup will not remove real files under it), while other views build as usual and lose .incomplete."""
     R = root()
     D = sub(R, "data")
     L = lock(R)
     views = [rel_ok(v, 2) for v in A["views"]]
     for h in A["links"].values():
         if not blob_ok(R, h):
-            raise Bad(f"缺 blob {h}")
+            raise Bad(f"missing blob {h}")
     incs = []
     for v in views:
         os.makedirs(os.path.join(D, v), exist_ok=True)
@@ -234,21 +213,22 @@ def op_view(A):
             os.remove(inc)
     if clash:
         L.close()
-        raise Bad("视图的位置上已有别的真文件，不盖：" + ", ".join(clash[:5]))
+        raise Bad("a view path already holds another real file, not overwriting: " + ", ".join(clash[:5]))
     return len(want) - len(incs)
 
 
-# ---------------- 拉回 ----------------
+# ---------------- fetch ----------------
 def raise_(e):
     raise e
 
 
 def op_list(A):
-    """out：主文件夹；outs：要拉回的文件夹（out 和其余的）；done；exclude：不拉的文件名；extra：out 上一级里还要拉的；key：分段日志；
-    links：这个任务的视图 {相对路径: sha256}（stage 时记下的）。
-    → dict(done, missing, items=[[相对路径, 大小, 修改时间 ns]], links=[[相对路径, 指向的相对数据目录的路径]], bad=[相对路径])。
-    产出里的软链接都换成它指的逻辑路径（相对数据目录）：指向数据目录里的（outs 里的、视图里的输入）按路径；指向 blob（解开过的输入）
-    按这个任务的视图换回那个输入的路径；指到别处、换不回的 → bad。"""
+    """out: the main dir; outs: dirs to fetch (out and the rest); done; exclude: file names not to fetch; extra: files in out's
+    parent to fetch too; key: part logs; links: this task's views {relative path: sha256} (recorded at stage time).
+    → dict(done, missing, items=[[relative path, size, mtime ns]], links=[[relative path, target relative to the data dir]], bad=[relative path]).
+    Every symlink in the outputs becomes the logical path it points at (relative to the data dir): paths into the data dir
+    (outputs, inputs in views) by path; links to a blob (an unpacked input) map back through this task's views to that input's
+    path; links elsewhere or impossible to map → bad."""
     R = root()
     D = sub(R, "data")
     Bdir = os.path.realpath(sub(R, "blobs"))
@@ -277,10 +257,10 @@ def op_list(A):
         top = os.path.join(D, o)
         if not os.path.isdir(top):
             continue
-        for dp, dns, fs in os.walk(top, onerror=raise_):  # 读不了的子目录不能静默跳过（只拉回一部分却算做完）
+        for dp, dns, fs in os.walk(top, onerror=raise_):  # never silently skip unreadable subdirs (would count a partial fetch as done)
             for f in fs + [d for d in dns if os.path.islink(os.path.join(dp, d))]:
                 p = os.path.join(dp, f)
-                if any(fnmatch.fnmatch(f, x) for x in A["exclude"]) or f.endswith(proto.TMP):  # 不拉的名字：文件、链接都不拉
+                if any(fnmatch.fnmatch(f, x) for x in A["exclude"]) or f.endswith(proto.TMP):  # excluded names: skip files and links alike
                     continue
                 if os.path.islink(p):
                     link(p)
@@ -299,7 +279,8 @@ def op_list(A):
 
 
 def op_drop(A):
-    """paths：要删的（相对数据目录，至少两级），删完把空的上级也删掉；logs：分段日志名的前缀（safe key）。"""
+    """paths: paths to remove (relative to the data dir, at least two levels); remove empty parents too. logs: prefix of part
+    log names (safe key)."""
     D = sub(root(), "data")
     n = 0
     for rel in A["paths"]:
@@ -329,9 +310,9 @@ def op_drop(A):
     return n
 
 
-# ---------------- 状态 ----------------
+# ---------------- status ----------------
 def versioned(args, inp=None):
-    """同一个代码包里的带版本号的命令（taskq.py status --json、spec.py collect --json）→ 去掉 version 的结果。"""
+    """A versioned command in the same bundle (taskq.py status --json, spec.py collect --json) → its result without version."""
     p = subprocess.run([sys.executable, os.path.join(HERE, args[0])] + args[1:], input=inp, capture_output=True, text=True)
     line = next((x[len(proto.JSON_MARK):] for x in p.stdout.splitlines() if x.startswith(proto.JSON_MARK)), None)
     try:
@@ -353,7 +334,7 @@ def op_states(A):
 
 
 def capped_free(path, cap, top=None):
-    """path 所在盘剩多少字节；有 cap（GB）时不超过 cap 减去 top（默认 path）下已占的。"""
+    """Bytes free on path's disk; with cap (GB), at most cap minus what top (default path) already uses."""
     free = shutil.disk_usage(path).free
     if not cap:
         return free
@@ -381,7 +362,7 @@ def env_states(R, A):
 
 
 def op_status(A):
-    """A：sched（pueue / slurm）、pueue、cap、blob_cap、env_root、envs。"""
+    """A: sched (pueue / slurm), pueue, cap, blob_cap, env_root, envs."""
     R = root()
     st = local_status()
     sp = [{k: t["spec"].get(k) for k in proto.COLLECT_FIELDS} for t in st["tasks"] if t.get("spec")]
@@ -397,7 +378,7 @@ def op_status(A):
         raw = None
     oks, envs_st = env_states(R, A)
     free = capped_free(R, A.get("cap"))
-    out_used = C.du([sub(R, "data")])[0]  # 各任务已经写出的产出（视图是链接，不算）：挑执行机时和留给它们的空间对冲
+    out_used = C.du([sub(R, "data")])[0]  # outputs tasks have already written (views are links, not counted): offsets space reserved for them when choosing an executor
     cdir = sub(R, "code")
     live = [d for d in (os.listdir(cdir) if os.path.isdir(cdir) else []) if ".tmp" not in d and os.path.isdir(os.path.join(cdir, d))
             and time.time() - os.stat(os.path.join(cdir, d)).st_mtime < proto.STALE_BEAT]
@@ -412,12 +393,13 @@ def op_status(A):
                 bundle=os.path.basename(os.path.realpath(sub(R, "current"))), live=live)
 
 
-# ---------------- 清理 ----------------
-_PINS = [None, set()]  # (pins 文件夹, inode, 修改时间 ns) 和读到的：没变时不重新读（几百个块、几十个钉子时清理很慢）
+# ---------------- cleanup ----------------
+_PINS = [None, set()]  # (pins dir, inode, mtime ns) and what was read: do not reread when unchanged (cleanup is slow with hundreds of blobs and dozens of pins)
 
 
 def pins(R):
-    """钉住的 blob（PIN_TTL 内写的 pins/*.json）。文件夹 2 秒内改过时总是重读（同一个修改时间里可能还在写）。"""
+    """Pinned blobs (pins/*.json written within PIN_TTL). Always reread when the dir changed in the last 2 seconds (writes may
+    still be landing in the same mtime tick)."""
     d, s = sub(R, "pins"), set()
     try:
         x = os.stat(d)
@@ -438,8 +420,9 @@ def pins(R):
 
 
 def op_gc(A):
-    """剩余空间（free / blob_free，没给就现量）低于 soft_gb 时：先删 views、scan 下不在 keep 里的视图，再按最久没用的删 blob
-    （没有视图指着、没被钉住、只有一个链接）。→ dict(freed, removed_views, removed_blobs, free[, blob_free])。"""
+    """When free space (free / blob_free, measured if absent) is below soft_gb: first remove views in views and under scan that
+    are not in keep, then remove blobs least recently used first (not referenced by a view, not pinned, only one link).
+    → dict(freed, removed_views, removed_blobs, free[, blob_free])."""
     R = root()
     soft = int(A["soft_gb"] * 1e9)
     D, B = sub(R, "data"), sub(R, "blobs")
@@ -511,13 +494,13 @@ def op_gc(A):
             for f in fns:
                 p = os.path.normpath(os.path.join(dp, f))
                 if f.endswith(proto.BLOB_STAT) and not os.path.exists(p[:-len(proto.BLOB_STAT)]):
-                    os.remove(p)  # blob 已经没了的记录
+                    os.remove(p)  # record for a blob that is already gone
                     continue
                 if not HASH_RE.fullmatch(f) or os.path.dirname(p) != os.path.dirname(blob_path(R, f)):
                     h = f.split(".", 1)[0]
                     if "." in f and HASH_RE.fullmatch(h) and os.path.dirname(p) == os.path.dirname(blob_path(R, h)) \
                             and time.time() - os.lstat(p).st_mtime > proto.TMP_KEEP and not f.endswith(proto.BLOB_STAT):
-                        os.remove(p)  # 传到一半丢下的（<h2>/<h>.<后缀>）；块目录外的、不按哈希起名的不碰
+                        os.remove(p)  # left behind by a half-done transfer (<h2>/<h>.<suffix>); touch nothing outside the blob dirs or not named by hash
                     continue
                 if os.path.realpath(p) in used or os.path.islink(p) or f in pinned:
                     continue
@@ -548,10 +531,11 @@ def op_gc(A):
     return out
 
 
-# ---------------- 环境 ----------------
+# ---------------- env ----------------
 def op_env_mark(A):
-    """建环境前：mode=reserve 按 need（字节）查 env_root 所在盘剩多少（cap：按根目录已占的算），够写 <环境>.building、不够写 .failed；
-    mode=clear 撤掉这次写的 .building。sd：标志文件夹。"""
+    """Before building an env: mode=reserve checks free space on env_root's disk against need (bytes) (cap: based on what the
+    root already uses); enough → write <env>.building, not enough → .failed. mode=clear removes the .building written this
+    time. sd: marker dir."""
     E, SD, n = os.path.expanduser(A["env_root"]), os.path.expanduser(A["sd"]), A["env"]
     os.makedirs(SD, exist_ok=True)
     if A["mode"] == "clear":
@@ -573,19 +557,19 @@ def op_env_mark(A):
     return dict(ok=ok, free=free, need=A["need"])
 
 
-# ---------------- store 的数据目录 ----------------
+# ---------------- store data dir ----------------
 def store_dir(A):
     return os.path.realpath(os.path.expanduser(A["data"]))
 
 
 def op_done(A):
-    """items {名: dict(out, done)} → {名: 缺的 done 项}（[] = 做完了）。"""
+    """items {name: dict(out, done)} → {name: missing done items} ([] = done)."""
     D = store_dir(A)
     return {k: done_missing(D, rel_ok(v["out"]), v["done"]) for k, v in A["items"].items()}
 
 
 def matches(D, pat):
-    """相对数据目录的通配 → 匹配到的路径（文件夹算它下面的全部）。"""
+    """A glob relative to the data dir → matching paths (a dir counts as everything under it)."""
     return glob.glob(os.path.join(D, rel_ok(pat)), recursive=True)
 
 
@@ -603,8 +587,8 @@ def newest(paths):
 
 
 def op_probe(A):
-    """pats：通配（相对数据目录）；size：要不要算大小（要传多少：软链接按指到的算，硬链接一份）
-    → {通配: dict(n=匹配几个, newest=最新的修改时间或 None, size=字节或 None)}。"""
+    """pats: globs (relative to the data dir); size: whether to measure size (how much to transfer: symlinks count their
+    target, hard links once) → {glob: dict(n=matches, newest=latest mtime or None, size=bytes or None)}."""
     D = store_dir(A)
     res = {}
     for pat in A["pats"]:
@@ -614,7 +598,8 @@ def op_probe(A):
 
 
 def op_rm(A):
-    """pats：中间产物的通配（相对数据目录）→ dict(n=删了几个, bytes=腾出多少)；只删文件，不删数据目录以外的。"""
+    """pats: temp-file globs (relative to the data dir) → dict(n=removed, bytes=freed); remove files only, never outside the
+    data dir."""
     D = store_dir(A)
     n, freed = 0, 0
     for pat in A["pats"]:
@@ -632,13 +617,14 @@ def op_rm(A):
     return dict(n=n, bytes=freed)
 
 
-# ---------------- 有文件要送的机器（store 的数据、hub 的 wheelhouse）：送给执行机、拉回、归档 ----------------
+# ---------------- machines with files to send (store data, hub wheelhouse): push to executors, fetch, archive ----------------
 def core_path(*parts):
     return os.path.join(os.path.dirname(HERE), *parts)
 
 
 def mods():
-    """传输、按说明解析才用的调度模块（names、spec、mtab、tunnel，要读配置和插件）：用到时才 import，执行机的操作不用。"""
+    """Scheduler modules needed only for transfers and spec resolution (names, spec, mtab, tunnel; they read config and
+    plugins): import lazily so executor operations do not need them."""
     for d in ("sites", "sync"):
         if core_path(d) not in sys.path:
             sys.path.insert(0, core_path(d))
@@ -650,7 +636,7 @@ def mods():
 
 
 def task_call(f, *a, **kw):
-    """说明、插件出的错（RelayError、SpecError）→ Bad：报给 hub 的是原因。"""
+    """Errors from specs and plugins (RelayError, SpecError) → Bad: the hub gets the reason."""
     _, N, S, _ = mods()
     try:
         return f(*a, **kw)
@@ -659,18 +645,19 @@ def task_call(f, *a, **kw):
 
 
 def reach(name):
-    """从本机到执行机 name：→ (ssh 名，本机是 None；那边的根目录)。ssh 是 None 的机器都在 hub 的机器上，彼此是本机。"""
+    """From this machine to executor name: → (ssh name, None for local; its root). Machines with ssh=None all live on the hub
+    machine and see each other as local."""
     M = mods()[0]
     m, me = M.machine(name), M.whoami()
     if name == me or m["ssh"] is None:
         if name != me and (me is None or M.machine(me)["ssh"] is not None):
-            raise Bad(f"{name} 在 hub 的机器上（ssh 是 None），{me} 连不到它")
+            raise Bad(f"{name} is on the hub machine (ssh is None); {me} cannot reach it")
         return None, m["root"].rstrip("/")
     return m["ssh"], m["root"].rstrip("/")
 
 
 def hashes(R, paths):
-    """真实路径 → sha256；按 (路径, 大小, 修改时间) 缓存在根目录的 state/hashes.db：没改过的文件不再读一遍。"""
+    """Real paths → sha256; cached by (path, size, mtime) in state/hashes.db under the root: unchanged files are not read again."""
     import sqlite3
     p = sub(R, "hashes")
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -692,9 +679,9 @@ def hashes(R, paths):
 
 
 def op_export(A):
-    """spec：解析好的说明 → 送这个任务要的东西（sites/names.py 的 export，在 store 的数据目录上）：
-    dict(params, views, outs, cleanup, texts={相对路径: base64},
-         files=[[相对路径, sha256, 字节数, 相对数据目录的路径（不在里面的 None）, store 上的真实路径]])。"""
+    """spec: a resolved spec → what sending this task needs (sites/names.py export, on the store data dir):
+    dict(params, views, outs, cleanup, texts={relative path: base64},
+         files=[[relative path, sha256, bytes, path relative to the data dir (None if outside), real path on the store]]))."""
     N = mods()[1]
     D = store_dir(A)
     ex = task_call(N.export, A["spec"], D)
@@ -705,8 +692,8 @@ def op_export(A):
 
 
 def op_push(A):
-    """to：执行机；files {sha256: 本机路径} → 放进那边的 blobs（同一台机器时在本机拷、能硬链接就硬链接，否则经隧道）
-    → 没传到、对不上的 sha256（已删掉）。"""
+    """to: executor; files {sha256: local path} → put them in the remote blobs (copy locally on the same machine, hard link when
+    possible, otherwise over the tunnel) → sha256s not transferred or mismatched (already removed)."""
     T = mods()[3]
     R = root()
     host, troot = reach(A["to"])
@@ -726,9 +713,9 @@ def op_push(A):
 
 
 def place(src, D, written, sp, links=()):
-    """核对过的结果（src 下，和数据目录一样的相对路径）挪进数据目录 D，标志最后放：普通文件 → out 上一级里 fetch.extra 的文件
-    （已有的不动）→ 产出里的软链接（links [(相对路径, 指向的相对数据目录的路径)]，写成相对链接）→ MANIFEST.json → 做完的标志
-    （按 done 倒着放，第一项最后放）。"""
+    """Move verified results (under src, same relative paths as the data dir) into data dir D, markers last: regular files →
+    files matching fetch.extra in out's parent (keep existing ones) → output symlinks (links [(relative path, target relative
+    to the data dir)], written as relative links) → MANIFEST.json → done markers (in reverse done order, first item last)."""
     S = mods()[2]
     o = S.outputs(sp)
     rout = o["outs"][0]
@@ -757,9 +744,10 @@ def place(src, D, written, sp, links=()):
 
 
 def op_pull(A):
-    """frm：执行机；spec；items [[相对路径, 字节数, 修改时间 ns]]、links [[相对路径, 指向的相对数据目录的路径]]：那边 list 列出的产出
-    → 拉到 store 数据目录下的 .relay_in/<safe key>（上次拉到一半、大小和修改时间对得上的不再拉），按说明核对（names.import_），
-    再放进数据目录（place，标志最后放）→ dict(files, links)。"""
+    """frm: executor; spec; items [[relative path, bytes, mtime ns]], links [[relative path, target relative to the data dir]]:
+    outputs listed by list over there → fetch into .relay_in/<safe key> under the store data dir (skip files from a previous
+    partial fetch with matching size and mtime), verify against the spec (names.import_), then place them in the data dir
+    (place, markers last) → dict(files, links)."""
     _, N, S, T = mods()
     D = store_dir(A)
     sp = A["spec"]
@@ -767,7 +755,7 @@ def op_pull(A):
     links = [(rel_ok(r), rel_ok(t)) for r, t in A["links"]]
     off = [r for r, _ in links if not any(C.under(r, o) for o in outs)]
     if off:
-        raise Bad(f"{sp['key']} 的链接不在结果文件夹里：{off[:3]}")
+        raise Bad(f"links for {sp['key']} are not inside the output dirs: {off[:3]}")
     host, troot = reach(A["frm"])
     inbox = os.path.join(D, proto.RELAY_INBOX, proto.safe(sp["key"]))
     out = inbox + ".real"
@@ -785,7 +773,7 @@ def op_pull(A):
     todo = [(r, v[0]) for r, v in want.items()]
     bad = T.pull(host, f"{troot}/{proto.ROOT['data']}", inbox, todo, site=A["frm"]) if todo else []
     if bad:
-        raise Bad(f"{len(bad)} 个文件没拉到（{bad[:3]}）")
+        raise Bad(f"{len(bad)} files were not fetched ({bad[:3]})")
     os.makedirs(inbox, exist_ok=True)
     written = task_call(N.import_, sp, inbox, out, D, links=[r for r, _ in links])
     place(out, D, written, sp, links)
@@ -795,20 +783,21 @@ def op_pull(A):
 
 
 def op_collect(A):
-    """specs → 这些任务在 store 数据目录里的情况（spec.py collect，和执行机 status 里的同一个）；wait：最多等几秒。"""
+    """specs → how these tasks look in the store data dir (spec.py collect, the same as in executor status); wait: max seconds
+    to wait."""
     return versioned(["spec.py", "collect", "--json"], json.dumps(dict(specs=A["specs"], root=store_dir(A), wait=A.get("wait"))))
 
 
 def op_facts(A):
-    """items [dict(spec, since, tags)] → 各任务在 store 数据目录里的结果和日志（spec.facts：执行机的队列在本机算的同一个），
-    hub 的总队列按它判断状态。"""
+    """items [dict(spec, since, tags)] → results and logs for each task in the store data dir (spec.facts: the same as the
+    executor queue computes locally); the hub queue uses it to decide state."""
     S = mods()[2]
     return S.facts(A["items"], store_dir(A))
 
 
 def op_smoke(A):
-    """recipe、names：冒烟定义（插件 smoke.py 的 SMOKE）里是函数的 params、vars，在 store 的数据目录上算 →
-    {字段: 值}；出错的字段 → {"error": {字段: 原因}}。"""
+    """recipe, names: params and vars that are functions in the smoke definition (SMOKE in the plugin's smoke.py), evaluated on
+    the store data dir → {field: value}; failing fields → {"error": {field: reason}}."""
     mods()
     import cfg
     ns = dict(SMOKE={})
@@ -824,11 +813,12 @@ def op_smoke(A):
 
 
 def op_archive(A):
-    """spec、dry：这个任务的结果从 store 备份到备份机、核对（archive_task.sh）→ True；没成 → Bad。输出在 stderr。"""
+    """spec, dry: back up this task's store results to the backup machine and verify (archive_task.sh) → True; failure → Bad.
+    Output goes to stderr."""
     p = subprocess.run(["bash", os.path.join(HERE, "archive_task.sh"), "--spec", json.dumps(A["spec"])] + (["--dry-run"] if A.get("dry") else []),
                        env=dict(os.environ, TASKQ_DATA=store_dir(A)), stdout=sys.stderr)
     if p.returncode:
-        raise Bad(f"归档没成（archive_task.sh 退出码 {p.returncode}）")
+        raise Bad(f"archive failed (archive_task.sh exit code {p.returncode})")
     return True
 
 
@@ -837,8 +827,8 @@ OPS = {k[3:]: v for k, v in globals().items() if k.startswith("op_")}
 
 def main(argv):
     if len(argv) != 1 or argv[0] not in OPS:
-        sys.exit("用法：site_ops.py <" + "|".join(sorted(OPS)) + ">（参数是标准输入上的 JSON）")
-    out, sys.stdout = sys.stdout, sys.stderr  # 操作里打印的进度（隧道、归档）都到 stderr，标准输出只有结果那一行
+        sys.exit("usage: site_ops.py <" + "|".join(sorted(OPS)) + "> (args are JSON on stdin)")
+    out, sys.stdout = sys.stdout, sys.stderr  # progress (tunnel, archive) goes to stderr; stdout carries only the result line
     try:
         res = OPS[argv[0]](json.load(sys.stdin))
     except Bad as e:

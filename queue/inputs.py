@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""任务的输入：开训前查全没有；执行机允许时在节点本地盘建一份这个任务私有的视图，开训后在后台把 blob 拷过去。
+"""Task inputs: check they are all present before starting; when the executor allows it, build a task-private view on the
+node's local disk and copy blobs there in the background.
 
-  inputs.py prepare <数据目录> <任务文件名> <本地根目录或空> <输入>...
-      查每个输入（文件或文件夹；链接要指得到文件；文件夹里任一层有 .incomplete = 建到一半，读不了也算缺）。不全 → 退出码 4，标准错误里写缺几个、举几个例子。
-      给了本地根目录时：在 <根>/views/<任务文件名>/ 下照数据目录的相对路径建一份只有链接的树，指向原处的文件（已经拷到本地的指本地），
-      要拷的写进 <根>/views/<任务文件名>.todo.json，打印这份视图的根；没给时打印数据目录。命令从打印的目录读（$TASK_INPUTS_ROOT）。
-      先删本节点上自己的、作业已经结束的本地副本（<根的上一级>/<proto.STAGE_DIR_PREFIX><作业号>）。
-  inputs.py copy <本地根目录> <任务文件名>
-      照清单把 blob 拷到 <根>/blobs/（布局同执行机，proto.blob；本节点别的作业已有的硬链接过来），边拷边核对 sha256，
-      再把视图里对应的链接换过去：换之前读原处，换之后读本地。拷完至少还剩 STAGE_KEEP_GB（默认 300）GB
-      （能从本节点别的作业硬链接来的不算），不够就不拷。本节点的拷贝排队（一把锁），一个查完拷完下一个再查。核对不上、拷不了的留着读原处。
-只拷 blob（真实路径是执行机 blobs 里的 <h2>/<h>，按内容认）；别的文件（执行机自己做出的产出）读原处。
-退出码：0 好了；4 缺输入；其他 = 出错（run_task.sh 照旧读原处）。
+    inputs.py prepare <data dir> <task name> <local root or empty> <input>...
+        Check every input (file or dir; .incomplete at any level = half-built, unreadable counts as missing) and print the data
+        dir, or build a links-only private view under <root>/views/<task name>/ plus <root>/views/<task name>.todo.json and print
+        the view root. Missing inputs → exit 4 with a count and examples on stderr.
+    inputs.py copy <local root> <task name>
+        Copy the listed blobs under <root>/blobs/, verify sha256, and repoint the view at the local copies, keeping at least
+        STAGE_KEEP_GB (default 300) GB free (hard links from other jobs on this node do not count). Copies on one node are
+        serialized by a lock; a mismatch or failure keeps reading the original.
+Only blobs are copied; other files are read in place. Exit codes: 0 ok; 4 missing inputs; anything else = error (run_task.sh
+reads in place in that case).
 """
 import fcntl
 import glob
@@ -34,14 +34,15 @@ KEEP_GB = float(os.environ.get("STAGE_KEEP_GB", 300))
 
 
 def entries(data, inp):
-    """一个输入 → ([(相对数据目录的路径, 绝对路径)], [缺的说明])。带通配符的展开成匹配到的文件，一个都没有算缺。"""
+    """One input → ([(path relative to the data dir, absolute path)], [missing descriptions]). A glob expands to matching files;
+    no matches counts as missing."""
     rel = os.path.relpath(inp, data)
     if rel.startswith(".."):
-        return [], [f"{inp} 不在数据目录里"]
+        return [], [f"{inp} is not inside the data dir"]
     if glob.has_magic(rel):
         hits = sorted(glob.glob(inp))
         if not hits:
-            return [], [f"{rel}（一个都没有）"]
+            return [], [f"{rel} (no matches)"]
         out, miss = [], []
         for h in hits:
             e, m = entries(data, h)
@@ -50,20 +51,21 @@ def entries(data, inp):
         return out, miss
     if os.path.isdir(inp):
         out, bad = [], []
-        for d, ds, fs in os.walk(inp, onerror=lambda e: bad.append(f"{os.path.relpath(e.filename, data)}（读不了）"), followlinks=True):
-            if proto.INCOMPLETE in fs or proto.INCOMPLETE in ds:  # 任一层建到一半
-                return [], [f"{os.path.relpath(d, data)}（建到一半）"]
+        for d, ds, fs in os.walk(inp, onerror=lambda e: bad.append(f"{os.path.relpath(e.filename, data)} (unreadable)"), followlinks=True):
+            if proto.INCOMPLETE in fs or proto.INCOMPLETE in ds:  # half-built at some level
+                return [], [f"{os.path.relpath(d, data)} (half-built)"]
             for f in fs:
                 p = os.path.join(d, f)
                 out.append((os.path.relpath(p, data), p))
         return ([], bad) if bad else (out, [])
     if os.path.lexists(inp):
         return [(rel, inp)], []
-    return [], [f"{rel}（没有）"]
+    return [], [f"{rel} (missing)"]
 
 
 def look(p):
-    """→ (大小, 真实路径, sha256 或 None)；指不到文件 → None。sha256：真实路径是 blob（<h2>/<h>）时的 h。"""
+    """→ (size, real path, sha256 or None); does not resolve to a file → None. sha256: h when the real path is a blob
+    (<h2>/<h>)."""
     try:
         st = os.stat(p)
     except OSError:
@@ -77,8 +79,8 @@ def look(p):
 
 
 def live_jobs():
-    """本账号在 Slurm 里还在的作业号；查不了 → None（这时不删别的作业的目录）。
-    作业数组的子任务 %i 显示成 <数组号>_<序号>，SLURM_JOB_ID（本地目录的名字）是 %A，两样都收。"""
+    """Job ids this account still has in Slurm; cannot check → None (then do not remove other jobs' dirs).
+    Array subjobs show %i as <array id>_<index> while SLURM_JOB_ID (the local dir name) is %A; accept both."""
     if not shutil.which("squeue"):
         return None
     try:
@@ -91,7 +93,7 @@ def live_jobs():
 
 
 def jobs_dirs(root):
-    """本节点上（同一个上一级文件夹里）各作业的本地副本 → {作业号: 文件夹}。"""
+    """Local copies of each job on this node (in the same parent dir) → {job id: dir}."""
     out = {}
     for d in glob.glob(os.path.join(os.path.dirname(root), proto.STAGE_DIR_PREFIX + "*")):
         j = os.path.basename(d)[len(proto.STAGE_DIR_PREFIX):]
@@ -110,7 +112,7 @@ def clean_old(root):
         except OSError:
             continue
         if d != root and j not in live and mine:
-            print(f"删掉已结束作业 {j} 的本地副本 {d}", file=sys.stderr)
+            print(f"removing local copy {d} of ended job {j}", file=sys.stderr)
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -123,9 +125,9 @@ def prepare(data, key, root, inputs):
         miss += m
     with ThreadPoolExecutor(PAR) as ex:
         info = list(ex.map(lambda e: look(e[1]), found))
-    miss += [f"{r}（指不到文件）" for (r, _), x in zip(found, info) if x is None]
+    miss += [f"{r} (does not resolve to a file)" for (r, _), x in zip(found, info) if x is None]
     if miss:
-        print(f"缺输入：{len(miss)} 个（{'；'.join(miss[:5])}{' …' if len(miss) > 5 else ''}）", file=sys.stderr)
+        print(f"missing inputs: {len(miss)} ({'; '.join(miss[:5])}{' …' if len(miss) > 5 else ''})", file=sys.stderr)
         return MISSING
     if not root:
         print(data)
@@ -165,7 +167,7 @@ def copy(root, key):
     root = os.path.abspath(root)
     view = os.path.join(root, "views", key)
     todo = json.load(open(view + ".todo.json"))
-    for p in glob.glob(os.path.join(root, "blobs", "*", "*" + proto.TMP)):  # 被停掉的拷贝留下的（<h>.<进程号>.tmp）
+    for p in glob.glob(os.path.join(root, "blobs", "*", "*" + proto.TMP)):  # left by a stopped copy (<h>.<pid>.tmp)
         try:
             if not alive(int(p.rsplit(".", 2)[1])):
                 os.remove(p)
@@ -176,12 +178,12 @@ def copy(root, key):
         by.setdefault(h, [real, size, []])[2].append(rel)
     others = [d for d in jobs_dirs(root).values() if d != root]
     with open(os.path.join(os.path.dirname(root), f".{proto.STAGE_DIR_PREFIX}{os.getuid()}.lock"), "a") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)  # 本节点的拷贝一个一个来：查空间和拷贝之间别的拷贝不插进来
+        fcntl.flock(lk, fcntl.LOCK_EX)  # one copy at a time on this node: no other copy between the space check and the copy
         need = sum(size for h, (_, size, _) in by.items()
                    if _size(os.path.join(root, proto.blob(h))) != size and not any(_size(os.path.join(o, proto.blob(h))) == size for o in others))
         free = shutil.disk_usage(root).free
         if free - need < KEEP_GB * 1024 ** 3:
-            print(f"本地盘剩 {free / 1024 ** 3:.0f} GB，拷 {need / 1024 ** 3:.0f} GB 后不到 {KEEP_GB:.0f} GB，不拷，读原处")
+            print(f"local disk has {free / 1024 ** 3:.0f} GB; copying {need / 1024 ** 3:.0f} GB would leave less than {KEEP_GB:.0f} GB, not copying, reading in place")
             return 0
         return _copy(root, view, by, others, t0)
 
@@ -212,15 +214,15 @@ def _copy(root, view, by, others, t0):
                     n["copied"] += 1
                     n["bytes"] += size
             except OSError as e:
-                bad.append(f"{os.path.basename(rels[0])}：{e}")
+                bad.append(f"{os.path.basename(rels[0])}: {e}")
                 return
         for rel in rels:
             C.atomic_link(dst, os.path.join(view, rel))
     with ThreadPoolExecutor(min(PAR, 8)) as ex:
         list(ex.map(one, sorted(by.items(), key=lambda x: x[1][2][0])))
-    print(f"{time.strftime('%F %T')} 输入拷到本地 {view}：{len(by) - len(bad)}/{len(by)} 个文件（新拷 {n['copied']} 个 "
-          f"{n['bytes'] / 1024 ** 3:.1f} GB，硬链接 {n['linked']} 个，已有 {n['had']} 个），{time.time() - t0:.0f} 秒"
-          + (f"；{len(bad)} 个没拷成，读原处（{'；'.join(bad[:3])}）" if bad else ""))
+    print(f"{time.strftime('%F %T')} inputs copied to local {view}: {len(by) - len(bad)}/{len(by)} files (new {n['copied']} "
+          f"{n['bytes'] / 1024 ** 3:.1f} GB, hard-linked {n['linked']}, already present {n['had']}), {time.time() - t0:.0f} s"
+          + (f"; {len(bad)} were not copied, reading in place ({'; '.join(bad[:3])})" if bad else ""))
     return 0
 
 

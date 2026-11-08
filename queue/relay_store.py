@@ -1,18 +1,17 @@
-"""relay 在 hub 上的记账（状态文件夹的 relay/state.json，cfg.state：每台各任务放过去的路径、视图、代码包）和执行机根目录的清理。
-
-清理：剩余低于软线时，先删总队列不再要的视图（state 里登记过的各任务的视图，加上插件建视图的文件夹（sites/names.py 的
-VIEW_ROOTS）下的目录；不在 keep 里、没有 .incomplete（正在建，或位置上有别的真文件、没建成）的），再按最久没用先删没有软链接指向的 blob（只删 nlink == 1 的，
-别处还有硬链接的不碰；正在传、视图还没建好的任务钉住的（R/state/pins/，relay.py stage 写，PIN_TTL 内的）和传到一半的临时文件
-不碰），直到剩余回到软线以上。只碰根目录 R 里面的东西；R/blobs 是指到别的盘的软链接时（如 Slurm 执行机的 scratch 盘）也清理它，
-只删 blobs/<前两位>/ 下的文件。删视图时拿建视图的锁（R/state/view.lock）。
-根目录经软链接到达时，视图里的软链接指的是软链接的路径，比较时都换成真实路径。"""
+"""Relay bookkeeping on the hub (relay/state.json in the state dir, cfg.state: paths placed per machine and task, views,
+bundles) and cleanup of executor roots.
+Cleanup below the soft limit removes views the hub queue no longer wants (registered per-task views plus dirs under the dirs
+where plugins build views, VIEW_ROOTS in sites/names.py; never half-built ones), then blobs with no symlink pointing at them,
+least recently used first (never ones hard-linked elsewhere or pinned by a running stage), until free space is back above the
+limit. Only touch things inside the root R, take the view lock when removing views, and compare real paths when R is reached
+through a symlink."""
 import fcntl
 import json
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of the scheduler code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
@@ -25,7 +24,7 @@ DIR = cfg.state("relay")
 STATE = os.path.join(DIR, "state.json")
 
 
-# ---------------- 状态文件 ----------------
+# ---------------- state file ----------------
 def update_state(fn):
     os.makedirs(DIR, exist_ok=True)
     with open(STATE + ".lock", "a") as lk:
@@ -45,18 +44,18 @@ def load_state():
 
 
 def keys_of(st, name):
-    """key → dict(recipe, params, inputs, staged, views, placed, outs, cleanup)。inputs：说明里的输入；placed：放过去的文件、视图里的除外（相对 R/data）；
-    outs：产出的文件夹。"""
+    """key → dict(recipe, params, inputs, staged, views, placed, outs, cleanup). inputs: the spec's inputs; placed: files placed
+    outside views (relative to R/data); outs: output dirs."""
     return (st.get("keys") or {}).get(name) or {}
 
 
 def paths_of(k):
-    """一个任务在那边占的路径（相对 R/data）：视图、输入、产出、要清理的。"""
+    """Paths a task occupies over there (relative to R/data): views, inputs, outputs, cleanup."""
     return set(views_of(k)) | set(k.get("placed") or []) | set(k.get("outs") or []) | set(k.get("cleanup") or [])
 
 
 def overlaps(p, used, anc):
-    """p 和 used 里的某个路径相同、是它的上级或下级 → True。anc：used 里各路径的所有上级。"""
+    """True when p equals, contains or is contained by a path in used. anc: all ancestors of the paths in used."""
     if p in used or p in anc:
         return True
     parts = p.split("/")
@@ -68,36 +67,37 @@ def ancestors(paths):
 
 
 def droppable(keys, key, paths):
-    """删 key 时 paths 里能删的：别的任务（keys 里的其余记录）还用着的（相同、上级或下级）不删。"""
+    """Paths in paths that can be removed when dropping key: keep ones still used by other tasks (same, parent or child)."""
     used = set().union(*[paths_of(k) for r, k in keys.items() if r != key]) if len(keys) > 1 else set()
     anc = ancestors(used)
     return sorted(p for p in paths if not overlaps(p, used, anc))
 
 
 def views_of(k):
-    """一个任务的视图文件夹。"""
+    """A task's view dirs."""
     return list(k.get("views") or [])
 
 
 def safe_rel(rel):
-    """相对 R/data 的路径：不能是绝对路径、不能有 ..、至少两层（不删到 data 下的第一层）。"""
+    """A path relative to R/data: not absolute, no .., at least two levels (never remove the first level under data)."""
     r = os.path.normpath(rel)
     if r.startswith("/") or ".." in r.split("/") or len(r.split("/")) < 2:
-        raise RN.RelayError(f"路径不对：{rel}")
+        raise RN.RelayError(f"bad path: {rel}")
     return r
 
 
-# ---------------- 清理 ----------------
+# ---------------- cleanup ----------------
 def budget(name):
     return M.machine(name).get("budget")
 
 
 def gc(name, keep_dirs, op, soft_gb=None, free=None, views=(), blob_free=None):
-    """name 这台的清理 → dict(freed, removed_views, removed_blobs, free)；没有 budget → None。
-    keep_dirs：分给这台的任务要用的、刚建的视图（相对 R/data）。views：登记过的视图（state.json 的 views）。op：relay_remote.op。
-    free：剩余的字节数（有 cap 的执行机由 relay.py 按 cap 算好传进来；不给时看盘本身）。
-    blob_free：blobs 在另一个盘、有 blob_cap 时 blobs 那边的剩余（relay.py 按 blob_cap 算好传进来）：删 blob 只看它，
-    删视图看两边哪边剩不到软线；不给时 blob 和视图都看 free。removed_views 里也有登记了但那边已经没有的视图（登记表跟着去掉）。"""
+    """Cleanup for machine name → dict(freed, removed_views, removed_blobs, free); no budget → None.
+    keep_dirs: views assigned to this machine that are needed or just built (relative to R/data). views: registered views
+    (state.json views). op: relay_remote.op. free: remaining bytes (executors with cap pass relay.py's cap-based value; without
+    it, look at the disk). blob_free: remaining on the blob disk when blobs are on another disk with blob_cap (computed by
+    relay.py from blob_cap): removing blobs looks only at it; removing views looks at whichever side is below the soft limit;
+    without it both use free. removed_views also includes registered views that are already gone (drop them from the registry)."""
     if soft_gb is None:
         b = budget(name)
         if not b:

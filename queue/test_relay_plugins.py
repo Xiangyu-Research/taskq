@@ -1,6 +1,6 @@
-"""relay_plugins.py 和 sites/names.py 的测试：测试用的配置（testdata/）里的 toy、toy_infer 插件和通用的 path 插件，
-假的数据集、训练结果、推理结果，按真名送出、拉回、核对。
-跑法：python3 queue/test_relay_plugins.py"""
+"""Tests for relay_plugins.py and sites/names.py: the toy and toy_infer plugins in the test config (testdata/) and the generic
+path plugin, with a fake dataset, training and inference results, sent and fetched by real names and verified.
+Run: python3 queue/test_relay_plugins.py"""
 import hashlib
 import json
 import os
@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
 import fixture  # noqa: E402
 TMP = fixture.tmpdir(prefix="test_relay_plugins_")
-os.environ.setdefault("TASKQ_STATE", os.path.join(TMP, "state"))  # relay 的记账（cfg.state("relay")）放临时目录
+os.environ.setdefault("TASKQ_STATE", os.path.join(TMP, "state"))  # relay bookkeeping (cfg.state("relay")) in a temp dir
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 fixture.use()
@@ -20,14 +20,14 @@ import relay_plugins as RN  # noqa: E402
 import names as N  # noqa: E402
 import spec as S  # noqa: E402
 import cfg  # noqa: E402
-QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
+QR = cfg.rel("queue")  # queue/ under the repo root (scripts/taskq/queue when nested, queue in a standalone checkout)
 
 DS = "D777_fake"
 CASES = ["s101", "s101_b", "s102", "x-00582-000-syn"]
 ROOT = os.path.join(TMP, "root")
 PRE = os.path.join(ROOT, "prepared", DS)
 DI = "PlanM_full"
-PM = sys.modules[RN.PLUGINS["toy_infer"][0].__module__]  # 插件模块（只有约定的表合进 relay_plugins）
+PM = sys.modules[RN.PLUGINS["toy_infer"][0].__module__]  # the plugin module (only the agreed tables merge into relay_plugins)
 REAL_INFER_INPUTS = PM.infer_inputs
 
 
@@ -53,10 +53,10 @@ def fails(fn, *a, has=""):
     except RN.RelayError as e:
         assert has in str(e), (has, str(e))
         return
-    raise AssertionError(f"应报错（{has}）")
+    raise AssertionError(f"expected a failure ({has})")
 
 
-# ---------------- 训练 ----------------
+# ---------------- training ----------------
 def setup():
     wj(os.path.join(PRE, "dataset.json"), dict(channel_names={"0000": "c0"}, labels={"background": 0, "a": 1},
                                                numTraining=4, file_ending=".dat", name=DS))
@@ -91,12 +91,12 @@ def test_train():
     assert set(fm) == want, sorted(set(fm) ^ want)
     assert fm[f"{base}/{DI}/s102.bin"] == os.path.join(ROOT, "prepared", "D716_base", DI, "s102.bin")
     assert ex["outs"] == [sp["out"]] and ex["cleanup"] == [sp["out"]]
-    ok("训练送出：真路径、只列这次要的文件（不含 splits_final_v1.json），软链接按真实文件送，参数原样")
+    ok("training export: real paths, only the files needed this time (splits_final_v1.json excluded), symlinks sent as their real files, params unchanged")
 
     wj(os.path.join(PRE, "splits_final.json"), [dict(train=CASES[2:], val=CASES[:2] + ["nobody"])])
     fails(N.export, sp, ROOT, has="不一致")
     wj(os.path.join(PRE, "splits_final.json"), [dict(train=CASES[2:], val=CASES[:2]), dict(train=CASES[:2], val=CASES[2:])])
-    ok("训练送出：splits 里有 gt 没有的样本时报错")
+    ok("training export: fails when splits contain samples without gt")
 
     src = os.path.join(TMP, "train_src")
     out = os.path.join(src, sp["out"])
@@ -113,7 +113,7 @@ def test_train():
     par = os.path.dirname(sp["out"])
     assert f"{par}/plans.json" in written and f"{sp['out']}/final.ckpt" in written, written
     assert len(written) == 8 and all(os.path.isfile(os.path.join(dst, w)) for w in written), written
-    ok("训练拉回：结果、上一级的 json（fetch.extra）、分段日志放到同样的相对路径")
+    ok("training fetch: results, parent json (fetch.extra) and part logs land at the same relative paths")
 
     os.remove(os.path.join(out, "check", CASES[1] + ".dat"))
     fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="验证集对不上")
@@ -122,24 +122,24 @@ def test_train():
     wj(os.path.join(out, "check", "summary.json"), dict(metric_per_case=[{}]))
     fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="summary.json")
     wj(os.path.join(out, "check", "summary.json"), dict(metric_per_case=[{}, {}]))
-    ok("训练拉回：验证集缺样本、summary.json 例数不对都报错，目标不动")
+    ok("training fetch: missing validation samples or a wrong case count in summary.json both fail, leaving the target alone")
 
     longer = os.path.join(src, "logs", "tasks", S.safe(sp["key"]) + "__x__1_part1.log")
     wb(longer, b"log")
-    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="认不出")
+    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="do not belong here")
     os.remove(longer)
-    ok("训练拉回：key 更长的别的任务的分段日志不算这个任务的（报认不出）")
+    ok("training fetch: another task's part log with a longer key does not belong to this task (reported as unrecognized)")
 
     os.remove(os.path.join(out, "final.ckpt"))
-    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="不全")
+    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="incomplete")
     wb(os.path.join(out, "final.ckpt"), b"ck")
     wb(os.path.join(src, "prepared", DS, "x.json"), b"{}")
-    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="认不出")
+    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="do not belong here")
     os.remove(os.path.join(src, "prepared", DS, "x.json"))
-    ok("训练拉回：done 不全、有认不出的文件都报错")
+    ok("training fetch: incomplete done markers or unrecognized files both fail")
 
 
-# ---------------- 推理 ----------------
+# ---------------- inference ----------------
 TD = "V_save__PlanM__full"
 INS = {"raw/holdout/A/inputs": ["A-001", "A-002"],
        "raw/ext/B/inputs": ["B-004"],
@@ -187,7 +187,7 @@ def fake_pred(src, sp):
 
 
 def test_infer_needs():
-    """真跑一次 --stage needs（模型还不在 store 上也能列）。"""
+    """Run --stage needs for real (it lists even when the model is not on the store yet)."""
     q = dict(key="infer/x", env="base", cmd=f"bash {INFER_SH} {{data}}/results/D9_X/T__P__c 0",
              out="preds/D9_X/T__P__c/frag_0", done=["MANIFEST.json"], relay="toy_infer", vars=dict(SKIP_EXT="", ONLY_EXT="G-A"))
     sp = S.resolve("command", dict(q, inputs_cmd=f"bash {QR}/testdata/bin/step.sh --stage needs:infer {{data}}/results/D9_X/T__P__c 0"))
@@ -196,9 +196,9 @@ def test_infer_needs():
     m = "results/D9_X/T__P__c"
     assert got[:3] == [f"{m}/dataset.json", f"{m}/plans.json", f"{m}/frag_0/final.ckpt"], got
     assert len(got) == 5 and all(g.startswith("raw/") and g.endswith("/inputs") for g in got[3:]), got
-    ok("推理：真跑任务的 inputs_cmd（step.sh --stage needs:infer），带任务的 vars，列出模型文件和输入文件夹")
+    ok("inference: runs the task's inputs_cmd (step.sh --stage needs:infer) with the task vars and lists model files and input dirs")
     fails(REAL_INFER_INPUTS, S.resolve("command", q), ROOT, has="没有 inputs_cmd")
-    ok("推理：没有 inputs_cmd 的报错，不从命令里猜")
+    ok("inference: fails without inputs_cmd instead of guessing from the command")
 
 
 def test_infer():
@@ -212,13 +212,13 @@ def test_infer():
     assert fm[f"{model}/frag_0/final.ckpt"] == os.path.join(ROOT, model, "frag_0", "final.ckpt")
     assert fm["raw/holdout/A/inputs/A-001_0000.dat"] == os.path.join(ROOT, "raw_store", "raw/holdout/A/inputs/A-001_0000.dat")
     assert len(fm) == 3 + 4 * sum(map(len, INS.values())) and ex["cleanup"] == [sp["out"]], ex["cleanup"]
-    ok("推理送出：needs 列的模型文件（不当视图）和输入文件夹（视图）都在真路径，参数原样")
+    ok("inference export: model files from needs (not views) and input dirs (views) are at real paths, params unchanged")
 
     src = os.path.join(TMP, "infer_src")
     out = fake_pred(src, sp)
     written = N.import_(sp, src, os.path.join(TMP, "infer_dst"), ROOT)
     assert f"{sp['out']}/MANIFEST.json" in written and f"{sp['out']}/C-x/C-010.prob" in written, written
-    ok("推理拉回：各测试集样本齐、和 store 上的输入一致，存档的 sha256 对得上，原样放回")
+    ok("inference fetch: every test-set sample is present and matches the store inputs, checkpoint sha256 matches, placed unchanged")
 
     def bad(why, has, change, undo):
         change()
@@ -227,9 +227,9 @@ def test_infer():
         assert not os.path.exists(os.path.join(TMP, "infer_dst2")), why
 
     p = os.path.join(out, "B", "B-004.prob")
-    bad("缺概率", "对不上", lambda: os.remove(p), lambda: wb(p, b"p"))
+    bad("missing probability", "对不上", lambda: os.remove(p), lambda: wb(p, b"p"))
     t = os.path.join(out, "B", "B-004.tmp.prob")
-    bad("写到一半的概率", "认不出", lambda: wb(t, b"p"), lambda: os.remove(t))
+    bad("half-written probability", "认不出", lambda: wb(t, b"p"), lambda: os.remove(t))
     m = os.path.join(out, "MANIFEST.json")
     keep = open(m).read()
     man = json.loads(keep)
@@ -240,19 +240,20 @@ def test_infer():
     def back():
         open(m, "w").write(keep)
 
-    bad("存档不同", "存档", put(dict(man, checkpoints=[dict(sha256="0" * 64)])), back)
-    bad("MANIFEST 少一个测试集", "MANIFEST", put(dict(man, cohorts={k: v for k, v in man["cohorts"].items() if k != "B"})), back)
-    bad("MANIFEST 的数目不对", "对不上", put(dict(man, cohorts=dict(man["cohorts"], B=dict(n_outputs=2, n_probs=2)))), back)
+    bad("different checkpoint", "存档", put(dict(man, checkpoints=[dict(sha256="0" * 64)])), back)
+    bad("MANIFEST misses a test set", "MANIFEST", put(dict(man, cohorts={k: v for k, v in man["cohorts"].items() if k != "B"})), back)
+    bad("MANIFEST counts are wrong", "对不上", put(dict(man, cohorts=dict(man["cohorts"], B=dict(n_outputs=2, n_probs=2)))), back)
     gone = os.path.join(out, "B")
-    bad("少一个测试集的文件夹", "MANIFEST", lambda: shutil.move(gone, gone + ".x"), lambda: shutil.move(gone + ".x", gone))
+    bad("a test-set dir is missing", "MANIFEST", lambda: shutil.move(gone, gone + ".x"), lambda: shutil.move(gone + ".x", gone))
     d, keep = os.path.join(out, "MANIFEST.json"), open(os.path.join(out, "MANIFEST.json"), "rb").read()
-    bad("没有完成标志 MANIFEST.json", "不全", lambda: os.remove(d), lambda: wb(d, keep))
-    ok("推理拉回：缺概率、写到一半的文件、存档不同、MANIFEST 和文件夹或数目不一致、没有完成标志都报错，目标不动")
+    bad("no done marker MANIFEST.json", "incomplete", lambda: os.remove(d), lambda: wb(d, keep))
+    ok("inference fetch: missing probabilities, half-written files, a different checkpoint, MANIFEST/dir or count mismatches and a missing done marker all fail, leaving the target alone")
 
 
-# ---------------- 通用的 path ----------------
+# ---------------- generic path ----------------
 def path_setup():
-    """store 上：一个输入文件夹（含指向别处的软链接）、一个输入文件、glob、store 数据目录外的绝对路径。→ 任务说明。"""
+    """On the store: an input dir (with a symlink pointing elsewhere), an input file, a glob, and an absolute path outside the
+    store data dir. → task spec."""
     base = os.path.join(ROOT, "proj", "inputs", "cohortA")
     wb(os.path.join(base, "a", "x_0000.dat"), b"xa")
     wb(os.path.join(ROOT, "elsewhere", "y.dat"), b"yy")
@@ -281,7 +282,7 @@ def test_path():
     assert pa["machines"] == ["site-pueue"] and pa["key"] == sp["key"] and pa["out"] == sp["out"], pa
     assert pa["inputs"] == ["proj/inputs/cohortA", "proj/lists/cases.txt", "raw/Set/*/*-seg.dat", a_ext], pa["inputs"]
     assert f"--ref {{data}}/{a_ext} " in pa["cmd"] and f"--ref2 {os.path.join(TMP, 'boxonly', 'ref.json')}x" in pa["cmd"], pa["cmd"]
-    assert f"--in2 {ROOT}/proj/inputs/cohortA" in pa["cmd"], "不在输入里的数据目录内的路径不动"
+    assert f"--in2 {ROOT}/proj/inputs/cohortA" in pa["cmd"], "paths inside the data dir but not inputs are left alone"
     assert pa["vars"] == dict(REF="{data}/" + a_ext), pa["vars"]
     assert ex["views"] == ["proj/inputs/cohortA"], ex["views"]
     fm = dict(ex["files"])
@@ -289,21 +290,21 @@ def test_path():
     assert "proj/lists/cases.txt" in fm and fm[a_ext] == os.path.join(TMP, "boxonly", "ref.json")
     assert {f for f in fm if f.startswith("raw/")} == {"raw/Set/c1/c1-seg.dat", "raw/Set/c2/c2-seg.dat"}, fm
     assert ex["outs"] == [sp["out"], "proj/analysis/thing/shared"] and ex["cleanup"] == ex["outs"]
-    ok("通用送出：文件夹当视图、文件和 glob 展开的文件按同样的相对路径，数据目录外的绝对路径放到 abs/、参数里跟着换，名字相近的不换")
+    ok("generic export: dirs become views, files and expanded globs keep the same relative paths, absolute paths outside the data dir go to abs/ and change in params; similar names are left alone")
 
     sp2 = dict(sp, inputs=[f"{ROOT}/proj/lists/cases.txt"], params=dict(sp["params"], inputs=[f"{ROOT}/proj/lists/cases.txt"],
                                                                                     cmd=f"cat {ROOT}/proj/lists/cases.txt"))
     ex2 = N.export(sp2, ROOT)
     assert ex2["params"]["inputs"] == ["proj/lists/cases.txt"] and ex2["params"]["cmd"] == "cat {data}/proj/lists/cases.txt", ex2["params"]
     assert ex2["views"] == [] and dict(ex2["files"]) == {"proj/lists/cases.txt": os.path.join(ROOT, "proj/lists/cases.txt")}
-    ok("通用送出：数据目录里的绝对路径当相对路径、参数里换成 {data}/…，只有文件时没有视图")
+    ok("generic export: absolute paths inside the data dir become relative, params use {data}/..., and there are no views when only files are involved")
 
-    fails(N.export, dict(sp, inputs=["raw/Set/*/*-none.dat"]), ROOT, has="对得上")
-    fails(N.export, dict(sp, inputs=["proj/inputs/nothing"]), ROOT, has="没有输入")
+    fails(N.export, dict(sp, inputs=["raw/Set/*/*-none.dat"]), ROOT, has="no file on the store matches")
+    fails(N.export, dict(sp, inputs=["proj/inputs/nothing"]), ROOT, has="no input")
     wb(os.path.join(ROOT, "proj", "analysis", "thing", "old.txt"), b"o")
-    fails(N.export, dict(sp, inputs=["proj/analysis/thing"]), ROOT, has="重叠")
-    fails(N.export, dict(sp, relay=None), ROOT, has="不能送")
-    ok("通用送出：glob 没对上、缺输入、视图和结果重叠、没写 relay 都报错")
+    fails(N.export, dict(sp, inputs=["proj/analysis/thing"]), ROOT, has="overlaps output")
+    fails(N.export, dict(sp, relay=None), ROOT, has="cannot be sent")
+    ok("generic export: an unmatched glob, a missing input, an overlapping view and output, or a missing relay all fail")
 
     src = os.path.join(TMP, "path_src")
     wb(os.path.join(src, sp["out"], "a.csv"), b"1")
@@ -318,13 +319,13 @@ def test_path():
     assert sorted(written) == sorted([f"{sp['out']}/a.csv", f"{sp['out']}/sub/p.dat", f"{sp['out']}/.done",
                                       "proj/analysis/thing/shared/s.txt", "proj/analysis/thing/plans.json",
                                       f"logs/tasks/{S.safe(sp['key'])}__1_part1.log"]), written
-    ok("通用拉回：out、fetch.also、上一级里 fetch.extra 的文件、分段日志放到同样的相对路径；done 不全时报错")
+    ok("generic fetch: out, fetch.also, fetch.extra files in the parent and part logs land at the same relative paths; incomplete done markers fail")
     wb(os.path.join(src, "proj/analysis/thing", "notes.txt"), b"?")
-    fails(N.import_, sp, src, os.path.join(TMP, "path_dst3"), ROOT, has="认不出")
+    fails(N.import_, sp, src, os.path.join(TMP, "path_dst3"), ROOT, has="do not belong here")
     os.remove(os.path.join(src, "proj/analysis/thing", "notes.txt"))
     wb(os.path.join(src, "proj/inputs/cohortA", "stray.txt"), b"?")
-    fails(N.import_, sp, src, os.path.join(TMP, "path_dst3"), ROOT, has="认不出")
-    ok("通用拉回：上一级里不在 extra 的、视图里的文件报错")
+    fails(N.import_, sp, src, os.path.join(TMP, "path_dst3"), ROOT, has="do not belong here")
+    ok("generic fetch: files in the parent not in extra, and files in views, fail")
 
 
 if __name__ == "__main__":
@@ -334,4 +335,4 @@ if __name__ == "__main__":
     test_infer()
     test_path()
     shutil.rmtree(TMP)
-    print("全部通过")
+    print("all passed")

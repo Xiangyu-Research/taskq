@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""relay_bundle.py 的测试：取文件、钥匙、包里的文件原样（不生成、不改写）、包名、包里的 taskq.py 和 site_ops.py 完整走一遍、
-包里的 worker 跑 test_worker*.sh 的几个情况。
-包从工作区建（commit=None），根目录是临时目录；配置用测试用的（testdata/，OUTPUTS["bundle"] 是调度代码所在的文件夹）。
-包里的命令不带本机的 TASKQ_CONFIG、TASKQ_PLUGINS：配置和插件按包里的 .taskq.toml 找，是哪台由 TASKQ_MACHINE、根目录由 TASKQ_ROOT 告诉它。
+"""Tests for relay_bundle.py: taking files, secrets, bundle contents unchanged (nothing generated or rewritten), bundle name,
+a full run of taskq.py and site_ops.py from the bundle, and the bundled worker running a few test_worker*.sh cases.
+Bundles are built from the worktree (commit=None) into a temp root; config is the test one (testdata/; OUTPUTS["bundle"] is the
+dir holding the scheduler code). Commands in the bundle do not get the local TASKQ_CONFIG or TASKQ_PLUGINS: config and plugins
+come from the bundle's .taskq.toml, TASKQ_MACHINE says which machine it is and TASKQ_ROOT gives the root.
     python3 queue/test_relay_bundle.py
 """
 import json
@@ -13,16 +14,16 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of the scheduler code
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
-REPO = cfg.REPO  # 使用者的仓库根
-QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
-BQ = cfg.bundle_rel("queue")  # 包里调度代码的 queue/（总是 scripts/taskq/queue）
+REPO = cfg.REPO  # project repo root
+QR = cfg.rel("queue")  # queue/ under the repo root (scripts/taskq/queue when nested, queue in a standalone checkout)
+BQ = cfg.bundle_rel("queue")  # queue/ of the scheduler code in a bundle (always scripts/taskq/queue)
 
 cfg.use_config()
 import proto  # noqa: E402
@@ -30,7 +31,7 @@ import relay_bundle as B  # noqa: E402
 import spec as S  # noqa: E402
 
 NAME = "site-slurm2"
-STEP = f"{BQ}/testdata/bin/step.sh"  # 包里的
+STEP = f"{BQ}/testdata/bin/step.sh"  # inside the bundle
 DROP = ("TASKQ_DATA", "TASKQ_DIR", "TASKQ_MACHINE", "TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_ROOT", "TASKQ_STATE", "TASKQ_DB")
 
 
@@ -39,7 +40,8 @@ def ok(msg):
 
 
 def bare_env(**kw):
-    """包里的命令的环境：去掉本机的配置、队列、数据目录（包按自己的 .taskq.toml 找配置和插件）。"""
+    """Environment for commands in the bundle: drop local config, queue and data dir (the bundle finds config and plugins via
+    its own .taskq.toml)."""
     e = {k: v for k, v in os.environ.items() if k not in DROP}
     e.update(kw)
     return e
@@ -57,15 +59,16 @@ def test_source_files_from_commit():
     assert B._wanted("x/a.R", 10) and not B._wanted("x/big.json", B.SMALL_MAX + 1) and not B._wanted("x/__pycache__/a.py", 1)
     assert not any(f.startswith(("papers/", "admin/", "talks/")) for f in files)
     assert not any("__pycache__" in f for f in files) and all(len(files[f][0]) <= B.SMALL_MAX for f in files if f.endswith(B.SMALL))
-    (_, mode, oid, _, repo, _), = B._entries("HEAD", ["queue/testdata/bin/step.sh"], CORE)  # 核心的文件取自核心的仓库
+    (_, mode, oid, _, repo, _), = B._entries("HEAD", ["queue/testdata/bin/step.sh"], CORE)  # core files come from the core repo
     head = subprocess.run(["git", "-C", repo, "cat-file", "blob", oid], capture_output=True).stdout
     assert head and files[STEP] == (head, mode == "100755")
-    ok("从提交取文件：OUTPUTS[\"bundle\"] 下的代码（含 .R）和小数据文件，内容和可执行位同提交（.sh 在包里另设可执行），没有 papers/ 等")
+    ok("take files from a commit: code (including .R) and small data files under OUTPUTS[\"bundle\"], content and executable bit match the commit (.sh is made executable in the bundle), and no papers/ etc")
 
 
 def test_source_files_submodule(T):
-    """使用者的文件取自使用者仓库的提交（别的子模块进去取它钉的提交，核心那个子模块跳过）；核心的文件取自核心自己的仓库的 HEAD
-    （不看使用者仓库钉的提交），放在包里的 BUNDLE_CORE/ 下。核心嵌在仓库里、在仓库外，取到的核心文件相同。"""
+    """Project files come from the project repo commit (other submodules at their pinned commit; the core submodule is
+    skipped); core files come from HEAD in the core repo (not the project repo's pinned commit), placed under BUNDLE_CORE/ in
+    the bundle. The same core files are taken whether the core is nested in the repo or outside it."""
     env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
     BC = B.BC
 
@@ -101,9 +104,9 @@ def test_source_files_submodule(T):
         g("add", "-A", cwd=d)
         g("commit", "-qm", "p", cwd=d)
     emb = os.path.join(sup, BC)
-    put(emb, (("q/b.py", "B = 2\n", False),))  # 核心的检出里新提交、使用者仓库没跟着钉：取核心的 HEAD
+    put(emb, (("q/b.py", "B = 2\n", False),))  # new commit in the core checkout, project repo not repinned: take the core HEAD
     g("commit", "-qam", "c2", cwd=emb)
-    put(emb, (("q/a.sh", "echo wd\n", True),))  # 核心工作区没提交的：只有 commit=None 时读
+    put(emb, (("q/a.sh", "echo wd\n", True),))  # uncommitted in the core worktree: read only with commit=None
     put(core, (("q/b.py", "B = 2\n", False),))
     g("commit", "-qam", "c2", cwd=core)
     put(core, (("q/a.sh", "echo wd\n", True),))
@@ -112,23 +115,23 @@ def test_source_files_submodule(T):
         B.TOPS, B.RUNTIME = ("cfg", "x", "scripts"), ("q/a.sh", "big.json")
         B.RUNTIME_B = frozenset(f"{BC}/{f}" for f in B.RUNTIME)
         got = {}
-        for way, repo, c in (("嵌着", sup, emb), ("在仓库外", flat, core)):
+        for way, repo, c in (("nested", sup, emb), ("outside", flat, core)):
             B.REPO, B.CORE = repo, c
             got[way] = (B.source_files("HEAD"), B.source_files(None), B.read("HEAD", "x/y.py"), B.core_version("HEAD"))
     finally:
         B.REPO, B.CORE, B.TOPS, B.RUNTIME, B.RUNTIME_B = saved
-    files, wd, y, ver = got["嵌着"]
+    files, wd, y, ver = got["nested"]
     assert sorted(files) == ["cfg/m.py", "scripts/queue/worker_start.sh", f"{BC}/big.json", f"{BC}/q/a.sh", f"{BC}/q/b.py",
-                             f"{BC}/q/hub_only.py", "x/lib/l.py", "x/y.py"], sorted(files)  # OUTPUTS["bundle"] 盖住了核心：整个核心
+                             f"{BC}/q/hub_only.py", "x/lib/l.py", "x/y.py"], sorted(files)  # OUTPUTS["bundle"] covers the core: the whole core
     assert files[f"{BC}/q/b.py"] == (b"B = 2\n", False) and files[f"{BC}/q/a.sh"] == (b"echo a\n", True), files
     assert wd[f"{BC}/q/a.sh"] == (b"echo wd\n", True) and sorted(wd) == sorted(files), wd
     assert y == "Y = 3\n" and re.fullmatch(r"[0-9a-f]{7,}", ver)
-    files2, wd2, _, _ = got["在仓库外"]
+    files2, wd2, _, _ = got["outside"]
     assert sorted(files2) == ["cfg/m.py", "scripts/queue/worker_start.sh", f"{BC}/big.json", f"{BC}/q/a.sh", "x/lib/l.py", "x/y.py"], \
         sorted(files2)
     assert {k: v for k, v in files.items() if k not in (f"{BC}/q/b.py", f"{BC}/q/hub_only.py")} == files2 and wd2[f"{BC}/q/a.sh"] == (b"echo wd\n", True)
-    ok("取文件：使用者的从提交（别的子模块取它钉的提交，核心的子模块跳过），核心的从核心仓库的 HEAD（不看钉的提交）放在 "
-       f"{BC}/ 下；commit=None 时两边都读工作区；核心在仓库外时只取 RUNTIME")
+    ok("taking files: project files from the commit (other submodules at their pinned commit; core submodule skipped), core files from the core repo HEAD (not the pinned commit) under "
+       f"{BC}/; commit=None reads both worktrees; with the core outside the repo only RUNTIME is taken")
 
 
 def test_secrets():
@@ -140,12 +143,12 @@ def test_secrets():
     B.source_files = lambda *a: dict(saved(*a), **{"scripts/x.sh": (f"echo {tok}".encode(), False)})
     try:
         B.contents(None)
-        raise AssertionError("有钥匙应报错")
+        raise AssertionError("a secret should fail")
     except B.BundleError as e:
         assert "scripts/x.sh:1" in str(e) and tok not in str(e), e
     finally:
         B.source_files = saved
-    ok("钥匙：私钥、GitHub token 报错（报错里不带整个钥匙），短的不算")
+    ok("secrets: private keys and GitHub tokens fail (the error omits the whole secret); short look-alikes do not")
 
 
 def test_bundle(T):
@@ -155,7 +158,7 @@ def test_bundle(T):
     bid2, path2 = B.build(None, out=os.path.join(R, "code"))
     assert (bid2, path2) == (bid, path)
     assert not [n for n in os.listdir(os.path.join(R, "code")) if n.startswith(".")]
-    ok("建包：包名是 16 位内容哈希，同样的内容再建一次用原来的包、不留临时目录")
+    ok("build: the name is a 16-char content hash; the same content reuses the bundle and leaves no temp dir")
 
     files, links = set(), []
     for d, ds, fs in os.walk(path):
@@ -166,12 +169,12 @@ def test_bundle(T):
     src = B.source_files(None)
     for f in B.RUNTIME:
         if os.path.isfile(os.path.join(CORE, f)):
-            assert f"{B.BC}/{f}" in files, f"{f} 不在包里（没在 git 里跟踪？）"
+            assert f"{B.BC}/{f}" in files, f"{f} is not in the bundle (not tracked by git?)"
     for f in (f"{BQ}/site_ops.py", f"{BQ}/schema.py", f"{BQ}/worker.sbatch", f"{BQ}/cpu_worker.sbatch", f"{BQ}/worker_start.sh",
               f"{BQ}/testdata/bin/toy_train.sh", STEP, f"{BQ}/testdata/exps/demo/experiments.py", B.VERSION, B.PROJECT_FILE):
         assert f in files, f
     for f, (raw, exe) in src.items():
-        assert open(os.path.join(path, f), "rb").read() == raw, f"{f} 和工作区的不一样"
+        assert open(os.path.join(path, f), "rb").read() == raw, f"{f} differs from the worktree"
         assert os.access(os.path.join(path, f), os.X_OK) == (exe or f.endswith(".sh")), f
     for f in ("machines.py", "policy.py"):
         assert open(os.path.join(path, B.conf_path(f)), "rb").read() == open(os.path.join(cfg.config_dir(), f), "rb").read(), f
@@ -180,13 +183,13 @@ def test_bundle(T):
     plug = os.path.relpath(os.path.realpath(fixture.PLUGINS), os.path.realpath(REPO))
     toml = open(os.path.join(path, B.PROJECT_FILE)).read()
     assert toml == f'config = "{B.conf_rel()}"\nplugins = ["{plug}"]\n', toml
-    ok("包里的文件：工作区的代码、配置文件夹（machines.py、policy.py）原样，一个都不生成、不改写，"
-       "没有软链接、没有旧入口；RUNTIME 全在（含 site_ops.py）；VERSION 是核心的提交号；.taskq.toml 写配置文件夹和插件在包里的位置")
+    ok("bundle contents: worktree code and the config dir (machines.py, policy.py) as is, nothing generated or rewritten, "
+       "no symlinks or old entry points; all of RUNTIME is there (including site_ops.py); VERSION is the core commit; .taskq.toml records the config dir and plugin locations in the bundle")
     return bid, path
 
 
 def test_in_bundle(T, bid, path):
-    """包里的 taskq.py、mtab.py、site_ops.py：只靠 TASKQ_MACHINE、TASKQ_ROOT 和包里的 .taskq.toml。"""
+    """taskq.py, mtab.py and site_ops.py in the bundle: only TASKQ_MACHINE, TASKQ_ROOT and the bundle's .taskq.toml."""
     R = os.path.dirname(os.path.dirname(path))
     os.symlink(bid, os.path.join(R, "code", "current"))
     cur = os.path.join(R, "code", "current")
@@ -199,7 +202,7 @@ def test_in_bundle(T, bid, path):
     assert NAME in run(["python3", mp, "names", "slurm"], env).stdout.split()
     got = run(["python3", mp, "get", ".", "no_such_field"], env)
     assert got.returncode == 1 and "Traceback" not in got.stderr and "no_such_field" in got.stderr, got
-    ok("包里的 mtab.py：读包里原样的机器表，按 TASKQ_MACHINE 认出本机；没有的字段说清、退出码 1")
+    ok("mtab.py in the bundle: reads the machine table as packaged, recognizes this machine by TASKQ_MACHINE; a missing field is explained with exit 1")
 
     tq = ["python3", os.path.join(cur, BQ, "taskq.py")]
 
@@ -228,8 +231,8 @@ def test_in_bundle(T, bid, path):
     assert run(tq + ["remove", key], env).returncode == 0
     assert not open(os.path.join(R, "queue", "tasks.jsonl")).read().strip()
     assert status()["enabled"] is False
-    ok("包里的 taskq.py：add（做法 toy 来自 .taskq.toml 写的插件）→ status --json → next（0；再领 10）→ beat → stop → release → "
-       "resume → remove；队列在 TASKQ_ROOT 下的 queue/")
+    ok("taskq.py in the bundle: add (recipe toy from the plugin in .taskq.toml) → status --json → next (0; claiming again gives 10) → beat → stop → release → "
+       "resume → remove; the queue is under TASKQ_ROOT/queue/")
 
     ops = os.path.join(cur, BQ, "site_ops.py")
 
@@ -257,13 +260,14 @@ def test_in_bundle(T, bid, path):
     assert op("smoke", dict(data=D, recipe="toy", names={}), **sto)[:2] == (0, {})
     rc, got, err = op("export", dict(data=D, spec=sp), **sto)
     assert rc != 0 and "dataset.json" in err and not re.search(r"ModuleNotFoundError|ImportError", err), err[-2000:]
-    ok("包里的 site_ops.py：执行机的 status（包名是这个包）、states；store 的 done（按 done 的每一项数盘上的文件）、collect、"
-       "smoke、export（走到插件，缺的是数据不是模块）")
+    ok("site_ops.py in the bundle: executor status (the bundle name is this bundle) and states; store done (checks each done item on disk), collect, "
+       "smoke, export (reaches the plugin; what is missing is data, not modules)")
 
 
 def test_scope_and_id(T):
-    """包里只有执行机要用的调度文件（RUNTIME）加 OUTPUTS["bundle"] 减 bundle_skip；包名只按内容。
-    这里把 bundle 换成 testdata（当 research 用），bundle_skip 换成 */bin/*、*/test_* 和 RUNTIME 里的 run_task.sh。"""
+    """The bundle has only the scheduler files executors need (RUNTIME) plus OUTPUTS["bundle"] minus bundle_skip; the name depends
+    only on content. Here bundle is replaced with testdata (as the project) and bundle_skip with */bin/*, */test_* and
+    run_task.sh from RUNTIME."""
     saved = B.TOPS, B.SKIP
     B.TOPS, B.SKIP = (f"{QR}/testdata",), ("*/test_*", "*/bin/*", "*/run_task.sh")
     try:
@@ -275,14 +279,14 @@ def test_scope_and_id(T):
     for f in B.RUNTIME:
         if os.path.isfile(os.path.join(CORE, f)):
             assert f"{B.BC}/{f}" in src, f
-    assert f"{BQ}/run_task.sh" in src, "RUNTIME 里的不受 bundle_skip 影响"
+    assert f"{BQ}/run_task.sh" in src, "RUNTIME files are not affected by bundle_skip"
     for f in (f"{BQ}/relay.py", f"{BQ}/advance.py", f"{BQ}/relay_transfer.py", f"{BQ}/README.md",
               f"{BQ}/test_relay_bundle.py", STEP, f"{BQ}/testdata/bin/toy_train.sh"):
         assert f not in src, f
     assert not [f for f in src if f.startswith(B.BC + "/") and not f.startswith(f"{BQ}/testdata/") and f not in B.RUNTIME_B], src
     assert f"{QR}/testdata/exps/demo/experiments.py" in src
-    ok("包里的文件：RUNTIME 全在（bundle_skip 不管它们），hub 才用的（relay.py、advance.py、relay_transfer.py）、说明、测试、"
-       "bundle_skip 匹配的不在")
+    ok("bundle contents: all of RUNTIME is there (bundle_skip ignores them); hub-only files (relay.py, advance.py, relay_transfer.py), docs, tests and "
+       "bundle_skip matches are not")
 
     def id_with(change):
         f = dict(files)
@@ -294,33 +298,34 @@ def test_scope_and_id(T):
     assert id_with(lambda f: None) == bid
     assert id_with(edit(f"{BQ}/run_task.sh")) != bid
     assert id_with(edit(f"{QR}/testdata/exps/demo/experiments.py")) != bid
-    assert id_with(edit(B.conf_path("machines.py"))) != bid, "配置原样带上：改了就换包"
+    assert id_with(edit(B.conf_path("machines.py"))) != bid, "config is included as is: a change changes the bundle"
     assert id_with(lambda f: f.__setitem__(f"{BQ}/run_task.sh", (f[f"{BQ}/run_task.sh"][0], False))) != bid
-    assert id_with(lambda f: f.__setitem__(B.VERSION, ("0000000\n", False))) == bid, "核心的提交号不算进包名"
-    ok("包名：只按内容（16 位），改执行机用的 run_task.sh、改 research 里的文件、改配置、改可执行位都换；核心的提交号（VERSION）改了不换")
+    assert id_with(lambda f: f.__setitem__(B.VERSION, ("0000000\n", False))) == bid, "the core commit is not part of the bundle name"
+    ok("bundle name: content only (16 chars); changing run_task.sh used by executors, a project file, config or the executable bit changes it; changing the core commit (VERSION) does not")
 
 
 SMOKE = {"test_worker.sh": "1", "test_worker_stop.sh": "3 4b", "test_worker_code.sh": "6e"}
-KEEP_FIXTURE = ("test_worker_code.sh",)  # 6e 自己拿核心再搭两个代码包（不带 .taskq.toml），配置、插件经 fixture.sh 设的 TASKQ_CONFIG、TASKQ_PLUGINS 找
+KEEP_FIXTURE = ("test_worker_code.sh",)  # 6e builds two more bundles from the core (without .taskq.toml) and finds config and plugins through TASKQ_CONFIG and TASKQ_PLUGINS set by fixture.sh
 
 
 def checks_in(text, ids):
-    """测试文件里 want <情况> 那几段的 check 个数。"""
+    """Number of checks in the want <case> blocks of a test file."""
     blocks = dict(re.findall(r"^if want (\S+); then\n(.*?)^fi$", text, re.M | re.S))
     assert set(ids.split()) <= set(blocks), ids
     return sum(len(re.findall(r"^check ", blocks[i], re.M)) for i in ids.split())
 
 
 def test_worker_in_bundle(T):
-    """包里的 worker.sbatch、worker_start.sh、consume.py、run_task.sh、taskq.py 跑 test_worker*.sh 的几个情况：
-    Slurm 作业的调用方式、领、训、交还（1），停止信号交还（3），CPU worker（4b），代码包换新（6e），够看出包里原样的配置、
-    .taskq.toml、taskq.py 的调用和代码包都能用；别的情况测的是 worker 本身的逻辑，和打不打包无关，单独跑那几个文件。三个文件同时跑。"""
+    """The bundled worker.sbatch, worker_start.sh, consume.py, run_task.sh and taskq.py run a few test_worker*.sh cases:
+    Slurm job invocation, claim, run, release (1), release on a stop signal (3), CPU worker (4b), bundle switch (6e), enough to
+    show that config as packaged, .taskq.toml, taskq.py invocation and bundles all work; other cases test worker logic unrelated
+    to bundling and run those files separately. Three files run at once."""
     R = os.path.join(T, "R2")
     _, path = B.build(None, out=os.path.join(R, "code"))
-    fake = os.path.join(path, os.path.dirname(B.conf_rel()))  # 包里机器表的 FAKE（testdata/）
-    shutil.copytree(os.path.join(fixture.FIX, "venv"), os.path.join(fake, "venv"))  # 假的 venv（bin/activate 不是代码，不进包）
+    fake = os.path.join(path, os.path.dirname(B.conf_rel()))  # FAKE from the bundle machine table (testdata/)
+    shutil.copytree(os.path.join(fixture.FIX, "venv"), os.path.join(fake, "venv"))  # fake venv (bin/activate is not code, so not in the bundle)
     fx ='source "$HERE/testdata/fixture.sh"'
-    bare = 'PATH=$(python3 "$HERE/testdata/fixture.py" path "$PATH") || exit 1; export PATH'  # 不设 TASKQ_CONFIG、TASKQ_PLUGINS
+    bare = 'PATH=$(python3 "$HERE/testdata/fixture.py" path "$PATH") || exit 1; export PATH'  # no TASKQ_CONFIG or TASKQ_PLUGINS
     procs = {}
     for name, ids in SMOKE.items():
         test = open(os.path.join(HERE, name)).read()
@@ -335,18 +340,19 @@ def test_worker_in_bundle(T):
     for name, (want, p) in procs.items():
         out, err = p.communicate(timeout=900)
         got = out.count("PASS:")
-        assert p.returncode == 0 and "全部通过" in out and not [ln for ln in out.splitlines() if ln.startswith("FAIL:")] and got == want, \
-            f"{name}：{got}/{want}\n" + out[-3000:] + err[-2000:]
+        assert p.returncode == 0 and "all passed" in out and not [ln for ln in out.splitlines() if ln.startswith("FAIL:")] and got == want, \
+            f"{name}: {got}/{want}\n" + out[-3000:] + err[-2000:]
         total += got
-    ok(f"包里的 worker 跑 test_worker*.sh 的几个情况（{'，'.join(f'{n} {i}' for n, i in SMOKE.items())}）：{total} 项全部通过")
+    ok(f"the bundled worker ran a few test_worker*.sh cases ({', '.join(f'{n} {i}' for n, i in SMOKE.items())}): all {total} passed")
 
 
 def test_prune(T):
-    """hub 上建的包：留 keep（各执行机在用的、闸门挡着的）和最近的 proto.CODE_KEEP 个；建到一半的临时目录 1 天后删。"""
+    """Bundles on the hub: keep keep (used by executors or held by the gate) and the newest proto.CODE_KEEP; remove half-built
+    temp dirs after a day."""
     import time
     out = os.path.join(T, "prune")
     now = time.time()
-    names = [f"b{i}" for i in range(proto.CODE_KEEP + 3)]  # b0 最新
+    names = [f"b{i}" for i in range(proto.CODE_KEEP + 3)]  # b0 is newest
     for i, d in enumerate(names + [".tmp_old", ".tmp_new"]):
         os.makedirs(os.path.join(out, d))
         t = now - 3 * 86400 if d == ".tmp_old" else now - 60 if d == ".tmp_new" else now - 3600 * i
@@ -354,7 +360,7 @@ def test_prune(T):
     gone = B.prune({names[-1]}, out)
     left = set(os.listdir(out))
     assert sorted(gone) == sorted(names[proto.CODE_KEEP:-1]) and left == set(names[:proto.CODE_KEEP]) | {names[-1], ".tmp_new"}, (gone, left)
-    ok(f"hub 上的包：留在用的和最近的 {proto.CODE_KEEP} 个，别的删掉；建到一半的临时目录 1 天后删")
+    ok(f"bundles on the hub: keep ones in use and the newest {proto.CODE_KEEP}, remove the rest; remove half-built temp dirs after a day")
 
 
 def main():
@@ -369,10 +375,10 @@ def main():
         test_worker_in_bundle(T)
         test_prune(T)
     except BaseException:
-        print(f"失败（文件在 {T}）")
+        print(f"failed (files in {T})")
         raise
     shutil.rmtree(T)
-    print("全部通过")
+    print("all passed")
 
 
 if __name__ == "__main__":

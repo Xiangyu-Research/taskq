@@ -19,7 +19,7 @@ SPEC=$2 DRY=${3:-}
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root
 M="python3 $CORE/sites/mtab.py"
 HOST=$($M names store | head -1)
-LD=${TASKQ_DATA:?run on the store: TASKQ_DATA is the store's data dir}
+LD=${TASKQ_DATA:?run on the store: TASKQ_DATA is the data dir of the store}
 BK=$($M backups | grep -vx "$HOST" | head -1)
 [[ -n $BK ]] || { echo "the machine table (machines.py) has no backup machine (role backup) other than $HOST" >&2; exit 2; }
 BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" backup 2> /dev/null || $M get "$BK" data)

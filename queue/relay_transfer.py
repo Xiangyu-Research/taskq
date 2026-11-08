@@ -1,6 +1,7 @@
-"""relay：store 上的数据传到执行机（stage）、做完的结果从执行机拉回 store（fetch）、备份到备份机（archive）、删那边的任务和结果
-（drop_remote）。hub 只统筹：读写数据的都在 store、执行机上跑（relay_remote.op / store_op，queue/site_ops.py），数据在 store 和
-执行机之间直接传，不经过 hub 的盘。那边的路径和 store 的数据目录一样；数据按 sha256 存成 blob（relay_remote.py 的说明）。"""
+"""Relay: stage data from the store to an executor, fetch finished results back to the store, archive them to the backup
+machine, and drop a remote task and its results. The hub only coordinates: everything that reads or writes data runs on the
+store or the executor (relay_remote.op / store_op, queue/site_ops.py), and data moves directly between them, never through the
+hub's disk. Remote paths match the store's data dir; data is stored as blobs by sha256 (see relay_remote.py)."""
 import contextlib
 import json
 import os
@@ -10,7 +11,7 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of the scheduler code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
@@ -23,40 +24,41 @@ import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
 import bundle_gate as BG  # noqa: E402
 
-PIN_EVERY = 3600  # 传数据期间每隔这么久重写一次钉子（那边的清理只认 12 小时内的）
-MOVE_TIMEOUT = 3 * 86400  # 一次送、拉、归档最多跑多久（隧道自己连续 STALL 秒没有进展就停）
+PIN_EVERY = 3600  # rewrite the pin this often while staging (remote cleanup only honours pins younger than 12 hours)
+MOVE_TIMEOUT = 3 * 86400  # max run time for one stage, fetch or archive (the tunnel stops after STALL seconds without progress)
 
 
 class Gone(RN.RelayError):
-    """实验表和总队列里都没有这个 key。"""
+    """Neither the experiment table nor the hub queue has this key."""
 
 
-# ---------------- 传数据（hub 的 wait 组里跑） ----------------
+# ---------------- staging (runs in the hub's wait group) ----------------
 def lookup(key):
     s = S.lookup(key)
     if s is None:
-        raise Gone(f"实验表和总队列里都没有 {key}")
+        raise Gone(f"no {key} in the experiment table or the hub queue")
     return s if s.get("exp") else S.resolve(s["recipe"], s["params"])
 
 
 def stage(name, key, nice=None, add=True, say=print):
-    """store 上的数据 → 那边（和 store 的数据目录一样的相对路径）；add 时再加进那边的队列。→ key。"""
+    """Store data → remote (same relative paths as the store data dir); when add, also add it to the remote queue. → key."""
     real = lookup(key)
     ex = RM.store_op("export", dict(spec=real))
     ids = in_use(name) if add else []
     g = ids and BG.check_all(S.sendable(S.resolve(real["recipe"], ex["params"])), ids)
-    if g:  # 那边在用的代码包跑不了要送的说明：不传、不加，领取保留（queue/bundle_gate.py）
+    if g:  # the bundle in use over there cannot run the spec to send: do not stage or add, keep the claim (queue/bundle_gate.py)
         BG.hold(name, key, *g)
-        say(f"{RM.conf(name)['label']} 在用的代码包 {g[0]} 跑不了 {key} 的说明，先不送：{g[1]}")
+        say(f"the bundle {g[0]} in use on {RM.conf(name)['label']} cannot run the spec for {key}, not sending yet: {g[1]}")
         return None
     links = {rel: h for rel, h, *_ in ex["files"]}
-    with pinned(name, key, links.values(), say):  # 视图建好前那边的清理不删这些块
+    with pinned(name, key, links.values(), say):  # remote cleanup will not remove these blobs before the view is built
         return _stage(name, key, nice, add, say, real, ex, links)
 
 
 @contextlib.contextmanager
 def pinned(name, key, hashes, say=print):
-    """这段时间里那边的清理不删这些 blob（R/state/pins/<key>.json）；时间长时定时重写，钉子不过期，出来时撤掉。"""
+    """Remote cleanup will not remove these blobs while this runs (R/state/pins/<key>.json); refresh it periodically so it does
+    not expire, and clear it on exit."""
     pin = proto.safe(key)
     want = dict(key=pin, hashes=sorted(set(hashes)))
     RM.op(name, "pin", want)
@@ -78,37 +80,39 @@ def pinned(name, key, hashes, say=print):
         try:
             RM.op(name, "pin", dict(key=pin, hashes=None))
         except RuntimeError as e:
-            say(f"撤掉 {key} 的钉住记录没成（{e}），清理 12 小时后不再认它")
+            say(f"could not clear the pin for {key} ({e}); cleanup stops honouring it after 12 hours")
 
 
 def ensure_blobs(name, files, say=print, src=None, what=None, n=None):
-    """src（默认 store）上的文件 {sha256: [相对 src 数据目录的路径或 None, 字节数, src 上的路径]} → 那边的 blobs 里都有了
-    → {sha256: 那边的路径（R/blobs/<前两位>/<sha256>，~ 不展开）}。先问那边缺哪些；缺的先从那边本机已有的数据目录里找
-    （relay_remote.same_disk_srcs：按相对路径找，大小、sha256 对得上、同一个盘的硬链接）；还缺的由 src 送过去（site_ops push）。
-    要不被清理删掉，调用方先 pinned。CPU 作业排不上 → RM.NoSlot；没传到 → RelayError。"""
+    """Files on src (default the store) as {sha256: [path relative to src's data dir or None, bytes, path on src]} → they all
+    exist in the remote blobs → {sha256: remote path (R/blobs/<first two>/<sha256>, ~ not expanded)}. First ask what is
+    missing; for those, try data dirs already on that machine (relay_remote.same_disk_srcs: by relative path, matching size and
+    sha256, hard link on the same disk); the rest is sent by src (site_ops push). Caller pins first so cleanup leaves them alone.
+    No CPU job slot → RM.NoSlot; not transferred → RelayError."""
     miss = RM.op(name, "missing", sorted(files))
-    say(f"{what or name}：{len(files) if n is None else n} 个文件，那边缺 {len(miss)} 个")
+    say(f"{what or name}: {len(files) if n is None else n} files, {len(miss)} missing over there")
     if miss:
         got = set(RM.op(name, "ingest", dict(srcs=RM.same_disk_srcs(name), files={h: files[h][:2] for h in miss}),
                         timeout=3 * 3600, job=RM.conf(name).get("transfer_job")))
         miss = [h for h in miss if h not in got]
-        say(f"那边已有的数据里收进 {len(got)} 个，还缺 {len(miss)} 个")
+        say(f"ingested {len(got)} from data already over there, {len(miss)} still missing")
     if miss:
         src = src or M.store()
         bad = RM.op(src, "push", dict(to=name, files={h: files[h][2] for h in miss}), timeout=MOVE_TIMEOUT, say=say)
         if bad:
-            raise RN.RelayError(f"{len(bad)} 个文件没传到或对不上（下次重传）")
+            raise RN.RelayError(f"{len(bad)} files were not transferred or do not match (will retry)")
     return {h: f"{RM.root(name)}/{proto.blob(h)}" for h in files}
 
 
 def in_use(name):
-    """那边在用的代码包（queue/bundle_gate.py）；连不上 → []。"""
+    """The bundle in use over there (queue/bundle_gate.py); unreachable → []."""
     u = BG.current(name)
     return BG.in_use(name, *u) if u else []
 
 
 def check_overlap(name, key, paths):
-    """这个任务要放的路径和同一台上别的没做完的任务的产出重叠（相同、上级或下级）→ RelayError，不传。"""
+    """The paths this task will place overlap (same, parent or child) with outputs of another unfinished task on the same
+    machine → RelayError, do not stage."""
     keys = ST.keys_of(ST.load_state(), name)
     hit = []
     for r, k in keys.items():
@@ -123,7 +127,7 @@ def check_overlap(name, key, paths):
     states = RM.op(name, "states", None)
     busy = [r for r in hit if states.get(r) not in (None, "done")]
     if busy:
-        raise RN.RelayError(f"{key} 要放的输入和 {RM.conf(name)['label']} 上还没做完的 {', '.join(busy)} 的产出重叠，先不传")
+        raise RN.RelayError(f"inputs for {key} overlap outputs of unfinished {', '.join(busy)} on {RM.conf(name)['label']}, not staging")
 
 
 def _stage(name, key, nice, add, say, real, ex, links):
@@ -135,15 +139,15 @@ def _stage(name, key, nice, add, say, real, ex, links):
     try:
         ensure_blobs(name, {h: [inner, size, path] for _, h, size, inner, path in ex["files"]}, say, what=key, n=len(links))
     except RM.NoSlot as e:
-        say(f"{e}；这次不传，下次检查再来")
+        say(f"{e}; not staging this time, will retry on the next check")
         return None
     now = time.time()
     ST.update_state(lambda st: st.setdefault("views", {}).setdefault(name, {}).update({v: now for v in views}))
     others = [k for r, k in ST.keys_of(ST.load_state(), name).items() if r != key]
     used = set().union(*[ST.paths_of(k) for k in others]) if others else set()
-    clean = [v for v in views if not ST.overlaps(v, used, ST.ancestors(used))]  # 视图里多出来的旧链接只在别的任务不用这个视图时删
+    clean = [v for v in views if not ST.overlaps(v, used, ST.ancestors(used))]  # extra old links in a view go only when no other task uses that view
     n = RM.op(name, "view", dict(views=views, clean=clean, links=links, texts=ex["texts"]))
-    say(f"那边的输入放好了（{n} 个文件，视图 {'、'.join(views) or '无'}）")
+    say(f"inputs placed over there ({n} files, views {', '.join(views) or 'none'})")
 
     def rec(st):
         st.setdefault("keys", {}).setdefault(name, {})[key] = dict(
@@ -153,78 +157,79 @@ def _stage(name, key, nice, add, say, real, ex, links):
     if add:
         r = RM.rtq(name, f"add --nice {int(nice)} --spec-stdin", input=json.dumps([S.sendable(S.resolve(real["recipe"], ex["params"]))]))
         if r is None or r[0]:
-            raise RuntimeError(f"加进 {RM.conf(name)['label']} 的队列出错：{RM.err_tail((r or [0, 'ssh 不通'])[1])}")
+            raise RuntimeError(f"could not add to the {RM.conf(name)['label']} queue: {RM.err_tail((r or [0, 'ssh unreachable'])[1])}")
         say(r[1])
-    else:  # 补传（那边查到缺输入）：撤掉标记，那边接着领
+    else:  # restage (the remote side reported missing inputs): clear the marker so it can claim again
         r = RM.rtq(name, f"input-ok {shlex.quote(key)}")
         if r is None or r[0]:
-            raise RuntimeError(f"{RM.conf(name)['label']} 上撤掉缺输入的标记出错：{RM.err_tail((r or [0, 'ssh 不通'])[1])}")
-        say(r[1] or "那边没有缺输入的标记")
+            raise RuntimeError(f"could not clear the missing-input marker on {RM.conf(name)['label']}: {RM.err_tail((r or [0, 'ssh unreachable'])[1])}")
+        say(r[1] or "no missing-input marker over there")
     return key
 
 
 def resend(name, say=print):
-    """把传给这台的任务按现在的做法重新解析，换掉那边队列里的说明（只换那边已有的，不加新的）。"""
+    """Re-resolve tasks staged to this machine and replace their specs in the remote queue (only existing ones, add nothing)."""
     keys = ST.keys_of(ST.load_state(), name)
     specs, ids = [], in_use(name) if keys else []
     for real, k in keys.items():
         sp = S.sendable(S.resolve(k["recipe"], k["params"]))
         g = BG.check_all(sp, ids)
-        if g:  # 那边在用的包跑不了新的说明：留着那边原来的
-            say(f"{real} 不换：在用的代码包 {g[0]} 跑不了新的说明（{g[1]}）")
+        if g:  # the bundle in use cannot run the new spec: keep the remote one
+            say(f"{real} not updated: the bundle {g[0]} in use cannot run the new spec ({g[1]})")
         else:
             specs.append(sp)
     if not specs:
-        say("没有传过去的任务")
+        say("no staged tasks")
         return
     r = RM.rtq(name, "add --nice 0 --spec-stdin --update-only", input=json.dumps(specs))
     if r is None or r[0]:
-        raise RuntimeError(f"{RM.conf(name)['label']} 换说明出错：{RM.err_tail((r or [0, 'ssh 不通'])[1])}")
-    say(r[1] or "没有要换的")
+        raise RuntimeError(f"could not replace specs on {RM.conf(name)['label']}: {RM.err_tail((r or [0, 'ssh unreachable'])[1])}")
+    say(r[1] or "nothing to replace")
 
 
-# ---------------- 拉回、归档（hub 的 IO 组里排，数据在 store 和执行机之间走） ----------------
+# ---------------- fetch and archive (queued in the hub's IO group; data moves between the store and the executor) ----------------
 def fetch(name, key, say=print):
-    """那边做完的结果 → store 的数据目录（site_ops 的 list 在那边列、pull 在 store 上拉、核对、放好）。
-    没拉成（没做完、那边列不出、store 上拉、核对出错）都报 RelayError。"""
+    """Results finished over there → the store data dir (site_ops list on the remote side, pull on the store, verify, place).
+    Any failure (not done, cannot list, pull or verify) raises RelayError."""
     real = lookup(key)
     k = ST.keys_of(ST.load_state(), name).get(key)
     if not k:
-        raise RN.RelayError(f"{key} 没有传给 {RM.conf(name)['label']} 的记录")
+        raise RN.RelayError(f"no record of {key} staged to {RM.conf(name)['label']}")
     o = S.outputs(real)
     try:
         res = RM.op(name, "list", dict(out=real["out"], done=o["done"], exclude=o["exclude"], extra=o["extra"],
                                        outs=k.get("outs") or o["outs"], key=key, links=k.get("links") or {}))
     except RuntimeError as e:
-        raise RN.RelayError(f"列 {key} 的产出出错：{e}") from None
+        raise RN.RelayError(f"could not list outputs of {key}: {e}") from None
     if not res["done"]:
-        raise RN.RelayError(f"{RM.conf(name)['label']} 上 {key} 还没做完")
+        raise RN.RelayError(f"{key} is not done on {RM.conf(name)['label']} yet")
     if res["bad"]:
-        raise RN.RelayError(f"{key} 的产出里有指到别处的链接（不是数据目录里的、也不是这个任务的输入）：{res['bad'][:3]}")
+        raise RN.RelayError(f"outputs of {key} contain links pointing elsewhere (not into the data dir or this task's inputs): {res['bad'][:3]}")
     try:
         r = RM.store_op("pull", dict(frm=name, spec=real, items=res["items"], links=res["links"]), timeout=MOVE_TIMEOUT, say=say)
     except RuntimeError as e:
-        raise RN.RelayError(f"{key} 拉回 store 出错：{e}") from None
-    say(f"{key} 拉回了 {r['files']} 个文件、{r['links']} 个链接")
+        raise RN.RelayError(f"could not fetch {key} to the store: {e}") from None
+    say(f"{key} fetched {r['files']} files and {r['links']} links")
 
 
 def archive(key, say=print):
-    """store 上这个任务的结果备份到备份机、核对（site_ops archive → archive_task.sh）。"""
+    """Back up this task's results on the store to the backup machine and verify (site_ops archive → archive_task.sh)."""
     RM.store_op("archive", dict(spec=S.sendable(lookup(key))), timeout=MOVE_TIMEOUT, say=say)
-    say(f"{key} 归档了")
+    say(f"{key} archived")
 
 
-# ---------------- 删那边的任务 ----------------
+# ---------------- drop the remote task ----------------
 class PathsLeft(Exception):
-    """那边的任务删了、路径没删掉：记录里标了 dropped，relay.plan 下一轮再删。"""
+    """The remote task was dropped but its paths were not: mark it dropped in the record and relay.plan retries next round."""
 
 
 def drop_remote(name, key, rk, gone=False):
-    """删那边的任务（taskq.py remove 在锁里查过没人领着），再删这个任务占的、别的任务不用的路径和日志，最后删记录 → 出错说明或 None。"""
+    """Drop the remote task (taskq.py remove checks under the lock that nobody claimed it), then remove paths and logs this
+    task occupied that no other task uses, and finally its record → error text or None."""
     if not gone:
         r = RM.rtq(name, f"remove {shlex.quote(rk)}")
-        if not r or r[0] not in (0, proto.EXIT["gone"]):  # gone：上次删了任务、没删完路径
-            return f"任务没删掉，路径留着：{RM.err_tail((r or [0, 'ssh 不通'])[1], 150)}"
+        if not r or r[0] not in (0, proto.EXIT["gone"]):  # gone: the task was removed last time but paths were left
+            return f"task not removed, paths left: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}"
         ST.update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(key) or {}).update(dropped=time.time()))
     keys = ST.keys_of(ST.load_state(), name)
     paths = ST.droppable(keys, key, ST.paths_of(keys.get(key) or {}))
