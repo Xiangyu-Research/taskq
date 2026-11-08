@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""本机（跑传输的机器：store，或送环境包时的 hub）和别的机器之间经本机的 Cloudflare 隧道传大批文件，两个方向的连接都由
-那边发起，那边不开服务；本机的地址是机器表里本机的 transfer（临时地址：quick）：
-  push：那边从本机的文件服务下载（Slurm 执行机上大文件可以在 CPU 节点上下载，见机器表的 transfer_job）
-  pull：那边按 90 MB 一块上传到本机的文件服务（Cloudflare 一次请求最多 100 MB）
-同一台机器的传输一个接一个，不同机器的同时传，共用一个文件服务进程。
-在哪里收发、地址见 queue/README.md 的“传输”一条。
+"""Transfer large files between this machine (the store, or the hub when sending env bundles) and other machines over a
+Cloudflare tunnel from here. The other side opens the connection and runs no service; this machine's address is its
+`transfer` entry in the machine table (temporary: `quick`). push: the other side downloads from the file server here
+(on Slurm a large transfer can download on a CPU node, see `transfer_job`); pull: it uploads in 90 MB chunks (Cloudflare
+caps one request at 100 MB). Transfers for one machine run one at a time; different machines share one file server process.
 
-  taskq tunnel rsync <rsync 的参数> <源> <目标>  rsync 的替身：先把要传的文件经隧道传到目标旁边的暂存目录，再照原样跑 rsync
-                                                （加 --link-dest，对上的文件不再经 ssh 传），最后删暂存目录
-  taskq tunnel push <机器> <本机的源目录> <那边的目标目录> <清单>   清单每行一个相对源目录的路径
-  taskq tunnel pull <机器> <那边的源目录> <本机的目标目录> <清单>   清单每行"相对路径<TAB>字节数"
+  taskq tunnel rsync <rsync args> <source> <target>  drop-in rsync: transfer the files through the tunnel to a staging
+                                                     dir next to the target, run rsync as usual (with --link-dest, so
+                                                     matching files do not go over ssh), then delete the staging dir
+  taskq tunnel push <machine> <source dir here> <target dir there> <list>   list: one path relative to the source dir
+  taskq tunnel pull <machine> <source dir there> <target dir here> <list>   list: one "relpath<TAB>bytes" per line
 """
 import fcntl
 import hashlib
@@ -31,13 +31,13 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # scheduler code root
 CHUNK = int(os.environ.get("TUNNEL_CHUNK", 90 * 2 ** 20))
 NPAR = int(os.environ.get("TUNNEL_NPAR", 8))
 MIN_JOB = float(os.environ.get("TUNNEL_MIN_JOB", 1e9))
 JOB_WAIT = 600
 STALL = int(os.environ.get("TUNNEL_STALL", 3600))
-ROUNDS = 3  # 没传到、对不上的文件同一次里再补传几轮（文件多时偶尔断几个）
+ROUNDS = 3  # retry missing or mismatched files within the same run (a few drop when there are many)
 POLL = float(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
 LOCK = os.environ.get("TUNNEL_LOCK")
@@ -65,11 +65,11 @@ def state(*parts, **kw):
 
 
 def ssh(host, cmd, check=True, input=None, timeout=300):
-    """那边跑一条短命令；那边也限时，卡在存储里时不留进程。"""
+    """Run one short command on the other side, bounded there too so a hang in storage leaves no process."""
     r = subprocess.run(SSH + [host, f"timeout -k 10 {timeout - 15} bash -c {shlex.quote(cmd)}"], input=input, capture_output=True, text=True,
                        timeout=timeout)
     if check and r.returncode:
-        raise RuntimeError(f"ssh {host} 出错（{r.returncode}）：{r.stderr.strip()[-300:]}")
+        raise RuntimeError(f"ssh {host} failed ({r.returncode}): {r.stderr.strip()[-300:]}")
     return r.stdout
 
 
@@ -85,10 +85,12 @@ def md5_of(path):
     return h.hexdigest()
 
 
-# ---------------- 本机的文件服务 ----------------
-# 所有传输共用 bind 上的一个文件服务进程（_serve）：第一个要用的传输起它，挂了下一个要用的再起，没有会话空闲 IDLE 秒后退出。
-# 每次传输是一个会话：<服务文件夹>/<token>.json 放清单、src / dst、传输进程的 pid（服务按 pid 清掉没人要的会话），
-# 服务记下的进度（传了多少字节、发出的文件的 MD5、收到的文件对不对）追加到 <token>.out，传输进程从那里读。
+# ---------------- file server on this machine ----------------
+# All transfers share one file server process on bind (_serve): the first transfer starts it, another starts it again if
+# it died, and it exits after IDLE seconds without sessions. Each transfer is a session:
+# <server dir>/<token>.json holds the list, src / dst and the transfer process pid (the server drops sessions whose pid
+# is gone); progress (bytes moved, MD5 of sent files, whether received files match) is appended to <token>.out, which
+# the transfer process reads.
 
 def alive(pid):
     try:
@@ -101,7 +103,7 @@ def alive(pid):
 
 
 class Served:
-    """服务进程里的一个会话。"""
+    """One session inside the server process."""
 
     def __init__(self, path, d):
         self.files = {r: tuple(v) for r, v in d["files"].items()}
@@ -143,7 +145,7 @@ class Registry:
         return self.cache[token]
 
     def prune(self):
-        """删掉传输进程已经不在的会话 → 还有几个会话；服务文件夹没了 → None。"""
+        """Delete sessions whose transfer process is gone → number left; server dir gone → None."""
         try:
             names = os.listdir(self.d)
         except FileNotFoundError:
@@ -189,7 +191,7 @@ def handler(reg):
             self.wfile.write(body)
 
         def session(self):
-            """/<token>/<相对路径>?… → (会话, 相对路径, 参数)；token 不对 → 会话是 None。"""
+            """/<token>/<relpath>?query → (session, relpath, params); bad token → session is None."""
             p = urllib.parse.urlsplit(self.path)
             parts = p.path.split("/", 2)
             if len(parts) < 3:
@@ -201,7 +203,7 @@ def handler(reg):
                 return self.reply(200, b"ok")
             S, rel, _ = self.session()
             if S is not None and rel == "":
-                return self.reply(200, b"ok")  # 传输进程确认服务认得这个会话
+                return self.reply(200, b"ok")  # the transfer process checks that the server knows this session
             if S is None or S.src is None or rel not in S.files:
                 return self.reply(404)
             size = S.files[rel][0]
@@ -267,20 +269,20 @@ def handler(reg):
 
 
 def serve_main(bind, d):
-    """共享的文件服务（tunnel.py _serve）：bind 上已经有服务时直接退出。"""
+    """Shared file server (tunnel.py _serve); exits if bind already has one."""
     reg = Registry(d)
     host, port = bind.rsplit(":", 1)
     try:
         srv = http.server.ThreadingHTTPServer((host, int(port)), handler(reg))
     except OSError as e:
-        log(f"{bind} 已经有服务（{e}），不另起")
+        log(f"{bind} already has a server ({e}), not starting another")
         return 0
     srv.daemon_threads = True
     pidf = os.path.join(d, "serve.pid")
     with open(pidf, "w") as f:
         f.write(f"{os.getpid()}\n")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log(f"文件服务在 {bind} 起来了（pid {os.getpid()}）")
+    log(f"file server up on {bind} (pid {os.getpid()})")
     last = time.time()
     while True:
         time.sleep(min(10, IDLE / 3))
@@ -298,7 +300,7 @@ def serve_main(bind, d):
             os.unlink(pidf)
     except OSError:
         pass
-    log("没有会话了，文件服务退出")
+    log("no sessions left, file server exits")
     return 0
 
 
@@ -309,7 +311,7 @@ def srv_dir():
 
 
 class Session:
-    """一次传输在共享文件服务上的会话（传输进程这边）。"""
+    """One transfer's session on the shared file server (transfer-process side)."""
 
     def __init__(self, files, src=None, dst=None):
         self.token = secrets.token_urlsafe(24)
@@ -326,7 +328,7 @@ class Session:
         os.replace(tmp, self.base + ".json")
 
     def ensure(self):
-        """bind 上没有服务在听时起一个（同时起了两个的，后起的绑不上自己退出）。"""
+        """Start a server if nothing listens on bind (of two started at once, the second cannot bind and exits)."""
         h, p = self.bind.rsplit(":", 1)
         try:
             with socket.create_connection(("127.0.0.1" if h in ("", "0.0.0.0") else h, int(p)), timeout=3):
@@ -338,7 +340,7 @@ class Session:
                              cwd=self.dir, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
 
     def open(self, quick=False):
-        """→ 那边用的地址。quick：用临时地址（机器表里本机的 quick、执行机的 quick_tunnel），不用本机的固定地址。"""
+        """→ address for the other side. quick: use a temporary address (this machine's quick, an executor's quick_tunnel) instead of this machine's fixed address."""
         quick = quick and "TUNNEL_URL" not in os.environ
         for attempt in range(3 if quick else 1):
             self.ensure()
@@ -356,7 +358,7 @@ class Session:
                 time.sleep(wait)
                 wait = min(2 * wait, 2)
                 self.ensure()
-        raise RuntimeError(f"{self.url} 连不到文件服务（traefik 的路由或隧道）")
+        raise RuntimeError(f"cannot reach the file server at {self.url} (traefik route or tunnel)")
 
     def poll(self):
         try:
@@ -387,7 +389,7 @@ class Session:
 
 
 def entry(host, site=None):
-    """那边的机器条目：site 给了按名字查，不给按 ssh 名字找；机器表里没有 → {}。"""
+    """Machine entry for the other side: look up by name if site is given, else by ssh name; not in the machine table → {}."""
     M = machines()
     if site is not None:
         return M.machine(site) if site in M.MACHINES else {}
@@ -395,11 +397,11 @@ def entry(host, site=None):
 
 
 def here():
-    """本机（跑传输的机器）的机器条目：TASKQ_MACHINE，或按主机名认。"""
+    """Machine entry for this machine (the one running the transfer): TASKQ_MACHINE, or match the hostname."""
     M = machines()
     me = M.whoami()
     if me is None or not M.machine(me).get("transfer"):
-        raise RuntimeError(f"本机（{me or '机器表里认不出'}）没有 transfer（文件服务的地址），不能经隧道传")
+        raise RuntimeError(f"this machine ({me or 'not in the machine table'}) has no transfer (file server address), cannot use the tunnel")
     return M.machine(me)
 
 
@@ -414,7 +416,7 @@ def quick_tunnel(bind):
             return cid, m.group(0)
         time.sleep(1)
     subprocess.run(["docker", "stop", cid], capture_output=True)
-    raise RuntimeError("临时隧道没给出地址")
+    raise RuntimeError("temporary tunnel gave no address")
 
 
 def lock_path(host=None):
@@ -423,27 +425,28 @@ def lock_path(host=None):
 
 
 def take_lock(host):
-    """同一台机器（按 ssh 名字）的传输一个接一个，不同机器的同时传。→ 拿着的锁（进程退出时放开）。"""
+    """Transfers for one machine (by ssh name) run one at a time; different machines run at once. → the held lock (released when the process exits)."""
     path = lock_path(host)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     f = open(path, "a")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        log(f"{host} 的另一个隧道传输在跑，等它结束")
+        log(f"another tunnel transfer to {host} is running, waiting for it")
         fcntl.flock(f, fcntl.LOCK_EX)
     return f
 
 
 def status_cmd(wd):
-    """那边的传输：done / run / dead，再加最近一行"在 …"。进程没了时再看一次 done（刚写完 done 就退出的不算 dead）。"""
+    """The remote transfer: done / run / dead, plus the last "at ..." line. Check done again after the process is gone (exiting right after writing done is not dead)."""
     return (f"cd {wd} && if [ -e done ]; then echo done; elif pgrep -f '[b]ash {wd}/run.sh' > /dev/null; then echo run; "
             f"elif [ -e done ]; then echo done; else echo dead; fi; grep '^at ' log 2> /dev/null | tail -1")
 
 
 def run_remote(host, mode, plan, serve, total, site=None):
-    """在那边建工作目录、放脚本和清单、后台跑，等它写 done；返回那边的 results（相对路径 → md5）。
-    工作目录：有根目录的机器在根目录的 tmp 下，没有的在状态文件夹下；Python 用那台 conda 的（没有 conda 用 python3）。"""
+    """Create the work dir on the other side, put the script and plan there, run in the background, wait for done; return
+    results there (relpath → md5). Work dir: under the root's tmp when the machine has a root, else in the state dir.
+    Python: the machine's conda if it has one, else python3."""
     sys.path.insert(0, os.path.join(CORE, "queue"))
     import proto
     m = entry(host, site)
@@ -460,7 +463,7 @@ def run_remote(host, mode, plan, serve, total, site=None):
     if job:
         t = max(30, int(total / 5e6 / 60) + 10)
         sys.path.insert(0, os.path.join(CORE, "sites"))
-        import slurm  # 作业名每次随机
+        import slurm  # random job name each time
         run.append(f"srun -I{JOB_WAIT} {job} -t {t} -J {slurm.jobname(m.get('job_names'))} {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append(f"grep -q '^complete' log 2> /dev/null || {pyx} {script} {mode} plan.json >> log 2>&1")
     run.append("touch done")
@@ -477,23 +480,23 @@ def run_remote(host, mode, plan, serve, total, site=None):
                 seen = time.time()
             except RuntimeError:
                 st = [""]
-            serve.ensure()  # 共享的服务挂了就重起，那边的 curl、上传会重试
+            serve.ensure()  # restart the shared server if it died; curl and uploads there retry
             serve.poll()
             if len(st) > 1 and st[1] and st[1] != where:
                 where = st[1]
-                log(f"那边{where}")
+                log(f"remote {where}")
             if st[0] == "done":
                 break
             if st[0] == "dead":
-                raise RuntimeError("那边的传输进程没了、没有写 done：" + ssh(host, f"tail -5 {wd}/log", check=False))
+                raise RuntimeError("the transfer process on the other side is gone without writing done: " + ssh(host, f"tail -5 {wd}/log", check=False))
             if time.time() - seen > STALL:
-                raise RuntimeError(f"连续 {STALL // 60} 分钟连不上 {host}")
+                raise RuntimeError(f"cannot reach {host} for {STALL // 60} minutes")
             if time.time() - serve.last > STALL:
-                raise RuntimeError(f"连续 {STALL // 60} 分钟没有数据经过隧道")
+                raise RuntimeError(f"no data through the tunnel for {STALL // 60} minutes")
             dt = time.time() - t0
             if wait < POLL:
                 continue
-            log(f"已传 {serve.moved / 1e9:.1f} / {total / 1e9:.1f} GB，平均 {serve.moved / 1e6 / dt:.1f} MB/s")
+            log(f"transferred {serve.moved / 1e9:.1f} / {total / 1e9:.1f} GB, average {serve.moved / 1e6 / dt:.1f} MB/s")
         out = ssh(host, f"cat {wd}/results.tsv 2> /dev/null || true; echo ===; grep '^failed' {wd}/log || true")
         res, fails = out.split("===\n", 1)
         for ln in fails.splitlines():
@@ -504,14 +507,15 @@ def run_remote(host, mode, plan, serve, total, site=None):
 
 
 def home_path(p):
-    """那边的路径（~ 开头、绝对，或相对 home）→ 绝对路径。"""
+    """A path on the other side (~, absolute, or relative to home) → absolute path."""
     return os.path.join(os.path.expanduser("~"), os.path.expanduser(p))
 
 
 def local_copy(src, dst, rels, link=False):
-    """和本机在同一台机器上的执行机：不开隧道，直接在本机拷 src/<rel> → dst/<rel>。
-    先写到同目录的 .tunnelpart、核对大小（push 另核 MD5）、带上修改时间和权限，再改名；已有、大小和修改时间都一样的不再拷。
-    link（push）：先试硬链接（blob 按内容命名、不改，和收编一样），不在一个盘上再拷、核对 MD5。返回没拷成的（已删掉半个）。"""
+    """Executor on the same machine as this one: copy src/<rel> → dst/<rel> here directly, no tunnel.
+    Write to .tunnelpart in the same dir, check the size (push also checks MD5), keep mtime and mode, then rename; skip
+    files that exist with the same size and mtime. link (push): try a hard link first (blobs are named by content and
+    never change, same as ingest), copy and check MD5 if on another disk. Return the files not copied (partials removed)."""
     bad = []
     for r in rels:
         a, b = os.path.join(src, r), os.path.join(dst, r)
@@ -532,12 +536,12 @@ def local_copy(src, dst, rels, link=False):
                 shutil.copy2(a, part)
                 linked = False
             if os.path.getsize(part) != st.st_size:
-                raise IOError(f"只拷到 {os.path.getsize(part)} / {st.st_size} 字节")
+                raise IOError(f"copied only {os.path.getsize(part)} / {st.st_size} bytes")
             if link and not linked and md5_of(part) != md5_of(a):
-                raise IOError("MD5 对不上")
+                raise IOError("MD5 mismatch")
             os.replace(part, b)
         except OSError as e:
-            log(f"失败 {r}：{e}")
+            log(f"failed {r}: {e}")
             bad.append(r)
         finally:
             if os.path.lexists(part):
@@ -546,25 +550,26 @@ def local_copy(src, dst, rels, link=False):
 
 
 def push(host, src, dst, rels, site=None):
-    """本机的 src/<rel> → 那边的 dst/<rel>（dst 相对那边的 home 或绝对路径）。没传到、对不上的再补传几轮（ROUNDS），
-    返回最后还对不上、已删掉的文件。site：那边的机器名（entry）。"""
+    """This machine's src/<rel> → dst/<rel> on the other side (dst relative to its home, or absolute). Retry files that
+    did not arrive or do not match a few times (ROUNDS); return the ones still bad (already deleted). site: the machine
+    name there (entry)."""
     files = {}
     for r in rels:
         st = os.stat(os.path.join(src, r))
         files[r] = (st.st_size, st.st_mtime_ns, st.st_mode & 0o7777)
     total = sum(v[0] for v in files.values())
     if host is None:
-        log(f"本机拷 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {dst}")
+        log(f"local copy of {len(files)} files, {total / 1e9:.2f} GB to {dst}")
         return local_copy(src, home_path(dst), rels, link=True)
     lk = take_lock(host)
     serve = Session(files, src=src)
     try:
         url = serve.open(quick=bool(entry(host, site).get("quick_tunnel")))
-        log(f"经隧道传 {len(files)} 个文件、{total / 1e9:.2f} GB 到 {host}:{dst}")
+        log(f"tunnel transfer of {len(files)} files, {total / 1e9:.2f} GB to {host}:{dst}")
         t0, bad = time.time(), list(files)
         for k in range(ROUNDS + 1):
             if k:
-                log(f"补传 {len(bad)} 个缺的文件（第 {k} 轮）")
+                log(f"retry {len(bad)} missing (round {k})")
             serve.poll()
             for r in bad:
                 serve.sent.pop(r, None)
@@ -574,7 +579,7 @@ def push(host, src, dst, rels, site=None):
             except RuntimeError as e:
                 if not k:
                     raise
-                log(f"补传出错（{e}），不再补")
+                log(f"retry failed ({e}), not retrying again")
                 res, stop = {}, True
             serve.poll()
             bad = [r for r in bad if res.get(r) != (serve.sent.get(r) or md5_of(os.path.join(src, r)))]
@@ -586,27 +591,27 @@ def push(host, src, dst, rels, site=None):
         serve.close()
         lk.close()
     dt = time.time() - t0
-    log(f"传完：{len(files) - len(bad)} 个一致，{len(bad)} 个没传到或对不上（已删）；用时 {dt / 60:.0f} 分钟，平均 {total / 1e6 / dt:.1f} MB/s")
+    log(f"done: {len(files) - len(bad)} files match, {len(bad)} missing or mismatched (deleted); {dt / 60:.0f} min, average {total / 1e6 / dt:.1f} MB/s")
     return bad
 
 
 def pull(host, src, dst, items, site=None):
-    """那边的 src/<rel> → 本机的 dst/<rel>。items：[(rel, 字节数)]。没拉到的再补拉几轮（ROUNDS），返回最后还没拉到的文件。"""
+    """src/<rel> on the other side → dst/<rel> here. items: [(rel, bytes)]. Retry files that did not arrive a few times (ROUNDS); return the ones still missing."""
     files = {r: (int(n),) for r, n in items}
     total = sum(v[0] for v in files.values())
     os.makedirs(dst, exist_ok=True)
     if host is None:
-        log(f"本机从 {src} 拷 {len(files)} 个文件、{total / 1e9:.2f} GB")
+        log(f"local copy of {len(files)} files, {total / 1e9:.2f} GB from {src}")
         return local_copy(home_path(src), dst, list(files))
     lk = take_lock(host)
     serve = Session(files, dst=dst)
     try:
         url = serve.open(quick=bool(entry(host, site).get("quick_tunnel")))
-        log(f"经隧道从 {host}:{src} 拉 {len(files)} 个文件、{total / 1e9:.2f} GB")
+        log(f"tunnel transfer of {len(files)} files, {total / 1e9:.2f} GB from {host}:{src}")
         t0, bad = time.time(), list(files)
         for k in range(ROUNDS + 1):
             if k:
-                log(f"补传 {len(bad)} 个缺的文件（第 {k} 轮）")
+                log(f"retry {len(bad)} missing (round {k})")
             serve.poll()
             for r in bad:
                 serve.done.pop(r, None)
@@ -617,7 +622,7 @@ def pull(host, src, dst, items, site=None):
             except RuntimeError as e:
                 if not k:
                     raise
-                log(f"补传出错（{e}），不再补")
+                log(f"retry failed ({e}), not retrying again")
                 stop = True
             serve.poll()
             bad = [r for r in bad if not serve.done.get(r)]
@@ -631,11 +636,11 @@ def pull(host, src, dst, items, site=None):
             if os.path.exists(p):
                 os.unlink(p)
     dt = time.time() - t0
-    log(f"传完：{len(files) - len(bad)} 个一致，{len(bad)} 个没传到或对不上；用时 {dt / 60:.0f} 分钟，平均 {total / 1e6 / dt:.1f} MB/s")
+    log(f"done: {len(files) - len(bad)} files match, {len(bad)} missing or mismatched; {dt / 60:.0f} min, average {total / 1e6 / dt:.1f} MB/s")
     return bad
 
 
-# ---------------- 那边跑的 ----------------
+# ---------------- remote side ----------------
 
 def retry(f, what):
     for i in range(5):
@@ -669,10 +674,10 @@ def remote_fetch(plan):
                 cfg = {"url": plan["base"] + "/" + urllib.parse.quote(rel), "user-agent": UA["User-Agent"], "output": p + ".tunnelpart"}
                 cfg = "".join(f'{k} = "{v.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"\n' for k, v in cfg.items())
                 subprocess.run(["curl", "-sSf", "--retry", "5", "--retry-all-errors", "--speed-limit", "1024", "--speed-time", "180", "-K", "-"],
-                               input=cfg, text=True, check=True, capture_output=True)  # 地址、口令不出现在进程列表里
+                               input=cfg, text=True, check=True, capture_output=True)  # address and token stay out of the process list
                 n = os.path.getsize(p + ".tunnelpart")
                 if n != size:
-                    raise IOError(f"只收到 {n} / {size} 字节")
+                    raise IOError(f"received only {n} / {size} bytes")
                 digest = md5_of(p + ".tunnelpart")
                 os.chmod(p + ".tunnelpart", mode)
                 os.utime(p + ".tunnelpart", ns=(mtime, mtime))
@@ -718,7 +723,7 @@ def remote_send(plan):
                     while left:
                         b = f.read(min(1 << 20, left))
                         if not b:
-                            raise IOError("文件变短了")
+                            raise IOError("file shrank")
                         c.send(b)
                         hh.update(b)
                         left -= len(b)
@@ -740,20 +745,20 @@ def remote_send(plan):
         try:
             st = os.stat(p)
             if st.st_size != size:
-                raise IOError(f"大小变了（{st.st_size}，清单里 {size}）")
+                raise IOError(f"size changed ({st.st_size}, list has {size})")
             h, off = hashlib.md5(), 0
             with open(p, "rb") as f:
                 while True:
                     n = min(chunk, size - off)
                     code, h = req("PUT", urllib.parse.quote(rel) + f"?off={off}", f, off, n, h)
                     if code != 200:
-                        raise IOError(f"第 {off // chunk + 1} 块传失败（{code}）")
+                        raise IOError(f"chunk {off // chunk + 1} failed ({code})")
                     off += n
                     if off >= size:
                         break
             q = urllib.parse.urlencode(dict(md5="0" * 32 if rel == bad else h.hexdigest(), mtime=st.st_mtime_ns, mode=st.st_mode & 0o7777))
             if req("POST", urllib.parse.quote(rel) + "?" + q)[0] != 200:
-                raise IOError("本机的校验和对不上")
+                raise IOError("checksum mismatch")
         except Exception as e:
             print(f"failed {rel}: {e}", flush=True)
 
@@ -762,7 +767,7 @@ def remote_send(plan):
     print("complete", flush=True)
 
 
-# ---------------- rsync 的替身 ----------------
+# ---------------- rsync stand-in ----------------
 
 VALUE_OPTS = {"-e", "--rsh", "-f", "--filter", "--exclude", "--include", "--files-from", "-T", "--temp-dir",
               "--link-dest", "--copy-dest", "--compare-dest", "--out-format", "--log-file", "-M", "--remote-option"}
@@ -798,7 +803,7 @@ def wrap(args):
         plain(args)
     M = machines()
     me = M.whoami()
-    if me is None or not M.machine(me).get("transfer"):  # 本机没有文件服务：照原样跑 rsync
+    if me is None or not M.machine(me).get("transfer"):  # no file server on this machine: run rsync as is
         plain(args)
     hosts = {m["ssh"]: m for m in M.MACHINES.values() if m.get("ssh")}
     rs, rd = (re.match(r"^([^/:]+):(.*)$", x) for x in (src, dst))
@@ -833,7 +838,7 @@ def wrap(args):
             ssh(host, "mkdir -p " + rq(stage))
             push(host, sroot, stage, [i[0] for i in items])
     except Exception as e:
-        log(f"隧道没传成（{e}），全部用 rsync 经 ssh 传")
+        log(f"tunnel transfer failed ({e}), sending everything with rsync over ssh")
     try:
         rc = subprocess.run(["rsync"] + opts + [f"--link-dest=../{name}", src, dst]).returncode
     finally:
@@ -852,7 +857,7 @@ def main(argv):
     cmd, a = argv[0], argv[1:]
     helps = ("-h", "--help")
     if cmd in helps or (cmd == "rsync" and a[:1] and a[0] in helps) or (cmd in ("push", "pull") and set(a) & set(helps)):
-        print(__doc__.strip())  # --help 不做事（rsync 只认紧跟着的第一个参数，后面的 -h 是 rsync 自己的）
+        print(__doc__.strip())  # --help does nothing (rsync only takes the first argument right after it; a later -h belongs to rsync)
         return 0
     if cmd == "rsync":
         if not a:
@@ -869,19 +874,19 @@ def main(argv):
     if cmd in ("push", "pull") and len(a) == 4:
         M = machines()
         from proto import EXIT
-        prog = f"{os.path.basename(sys.argv[0])} {cmd}"  # tunnel.py push，或 taskq tunnel push
+        prog = f"{os.path.basename(sys.argv[0])} {cmd}"  # tunnel.py push, or taskq tunnel push
         try:
             host, site = M.machine(a[0]).get("ssh"), (a[0] if M.MACHINES[a[0]].get("root") else None)
         except KeyError:
-            print(f"{prog}：机器表里没有 {a[0]}", file=sys.stderr)
+            print(f"{prog}: no {a[0]} in the machine table", file=sys.stderr)
             return EXIT["gone"]
         if not host and not site:
-            print(f"{prog}：{a[0]} 没有 ssh，传不过去", file=sys.stderr)
+            print(f"{prog}: {a[0]} has no ssh, cannot transfer", file=sys.stderr)
             return 2
         try:
             lines = [ln for ln in open(a[3]).read().splitlines() if ln]
         except OSError as e:
-            print(f"{prog}：读不了清单 {a[3]}：{e.strerror}", file=sys.stderr)
+            print(f"{prog}: cannot read list {a[3]}: {e.strerror}", file=sys.stderr)
             return 2
         if cmd == "push":
             return 1 if push(host, a[1], a[2], lines, site=site) else 0
