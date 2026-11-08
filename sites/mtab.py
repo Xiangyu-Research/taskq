@@ -467,7 +467,8 @@ def main(argv):
     elif cmd == "q-env":
         gs = groups(me) if me else {}
         if args[0] not in gs:
-            return err(f"no group {args[0]} on {me or 'this machine'} (have: {', '.join(gs) or 'none'})", 2)
+            print(f"no group {args[0]} on {me or 'this machine'} (have: {', '.join(gs) or 'none'})", file=sys.stderr)
+            return 2
         _, gpu, env = gs[args[0]]
         w = next((w for w in workers(me) if w["group"] == args[0]), None)
         env = {**(worker_env(w) if w else {"CUDA_VISIBLE_DEVICES": gpu or ""}), **env}

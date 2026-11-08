@@ -14,7 +14,7 @@ unset TASKQ_PROG
 G=$1; shift
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root; the user repo root REPO (TASKQ_REPO, else as in cfg.py)
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
-E=$(python3 "$CORE/sites/mtab.py" q-env "$G" 2>&1 > /dev/null) || { echo "$PROG: ${E#*: }" >&2; exit 2; }
+E=$(python3 "$CORE/sites/mtab.py" q-env "$G" 2>&1 > /dev/null) || { echo "$PROG: $E" >&2; exit 2; }
 REPO=$(readlink -f "$(python3 "$CORE/sites/mtab.py" get . repo)")
 [[ -d $REPO ]] || { echo "$PROG: no working dir $REPO (this machine's repo in machines.py)" >&2; exit 2; }
 PUEUE=$(python3 "$CORE/sites/mtab.py" get . pueue)

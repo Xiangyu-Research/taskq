@@ -249,6 +249,8 @@ class Errors(unittest.TestCase):
         for args in (("get", "NOPE", "data"), ("groups", "NOPE"), ("activate", "base", "NOPE")):
             self.check(("machines", *args), GONE, f"taskq machines {args[0]}", "NOPE")
         self.check(("machines", "activate", "nosuchenv"), GONE, "nosuchenv")
+        r = self.check(("machines", "q-env", "NOPE"), 2, "no group NOPE")
+        self.assertNotIn("q-env:", r.stderr, "q-env prints the message itself; queue/q adds its own name")
         self.check(("machines", "get", "hub", "nofield"), 1, "nofield")
         self.check(("machines", "bogus"), 2, "taskq machines bogus")
         self.assertEqual(taskq("machines", "get", "site-slurm", "root").stdout.strip(), "~/q")
