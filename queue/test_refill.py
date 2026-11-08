@@ -134,10 +134,11 @@ ok("places: then intersected with the spec's machines", R.places("x", dict(step=
 four = [ctq(f"c/{i}", order=i) for i in range(4)]
 got, res = pick(four, [site("site-pueue", dict(gpu=2)), site("site-slurm", dict(gpu=1)), site("site-slurm2", dict(gpu=1))])
 ok("two or three can take it: split by free slots (fill the preferred one first, then the next)",
-   got == {"c/0": "site-pueue", "c/1": "site-pueue", "c/2": "site-slurm", "c/3": "site-slurm2"} and res == dict(why={}, nowhere=[], noroom=[]))
+   got == {"c/0": "site-pueue", "c/1": "site-pueue", "c/2": "site-slurm", "c/3": "site-slurm2"} and res == dict(why={}, by_site={}, nowhere=[], noroom=[]))
 got, res = pick(four, [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))])
 ok("not enough slots: the rest are not sent this round, say why for each", len(got) == 2 and set(res["why"]) == {"c/2", "c/3"}
-   and "site-pueue: full" in res["why"]["c/2"] and "site-slurm: full" in res["why"]["c/2"] and res["noroom"] == [])
+   and "site-pueue: full" in res["why"]["c/2"] and "site-slurm: full" in res["why"]["c/2"] and res["noroom"] == []
+   and res["by_site"]["c/2"] == [("site-pueue", "full"), ("site-slurm", "full")])
 got, res = pick([ctq("s/1", skipped_by=["site-pueue"])], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))])
 ok("skipped by one: send to another that can take it", got == {"s/1": "site-slurm"})
 got, res = pick([ctq("s/2", skipped_by=["site-pueue", "site-slurm", "site-slurm2"])], [site("site-pueue", dict(gpu=1))])

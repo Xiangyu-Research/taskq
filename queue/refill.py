@@ -154,10 +154,12 @@ def choose(tasks, sites, specs, held=None, sizes=None):
     """Tasks in the queue that can be sent (unclaimed, parseable, accepted by the plugin) -> pick an executor for each
     and record it in sites[name].take / swaps. specs {key: (recipe, spec)}; held: holders() result; sizes: {input: GB
     or None} (measured on the store, data_sizes). Order: nice, then half-done within the same nice, then queue order.
-    -> dict(why={key: why it was not sent this round}, nowhere=[keys whose every candidate skipped it],
+    -> dict(why={key: why it was not sent this round} (text for display),
+    by_site={key: [(executor, that executor's reason)]} (the same reasons as data),
+    nowhere=[keys whose every candidate skipped it],
     noroom=[keys that fit on none of this round's available executors] (not full: waiting will not help, free space or
     lower out_gb))."""
-    held, sizes, planned, why, nowhere, noroom = held or {}, sizes or {}, {}, {}, [], []
+    held, sizes, planned, why, by_site, nowhere, noroom = held or {}, sizes or {}, {}, {}, {}, [], []
     for t in sorted(tasks, key=lambda t: (t["nice"], t["key"] not in held, t["order"])):
         rec, sp = specs[t["key"]]
         opts = places(rec, sp)
@@ -183,12 +185,13 @@ def choose(tasks, sites, specs, held=None, sizes=None):
             r = sites[n].fit(t, sp, sizes, planned)
             if r is None:
                 break
-            fails.append(f"{n}: {r}")
+            fails.append((n, r))
         else:
-            why[t["key"]] = "; ".join(fails)
-            if all(f.split(": ", 1)[1].startswith(NOROOM) for f in fails):
+            why[t["key"]] = "; ".join(f"{n}: {r}" for n, r in fails)
+            by_site[t["key"]] = fails
+            if all(r.startswith(NOROOM) for _, r in fails):
                 noroom.append(t["key"])
-    return dict(why=why, nowhere=nowhere, noroom=noroom)
+    return dict(why=why, by_site=by_site, nowhere=nowhere, noroom=noroom)
 
 
 def data_sizes(paths, probe):

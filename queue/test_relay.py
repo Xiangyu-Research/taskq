@@ -139,27 +139,28 @@ def test_pueue_worker():
     ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
     none = dict(tasks=[dict(key="a/x/1", state="claimed")])
     nocpu = f"no staged unclaimed CPU task over there for {cw['id']}"
-    assert relay.topup("site-pueue", dict(jobs=None, taskq=ready)) == ([], "cannot read pueue")
-    subs, why = relay.topup("site-pueue", dict(jobs=[], taskq=ready))
+    assert relay.topup("site-pueue", dict(jobs=None, taskq=ready)) == ([], "cannot read pueue", [])
+    subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=ready))
     assert ids(subs) == [g1["id"], g0["id"]] and why == nocpu, (subs, why)
-    subs, why = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Running", None]], taskq=ready))
+    subs, why, _ = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Running", None]], taskq=ready))
     assert ids(subs) == [g0["id"]] and why == f"{g1['id']} is running; {nocpu}", (subs, why)
-    subs, why = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Killed"], [4, "other", "Running", None]], taskq=ready))
+    subs, why, _ = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Killed"], [4, "other", "Running", None]], taskq=ready))
     assert ids(subs) == [g1["id"], g0["id"]], (subs, why)
-    subs, why = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "{'Failed': 1}"]], taskq=ready))
-    assert ids(subs) == [g0["id"]] and why.startswith(f"previous {g1['id']} (pueue task 3) failed ({{'Failed': 1}})"), (subs, why)
+    subs, why, failed = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "{'Failed': 1}"]], taskq=ready))
+    assert ids(subs) == [g0["id"]] and why.startswith(f"previous {g1['id']} (pueue task 3) failed ({{'Failed': 1}})")
+    assert failed == [(g1["id"], 3, "{'Failed': 1}")], failed
     ok("pueue executor (site-pueue): each worker in the machine table is judged separately; start one only when none is alive, and not after the previous one failed")
     gpu_none = "; ".join(f"no staged unclaimed task over there for {w['id']}" for w in (g1, g0))
-    assert relay.topup("site-pueue", dict(jobs=[], taskq=none)) == ([], f"{gpu_none}; {nocpu}")
-    assert relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Success"]], taskq=none)) == ([], f"{gpu_none}; {nocpu}")
+    assert relay.topup("site-pueue", dict(jobs=[], taskq=none)) == ([], f"{gpu_none}; {nocpu}", [])
+    assert relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Success"]], taskq=none)) == ([], f"{gpu_none}; {nocpu}", [])
     ok("pueue executor: no worker is started without such a staged task (an idle exit is not a failure), and one starts when work appears")
     cpu = dict(tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu")), dict(key="a/x/1", state="claimed")])
-    subs, why = relay.topup("site-pueue", dict(jobs=[], taskq=cpu))
+    subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=cpu))
     assert ids(subs) == [cw["id"]] and why == gpu_none, (subs, why)
-    subs, why = relay.topup("site-pueue", dict(jobs=[[5, lab(cw), "Done", "{'Failed': 1}"]], taskq=dict(tasks=cpu["tasks"] + ready["tasks"][:1])))
+    subs, why, _ = relay.topup("site-pueue", dict(jobs=[[5, lab(cw), "Done", "{'Failed': 1}"]], taskq=dict(tasks=cpu["tasks"] + ready["tasks"][:1])))
     assert ids(subs) == [g1["id"], g0["id"]] and why == f"previous {cw['id']} (pueue task 5) failed ({{'Failed': 1}})", (subs, why)
     with patched(relay.M, working=lambda n, w, t=None: w["id"] != g0["id"]):
-        subs, why = relay.topup("site-pueue", dict(jobs=[], taskq=ready))
+        subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=ready))
     assert ids(subs) == [g1["id"]] and f"{g0['id']} is outside its hours window" in why, (subs, why)
     ok("pueue executor: a CPU worker only looks at pure CPU tasks; workers outside their hours window are not started (machines.py hours)")
 
@@ -169,29 +170,29 @@ def test_slurm_topup_ready():
     probe = lambda out: (lambda name, cmd: (0, out, ""))  # noqa: E731
     q = next(iter(relay.P.SLURM[NAME]["gpu"]))
     keep = relay.P.SLURM[NAME]["gpu"][q][1]
-    subs, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|0|0\n"))
+    subs, _, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|0|0\n"))
     assert [n for _, _, n, _ in subs] == [10 - keep] and subs[0][3] == "gpu", subs
-    subs, why = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|{10 - keep}|2\n"))
+    subs, why, _ = relay.topup(NAME, dict(taskq=two), run=probe(f"QOS|{q}|10|{10 - keep}|2\n"))
     assert subs == [] and "full" in why
-    subs, why = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
+    subs, why, _ = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "no GPU tasks in the queue" in why
-    assert relay.topup(NAME, dict(taskq=two), run=lambda n, c: (1, "", "ssh down")) == ([], "cannot read job counts")
+    assert relay.topup(NAME, dict(taskq=two), run=lambda n, c: (1, "", "ssh down")) == ([], "cannot read job counts", [])
     ok("Slurm executor (site-slurm2): with tasks, fill the quota (to build queue time); submit nothing when full, without tasks, or when job counts cannot be read")
     cpu = dict(enabled=True, tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu"))])
-    subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\n"))
+    subs, why, _ = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "CPU" not in why, (subs, why)
     slurm0 = relay.P.SLURM
     with pdict(relay.P.SLURM, **{"site-slurm": dict(gpu={"long": ("3-00:00:00", 0)}, cpu=("normal", "08:00:00", 2)),
                                  NAME: dict(slurm0[NAME], cpu=("normal", "08:00:00", 2))}):
-        subs, why = relay.topup("site-slurm", dict(taskq=cpu), run=probe("QOS|long|10|0|0\nCPU|0\nALL|10|3\n"))
+        subs, why, _ = relay.topup("site-slurm", dict(taskq=cpu), run=probe("QOS|long|10|0|0\nCPU|0\nALL|10|3\n"))
         assert subs == [("normal", "08:00:00", 1, "cpu")], (subs, why)
-        subs, why = relay.topup("site-slurm", dict(taskq=dict(two, tasks=two["tasks"] + cpu["tasks"])), run=probe("QOS|long|10|0|0\nCPU|1\nALL|10|3\n"))
+        subs, why, _ = relay.topup("site-slurm", dict(taskq=dict(two, tasks=two["tasks"] + cpu["tasks"])), run=probe("QOS|long|10|0|0\nCPU|1\nALL|10|3\n"))
         assert subs == [("long", "3-00:00:00", 10, "gpu")] and "CPU: 1 already" in why, (subs, why)
-        subs, why = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\nCPU|0\nALL|10|3\n"))
+        subs, why, _ = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\nCPU|0\nALL|10|3\n"))
         assert subs == [] and "CPU" not in why, (subs, why)
     with pdict(relay.P.SLURM):
         relay.P.SLURM.pop(NAME)
-        assert relay.topup(NAME, dict(taskq=two), run=probe("")) == ([], "not in policy.py SLURM")
+        assert relay.topup(NAME, dict(taskq=two), run=probe("")) == ([], "not in policy.py SLURM", [])
     ok("Slurm executor: one with cpu in jobs (site-slurm) submits CPU workers for pure CPU tasks; one without (site-slurm2) does not even with cpu in SLURM; "
        "a machine not in SLURM submits nothing")
 

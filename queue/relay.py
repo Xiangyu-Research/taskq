@@ -575,7 +575,7 @@ def assign(s, ctxs, stuck=None, notes=None):
             notes.setdefault(n, []).extend(sg.notes)
         out[n] = ops + sg.ops()
         if not out[n]:
-            mine = sorted({p[len(n) + 2:] for r in res["why"].values() for p in r.split("; ") if p.startswith(f"{n}: ")})
+            mine = sorted({r for pairs in res["by_site"].values() for site, r in pairs if site == n})
             why[n] = ", ".join(mine[:3]) or "no task in the queue can go to it"
     return out, why
 
@@ -599,20 +599,22 @@ def sub_kind(x):
 
 
 def topup(name, rs, run=None):
-    """→ workers to start, and why none. How many is computed only here; adapters just read state and start them:
+    """→ (workers to start, why none, previous jobs that failed). How many is computed only here; adapters just read state
+    and start them:
     pueue machines: start each machines.py worker when it is inside its hours window, none is alive, the previous one did not
-    fail, and there is a staged unclaimed task of its kind → ("pueue", worker);
+    fail, and there is a staged unclaimed task of its kind → ("pueue", worker); failed: [(worker id, pueue task id, state)];
     Slurm machines: kinds this machine can run from policy.py SLURM, submitted by refill.slurm_plan → (QOS, time limit, count, sbatch file).
     run: fn(name, command) → (exit code, output, error), replaced in tests."""
     if RM.conf(name)["scheduler"] == "pueue":
         if rs.get("jobs") is None:
-            return [], "cannot read pueue"
-        subs, why = [], []
+            return [], "cannot read pueue", []
+        subs, why, failed = [], [], []
         for w in M.workers(name):
             mine = PQ.workers(w, rs["jobs"])
             if any(j[2] != "Done" for j in mine):
                 why.append(f"{w['id']} is running")
             elif mine and mine[-1][3] not in ("Success", "Killed"):
+                failed.append((w["id"], mine[-1][0], mine[-1][3]))
                 why.append(f"previous {w['id']} (pueue task {mine[-1][0]}) failed ({mine[-1][3]})")
             elif not M.working(name, w):
                 why.append(f"{w['id']} is outside its hours window")
@@ -620,14 +622,14 @@ def topup(name, rs, run=None):
                 why.append(f"no staged unclaimed {kname(w['kind'])}task over there for {w['id']}")  # an idle worker exits after 30 minutes; start one when work appears
             else:
                 subs.append(("pueue", w))
-        return subs, "; ".join(why)
+        return subs, "; ".join(why), failed
     conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
     if not conf_:
-        return [], "not in policy.py SLURM"
+        return [], "not in policy.py SLURM", []
     st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
     if st is None:
-        return [], "cannot read job counts"
-    return refill.slurm_plan(rs["taskq"], st, conf_)
+        return [], "cannot read job counts", []
+    return refill.slurm_plan(rs["taskq"], st, conf_) + ([],)
 
 
 def label(op, key):
@@ -971,12 +973,10 @@ def finish(s, name, c, more, why, snotes, dry):
     L, rs, acts, stuck, notes = RM.conf(name)["label"], c["rs"], c["acts"], c["stuck"], c["notes"]
     if snotes and not dry and C.changed(f"smoke_{name}", snotes):
         log(snotes)
-    subs, swhy = (topup(name, rs) if rs is not None else ([], "unreachable"))
-    for part in swhy.split("; "):
-        w = next((w for w in M.workers(name) if part.startswith(f"previous {w['id']} (")), None)
-        if w:
-            stuck[alert_id("site", name, "worker", w["id"])] = alert(f"{L} {part}; check the pueue log over there, then pueue remove that task to retry next check",
-                                                                     worker=w["id"], start=False)
+    subs, swhy, failed = (topup(name, rs) if rs is not None else ([], "unreachable", []))
+    for wid, tid, state in failed:
+        stuck[alert_id("site", name, "worker", wid)] = alert(f"{L} previous {wid} (pueue task {tid}) failed ({state}); check the pueue log over there, then pueue remove that task to retry next check",
+                                                               worker=wid, start=False)
     todo = [a for a in acts if a["op"] != "beat"]
     desc = ", ".join(f"{a['op']} {a['key']}" for a in todo + more)
     sdesc = ", ".join(f"start {x[1]['id']}" if x[0] == "pueue" else f"submit {x[2]} {wname(sub_kind(x))} to {x[0]}" for x in subs)
