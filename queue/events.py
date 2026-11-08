@@ -1,12 +1,8 @@
-"""事件日志：hub 数据库里的一张表（log），调度和人记下的事都在里面。
+"""Event log: one table (log) in the hub database for scheduler and human events.
 
-    taskq events [--since T] [--until T] [--key K] [--site S] [--source S] [--kind K] [--level L] [--grep RE] [-n N] [-f] [--json]
-    taskq note "<文字>" [--key K] [--site S] [--kind K] [--at T] [--uid U] [--data JSON]
-    taskq progress [--key K] [--since T] [--json]
-
-add() 不抛异常：数据库忙或坏了时，事件写进它旁边的 spool 文件，下一轮 tick 再导入（flush()）。没有数据库的地方（执行机）
-什么都不存。proto.TEXT_LOGS 里列的来源还在各自的文本文件（cfg.log(source)）里写一行"时间 消息"，给 tail 看；没有代码读回这些文件。
-时间（--since/--until/--at）："YYYY-MM-DD[ HH:MM[:SS]]"，或相对的 "30m"、"2h"、"3d"。
+    taskq events [...]    taskq note "<text>" [...]    taskq progress [...]
+add() never raises: when the database is busy or broken, events go to a spool file next to it and are imported on the next tick (flush()). No database (executors) stores nothing. Sources in proto.TEXT_LOGS also get a "time message" line in their text file (cfg.log(source)) for tail; nothing reads those files back.
+Times (--since/--until/--at): "YYYY-MM-DD[ HH:MM[:SS]]" or relative "30m", "2h", "3d".
 """
 import argparse
 import json
@@ -53,7 +49,7 @@ def _text(rows):
 
 
 def add_many(rows, db=None):
-    """rows：_row() 生成的。不抛异常。"""
+    """rows: made by _row(). Never raises."""
     rows = list(rows)
     if not rows:
         return
@@ -64,7 +60,7 @@ def add_many(rows, db=None):
         if db is None:
             return
         if not D.has(db, "log"):
-            raise OSError("数据库还没迁移")
+            raise OSError("database not migrated yet")
         _insert(db, rows)
     except Exception:  # noqa: BLE001
         try:
@@ -82,13 +78,13 @@ def add(source, msg, db=None, **kw):
 
 
 def lines(source, msgs, db=None, **kw):
-    """同一个来源、同一时刻的几行文字。"""
+    """Several lines of text from one source at the same moment."""
     now = time.time()
     add_many([_row(source, m, t=now, **kw) for m in msgs], db)
 
 
 def flush(db):
-    """导入 spool（hub 的一轮 tick 里，在 connect(create=True) 之后）。"""
+    """Import the spool (in a hub tick, after connect(create=True))."""
     p = spool_path()
     if not os.path.exists(p):
         return 0
@@ -111,9 +107,9 @@ def flush(db):
     return len(rows)
 
 
-# ---------------- 读 ----------------
+# ---------------- read ----------------
 def when(s, now=None):
-    """'2h' / '3d' / '30m'（多久以前）/ 'YYYY-MM-DD[ HH:MM[:SS]]' → epoch 秒。"""
+    """'2h' / '3d' / '30m' (that long ago) / 'YYYY-MM-DD[ HH:MM[:SS]]' -> epoch seconds."""
     now = now or time.time()
     m = re.fullmatch(r"(\d+(?:\.\d+)?)([mhd])", s.strip())
     if m:
@@ -123,17 +119,17 @@ def when(s, now=None):
             return time.mktime(time.strptime(s.strip(), fmt))
         except ValueError:
             continue
-    raise ValueError(f"不是时间：{s!r}（YYYY-MM-DD[ HH:MM]，或 30m / 2h / 3d）")
+    raise ValueError(f"not a time: {s!r} (YYYY-MM-DD[ HH:MM], or 30m / 2h / 3d)")
 
 
 def ahead(s, now=None):
-    """从现在起 '2h' / '3d' / '30m' 以后，或一个绝对时间 → epoch 秒。"""
+    """'2h' / '3d' / '30m' from now, or an absolute time -> epoch seconds."""
     now = now or time.time()
     return 2 * now - when(s, now) if re.fullmatch(r"\d+(?:\.\d+)?[mhd]", s.strip()) else when(s, now)
 
 
 def query(db, since=None, until=None, key=None, site=None, source=None, kind=None, level=None, grep=None, limit=None, after_id=None):
-    """→ [带 id 的行 dict]，旧的在前。key 对的是 key 列；没有 key 的行对文字。"""
+    """-> [row dicts with id], oldest first. key matches the key column; rows without a key match the text."""
     if not D.has(db, "log"):
         return []
     w, a = [], []
@@ -184,18 +180,18 @@ def as_json(d):
 
 
 def cmd_events(argv):
-    ap = argparse.ArgumentParser(prog="taskq events", description="事件日志：发生过什么（调度、健康检查、记的笔记）")
-    ap.add_argument("--since", help="从什么时候起（默认 24 小时前，给了 -n 或 --key 时不限；'all' 是全部）")
-    ap.add_argument("--until", help="到什么时候（同 --since 的写法）")
-    ap.add_argument("--key", help="只看这个任务的（任务名；没记任务名的事件按文字里提到它算）")
-    ap.add_argument("--site", help="只看这台机器的")
-    ap.add_argument("--source", help="relay、feed、advance、health、note、…")
-    ap.add_argument("--kind", help="事件的种类（--json 里的 kind）")
-    ap.add_argument("--level", help="info、normal、urgent")
-    ap.add_argument("--grep", help="按正则筛文字")
-    ap.add_argument("-n", type=int, help="只看最后 N 条")
-    ap.add_argument("-f", "--follow", action="store_true", help="一直打印新来的事件")
-    ap.add_argument("--json", action="store_true", help="每行一个 JSON 对象（proto.EVENT_FIELDS）")
+    ap = argparse.ArgumentParser(prog="taskq events", description="event log: what happened (scheduler, health check, notes)")
+    ap.add_argument("--since", help="from when (default 24 hours ago; unlimited with -n or --key; 'all' is everything)")
+    ap.add_argument("--until", help="to when (same form as --since)")
+    ap.add_argument("--key", help="only this task (task name; events without a task name match text that mentions it)")
+    ap.add_argument("--site", help="only this machine")
+    ap.add_argument("--source", help="relay, feed, advance, health, note, ...")
+    ap.add_argument("--kind", help="event kind (kind in --json)")
+    ap.add_argument("--level", help="info, normal, urgent")
+    ap.add_argument("--grep", help="filter text by regex")
+    ap.add_argument("-n", type=int, help="only the last N rows")
+    ap.add_argument("-f", "--follow", action="store_true", help="keep printing new events")
+    ap.add_argument("--json", action="store_true", help="one JSON object per line (proto.EVENT_FIELDS)")
     a = ap.parse_args(argv)
     try:
         since = None if a.since == "all" else when(a.since) if a.since else (None if a.n or a.key else time.time() - 86400)
@@ -207,7 +203,7 @@ def cmd_events(argv):
         return 2
     db = D.connect(ro=True)
     if db is None:
-        print(f"taskq events: {D.path()} 没有数据库（hub 上第一轮 tick 会建）", file=sys.stderr)
+        print(f"taskq events: no database at {D.path()} (the first tick on the hub creates it)", file=sys.stderr)
         return 1
     q = dict(since=since, until=until, key=a.key, site=a.site, source=a.source, kind=a.kind, level=a.level, grep=a.grep)
     rows = query(db, limit=a.n, **q)
@@ -233,21 +229,21 @@ def cmd_events(argv):
 
 
 def cmd_note(argv):
-    ap = argparse.ArgumentParser(prog="taskq note", description="往事件日志里记一条（出了什么事、做了什么）")
-    ap.add_argument("text", nargs="*", help="要记的话（不给时从标准输入读）")
-    ap.add_argument("--key", help="关于哪个任务（任务名）")
-    ap.add_argument("--site", help="关于哪台机器")
-    ap.add_argument("--kind", default="note", help="例如 incident、fix、change、decision、remark（默认 note）")
-    ap.add_argument("--at", help="什么时候发生的（默认现在）")
-    ap.add_argument("--uid", help="唯一编号：同一个 uid 的第二条不记（导入用）")
-    ap.add_argument("--data", help="和这条一起存的 JSON 对象（taskq events --json 里能看到）")
+    ap = argparse.ArgumentParser(prog="taskq note", description="record a line in the event log (what happened, what was done)")
+    ap.add_argument("text", nargs="*", help="text to record (read from stdin when omitted)")
+    ap.add_argument("--key", help="which task (task name)")
+    ap.add_argument("--site", help="which machine")
+    ap.add_argument("--kind", default="note", help="for example incident, fix, change, decision, remark (default note)")
+    ap.add_argument("--at", help="when it happened (default now)")
+    ap.add_argument("--uid", help="unique id: a second row with the same uid is not recorded (for imports)")
+    ap.add_argument("--data", help="JSON object stored with this row (visible in taskq events --json)")
     ap.add_argument("--source", default="note", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     text = " ".join(a.text).strip()
     if not a.text and not sys.stdin.isatty():
         text = sys.stdin.read().strip()
     if not text:
-        print("taskq note: 没有文字", file=sys.stderr)
+        print("taskq note: no text", file=sys.stderr)
         return 2
     try:
         t = when(a.at) if a.at else None
@@ -257,19 +253,19 @@ def cmd_note(argv):
         return 2
     db = D.connect()
     if db is None or not D.has(db, "log"):
-        print(f"taskq note: {D.path()} 没有数据库（要在 hub 上跑；`taskq db migrate` 会建）", file=sys.stderr)
+        print(f"taskq note: no database at {D.path()} (run on the hub; `taskq db migrate` creates it)", file=sys.stderr)
         return 1
     n = db.total_changes
     _insert(db, [_row(a.source, text, kind=a.kind, key=a.key, site=a.site, t=t, uid=a.uid, data=data)])
     added = db.total_changes > n
     db.close()
-    print("记下了" if added else f"已经有了（uid {a.uid}）")
+    print("recorded" if added else f"already there (uid {a.uid})")
     return 0
 
 
-# ---------------- 进度快照 ----------------
+# ---------------- progress snapshots ----------------
 def snapshot(db, tasks, t=None):
-    """tasks：[dict(key, state, progress, site, data)] → 状态、进度或机器变了的任务各记一行。→ 记了几行。"""
+    """tasks: [dict(key, state, progress, site, data)] -> one row per task whose state, progress or machine changed. -> rows written."""
     t = time.time() if t is None else t
     last = {k: (s, p, w) for k, s, p, w in db.execute(
         "SELECT key, state, progress, site FROM progress p WHERE t=(SELECT max(t) FROM progress WHERE key=p.key)")}
@@ -294,10 +290,10 @@ def progress_rows(db, key=None, since=None):
 
 
 def cmd_progress(argv):
-    ap = argparse.ArgumentParser(prog="taskq progress", description="任务进度随时间的变化（状态、进度或机器一变就记一行）")
-    ap.add_argument("--key", help="只看一个任务")
-    ap.add_argument("--since", help="从什么时候起（YYYY-MM-DD[ HH:MM]，或 30m / 2h / 3d 以前；默认全部）")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（proto.PROGRESS_TOP；每行记录 proto.PROGRESS_FIELDS）")
+    ap = argparse.ArgumentParser(prog="taskq progress", description="task progress over time (one row whenever state, progress or machine changes)")
+    ap.add_argument("--key", help="only one task")
+    ap.add_argument("--since", help="from when (YYYY-MM-DD[ HH:MM], or 30m / 2h / 3d ago; default all)")
+    ap.add_argument("--json", action="store_true", help="one JSON line (proto.PROGRESS_TOP; each row proto.PROGRESS_FIELDS)")
     a = ap.parse_args(argv)
     try:
         since = when(a.since) if a.since else None

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""taskq.py 的测试：临时目录里的假队列、假训练结果，不连任何机器。  python3 queue/test_taskq.py"""
+"""Tests for taskq.py: fake queues and fake training results in temp dirs; connects to no machine.  python3 queue/test_taskq.py"""
 import glob
 import json
 import os
@@ -16,12 +16,12 @@ import fixture  # noqa: E402
 T = fixture.tmpdir()
 TQ, DATA = os.path.join(T, "taskq"), os.path.join(T, "data")
 RES = os.path.join(DATA, "results")
-ENV = dict(os.environ, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MACHINE="slurm-login")  # 测试里本机当队列所在的机器
+ENV = dict(os.environ, TASKQ_DIR=TQ, TASKQ_DATA=DATA, TASKQ_MACHINE="slurm-login")  # in tests this machine holds the queue
 ENV.pop("DEMO_RESULTS", None)
 sys.path.insert(0, HERE)
 fixture.use()
 ENV.update(TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS)
-os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # 本进程里等锁的重试间隔（try_lock 预期拿不到的几项）
+os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # lock retry interval in this process (try_lock cases that must not get it)
 import taskq  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
@@ -37,7 +37,7 @@ def check(name, cond):
 
 def tq(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=ENV, capture_output=True, text=True)
-    return r.returncode, (r.stdout + r.stderr).strip()  # 消息在 stderr
+    return r.returncode, (r.stdout + r.stderr).strip()  # messages go to stderr
 
 
 def part(ds, tr, f):
@@ -65,49 +65,49 @@ write_jsonl(os.path.join(TQ, "tasks.jsonl"), tasks)
 for t in tasks:
     part(*t[2].split("/"))
 
-# 第 0 份已训完
+# part 0 is done
 d0 = part("D121_x", "V_save", "0")
 open(os.path.join(d0, "final.ckpt"), "w").close()
 os.makedirs(os.path.join(d0, "check"))
 open(os.path.join(d0, "check", "summary.json"), "w").write("{}")
-# 第 1 份的训练日志刚更新过（别处在训，比如附加训练）
+# part 1's training log was just updated (someone else is training, e.g. extra training)
 open(os.path.join(part("D121_x", "V_save", "1"), "train_log_x.txt"), "w").write("x")
 
 rc, out = tq("next", "--worker", "100", "--envs", ALL)
-check("按档位先领、跳过训完的和日志刚更新的：领到第 2 份", rc == 0 and out.startswith("D121_x/V_save/2\n"))
+check("claim by nice first, skip done and freshly logged: claims part 2", rc == 0 and out.startswith("D121_x/V_save/2\n"))
 rc, out = tq("next", "--worker", "101", "--envs", ALL)
-check("已经被领的不再领：下一个是档位 50 的", rc == 0 and out.startswith("D103_y/"))
+check("an already claimed task is not claimed again: next is nice 50", rc == 0 and out.startswith("D103_y/"))
 rc, out = tq("next", "--worker", "103", "--envs", ALL)
-check("照顺序领 V_s（环境 alt）", rc == 0 and out.startswith("D101_z/V_s/0\n") and "env=alt" in out)
+check("claim V_s in order (env alt)", rc == 0 and out.startswith("D101_z/V_s/0\n") and "env=alt" in out)
 rc, out = tq("next", "--worker", "102", "--envs", ALL)
-check("没有能领的：退出码 10", rc == 10 and out == "")
+check("nothing to claim: exit code 10", rc == 10 and out == "")
 
-# 领取过期（心跳 30 分钟前、日志也没更新）→ 可以重新领
+# claim expired (heartbeat 30 minutes ago, log not updated either) -> can be claimed again
 p = os.path.join(TQ, "claims", taskq.safe("D103_y/V_save/0"), "info")
 ci = json.load(open(p))
 ci["beat"] = time.time() - 1800
 json.dump(ci, open(p, "w"))
 rc, out = tq("next", "--worker", "104", "--envs", ALL)
-check("心跳过期、日志也没更新的重新领", rc == 0 and out.startswith("D103_y/"))
-check("重新领后记的是新的 worker", json.load(open(p))["worker"] == "104")
+check("expired heartbeat and no log update: claimed again", rc == 0 and out.startswith("D103_y/"))
+check("the new claim records the new worker", json.load(open(p))["worker"] == "104")
 
-# next 的第三行是这次领取的 token；同名 worker 重开（pueue-host 的 pueue worker 名不变）后，旧一轮带旧 token 的交还、心跳不动新一轮的领取
+# next's third line is the token for this claim; after a worker with the same name restarts (a pueue-host pueue worker name does not change), releasing or beating with the old round's token does not touch the new claim
 lines = out.splitlines()
-check("next 第三行是 token，和领取记录里的一样", len(lines) == 3 and lines[2] == json.load(open(p))["token"])
+check("next's third line is the token, same as in the claim record", len(lines) == 3 and lines[2] == json.load(open(p))["token"])
 K103 = "D103_y/V_save/0"
 ci = json.load(open(p))
 ci["beat"] = time.time() - 600
 json.dump(ci, open(p, "w"))
 tq("beat", "--worker", "104", "--token", "0ld0ld", K103)
-check("旧一轮的 token：心跳不改记录", time.time() - json.load(open(p))["beat"] > 500)
+check("old round's token: beat does not change the record", time.time() - json.load(open(p))["beat"] > 500)
 tq("release", "--worker", "104", "--token", "0ld0ld", K103)
-check("旧一轮的 token：交还不了", os.path.exists(p))
+check("old round's token: cannot release", os.path.exists(p))
 rc, _ = tq("missing", "--worker", "104", "--token", "0ld0ld", K103)
-check("旧一轮的 token：记不了缺输入", rc == 1 and os.path.exists(p) and taskq.input_info(K103) is None)
+check("old round's token: cannot record missing inputs", rc == 1 and os.path.exists(p) and taskq.input_info(K103) is None)
 tq("beat", "--worker", "104", "--token", lines[2], K103)
-check("这一轮的 token：心跳更新", time.time() - json.load(open(p))["beat"] < 10)
+check("this round's token: beat updates", time.time() - json.load(open(p))["beat"] < 10)
 
-# 心跳过期但训练日志刚更新 → 仍算在训
+# heartbeat expired but the training log was just updated -> still counts as training
 key2 = "D121_x/V_save/2"
 p2 = os.path.join(TQ, "claims", taskq.safe(key2), "info")
 ci = json.load(open(p2))
@@ -115,36 +115,36 @@ ci["beat"] = time.time() - 1800
 json.dump(ci, open(p2, "w"))
 open(os.path.join(part("D121_x", "V_save", "2"), "train_log_y.txt"), "w").write("y")
 rc, out = tq("next", "--worker", "105", "--envs", ALL)
-check("心跳过期但日志刚更新的不领", rc == 10)
+check("expired heartbeat but a fresh log: not claimed", rc == 10)
 
-# 心跳
+# heartbeat
 rc, _ = tq("beat", "--worker", "100", key2)
-check("心跳更新", rc == 0 and time.time() - json.load(open(p2))["beat"] < 10)
+check("beat updates", rc == 0 and time.time() - json.load(open(p2))["beat"] < 10)
 rc, _ = tq("beat", "--worker", "999", key2)
-check("别的 worker 的心跳不改记录", json.load(open(p2))["worker"] == "100")
+check("another worker's beat does not change the record", json.load(open(p2))["worker"] == "100")
 
-# 交还：只有自己领的能交还；失败记一次
+# release: only its own claim can be released; a failure is recorded once
 rc, _ = tq("release", "--worker", "999", key2)
-check("别的 worker 交还不了", os.path.exists(p2))
-rc, _ = tq("release", "--worker", "100", key2, "--failed", "退出码 1")
-check("交还后领取记录删掉、失败记一次", not os.path.exists(p2) and taskq.failures(key2) == 1)
-tq("release", "--worker", "104", "D103_y/V_save/0", "--failed", "退出码 1")
-tq("release", "--worker", "104", "D103_y/V_save/0", "--failed", "退出码 1")
+check("another worker cannot release", os.path.exists(p2))
+rc, _ = tq("release", "--worker", "100", key2, "--failed", "exit code 1")
+check("release deletes the claim and records one failure", not os.path.exists(p2) and taskq.failures(key2) == 1)
+tq("release", "--worker", "104", "D103_y/V_save/0", "--failed", "exit code 1")
+tq("release", "--worker", "104", "D103_y/V_save/0", "--failed", "exit code 1")
 rc, _ = tq("next", "--worker", "110", "--envs", ALL)
-check("3 小时内失败 3 次：整个队列暂停领任务（退出码 12）", rc == 12)
-for fp in glob.glob(os.path.join(TQ, "failures", "*")):  # 把失败记录改成 4 小时前
+check("3 failures in 3 hours: the whole queue stops claiming (exit code 12)", rc == 12)
+for fp in glob.glob(os.path.join(TQ, "failures", "*")):  # move the failure records to 4 hours ago
     old = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 4 * 3600))
     lines = open(fp).readlines()
     open(fp, "w").write("".join(old + ln[19:] for ln in lines))
 for f in os.listdir(part("D121_x", "V_save", "2")):
     os.utime(os.path.join(part("D121_x", "V_save", "2"), f), (time.time() - 3600,) * 2)
 rc, out = tq("next", "--worker", "106", "--envs", ALL)
-check("失败 1 次的还能领、失败 2 次的不领", rc == 0 and out.startswith(key2))
+check("1 failure can still be claimed, 2 failures cannot", rc == 0 and out.startswith(key2))
 tq("release", "--worker", "106", key2)
 rc, out = tq("next", "--worker", "106", "--envs", ALL, "--exclude", key2)
-check("本作业失败过的（--exclude）不再领", rc == 10)
+check("a task this job failed on (--exclude) is not claimed again", rc == 10)
 
-# 失败只算在用的代码包上的：换了包以后旧包上的不再算（暂停、失败 2 次不领都按它）；记录里写下跑它的代码包
+# failures count only on the bundle in use: after switching bundles the old bundle's failures no longer count (pausing and the 2-failure limit follow this); the record notes the bundle that ran it
 TQC, RC = os.path.join(T, "taskq_code"), os.path.join(T, "root_code")
 os.makedirs(os.path.join(TQC, "failures"))
 os.makedirs(os.path.join(RC, "code", "B", "scripts", "taskq", "queue"))
@@ -154,68 +154,68 @@ open(os.path.join(TQC, "failures", "k__a"), "w").write(f"{now_c}\tjob 1\tx\tA\n{
 open(os.path.join(TQC, "failures", "k__b"), "w").write(f"{now_c}\tjob 3\tx\tB\n{now_c}\tjob 4\tx\t\n")
 keep = taskq.TQ, taskq.HERE, os.environ.get("TASKQ_ROOT")
 taskq.TQ = TQC
-check("不在执行机的根目录里：失败全算", taskq.recent_failures() == 4 and taskq.failures("k/a") == 2)
+check("not in an executor root: all failures count", taskq.recent_failures() == 4 and taskq.failures("k/a") == 2)
 os.environ["TASKQ_ROOT"] = RC
-check("在用的是 B：旧包 A 上的不算，B 上的和不在包里跑的算",
+check("B is in use: old bundle A's failures do not count, B's and ones not run from a bundle do",
       taskq.code_now() == "B" and taskq.recent_failures() == 2 and taskq.failures("k/a") == 0 and taskq.failures("k/b") == 2)
 taskq.HERE = os.path.join(RC, "code", "B", "scripts", "taskq", "queue")
-check("这个进程跑的代码包：按文件在 code/<包名> 里算", taskq.code_mine() == "B")
+check("the bundle this process runs: from the file being under code/<bundle>", taskq.code_mine() == "B")
 taskq.HERE = HERE
-check("不在代码包里跑：代码包一栏是空的", taskq.code_mine() == "")
+check("not running in a bundle: the bundle field is empty", taskq.code_mine() == "")
 taskq.TQ, taskq.HERE = keep[0], keep[1]
 if keep[2] is None:
     del os.environ["TASKQ_ROOT"]
 else:
     os.environ["TASKQ_ROOT"] = keep[2]
 
-# 交还之后日志没再更新：马上能领；交还之后日志又更新了：算队列外有人在训
+# the log did not move after the release: claim again at once; the log moved after the release: someone outside the queue is training
 open(os.path.join(part("D121_x", "V_save", "2"), "train_log_y.txt"), "w").write("y")
 rc, out = tq("next", "--worker", "120", "--envs", ALL)
-check("刚领的（日志刚更新）照常领到", rc == 0 and out.startswith(key2))
+check("freshly claimed (fresh log) is claimed as usual", rc == 0 and out.startswith(key2))
 tq("release", "--worker", "120", key2)
 rc, out = tq("next", "--worker", "121", "--envs", ALL)
-check("刚交还、日志 15 分钟内更新过，也马上能领", rc == 0 and out.startswith(key2))
+check("just released with a log update in the last 15 minutes: also claimable at once", rc == 0 and out.startswith(key2))
 tq("release", "--worker", "121", key2)
 rel = os.path.join(TQ, "released", taskq.safe(key2))
-check("交还时记下了时间（released/<key>）", taskq.released_at(key2) is not None)
-open(rel, "w").write(f"{time.time() - 10} 121\n")  # 交还记在 10 秒前，日志在那之后更新
+check("release records the time (released/<key>)", taskq.released_at(key2) is not None)
+open(rel, "w").write(f"{time.time() - 10} 121\n")  # release recorded 10 seconds ago; the log updated after that
 open(os.path.join(part("D121_x", "V_save", "2"), "train_log_y.txt"), "w").write("y2")
 rc, out = tq("next", "--worker", "122", "--envs", ALL)
-check("交还之后日志又更新了（队列外在训）：不领", rc == 10)
+check("log moved after the release (someone outside the queue is training): not claimed", rc == 10)
 
-# 排在前面的一份刚停下（日志新、没人领），后面还有能领的：开始后的等待时间内先等它
-open(os.path.join(part("D121_x", "V_save", "1"), "train_log_x.txt"), "w").write("x")  # 第 1 份刚停下
-os.remove(os.path.join(TQ, "failures", taskq.safe("D103_y/V_save/0")))  # 让后面有一个能领的
+# an earlier part just stopped (fresh log, unclaimed) and there is a claimable one behind it: wait for it within the patience window
+open(os.path.join(part("D121_x", "V_save", "1"), "train_log_x.txt"), "w").write("x")  # part 1 just stopped
+os.remove(os.path.join(TQ, "failures", taskq.safe("D103_y/V_save/0")))  # leave one claimable behind it
 rc, out = tq("next", "--worker", "130", "--envs", ALL, "--free-slots", "1", "--patience-until", str(time.time() + 600))
-check("空 1 个位置、前面有 1 个刚停下的：等（退出码 11）", rc == 11)
+check("1 free slot and 1 just stopped ahead: wait (exit code 11)", rc == 11)
 rc, out = tq("next", "--worker", "130", "--envs", ALL, "--free-slots", "3", "--patience-until", str(time.time() + 600))
-check("空的位置比刚停下的多：照常领后面的", rc == 0 and out.startswith("D103_y/"))
+check("more free slots than just-stopped tasks: claim the one behind as usual", rc == 0 and out.startswith("D103_y/"))
 tq("release", "--worker", "130", "D103_y/V_save/0")
 rc, out = tq("next", "--worker", "131", "--envs", ALL, "--free-slots", "1", "--patience-until", str(time.time() - 1))
-check("等待时间过了：领后面的", rc == 0 and out.startswith("D103_y/"))
+check("patience window passed: claim the one behind", rc == 0 and out.startswith("D103_y/"))
 tq("release", "--worker", "131", "D103_y/V_save/0")
 os.remove(os.path.join(part("D121_x", "V_save", "1"), "train_log_x.txt"))
 
 for f in os.listdir(part("D121_x", "V_save", "2")):
     os.utime(os.path.join(part("D121_x", "V_save", "2"), f), (time.time() - 3600,) * 2)
 rc, out = tq("next", "--worker", "107", "--envs", ALL)
-check("照顺序领第 1 份", rc == 0 and out.startswith("D121_x/V_save/1\n"))
+check("claim part 1 in order", rc == 0 and out.startswith("D121_x/V_save/1\n"))
 rc, out = tq("next", "--worker", "108", "--envs", ALL)
-check("再下一个是第 2 份（日志 1 小时前更新过，没人领）", rc == 0 and out.startswith(key2))
-# 并发领：同时起 6 个，只有 1 个领到
+check("next is part 2 (log updated 1 hour ago, unclaimed)", rc == 0 and out.startswith(key2))
+# concurrent claims: start 6 at once, only 1 gets it
 procs = [subprocess.Popen([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", f"2{i}", "--envs", ALL],
                           env=ENV, stdout=subprocess.PIPE, text=True) for i in range(6)]
 outs = [p.communicate()[0].strip() for p in procs]
-check("同时领，只有一个领到", sum(1 for o in outs if o) == 1)
+check("claiming at the same time, only one gets it", sum(1 for o in outs if o) == 1)
 
-# ---------------- take --assign、add、set-nice、kind any ----------------
+# ---------------- take --assign, add, set-nice, kind any ----------------
 TQ2 = os.path.join(T, "taskq2")
 ENV2 = dict(ENV, TASKQ_DIR=TQ2)
 
 
 def tq2(*args, env=None):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=env or ENV2, capture_output=True, text=True)
-    return r.returncode, (r.stdout + r.stderr).strip()  # 消息在 stderr
+    return r.returncode, (r.stdout + r.stderr).strip()  # messages go to stderr
 
 
 os.makedirs(TQ2)
@@ -226,74 +226,74 @@ rc, out = tq2("add", "--nice", "50", "--exp", "arch_m", "--only", "frag=0")
 rc2, out2 = tq2("add", "--nice", "50", "--exp", "arch_m", "--only", "frag=0")
 ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
 um = ts[1]
-check("add --exp：照实验表（arch_m：环境 alt2、实验 arch_m），按档位排进去，已有的跳过",
+check("add --exp: follows the experiment table (arch_m: env alt2, experiment arch_m), ordered by nice, existing ones skipped",
       rc == 0 and [t["key"].split("/")[1] for t in ts] == ["V_save", "V_m", "V_s"]
-      and um["exp"] == "arch_m" and um["params"]["env"] == "alt2" and um["order"] == 486301 and "已有，跳过" in out2)
+      and um["exp"] == "arch_m" and um["params"]["env"] == "alt2" and um["order"] == 486301 and "exists, skipped" in out2)
 rc, out = tq2("add", "--nice", "0", "--exp", "nosuch")
-check("add：实验表里没有的实验报错", rc != 0)
+check("add: an experiment not in the table is an error", rc != 0)
 rc, out = tq2("add", "--nice", "0", "D101_alpha/V_m/0")
-check("add：不给 --exp / --recipe 报错", rc != 0)
+check("add: no --exp / --recipe is an error", rc != 0)
 rc, out = tq2("set-nice", "--nice", "100", "D101_alpha/V_s/0")
 ts = taskq.read_tasks(os.path.join(TQ2, "tasks.jsonl"))
-check("set-nice：改档位后重新排序", rc == 0 and "V_s" in ts[2]["key"] and ts[2]["nice"] == 100)
+check("set-nice: reorders after the nice change", rc == 0 and "V_s" in ts[2]["key"] and ts[2]["nice"] == 100)
 rc, out = tq2("set-nice", "--nice", "1", "D101_alpha/V_save/9")
-check(f"set-nice：没有的 key 退出码 {taskq.GONE}", rc == taskq.GONE)
+check(f"set-nice: absent key exits {taskq.GONE}", rc == taskq.GONE)
 
 UM = "D101_alpha/V_m/0"
 SWK = "D101_alpha/V_s/0"
 rc, out = tq2("take", "--worker", "pueue-host", "--assign", UM)
 ci = json.load(open(os.path.join(TQ2, "claims", taskq.safe(UM), "info")))
-check("take --assign：分到指定的一个任务，记下 worker、assigned", rc == 0 and out.startswith(UM) and ci["worker"] == "pueue-host" and ci["assigned"] == "pueue-host")
+check("take --assign: assign one given task, record worker and assigned", rc == 0 and out.startswith(UM) and ci["worker"] == "pueue-host" and ci["assigned"] == "pueue-host")
 rc, out = tq2("next", "--worker", "500", "--envs", ALL, "--exclude", "D101_alpha/V_s/0", "D116_gamma/V_save/4")
-check("分给 pueue-host 的，Slurm 作业不再领", rc == 10)
+check("assigned to pueue-host: Slurm jobs do not claim it", rc == 10)
 ci["beat"] = time.time() - 3 * 86400
 json.dump(ci, open(os.path.join(TQ2, "claims", taskq.safe(UM), "info"), "w"))
 rc, out = tq2("next", "--worker", "500", "--envs", ALL, "--exclude", "D101_alpha/V_s/0", "D116_gamma/V_save/4")
-check("分出去的不过期：心跳 3 天前仍算领着", rc == 10)
+check("assigned tasks do not expire: heartbeat 3 days ago still counts as claimed", rc == 10)
 rc, out = tq2("take", "--worker", "pueue-host", "--assign", UM)
 ci2 = json.load(open(os.path.join(TQ2, "claims", taskq.safe(UM), "info")))
-check("take 已分给自己的：续上、领取时间不变", rc == 0 and ci2["since"] == ci["since"] and time.time() - ci2["beat"] < 10)
+check("take on one already assigned to it: continues, claim time unchanged", rc == 0 and ci2["since"] == ci["since"] and time.time() - ci2["beat"] < 10)
 rc, out = tq2("take", "--worker", "other", "--assign", UM)
-check("take 分给别人的：分不到（退出码 10）", rc == 10)
+check("take on one assigned to someone else: cannot assign (exit code 10)", rc == 10)
 rc, _ = tq2("take", "--worker", "pueue-host", UM)
-check("take 不带 --assign：参数错", rc == 2)
+check("take without --assign: argument error", rc == 2)
 rc, _ = tq2("take", "--worker", "other", "--assign", "--from", "pueue-host", UM)
-check("take 没有 --from（分给一台的不在队列里改分）：参数错", rc == 2)
+check("take has no --from (an assigned task cannot be reassigned in the queue): argument error", rc == 2)
 tq2("release", "--worker", "pueue-host", UM)
 rc, out = tq2("next", "--worker", "501", "--envs", ALL, "--exclude", "D101_alpha/V_s/0", "D116_gamma/V_save/4")
-check("交还以后 Slurm 作业能接着领", rc == 0 and out.startswith(UM))
+check("after release a Slurm job can claim it again", rc == 0 and out.startswith(UM))
 rc, out = tq2("take", "--worker", "pueue-host", "--assign", "D116_gamma/V_save/9")
-check("take 队列里没有的：退出码 10", rc == 10)
+check("take on a key not in the queue: exit code 10", rc == 10)
 d = part("D116_gamma", "V_save", "4")
 open(os.path.join(d, "final.ckpt"), "w").close()
 os.makedirs(os.path.join(d, "check"), exist_ok=True)
 open(os.path.join(d, "check", "summary.json"), "w").write("{}")
 rc, out = tq2("take", "--worker", "pueue-host", "--assign", "D116_gamma/V_save/4")
-check("take 已训完的：领不到", rc == 10 and "done" in out)
+check("take on a done task: cannot claim", rc == 10 and "done" in out)
 rc, out = tq2("next", "--worker", "502", "--envs", ALL)
-check("kind any：什么种类都领（领到 V_s）", rc == 0 and out.startswith("D101_alpha/V_s/0"))
+check("kind any: claims any kind (gets V_s)", rc == 0 and out.startswith("D101_alpha/V_s/0"))
 s2 = taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json", "--internal"], env=ENV2, capture_output=True, text=True).stdout)
 row = next(t for t in s2["tasks"] if t["key"] == UM)
-rc, _ = tq2("release", "--worker", "pueue-host", SWK, "--skip", "训练任务 5 Failed (1)")
+rc, _ = tq2("release", "--worker", "pueue-host", SWK, "--skip", "training job 5 Failed (1)")
 s3 = taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json", "--internal"], env=ENV2, capture_output=True, text=True).stdout)
 row3 = next(t for t in s3["tasks"] if t["key"] == SWK)
-check("release --skip：记在 skips/、不算失败；status --json 带 skipped_by 和 24 小时内的次数",
+check("release --skip: recorded in skips/, not a failure; status --json has skipped_by and the 24-hour count",
       rc == 0 and row3["skipped_by"] == ["pueue-host"] and row3["failures"] == 0
       and s3["recent_skips"] == {"pueue-host": 1} and not os.path.exists(os.path.join(TQ2, "failures", taskq.safe(SWK))))
-check("status --json 带 worker、host、beat", row["worker"] == "501" and "host" in row and row["beat"])
+check("status --json has worker, host, beat", row["worker"] == "501" and "host" in row and row["beat"])
 
-# worker 的调用方式（consume.py 实际传的参数）不变：在跑的 worker 每次都调用仓库里的 taskq.py
+# the way workers call it (the arguments consume.py passes) does not change: a running worker calls the repo's taskq.py every time
 rc, out = tq2("next", "--worker", "503", "--envs", ALL, "--free-slots", "2", "--patience-until", str(time.time() + 1200))
-check("worker：next 带 --free-slots / --patience-until，没有能领的退出码 10", rc == 10)
+check("worker: next with --free-slots / --patience-until, exit code 10 when nothing can be claimed", rc == 10)
 rc, _ = tq2("beat", "--worker", "502", "D101_alpha/V_s/0")
-check("worker：beat 退出码 0", rc == 0)
+check("worker: beat exits 0", rc == 0)
 rc, _ = tq2("release", "--worker", "502", "D101_alpha/V_s/0")
-check("worker：release 退出码 0、记录删掉", rc == 0 and not os.path.exists(os.path.join(TQ2, "claims", taskq.safe("D101_alpha/V_s/0"))))
-rc, _ = tq2("release", "--worker", "501", UM, "--failed", "退出码 1")
-check("worker：release --failed 记失败", rc == 0 and len(open(os.path.join(TQ2, "failures", taskq.safe(UM))).readlines()) == 1)
+check("worker: release exits 0 and deletes the record", rc == 0 and not os.path.exists(os.path.join(TQ2, "claims", taskq.safe("D101_alpha/V_s/0"))))
+rc, _ = tq2("release", "--worker", "501", UM, "--failed", "exit code 1")
+check("worker: release --failed records a failure", rc == 0 and len(open(os.path.join(TQ2, "failures", taskq.safe(UM))).readlines()) == 1)
 rc, out = tq2("next", "--worker", "504", "--envs", ALL, "--exclude", UM)
-check("pueue-host 跳过的任务（skips/）Slurm 作业照样领", rc == 0 and out.startswith(SWK))
-tq2("release", "--worker", "other-host", SWK, "--skip", "放不下")
+check("a task skipped by pueue-host (skips/) is still claimed by Slurm jobs", rc == 0 and out.startswith(SWK))
+tq2("release", "--worker", "other-host", SWK, "--skip", "does not fit")
 
 
 def skipped_by(k):
@@ -306,22 +306,22 @@ sk0 = skipped_by(SWK)
 rc1, _ = tq2("unskip", "--worker", "other-host", SWK)
 sk1 = skipped_by(SWK)
 rc2, _ = tq2("unskip", SWK)
-check("unskip --worker：只撤那台的跳过记录；不给 --worker：全撤、记录文件删掉",
+check("unskip --worker: removes only that machine's skip record; without --worker: removes all and deletes the record file",
       sorted(sk0) == ["other-host", "pueue-host"] and rc1 == 0 and sk1 == ["pueue-host"] and rc2 == 0 and skipped_by(SWK) == []
       and not os.path.exists(os.path.join(TQ2, "skips", taskq.safe(SWK))))
 rc, out = tq2("beat", "--worker", "504", "--strict", SWK)
-check("beat --strict：领取是自己的，退出码 0", rc == 0 and out == "")
+check("beat --strict: the claim is its own, exit code 0", rc == 0 and out == "")
 rc, out = tq2("beat", "--worker", "999", "--strict", SWK, "gone/x/0")
-check("beat --strict：领取是别人的、已经没了 → 退出码 13，打印这些 key", rc == 13 and out.split("\n") == [SWK, "gone/x/0"])
+check("beat --strict: claims are someone else's or gone -> exit code 13, prints those keys", rc == 13 and out.split("\n") == [SWK, "gone/x/0"])
 os.makedirs(os.path.join(TQ2, "claims", taskq.safe("gone/x/0")))
 rc, out = tq2("beat", "--worker", "999", "--strict", "gone/x/0")
-check("beat --strict：领取目录在、记录读不了，不算丢", rc == 0)
+check("beat --strict: claim dir exists but the record is unreadable, not counted as lost", rc == 0)
 os.rmdir(os.path.join(TQ2, "claims", taskq.safe("gone/x/0")))
 os.makedirs(os.path.join(TQ2, "lock"))
 open(os.path.join(TQ2, "lock", "owner"), "w").write(f"{socket.gethostname()}\t{os.getpid()}\tx\n")
 t0 = time.time()
 rc, _ = tq2("release", "--worker", "504", "--lock-wait", "1", SWK)
-check("release --lock-wait 1：锁被占着，约 1 秒就放弃（退出码非 0），不交还",
+check("release --lock-wait 1: the lock is held, gives up after about 1 second (non-zero exit code) and does not release",
       rc != 0 and time.time() - t0 < 5 and os.path.exists(os.path.join(TQ2, "claims", taskq.safe(SWK), "info")))
 shutil.rmtree(os.path.join(TQ2, "lock"))
 info_p = os.path.join(TQ2, "claims", taskq.safe(SWK), "info")
@@ -330,36 +330,36 @@ ci3.pop("ttl", None)
 ci3["beat"] = time.time() - 600
 json.dump(ci3, open(info_p, "w"))
 rc, _ = tq2("next", "--worker", "505", "--envs", ALL, "--exclude", UM)
-check("worker：没有 ttl 的领取记录，心跳 10 分钟前仍算在训", rc == 10)
+check("worker: a claim record without ttl, heartbeat 10 minutes ago still counts as training", rc == 10)
 ci3["beat"] = time.time() - 1300
 json.dump(ci3, open(info_p, "w"))
 rc, out = tq2("next", "--worker", "505", "--envs", ALL, "--exclude", UM)
-check("worker：没有 ttl 的领取记录，心跳超过 20 分钟就过期、别人能领", rc == 0 and out.startswith(SWK))
+check("worker: a claim record without ttl, heartbeat over 20 minutes ago expires and someone else can claim it", rc == 0 and out.startswith(SWK))
 NOQ = os.path.join(T, "no_tasks")
 os.makedirs(NOQ)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "506", "--envs", ALL],
                    env=dict(ENV, TASKQ_DIR=NOQ), capture_output=True, text=True)
-check("没有任务表：next 退出码 2（出错，不是 10「没有任务」，作业不会因此提前结束）", r.returncode == 2)
+check("no task table: next exits 2 (an error, not 10 'no tasks', so jobs do not end early because of it)", r.returncode == 2)
 
-EMPTY = os.path.join(T, "hub_tq")  # hub 上：空的队列目录，没有任务表
+EMPTY = os.path.join(T, "hub_tq")  # on the hub: an empty queue dir without a task table
 os.makedirs(EMPTY)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "toy",
                     "ds=D113_delta", "variant=V_save", "frag=0"],
                    env=dict(os.environ, TASKQ_DIR=EMPTY, TASKQ_MACHINE="hub"), capture_output=True, text=True)
-check("在 hub 上（总队列所在的机器）add：本机建总队列（不转发）", r.returncode == 0 and "加入" in r.stdout
+check("add on the hub (the machine with the hub queue): creates the hub queue locally (no forwarding)", r.returncode == 0 and "added:" in r.stdout
       and "D113_delta" in open(os.path.join(EMPTY, "tasks.jsonl")).read())
 NOWHERE = os.path.join(T, "no_queue_here")
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", "100", "--recipe", "toy",
                     "ds=D113_delta", "variant=V_save", "frag=0"],
                    env=dict(os.environ, TASKQ_DIR=NOWHERE, TASKQ_MACHINE="pueue-host"), capture_output=True, text=True)
-check("不在 hub、本机也没有队列：add 退出码 2，提示（标准错误）总队列在 hub，不建目录", r.returncode == 2 and "总队列在 hub" in r.stderr
+check("not on the hub and no local queue: add exits 2, says (on stderr) that the hub queue is on the hub, creates no dir", r.returncode == 2 and "the hub queue is on hub" in r.stderr
       and not os.path.exists(NOWHERE))
 J = '{"tasks": [], "enabled": true}'
-check("@@JSON 行前后混着别的输出：只读那一行", taskq.S.json_in(f"警告：x {{1}}\n@@JSON {J}\n{{别的}}\n") == json.loads(J))
-check("没有 @@JSON 行：不认（不找第一个 {）", taskq.S.json_in(f"x\n{J}\n") is None)
+check("other output around the @@JSON line: only that line is read", taskq.S.json_in(f"warning: x {{1}}\n@@JSON {J}\n{{other}}\n") == json.loads(J))
+check("no @@JSON line: not read (does not look for the first {)", taskq.S.json_in(f"x\n{J}\n") is None)
 
 
-# ---------------- 任务说明（next、set、show、add --exp / --recipe） ----------------
+# ---------------- task specs (next, set, show, add --exp / --recipe) ----------------
 TQ3 = os.path.join(T, "taskq3")
 ENV3 = dict(ENV, TASKQ_DIR=TQ3)
 
@@ -373,89 +373,89 @@ os.makedirs(TQ3)
 open(os.path.join(TQ3, "tasks.jsonl"), "w").close()
 rc, out, _ = tq3("add", "--nice", "0", "--exp", "t15b", "--only", "frag=1,2")
 ts = taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))
-check("add --exp --only：从实验表展开、记下实验 id", rc == 0 and [t["key"] for t in ts] ==
+check("add --exp --only: expands from the experiment table, records the experiment id", rc == 0 and [t["key"] for t in ts] ==
       ["D111_beta/V_save_n470/1", "D111_beta/V_save_n470/2"] and ts[0]["exp"] == "t15b")
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=stats", "out=toy/a", 'done=["DONE"]')
-check("add --recipe：实验表以外的任务", rc == 0 and "toy/a" in out and "环境 stats" in out)
+check("add --recipe: a task outside the experiment table", rc == 0 and "toy/a" in out and "env stats" in out)
 rc, out, err = tq3("add", "--nice", "5", "--recipe", "toy", "ds=D101_alpha", "frag=0", "variantt=x")
-check("add --recipe：写错参数名报错、不加", rc == 2 and "variantt" in err and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
+check("add --recipe: a wrong param name is an error and adds nothing", rc == 2 and "variantt" in err and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
 rc, out, err = tq3("add", "--nice", "5", "--recipe", "command", "key=toy__a", "cmd=python3 -c 1", "env=stats", "out=toy/a2", 'done=["DONE"]')
-check("add：转成文件名和已有任务重名（toy/a 与 toy__a）→ 报错、不加", rc == 2 and "文件名" in err
+check("add: the file name clashes with an existing task (toy/a and toy__a) -> error, not added", rc == 2 and "file name" in err
       and len(taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))) == 3)
 rc, out, _ = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 1", "env=stats", "out=toy/a", 'done=["DONE"]')
 rc2, _, out2 = tq3("add", "--nice", "5", "--recipe", "command", "key=toy/a", "cmd=python3 -c 2", "env=stats", "out=toy/a", 'done=["DONE"]')
-check("add --recipe 同名：说明一样 → 跳过；说明不一样 → 报出来、退出码 2、不改原来的",
-      rc == 0 and "已有，跳过" in out and rc2 == 2 and "说明不一样" in out2
+check("add --recipe with the same name: same spec -> skipped; different spec -> reported, exit code 2, original unchanged",
+      rc == 0 and "exists, skipped" in out and rc2 == 2 and "different spec" in out2
       and next(x for x in taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl")) if x["key"] == "toy/a")["params"]["cmd"] == "python3 -c 1")
-check("same_file：同一批里两个 key 转成同一个文件名也拦", taskq.same_file(["x/y", "x__y"], set()) and not taskq.same_file(["x/y"], {"x/y"}))
+check("same_file: two keys in one batch mapping to the same file name are caught", taskq.same_file(["x/y", "x__y"], set()) and not taskq.same_file(["x/y"], {"x/y"}))
 rc, out, _ = tq3("next", "--worker", "700", "--envs", "base,alt")
 lines = out.splitlines()
-check("next：打印 key 和 run_task.sh 的参数", rc == 0 and lines[0] == "D111_beta/V_save_n470/1"
+check("next: prints the key and run_task.sh arguments", rc == 0 and lines[0] == "D111_beta/V_save_n470/1"
       and lines[1] == "toy ds=D111_beta variant=V_save_n470 frag=1")
 rc, out, _ = tq3("next", "--worker", "701", "--envs", "base,alt")
 rc2, out2, _ = tq3("next", "--worker", "702", "--envs", "base")
-check("next：本机没有的环境（stats）不领", rc == 0 and rc2 == 10)
+check("next: an env this machine does not have (stats) is not claimed", rc == 0 and rc2 == 10)
 rc, out, _ = tq3("next", "--worker", "703", "--envs", "stats")
-check("next：有这个环境的机器领得到；JSON 值原样带上", rc == 0 and out.splitlines()[1] == "command key=toy/a 'cmd=python3 -c 1' env=stats out=toy/a 'done=[\"DONE\"]'")
+check("next: a machine with this env can claim it; JSON values are passed as is", rc == 0 and out.splitlines()[1] == "command key=toy/a 'cmd=python3 -c 1' env=stats out=toy/a 'done=[\"DONE\"]'")
 tq3("release", "--worker", "700", "D111_beta/V_save_n470/1")
 rc, out, _ = tq3("set", "D111_beta/V_save_n470/1", "env=alt2")
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))}
-check("set：改单个任务的参数", rc == 0 and ts["D111_beta/V_save_n470/1"]["params"]["env"] == "alt2")
+check("set: changes one task's params", rc == 0 and ts["D111_beta/V_save_n470/1"]["params"]["env"] == "alt2")
 rc, out, _ = tq3("next", "--worker", "705", "--envs", "alt2")
-check("next：改了环境以后按新环境领", rc == 0 and out.startswith("D111_beta/V_save_n470/1"))
+check("next: after the env change it is claimed with the new env", rc == 0 and out.startswith("D111_beta/V_save_n470/1"))
 tq3("release", "--worker", "705", "D111_beta/V_save_n470/1")
 rc, out, _ = tq3("set", "D111_beta/V_save_n470/1", "env=")
 rc, out, _ = tq3("next", "--worker", "706", "--envs", "base")
-check("set k=（空值）删掉参数、回到默认环境", rc == 0 and out.startswith("D111_beta/V_save_n470/1\n"))
+check("set k= (empty value) deletes the param and returns to the default env", rc == 0 and out.startswith("D111_beta/V_save_n470/1\n"))
 rc, out, _ = tq3("set", "D111_beta/V_save_n470/1", "frag=3")
-check("set：会改变任务名的不让改", rc == 2)
+check("set: a change that would rename the task is refused", rc == 2)
 rc, out, _ = tq3("show", "--json", "toy/a")
 sj = taskq.S.json_in(out)
-check("show --json：完整说明，写在 @@JSON 开头的一行里", rc == 0 and out.startswith("@@JSON ") and sj["out"] == "toy/a" and sj["env"] == "stats")
+check("show --json: full spec on the line starting with @@JSON", rc == 0 and out.startswith("@@JSON ") and sj["out"] == "toy/a" and sj["env"] == "stats")
 rc, out, _ = tq3("show", "D111_beta/V_save_n470/2")
-check("show：说明、状态、run_task.sh 的写法", rc == 0 and "claimed" in out and "run_task.sh toy" in out and "train.sh" in out)
+check("show: spec, state, run_task.sh form", rc == 0 and "claimed" in out and "run_task.sh toy" in out and "train.sh" in out)
 d = os.path.join(DATA, "toy", "a")
 os.makedirs(d)
 open(os.path.join(d, "DONE"), "w").close()
 s3 = taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json", "--internal"], env=ENV3, capture_output=True, text=True).stdout)
 st3 = {t["key"]: t for t in s3["tasks"]}
-check("status --json：带说明；command 任务按 done 判断训完", st3["toy/a"]["state"] == "done" and st3["toy/a"]["spec"]["recipe"] == "command"
+check("status --json: includes the spec; a command task is done by its done files", st3["toy/a"]["state"] == "done" and st3["toy/a"]["spec"]["recipe"] == "command"
       and st3["D111_beta/V_save_n470/2"]["spec"]["out"].startswith("results/D111_beta/"))
 with open(os.path.join(TQ3, "tasks.jsonl"), "a") as f:
     f.write(json.dumps(dict(order=99, nice=1, key="bad/x", exp=None, recipe="toy", params=dict(frag="0"))) + "\n")
 rc, out, _ = tq3("status")
-check("解析不了的任务显示 bad、不影响别的", rc == 0 and "bad" in out)
+check("a task that cannot be resolved shows bad and does not affect others", rc == 0 and "bad" in out)
 
-# machines 限定在哪几台机器上领（推理只在 Slurm）
+# machines restricts which machines may claim it (inference only on Slurm)
 tq3("add", "--nice", "-100", "--recipe", "command", "key=toy/m", "cmd=true", "env=base", "out=toy/m", 'done=["DONE"]', 'machines=["slurm-login"]')
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "710", "--envs", "base"],
                    env=dict(ENV3, TASKQ_MACHINE="pueue-host"), capture_output=True, text=True)
-check("next：machines 里没有本机的不领", r.returncode == 10)
+check("next: not claimed when machines does not list this machine", r.returncode == 10)
 r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "711", "--envs", "base"],
                    env=dict(ENV3, TASKQ_MACHINE="slurm-login"), capture_output=True, text=True)
-check("next：machines 里有本机的照档位先领", r.returncode == 0 and r.stdout.startswith("toy/m"))
-# device=cpu 的只给 CPU worker（--device cpu）；不带 --device 的（GPU worker、在跑的旧 worker）不领
+check("next: claimed by nice order when machines lists this machine", r.returncode == 0 and r.stdout.startswith("toy/m"))
+# device=cpu tasks go only to CPU workers (--device cpu); without --device (GPU workers, older running workers) they are not claimed
 tq3("add", "--nice", "-200", "--recipe", "command", "key=toy/c", "cmd=true", "env=base", "out=toy/c", 'done=["DONE"]', "device=cpu")
 rc, out, _ = tq3("next", "--worker", "712", "--envs", "base")
-check("next：不带 --device（GPU worker）不领 device=cpu 的，即使排在最前", rc != 0 or not out.startswith("toy/c"))
+check("next: without --device (GPU worker), device=cpu tasks are not claimed even when first", rc != 0 or not out.startswith("toy/c"))
 if rc == 0:
     tq3("release", "--worker", "712", out.splitlines()[0])
 rc, out, _ = tq3("next", "--worker", "713", "--envs", "base", "--device", "cpu")
-check("next --device cpu：只领 device=cpu 的", rc == 0 and out.startswith("toy/c\n") and "device=cpu" in out)
+check("next --device cpu: claims only device=cpu", rc == 0 and out.startswith("toy/c\n") and "device=cpu" in out)
 rc, out, _ = tq3("next", "--worker", "714", "--envs", "base", "--device", "cpu")
-check("next --device cpu：没有别的纯 CPU 任务 → 10", rc == 10)
+check("next --device cpu: no other CPU-only task -> 10", rc == 10)
 rc, out, _ = tq3("add", "--nice", "-200", "--recipe", "command", "key=toy/e", "cmd=true", 'env=["base","stats"]', "out=toy/e",
                  'done=["DONE"]', "device=cpu")
-check("add：env 可以是几个环境的列表", rc == 0 and "环境 base,stats" in out)
+check("add: env can be a list of several envs", rc == 0 and "env base,stats" in out)
 rc, out, _ = tq3("next", "--worker", "715", "--envs", "base", "--device", "cpu")
-check("next：env 列表里有没备好的环境 → 不领", rc == 10)
+check("next: an env in the list that is not ready -> not claimed", rc == 10)
 rc, out, _ = tq3("next", "--worker", "715", "--envs", "base,stats", "--device", "cpu")
-check("next：env 列表里的环境都备好 → 领", rc == 0 and out.startswith("toy/e\n"))
+check("next: all envs in the list are ready -> claimed", rc == 0 and out.startswith("toy/e\n"))
 rc, out, _ = tq3("status")
-check("status：env 列表显示成 a,b", rc == 0 and "base,stats" in out)
+check("status: an env list shows as a,b", rc == 0 and "base,stats" in out)
 
-# 主数据目录读不了时不领
-# add 不给 --nice：--exp 用实验表里的档位，别的报错（单独一份队列，不影响上面的）
+# do not claim when the main data dir cannot be read
+# add without --nice: --exp uses the table's nice, anything else is an error (a separate queue, does not affect the above)
 TQ3B = os.path.join(T, "taskq3b")
 os.makedirs(TQ3B)
 open(os.path.join(TQ3B, "tasks.jsonl"), "w").close()
@@ -468,17 +468,17 @@ def tq3b(*args):
 
 rc, out, _ = tq3b("add", "--exp", "t15g", "--only", "frag=0")
 ts = taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))
-check("add --exp 不给 --nice：用实验表里的档位", rc == 0 and [t["key"] for t in ts] == ["D116_gamma/V_save_n470/0"]
+check("add --exp without --nice: uses the nice from the experiment table", rc == 0 and [t["key"] for t in ts] == ["D116_gamma/V_save_n470/0"]
       and ts[0]["nice"] == E.experiment("t15g")["nice"])
 rc, out, err = tq3b("add", "--recipe", "command", "key=toy/n", "cmd=true", "env=base", "out=toy/n", 'done=["DONE"]')
-check("add --recipe 不给 --nice：报错、不加", rc != 0 and "--nice" in err and len(taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))) == 1)
+check("add --recipe without --nice: error, not added", rc != 0 and "--nice" in err and len(taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))) == 1)
 want = [t["key"] for t in E.expand(E.experiment("t16"))]
 rc, out, _ = tq3b("add", "--exp", "t16")
 rc2, out2, _ = tq3b("add", "--exp", "t16")
 ts = [t for t in taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl")) if t["exp"] == "t16"]
-check("add --exp（整个实验）：实验表展开的任务都加上、档位用表里的，再加一次全部跳过",
+check("add --exp (whole experiment): all expanded tasks added with the table's nice; a second add skips them all",
       rc == 0 and rc2 == 0 and len(want) == 5 and sorted(t["key"] for t in ts) == sorted(want)
-      and {t["nice"] for t in ts} == {E.experiment("t16")["nice"]} and out2.count("已有，跳过") == len(want)
+      and {t["nice"] for t in ts} == {E.experiment("t16")["nice"]} and out2.count("exists, skipped") == len(want)
       and len(taskq.read_tasks(os.path.join(TQ3B, "tasks.jsonl"))) == 1 + len(want))
 
 TQ4, D4 = os.path.join(T, "taskq4"), os.path.join(T, "data4")
@@ -498,13 +498,13 @@ def tq4(*args, root=D4):
 
 
 rc, out, err = tq4("next", "--worker", "800", "--envs", ALL, root=os.path.join(T, "nosuch"))
-check("next：数据目录读不了时不领（退出码 12，报原因）", rc == 12 and "读不了" in err)
+check("next: does not claim when the data dir cannot be read (exit code 12, says why)", rc == 12 and "cannot read" in err)
 rc, out, err = tq4("take", "--worker", "pueue-host", "--assign", ks4[2], root=os.path.join(T, "nosuch"))
-check("take：数据目录读不了时不领", rc == 10 and "读不了" in out and not os.path.exists(os.path.join(TQ4, "claims", taskq.safe(ks4[2]))))
+check("take: does not claim when the data dir cannot be read", rc == 10 and "cannot read" in out and not os.path.exists(os.path.join(TQ4, "claims", taskq.safe(ks4[2]))))
 rc, out, err = tq4("next", "--worker", "801", "--envs", ALL)
-check("最近 4 次FAIL:暂停", rc == 12)
+check("4 recent failures: paused", rc == 12)
 
-# ---------------- 领取只建了目录、info 没写上（领的进程在中间被杀） ----------------
+# ---------------- claim made only the dir, info was never written (the claiming process was killed) ----------------
 TQ5, D5 = os.path.join(T, "taskq5"), os.path.join(T, "data5")
 k5 = "D121_x/V_save/3"
 write_jsonl(os.path.join(TQ5, "tasks.jsonl"), [(1, 0, k5)])
@@ -516,28 +516,28 @@ os.makedirs(D5, exist_ok=True)
 def tq5(*args):
     r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(ENV, TASKQ_DIR=TQ5, TASKQ_DATA=D5),
                        capture_output=True, text=True)
-    return r.returncode, (r.stdout + r.stderr).strip()  # 消息在 stderr
+    return r.returncode, (r.stdout + r.stderr).strip()  # messages go to stderr
 
 
 rc, out = tq5("next", "--worker", "900", "--envs", ALL)
-check("半建的领取：刚建的（5 分钟内）当作正在领，不抢", rc == 10)
+check("half claim: one just made (within 5 minutes) counts as being claimed, not taken", rc == 10)
 rc, out = tq5("take", "--worker", "pueue-host", "--assign", k5)
-check("半建的领取：take 也不抢刚建的", rc == 10)
+check("half claim: take does not take a fresh one either", rc == 10)
 os.utime(half, (time.time() - 600,) * 2)
 rc, out = tq5("status")
-check("半建的领取：10 分钟前建的算过期", "stale" in out or "过期" in out or "不完整" in out)
+check("half claim: one made 10 minutes ago counts as expired", "stale" in out or "expired" in out or "incomplete" in out)
 rc, out = tq5("next", "--worker", "901", "--envs", ALL)
 ci5 = json.load(open(os.path.join(half, "info")))
-check("半建的领取：过期后照常领走，info 写全", rc == 0 and out.startswith(k5 + "\n") and ci5["worker"] == "901")
+check("half claim: claimed as usual after expiry, info written in full", rc == 0 and out.startswith(k5 + "\n") and ci5["worker"] == "901")
 shutil.rmtree(half)
 os.makedirs(half)
 os.utime(half, (time.time() - 600,) * 2)
 rc, out = tq5("take", "--worker", "pueue-host", "--assign", k5)
 ci5 = json.load(open(os.path.join(half, "info")))
-check("半建的领取：take 也能领走过期的", rc == 0 and ci5["worker"] == "pueue-host" and ci5["assigned"] == "pueue-host")
-check("info 写完不留临时文件", os.listdir(half) == ["info"])
+check("half claim: take can also take an expired one", rc == 0 and ci5["worker"] == "pueue-host" and ci5["assigned"] == "pueue-host")
+check("writing info leaves no temp file", os.listdir(half) == ["info"])
 
-# ---------------- remove（Slurm 停机时把排在那边的任务删掉、改在别处做） ----------------
+# ---------------- remove (delete steps queued on a stopped Slurm machine and do them elsewhere) ----------------
 TQ6, D6 = os.path.join(T, "taskq6"), os.path.join(T, "data6")
 kt = "D121_x/V_save/4"
 os.makedirs(os.path.join(TQ6), exist_ok=True)
@@ -568,21 +568,21 @@ def st6():
 
 
 rc, out = tq6("remove", "nosuch/key")
-check("remove：没有的 key 退出码 4", rc == taskq.GONE and "队列里没有" in out)
+check("remove: an absent key exits 4", rc == taskq.GONE and "not in queue" in out)
 rows2 = rows + [dict(order=5, nice=-100, key="free/z", exp=None, recipe="command",
                      params=dict(key="free/z", cmd="true", env="base", out="out/free/z", done=[".done"], device="cpu"))]
 with open(os.path.join(TQ6, "tasks.jsonl"), "a") as f:
     f.write(json.dumps(rows2[-1]) + "\n")
 rc, out = tq6("next", "--worker", "970", "--envs", ALL, "--device", "cpu", "--exclude", "eval/x/frag_4")
 rc2, out2 = tq6("remove", "free/z")
-check("remove：有人领着的不删（退出码 3）", rc == 0 and out.startswith("free/z\n") and rc2 == taskq.REFUSED and "claimed" in out2
+check("remove: a claimed task is not removed (exit code 3)", rc == 0 and out.startswith("free/z\n") and rc2 == taskq.REFUSED and "claimed" in out2
       and "free/z" in st6())
 rc, out = tq6("remove", "infer/x/frag_4", "eval/x/frag_4", "nosuch/key")
 s6 = st6()
-check("remove：一批删几个 → 都删掉，别的不动；一批里已经不在的跳过，退出码 0", rc == 0 and "infer/x/frag_4" not in s6
-      and "eval/x/frag_4" not in s6 and kt in s6 and "free/z" in s6 and "队列里没有：nosuch/key" in out)
+check("remove: several in one batch -> all removed, others untouched; ones already absent are skipped, exit code 0", rc == 0 and "infer/x/frag_4" not in s6
+      and "eval/x/frag_4" not in s6 and kt in s6 and "free/z" in s6 and "not in queue: nosuch/key" in out)
 
-# ---------------- 总队列在 hub、分给执行机（take --assign） ----------------
+# ---------------- hub queue on the hub, assigning to an executor (take --assign) ----------------
 TQ7 = os.path.join(T, "taskq7")
 os.makedirs(TQ7)
 kt7 = "D121_x/V_save/3"
@@ -606,30 +606,30 @@ def st7(d=TQ7):
 
 rc, out = tq7("take", "--worker", "slurm-login", "--assign", "infer/x/frag_3")
 s7 = st7()
-check("take --assign：分出去 → claimed、记下 assigned", rc == 0 and s7["infer/x/frag_3"]["assigned"] == "slurm-login"
+check("take --assign: assigned -> claimed, records assigned", rc == 0 and s7["infer/x/frag_3"]["assigned"] == "slurm-login"
       and s7["infer/x/frag_3"]["state"] == "claimed")
 rc, out = tq7("take", "--worker", "slurm-login", "--assign", kt7)
 ci7 = json.load(open(os.path.join(TQ7, "claims", taskq.safe(kt7), "info")))
 ci7["beat"] = time.time() - 30 * 86400
 json.dump(ci7, open(os.path.join(TQ7, "claims", taskq.safe(kt7), "info"), "w"))
 s7 = st7()
-check("take --assign：分出去的不过期（心跳 30 天前也还是 claimed）", rc == 0 and s7[kt7]["state"] == "claimed" and "ttl" not in ci7
+check("take --assign: assigned tasks do not expire (heartbeat 30 days ago still claimed)", rc == 0 and s7[kt7]["state"] == "claimed" and "ttl" not in ci7
       and s7[kt7]["assigned"] == "slurm-login")
 rc, out = tq7("take", "--worker", "slurm-login", "--assign", kt7)
-check("take --assign：已经分给自己的再分一次照样成功", rc == 0)
+check("take --assign: assigning one already its own succeeds again", rc == 0)
 rc, out = tq7("take", "--worker", "pueue-host", "--assign", kt7)
-check("take --assign：分给别人的不能再分", rc == 10)
+check("take --assign: cannot assign one assigned to someone else", rc == 10)
 rc, out = tq7("next", "--worker", "960", "--envs", ALL)
-check("总队列里分出去的任务 worker 不领", rc == 10)
+check("workers do not claim tasks assigned in the hub queue", rc == 10)
 rc, out = tq7("remove", kt7, "infer/x/frag_3")
-check("remove：分出去的不删，提示先 stop", rc == taskq.REFUSED and "先 stop" in out)
+check("remove: an assigned task is not removed, says stop first", rc == taskq.REFUSED and "stop it first" in out)
 rc, out = tq7("stop", kt7)
-check("stop：分出去的提示由 hub 下次检查时停", rc == 0 and "分给了 slurm-login" in out)
-rc, out = tq7("take", "--worker", "slurm-login", "--assign", kt7)  # 停了的，原来领着的也不能再领
-check("take：停了的（就算是自己领着的）不领", rc == 10 and "stopped" in out)
+check("stop: an assigned task says the hub stops it on its next check", rc == 0 and "assigned to slurm-login" in out)
+rc, out = tq7("take", "--worker", "slurm-login", "--assign", kt7)  # stopped: even its current holder cannot claim it
+check("take: a stopped task (even one it holds) is not assigned", rc == 10 and "stopped" in out)
 tq7("resume", kt7)
 
-# 缺输入：worker 记 missing → input，不领、不算失败；input-ok 撤掉（执行机上的队列，relay.py 补传后撤）
+# missing inputs: a worker records missing -> input, not claimed, not a failure; input-ok clears it (executor queue, after relay.py re-sends)
 EQ = os.path.join(T, "exec7")
 os.makedirs(EQ)
 open(os.path.join(EQ, "ENABLED"), "w").close()
@@ -645,17 +645,17 @@ def tqe(*args):
 
 rc, out = tqe("next", "--worker", "963", "--envs", ALL)
 rc1, _ = tqe("missing", "--worker", "999", "--why", "x", kt7)
-rc2, _ = tqe("missing", "--worker", "963", "--why", "作业 963 开训前查到", kt7)
+rc2, _ = tqe("missing", "--worker", "963", "--why", "job 963 checked before starting", kt7)
 sb = st7(EQ)
-check("缺输入：不是自己领的不能记；自己领的记上 → input、交还、不算失败", rc == 0 and out.startswith(kt7 + "\n") and rc1 == 1 and rc2 == 0
-      and sb[kt7]["state"] == "input" and "缺输入" in sb[kt7]["note"] and not sb[kt7]["worker"] and sb[kt7]["failures"] == 0
+check("missing inputs: cannot record for a task it does not hold; its own -> input, released, not a failure", rc == 0 and out.startswith(kt7 + "\n") and rc1 == 1 and rc2 == 0
+      and sb[kt7]["state"] == "input" and "missing inputs" in sb[kt7]["note"] and not sb[kt7]["worker"] and sb[kt7]["failures"] == 0
       and sb[kt7]["input_since"])
 rc, out = tqe("next", "--worker", "964", "--envs", ALL)
-check("缺输入：不再领它", rc == 10 or not out.startswith(kt7 + "\n"))
+check("missing inputs: not claimed again", rc == 10 or not out.startswith(kt7 + "\n"))
 rc, out = tqe("input-ok", kt7)
-check("缺输入：input-ok 撤掉标记 → 照常领", rc == 0 and st7(EQ)[kt7]["state"] == "free")
+check("missing inputs: input-ok clears the marker -> claimable as usual", rc == 0 and st7(EQ)[kt7]["state"] == "free")
 
-# ---------------- add --file（任务单） ----------------
+# ---------------- add --file (task sheet) ----------------
 TQF = os.path.join(T, "taskqf")
 os.makedirs(TQF)
 open(os.path.join(TQF, "tasks.jsonl"), "w").close()
@@ -674,27 +674,27 @@ fn = os.path.join(T, "job.json")
 json.dump(sheet, open(fn, "w"))
 rc, out, _ = tqf("add", "--file", fn)
 tf = taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))
-check("add --file：一张任务单 → command 任务，档位用单子里的", rc == 0 and len(tf) == 1 and tf[0]["key"] == "guest/alice/toy"
+check("add --file: one task sheet -> a command task, nice from the sheet", rc == 0 and len(tf) == 1 and tf[0]["key"] == "guest/alice/toy"
       and tf[0]["recipe"] == "command" and tf[0]["nice"] == 40 and "nice" not in tf[0]["params"])
 sf = S.resolve(tf[0]["recipe"], tf[0]["params"])
-check("add --file：inputs、res、resume、owner 进了任务说明", sf["inputs"] == ["guest/alice/in"]
+check("add --file: inputs, res, resume, owner go into the spec", sf["inputs"] == ["guest/alice/in"]
       and sf["res"] == dict(gpus=1, cpus=8, mem="32G") and sf["resume"] == ["ckpt_*.pt"] and sf["owner"] == "alice")
-check("add --file：任务单不写 relay 时按默认的 path 准备输入（不往参数里另加）", sf["relay"] == "path" and "relay" not in tf[0]["params"])
+check("add --file: without relay in the sheet, inputs use the default path (not added to params)", sf["relay"] == "path" and "relay" not in tf[0]["params"])
 json.dump([dict(sheet, key="guest/alice/b", out="guest/alice/b"), dict(sheet, key="guest/alice/c", out="guest/alice/c")], open(fn, "w"))
 rc, out, _ = tqf("add", "--nice", "7", "--file", fn)
 tf = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))}
-check("add --file：一列任务单、--nice 优先", rc == 0 and tf["guest/alice/b"]["nice"] == 7 and tf["guest/alice/c"]["nice"] == 7)
+check("add --file: a list of task sheets, --nice wins", rc == 0 and tf["guest/alice/b"]["nice"] == 7 and tf["guest/alice/c"]["nice"] == 7)
 json.dump(dict(sheet, key="guest/alice/d", res=dict(gpu=1)), open(fn, "w"))
 rc, _, err = tqf("add", "--file", fn)
-check("add --file：res 写错字段报错、不加", rc == 2 and "res" in err and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
+check("add --file: a wrong res field is an error and adds nothing", rc == 2 and "res" in err and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
 json.dump(dict(sheet, key="guest/alice/e", nice=None), open(fn, "w"))
 rc, out, err = tqf("add", "--file", fn)
-check("add --file：单子和命令行都没有档位 → 报错、不加", rc != 0 and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
+check("add --file: no nice in the sheet or on the command line -> error, not added", rc != 0 and len(taskq.read_tasks(os.path.join(TQF, "tasks.jsonl"))) == 3)
 open(fn, "w").write("{oops")
 rc, _, err = tqf("add", "--nice", "1", "--file", fn)
-check("add --file：不是 JSON → 报错", rc == 2 and "任务单" in err)
+check("add --file: not JSON -> error", rc == 2 and "task sheet" in err)
 
-# ---------------- 锁、take --assign、旧 token 交还 ----------------
+# ---------------- locks, take --assign, old-token release ----------------
 TQR = os.path.join(T, "taskqr")
 os.makedirs(TQR)
 
@@ -723,54 +723,54 @@ tq_orig, taskq.TQ = taskq.TQ, TQR
 LK = os.path.join(TQR, "lock")
 holder = subprocess.Popen([sys.executable, "-c", "import sys, taskq\nwith taskq.Lock():\n    print('held', flush=True)\n    sys.stdin.read()"],
                           env=dict(ENV, TASKQ_DIR=TQR, PYTHONPATH=HERE), stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-check("锁：另一个进程拿到锁", holder.stdout.readline().strip() == "held")
+check("lock: another process gets the lock", holder.stdout.readline().strip() == "held")
 os.utime(LK, (time.time() - 121,) * 2)
 lk = try_lock()
-check("锁：持有者在本机、进程还活着，锁目录 2 分钟没动也不抢", lk is None and os.path.isdir(LK))
+check("lock: holder is on this host and alive, lock dir untouched for 2 minutes is not taken", lk is None and os.path.isdir(LK))
 if lk:
     lk.__exit__()
 holder.stdin.close()
 holder.wait(timeout=30)
-check("锁：持有者退出时删掉自己的锁", not os.path.exists(LK))
+check("lock: the holder removes its own lock on exit", not os.path.exists(LK))
 dead = subprocess.Popen([sys.executable, "-c", "pass"])
 dead.wait()
 os.mkdir(LK)
 open(os.path.join(LK, "owner"), "w").write(f"{socket.gethostname()}\t{dead.pid}\tx\n")
 os.utime(LK, (time.time() - 121,) * 2)
 lk = try_lock()
-check("锁：持有者的进程已经不在，过 2 分钟照常抢", lk is not None)
+check("lock: the holder's process is gone, taken as usual after 2 minutes", lk is not None)
 if lk:
     lk.__exit__()
 os.mkdir(LK)
 open(os.path.join(LK, "owner"), "w").write(f"elsewhere\t{os.getpid()}\tx\n")
 lk = try_lock()
-check("锁：别的主机拿着、锁目录是新的 → 等", lk is None)
+check("lock: held on another host, lock dir fresh -> wait", lk is None)
 os.utime(LK, (time.time() - 121,) * 2)
 lk = try_lock()
-check("锁：别的主机拿着、2 分钟没动 → 还等（看不到那边的死活）", lk is None)
+check("lock: held on another host, untouched for 2 minutes -> still wait (cannot see whether it is alive)", lk is None)
 os.utime(LK, (time.time() - taskq.LOCK_REMOTE - 1,) * 2)
 lk = try_lock()
-check("锁：别的主机拿着、LOCK_REMOTE 没动 → 抢", lk is not None)
+check("lock: held on another host, untouched for LOCK_REMOTE -> take", lk is not None)
 if lk:
     lk.__exit__()
 os.mkdir(LK)
 os.utime(LK, (time.time() - 121,) * 2)
 lk = try_lock()
-check("锁：旧版本留下的空锁目录，过 2 分钟照常抢", lk is not None)
+check("lock: an empty lock dir left by an old version is taken as usual after 2 minutes", lk is not None)
 if lk:
     lk.__exit__()
 lk = taskq.Lock().__enter__()
 shutil.rmtree(LK, ignore_errors=True)
 os.mkdir(LK)
 lk.__exit__()
-check("锁：锁已经被旧版本的进程接管（空目录），原持有者退出时不删", os.path.isdir(LK))
+check("lock: taken over by an old-version process (empty dir), the original holder does not remove it on exit", os.path.isdir(LK))
 shutil.rmtree(LK, ignore_errors=True)
 lk = taskq.Lock().__enter__()
 shutil.rmtree(LK, ignore_errors=True)
 os.mkdir(LK)
 open(os.path.join(LK, "owner"), "w").write("other\t1\tzz\n")
 lk.__exit__()
-check("锁：锁已经被别人接管，原持有者退出时不删", os.path.exists(os.path.join(LK, "owner")))
+check("lock: taken over by someone else, the original holder does not remove it on exit", os.path.exists(os.path.join(LK, "owner")))
 shutil.rmtree(LK, ignore_errors=True)
 taskq.TQ = tq_orig
 
@@ -781,9 +781,9 @@ with open(os.path.join(TQR, "tasks.jsonl"), "w") as f:
 rc, _ = tqr("take", "--worker", "A", "--assign", kc)
 rc2, out2 = tqr("take", "--worker", "B", "--assign", kc)
 ci = json.load(open(os.path.join(TQR, "claims", taskq.safe(kc), "info")))
-check("take --assign：已分给 A，B 分不到（退出码 10），仍是 A", rc == 0 and rc2 == 10 and ci["assigned"] == "A")
+check("take --assign: already assigned to A, B cannot take it (exit code 10), still A", rc == 0 and rc2 == 10 and ci["assigned"] == "A")
 rc, _ = tqr("take", "--worker", "A", "--assign", kc)
-check("take --assign：A 再分自己的照样成功", rc == 0 and json.load(open(os.path.join(TQR, "claims", taskq.safe(kc), "info")))["assigned"] == "A")
+check("take --assign: A assigning its own again succeeds", rc == 0 and json.load(open(os.path.join(TQR, "claims", taskq.safe(kc), "info")))["assigned"] == "A")
 
 rc, out = tqr("next", "--worker", "W", "--envs", ALL, "--exclude", kp)
 tok1 = out.splitlines()[-1] if rc == 0 else None
@@ -793,18 +793,18 @@ ci["beat"] = time.time() - 1800
 json.dump(ci, open(pr, "w"))
 rc2, out2 = tqr("next", "--worker", "W", "--envs", ALL, "--exclude", kp)
 tok2 = out2.splitlines()[-1] if rc2 == 0 else None
-check("旧 token：同名 worker 重新领到过期的任务，token 换了", rc == 0 and rc2 == 0 and out.startswith(kr) and tok1 != tok2)
+check("old token: a same-name worker re-claims an expired task and the token changes", rc == 0 and rc2 == 0 and out.startswith(kr) and tok1 != tok2)
 for _ in range(3):
-    tqr("release", "--worker", "W", "--token", tok1, kr, "--failed", "旧一轮失败")
-    tqr("release", "--worker", "W", "--token", tok1, kr, "--skip", "旧一轮放不下")
-check("旧 token：release --failed / --skip 不记失败、跳过，领取还在", os.path.exists(pr) and json.load(open(pr))["token"] == tok2
+    tqr("release", "--worker", "W", "--token", tok1, kr, "--failed", "old round failed")
+    tqr("release", "--worker", "W", "--token", tok1, kr, "--skip", "old round did not fit")
+check("old token: release --failed / --skip record no failure or skip, the claim stays", os.path.exists(pr) and json.load(open(pr))["token"] == tok2
       and not os.path.exists(os.path.join(TQR, "failures", taskq.safe(kr))) and not os.path.exists(os.path.join(TQR, "skips", taskq.safe(kr)))
       and not os.path.exists(os.path.join(TQR, "released", taskq.safe(kr))) and strl()[kr][0] == "claimed")
-rc, _ = tqr("release", "--worker", "W", "--token", tok2, kr, "--failed", "这一轮失败")
-check("这一轮的 token：release --failed 记一次、交还", rc == 0 and not os.path.exists(pr)
+rc, _ = tqr("release", "--worker", "W", "--token", tok2, kr, "--failed", "this round failed")
+check("this round's token: release --failed records once and releases", rc == 0 and not os.path.exists(pr)
       and len(open(os.path.join(TQR, "failures", taskq.safe(kr))).readlines()) == 1)
 
-# 有缺输入的标记、但已经有人领着（标记之后重新领了）→ 算 claimed，不算 input（input 的可以被 remove、被 restage）
+# a missing-input marker but someone holds it (re-claimed after the marker) -> claimed, not input (input tasks can be removed and restaged)
 tq_orig, taskq.TQ = taskq.TQ, TQR
 try:
     taskq.write_tasks([dict(cmdtask(1, "r/inp"))])
@@ -814,11 +814,11 @@ try:
     os.makedirs(os.path.join(TQR, "claims", taskq.safe("r/inp")), exist_ok=True)
     taskq.write_json(os.path.join(TQR, "claims", taskq.safe("r/inp"), "info"), dict(worker="W2", host="h", since=time.time(), beat=time.time()), indent=None)
     st_i = taskq.state(t_i, taskq.S.facts([dict(spec=taskq.spec_of(t_i), since=t_i.get("added"), tags=["W2"])], DATA)["r/inp"])
-    check("缺输入的标记 + 有人领着 → claimed", st_i[0] == "claimed")
+    check("missing-input marker + someone holds it -> claimed", st_i[0] == "claimed")
 finally:
     taskq.TQ = tq_orig
 
-# ---------------- 执行机的队列存 hub 解析好的说明（add --spec-stdin、next 给 --spec） ----------------
+# ---------------- executor queues store specs resolved by the hub (add --spec-stdin, next gives --spec) ----------------
 TQS = os.path.join(T, "taskq_spec")
 ENVS_ = dict(ENV, TASKQ_DIR=TQS)
 os.makedirs(TQS)
@@ -834,54 +834,54 @@ sp_a = S.sendable(S.resolve("command", S.parse_kv(["key=sp/a", "cmd=python3 -c 1
 sp_b = S.sendable(S.resolve("toy", dict(ds="D101_alpha", frag="2")))
 rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps([sp_a, sp_b]))
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("add --spec-stdin：记下说明，做法和参数也留着（还在用旧包的 worker 照旧能领）",
+check("add --spec-stdin: records the spec, keeps recipe and params too (workers still on an old bundle can claim it)",
       rc == 0 and set(ts) == {"sp/a", sp_b["key"]} and ts["sp/a"]["spec"]["cmd"] == "python3 -c 1"
       and ts["sp/a"]["recipe"] == "command" and ts["sp/a"]["params"]["key"] == "sp/a")
-check("sendable：去掉只在 hub 上有意义的字段", not set(S.SENT_DROP) & set(sp_a))
-nop = dict(ENVS_, TASKQ_PLUGINS=os.path.join(T, "no_plugins"))  # 那边没有做法、实验表的插件
+check("sendable: drops fields that only mean something on the hub", not set(S.SENT_DROP) & set(sp_a))
+nop = dict(ENVS_, TASKQ_PLUGINS=os.path.join(T, "no_plugins"))  # no recipe or experiment table plugins there
 os.makedirs(nop["TASKQ_PLUGINS"], exist_ok=True)
 rc, out, err = tqs("next", "--worker", "s1", "--envs", "stats", env=nop)
 lines = out.splitlines()
-check("next：带说明的给 run_task.sh --spec <JSON>，不用查做法", rc == 0 and lines[0] == "sp/a" and lines[1].startswith("--spec ")
+check("next: a task with a spec gives run_task.sh --spec <JSON>, without looking up the recipe", rc == 0 and lines[0] == "sp/a" and lines[1].startswith("--spec ")
       and json.loads(__import__("shlex").split(lines[1])[1])["key"] == "sp/a")
 rc, sh, err = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", json.dumps(sp_a)], env=nop,
                              capture_output=True, text=True).returncode, None, None
 r1 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", json.dumps(sp_b)], env=nop, capture_output=True, text=True)
 r2 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", *S.kv_args("toy", dict(ds="D101_alpha", frag="2"))], env=ENVS_,
                     capture_output=True, text=True)
-check("spec.py shell --spec 和 <做法> k=v 给出同样的 shell 语句（没有插件也行）", rc == 0 and r1.returncode == 0 and r1.stdout == r2.stdout)
+check("spec.py shell --spec and <recipe> k=v give the same shell line (works without plugins)", rc == 0 and r1.returncode == 0 and r1.stdout == r2.stdout)
 os.makedirs(os.path.join(DATA, "sp/a"), exist_ok=True)
 r3 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "done", "--spec", json.dumps(sp_a)], env=nop)
 open(os.path.join(DATA, "sp/a", "ALT"), "w").close()
 r4 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "done", "--spec", json.dumps(sp_a)], env=nop)
-check("spec.py done --spec：按说明的 done 判断（a|b 有一个就行）", r3.returncode == 1 and r4.returncode == 0)
+check("spec.py done --spec: done follows the spec (a|b, one is enough)", r3.returncode == 1 and r4.returncode == 0)
 r5 = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", '{"key": "x"}'], env=nop, capture_output=True, text=True)
-check("spec.py shell --spec：缺字段退出码 2", r5.returncode == 2 and "缺字段" in r5.stderr)
+check("spec.py shell --spec: missing fields exit 2", r5.returncode == 2 and "missing fields" in r5.stderr)
 tqs("set-nice", "--nice", "9", "sp/a")
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("set-nice 以后说明还在", ts["sp/a"]["nice"] == 9 and ts["sp/a"]["spec"] == sp_a)
+check("the spec is still there after set-nice", ts["sp/a"]["nice"] == 9 and ts["sp/a"]["spec"] == sp_a)
 sp_a2 = dict(sp_a, cmd="python3 -c 2")
 rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps(sp_a2))
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("add --spec-stdin 已有的：换成新说明，档位、顺序不变", rc == 0 and "换了说明" in out and ts["sp/a"]["spec"]["cmd"] == "python3 -c 2"
+check("add --spec-stdin for an existing task: replaces the spec, nice and order unchanged", rc == 0 and "spec replaced" in out and ts["sp/a"]["spec"]["cmd"] == "python3 -c 2"
       and ts["sp/a"]["nice"] == 9)
 open(os.path.join(TQS, "tasks.jsonl"), "a").write(json.dumps(dict(order=99, nice=1, key="old/c", exp=None, recipe="command",
                                                                     params=dict(key="old/c", cmd="true", env="stats", out="old/c", done="D"))) + "\n")
 rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", stdin=json.dumps(S.sendable(S.resolve("command", dict(key="old/c", cmd="true", env="stats", out="old/c", done="D")))))
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("add --spec-stdin：已有的老记录（没有说明）补上说明", rc == 0 and ts["old/c"].get("spec", {}).get("key") == "old/c" and ts["old/c"]["nice"] == 1)
+check("add --spec-stdin: an existing old record (no spec) gets a spec", rc == 0 and ts["old/c"].get("spec", {}).get("key") == "old/c" and ts["old/c"]["nice"] == 1)
 rc, out, _ = tqs("add", "--nice", "3", "--spec-stdin", "--update-only",
                 stdin=json.dumps([dict(sp_a, cmd="python3 -c 3"), S.sendable(S.resolve("command", dict(key="gone/x", cmd="true", env="stats", out="gone/x", done="D")))]))
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("add --update-only：只换已有的说明，不在队列里的不加", rc == 0 and "gone/x" not in ts and ts["sp/a"]["spec"]["cmd"] == "python3 -c 3")
+check("add --update-only: only replace existing specs, do not add ones not in the queue", rc == 0 and "gone/x" not in ts and ts["sp/a"]["spec"]["cmd"] == "python3 -c 3")
 rc, _, err = tqs("set", sp_b["key"], "env=alt2")
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQS, "tasks.jsonl"))}
-check("set：hub 送来的说明不改（改总队列再 resend）", rc == 2 and "resend" in err and ts[sp_b["key"]]["spec"] == sp_b
+check("set: does not change a spec sent by the hub (change the hub queue, then resend)", rc == 2 and "resend" in err and ts[sp_b["key"]]["spec"] == sp_b
       and "env" not in ts[sp_b["key"]]["params"])
 rc, out, _ = tqs("show", "sp/a")
-check("show：带说明的显示 run_task.sh --spec", rc == 0 and "run_task.sh --spec" in out)
+check("show: a task with a spec shows run_task.sh --spec", rc == 0 and "run_task.sh --spec" in out)
 
-# ---------------- remove 看领取、连记录一起删；坏说明；--update-only；迟到的交还 ----------------
+# ---------------- remove checks claims and deletes records too; bad spec; --update-only; late release ----------------
 TQX = os.path.join(T, "taskq_x")
 os.makedirs(TQX)
 open(os.path.join(TQX, "tasks.jsonl"), "w").close()
@@ -913,19 +913,19 @@ rc, out = tqx("next", "--worker", "w1", "--envs", "stats")
 tok = out.splitlines()[-1]
 tqx("stop", "x/a")
 rc2, out2 = tqx("remove", "x/a")
-check("remove：停了、worker 还领着 → 不删（退出码 3），领取还在", rc == 0 and out.startswith("x/a\n") and rc2 == taskq.REFUSED
+check("remove: stopped but a worker still holds it -> not removed (exit code 3), claim stays", rc == 0 and out.startswith("x/a\n") and rc2 == taskq.REFUSED
       and os.path.isdir(xp("claims", "x/a")) and sx()["x/a"]["state"] == "stopped")
 os.makedirs(os.path.join(DATA, "x/x/a"), exist_ok=True)
 open(os.path.join(DATA, "x/x/a", "DONE"), "w").close()
 rc, out = tqx("remove", "x/a")
-check("remove：done 齐了、worker 还领着（还在写结果）→ 不删", rc == taskq.REFUSED and sx()["x/a"]["state"] == "done")
-shutil.rmtree(xp("claims", "x/a"))  # 领取过期后被别人领走、交还了
-rc, out = tqx("release", "--worker", "w1", "--token", tok, "x/a", "--failed", "迟到的失败")
-check("迟到的 release --failed（领取已经没了）：不记失败，说一句", rc == 0 and not os.path.exists(xp("failures", "x/a")) and "不记失败" in out)
+check("remove: done files complete but a worker still holds it (still writing results) -> not removed", rc == taskq.REFUSED and sx()["x/a"]["state"] == "done")
+shutil.rmtree(xp("claims", "x/a"))  # claim expired, claimed elsewhere and released
+rc, out = tqx("release", "--worker", "w1", "--token", tok, "x/a", "--failed", "late failure")
+check("late release --failed (the claim is gone): records no failure, says so", rc == 0 and not os.path.exists(xp("failures", "x/a")) and "not recording failure" in out)
 
 now_s = time.strftime("%F %T")
 for sub, line in (("failures", f"{now_s}\tjob 1\tx\t\n"), ("inputs", f"{time.time()}\tW\tx\n"), ("released", f"{time.time()} W\n"),
-                  ("skips", f"{now_s}\tw\t放不下\n")):
+                  ("skips", f"{now_s}\tw\tdoes not fit\n")):
     os.makedirs(os.path.join(TQX, sub), exist_ok=True)
     open(xp(sub, "x/b"), "w").write(line)
 tqx("stop", "x/b")
@@ -934,39 +934,39 @@ taskq.write_json(os.path.join(xp("claims", "x/b"), "info"), dict(worker="old", h
 rc, out = tqx("remove", "x/b")
 left = [sub for sub in ("failures", "stopped", "inputs", "released", "skips", "claims") if os.path.exists(xp(sub, "x/b"))]
 tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(xb))
-check("remove：连同失败、停止、缺输入、交还、跳过记录和过期的领取一起删；再加回来是新任务（free）", rc == 0 and not left
+check("remove: deletes failures, stop, missing-input, release, skip records and the stale claim; adding it back is a new task (free)", rc == 0 and not left
       and sx()["x/b"]["state"] == "free" and sx()["x/b"]["failures"] == 0)
 tqx("add", "--nice", "0", "--recipe", "command", "key=x/c", "cmd=true", "env=stats", "out=x/x/c", "done=DONE")
 for sub in ("failures", "skips"):
     open(xp(sub, "x/c"), "w").write(f"{now_s}\tw\tx\n")
 rc, out = tqx("remove", "x/c")
-check("remove：总队列的记录（没有 spec）删失败记录，跳过留着", rc == 0 and not os.path.exists(xp("failures", "x/c"))
+check("remove: a hub queue record (no spec) deletes the failure record, skips stay", rc == 0 and not os.path.exists(xp("failures", "x/c"))
       and os.path.exists(xp("skips", "x/c")))
 
 rc, out = tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(dict(cspec("x/d"), done=5)))
 rc2, out2 = tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(dict(cspec("x/e"), res="abc")))
 rc3, out3 = tqx("add", "--nice", "0", "--spec-stdin", stdin="{oops")
 rc4, out4 = tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(dict(cspec("x/e"), vars=["A=1"])))
-check("add --spec-stdin：done、res、vars 类型不对、不是 JSON → 加不进去（退出码 2）", (rc, rc2, rc3, rc4) == (2, 2, 2, 2)
+check("add --spec-stdin: wrong done, res, vars types or not JSON -> cannot add (exit code 2)", (rc, rc2, rc3, rc4) == (2, 2, 2, 2)
       and "done" in out and "res" in out2 and "JSON" in out3 and "vars" in out4 and not {"x/d", "x/e"} & set(sx()))
 with open(os.path.join(TQX, "tasks.jsonl"), "a") as f:
     f.write(json.dumps(dict(order=99, nice=-5, key="x/f", exp=None, recipe="command", params={}, spec=dict(cspec("x/f"), done=5))) + "\n")
 rc, out = tqx("status")
 rc2, out2 = tqx("next", "--worker", "w2", "--envs", "stats")
-check("队列里有一条坏说明：status 照常、显示 bad；next 跳过它领别的", rc == 0 and "x/f" in out and "bad" in out
+check("one bad spec in the queue: status works and shows bad; next skips it and claims another", rc == 0 and "x/f" in out and "bad" in out
       and rc2 == 0 and out2.startswith("x/b\n"))
 
 rc, out = tqx("add", "--nice", "0", "--spec-stdin", "--update-only",
               stdin=json.dumps([dict(xb, out="x/new"), dict(cspec("x/h"), done=5), cspec("x/zz"), dict(xa, cmd="python3 -c 9")]))
 tx = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQX, "tasks.jsonl"))}
-check("--update-only：坏的逐个报、别的照换；队列里没有的打出来；在训的 out 变了先不换", rc == 2 and "换不了：x/h" in out
-      and "队列里没有，不换：x/zz" in out and "换了说明：x/a" in out and "在训" in out and tx["x/a"]["spec"]["cmd"] == "python3 -c 9"
+check("--update-only: reports bad ones one by one, replaces the rest; prints ones not in the queue; a running task with changed out is not replaced", rc == 2 and "cannot replace: x/h" in out
+      and "not in queue, not replaced: x/zz" in out and "spec replaced: x/a" in out and "running" in out and tx["x/a"]["spec"]["cmd"] == "python3 -c 9"
       and tx["x/b"]["spec"]["out"] == xb["out"] and "x/h" not in tx and "x/zz" not in tx)
 rc, out = tqx("add", "--nice", "0", "--spec-stdin", "--update-only", stdin=json.dumps([dict(xb, cmd="python3 -c 8")]))
 tx = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQX, "tasks.jsonl"))}
-check("--update-only：在训的只改命令（out、done 不变）照换", rc == 0 and tx["x/b"]["spec"]["cmd"] == "python3 -c 8")
+check("--update-only: a running task with only a command change (out, done unchanged) is replaced", rc == 0 and tx["x/b"]["spec"]["cmd"] == "python3 -c 8")
 
-# ---------------- next --log-tag（pueue-host 的分段日志名不是 worker 名）、status --json、proto.claim_alive ----------------
+# ---------------- next --log-tag (pueue-host's part log name is not the worker name), status --json, proto.claim_alive ----------------
 import proto  # noqa: E402
 TQL = os.path.join(T, "taskq_l")
 os.makedirs(TQL)
@@ -984,7 +984,7 @@ rc, out = tql("next", "--worker", "site-pueue", "--envs", "stats", "--log-tag", 
 rc2, out2 = tql("next", "--worker", "site-pueue", "--envs", "stats")
 ia = json.load(open(os.path.join(TQL, "claims", taskq.safe("l/a"), "info")))
 ib = json.load(open(os.path.join(TQL, "claims", taskq.safe("l/b"), "info")))
-check("next --log-tag：领取记录多一个 log 字段；不给时没有这个字段",
+check("next --log-tag: the claim record has an extra log field; without it the field is absent",
       rc == 0 and rc2 == 0 and ia.get("log") == "gpuhost-202611041200" and ia["worker"] == "site-pueue" and "log" not in ib
       and set(ia) <= set(proto.CLAIM_FIELDS) and set(ib) <= set(proto.CLAIM_FIELDS))
 lg = os.path.join(DATA, proto.TASK_LOGS)
@@ -993,7 +993,7 @@ open(os.path.join(lg, f"{taskq.safe('l/a')}__gpuhost-202611041200_part1.log"), "
 open(os.path.join(lg, f"{taskq.safe('l/b')}__site-pueue_part1.log"), "w").write("x\n")
 old_t = time.time() - 4000
 os.utime(os.path.join(lg, f"{taskq.safe('l/b')}__site-pueue_part1.log"), (old_t, old_t))
-check("seg_age：按领取记录的作业名（log 或 worker）找分段日志；没有这个名字的 → None",
+check("seg_age: finds the part log by the job name in the claim record (log or worker); no such name -> None",
       taskq.S.seg_age(DATA, "l/a", "gpuhost-202611041200") < 60
       and taskq.S.seg_age(DATA, "l/a", "site-pueue") is None
       and 3900 < taskq.S.seg_age(DATA, "l/b", "site-pueue") < 4100
@@ -1003,13 +1003,13 @@ lines = out.splitlines()
 js = taskq.S.json_in(out)
 rows = {t["key"]: t for t in js["tasks"]}
 rc_old, _ = tql("--json-status")
-check("status --json：一行 @@JSON，带 version 和 local_status 的顶层字段；task_log_age 按 log 字段找；没有 --json-status",
+check("status --json: one @@JSON line with version and local_status's top-level fields; task_log_age found by the log field; no --json-status",
       rc == 0 and len(lines) == 1 and lines[0].startswith(proto.JSON_MARK) and js["version"] == proto.VERSION
       and set(proto.STATUS_TOP) <= set(js) and rows["l/a"]["task_log_age"] < 60 and rows["l/b"]["task_log_age"] > 3900
       and rc_old == 2)
 
 
-def ref_alive(ci, made, now, age, stale, fresh, half):  # 参照：领取还算不算活着，逐条写出来
+def ref_alive(ci, made, now, age, stale, fresh, half):  # reference: whether a claim is alive, spelled out case by case
     if ci is None:
         return not now - made > half
     if ci.get("assigned"):
@@ -1021,12 +1021,12 @@ now = time.time()
 grid = [(ci, made, age) for ci in (None, dict(assigned="site-pueue"), dict(beat=now - 10), dict(beat=now - 1199), dict(beat=now - 1201),
                                    dict(beat=now - 9000), dict(worker="w"))
         for made in (now - 10, now - 299, now - 301) for age in (None, 10, 899, 901)]
-check("proto.claim_alive 和参照写法的判断一样（默认值和改过的阈值）",
+check("proto.claim_alive matches the reference (default and changed thresholds)",
       all(proto.claim_alive(ci, made, now, age) == ref_alive(ci, made, now, age, 1200, 900, 300) for ci, made, age in grid)
       and all(proto.claim_alive(ci, made, now, age, stale=100, fresh=50, half=20) == ref_alive(ci, made, now, age, 100, 50, 20)
               for ci, made, age in grid))
 
-# next 领了、还没打印就被停：撤掉这次领取，不留到过期；退出仍是被信号停的
+# next claimed but was stopped before printing: drop the claim instead of leaving it to expire; still exits from the signal
 TQK = os.path.join(T, "taskq_kill")
 write_jsonl(os.path.join(TQK, "tasks.jsonl"), [(1, 0, "D103_y/V_save/0")])
 KILL_NEXT = ("import os,signal,sys\nsys.path.insert(0, sys.argv.pop(1))\nimport taskq\n_w = taskq.write_json\n"
@@ -1037,10 +1037,10 @@ r = subprocess.run([sys.executable, "-c", KILL_NEXT, HERE, "next", "--worker", "
 left = os.listdir(os.path.join(TQK, "claims")) if os.path.isdir(os.path.join(TQK, "claims")) else []
 r2 = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "601", "--envs", ALL], env=dict(ENV, TASKQ_DIR=TQK),
                     capture_output=True, text=True)
-check("next 领了、打印前被 SIGTERM：撤掉领取（别的 worker 马上能领），退出码仍是被信号停的",
+check("next claimed and got SIGTERM before printing: drops the claim (another worker can claim at once), exit code still from the signal",
       r.returncode == -15 and not r.stdout and not left and r2.returncode == 0 and r2.stdout.startswith("D103_y/V_save/0"))
 
-# ---------------- 同一档里有存档（接着训到一半的）先领，档位仍然优先 ----------------
+# ---------------- within the same nice, a task with a checkpoint (half-done) is claimed first; nice still wins ----------------
 TQP = os.path.join(T, "taskq_progress")
 os.makedirs(TQP)
 open(os.path.join(TQP, "tasks.jsonl"), "w").close()
@@ -1061,17 +1061,17 @@ os.makedirs(os.path.join(DATA, "p/p/half"), exist_ok=True)
 open(os.path.join(DATA, "p/p/half", "ckpt_latest.pt"), "w").close()
 rc, out = tqp("next", "--worker", "p1", "--envs", "stats")
 rc2, out2 = tqp("next", "--worker", "p2", "--envs", "stats")
-check("next：同一档里有存档的先领（排在先加的、没开始的前面），其余照加的先后",
+check("next: within the same nice, a checkpointed task is claimed first (ahead of earlier unstarted ones), the rest by add order",
       rc == 0 and out.startswith("p/half\n") and rc2 == 0 and out2.startswith("p/new1\n"))
 tqp("add", "--nice", "-100", "--spec-stdin", stdin=json.dumps(pspec("p/urgent")))
 os.makedirs(os.path.join(DATA, "p/p/new2"), exist_ok=True)
 open(os.path.join(DATA, "p/p/new2", "ckpt_latest.pt"), "w").close()
 rc, out = tqp("next", "--worker", "p3", "--envs", "stats")
 rc2, out2 = tqp("next", "--worker", "p4", "--envs", "stats")
-check("next：更靠前的档（没有存档的新任务）仍然先领，有存档的只在同一档里提前",
+check("next: an earlier nice (a new task without a checkpoint) is still claimed first; a checkpoint only moves a task up within its nice",
       rc == 0 and out.startswith("p/urgent\n") and rc2 == 0 and out2.startswith("p/new2\n"))
 
-# 推理之类没写 resume 的：这台跑过（有分段日志）、交还的同一档先领；失败过的不提前；a/b 的日志不算 a/b/c 的
+# steps without resume (inference and the like): one that ran here (has a part log) and was released is claimed first within its nice; ones that failed are not moved up; a/b's log does not count for a/b/c
 def sspec(key):
     return S.sendable(S.resolve("command", dict(key=key, cmd="true", env="stats", out=f"s/{key}", done="DONE")))
 
@@ -1083,12 +1083,12 @@ for k in ("s/half", "s/bad"):
     open(os.path.join(LOGS, k.replace("/", "__") + "__host-1107_part1.log"), "w").close()
 os.makedirs(os.path.join(TQP, "failures"), exist_ok=True)
 with open(os.path.join(TQP, "failures", "s__bad"), "w") as f:
-    f.write("2026-11-07 10:00:00\tjob p0\t退出码 1\t\n")
+    f.write("2026-11-07 10:00:00\tjob p0\texit code 1\t\n")
 got = [tqp("next", "--worker", f"s{i}", "--envs", "stats")[1].split("\n")[0] for i in range(4)]
-check("next：没有 resume 的步骤跑过、交还的同一档先领；失败过的、只有子 key 日志的照加的先后",
+check("next: steps without resume that ran and were released are claimed first within their nice; failed ones and ones with only a sub-key log follow add order",
       got == ["s/half", "s/new", "s/bad", "s/half/sub"])
 
-# 重做的任务：加进队列以前的日志不算做了一半；加进来以后写过的算。交还记下原因；缺输入交还的不提前
+# a redone task: logs from before it was added do not count as half-done; ones written after it was added do. Release records the reason; a missing-input release is not moved up
 def slog(k, age=0):
     f = os.path.join(LOGS, k.replace("/", "__") + "__host-1107_part1.log")
     open(f, "a").close()
@@ -1099,12 +1099,12 @@ tqp("add", "--nice", "70", "--spec-stdin", stdin=json.dumps([sspec("r/old"), ssp
 rec = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQP, "tasks.jsonl"))}
 slog("r/old", age=3600)
 slog("r/new")
-check("add：新任务记下加进来的时间（added）", all(abs(rec[k].get("added", 0) - time.time()) < 60 for k in ("r/old", "r/new")))
+check("add: a new task records when it was added (added)", all(abs(rec[k].get("added", 0) - time.time()) < 60 for k in ("r/old", "r/new")))
 got = [tqp("next", "--worker", f"r{i}", "--envs", "stats")[1].split("\n")[0] for i in range(2)]
-check("next：重做的任务（日志早于 added）不提前，加进来以后跑过的提前", got == ["r/new", "r/old"])
+check("next: a redone task (log older than added) is not moved up; one run after it was added is", got == ["r/new", "r/old"])
 who = {k: f"r{i}" for i, k in enumerate(got)}
 tqp("release", "--worker", who.get("r/new", "r0"), "r/new")
-tqp("release", "--worker", who.get("r/old", "r1"), "--failed", "退出码 1", "r/old")
+tqp("release", "--worker", who.get("r/old", "r1"), "--failed", "exit code 1", "r/old")
 
 
 def rel(k):
@@ -1114,24 +1114,24 @@ def rel(k):
         return []
 
 
-check("release：released/<key> 记下原因（普通交还 back、失败 failed）",
+check("release: released/<key> records the reason (normal release back, failure failed)",
       rel("r/new")[2:] == ["back"] and rel("r/old")[2:] == ["failed"])
 tqp("add", "--nice", "60", "--spec-stdin", stdin=json.dumps([sspec("m/plain"), sspec("m/miss")]))
 rc, out = tqp("next", "--worker", "m0", "--envs", "stats")
 rc2, out2 = tqp("next", "--worker", "m1", "--envs", "stats")
 slog("m/miss")
-tqp("missing", "--worker", "m1", "--why", "缺 x", "m/miss")
+tqp("missing", "--worker", "m1", "--why", "missing x", "m/miss")
 tqp("release", "--worker", "m0", "m/plain")
 tqp("input-ok", "m/miss")
 got = [tqp("next", "--worker", f"m{i}", "--envs", "stats")[1].split("\n")[0] for i in (2, 3)]
-check("missing：记原因 missing；缺输入交还的（有日志）不算做了一半，照加的先后",
+check("missing: records reason missing; a missing-input release (with a log) is not half-done, so add order holds",
       out.startswith("m/plain\n") and out2.startswith("m/miss\n") and rel("m/miss")[2:] == ["missing"] and got == ["m/plain", "m/miss"])
 tq_orig, taskq.TQ = taskq.TQ, TQP
 ri = taskq.released_info("r/new")
-check("released_info：(时间, worker, 原因)，released_at 是其中的时间",
+check("released_info: (time, worker, reason); released_at is the time in it",
       ri is not None and ri[1] == who.get("r/new", "r0") and ri[2] == "back" and taskq.released_at("r/new") == ri[0]
       and taskq.released_info("nosuch/key") is None)
 taskq.TQ = tq_orig
 
-print("\n全部通过" if ok else "\n有失败")
+print("\nall passed" if ok else "\nfailed")
 sys.exit(0 if ok else 1)

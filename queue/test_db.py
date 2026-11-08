@@ -141,5 +141,5 @@ EV.add("relay", "after newer")
 ok("events.add on a newer database: spooled, not lost", "after newer" in open(EV.spool_path()).read())
 db.execute(f"PRAGMA user_version={D.VERSION}")
 
-print("全部通过" if not fails else f"{fails} 项失败")
+print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)

@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
-"""只读的 JSON 命令：使用者的测试、脚本经命令行读核心按配置算出来的值，不 import 核心的模块。
-输出一行 JSON（带 version，字段见 proto 的 MSHOW_*、EXP_STEPS_*、RELAY_*，只加不改）；--json 可写可不写。
-
-  taskq machines show [名…] [--json]
-      每台机器：角色、是不是执行机、暂停没有、种类、worker、开 worker 的命令、pueue 组、根目录的 shell 写法、能用的环境、
-      激活语句、给任务加的语句；
-      还有环境描述（<配置文件夹>/specs/*.yml）的哈希、base、torch 变体
-  taskq exp steps [--exp ID…] [--key KEY…] [--level task|group|final…] [--data 目录] [--done] [--needs] [--json]
-      实验表的步骤（flow/compile.py 的实例）：命令按 names 填好，产出、声明的输入（data 默认本机的数据目录，没有时留 {data}）。
-      --done：在 --data 下判断做完没有（site_ops.done_missing）；--needs：写了 inputs_cmd 的真跑一次（TASKQ_DATA = --data）
-  taskq spec export --spec <JSON|-> --root <目录> [--json]
-      中继插件送出：要传的文件、视图、拉回的文件夹（只读 --root）
-  taskq spec import --spec <JSON|-> --src <目录> --dst <目录> --root <目录> [--json]
-      中继插件拉回核对：src 下是拉回的文件，核对过的放进 dst（写的只有 dst）
-出错（说明不对、插件核对不过）退出码 1，原因在 stderr；参数不对 2；机器表、实验表里没有 4（proto.EXIT["gone"]）。
+"""Read-only JSON commands: tests and scripts read config-derived values without importing core modules.
+One JSON line with version; fields are proto MSHOW_*, EXP_STEPS_*, RELAY_* (add-only); --json is optional.
+Errors: bad spec or plugin check exit 1 on stderr, bad args 2, not in a table 4 (proto.EXIT["gone"]).
 """
 import argparse
 import json
@@ -60,23 +48,23 @@ def spec_json(env):
     M = cfg.mtab()
     try:
         sp = EV.load(env)
-    except Exception as e:  # noqa: BLE001  描述读不了（缺字段、不是 YAML、没装 yaml）
+    except Exception as e:  # noqa: BLE001  cannot read the description (missing field, not YAML, yaml not installed)
         return dict(hash=M.spec_hash(env), base=None, torch={}, error=f"{type(e).__name__}: {e}")
     torch = {k: (v or {}).get("index_url") for k, v in (sp.get("torch") or {}).items()}
     return dict(hash=M.spec_hash(env), base=sp.get("base"), torch=torch, error=None)
 
 
 def machines_show(argv):
-    ap = argparse.ArgumentParser(prog="taskq machines show", description="核心按机器表算出来的值（一行 JSON，proto.MSHOW_*）")
-    ap.add_argument("names", nargs="*", metavar="名", help="只看这几台（默认机器表的全部）")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（默认就是）")
+    ap = argparse.ArgumentParser(prog="taskq machines show", description="values the core computes from the machine table (one JSON line, proto.MSHOW_*)")
+    ap.add_argument("names", nargs="*", metavar="NAME", help="only these machines (default: all in the machine table)")
+    ap.add_argument("--json", action="store_true", help="one JSON line (this is the default)")
     a = ap.parse_args(argv)
     import glob
     M = cfg.mtab()
     every = list(M.MACHINES)
     bad = [n for n in a.names if n not in every]
     if bad:
-        return _fail(f"机器表里没有 {'、'.join(bad)}（有：{'、'.join(every)}）", proto.EXIT["gone"])
+        return _fail(f"not in the machine table: {', '.join(bad)} (have: {', '.join(every)})", proto.EXIT["gone"])
     specs = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(M.SPECS, "*.yml")))
     _line(dict(version=proto.VERSION, hub=M.hub(), machines={n: machine_json(n) for n in a.names or every},
                specs={s: spec_json(s) for s in specs}))
@@ -88,14 +76,14 @@ LEVELS = ("task", "group", "final")
 
 
 def exp_steps(argv):
-    ap = argparse.ArgumentParser(prog="taskq exp steps", description="实验表的步骤，命令按 names 填好（一行 JSON，proto.EXP_STEPS_*）")
-    ap.add_argument("--exp", nargs="+", metavar="ID", help="只列这几个实验的（FINAL 的不列）")
-    ap.add_argument("--key", nargs="+", metavar="KEY", help="每个任务的步骤只列这几个任务的（实验一级、FINAL 的不列）")
-    ap.add_argument("--level", nargs="+", choices=LEVELS, help="只列这几级：task（每个任务）、group（实验一级）、final")
-    ap.add_argument("--data", help="命令里的 {data}（默认本机的数据目录，没有时留 {data}）")
-    ap.add_argument("--done", action="store_true", help="在 --data 下判断每个步骤做完没有（第一个产出下 done 的文件都在）")
-    ap.add_argument("--needs", action="store_true", help="写了 inputs_cmd 的步骤真跑一次，列出它打印的输入")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（默认就是）")
+    ap = argparse.ArgumentParser(prog="taskq exp steps", description="experiment table steps with commands filled from names (one JSON line, proto.EXP_STEPS_*)")
+    ap.add_argument("--exp", nargs="+", metavar="ID", help="only these experiments (FINAL is not listed)")
+    ap.add_argument("--key", nargs="+", metavar="KEY", help="for per-task steps, only these tasks (experiment-level steps and FINAL are not listed)")
+    ap.add_argument("--level", nargs="+", choices=LEVELS, help="only these levels: task (per task), group (experiment level), final")
+    ap.add_argument("--data", help="{data} in commands (default: this machine's data dir; left as {data} when absent)")
+    ap.add_argument("--done", action="store_true", help="check under --data whether each step is done (all done files under the first output exist)")
+    ap.add_argument("--needs", action="store_true", help="really run steps with inputs_cmd and list the inputs they print")
+    ap.add_argument("--json", action="store_true", help="one JSON line (this is the default)")
     a = ap.parse_args(argv)
     import experiments as E
     import spec as S
@@ -103,7 +91,7 @@ def exp_steps(argv):
     from flow.model import EACH, GATHER, GLOBAL
     data = a.data or S.local_data()
     if (a.done or a.needs) and not data:
-        return _fail("--done、--needs 要知道数据目录：给 --data，或设 TASKQ_DATA")
+        return _fail("--done and --needs need the data dir: pass --data, or set TASKQ_DATA")
     data = os.path.abspath(os.path.expanduser(data)) if data else "{data}"
     levels = set(a.level or LEVELS)
     if a.key:
@@ -113,7 +101,7 @@ def exp_steps(argv):
         bad = [x for x in a.exp or [] if E.experiment(x) is None]
         bad += [k for k in a.key or [] if k not in E.tasks()]
         if bad:
-            return _fail(f"实验表里没有 {'、'.join(bad)}", proto.EXIT["gone"])
+            return _fail(f"not in the experiment table: {', '.join(bad)}", proto.EXIT["gone"])
         flow = FC.build()
     except S.SpecError as err:
         return _fail(str(err))
@@ -143,14 +131,14 @@ def step_row(i, lv, done, data):
     try:
         row["cmd"] = _fill_data(st["cmd"], i.names, data)
     except Exception as e:  # noqa: BLE001
-        row["error"] = f"cmd 填不上：{e}"
+        row["error"] = f"cannot fill cmd: {e}"
     if done:
         row["done"] = not SO.done_missing(data, i.outputs[0], [d.split("|") for d in st["done"]])
     return row
 
 
 def need_rows(rows, insts, data):
-    """写了 inputs_cmd 的步骤：真跑一次（spec.listed_inputs，{data} = data），needs = 它打印的输入。"""
+    """Steps with inputs_cmd: really run once (spec.listed_inputs, {data} = data); needs = the inputs it prints."""
     import spec as S
 
     def one(x):
@@ -167,26 +155,26 @@ def need_rows(rows, insts, data):
 def _spec_arg(text):
     s = json.loads(sys.stdin.read() if text == "-" else text)
     if not isinstance(s, dict) or "key" not in s:
-        raise ValueError("--spec 要是解析好的说明（taskq spec resolve 的输出）")
+        raise ValueError("--spec must be a resolved spec (the output of taskq spec resolve)")
     return s
 
 
 def spec_relay(argv, which):
     ap = argparse.ArgumentParser(prog=f"taskq spec {which}",
-                                 description="中继插件" + ("送出（只读）" if which == "export" else "拉回核对，放进 --dst") + "（一行 JSON）")
-    ap.add_argument("--spec", required=True, help="解析好的说明（JSON；- = 标准输入）")
-    ap.add_argument("--root", required=True, help="hub 的数据目录")
+                                 description="relay plugin " + ("export (read-only)" if which == "export" else "import check, places files in --dst") + " (one JSON line)")
+    ap.add_argument("--spec", required=True, help="resolved spec (JSON; - = stdin)")
+    ap.add_argument("--root", required=True, help="hub data dir")
     if which == "import":
-        ap.add_argument("--src", required=True, help="拉回的文件（真的相对路径）")
-        ap.add_argument("--dst", required=True, help="核对过的放到这里")
-    ap.add_argument("--json", action="store_true", help="一行 JSON（默认就是）")
+        ap.add_argument("--src", required=True, help="fetched files (real relative paths)")
+        ap.add_argument("--dst", required=True, help="checked files go here")
+    ap.add_argument("--json", action="store_true", help="one JSON line (this is the default)")
     a = ap.parse_args(argv)
     import names as N
     import spec as S
     try:
         sp = _spec_arg(a.spec)
-    except ValueError as e:  # 含 JSONDecodeError
-        ap.error(f"--spec：{e}")
+    except ValueError as e:  # includes JSONDecodeError
+        ap.error(f"--spec: {e}")
     try:
         if which == "export":
             ex = N.export(sp, a.root)

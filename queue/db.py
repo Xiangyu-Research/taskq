@@ -1,8 +1,6 @@
-"""hub 的数据库（状态目录下的 proto.DB）：事件日志、健康检查的问题、提醒、确认（ack）、进度快照。
+"""Hub database (proto.DB under the state dir): event log, health problems, notices, acks, progress snapshots.
 
-只有 hub 上有。只有 create=True 的调用（真做的一轮 tick、`taskq db migrate`）会建库或做迁移；别的调用只打开已有的文件，
-没有就得到 None，所以执行机代码包里的代码不会建库。放在网络文件系统上的不用（那里 SQLite 的锁不可靠）。
-比这份代码新的数据库只读打开。
+Only exists on the hub. Only create=True calls (a real tick, `taskq db migrate`) create or migrate; other calls open an existing file only and return None, so executor bundles never create it. Not used on network filesystems (SQLite locking is unreliable there). A database newer than this code opens read-only.
 """
 import json
 import os
@@ -31,7 +29,7 @@ SCHEMA = [
     CREATE TABLE progress(t REAL NOT NULL, key TEXT NOT NULL, state TEXT, progress REAL, site TEXT, data TEXT, PRIMARY KEY(key, t));
     CREATE INDEX progress_t ON progress(t);
     """,
-    # 2：sha256 缓存搬到了 store（site_ops.hashes）；taskq self migrate 在这之前先把它拷过去
+    # 2: the sha256 cache moved to the store (site_ops.hashes); taskq self migrate copies it there first
     """
     DROP TABLE hash;
     """,
@@ -44,7 +42,7 @@ def path():
 
 
 def fstype(p):
-    """p 所在挂载点的文件系统类型（/proc/self/mounts 里最长的挂载点前缀）；认不出 → ""。"""
+    """Filesystem type of p's mount point (longest mount point prefix in /proc/self/mounts); unknown -> ""."""
     p = os.path.realpath(p)
     best, kind = "", ""
     try:
@@ -66,8 +64,8 @@ def on_netfs(p):
 
 
 def connect(create=False, ro=False, p=None):
-    """→ sqlite3 连接（自动提交；写的时候用 tx()）；没有数据库（且 create 为 False）或它在网络文件系统上时 → None。
-    create=True 时建库并做还没做的迁移。"""
+    """-> sqlite3 connection (autocommit; use tx() to write); None when the database is absent (and create is False) or on a network filesystem.
+    create=True creates it and applies pending migrations."""
     p = p or path()
     d = os.path.dirname(p) or "."
     if not os.path.exists(p):
@@ -104,7 +102,7 @@ def migrate(db, v):
 
 
 class tx:
-    """with tx(db): ... → BEGIN IMMEDIATE … COMMIT（出错时 ROLLBACK）。"""
+    """with tx(db): ... -> BEGIN IMMEDIATE ... COMMIT (ROLLBACK on error)."""
 
     def __init__(self, db):
         self.db = db
@@ -119,7 +117,7 @@ class tx:
 
 
 def writable(db):
-    """只读的连接（mode=ro，或比这份代码新的数据库）→ False。"""
+    """Read-only connection (mode=ro, or a database newer than this code) -> False."""
     try:
         db.execute("BEGIN IMMEDIATE")
         db.execute(f"PRAGMA user_version={db.execute('PRAGMA user_version').fetchone()[0]}")
@@ -148,24 +146,24 @@ def set_meta(db, k, v):
 
 def main(argv):
     import argparse
-    ap = argparse.ArgumentParser(prog="taskq db", description="hub 的数据库")
+    ap = argparse.ArgumentParser(prog="taskq db", description="hub database")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("migrate", help="建库或做还没做的迁移（只在 hub 上）")
-    sub.add_parser("path", help="在哪")
-    sub.add_parser("version", help="盘上和这份代码的表结构版本")
+    sub.add_parser("migrate", help="create the database or apply pending migrations (hub only)")
+    sub.add_parser("path", help="where it is")
+    sub.add_parser("version", help="schema version on disk and in this code")
     a = ap.parse_args(argv)
     if a.cmd == "path":
         print(path())
         return 0
     if a.cmd == "version":
         db = connect(ro=True)
-        print(f"盘上 {db.execute('PRAGMA user_version').fetchone()[0] if db else '没有'}，代码 {VERSION}")
+        print(f"on disk {db.execute('PRAGMA user_version').fetchone()[0] if db else 'none'}, code {VERSION}")
         return 0
     if on_netfs(os.path.dirname(path())):
-        print(f"taskq db: {path()} 在网络文件系统上（{fstype(os.path.dirname(path()))}），不建库", file=sys.stderr)
+        print(f"taskq db: {path()} is on a network filesystem ({fstype(os.path.dirname(path()))}), not creating it", file=sys.stderr)
         return 1
     connect(create=True).close()
-    print(f"{path()}：版本 {VERSION}")
+    print(f"{path()}: version {VERSION}")
     return 0
 
 
