@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""查看有 pueue 组的机器（配置文件夹里的 machines.py；mtab.pueue_hosts）的队列：每个任务一行，按机器、组排列；已结束的只列最近 24 小时的。
+"""Show the queues of machines with pueue groups (the config dir's machines.py; mtab.pueue_hosts): one line per task, ordered by
+machine and group; finished ones only for the last 24 hours.
 
-    taskq pueue-status              都看（在 hub 上运行；别的机器经 ssh）
-    taskq pueue-status <机器>       只看这一台
-    taskq pueue-status --json       机器 → 任务列表（monitor/health.py 用）：status 是给人看的（如 "Failed (1)"），
-                                    程序看 result（Success / Failed / Killed / …，没结束是 None）和 code（退出码，没有是 None）
-wait 组里在跑的任务（拉回、归档、传输）下面多一行：输出的最后一行。
-单个任务的输出：pueue log <编号>（pueue 是机器表里那台的 pueue，默认 ~/.local/bin/pueue）。
+    taskq pueue-status              all (run on the hub; other machines over ssh)
+    taskq pueue-status <machine>    only this machine
+    taskq pueue-status --json       machine -> task list (used by monitor/health.py): status is for humans (such as "Failed (1)");
+                                    programs read result (Success / Failed / Killed / ..., None while unfinished) and code (exit code, None when absent)
+A running task in the wait group (fetch, archive, transfer) gets one extra line: the last line of its output.
+Output of one task: pueue log <id> (pueue is that machine's pueue from the machine table, default ~/.local/bin/pueue).
 """
 import datetime as dt
 import json
@@ -25,7 +26,7 @@ ME = M.whoami()
 
 
 def pueue(machine, args):
-    """这台机器上跑 pueue <args>（机器表里这台的 pueue；别的机器上开头的 ~ 留给那边展开）→ (退出码, 标准输出, 标准错误)。"""
+    """Run pueue <args> on this machine (its pueue from the machine table; a leading ~ on other machines is left for that side) -> (exit code, stdout, stderr)."""
     p = M.machine(machine)["pueue"]
     if machine == ME:
         return C.run([M.expand(p), *args], timeout=60)
@@ -35,12 +36,12 @@ def pueue(machine, args):
 def status(machine):
     rc, out, err = pueue(machine, ["status", "--json"])
     if rc:
-        raise RuntimeError(err.strip() or "pueue 没有响应")
+        raise RuntimeError(err.strip() or "pueue does not respond")
     return json.loads(out)
 
 
 def last_lines(machine, ids):
-    """任务编号 → 输出的最后一行。"""
+    """Task id -> the last line of its output."""
     if not ids:
         return {}
     try:
@@ -69,17 +70,17 @@ def tasks(d):
 def main(argv=None):
     import argparse
     hosts = M.pueue_hosts()
-    ap = argparse.ArgumentParser(description="有 pueue 组的机器的队列（只看）")
-    ap.add_argument("machines", nargs="*", metavar="机器", help=f"只看这几台（{'、'.join(hosts)}）；不给就都看")
-    ap.add_argument("--json", action="store_true", help="机器 → 任务列表，一行 JSON")
+    ap = argparse.ArgumentParser(description="queues of machines with pueue groups (read-only)")
+    ap.add_argument("machines", nargs="*", metavar="MACHINE", help=f"only these ({', '.join(hosts)}); all without")
+    ap.add_argument("--json", action="store_true", help="machine -> task list, one JSON line")
     a = ap.parse_args(argv)
     gone = [m for m in a.machines if m not in M.MACHINES]
     if gone:
-        print(f"{ap.prog}：机器表里没有 {'、'.join(gone)}", file=sys.stderr)
+        print(f"{ap.prog}: not in the machine table: {', '.join(gone)}", file=sys.stderr)
         return EXIT["gone"]
     bad = [m for m in a.machines if m not in hosts]
     if bad:
-        ap.error(f"没有 pueue 组：{'、'.join(bad)}")
+        ap.error(f"no pueue groups: {', '.join(bad)}")
     as_json = a.json
     machines = a.machines or hosts
     out = {}
@@ -87,7 +88,7 @@ def main(argv=None):
         try:
             d = status(m)
             out[m] = {"groups": {g: v["status"] for g, v in d["groups"].items() if g != "default"}, "tasks": tasks(d)}
-        except Exception as e:  # 一台连不上不影响另一台
+        except Exception as e:  # one unreachable machine does not affect the rest
             out[m] = {"error": str(e)}
     if as_json:
         print(json.dumps(out, ensure_ascii=False))
@@ -97,12 +98,12 @@ def main(argv=None):
     for m, d in out.items():
         print(f"== {m}")
         if "error" in d:
-            print("  连不上：" + d["error"])
+            print("  unreachable: " + d["error"])
             continue
         last = last_lines(m, [r["id"] for r in d["tasks"] if r["group"] == "wait" and r["status"] == "Running"])
         for g, gst in sorted(d["groups"].items()):
             rows = [r for r in d["tasks"] if r["group"] == g and not (t(r["end"]) and t(r["end"]) < cut)]
-            print(f"  [{g}]" + ("" if gst == "Running" else "（停着）") + ("" if rows else " 空"))
+            print(f"  [{g}]" + ("" if gst == "Running" else " (paused)") + ("" if rows else " empty"))
             for r in rows:
                 _row(r)
                 if last.get(r["id"]):
@@ -110,8 +111,8 @@ def main(argv=None):
 
 
 def _row(r):
-    when = "→".join(x.strftime("%m-%d %H:%M") for x in (C.local_time(r["start"]), C.local_time(r["end"])) if x)
-    deps = f" 等 {','.join(map(str, r['deps']))}" if r["deps"] and r["status"] == "Queued" else ""
+    when = " -> ".join(x.strftime("%m-%d %H:%M") for x in (C.local_time(r["start"]), C.local_time(r["end"])) if x)
+    deps = f" waits {','.join(map(str, r['deps']))}" if r["deps"] and r["status"] == "Queued" else ""
     name = r["label"] or r["command"][:60]
     print(f"  {r['id']:>4}  {r['status']:<12} {name:<22}{deps:<8} {when}")
 

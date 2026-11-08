@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
-# GPU worker 作业：sites/slurm.py 交，分区、卡、核、内存、QOS、时限、日志、TASKQ_ROOT、TASKQ_MACHINE 都在 sbatch 的命令行上；
-# $1 = 根目录 code/current 下的 worker_start.sh（作业开始时才解析，用的是那时的代码包）
+# GPU worker job: submitted by sites/slurm.py; partition, GPU, cores, memory, QOS, time limit, log, TASKQ_ROOT and TASKQ_MACHINE are all on the sbatch command line;
+# $1 = worker_start.sh under the root's code/current (resolved when the job starts, so it uses the bundle of that moment)
 exec bash "$1"

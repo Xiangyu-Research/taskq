@@ -1,6 +1,7 @@
 #!/bin/bash
-# 装 pueue / pueued（静态编译的单文件，不需要 root）：放在机器表里这台的 pueue（默认 ~/.local/bin/pueue）所在的目录。
-#   bash queue/install_pueue.sh [版本，默认 v4.0.4]
+# Install pueue / pueued (statically built single files, no root needed) into the dir of this machine's pueue in the machine
+# table (default ~/.local/bin/pueue).
+#   bash queue/install_pueue.sh [version, default v4.0.4]
 set -euo pipefail
 V=${1:-v4.0.4}
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)

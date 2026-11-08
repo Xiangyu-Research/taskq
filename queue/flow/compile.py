@@ -1,7 +1,8 @@
-"""实验表（experiments.py 读的 EXPERIMENTS、FINAL）→ 实例和先后。
-先后只有两条：同一个任务里按顺序（源头 → after 的第一步 → 第二步 …）；输入（含通配）落在别的实例的产出里（相同、在里面、或包着它）
-就接在那个实例后面，不管属于哪个实验。不在任何产出里的输入是原始数据（raw）。
-核对（errors）：模板里不认识的名字、产出带通配、两个实例的产出重叠、输入落在自己的产出里、有环。"""
+"""Experiment table (EXPERIMENTS and FINAL read by experiments.py) -> instances and order.
+There are only two ordering rules: within a task in order (source -> after's first step -> second ...); an input (wildcards
+included) that falls in another instance's output (equal, inside it, or containing it) runs after that instance, whichever
+experiment it belongs to. An input in no output is raw data (raw).
+Checks (errors): unknown template names, wildcard outputs, overlapping outputs of two instances, an input inside its own outputs, cycles."""
 import fnmatch
 import glob as G
 import itertools
@@ -20,7 +21,7 @@ def norm(p):
 
 
 def expand_inputs(paths, names, each=()):
-    """输入的模板 → 相对数据目录的路径；实验一级的里带 {<参数>}（each 的参数，names 里没有它）的按 <参数>_list 的每个取值展开。"""
+    """Input templates -> paths relative to the data dir; at experiment level, a {<param>} (an each param missing from names) expands over every value in <param>_list."""
     out = []
     for p in paths:
         ks = [k for k in each if "{" + k + "}" in p and k not in names]
@@ -32,7 +33,7 @@ def expand_inputs(paths, names, each=()):
 
 
 class Outs:
-    """所有实例的产出，按路径的段建的树：match(输入) → 产出落在这个输入里或包着它的实例。"""
+    """All instances' outputs in a tree by path component: match(input) -> instances whose outputs fall in this input or contain it."""
     END = "\0"
 
     def __init__(self):
@@ -55,13 +56,13 @@ class Outs:
                     everything(v)
 
         def walk(n, i):
-            if self.END in n:  # 产出到这里为止：输入在它里面
+            if self.END in n:  # output ends here: the input is inside it
                 out.update(n[self.END])
-            if i == len(parts):  # 输入到这里为止：产出在它里面
+            if i == len(parts):  # input ends here: outputs are inside it
                 everything(n)
                 return
             c = parts[i]
-            for k, v in n.items():  # 输入的这一段带通配时按它匹配树里的；树里的这一段带通配（fetch.extra 的 *.json）时反过来
+            for k, v in n.items():  # a wildcard input component matches tree components; a wildcard tree component (fetch.extra's *.json) matches the other way round
                 if k != self.END and (fnmatch.fnmatchcase(k, c) if G.has_magic(c) else k == c or G.has_magic(k) and fnmatch.fnmatchcase(c, k)):
                     walk(v, i + 1)
         walk(self.root, 0)
@@ -69,14 +70,14 @@ class Outs:
 
 
 def build(exps=None, final=None, queue_tasks=()):
-    """→ Flow。queue_tasks：总队列里的任务（taskq status --json 的 tasks），不属于实验表、有做法的也算源头。"""
+    """-> Flow. queue_tasks: tasks in the hub queue (taskq status --json tasks); those with a recipe and not in the experiment table are sources too."""
     if exps is None:
         exps, final = E.load()
     inst, errors = {}, []
 
     def add(i):
         if i.id in inst:
-            errors.append(f"实例 id 重复：{i.id}")
+            errors.append(f"duplicate instance id: {i.id}")
         inst[i.id] = i
         return i
 
@@ -90,13 +91,13 @@ def build(exps=None, final=None, queue_tasks=()):
         try:
             outs = [norm(S.fill(x, names)) for x in st["out"]]
             ins = expand_inputs(st["inputs"], names, each)
-            st = dict(st, **{k: [S.fill(x, names) for x in st[k]] for k in ("env", "done")})  # 和 cmd、out、inputs 一样是模板
+            st = dict(st, **{k: [S.fill(x, names) for x in st[k]] for k in ("env", "done")})  # templates like cmd, out and inputs
         except S.SpecError as e:
-            errors.append(f"{iid}：{e}")
+            errors.append(f"{iid}: {e}")
             return None
         for o in outs:
             if G.has_magic(o):
-                errors.append(f"{iid} 的产出 {o} 带通配（产出要写确定的路径）")
+                errors.append(f"output {o} of {iid} has a wildcard (outputs must be concrete paths)")
         return add(Instance(id=iid, scope=scope, rule=st["name"], exp=exp, names=names, deps=list(deps), outputs=outs,
                             inputs=ins, step=st, **kw))
 
@@ -111,7 +112,7 @@ def build(exps=None, final=None, queue_tasks=()):
             sp = q.get("spec") or E.resolve_task(q["recipe"], q.get("params") or {}, q.get("exp"))
         except S.SpecError:
             continue
-        if not sp.get("step"):  # 步骤实例由下面按实验表推出来
+        if not sp.get("step"):  # step instances are derived from the experiment table below
             source(q["key"], None, q["recipe"], sp, q["key"])
 
     for e in exps:
@@ -139,39 +140,39 @@ def build(exps=None, final=None, queue_tasks=()):
         for p in i.inputs:
             own = [o for o in i.outputs if C.under(p, o) or C.under(o, p)]
             if own:
-                errors.append(f"{i.id} 的输入 {p} 落在自己的产出 {own[0]} 里（输入和产出不能重叠）")
+                errors.append(f"input {p} of {i.id} falls in its own output {own[0]} (inputs and outputs must not overlap)")
             src = outs.match(p) - {i.id}
             if src:
-                i.deps += [d for d in inst if d in src and d not in i.deps]  # 按实验表的顺序
+                i.deps += [d for d in inst if d in src and d not in i.deps]  # in experiment table order
             elif not shared.match(p):
                 i.raw.append(p)
     return Flow(instances=inst, errors=errors + cycles(inst))
 
 
 def overlaps(inst):
-    """两个实例的产出相同、或一个在另一个里面 → [问题]。"""
+    """Two instances have the same output, or one is inside the other -> [problems]."""
     owner, probs = {}, []
     for i in inst.values():
         for o in i.outputs:
             if o in owner and owner[o] != i.id:
-                probs.append(f"{o} 同时是 {owner[o]} 和 {i.id} 的产出")
+                probs.append(f"{o} is an output of both {owner[o]} and {i.id}")
             owner.setdefault(o, i.id)
     for o, iid in owner.items():
         parts = o.split("/")
         for n in range(1, len(parts)):
             up = "/".join(parts[:n])
             if up in owner and owner[up] != iid:
-                probs.append(f"{iid} 的产出 {o} 在 {owner[up]} 的产出 {up} 里（一个路径只归一个步骤）")
+                probs.append(f"output {o} of {iid} is inside output {up} of {owner[up]} (a path belongs to one step only)")
     return probs
 
 
 def cycles(inst):
-    """先后有环 → [问题]（每个环报一次）。"""
+    """The order has cycles -> [problems] (each cycle once)."""
     state, probs = {}, []
 
     def visit(n, path):
         if state.get(n) == 1:
-            probs.append("先后有环：" + " → ".join(path[path.index(n):] + [n]))
+            probs.append("cycle in the order: " + " -> ".join(path[path.index(n):] + [n]))
             return
         if state.get(n) == 2 or n not in inst:
             return

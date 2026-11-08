@@ -1,4 +1,4 @@
 #!/bin/bash
 #SBATCH --nodes=1
-# CPU worker 作业：同 worker.sbatch（squeue 按文件名认出是 CPU worker）
+# CPU worker job: same as worker.sbatch (squeue recognises a CPU worker by the file name)
 WORKER_DEVICE=cpu exec bash "$1"

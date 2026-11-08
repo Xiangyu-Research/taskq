@@ -1,25 +1,27 @@
 #!/bin/bash
-# 往本机 pueue 的手动组（machines.py 的 manual_groups）里加一个任务：按组设好用哪张卡，工作目录是这台的 repo。
-#   taskq pueue-add <组> [pueue add 的选项，如 --label 名字] -- '<命令>'（即 queue/q）
-# 各机器有哪些组、每组用哪张卡、带哪些环境变量，写在配置文件夹里的 machines.py（setup.sh 按它建组）；
-# 没有卡的组 CUDA_VISIBLE_DEVICES 设为空（看不到卡）。每个任务都带上 policy.py 的 OUTPUTS["env_script"] 设的环境变量。
-# 要钉住代码版本、由调度放到执行机上跑的，用 taskq add（代码包）。
-# 例：taskq pueue-add gpu1 --label demo -- 'python3 train.py'
+# Add a task to this machine's pueue manual group (machines.py's manual_groups): set the GPU from the group, working dir is this
+# machine's repo.
+#   taskq pueue-add <group> [pueue add options, such as --label NAME] -- '<command>'  (this is queue/q)
+# Which groups each machine has, which GPU each uses and which env vars it gets are in the config dir's machines.py (setup.sh
+# creates groups from it); a group without a GPU sets CUDA_VISIBLE_DEVICES empty (no GPU visible). Every task gets the env vars
+# from policy.py's OUTPUTS["env_script"].
+# To pin the code version and have the scheduler run it on an executor, use taskq add (bundle).
+# Example: taskq pueue-add gpu1 --label demo -- 'python3 train.py'
 set -euo pipefail
 PROG=${TASKQ_PROG:-q}
 unset TASKQ_PROG
-(( $# >= 2 )) && [[ $1 != -* && ${*: -1} != -- ]] || { echo "用法：$PROG <组> [pueue add 的选项] -- '<命令>'" >&2; exit 2; }
+(( $# >= 2 )) && [[ $1 != -* && ${*: -1} != -- ]] || { echo "usage: $PROG <group> [pueue add options] -- '<command>'" >&2; exit 2; }
 G=$1; shift
-CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # 调度代码的根；使用者的仓库根 REPO（TASKQ_REPO，没设时同 cfg.py）
+CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root; the user repo root REPO (TASKQ_REPO, else as in cfg.py)
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 E=$(python3 "$CORE/sites/mtab.py" q-env "$G" 2>&1 > /dev/null) || { echo "$PROG：${E#*：}" >&2; exit 2; }
 REPO=$(readlink -f "$(python3 "$CORE/sites/mtab.py" get . repo)")
-[[ -d $REPO ]] || { echo "$PROG：没有工作目录 $REPO（machines.py 里这台的 repo）" >&2; exit 2; }
+[[ -d $REPO ]] || { echo "$PROG: no working dir $REPO (this machine's repo in machines.py)" >&2; exit 2; }
 PUEUE=$(python3 "$CORE/sites/mtab.py" get . pueue)
 ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export PATH="$CORE/bin:$PATH"  # 环境脚本和任务的命令里能用 taskq（cron 的 PATH 里没有 ~/.local/bin；同 run_task.sh）
+export PATH="$CORE/bin:$PATH"  # env scripts and task commands can use taskq (cron PATH lacks ~/.local/bin; same as run_task.sh)
 ES=$(TASKQ_REPO=$REPO python3 "$CORE/queue/cfg.py" get env_script)
 [[ -z $ES ]] || source "$REPO/$ES"
 exec "${PUEUE/#\~/$HOME}" add -g "$G" -w "$REPO" "$@"

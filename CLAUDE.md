@@ -1,36 +1,61 @@
-# 给 Claude Code 的说明：改 taskq 核心
+# Notes for Claude Code: changing the taskq core
 
-taskq 是通用的任务调度（总队列在 hub 上，执行机按机器表接进来）。项目只经配置文件夹（`machines.py`、`policy.py`）、插件文件夹和命令行用它；结构、命令和约定见 `README.md`、`queue/README.md`。
+taskq is a general task scheduler (the hub queue lives on the hub; executors join through the machine table). A project uses it only
+through a config dir (`machines.py`, `policy.py`), a plugins dir and the command line; structure, commands and conventions are in
+`README.md` and `queue/README.md`.
 
-## 同步和上线
+## Sync and release
 
-- 改之前 `git pull --rebase`；只有 main 一个版本，推到 main 就是上线（hub 的 cron 下一轮 `taskq self update`）。不强推；冲突合并好再提交。
-- 使用者的仓库同时要改时，先推 taskq，再推使用者（使用者要用核心的新东西时，核心先到）。
-- 改了执行机要用的文件，代码包下一轮检查自动重打，在跑的 worker 空下来时换包；所以执行机用的文件（含注释）改动攒在一起推。
-- 正在跑的 shell 脚本不原地改（Write / Edit、`sed -i` 都算）：写到临时文件再 `mv` 过去。
-- 新写的调度脚本上线前在 cron 的环境里实跑一次：`env -i HOME=$HOME PATH=/usr/bin:/bin bin/taskq --project <使用者仓库> plan`（只看不做的形式），不只跑单元测试。
+- Run `git pull --rebase` before changing anything; there is only one version, `main`, and pushing to it is going live (the hub's cron
+  runs `taskq self update` next round). Never force-push; resolve conflicts before committing.
+- When the user's repo must change at the same time, push taskq first and the user's repo after (the core must arrive first when the
+  user needs something new from it).
+- If you changed files executors use, the bundle is rebuilt automatically at the next health check and running workers switch when they
+  go idle; batch such changes (comments included) into one push.
+- Never edit a running shell script in place (Write / Edit and `sed -i` both count): write a temp file and `mv` it over.
+- Before releasing a new scheduler script, run it once in the cron environment: `env -i HOME=$HOME PATH=/usr/bin:/bin bin/taskq --project <user repo> plan`
+  (the dry-run form), not only the unit tests.
 
-## 测试
+## Tests
 
-- `bin/taskq self test`（全部，同时跑几个文件；`-l` 看有哪些，`taskq self test <模式>` 只跑相关的）。同一个改动全套只跑一次，失败了查原因再跑那一个文件。
-- 核心的测试只用 `queue/testdata/` 的固定配置和小实验表，不读使用者项目的配置、实验表、插件；关于真实项目的检查写在项目自己的测试里。
-- 测试里替换掉的外部命令至少要有一条真跑：调度调用的项目脚本（如步骤的 `inputs_cmd`），对测试实验表的每个实验真跑一次，状态取"刚训完、东西还在别的机器上"。
-- 测试时只杀自己记下的 PID（`$!`、限定到测试目录的 `pgrep`），不用 `pkill -f` 这类通用匹配：真实任务也在跑同样的命令。
+- `bin/taskq self test` (everything, several files at once; `-l` lists them, `taskq self test <pattern>` runs only related ones). Run the
+  full suite once per change; when it fails, find the cause and then rerun that one file.
+- Core tests use only the fixed config and small experiment table in `queue/testdata/`; they never read the user's project config,
+  experiment table or plugins. Checks about a real project belong in that project's own tests.
+- Every external command a test replaces must also run for real at least once: project scripts the scheduler calls (such as a step's
+  `inputs_cmd`) run for real against each experiment in the test experiment table, with state "just finished, files still on another machine".
+- Tests kill only PIDs they recorded themselves (`$!`, `pgrep` limited to the test dir); never use broad matches such as `pkill -f`:
+  real tasks run the same commands.
 
-## 改格式（盘上的布局、队列、标志文件、JSON 字段、代码包）
+## Changing formats (on-disk layout, queue, marker files, JSON fields, bundles)
 
-- 改格式时把旧状态的改写写进 `taskq self migrate`（`queue/migrate.py`），在同一次切换里做完：停 cron、交还在训的任务、推代码、各执行机换新包、跑 migrate、开 cron。代码里不留读旧格式的分支、不留"过渡期再删"的老入口。
-- 不经切换就上线的改动，不改下面这些（在跑的 worker、排着的 Slurm 作业还在用）：
-  - `taskq worker next/beat/release` 的参数和退出码；`self test` 里守这组接口的测试（worker 的调用方式、停止、代码包）必须过；
-  - hub 读执行机用的带版本号的 `taskq status --json`、`spec collect --json`（`@@JSON` 开头的一行），字段只加；
-  - 启动脚本在代码包里的路径（排着的 Slurm 作业开始时按 `code/current` 下同一个路径找）。
+- When a format changes, put the rewrite of old state into `taskq self migrate` (`queue/migrate.py`) and do it in the same cutover: stop
+  cron, hand back running tasks, push the code, switch every executor to the new bundle, run migrate, start cron. Code keeps no branch
+  reading the old format and no old entry point "to delete after the transition".
+- Changes that go live without a cutover do not change:
+  - the arguments and exit codes of `taskq worker next/beat/release`; the tests in `self test` guarding this interface (worker calls,
+    stops, bundles) must pass;
+  - the versioned `taskq status --json` and `spec collect --json` the hub reads from executors (one line starting with `@@JSON`), fields add-only;
+  - the launcher path inside a bundle (queued Slurm jobs find it at the same path under `code/current` when they start).
 
-## 写法
+## Style
 
-- **协议只在 `queue/proto.py`**：盘上的名字（根目录布局、队列目录、标志文件）、时间常数、任务状态、退出码、字段表、报警格式、`TASKQ_*` 环境变量都只在那里定义，核心别处不手写字面量（`test_protocol.py` 核对）；改值见上面"改格式"。
-- **核心是通用的**：不写具体项目、模型、训练器、数据集、机器名、主机名、路径（`test_core_clean.py` 核对）；项目要的东西走配置和插件（`cfg.KINDS`），插件只 import `taskq_api`。缺一种表达时在核心里加一种通用的写法（地方、条件、插件种类）并加测试，不按步骤或机器另写一条路。
-- **不按模型分类**：一张卡训几个、显存填充什么时候补、能不能训，都看运行时实况（GPU 使用率、显存、失败记录），不加"训练器 → 种类 / 阈值"的表。
-- **每件事一条路**：送任务只有健康检查里的一步；Slurm / pueue 的读状态、交作业、开 worker 只经 `sites/` 的适配器；要开几个只在调用方算一次，适配器里不重复这条规则；远程命令里根目录开头的 `~` 留给那边展开。
-- **"做完了"看结果本身**：数盘上实际的文件，不只信标志文件或清单；拷贝时标志文件（`MANIFEST.json`、最上层的文件）最后拷；有拷贝、拉回、传输在跑时不算做完、不清理源头。新写一条传结果的路时按这三条写，并加"拷到一半"的测试。
-- 命令的 `--json` 输出一行 JSON，字段表在 `proto.py`、带 `version`；只有经 ssh 读回的冻结命令以 `@@JSON ` 开头。
-- 配置字段只在 `queue/schema.py` 定义（类型、默认值、说明），`check` 按它报不认识的字段；README 的字段表由它生成、命令表和 `bin/taskq` 一致（`test_readme.py` 核对）；README 只写现在通用的机制，不写历史和日期，项目专有的说明留在项目里。
+- **The protocol lives only in `queue/proto.py`**: on-disk names (root layout, queue dirs, marker files), time constants, task states,
+  exit codes, field tables, alert formats and `TASKQ_*` env vars are defined only there; the rest of the core writes no literals
+  (`test_protocol.py` checks); to change a value see "Changing formats" above.
+- **The core is general**: no specific project, model, training code, dataset, machine name, hostname or path (`test_core_clean.py` checks);
+  project-specific things go through config and plugins (`cfg.KINDS`), and plugins import only `taskq_api`. When an expression is missing,
+  add a general mechanism to the core (place, condition, plugin kind) with tests, not a special path per step or machine.
+- **Do not classify by model**: how many tasks share a GPU, when to refill the GPU pad, whether training can start all follow live state
+  (GPU utilisation, memory, failure records); do not add "training code -> kind / threshold" tables.
+- **One path per job**: sending tasks is one step inside the health check; reading Slurm / pueue state, submitting jobs and starting workers
+  go only through adapters in `sites/`; "how many to start" is computed once by the caller, adapters do not repeat that rule; a leading
+  `~` in a remote command is left for the other side to expand.
+- **"Done" means the outputs are there**: count actual files on disk, not just marker files or manifests; when copying, write marker files
+  (`MANIFEST.json`, top-level files) last; while a copy, fetch or transfer is running, it is not done and the source is not cleaned up.
+  Follow these three rules when adding a new result path, and add a "copied halfway" test.
+- A command's `--json` output is one JSON line, its field table in `proto.py`, with a `version`; only frozen commands read back over ssh
+  start with `@@JSON `.
+- Config fields are defined only in `queue/schema.py` (type, default, description), and `check` reports unknown fields against it; the
+  README's field tables are generated from it, and the command table matches `bin/taskq` (`test_readme.py` checks); README describes only
+  current general mechanisms, never history or dates, and project-specific notes stay in the project.

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""送任务的唯一入口：hub 的健康检查（monitor/health.py，每 30 分钟）调用 run_all，
-转给 queue/relay.py 处理机器表里的执行机（pueue 执行机、Slurm 执行机，细节记 ~/relay.log，
-~/feed.log 里记一行指过去）。另外查总队列里分给了不是执行机的名字的任务（执行机换了名字、撤掉以后留下的），报 feed:nobody。
+"""The only entry point for sending tasks: the hub's health check (monitor/health.py, every 30 minutes) calls run_all,
+which hands off to queue/relay.py to handle the executors in the machine table (pueue and Slurm executors; details go to
+~/relay.log, with one line in ~/feed.log pointing there). It also checks tasks in the hub queue assigned to a name that is not
+an executor (left over after a machine was renamed or removed) and reports feed:nobody.
 
-    python3 queue/feed.py [-n]       看现在会做什么（不改任何东西；-n / --dry-run / --dry 写不写都一样；taskq plan 包括它）
+    python3 queue/feed.py [-n]       show what it would do (changes nothing; -n / --dry-run / --dry are the same; taskq plan includes it)
 """
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # scheduler core root
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
@@ -26,26 +27,26 @@ def log(lines):
 
 
 def nobody(ctq):
-    """总队列里分给了不是执行机的名字的 → {问题编号: 说明（带 data）}。"""
+    """Tasks in the hub queue assigned to a name that is not an executor -> {problem id: message (with data)}."""
     own = set(M.executors())
     by = {}
     for t in (ctq or {}).get("tasks") or []:
         if t.get("assigned") and t["assigned"] not in own and t["state"] != "done":
             by.setdefault(t["assigned"], []).append(t["key"])
-    return {alert_id("feed", "nobody", w): alert(f"总队列里 {len(ks)} 个任务分给了 {w}，但 {w} 不是执行机，没有谁会做（{ks[0]}…）；"
-                                                 f"交还：taskq worker release --worker {w} <key>…",
+    return {alert_id("feed", "nobody", w): alert(f"{len(ks)} tasks in the hub queue are assigned to {w}, but {w} is not an executor and nobody will run them ({ks[0]}...); "
+                                                 f"release them: taskq worker release --worker {w} <key>...",
                                                  worker=w, n=len(ks), keys=ks) for w, ks in by.items()}
 
 
 def run_all(s, dry=False):
-    """health.py 调用 → (说明, 卡住的 {问题编号: 说明})。"""
+    """Called by health.py -> (messages, stuck {problem id: message})."""
     try:
         import relay as RL  # queue/relay.py
         events, stuck = RL.run_all(s, dry=dry)
     except Exception as e:  # noqa: BLE001
-        events, stuck = [], {alert_id("relay", "error"): f"queue/relay.py 出错：{type(e).__name__}: {e}"[:300]}
+        events, stuck = [], {alert_id("relay", "error"): f"queue/relay.py failed: {type(e).__name__}: {e}"[:300]}
     if events and not dry:
-        log([f"执行机 {'、'.join(sorted(M.executors()))}（relay.py）：{len(events)} 条，见 ~/relay.log"])
+        log([f"executors {(', '.join(sorted(M.executors())))} (relay.py): {len(events)} entries, see ~/relay.log"])
     stuck = dict(stuck)
     stuck.update(nobody((s.get("taskq") or {}).get(M.hub())))
     return events, stuck
@@ -53,12 +54,12 @@ def run_all(s, dry=False):
 
 def main(argv=None):
     import argparse
-    ap = argparse.ArgumentParser(description="往执行机送任务（health.py 每次检查调用 run_all）；这里只看、不改")
-    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="只看会做什么（默认就是）")
+    ap = argparse.ArgumentParser(description="Send tasks to executors (run_all, called by every health check); here it only reads")
+    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="only show what it would do (the default)")
     ap.parse_args(argv)
     import health as H  # noqa: E402
     ev, st = run_all(H.gather(), dry=True)
-    print("\n".join(ev + [f"卡住：{alert_msg(v)}" for v in st.values()]))
+    print("\n".join(ev + [f"stuck: {alert_msg(v)}" for v in st.values()]))
     return 0
 
 
