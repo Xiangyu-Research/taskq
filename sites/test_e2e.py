@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""全流程测试：加任务 → 派给执行机 → 传数据 → 训练 → 拉回 → 判断做完 → 下一步。两种布局各在一个子进程里跑（同时跑）：
+"""End-to-end test: add tasks → send to an executor → transfer data → train → fetch back → decide done → next step.
+Two layouts (together: the hub is also the store and a pueue executor; store: separate hub, store and executor) each run
+in their own subprocess. Everything (roots, data dirs, queue, machine table) lives in a temp dir; ssh is a local bash -c
+and pueue is a private pueued, so no real machine or state is touched.
 
-  together  hub 兼 store、兼一台 pueue 执行机（ssh=None，两个 worker：1 号卡全天、0 号卡按时段），另有一台 pueue 执行机 site-pueue
-            （假的 ssh，经隧道传）。site-pueue 上：建环境 → 任务单加任务 → 领、传数据 → 开 worker → 中途停、接着做 → 拉回 → 清理；
-            hub 自己这台：同一个盘上硬链接进 blobs、不开隧道，任务环境里没有 hub 的变量；两个 worker：按时段的那个时段结束时交还，
-            另一个从存档接着做完。
-  store     hub、store、执行机三个根目录各不相同，store 经假的 ssh 连：store 直接送给执行机，拉回落到 store，做完在 store 上判断，
-            实验表 FINAL 的两步接着排、做完后删掉中间产物（temp）；最后核对 hub 的盘上（状态目录里也算）没有写数据文件。
-
-完全隔离：根目录、数据目录、总队列、机器表（临时的配置文件夹，TASKQ_CONFIG）都在临时目录里；pueue 是自己起的 pueued（自己的配置
-和 socket），结束时只停它们；ssh 换成本机的 bash -c，不连任何机器。各机器跑的都是它根目录 code/current 里的代码包（工作区的代码）。
-跑法：python3 sites/test_e2e.py（E2E_LAYOUT=together|store 只跑一种；E2E_TMP=<目录> 临时目录放在哪，E2E_KEEP=1 留下临时目录）"""
+    python3 sites/test_e2e.py (E2E_LAYOUT=together|store runs one layout; E2E_TMP dir; E2E_KEEP=1 keeps it)"""
 import datetime as dt
 import glob
 import hashlib
@@ -27,7 +21,7 @@ import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of this scheduler code
 LAYOUTS = ("together", "store")
 LAYOUT = os.environ.get("E2E_LAYOUT")
 PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
@@ -42,21 +36,21 @@ def numpy_python():
 
 
 def missing():
-    """跑不了的原因（缺 pueue、带 numpy 的 Python）→ 说明；都有 → None。"""
+    """Why it cannot run (no pueue, no Python with numpy) → explanation; all present → None."""
     lack = [b for b in (PUEUE, PUEUED) if not os.access(b, os.X_OK)]
     if lack:
-        return "本机没有 " + "、".join(map(os.path.basename, lack)) + "（queue/install_pueue.sh）"
+        return "no pueue on this machine (" + ", ".join(map(os.path.basename, lack)) + "), see queue/install_pueue.sh"
     if not numpy_python():
-        return "本机没有带 numpy 的 Python（miniforge 的环境）"
+        return "no Python with numpy on this machine (a miniforge env)"
     return None
 
 
 def runner():
-    """两种布局各起一个子进程同时跑，跑完按布局打印各自的输出。"""
+    """Start one subprocess per layout at the same time and print each layout's output when done."""
     why = missing()
     if why:
         print(f"SKIP:{why}")
-        return 77  # run_tests.py：跳过
+        return 77  # run_tests.py: skip
     ps = {n: subprocess.Popen([sys.executable, os.path.abspath(__file__)], env=dict(os.environ, E2E_LAYOUT=n),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for n in LAYOUTS}
     bad = []
@@ -65,7 +59,7 @@ def runner():
         print(f"======== {n} ========\n{out.rstrip()}", flush=True)
         if p.returncode:
             bad.append(n)
-    print("全部通过" if not bad else f"没通过的布局：{'、'.join(bad)}")
+    print("all passed" if not bad else f"layouts that failed: {', '.join(bad)}")
     return 1 if bad else 0
 
 
@@ -73,12 +67,12 @@ if __name__ == "__main__" and not LAYOUT:
     sys.exit(runner())
 
 # ======================================================================================================
-# 下面是一种布局的子进程（E2E_LAYOUT）
+# The subprocess for one layout (E2E_LAYOUT)
 # ======================================================================================================
 sys.path.insert(0, os.path.join(CORE, "queue", "testdata"))
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import fixture  # noqa: E402
-import proto  # noqa: E402  只用标准库，不读配置
+import proto  # noqa: E402  stdlib only, reads no config
 
 fixture.use()
 KEEP = bool(os.environ.get("E2E_KEEP"))
@@ -86,24 +80,24 @@ T = (tempfile.mkdtemp if KEEP else fixture.tmpdir)(prefix=f"e2e_{LAYOUT}_", dir=
 LOCAL = re.escape(socket.gethostname().split(".")[0])
 BIN = os.path.join(T, "bin")
 FAKE = os.path.join(BIN, "ssh")
-CONDA = os.path.join(T, "conda")  # 假的 conda：activate 只把 bin 放进 PATH（bin/python3 是本机一个有 numpy 的 Python）
-ORDER = os.path.join(T, "order")  # sitecustomize 记下的 site_ops 操作（哪台、什么操作）、拉回时放文件的先后
+CONDA = os.path.join(T, "conda")  # fake conda: activate only puts bin on PATH (bin/python3 is a local Python with numpy)
+ORDER = os.path.join(T, "order")  # site_ops operations recorded by sitecustomize (which machine, which op) and the file order on fetch
 HOOK = os.path.join(T, "hook")
 CONF = os.path.join(T, "config")
-HS = os.path.join(T, "hs")  # hub 的状态目录（policy 的 OUTPUTS["state"]）：总队列、relay 的记录、代码包
+HS = os.path.join(T, "hs")  # the hub's state dir (policy's OUTPUTS["state"]): hub queue, relay records, bundles
 for d in (BIN, ORDER, HOOK, os.path.join(CONF, "specs"), os.path.join(HS, "taskq"), os.path.join(T, "tmp_hub")):
     os.makedirs(d)
 open(os.path.join(HS, "taskq", proto.QUEUE["enabled"]), "w").close()
-# 假的 ssh：跳过 -o 和机器名，在本机跑；hub 这边的变量不带过去（同 relay_remote.site_argv 对 ssh=None 的做法），临时目录每台各用各的
+# fake ssh: skip -o and the host name, run here; the hub's variables are not passed (like relay_remote.site_argv for ssh=None); each machine gets its own temp dir
 with open(FAKE, "w") as f:
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nhost=$1; shift\n'
             f'export TMPDIR={T}/tmp_$host; mkdir -p "$TMPDIR"\n'
             f'cd "$HOME" && exec env {" ".join("-u " + v for v in proto.HUB_ONLY_ENV)} bash -c "$*"\n')
-with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # 不碰真的卡
+with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # never touch the real GPUs
     f.write("#!/bin/bash\nexit 0\n")
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):
     os.chmod(p, 0o755)
-with open(os.path.join(HOOK, "sitecustomize.py"), "w") as f:  # 只记录、不改行为：哪台跑了哪个 site_ops 操作；pull 里 os.replace 的目标
+with open(os.path.join(HOOK, "sitecustomize.py"), "w") as f:  # record only, change nothing: which machine ran which site_ops op; os.replace targets during pull
     f.write('''import os, sys
 _d = os.environ.get("E2E_ORDER")
 if _d and sys.argv and sys.argv[0].endswith("site_ops.py") and len(sys.argv) > 1:
@@ -130,7 +124,7 @@ def hm(hours):
 
 
 def pueue_home(tag):
-    """自己的 pueued 的目录、配置和指到它的 pueue（放在各根目录以外）。"""
+    """The private pueued's dir, config and a pueue pointing at it (outside the roots)."""
     d = os.path.join(T, f"pq_{tag}")
     os.makedirs(d)
     cfgf = os.path.join(d, "c.yml")
@@ -145,8 +139,8 @@ def pueue_home(tag):
     return dict(dir=d, cfg=cfgf, wrap=wrap)
 
 
-# 系统临时目录里的一个短目录（结束时删掉）：pueued 的 socket（路径长度有限）；执行机 site-pueue 的根目录实际在 T/r，
-# 经这里的一个软链接用（根目录经软链接到达的情况也测到）
+# A short dir in the system temp dir (removed at the end): pueued's socket (path length is limited); the site-pueue
+# executor's root is really T/r, used through a symlink here (so a root reached through a symlink is tested too)
 SHORT = tempfile.mkdtemp(prefix="e2e_", dir="/tmp")
 os.makedirs(os.path.join(T, "r"))
 RLINK = os.path.join(SHORT, "r")
@@ -156,7 +150,7 @@ PQS = pueue_home("site")
 SITE = dict(label="pueue", hostname=r"(?!)", ssh="fake-pueue-host", scheduler="pueue", root=RLINK, conda=(CONDA, "base"), envs=ENVS,
             pueue=PQS["wrap"], workers=[dict(gpu="1")], tunnel=("push", "pull"), budget=(0, 0))
 if LAYOUT == "together":
-    HR, HD = os.path.join(T, "hr"), os.path.join(T, "hd")  # hub 的根目录、数据目录（hub 兼 store）
+    HR, HD = os.path.join(T, "hr"), os.path.join(T, "hd")  # the hub's root, data dir (the hub is also the store)
     PQH = pueue_home("hub")
     MACHINES = {
         "hub": dict(label="hub", hostname=LOCAL, ssh=None, roles=("hub", "store"), root=HR, data=HD, conda=(CONDA, "base"), envs=ENVS,
@@ -166,9 +160,9 @@ if LAYOUT == "together":
     }
     READY = {NAME: 5, "hub": 1}
     EXPS = None
-    SD = HD  # store 的数据目录
+    SD = HD  # the store's data dir
 else:
-    SR, SD = os.path.join(T, "sr"), os.path.join(T, "sd")  # store 的根目录、数据目录
+    SR, SD = os.path.join(T, "sr"), os.path.join(T, "sd")  # the store's root, data dir
     PQH = None
     MACHINES = {
         "hub": dict(label="hub", hostname=LOCAL, ssh=None, roles=("hub",)),
@@ -179,32 +173,32 @@ else:
     READY = {NAME: 2}
     EXPS = os.path.join(T, "exps", "e2e", "experiments.py")
 with open(os.path.join(CONF, "machines.py"), "w") as f:
-    f.write(f'"""全流程测试（{LAYOUT}）的机器表：test_e2e.py 写的。"""\nMACHINES = {MACHINES!r}\n')
+    f.write(f'"""Machine table for the end-to-end test ({LAYOUT}): written by test_e2e.py."""\nMACHINES = {MACHINES!r}\n')
 with open(os.path.join(CONF, "policy.py"), "w") as f:
-    f.write(f'"""全流程测试（{LAYOUT}）的 policy：test_e2e.py 写的。"""\nimport os\n\nimport cfg\n\n'
+    f.write(f'"""Policy for the end-to-end test ({LAYOUT}): written by test_e2e.py."""\nimport os\n\nimport cfg\n\n'
             'AUTO = dict(advance=True, envs=False, revive=False, smoke=False)\nPAUSE = {}\nHOLD = []\nPLACE = {}\n'
             f'READY = {READY!r}\nSLURM = {{}}\n'
             f'OUTPUTS = dict(state={HS + "/"!r}, bundle=(os.path.dirname(cfg.CORE_REL) or ".",), experiments={EXPS!r}, name="e2e")\n')
-# 环境描述：建在一个有 numpy 的基础环境上的 venv（pip 不用下载）
+# env spec: a venv on a base env that has numpy (pip has nothing to download)
 with open(os.path.join(CONF, "specs", "toy.yml"), "w") as f:
-    f.write("# 测试\nbase: sys\npip:\n  - numpy\n")
+    f.write("# test\nbase: sys\npip:\n  - numpy\n")
 with open(os.path.join(CONF, "specs", "toy.check.py"), "w") as f:
     f.write("import numpy\nprint('numpy', numpy.__version__)\n")
 
 os.environ.update(
     TASKQ_CONFIG=CONF, PATH=BIN + ":" + os.environ["PATH"], RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_POLL="0.1", TUNNEL_IDLE="5",
-    TMPDIR=os.path.join(T, "tmp_hub"),  # 被停掉的 worker 留下的临时文件跟着 T 删
-    # worker（consume.py）、run_task.sh 的测试用开关：等得短一些
+    TMPDIR=os.path.join(T, "tmp_hub"),  # temp files left by stopped workers go with T
+    # test switches for worker (consume.py) and run_task.sh: shorter waits
     TASKQ_POLL="1", TASKQ_IDLE_POLL="1", TASKQ_PATIENCE="0", TASKQ_IDLE_EXIT="6", TASKQ_STOP_POLL="1", TASKQ_STOP_WAIT="5",
     TASKQ_HEAD_CMD="echo same", RUN_TASK_POLL="1",
-    TASKQ_TEST_NOW=os.path.join(T, "now"),  # 按时段的 worker 看的"现在"（文件不在时是真的时间）
+    TASKQ_TEST_NOW=os.path.join(T, "now"),  # the "now" the worker on an hours window sees (real time when the file is absent)
     E2E_ORDER=ORDER, PYTHONPATH=HOOK)
 for v in ("TASKQ_DIR", "TASKQ_DATA", "TASKQ_ROOT", "TASKQ_MACHINE", "TASKQ_STATE", "TUNNEL_LOCK", "TUNNEL_URL", "TUNNEL_BIND"):
     os.environ.pop(v, None)
 
 import cfg  # noqa: E402
 cfg.use_config()
-REPO = cfg.REPO  # 使用者的仓库根
+REPO = cfg.REPO  # the user's repo root
 for d in (cfg.rel("queue"), cfg.rel("sync"), cfg.rel("monitor"), cfg.rel("sites")):
     sys.path.insert(0, os.path.join(REPO, d))
 import mtab as M  # noqa: E402
@@ -252,9 +246,9 @@ open(f"{a.out}/DONE", "w").close()
 
 
 def step(msg, cond, why="", fatal=True):
-    if not cond and callable(why):  # 贵的说明只在失败时算
+    if not cond and callable(why):  # the expensive explanation is only computed on failure
         why = why()
-    print(("PASS:" if cond else "FAIL:") + msg + ("" if cond else f"（{why}）"), flush=True)
+    print(("PASS:" if cond else "FAIL:") + msg + ("" if cond else f" ({why})"), flush=True)
     if not cond:
         FAILS.append(msg)
         if fatal:
@@ -268,7 +262,7 @@ def wb(p, data):
 
 
 def text_of(i):
-    return f"数据 {i}\n" * i
+    return f"data {i}\n" * i
 
 
 def pq(home, *args):
@@ -277,7 +271,7 @@ def pq(home, *args):
 
 
 def jobs(home):
-    """自己的 pueued 里的任务 → [[任务号, 标签, 状态, 结果], …]（sites/pueue.py 的解析）；读不到 → None。"""
+    """The tasks in the private pueued → [[id, label, state, result], ...] (sites/pueue.py's parser); unreadable → None."""
     rc, out = pq(home, "status", "--json")
     return PQ.parse(out, list(json.loads(out).get("groups") or {})) if rc == 0 else None
 
@@ -310,7 +304,7 @@ def setup_common():
     if PQH:
         start_pueued(PQH, ["gpu1", "gpu0"])
     relay.refill.add = fake_add
-    # 代码包：工作区的代码（还没进 git 的新文件经临时的 index 带上，不动真的 index），各台由检查部署
+    # the bundle: this worktree's code (new files not in git yet go in through a temporary index, the real index is untouched); each machine gets it deployed by the check
     idx = os.path.join(T, "index")
     shutil.copy(os.path.join(REPO, subprocess.run(["git", "-C", REPO, "rev-parse", "--git-path", "index"], capture_output=True,
                                                   text=True).stdout.strip()), idx)
@@ -323,12 +317,12 @@ def setup_common():
         os.environ.pop("GIT_INDEX_FILE")
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
     core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
-    relay.BUNDLE_REF = commit  # 测试中途别处推送 main 也不重打包
+    relay.BUNDLE_REF = commit  # a push to main elsewhere during the test does not rebuild
     ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{commit}:{core}": bid}))
     return bid
 
 
-# ---------------- hub 的 IO 组：在进程里直接做 ----------------
+# ---------------- the hub's IO group: done in-process ----------------
 ADDED = []
 
 
@@ -339,14 +333,14 @@ def fake_add(host, lbl, step_, key, args, run=None, **rec):
     elif step_ == "relay_fetch":
         RT.fetch(rec["to"], key, say=LOG.append)
     else:
-        raise AssertionError(f"没想到的 hub 任务 {step_} {key}")
-    LOG.append(f"hub 任务 {step_} {key}")
+        raise AssertionError(f"unexpected hub task {step_} {key}")
+    LOG.append(f"hub task {step_} {key}")
     return len(LOG)
 
 
 def snapshot():
-    """health.gather 里调度要用的部分（出错时的处理同它）：总队列（读不了 → None，原因在 why）、store 上的训练状态
-    （出错 → 原因在 collect，不当成 store 连不上）。"""
+    """The parts of health.gather the scheduling needs (error handling as there): hub queue (unreadable → None, reason in
+    why), remote task state on the store (errors → reason in collect, not treated as the store being down)."""
     s = dict(taskq={}, pueue={HUB: dict(tasks=[])}, records=[], ok={HUB: True}, why={}, src={}, collect={})
     try:
         q = s["taskq"][HUB] = taskq.local_status()
@@ -361,24 +355,24 @@ def snapshot():
 
 
 def check(adv=False, src_ok=True):
-    """一次健康检查里调度的部分（advance.run → relay.run_all）；有出错的说明、卡住的问题、store 上收集训练状态出错
-    （src_ok 时）→ AssertionError。→ (说明, 这次的状态)。"""
+    """The scheduling part of one health check (advance.run → relay.run_all); error messages, stuck problems, errors
+    collecting remote task state on the store (when src_ok) → AssertionError. → (messages, this state)."""
     s = snapshot()
     if src_ok and (s["why"] or s["collect"]):
-        raise AssertionError(f"检查出错：{s['why']} {s['collect']}")
+        raise AssertionError(f"check failed: {s['why']} {s['collect']}")
     stuck = {}
     if adv:
         import advance
         did, st = advance.run(s)
-        LOG.extend(f"advance：{x}" for x in did)
+        LOG.extend(f"advance: {x}" for x in did)
         stuck.update(st)
         s["taskq"][HUB] = taskq.local_status()
     msgs, st = relay.run_all(s, False)
     LOG.extend(msgs)
     stuck.update(st)
-    bad = [m for m in msgs if "出错" in m]
+    bad = [m for m in msgs if "failed" in m or "could not" in m]
     if bad or stuck:
-        raise AssertionError(f"检查出错：{bad}；卡住的：{ {k: proto.alert_msg(v) for k, v in stuck.items()} }")
+        raise AssertionError(f"check failed: {bad}; stuck: { {k: proto.alert_msg(v) for k, v in stuck.items()} }")
     return msgs, s
 
 
@@ -397,7 +391,7 @@ def central(args):
 
 
 def ops():
-    """sitecustomize 记下的 site_ops 操作 → [(机器, 操作)]。"""
+    """The site_ops operations recorded by sitecustomize → [(machine, op)]."""
     try:
         return [tuple(ln.split("\t")[:2]) for ln in open(os.path.join(ORDER, "ops.log")).read().splitlines()]
     except OSError:
@@ -405,7 +399,8 @@ def ops():
 
 
 def pulled(out):
-    """最近一次拉回 out 时 os.replace 放进数据目录的先后（.relay_in 里的暂存不算）→ 相对数据目录的路径。"""
+    """The order os.replace placed files into the data dir during the latest fetch of out (staging in .relay_in excluded)
+    → paths relative to the data dir."""
     seq = []
     for f in sorted(glob.glob(os.path.join(ORDER, "pull_*.txt")), key=os.path.getmtime):
         lines = [ln for ln in open(f).read().splitlines() if f"/{proto.RELAY_INBOX}/" not in ln]
@@ -423,39 +418,39 @@ def wait(cond, timeout, what, every=1.0, act=None):
         if cond():
             return
         time.sleep(every)
-    raise AssertionError(f"{timeout} 秒内没等到：{what}")
+    raise AssertionError(f"timed out after {timeout}s waiting for: {what}")
 
 
 def view_files(name=NAME):
-    """那边每个任务的视图（文件夹）、单个的输入文件里的文件 → 软链接指向。"""
+    """Each remote task's views (dirs) and the files of single input files → symlink targets."""
     D = os.path.join(M.MACHINES[name]["root"], "data")
     out = {}
     for k in keys(name).values():
         for v in k["views"] + k.get("placed", []):
             ps = [os.path.join(D, v)] if not os.path.isdir(os.path.join(D, v)) else \
-                [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(D, v)) for f in fs]  # 视图是一个文件或一个文件夹
+                [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(D, v)) for f in fs]  # a view is a file or a dir
             for p in ps:
                 out[os.path.relpath(p, D)] = os.readlink(p) if os.path.islink(p) else None
     return out
 
 
 def blob_files(root):
-    """根目录 blobs 里的内容文件（旁边的 .st 记录不算）。"""
+    """Content files in the root's blobs (the .st records beside them do not count)."""
     return [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(root, "blobs")) for f in fs if not f.endswith(".st")]
 
 
 def step_deploy(bid):
-    _, s = check(src_ok=False)  # store 上还没有代码包：store 上的操作（收集训练状态；store 不是 hub 时还有总队列的状态）都读不到
-    step("第一次检查（还没部署）：读不到的只是 store 上的操作，不当成 hub、store 连不上",
+    _, s = check(src_ok=False)  # no bundle on the store yet: operations on the store (collecting remote task state; hub queue state too when the store is not the hub) are all unreadable
+    step("first check (not deployed yet): the only unreadable things are operations on the store, not the hub or store being down",
          set(s["why"]) <= {"taskq"} and (s["why"] or s["collect"]) and all(s["ok"].values()), (s["why"], s["collect"], s["ok"]))
     cur = relay.current_bundle(M.store())
-    step("第一次检查就把代码包部署到 store（读不到总队列时也先换包，之后的检查才读得到）", cur == bid, f"store 上的 current 是 {cur!r}")
+    step("the first check deploys the bundle to the store (the bundle is switched even when the hub queue is unreadable; later checks can read it)", cur == bid, f"current on the store is {cur!r}")
     check()
     roots = [m["root"] for m in M.MACHINES.values() if m.get("root")]
     cur = {r: os.path.basename(os.path.realpath(os.path.join(r, proto.ROOT["current"]))) for r in roots}
-    step(f"第一次检查：代码包 {bid} 部署到每台有根目录的机器（store、执行机；本机的也是）", all(v == bid for v in cur.values()), cur)
+    step(f"first check: bundle {bid} deployed to every machine with a root (store, executors; this machine too)", all(v == bid for v in cur.values()), cur)
     rs = relay.remote_status(NAME)
-    step("执行机那边的队列开着、是空的，自己的 pueued 起来了，状态里的代码包是这个",
+    step("the executor's queue is enabled and empty, its own pueued is up, and the status shows this bundle",
          rs is not None and rs["bundle"] == bid and rs["taskq"]["enabled"] and rs["taskq"]["tasks"] == [] and rs["jobs"] == [], rs)
     used = int(subprocess.run(["du", "-sb", os.path.join(T, "r")], capture_output=True, text=True).stdout.split()[0])
     M.MACHINES[NAME]["cap"] = 1
@@ -463,11 +458,11 @@ def step_deploy(bid):
         rs2 = relay.remote_status(NAME)
     finally:
         M.MACHINES[NAME].pop("cap")
-    step("cap：剩余按 cap 减去根目录已占的算，不看整个盘", rs2 is not None and 0 < rs2["free"] <= 1e9 - used * 0.5, (rs2 or {}).get("free"))
+    step("cap: free space is the cap minus what the root already uses, not the whole disk", rs2 is not None and 0 < rs2["free"] <= 1e9 - used * 0.5, (rs2 or {}).get("free"))
 
 
 # ======================================================================================================
-# together：hub 兼 store、兼执行机
+# together: the hub is also the store and an executor
 # ======================================================================================================
 KEYS = [f"guest/e2e/t{i}" for i in range(1, 6)]
 SLOW = KEYS[0]
@@ -477,11 +472,11 @@ RROOT = RLINK
 def sheet(key, inputs, cmd, out, machines):
     return dict(key=key, owner="alice", env="toy", inputs=inputs, cmd=cmd, out=out, done=["DONE"], progress="progress_json",
                 resume=["ckpt_*.json"], log="train.log", res={"gpus": 1}, machines=machines, nice=50,
-                out_gb=0.01)  # 挑执行机时给产出留的空间：测试的盘上剩多少都放得下
+                out_gb=0.01)  # space left for outputs when choosing an executor: anything fits on the test disk
 
 
 def setup_together():
-    # store（hub）上的输入：共用的代码、每个任务自己的数据（t5 的是一个文件）
+    # inputs on the store (hub): shared code, each task's own data (t5's is one file)
     wb(os.path.join(HD, "guest/e2e/code/toy.py"), TOY)
     for i in range(1, 5):
         wb(os.path.join(HD, f"guest/e2e/d{i}/a.txt"), text_of(i))
@@ -498,49 +493,49 @@ def setup_together():
 def step_env_gate():
     out = central(f"add --file {T}/sheets/job.json")
     bt = hub_tasks()
-    step("任务单加了 5 个任务，默认 relay=path", sorted(bt) == KEYS and all(t["spec"]["relay"] == "path" for t in bt.values()), out)
+    step("the sheet added 5 tasks, default relay=path", sorted(bt) == KEYS and all(t["spec"]["relay"] == "path" for t in bt.values()), out)
     st = E.states(NAME, run=run_local)
-    step("建环境前：toy 没建", st == {"sys": "不是按描述建的", "toy": "没建"}, st)
+    step("before the env is built: toy not built", st == {"sys": "not spec-built", "toy": "not built"}, st)
     check()
     bt, rs = hub_tasks(), relay.remote_status(NAME)
-    step("没有 .ok：一个都不领、不传，那边队列空，不开 worker",
+    step("no .ok: nothing is claimed or sent, the remote queue is empty, no worker is started",
          all(t["state"] == "free" and not t["worker"] for t in bt.values()) and rs["taskq"]["tasks"] == [] and jobs(PQS) == [],
          [(t["key"], t["state"], t["worker"]) for t in bt.values()])
     rc, out = E.build(NAME, "toy", run=run_local)
     okf = os.path.join(RROOT, "state/envs/toy.ok")
-    step("taskq site env 的建法（envs.build）：建好、检查过、写 .ok（= 描述加这台的变体的锁的哈希）",
+    step("how taskq site env builds (envs.build): built, checked, .ok written (= hash of the spec plus this machine's variant lock)",
          rc == 0 and open(okf).read().strip() == M.spec_hash("toy", M.spec_variant(NAME, "toy")), out)
     a = M.activate(NAME, "toy")
     r = subprocess.run(["bash", "-c", a + "\npython -c 'import numpy,sys; print(sys.prefix)'"], capture_output=True, text=True)
-    step("激活后用的是建好的 venv，能导入 numpy", r.returncode == 0 and "/envs/toy-" in r.stdout, r.stdout + r.stderr)
+    step("after activation the built venv is used and numpy imports", r.returncode == 0 and "/envs/toy-" in r.stdout, r.stdout + r.stderr)
     st = E.states(NAME, run=run_local)
-    step("状态：toy ok", st["toy"] == "ok", st)
+    step("state: toy ok", st["toy"] == "ok", st)
 
 
 def step_stage():
     n0 = len(LOG)
     check()
     bt, rs = hub_tasks(), relay.remote_status(NAME)
-    step("有了 .ok：5 个都领给 site-pueue、传过去、加进那边的队列",
+    step("with .ok: all 5 are claimed for site-pueue, sent over and added to the remote queue",
          all(t["state"] == "claimed" and t["worker"] == NAME for t in bt.values())
          and sorted(t["state"] for t in rs["taskq"]["tasks"]) == ["free"] * 5,
          lambda: ([(t["key"], t["state"]) for t in rs["taskq"]["tasks"]], LOG[n0:][-20:]))
     pushes = [o for o in ops() if o[1] == "push"]
-    step("数据由 store（hub）送给执行机：push 在 store 上跑、经隧道传",
-         pushes and all(m == HUB for m, _ in pushes) and any("经隧道传" in x for x in LOG[n0:]), (pushes, LOG[n0:][-20:]))
+    step("data goes from the store (hub) to the executor: push runs on the store, over the tunnel",
+         pushes and all(m == HUB for m, _ in pushes) and any("tunnel transfer" in x for x in LOG[n0:]), (pushes, LOG[n0:][-20:]))
     blobs = blob_files(RROOT)
     vf = view_files()
     D = os.path.join(RROOT, "data")
-    step(f"数据按内容放进 blobs（{len(blobs)} 个，共用的代码只一份），视图是指向 blobs 的软链接",
+    step(f"data goes into blobs by content ({len(blobs)} files, shared code only once), views are symlinks into blobs",
          len(blobs) == 6 and len(vf) == 6 and all(t and os.path.dirname(os.path.dirname(os.path.realpath(t))) == os.path.realpath(os.path.join(RROOT, "blobs"))
                                                   and os.path.isfile(os.path.join(D, p))
                                         for p, t in vf.items()), (len(blobs), vf))
     k1 = keys()[SLOW]
-    step("和 store 一样的路径：视图是输入的文件夹、结果在 out 原样、那边的 key 就是总队列的 key",
+    step("same paths as the store: views are the input dirs, results stay at out, the remote keys are the hub queue keys",
          k1["views"] == ["guest/e2e/code", "guest/e2e/d1"] and k1["params"]["out"] == "guest/e2e/r/t1" and k1["outs"] == ["guest/e2e/r/t1"]
          and sorted(t["key"] for t in rs["taskq"]["tasks"]) == KEYS, k1)
-    step("那边还没开 worker（这次检查开始时还没有备好的任务）", jobs(PQS) == [], jobs(PQS))
-    # 两个任务的视图同时在：一个重新传数据只清自己的视图
+    step("no worker started over there yet (nothing was ready when this check began)", jobs(PQS) == [], jobs(PQS))
+    # views of two tasks at the same time: restaging one clears only its own views
     k2 = keys()[KEYS[1]]
     own2 = [v for v in k2["views"] if v not in k1["views"]][0]
     own1 = [v for v in k1["views"] if v not in k2["views"]][0]
@@ -551,7 +546,7 @@ def step_stage():
     before = view_files()
     RT.stage(NAME, SLOW, nice=50, add=False, say=LOG.append)
     after = view_files()
-    step("几个任务的视图共存：t1 重新传数据只删自己独占的视图里多出来的链接，不碰 t2 的、大家共用的",
+    step("several task views coexist: restaging t1 removes only extra links in views it owns alone, not t2's or shared ones",
          not os.path.lexists(os.path.join(D, own1, "stray1.txt")) and os.path.lexists(os.path.join(D, own2, "stray2.txt"))
          and os.path.lexists(os.path.join(D, "guest/e2e/code", "stray0.txt"))
          and all(after.get(p) == t for p, t in before.items() if not p.endswith("stray1.txt")), after)
@@ -559,7 +554,7 @@ def step_stage():
     os.remove(os.path.join(D, "guest/e2e/code", "stray0.txt"))
     check()
     js = jobs(PQS)
-    step("下一次检查：有备好的任务了，开了一个 worker", len(js) == 1 and js[0][1] == f"{proto.WORKER_LABEL}{NAME}-gpu1", js)
+    step("next check: tasks are ready, so one worker is started", len(js) == 1 and js[0][1] == f"{proto.WORKER_LABEL}{NAME}-gpu1", js)
 
 
 def remote_out(key):
@@ -574,30 +569,30 @@ def progress_of(key):
 
 
 def step_stop():
-    wait(lambda: progress_of(SLOW) == 2, 120, "t1 做完第 2 轮", every=0.2)
-    central(f"stop --why 测试 {SLOW}")
+    wait(lambda: progress_of(SLOW) == 2, 120, "t1 finishes round 2", every=0.2)
+    central(f"stop --why test {SLOW}")
 
     def released():
         t = hub_tasks()[SLOW]
         return t["state"] == "stopped" and not t["worker"]
-    wait(released, 90, "总队列里停了 t1 后，那边停下、hub 交还", every=2, act=check)
+    wait(released, 90, "after t1 is stopped in the hub queue, it stops over there and the hub releases it", every=2, act=check)
     rs = relay.remote_status(NAME)
     a = next(t for t in rs["taskq"]["tasks"] if t["key"] == SLOW)
     f = (rs.get("tasks") or {}).get(SLOW)
     t = hub_tasks()[SLOW]
     skips = os.path.join(HS, "taskq", proto.QUEUE["skips"])
-    step("停下后：那边是 stopped、没人领，按存档算有进度，hub 交还时不带 skip",
+    step("after the stop: the remote task is stopped, unclaimed, has progress by its checkpoint, and the hub release carries no skip",
          a["state"] == "stopped" and not a.get("worker") and refill.site_progress(f) and t["skipped_by"] == []
          and not (os.path.isdir(skips) and os.listdir(skips)), (a, f, t["skipped_by"]))
-    step("那边留着第 2 轮的存档、没有 DONE",
+    step("the remote side keeps the round-2 checkpoint and has no DONE",
          os.path.exists(os.path.join(remote_out(SLOW), "ckpt_02.json")) and not os.path.exists(os.path.join(remote_out(SLOW), "DONE")),
          os.listdir(remote_out(SLOW)))
-    # 别的任务还在用视图时清理：只删不要的
+    # clean up while other tasks still use views: remove only what is unwanted
     before = view_files()
     reg = (ST.load_state().get("views") or {}).get(NAME) or {}
     keep = {v for k in keys().values() for v in ST.paths_of(k)}
     g = ST.gc(NAME, keep, RM.op, soft_gb=1e9, views=reg)
-    step("还有任务要用时清理（relay_store.gc）：要用的视图和 blob 一个不删",
+    step("cleanup while tasks still need them (relay_store.gc): no view or blob in use is removed",
          g["removed_views"] == [] and view_files() == before and all(os.path.isfile(os.path.join(RROOT, "data", p)) for p in before), g)
     central(f"resume {SLOW}")
 
@@ -608,42 +603,42 @@ def step_finish():
     def all_done():
         bt = hub_tasks()
         ks = keys()
-        if ks and len(ks) < len(KEYS):  # 有的已经删了、有的还在：还在的视图都完好
+        if ks and len(ks) < len(KEYS):  # some deleted, some still there: the remaining views are intact
             vf = view_files()
-            assert all(os.path.isfile(os.path.join(RROOT, "data", p)) for p in vf), "删一个任务时动了别的任务的视图"
+            assert all(os.path.isfile(os.path.join(RROOT, "data", p)) for p in vf), "deleting one task touched another task's views"
             seen_drop.append(len(ks))
         return all(t["state"] == "done" for t in bt.values()) and not ks
-    wait(all_done, 300, "5 个都做完、拉回、那边删掉", every=2, act=check)
-    step("一个任务做完删掉时，别的任务的视图都还在", bool(seen_drop), "没碰上有删有留的时候")
+    wait(all_done, 300, "all 5 done, fetched back, removed over there", every=2, act=check)
+    step("when one done task is deleted, the other tasks' views stay", bool(seen_drop), "never saw a delete while others stayed")
     pulls = [o for o in ops() if o[1] == "pull"]
-    step("拉回在 store（hub）上跑", pulls and all(m == HUB for m, _ in pulls), pulls)
+    step("fetch runs on the store (hub)", pulls and all(m == HUB for m, _ in pulls), pulls)
     for i, k in enumerate(KEYS, 1):
         out = os.path.join(HD, f"guest/e2e/r/t{i}")
         res = json.load(open(os.path.join(out, "result.json")))
         want = sum(text_of(i).encode())
-        step(f"{k} 拉回 store：真名路径、内容对（3 轮的和、读到的输入）{'、从第 2 轮的存档接着做' if k == SLOW else ''}",
+        step(f"{k} fetched to the store: real paths, right content (3 rounds' sum, the inputs it read){', carried on from the round-2 checkpoint' if k == SLOW else ''}",
              res["text"] == text_of(i) and res["total"] == 3 * want and res["start"] == (2 if k == SLOW else 0)
              and json.load(open(os.path.join(out, "PROGRESS.json")))["done"] == 3 and os.path.exists(os.path.join(out, "DONE")), res)
         seq = pulled(f"guest/e2e/r/t{i}")
-        step(f"{k} 拉回时 DONE 最后放", seq and seq[-1] == f"guest/e2e/r/t{i}/DONE", seq)
+        step(f"{k} puts DONE last on fetch", seq and seq[-1] == f"guest/e2e/r/t{i}/DONE", seq)
         logs = [f for f in os.listdir(os.path.join(HD, proto.TASK_LOGS)) if f.startswith(proto.safe(k) + proto.SAFE)]
-        step(f"{k} 的分段日志拉回了", bool(logs), os.listdir(os.path.join(HD, proto.TASK_LOGS)))
+        step(f"{k}'s part log was fetched back", bool(logs), os.listdir(os.path.join(HD, proto.TASK_LOGS)))
     r = subprocess.run(["grep", "-rlF", HD, os.path.join(RROOT, "data")], capture_output=True, text=True)
-    step("执行机的数据目录里没有 store 的绝对路径（命令里的 {data} 在那边展开）", r.stdout.strip() == "", r.stdout[:500])
+    step("the executor's data dir has no absolute store paths ({data} is expanded over there)", r.stdout.strip() == "", r.stdout[:500])
 
 
 def step_gc():
-    M.MACHINES[NAME]["budget"] = (1e6, 0)  # 软线高得够不着：能删的都删
+    M.MACHINES[NAME]["budget"] = (1e6, 0)  # a soft limit out of reach: delete everything possible
     relay.VIEW_KEEP_S = 0
     check()
     D = os.path.join(RROOT, "data")
     left = [os.path.relpath(os.path.join(dp, f), D) for dp, _, fs in os.walk(D) for f in fs]
-    blobs = [f for _, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs]  # .st 记录也跟着删
+    blobs = [f for _, _, fs in os.walk(os.path.join(RROOT, "blobs")) for f in fs]  # the .st records go too
     reg = (ST.load_state().get("views") or {}).get(NAME) or {}
     top = sorted(os.listdir(RROOT))
-    step("全部做完后清理（relay_store.gc）：视图、blob 都删了，数据目录只剩 worker 的日志，登记的视图清空",
+    step("cleanup after everything is done (relay_store.gc): views and blobs removed, only worker logs left in the data dir, registered views cleared",
          not blobs and all(p.startswith("logs/workers/") for p in left) and not reg, (left[:10], blobs[:5], reg))
-    step("根目录只剩还要用的：代码、队列、环境和它的状态", set(top) <= {"code", "queue", "blobs", "data", "tmp", "state", "envs"}
+    step("the root keeps only what is still needed: code, queue, blobs, data, tmp, state, envs", set(top) <= {"code", "queue", "blobs", "data", "tmp", "state", "envs"}
          and os.path.isfile(os.path.join(RROOT, "state/envs/toy.ok")), top)
     relay.VIEW_KEEP_S = 6 * 3600
     M.MACHINES[NAME]["budget"] = (0, 0)
@@ -653,12 +648,12 @@ K7 = "guest/e2e/t7"
 
 
 def step_local():
-    """hub 兼 store 兼执行机（ssh=None）：不经假的 ssh、不开隧道，数据在同一个盘上硬链接进 blobs。"""
-    step("本机执行机的作业名（worker id-时间；手动跑的主机名-时间）算它的",
+    """The hub is also store and executor (ssh=None): no fake ssh, no tunnel, data is hard-linked into blobs on the same disk."""
+    step("the local executor's job names (worker id-time; hostname-time when started by hand) map to it",
          M.machine_of_jobtag(M.workers(HUB)[0]["id"] + "-20261107120000") == M.MACHINES[HUB]["label"]
          and M.machine_of_jobtag(socket.gethostname().split(".")[0] + "-1107") == "hub")
-    rc, out = E.build(HUB, "toy")  # 不给 run：按机器表（ssh=None）在本机跑
-    step("本机执行机：按描述建环境（建在它自己的根目录下）", rc == 0 and os.path.isfile(os.path.join(HR, "state/envs/toy.ok")), out)
+    rc, out = E.build(HUB, "toy")  # no run given: run here per the machine table (ssh=None)
+    step("local executor: build the env from its spec (under its own root)", rc == 0 and os.path.isfile(os.path.join(HR, "state/envs/toy.ok")), out)
     out_t7 = "{data}/guest/e2e/r/t7"
     wb(os.path.join(T, "sheets/job7.json"), json.dumps([sheet(
         K7, ["guest/e2e/code", "guest/e2e/d2"],
@@ -670,21 +665,21 @@ def step_local():
     t7 = hub_tasks()[K7]
     blobs = blob_files(HR)
     src = {os.stat(os.path.join(HD, p)).st_ino for p in ("guest/e2e/code/toy.py", "guest/e2e/d2/a.txt")}
-    step("本机执行机领了 t7，数据从 store 的数据目录硬链接进它的 blobs（同一个盘，不拷、不经隧道）",
+    step("the local executor claimed t7, data is hard-linked from the store data dir into its blobs (same disk, no copy, no tunnel)",
          t7["worker"] == HUB and K7 in keys(HUB) and blobs and {os.stat(b).st_ino for b in blobs} == src
-         and not [o for o in ops()[n0:] if o[1] == "push"] and not any("经隧道" in x for x in LOG[nlog:]), (t7, blobs, LOG[nlog:][-8:]))
-    wait(lambda: hub_tasks()[K7]["state"] == "done", 300, "本机执行机做完 t7、拉回", every=2, act=check)
+         and not [o for o in ops()[n0:] if o[1] == "push"] and not any("tunnel transfer" in x for x in LOG[nlog:]), (t7, blobs, LOG[nlog:][-8:]))
+    wait(lambda: hub_tasks()[K7]["state"] == "done", 300, "local executor finishes t7 and fetches it back", every=2, act=check)
     out = os.path.join(HD, "guest/e2e/r/t7")
     res = json.load(open(os.path.join(out, "result.json")))
-    step("t7 拉回：结果对", res["text"] == text_of(2) and res["total"] == 3 * sum(text_of(2).encode()), res)
-    step("t7 拉回没经隧道（本机拷）", not any("经隧道" in x for x in LOG[nlog:]), LOG[nlog:][-10:])
+    step("t7 fetched: right result", res["text"] == text_of(2) and res["total"] == 3 * sum(text_of(2).encode()), res)
+    step("t7 was fetched without a tunnel (local copy)", not any("tunnel transfer" in x for x in LOG[nlog:]), LOG[nlog:][-10:])
     env = dict(ln.split("=", 1) for ln in open(os.path.join(out, "env.txt")).read().splitlines() if "=" in ln)
     leaked = {v: env[v] for v in proto.HUB_ONLY_ENV if os.environ.get(v) and env.get(v) == os.environ[v]}
     data = os.path.realpath(env.get("TASKQ_DATA", ""))
-    step("本机执行机的任务环境里没有 hub 的配置、数据目录、队列；TASKQ_DATA 是它自己的 <根目录>/data",
+    step("the local executor's task env has no hub config, data dir or queue; TASKQ_DATA is its own <root>/data",
          not leaked and data == os.path.realpath(os.path.join(HR, "data")), (leaked, env.get("TASKQ_DATA")))
     check()
-    step("总队列做完以后，本机执行机上 t7 的结果删了", K7 not in keys(HUB) and not os.path.exists(os.path.join(HR, "data/guest/e2e/r/t7")),
+    step("after the hub queue is done, t7's results on the local executor are deleted", K7 not in keys(HUB) and not os.path.exists(os.path.join(HR, "data/guest/e2e/r/t7")),
          keys(HUB))
 
 
@@ -692,9 +687,9 @@ K6 = "guest/e2e/t6"
 
 
 def step_two_workers():
-    """一台机器两个 worker：0 号卡按时段，时段结束时交还；1 号卡的从存档接着做完。"""
-    wait(lambda: all(j[2] == "Done" for j in jobs(PQH)), 60, "hub 上的 worker 都空下来退出", every=1)
-    pq(PQH, "pause", "-g", "gpu1")  # 先只让 0 号卡的 worker 领到
+    """One machine with two workers: card 0 on an hours window, releases when it ends; card 1 finishes from the checkpoint."""
+    wait(lambda: all(j[2] == "Done" for j in jobs(PQH)), 60, "the workers on the hub go idle and exit", every=1)
+    pq(PQH, "pause", "-g", "gpu1")  # let only the card 0 worker claim first
     wb(os.path.join(T, "sheets/job6.json"), json.dumps([sheet(
         K6, ["guest/e2e/code", "guest/e2e/d1"],
         "python3 {data}/guest/e2e/code/toy.py --data {data}/guest/e2e/d1 --out {data}/guest/e2e/r/t6 --pause 600",
@@ -705,37 +700,37 @@ def step_two_workers():
 
     def running0():
         return any(j[1] == w0 and j[2] == "Running" and j[0] > first for j in jobs(PQH))
-    wait(running0, 60, "hub 的 0 号卡 worker 开起来", every=1, act=check)
+    wait(running0, 60, "the hub's card 0 worker starts", every=1, act=check)
     o6 = os.path.join(HR, "data/guest/e2e/r/t6")
-    wait(lambda: os.path.exists(os.path.join(o6, "ckpt_02.json")), 120, "t6 在 0 号卡上做完第 2 轮", every=0.2)
+    wait(lambda: os.path.exists(os.path.join(o6, "ckpt_02.json")), 120, "t6 finishes round 2 on card 0", every=0.2)
     rq = {t["key"]: t for t in relay.remote_status(HUB)["taskq"]["tasks"]}
-    step("t6 由 0 号卡的 worker 领着", (rq.get(K6) or {}).get("worker") == f"{HUB}-gpu0", rq.get(K6))
-    # 时段结束：worker 看 TASKQ_TEST_NOW（3 小时后）；hub 这边的机器表也换成已经结束的时段（不再开 0 号卡的 worker）
+    step("t6 is claimed by the card 0 worker", (rq.get(K6) or {}).get("worker") == f"{HUB}-gpu0", rq.get(K6))
+    # the window ends: the worker sees TASKQ_TEST_NOW (3 hours later); the hub's table also gets a window that already ended (no more card 0 worker)
     wb(os.environ["TASKQ_TEST_NOW"], str(time.time() + 3 * 3600))
     M.MACHINES[HUB]["workers"][1]["hours"] = [(hm(-3), hm(-2), None, None)]
     jid = max(j[0] for j in jobs(PQH) if j[1] == w0)
 
     def job(i):
         return next(j for j in jobs(PQH) if j[0] == i)
-    wait(lambda: job(jid)[2] == "Done", 90, "0 号卡的 worker 时段结束后退出", every=1)
+    wait(lambda: job(jid)[2] == "Done", 90, "the card 0 worker exits after its window ends", every=1)
     jd = job(jid)
     log0 = pq(PQH, "log", "--full", str(jid))[1]
     rq = {t["key"]: t for t in relay.remote_status(HUB)["taskq"]["tasks"]}
-    step("时段结束：0 号卡的 worker 停训练、交还、正常退出（Success），t6 在那边的队列里没人领、留着第 2 轮的存档、没有 DONE",
-         "时段结束" in log0 and jd[3] == "Success" and rq.get(K6) and not rq[K6].get("worker")
+    step("window end: the card 0 worker stops training, releases, exits normally (Success), t6 is unclaimed in the remote queue, keeps the round-2 checkpoint and has no DONE",
+         "hours window ended" in log0 and jd[3] == "Success" and rq.get(K6) and not rq[K6].get("worker")
          and os.path.exists(os.path.join(o6, "ckpt_02.json")) and not os.path.exists(os.path.join(o6, "DONE")),
          lambda: (jd, rq.get(K6), log0[-1500:]))
     pq(PQH, "start", "-g", "gpu1")
-    wait(lambda: hub_tasks()[K6]["state"] == "done", 300, "1 号卡的 worker 从存档接着做完 t6、拉回", every=2, act=check)
+    wait(lambda: hub_tasks()[K6]["state"] == "done", 300, "the card 1 worker finishes t6 from the checkpoint and fetches it back", every=2, act=check)
     res = json.load(open(os.path.join(HD, "guest/e2e/r/t6/result.json")))
-    step("t6：1 号卡的 worker 从第 2 轮的存档接着做，结果对", res["start"] == 2 and res["total"] == 3 * sum(text_of(1).encode()), res)
+    step("t6: the card 1 worker carries on from the round-2 checkpoint, right result", res["start"] == 2 and res["total"] == 3 * sum(text_of(1).encode()), res)
     segs = sorted(f for f in os.listdir(os.path.join(HD, proto.TASK_LOGS)) if f.startswith(proto.safe(K6) + proto.SAFE))
     # each part starts with "job <job>_<part> @ host, task=<key>, ..."; two parts started in the same minute share a job name and file
     heads = [ln for f in segs for ln in open(os.path.join(HD, proto.TASK_LOGS, f), errors="replace").read().splitlines()
              if ln.startswith("job ") and f"task={K6}," in ln]
-    step("t6 两个 worker 的两段都记在拉回的分段日志里", len(heads) >= 2, (segs, heads))
+    step("both parts from t6's two workers are in the fetched part log", len(heads) >= 2, (segs, heads))
     later = [j for j in jobs(PQH) if j[1] == w0 and j[0] > jid]
-    step("时段结束以后没再开 0 号卡的 worker", not later, later)
+    step("no card 0 worker was started after the window ended", not later, later)
 
 
 def main_together():
@@ -752,11 +747,11 @@ def main_together():
 
 
 # ======================================================================================================
-# store：hub、store、执行机三个根目录各不相同
+# store: the hub, store and executor have different roots
 # ======================================================================================================
 KS = "guest/e2e/s1"
 SRC_TXT = text_of(4)
-EXP_PY = '''"""全流程测试（store）的实验表：test_e2e.py 写的。s1 训完 → mid（写中间产物 a.part）→ use（读 a.part）；use 做完后删掉 a.part。"""
+EXP_PY = '''"""Experiment table for the end-to-end test (store): written by test_e2e.py. s1 done → mid (writes temp file a.part) → use (reads a.part); a.part is deleted after use is done."""
 EXPERIMENTS = []
 FINAL = [
     dict(name="mid", env="toy", inputs=["e2e/r/s1", "e2e/code"], out="e2e/mid", done="keep.txt", temp=["*.part"], out_gb=0.01,
@@ -799,50 +794,50 @@ def main_store():
     central(f"add --file {T}/sheets/job.json")
     step_deploy(bid)
     r = subprocess.run([sys.executable, os.path.join(CORE, "queue", "taskq.py"), "status", "--json"], capture_output=True, text=True)
-    step("hub 不是 store、没有数据目录：总队列的状态在 store 上算（site_ops facts），读得出（taskq status --json）",
+    step("the hub is not the store and has no data dir: the hub queue state is computed on the store (site_ops facts) and readable (taskq status --json)",
          r.returncode == 0 and S.json_in(r.stdout) is not None, (r.stdout + r.stderr).strip()[-300:])
     rc, out = E.build(NAME, "toy", run=run_local)
-    step("执行机上按描述建好 toy", rc == 0, out)
+    step("toy built on the executor from its spec", rc == 0, out)
     n0 = len(LOG)
 
     def finished():
         bt = hub_tasks()
         return all(bt.get(k, {}).get("state") == "done" for k in (KS, "mid", "use")) \
             and not os.path.exists(os.path.join(SD, "e2e/mid/a.part")) and not keys()
-    wait(finished, 400, "s1 训完 → mid → use 都做完、拉回，a.part 删掉，执行机上的都删了", every=2, act=lambda: check(adv=True))
+    wait(finished, 400, "s1 done → mid → use all done and fetched, a.part deleted, everything on the executor removed", every=2, act=lambda: check(adv=True))
     bt = hub_tasks()
     res = json.load(open(os.path.join(SD, "e2e/r/s1/result.json")))
     total = 3 * sum(SRC_TXT.encode())
-    step("s1 拉回 store：内容对", res["text"] == SRC_TXT and res["total"] == total and res["start"] == 0, res)
-    step("FINAL 的两步按实验表排进总队列（advance）、在执行机上做完",
+    step("s1 fetched to the store: right content", res["text"] == SRC_TXT and res["total"] == total and res["start"] == 0, res)
+    step("the two FINAL steps are queued by the experiment table (advance) and done on the executor",
          bt["mid"]["spec"].get("step") == "mid" and bt["use"]["spec"].get("step") == "use"
          and open(os.path.join(SD, "e2e/use/use.txt")).read() == f"{total}\nok\n", (bt.get("mid"), bt.get("use")))
-    step("用到 mid 的步骤都做完后，store 上删掉中间产物 a.part（temp），keep.txt 留着",
+    step("after the steps using mid are done, the temp file a.part is deleted on the store, keep.txt stays",
          not os.path.exists(os.path.join(SD, "e2e/mid/a.part")) and os.path.isfile(os.path.join(SD, "e2e/mid/keep.txt")),
          os.listdir(os.path.join(SD, "e2e/mid")))
     by = {}
     for m, o in ops():
         by.setdefault(o, set()).add(m)
     want = ("export", "push", "pull", "done", "rm", "collect", "probe")
-    step("store 的操作（export、push、pull、done、rm、collect、probe）都在 store 上跑", all(by.get(o) == {"store"} for o in want), by)
-    step("hub 自己一个 site_ops 操作都不跑（它没有根目录）", not any(m == HUB for m, _ in ops()), by)
-    step("store 直接送给执行机（经隧道）", any("经隧道传" in x and "fake-pueue-host" in x for x in LOG[n0:]), LOG[n0:][-30:])
+    step("store operations (export, push, pull, done, rm, collect, probe) all run on the store", all(by.get(o) == {"store"} for o in want), by)
+    step("the hub runs no site_ops operation itself (it has no root)", not any(m == HUB for m, _ in ops()), by)
+    step("the store sends straight to the executor (over the tunnel)", any("tunnel transfer" in x and "fake-pueue-host" in x for x in LOG[n0:]), LOG[n0:][-30:])
     for out in ("e2e/r/s1", "e2e/mid", "e2e/use"):
         seq = pulled(out)
         done = {"e2e/r/s1": "DONE", "e2e/mid": "keep.txt", "e2e/use": "use.txt"}[out]
-        step(f"{out} 拉回落在 store 的数据目录、做完的标志最后放", seq and seq[-1] == f"{out}/{done}", seq)
-    step("执行机上的任务、视图都删了", not keys() and relay.remote_status(NAME)["taskq"]["tasks"] == [], keys())
+        step(f"{out} fetched into the store's data dir, the done marker placed last", seq and seq[-1] == f"{out}/{done}", seq)
+    step("the executor's tasks and views are gone", not keys() and relay.remote_status(NAME)["taskq"]["tasks"] == [], keys())
     left = sorted(os.path.relpath(p, SD) for p in files_under(SD))
     extra = [p for p in left if not p.startswith(("e2e/code/", "e2e/d1/", "e2e/r/s1/", "e2e/mid/", "e2e/use/", proto.TASK_LOGS + "/"))]
-    step("store 的数据目录里只有输入、结果和分段日志", not extra, extra)
-    # hub 的盘：T 里除了别的机器（store、执行机的根目录和数据目录、它们的临时目录、执行机的 pueued）以外的地方
+    step("the store's data dir has only inputs, results and part logs", not extra, extra)
+    # the hub's disk: everything under T except the other machines (the store's and executor's root and data dir, their temp dirs, the executor's pueued)
     other = {os.path.join(T, x) for x in ("sr", "sd", "r", "pq_site")} | set(glob.glob(os.path.join(T, "tmp_fake-*")))
     datas = {sha(p): os.path.relpath(p, SD) for p in files_under(SD) if os.path.getsize(p) >= 16}
     mine = [p for p in files_under(T, skip=other | {ORDER}) if os.path.isfile(p) and not os.path.islink(p)]
     copies = [(os.path.relpath(p, T), datas[sha(p)]) for p in mine if os.path.getsize(p) >= 16 and sha(p) in datas]
     named = [os.path.relpath(p, T) for p in mine if os.path.basename(p) in OUT_NAMES
              or re.fullmatch(r"ckpt_\d+\.json|.*\.part", os.path.basename(p))]
-    step("hub 的盘上没有写数据文件（输入、结果的副本都不在 hub 这边，状态目录里也没有）", not copies and not named, (copies[:5], named[:5]))
+    step("no data files were written on the hub's disk (no input or result copies on the hub, none in the state dir)", not copies and not named, (copies[:5], named[:5]))
 
 
 # ======================================================================================================
@@ -856,7 +851,7 @@ def cleanup():
             p.wait(10)
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGKILL)
-    # 只停这个临时目录里起的进程（worker、训练、隧道的服务）
+    # stop only processes started from this temp dir (workers, training, tunnel servers)
     pids = set()
     for pat in (T, SHORT):
         pids |= set(subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True).stdout.split())
@@ -877,12 +872,12 @@ def main():
             print(f"FAIL:{type(e).__name__}: {e}")
             traceback.print_exc(file=sys.stdout)
             FAILS.append(str(e))
-        print("--- 最近的检查说明 ---\n" + "\n".join(LOG[-30:]))
+        print("--- latest check messages ---\n" + "\n".join(LOG[-30:]))
         if KEEP:
-            print(f"临时目录 {T}")
+            print(f"temp dir {T}")
     finally:
         cleanup()
-    print("全部通过" if not FAILS else f"{len(FAILS)} 项失败")
+    print("all passed" if not FAILS else f"{len(FAILS)} failures")
     return 1 if FAILS else 0
 
 

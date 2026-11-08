@@ -1,8 +1,8 @@
-"""Slurm 执行机（machines.py 里 scheduler="slurm" 的机器）的适配器：读各 QOS 的作业数、按 QOS 分配、交 worker 作业。
-和 pueue.py 对应：读状态 → 调用方算交几个（queue/refill.py 的 topup_plan）→ start_workers 交。
-交的是核心里固定的 queue/worker.sbatch（GPU）、cpu_worker.sbatch（CPU）：分区、卡、核、内存（机器表的 jobs）、QOS、时限（policy.py 的 SLURM）、
-日志、TASKQ_ROOT、TASKQ_MACHINE 都在 sbatch 的命令行上给；作业开始时才经根目录的 code/current 找 worker_start.sh，用的是那时的代码包。
-run：fn(命令) → (退出码, 输出)，由调用方绑好机器（测试替换）。"""
+"""The Slurm adapter (machines with scheduler="slurm"): read job counts per QOS, share slots, submit worker jobs.
+Like pueue.py, the caller decides how many to submit (refill.py topup_plan) and start_workers submits them; it submits
+the core's queue/worker.sbatch (GPU) and cpu_worker.sbatch (CPU), with partition, cards, cpus, memory (the table's jobs),
+QOS, time limit (policy.py SLURM), logs, TASKQ_ROOT and TASKQ_MACHINE on the command line; worker_start.sh is found
+through code/current when the job starts, so it uses that bundle. run: fn(command) → (exit code, output)."""
 import os
 import secrets
 import shlex
@@ -17,10 +17,11 @@ import proto  # noqa: E402
 import mtab as M  # noqa: E402
 import remote as R  # noqa: E402
 
-SUBMIT_CAP = 10  # 读不到 QOS 的排队上限时按这个算
-FILES = {"gpu": "worker.sbatch", "cpu": "cpu_worker.sbatch"}  # worker 的种类 → sbatch 文件；认 worker 按 squeue 的 %o（交的脚本）
+SUBMIT_CAP = 10  # used when a QOS's submit limit is unreadable
+FILES = {"gpu": "worker.sbatch", "cpu": "cpu_worker.sbatch"}  # worker kind → sbatch file; workers are told apart by squeue's %o (the submitted script)
 
-# 作业名每次随机取（各账号、各作业的名字都不一样），不靠名字认作业；每台按机器表的 job_names 用自己的一套
+# Job names are random each time (different accounts and jobs may share a name); never identify jobs by name. Each
+# machine uses its own set from the table's job_names
 _W1 = ("amber azure bold brisk calm clear coral crisp dawn deep dry eager early fair fast fern firm fresh gentle glad gold "
        "grand green grey hazy keen kind late light lime lively lone loyal lucky mellow merry mild misty modest neat noble "
        "pale plain polar proud quick quiet rapid rare ready red rosy round royal ruby rustic sandy sharp shy silent silver "
@@ -36,26 +37,28 @@ _STARS = ("acrux adhara algol alnair altair antares arcturus atlas bellatrix bet
           "electra enif fomalhaut gacrux hadar hamal izar kochab lyra merak mimosa mira mizar nunki orion pollux procyon rigel "
           "sabik sadr saiph schedar shaula sirius spica suhail thuban vega wezen zosma").split()
 STYLES = {
-    "pair": lambda: f"{secrets.choice(_W1)}-{secrets.choice(_W2)}",  # <形容词>-<名词>，如 late-plover
-    "star": lambda: f"{secrets.choice(_STARS)}{secrets.randbelow(90) + 10}",  # <星名><两位数>，如 vega27
+    "pair": lambda: f"{secrets.choice(_W1)}-{secrets.choice(_W2)}",  # <adjective>-<noun>, e.g. late-plover
+    "star": lambda: f"{secrets.choice(_STARS)}{secrets.randbelow(90) + 10}",  # <star name><two digits>, e.g. vega27
 }
 
 
 def jobname(style=None):
-    """一个随机的作业名，按 style（STYLES 的键；没有 → pair）。"""
+    """A random job name, by style (a STYLES key; none → pair)."""
     return STYLES[style or "pair"]()
 
 
 def kind_of(command):
-    """squeue 的 %o（交的脚本的路径）→ worker 的种类（FILES）；不是 worker（传输作业、手动的作业）→ None。"""
+    """squeue's %o (the submitted script's path) → worker kind (FILES); not a worker (transfer jobs, manual jobs) → None."""
     base = (command or "").strip().rsplit("/", 1)[-1]
     return next((k for k, f in FILES.items() if base == f), None)
 
 
 def probe(name):
-    """每个 GPU QOS 一行"QOS|名字|排队上限|我们排着和在跑的段数|其中还在排（没开始）的段数"；交 CPU worker 时再加"CPU|我们的 CPU worker 作业数"、
-    "ALL|CPU worker 那个 QOS 的提交上限|我们所有的作业数"（有的集群所有分区都挂同一个 QOS，所有作业都占它的名额）；
-    有一条命令出错就整个出错（不按 0 算）。QOS 来自 policy.py 的 SLURM；CPU worker 按交的脚本（FILES["cpu"]）认。"""
+    """One line per GPU QOS "QOS|name|submit limit|our queued and running jobs|of which still queued (not started)";
+    when submitting CPU workers also "CPU|our CPU worker jobs" and "ALL|that QOS's submit limit|all our jobs" (some
+    clusters put every partition on the same QOS, so every job takes a slot there); any command failing fails the whole
+    probe (not counted as 0). QOS come from policy.py's SLURM; CPU workers are told apart by the submitted script
+    (FILES["cpu"])."""
     conf = P.SLURM[name]
     out = "set -e; for q in " + " ".join(conf["gpu"]) + "; do lim=$(sacctmgr -nP show qos $q format=maxsubmitpu); " \
         "ids=$(squeue -u $USER -h -r -q $q -o %i); pd=$(squeue -u $USER -h -r -q $q -t PD -o %i); " \
@@ -71,8 +74,8 @@ def probe(name):
 
 
 def parse(out):
-    """probe 的输出 → dict(counts={QOS: (排队上限或 None, 现有段数, 其中还在排的段数)}, cpu=CPU worker 作业数或 None,
-    free=还剩几个提交名额或 None)；读不出数的 QOS 行不算（那个 QOS 当读不到）。"""
+    """probe's output → dict(counts={QOS: (submit limit or None, our jobs, still queued)}, cpu=CPU worker jobs or None,
+    free=submit slots left or None); a QOS line without numbers is dropped (that QOS counts as unreadable)."""
     counts, cpu, free = {}, None, None
     for ln in out.splitlines():
         p = ln.split("|")
@@ -86,18 +89,19 @@ def parse(out):
 
 
 def status(name, run):
-    """→ parse 的结果；读不到 → None。"""
+    """parse's result; unreadable → None."""
     rc, out = run(probe(name))
     return None if rc else parse(out)
 
 
 def squeue(text):
-    """`squeue -h -o '%i|%j|%T|%M|%q|%R'` 的输出 → [[号, 名字, 状态, 已跑, QOS, 原因], …]。"""
+    """The output of `squeue -h -o '%i|%j|%T|%M|%q|%R'` → [[id, name, state, elapsed, QOS, reason], ...]."""
     return [ln.split("|") for ln in text.splitlines() if ln.strip()]
 
 
 def distribute(qos, counts, room, kind):
-    """要再交 room 个时按 QOS 的顺序、各自的上限（减去留给本人的）分 → [(QOS, 每段时限, 交几个, worker 的种类)]。"""
+    """Submit room more jobs, one QOS at a time in order, each up to its own limit (minus the slots kept for its owner)
+    → [(QOS, time per job, how many, worker kind)]."""
     out = []
     for q, v in qos.items():
         t, keep = (v, 0) if isinstance(v, str) else v
@@ -110,7 +114,8 @@ def distribute(qos, counts, room, kind):
 
 
 def submit_cmd(name, qos, time_, kind):
-    """交一个 kind（gpu / cpu）worker 作业的命令（在那边跑）。根目录开头的 ~ 留给那边展开（先赋给 R）。"""
+    """The command that submits one kind (gpu / cpu) worker job (run over there). A leading ~ in the root is left for
+    the other side to expand (assigned to R first)."""
     m = M.machine(name)
     opts = " ".join(f"--{'cpus-per-task' if k == 'cpus' else k}={shlex.quote(str(v))}" for k, v in (m["jobs"][kind] or {}).items() if v is not None)
     cur = f'"$R"/{proto.ROOT["current"]}'
@@ -121,8 +126,8 @@ def submit_cmd(name, qos, time_, kind):
 
 
 def start_workers(name, subs, run):
-    """交 subs（refill.slurm_plan 的 [(QOS, 时限, 交几个, 种类)]，每个作业一个随机名字，按机器表的 job_names）
-    → [dict(qos, time, n=要交几个, kind, ids, err)]；一个 QOS 出错就停这个 QOS。"""
+    """Submit subs (refill.slurm_plan's [(QOS, time limit, how many, kind)], one random name per job from the table's
+    job_names) → [dict(qos, time, n=how many, kind, ids, err)]; an error stops that QOS."""
     res = []
     for q, t, n, k in subs:
         ids, err = [], None

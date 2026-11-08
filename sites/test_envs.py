@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""测 sites/envs.py 和机器表里按描述建的环境：描述能读、激活语句、.ok 对不上时不送任务、
-建环境的命令只在 CPU 上跑；最后在临时目录里真建一个只有 numpy 的 venv（不联网时跳过装包那一步之外的部分不跑）。
+"""Tests sites/envs.py and spec-built envs in the machine table: specs load, activation, no sending while .ok does not
+match, build commands run on the CPU only; finally a real venv with only numpy is built in a temp dir.
 
     python3 sites/test_envs.py [--real]
 """
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of this scheduler code
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(CORE, "queue"))
 sys.path.insert(0, os.path.join(CORE, "queue", "testdata"))
@@ -34,9 +34,9 @@ def ok(what, cond, info=None):
     fails += 0 if cond else 1
 
 
-# ---------- 描述 ----------
+# ---------- specs ----------
 names = sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(M.SPECS, "*.yml")))
-ok("有 base、alt、alt2、stats 的描述", {"base", "alt", "alt2", "stats"} <= set(names))
+ok("specs for base, alt, alt2 and stats", {"base", "alt", "alt2", "stats"} <= set(names))
 for n in names:
     try:
         sp = E.load(n)
@@ -45,35 +45,35 @@ for n in names:
     except E.EnvError as e:
         print("  ", e)
         good = False
-    ok(f"{n}.yml 能读、有检查", good)
-    ok(f"{n}.check.py 能编译", bool(compile(open(E.check_file(n), encoding="utf-8").read(), n, "exec")))
-ok("alt 建在 base 上", E.load("alt")["base"] == "base")
-ok("base 有 cu128 的变体", "cu128" in E.load("base")["torch"])
-ok("还没有锁：哈希 = 描述内容的 sha256（有锁时加上锁，见 test_envlock.py）",
+    ok(f"{n}.yml loads and has a check", good)
+    ok(f"{n}.check.py compiles", bool(compile(open(E.check_file(n), encoding="utf-8").read(), n, "exec")))
+ok("alt builds on base", E.load("alt")["base"] == "base")
+ok("base has a cu128 variant", "cu128" in E.load("base")["torch"])
+ok("no lock yet: the hash = sha256 of the spec (a lock is added when present, see test_envlock.py)",
    not os.path.exists(M.lock_path("base"))
    and M.spec_hash("base") == hashlib.sha256(open(os.path.join(M.SPECS, "base.yml"), "rb").read()).hexdigest())
-ok("没有的描述 → 哈希 None", M.spec_hash("没有这个") is None)
+ok("no such spec → hash None", M.spec_hash("no-such-spec") is None)
 
-# ---------- 假机器 ----------
+# ---------- fake machines ----------
 SAVE_M = copy.deepcopy(M.MACHINES)
-M.MACHINES["tsite"] = dict(label="测试", hostname=r"tsite-host", ssh="tsite", scheduler="pueue", root="/r/x1",
+M.MACHINES["tsite"] = dict(label="test", hostname=r"tsite-host", ssh="tsite", scheduler="pueue", root="/r/x1",
                            conda=("/opt/c", "base"), envs={"base": ("spec", "cu128"), "alt": "spec", "old": ("conda", "o")},
                            workers=[dict(gpu="0")])
-M.MACHINES["tslurm"] = dict(label="测试 Slurm", hostname=r"tslurm-host", ssh="tslurm", scheduler="slurm", root="/s/y",
+M.MACHINES["tslurm"] = dict(label="test slurm", hostname=r"tslurm-host", ssh="tslurm", scheduler="slurm", root="/s/y",
                             conda=("/app/c", "pt"), envs={"base": "spec"}, jobs=dict(gpu=dict(partition="gpu-x")),
                             transfer_job="-p cpu-x --qos=normal -c 4 --mem=4G")
 
 a = M.activate("tsite", "alt")
-ok("spec 环境的激活语句 = 根目录下的 .activate", "source /r/x1/envs/alt/.activate" in a)
-ok("conda 条目照旧", "conda activate o" in M.activate("tsite", "old"))
-ok("没有 .ok 时 spec 环境不就绪，conda 的就绪", M.ready_envs("tsite") == {"old"})
+ok("a spec env activates through .activate under the root", "source /r/x1/envs/alt/.activate" in a)
+ok("a conda entry works as before", "conda activate o" in M.activate("tsite", "old"))
+ok("without .ok a spec env is not ready, a conda one is", M.ready_envs("tsite") == {"old"})
 h = M.spec_hash("base")
-ok(".ok 对得上才就绪", M.ready_envs("tsite", {"base": h}) == {"old", "base"})
-ok(".ok 是旧描述的哈希 → 不就绪", M.ready_envs("tsite", {"base": "0" * 64}) == {"old"})
-ok("现有机器条目的环境都还就绪（没改成 spec）",
+ok("ready only when .ok matches", M.ready_envs("tsite", {"base": h}) == {"old", "base"})
+ok(".ok from an old spec → not ready", M.ready_envs("tsite", {"base": "0" * 64}) == {"old"})
+ok("all envs of the existing machine entries are still ready (not turned into specs)",
    all(M.ready_envs(n) == set(M.machine(n).get("envs") or {}) for n in SAVE_M))
 
-# ---------- 送任务的门槛（refill.choose：这台的 Site.envs = 就绪的环境） ----------
+# ---------- sending gate (refill.choose: this machine's Site.envs = ready envs) ----------
 TASKS = [dict(key=k, nice=0, order=i) for i, k in enumerate("abc")]
 SPECS = {k: (None, dict(env=e, device="gpu")) for k, e in zip("abc", ("base", "old", "alt"))}
 
@@ -84,65 +84,65 @@ def got(oks):
     return sorted(t["key"] for t in site.take)
 
 
-ok("没有 .ok：只送 conda 环境的任务", got(None) == ["b"])
-ok("base 的 .ok 对上：也送 base 的", got({"base": h}) == ["a", "b"])
-ok("alt 的 .ok 是旧的：不送", got({"base": h, "alt": "x"}) == ["a", "b"])
+ok("no .ok: only tasks for the conda env are sent", got(None) == ["b"])
+ok("base .ok matches: base tasks are sent too", got({"base": h}) == ["a", "b"])
+ok("alt .ok is old: not sent", got({"base": h, "alt": "x"}) == ["a", "b"])
 
-# ---------- 建环境的脚本和命令 ----------
+# ---------- build script and command ----------
 s_ = E.build_script("tsite", "alt")
-ok("venv：先激活基础环境（它的 .activate）", "source /r/x1/envs/base/.activate" in s_)
-ok("venv：--system-site-packages", "--system-site-packages" in s_)
+ok("venv: activate the base env first (its .activate)", "source /r/x1/envs/base/.activate" in s_)
+ok("venv: --system-site-packages", "--system-site-packages" in s_)
 M.MACHINES["tsite"]["envs"]["alt3"] = "spec"
 s_ = E.build_script("tsite", "alt3")
 del M.MACHINES["tsite"]["envs"]["alt3"]
-ok("占位换成按环境算的变量", "${SPEC_TORCH_MM}" in s_ and "{torch_mm}" not in s_)
-ok("看不到卡", "export CUDA_VISIBLE_DEVICES=" in s_)
-ok("检查过才写 .ok、换软链接", s_.index("CHECK_EOF") < s_.index('mv -T') < s_.index('.ok"'))
+ok("placeholders become variables computed from the env", "${SPEC_TORCH_MM}" in s_ and "{torch_mm}" not in s_)
+ok("the GPUs are not visible", "export CUDA_VISIBLE_DEVICES=" in s_)
+ok("write .ok and switch the symlink only after the check", s_.index("CHECK_EOF") < s_.index('mv -T') < s_.index('.ok"'))
 s_ = E.build_script("tsite", "base")
-ok("conda：按变体装 torch（cu128）", "whl/cu128" in s_ and "torch==2.7.1" in s_)
-ok("conda：建在根目录下的 <名>-<哈希>", 'P="$ROOT/$N-${H:0:12}"' in s_ and "ROOT=/r/x1/envs" in s_)
-ok("检查拿到代码目录", "python3 - /r/x1/code/current" in s_)
+ok("conda: install torch per variant (cu128)", "whl/cu128" in s_ and "torch==2.7.1" in s_)
+ok("conda: built as <name>-<hash> under the root", 'P="$ROOT/$N-${H:0:12}"' in s_ and "ROOT=/r/x1/envs" in s_)
+ok("the check gets the code dir", "python3 - /r/x1/code/current" in s_)
 cmd, host = E.runner("tsite")
-ok("pueue 类：nice、看不到卡、在那台上", host == "tsite" and "nice -n 10 env CUDA_VISIBLE_DEVICES=" in cmd and "srun" not in cmd)
+ok("pueue kind: nice, no GPUs visible, runs on that machine", host == "tsite" and "nice -n 10 env CUDA_VISIBLE_DEVICES=" in cmd and "srun" not in cmd)
 cmd, host = E.runner("tslurm")
-ok("Slurm：CPU 分区的 srun，排着等（不设 -I）", cmd.count("srun -p cpu-x") == 1 and "gres" not in cmd and " -I" not in cmd)
+ok("Slurm: srun in the CPU partition, queue and wait (no -I)", cmd.count("srun -p cpu-x") == 1 and "gres" not in cmd and " -I" not in cmd)
 M.MACHINES["tslurm"]["env_job"] = "-p gpu-a --gres=gpu:1"
 try:
     E.runner("tslurm")
-    ok("env_job 要了 GPU → 报错", False)
+    ok("env_job asks for a GPU → error", False)
 except E.EnvError:
-    ok("env_job 要了 GPU → 报错", True)
+    ok("env_job asks for a GPU → error", True)
 try:
     E.build_script("tsite", "old")
-    ok("不是按描述建的环境 → 报错", False)
+    ok("an env not built from a spec → error", False)
 except E.EnvError:
-    ok("不是按描述建的环境 → 报错", True)
+    ok("an env not built from a spec → error", True)
 M.MACHINES["tsite"]["envs"]["alt"] = "spec"
-ok("dry-run 不跑命令", E.build("tsite", "alt", dry=True,
-                              run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("跑了")))[0] == 0)
-ok("生成的脚本 bash -n 过", all(subprocess.run(["bash", "-n"], input=E.build_script("tsite", n), text=True).returncode == 0
+ok("dry run runs no command", E.build("tsite", "alt", dry=True,
+                              run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))[0] == 0)
+ok("the generated script passes bash -n", all(subprocess.run(["bash", "-n"], input=E.build_script("tsite", n), text=True).returncode == 0
                                 for n in ("base", "alt")))
 
-# ---------- 状态 ----------
+# ---------- states ----------
 def fake(txt):
     return lambda cmd, host, timeout, input=None: (0, txt, "")
 
 
 now = 2_000_000_000
 st = E.states("tsite", run=fake(f"ENV|base|{h}|||1\nENV|alt||||0\nNOW|{now}\n"))
-ok("状态：ok、没建、conda 的不是按描述建的", st == {"old": "不是按描述建的", "base": "ok", "alt": "没建"})
+ok("states: ok, not built, a conda one is not spec-built", st == {"old": "not spec-built", "base": "ok", "alt": "not built"})
 uh = M.spec_hash("alt")
 st = E.states("tsite", run=fake(f"ENV|base|{'0'*64}|||1\nENV|alt||{uh}||0\nNOW|{now}\n"))
-ok("状态：描述变了、检查失败", st["base"] == "描述变了" and st["alt"] == "检查失败")
+ok("states: spec changed, check failed", st["base"] == "spec changed" and st["alt"] == "check failed")
 st = E.states("tsite", run=fake(f"ENV|base|||{h} {now - 60}|0\nENV|alt|||{uh} {now - 7 * 3600}|0\nNOW|{now}\n"))
-ok("状态：在建、在建很久", st["base"] == "在建" and st["alt"] == "在建（可能已停）")
-ok("连不上 → None", E.states("tsite", run=lambda *a, **k: (255, "", "")) is None)
-ok("oks_of 只放 ok 的（哈希按这台用的变体）", E.oks_of({"base": "ok", "alt": "没建"}, "tsite") == {"base": M.spec_hash("base", "cu128")})
+ok("states: building, building for a long time", st["base"] == "building" and st["alt"] == "building (may have stopped)")
+ok("unreachable → None", E.states("tsite", run=lambda *a, **k: (255, "", "")) is None)
+ok("oks_of keeps only ok envs (hash by the variant used here)", E.oks_of({"base": "ok", "alt": "not built"}, "tsite") == {"base": M.spec_hash("base", "cu128")})
 
 M.MACHINES.clear()
 M.MACHINES.update(SAVE_M)
 
-# ---------- 锁文件：不联网建 ----------
+# ---------- lock files: offline builds ----------
 import base64  # noqa: E402
 import json  # noqa: E402
 import zipfile  # noqa: E402
@@ -155,7 +155,7 @@ def sha(p):
 
 
 def tiny_wheel(d, name="tinypkg", ver="0.1"):
-    """一个能装的最小 wheel（纯 Python）→ 路径。"""
+    """A minimal installable wheel (pure Python) → path."""
     fn = f"{d}/{name}-{ver}-py3-none-any.whl"
     di = f"{name}-{ver}.dist-info"
     files = {f"{name}/__init__.py": f"VERSION = {ver!r}\n",
@@ -171,7 +171,7 @@ def tiny_wheel(d, name="tinypkg", ver="0.1"):
 
 
 def put(wh, p):
-    """文件放进 wheelhouse（<前两位>/<sha256>）→ 锁里的一项的公共字段。"""
+    """Put a file into the wheelhouse (<first two>/<sha256>) → the common fields of a lock entry."""
     h = sha(p)
     os.makedirs(f"{wh}/{h[:2]}", exist_ok=True)
     shutil.copy(p, f"{wh}/{h[:2]}/{h}")
@@ -196,7 +196,7 @@ M.SPECS = f"{LD}/specs"
 os.environ["TASKQ_STATE"] = f"{LD}/state"
 WH = f"{LD}/state/{proto.WHEELHOUSE}"
 whl = tiny_wheel(fixture.tmpdir(prefix="whl.", dir=LD))
-ok("wheel 的文件名：本地版本换成元数据的版本，别的不动", E.wheel_name(dict(fn="m_s-2.3.0+cu12torch2.5-cp311-cp311-linux_x86_64.whl", version="2.3.0"))
+ok("wheel file name: the local version becomes the metadata version, nothing else changes", E.wheel_name(dict(fn="m_s-2.3.0+cu12torch2.5-cp311-cp311-linux_x86_64.whl", version="2.3.0"))
    == "m_s-2.3.0-cp311-cp311-linux_x86_64.whl" and E.wheel_name(dict(fn="a-1.0-py3-none-any.whl", version="1.0")) == "a-1.0-py3-none-any.whl"
    and E.wheel_name(dict(fn="x-1.0.conda", version="1.0")) == "x-1.0.conda")
 pkg = f"{LD}/fake-1.0-0.conda"
@@ -206,68 +206,68 @@ cpk = dict(put(WH, pkg), name="fake", version="1.0", build="0", channel="https:/
 wpk = dict(put(WH, whl), name="tinypkg", version="0.1", no_deps=True)
 write_lock(M.SPECS, "cbase", "default", conda=[cpk])
 write_lock(M.SPECS, "tiny", "default", pip=[wpk])
-M.MACHINES["lsite"] = dict(label="锁测试", hostname=r"lsite-host", ssh="lsite", scheduler="pueue", root="/r/l", cap=50,
+M.MACHINES["lsite"] = dict(label="lock test", hostname=r"lsite-host", ssh="lsite", scheduler="pueue", root="/r/l", cap=50,
                            conda=("/opt/c", "base"), envs={"cbase": "spec", "tiny": "spec", "sysbase": ("conda", "s")},
                            workers=[dict(cpus=4)], ssh_master=True)
 s_ = E.build_script("lsite", "cbase", store="/r/l/blobs")
-ok("锁：conda 不联网建（--offline、explicit 文件、临时包目录）", 'conda create --offline -y -p "$P" --file "$T/explicit.txt"' in s_
+ok("lock: conda builds offline (--offline, explicit file, temp package dir)", 'conda create --offline -y -p "$P" --file "$T/explicit.txt"' in s_
    and 'CONDA_PKGS_DIRS="$T/pkgs"' in s_ and "CONDA_OFFLINE=1" in s_ and "conda-forge" not in s_)
-ok("锁：每个包按 sha256 从 blobs 硬链接成原来的文件名，explicit 里带 md5",
+ok("lock: each package is hard-linked from blobs by sha256 under its original name, with md5 in explicit",
    f"pkgs {cpk['sha256']} {cpk['fn']} {cpk['md5']}" in s_ and "BL=/r/l/blobs" in s_
    and 'file://$T/pkgs/$fn#$md5' in s_ and 'ln -f "$s"' in s_)
 s_ = E.build_script("lsite", "tiny", store="/r/l/blobs")
-ok("锁：pip 只从本地装、按哈希、不装依赖", "--no-index --no-deps --require-hashes" in s_ and '--find-links "$T/wheels"' in s_
+ok("lock: pip installs from local files only, by hash, without deps", "--no-index --no-deps --require-hashes" in s_ and '--find-links "$T/wheels"' in s_
    and f"tinypkg==0.1 --hash=sha256:{wpk['sha256']}" in s_ and "pip install --index-url" not in s_)
-ok("锁：临时目录在 trap 里删、.built 在换软链接之前", 'rm -rf "$T"' in s_ and s_.index("CHECK_EOF") < s_.index('> "$P/.built"') < s_.index("mv -T"))
-ok("锁：bash -n 过", all(subprocess.run(["bash", "-n"], input=E.build_script("lsite", n, store="~/q/blobs"), text=True).returncode == 0
+ok("lock: the temp dir is removed in the trap, .built is written before the symlink switch", 'rm -rf "$T"' in s_ and s_.index("CHECK_EOF") < s_.index('> "$P/.built"') < s_.index("mv -T"))
+ok("lock: passes bash -n", all(subprocess.run(["bash", "-n"], input=E.build_script("lsite", n, store="~/q/blobs"), text=True).returncode == 0
                        for n in ("cbase", "tiny")))
 try:
     E.build_script("lsite", "cbase")
-    ok("锁：没给放包的目录 → 报错", False)
+    ok("lock: no package dir given → error", False)
 except E.EnvError:
-    ok("锁：没给放包的目录 → 报错", True)
-ok("锁：要的空间 = 包 × 2.5 + 一份临时的", E.lock_need(E.load_lock("tiny", "default")) == int(wpk["size"] * 3.5))
-ok("锁：wheelhouse 里的路径", E.lock_files(E.load_lock("tiny", "default")) == {wpk["sha256"]: f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}"})
+    ok("lock: no package dir given → error", True)
+ok("lock: space needed = packages x 2.5 + one temp copy", E.lock_need(E.load_lock("tiny", "default")) == int(wpk["size"] * 3.5))
+ok("lock: paths in the wheelhouse", E.lock_files(E.load_lock("tiny", "default")) == {wpk["sha256"]: f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}"})
 json.dump(dict(format=1, name="tiny", variant="default", conda=[], pip=[dict(wpk, fn="../x")]), open(f"{M.SPECS}/tiny.v2.lock.json", "w"))
 try:
     E.load_lock("tiny", "v2")
-    ok("锁：fn 里有路径 → 报错", False)
+    ok("lock: a path in fn → error", False)
 except E.EnvError:
-    ok("锁：fn 里有路径 → 报错", True)
+    ok("lock: a path in fn → error", True)
 os.remove(f"{M.SPECS}/tiny.v2.lock.json")
-ok("没有这个变体的锁 → None（照旧联网建）", E.load_lock("tiny", "nolock") is None)
+ok("no lock for that variant → None (builds from the network as before)", E.load_lock("tiny", "nolock") is None)
 
-# 预建：条目还是 conda / venv 的也能建，venv 的基础环境用按描述建的那个
+# prebuild: entries still conda / venv can be built too, and a venv base uses the spec-built one
 M.MACHINES["lsite"]["envs"]["tiny"] = ("venv", "/old/tiny", "sysbase")
 open(f"{LD}/specs/sysbase.yml", "w").write("python: '3.12'\n")
 open(f"{LD}/specs/sysbase.check.py", "w").write("print('ok')\n")
 s_ = E.build_script("lsite", "tiny", store="/r/l/blobs")
-ok("预建：条目是 venv 的也能建，基础环境用 env_root 下按描述建的", "source /r/l/envs/sysbase/.activate" in s_)
-ok("预建：要建的里基础环境排在前面", list(E.wanted("lsite", ["tiny"])) == ["cbase", "sysbase", "tiny"])
+ok("prebuild: a venv entry can be built, with the spec-built base under env_root", "source /r/l/envs/sysbase/.activate" in s_)
+ok("prebuild: the base env comes first", list(E.wanted("lsite", ["tiny"])) == ["cbase", "sysbase", "tiny"])
 os.remove(f"{LD}/specs/sysbase.yml")
-ok("基础环境没有描述：只建它自己", list(E.wanted("lsite", ["tiny"])) == ["cbase", "tiny"])
+ok("the base env has no spec: only it is built", list(E.wanted("lsite", ["tiny"])) == ["cbase", "tiny"])
 M.MACHINES["lsite"]["envs"]["tiny"] = "spec"
-ok("条目里 spec 的都要建、变体按条目", E.wanted("lsite") == {"cbase": "default", "tiny": "default"})
+ok("every spec entry is built, with its variant from the entry", E.wanted("lsite") == {"cbase": "default", "tiny": "default"})
 
-# 状态：.failed 的两种写法
+# states: the two forms of .failed
 hc, ht = E.vhash("cbase", "default"), E.vhash("tiny", "default")
 now = 2_000_000_000
 W = {"cbase": "default", "tiny": "default"}
-rows = {"cbase": dict(failed=f"{hc} {now - 60} rc 1", log="a\nb\n坏了"), "tiny": dict(failed=f"{ht} {now - 60} nospace 900 100")}
+rows = {"cbase": dict(failed=f"{hc} {now - 60} rc 1", log="a\nb\nbroken"), "tiny": dict(failed=f"{ht} {now - 60} nospace 900 100")}
 st = E.classify(rows, W, now)
-ok("状态：rc → 检查失败，nospace → 空间不够", st == {"cbase": "检查失败", "tiny": "空间不够"})
-ok("下一个：检查失败的不重建，空间不够的没过 6 小时不再试", E.next_build(W, st, rows, now) is None)
-ok("下一个：空间不够的 6 小时后再试", E.next_build(W, st, rows, now + 7 * 3600) == ("tiny", "default"))
-ok("下一个：有在建的就不建", E.next_build(W, {"cbase": "在建", "tiny": "没建"}, {}, now) is None)
-ok("下一个：在建停了的重建", E.next_build(W, {"cbase": "在建（可能已停）", "tiny": "ok"}, {}, now) == ("cbase", "default"))
+ok("states: rc → check failed, nospace → no space", st == {"cbase": "check failed", "tiny": "no space"})
+ok("next: no rebuild after a failed check, no retry for lack of space before 6 hours", E.next_build(W, st, rows, now) is None)
+ok("next: a no-space build is retried after 6 hours", E.next_build(W, st, rows, now + 7 * 3600) == ("tiny", "default"))
+ok("next: nothing while one is building", E.next_build(W, {"cbase": "building", "tiny": "not built"}, {}, now) is None)
+ok("next: a stopped build is rebuilt", E.next_build(W, {"cbase": "building (may have stopped)", "tiny": "ok"}, {}, now) == ("cbase", "default"))
 pr = dict(E.problems("lsite", W, st, rows))
-ok("报：检查失败带日志最后几行，空间不够带要多少剩多少", "坏了" in pr["cbase"] and "0.0 GB" in pr["tiny"] and "空间不够" in pr["tiny"])
+ok("report: a failed check includes the last log lines, no space includes need and free", "broken" in pr["cbase"] and "0.0 GB" in pr["tiny"] and "no space" in pr["tiny"])
 os.rename(f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}", f"{LD}/moved")
-pr = E.problems("lsite", {"tiny": "default"}, {"tiny": "没建"}, {})
-ok("报：wheelhouse 里缺包", len(pr) == 1 and "wheelhouse" in pr[0][1])
+pr = E.problems("lsite", {"tiny": "default"}, {"tiny": "not built"}, {})
+ok("report: the wheelhouse is missing packages", len(pr) == 1 and "wheelhouse" in pr[0][1])
 os.rename(f"{LD}/moved", f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}")
 
-# build()：执行机先查空间、钉住、由 hub 把 wheelhouse 里的包送进 blobs，再跑；空间不够不跑；长连接断着不连
+# build(): the executor checks the space first, pins, the hub sends the wheelhouse packages into blobs, then it runs; no run without space; ssh master down means no connection
 calls = []
 
 
@@ -295,53 +295,54 @@ def run_op(name, what, data):
 
 def run_cmd(cmd, host, timeout, input=None):
     calls.append(("run", host))
-    return 0, "建好", ""
+    return 0, "built", ""
 
 
 RM.master_down = lambda m: False
 rc, out = E.build("lsite", "tiny", run=run_cmd, run_op=run_op, say=lambda *_: None)
-ok("执行机：查空间（site_ops 的 env_mark，按 cap）→ 钉住 → 放进 blobs → 跑 → 撤钉",
+ok("executor: check space (site_ops env_mark, by cap) → pin → put into blobs → run → unpin",
    rc == 0 and [c[0] for c in calls] == ["mark", "pin", "blobs", "run", "unpin"]
    and calls[0][3] == 50 and calls[0][4] == "env_mark" and calls[1][2] == [wpk["sha256"]], calls)
-ok("执行机：包从 hub 的 wheelhouse 送（src = hub，{sha256: [None, 字节数, wheelhouse 里的路径]}）",
+ok("executor: packages come from the hub's wheelhouse (src = hub, {sha256: [None, bytes, wheelhouse path]})",
    calls[2][2] == M.hub() and calls[2][1] == {wpk["sha256"]: [None, wpk["size"], f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}"]}, calls)
 calls.clear()
 free[0] = 10
 rc, out = E.build("lsite", "tiny", run=run_cmd, run_op=run_op, say=lambda *_: None)
-ok("执行机：空间不够 → 不传、不跑、退出码 1", rc == 1 and [c[0] for c in calls] == ["mark"] and "空间不够" in out, (calls, out))
+ok("executor: no space → no transfer, no run, exit 1", rc == 1 and [c[0] for c in calls] == ["mark"] and "no space" in out, (calls, out))
 calls.clear()
 free[0] = 10 ** 12
 
 
 def noslot(*a, **k):
-    raise RM.NoSlot("排不上")
+    raise RM.NoSlot("no slot")
 
 
 RT.ensure_blobs = noslot
 rc, out = E.build("lsite", "tiny", run=run_cmd, run_op=run_op, say=lambda *_: None)
-ok("执行机：CPU 作业排不上 → stage_later、撤掉 .building、不跑", rc == proto.EXIT["stage_later"]
+ok("executor: no CPU job slot → stage_later, .building removed, no run", rc == proto.EXIT["stage_later"]
    and [c[:2] for c in calls] == [("mark", "reserve"), ("pin", "env.tiny"), ("unpin",), ("mark", "clear")], calls)
 calls.clear()
 RM.master_down = lambda m: True
 try:
     E.build("lsite", "tiny", run=run_cmd, run_op=run_op)
-    ok("长连接断着 → 报错，不连", False)
+    ok("ssh master down → error, no connection", False)
 except E.EnvError:
-    ok("长连接断着 → 报错，不连", calls == [])
+    ok("ssh master down → error, no connection", calls == [])
 RM.master_down = SAVE_MD
 RT.pinned, RT.ensure_blobs = SAVE_RT
-M.MACHINES["lremote"] = dict(label="远程", hostname=r"lr-host", ssh="lr", conda=None, envs={"tiny": "spec"})
+M.MACHINES["lremote"] = dict(label="remote", hostname=r"lr-host", ssh="lr", conda=None, envs={"tiny": "spec"})
 try:
     E.build("lremote", "tiny", run=run_cmd)
-    ok("有锁的不在 hub、执行机以外的远程机器上建", False)
+    ok("a locked env is not built on a remote machine that is neither hub nor executor", False)
 except E.EnvError:
-    ok("有锁的不在 hub、执行机以外的远程机器上建", True)
+    ok("a locked env is not built on a remote machine that is neither hub nor executor", True)
 del M.MACHINES["lremote"]
 del M.MACHINES["lsite"]
 
-# 本机执行机真建（不联网）：venv 建在一个现成的 Python 上，pip 包从 hub 的 wheelhouse 送进这台的 blobs（同 hub 一台机器：硬链接）。
-# site_ops 的操作（env_mark、pin、missing、ingest，hub 上的 push）在这个进程里跑，TASKQ_ROOT、TASKQ_MACHINE 同 relay_remote.op 的前缀
-# （本机条目只在这个进程的机器表里，子进程读的配置里没有它）
+# A real build on this machine as executor (offline): the venv builds on an existing Python, pip packages go from the
+# hub's wheelhouse into this machine's blobs (same machine as the hub: hard links). The site_ops operations (env_mark,
+# pin, missing, ingest, push on the hub) run in this process, with TASKQ_ROOT / TASKQ_MACHINE as relay_remote.op prefixes
+# (the local entry exists only in this process's machine table, not in the config the child reads)
 import site_ops as SO  # noqa: E402
 ops_run = []
 
@@ -353,7 +354,7 @@ def local_op(name, what, data=None, timeout=600, job=None, say=None):
     try:
         return json.loads(json.dumps(SO.OPS[what](json.loads(json.dumps(data)))))
     except SO.Bad as e:
-        raise RuntimeError(f"{name} 上 {what} 出错：{e}") from None
+        raise RuntimeError(f"{what} failed on {name}: {e}") from None
     finally:
         for k, v in keep.items():
             if v is None:
@@ -364,37 +365,37 @@ def local_op(name, what, data=None, timeout=600, job=None, say=None):
 
 SAVE_OP, SAVE_HUBROOT = RM.op, M.MACHINES[M.hub()]["root"]
 RM.op = local_op
-M.MACHINES[M.hub()]["root"] = f"{LD}/hubroot"  # hub 跑 push 用的临时目录在它的根目录下：不碰真的家目录
+M.MACHINES[M.hub()]["root"] = f"{LD}/hubroot"  # the temp dir the hub uses for push lives under its root: never touch the real home
 pyd = next(p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
            if subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0)
 E.base_activation = lambda name, base: f'export PATH={pyd}:"$PATH"'
 open(f"{LD}/specs/tiny.check.py", "w").write("import tinypkg, sys\nprint('tinypkg', tinypkg.VERSION, sys.prefix)\n")
-M.MACHINES["toff"] = dict(label="本机", hostname=r"toff-host", ssh=None, scheduler="pueue", root=f"{LD}/root", conda=None,
+M.MACHINES["toff"] = dict(label="local", hostname=r"toff-host", ssh=None, scheduler="pueue", root=f"{LD}/root", conda=None,
                           envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, workers=[dict(cpus=2)])
 PX = {k: os.environ.get(k) for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "PIP_INDEX_URL")}
 os.environ.update(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
                   HTTPS_PROXY="http://127.0.0.1:9", PIP_INDEX_URL="http://127.0.0.1:9/simple")
 rc, out = E.build("toff", "tiny")
-ok("本机不联网建：退出码 0", rc == 0, out)
-ok("本机执行机走执行机的路：这台 env_mark、pin、missing，hub 上 push，建完撤钉",
+ok("offline build on this machine: exit 0", rc == 0, out)
+ok("a local executor takes the executor path: env_mark, pin, missing here, push on the hub, unpin after the build",
    [w for n, w in ops_run if n == "toff"][:3] == ["env_mark", "pin", "missing"] and ("hub", "push") in ops_run
    and ops_run[-1] == ("toff", "pin") and not os.listdir(f"{LD}/root/{proto.ROOT['pins']}"), ops_run)
-ok("本机执行机：包硬链接进这台的 blobs", os.path.samefile(f"{LD}/root/{proto.blob(wpk['sha256'])}",
+ok("local executor: packages are hard-linked into this machine's blobs", os.path.samefile(f"{LD}/root/{proto.blob(wpk['sha256'])}",
                                                       f"{WH}/{wpk['sha256'][:2]}/{wpk['sha256']}"))
 okf = f"{LD}/root/state/envs/tiny.ok"
-ok("本机不联网建：.ok 是哈希，状态 ok，没留临时目录", os.path.isfile(okf) and open(okf).read().strip() == E.vhash("tiny", "default")
+ok("offline build on this machine: .ok holds the hash, state ok, no temp dir left", os.path.isfile(okf) and open(okf).read().strip() == E.vhash("tiny", "default")
    and E.states("toff")["tiny"] == "ok" and not glob.glob(f"{LD}/root/envs/.tmp-*"))
 r = subprocess.run(["bash", "-c", M.activate("toff", "tiny") + "\npython -c 'import tinypkg; print(tinypkg.__file__)'"],
                    capture_output=True, text=True)
-ok("本机不联网建：激活后能导入 wheelhouse 里的包", r.returncode == 0 and f"{LD}/root/envs/tiny-" in r.stdout, r.stdout + r.stderr)
-hb = "0" * 64  # 内容和锁里的哈希对不上
+ok("offline build on this machine: the wheelhouse package imports after activation", r.returncode == 0 and f"{LD}/root/envs/tiny-" in r.stdout, r.stdout + r.stderr)
+hb = "0" * 64  # content does not match the hash in the lock
 os.makedirs(f"{WH}/00", exist_ok=True)
 shutil.copy(whl, f"{WH}/00/{hb}")
-open(f"{LD}/specs/tiny.yml", "a").write("# 改了\n")
+open(f"{LD}/specs/tiny.yml", "a").write("# changed\n")
 write_lock(M.SPECS, "tiny", "default", pip=[dict(wpk, sha256=hb)])
 rc, out = E.build("toff", "tiny")
 st = E.states("toff")["tiny"]
-ok("包的哈希对不上 → pip 不装、检查失败、旧环境照旧在用", rc != 0 and st == "检查失败" and os.path.isfile(f"{LD}/root/envs/tiny/.activate"),
+ok("package hash mismatch → pip installs nothing, check failed, the old env stays in use", rc != 0 and st == "check failed" and os.path.isfile(f"{LD}/root/envs/tiny/.activate"),
    (rc, st, out))
 for k, v in PX.items():
     if v is None:
@@ -408,40 +409,40 @@ if SAVE_ST is None:
 else:
     os.environ["TASKQ_STATE"] = SAVE_ST
 
-# ---------- 真建一个小环境（--real：在临时目录里，只有 numpy） ----------
+# ---------- a real small build (--real: temp dir, numpy only) ----------
 if "--real" in sys.argv:
     d = fixture.tmpdir(prefix="envtest.", dir=os.environ.get("TMPDIR"))
     os.makedirs(f"{d}/specs")
-    open(f"{d}/specs/tiny.yml", "w").write("# 测试\nbase: sysbase\npip:\n  - numpy\n")
+    open(f"{d}/specs/tiny.yml", "w").write("# test\nbase: sysbase\npip:\n  - numpy\n")
     open(f"{d}/specs/tiny.check.py", "w").write("import numpy\nprint('numpy', numpy.__version__)\n")
     M.SPECS = f"{d}/specs"
-    M.MACHINES["treal"] = dict(label="本机测试", hostname=r"treal-host", ssh=None, scheduler="pueue", root=f"{d}/root",
+    M.MACHINES["treal"] = dict(label="local test", hostname=r"treal-host", ssh=None, scheduler="pueue", root=f"{d}/root",
                                conda=None, envs={"sysbase": ("conda", "unused"), "tiny": "spec"}, workers=[dict(cpus=2)])
-    # 基础环境：本机一个带 venv、没有 numpy 的 python（hub 上是 miniforge 的 base）
+    # base env: a local python with venv and without numpy (the hub uses miniforge's base)
     pyd = next(p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
                if subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0)
     E.base_activation = lambda name, base: f'export PATH={pyd}:"$PATH"'
     rc, out = E.build("treal", "tiny")
     print(out)
-    ok("真建：退出码 0", rc == 0)
+    ok("real build: exit 0", rc == 0)
     okf = f"{d}/root/state/envs/tiny.ok"
-    ok("真建：写了 .ok，内容是描述的哈希", os.path.isfile(okf) and open(okf).read().strip() == M.spec_hash("tiny"))
-    ok("真建：软链接和 .activate 在", os.path.isfile(f"{d}/root/envs/tiny/.activate"))
+    ok("real build: .ok written with the spec hash", os.path.isfile(okf) and open(okf).read().strip() == M.spec_hash("tiny"))
+    ok("real build: the symlink and .activate are there", os.path.isfile(f"{d}/root/envs/tiny/.activate"))
     r = subprocess.run(["bash", "-c", M.activate("treal", "tiny") + "\npython -c 'import numpy; print(numpy.__file__)'"],
                        capture_output=True, text=True)
-    ok("真建：激活后能导入 numpy，用的是新环境的", r.returncode == 0 and f"{d}/root/envs/tiny-" in r.stdout)
-    ok("真建：状态 ok", E.states("treal") == {"sysbase": "不是按描述建的", "tiny": "ok"})
-    open(f"{d}/specs/tiny.yml", "a").write("# 改一下\n")
-    ok("真建：描述改了 → 描述变了、不就绪", E.states("treal")["tiny"] == "描述变了"
+    ok("real build: numpy imports after activation, from the new env", r.returncode == 0 and f"{d}/root/envs/tiny-" in r.stdout)
+    ok("real build: state ok", E.states("treal") == {"sysbase": "not spec-built", "tiny": "ok"})
+    open(f"{d}/specs/tiny.yml", "a").write("# changed\n")
+    ok("real build: after a spec change → spec changed, not ready", E.states("treal")["tiny"] == "spec changed"
        and "tiny" not in M.ready_envs("treal", E.oks_of(E.states("treal"), "treal")))
-    open(f"{d}/specs/tiny.check.py", "w").write("import sys\nsys.exit('故意失败')\n")
+    open(f"{d}/specs/tiny.check.py", "w").write("import sys\nsys.exit('fails on purpose')\n")
     rc, out = E.build("treal", "tiny")
     st = E.states("treal")["tiny"]
-    ok("真建：检查失败 → 退出码非 0、状态检查失败、旧的 .ok 不变", rc != 0 and st == "检查失败"
+    ok("real build: failed check → nonzero exit, state check failed, the old .ok unchanged", rc != 0 and st == "check failed"
        and open(okf).read().strip() != M.spec_hash("tiny"))
     shutil.rmtree(d)
 
-    # conda + pip 都从锁、不联网：先按 conda 解出的包从 conda-forge 下载进 wheelhouse，再断网建
+    # conda + pip both from the lock, offline: first fetch the packages conda resolved from conda-forge into the wheelhouse, then build without a network
     import urllib.request
     cd_ = os.path.expanduser("~/miniforge3")
     d = fixture.tmpdir(prefix="envtestc.", dir=os.environ.get("TMPDIR"))
@@ -462,12 +463,12 @@ if "--real" in sys.argv:
         cpks.append(dict(put(wh, f"{dl}/{fn}"), name=x["name"], version=x["version"], build=x["build_string"], url=url,
                          channel=x["base_url"], subdir=x["platform"], md5=hashlib.md5(open(f"{dl}/{fn}", "rb").read()).hexdigest()))
     w2 = tiny_wheel(fixture.tmpdir(prefix="whl.", dir=d))
-    w2l = w2.replace("tinypkg-0.1-", "tinypkg-0.1+local-")  # 文件名带本地版本、元数据没有（同 mamba_ssm 的 wheel）
+    w2l = w2.replace("tinypkg-0.1-", "tinypkg-0.1+local-")  # the file name has a local version, the metadata does not (like the mamba_ssm wheel)
     os.rename(w2, w2l)
     w2 = w2l
     write_lock(M.SPECS, "creal", "default", conda=cpks, pip=[dict(put(wh, w2), name="tinypkg", version="0.1", no_deps=True)])
     shutil.rmtree(dl)
-    M.MACHINES["creal"] = dict(label="本机", hostname=r"creal-host", ssh=None, scheduler="pueue", root=f"{d}/root", conda=(cd_, "base"),
+    M.MACHINES["creal"] = dict(label="local", hostname=r"creal-host", ssh=None, scheduler="pueue", root=f"{d}/root", conda=(cd_, "base"),
                                envs={"creal": "spec"}, workers=[dict(cpus=2)])
     os.environ.update(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
                       HTTPS_PROXY="http://127.0.0.1:9", PIP_INDEX_URL="http://127.0.0.1:9/simple", CONDA_OFFLINE="1")
@@ -477,10 +478,10 @@ if "--real" in sys.argv:
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
-    ok("真建 conda + pip（不联网，只用 wheelhouse）：退出码 0、状态 ok", rc == 0 and E.states("creal")["creal"] == "ok", out[-3000:])
+    ok("real conda + pip build (offline, wheelhouse only): exit 0, state ok", rc == 0 and E.states("creal")["creal"] == "ok", out[-3000:])
     r = subprocess.run(["bash", "-c", M.activate("creal", "creal") + "\npython -c 'import sys, tinypkg; print(sys.prefix)'"],
                        capture_output=True, text=True)
-    ok("真建 conda + pip：激活后是新环境的 Python 3.10.12、能导入 wheel", r.returncode == 0 and f"{d}/root/envs/creal-" in r.stdout,
+    ok("real conda + pip build: activation gives the new env's Python 3.10.12 and imports the wheel", r.returncode == 0 and f"{d}/root/envs/creal-" in r.stdout,
        r.stdout + r.stderr)
     del M.MACHINES["creal"]
     M.SPECS = SAVE_SPECS
@@ -492,5 +493,5 @@ if "--real" in sys.argv:
 
 RM.op, M.MACHINES[M.hub()]["root"] = SAVE_OP, SAVE_HUBROOT
 
-print("全部通过" if not fails else f"{fails} 项失败")
+print("all passed" if not fails else f"{fails} failures")
 sys.exit(1 if fails else 0)

@@ -1,20 +1,7 @@
-"""送到执行机的任务：执行机的数据目录 R/data 和 store 的数据目录同样布局，任务要的文件以软链接放在
-同样的相对路径，参数原样送过去，结果在同样的相对路径拉回。唯一的换法：store 上数据目录外的绝对路径输入放到 abs/<路径>，
-参数里换成 {data}/abs/<路径>。
-  path（通用，任何任务）：输入（spec 的 inputs）是数据目录下的文件夹（视图）、文件或 glob（展开成文件），或 store 上的绝对路径。
-  项目自己的种类（插件文件夹的 relay_plugins.py，经 queue/relay_plugins.py 加载）：按参数列出要的文件，拉回后核对。
-任务用哪种：说明的 relay 字段（queue/recipes.py）。
-
-export(spec, root) → dict(params, files, texts, views, outs, cleanup)：
-  params   那边加任务用的参数
-  files    [(相对路径, store 上的真实文件)]，按 sha256 放进 blobs、在那边是软链接
-  texts    {相对路径: 内容}（现在的插件都不用）
-  views    视图文件夹：那边按这次列出的文件同步，多出来的删掉
-  outs     要拉回的文件夹（outs(spec)：out 和 fetch.also）
-  cleanup  任务交还后那边可以删的文件夹（默认 = outs）
-import_(spec, src, dst, root, links) → 放进 dst 的文件（相对路径）：src 下是拉回的文件（真的相对路径），links 是产出里
-另外建的软链接（相对路径，算进 done）；认不出的、done 不全的、插件核对不过的报 RelayError，这时 dst 不动。
-两个都在 store 上跑（queue/site_ops.py 的 export、pull），root 是 store 的数据目录。"""
+"""Relay plugin "path": the files a task needs are placed at the same relative paths on the executor
+(symlinks to blobs), params are sent as is and results come back at the same paths. The one exception: an
+absolute input outside the store data dir goes under abs/<path> over there, and the param becomes {data}/abs/<path>.
+Other plugins (relay_plugins.py in the project) list their files per params and check them after the fetch."""
 import fnmatch
 import glob
 import os
@@ -22,14 +9,14 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of this scheduler code
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import common as C  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import spec as S  # noqa: E402
 
 RelayError = RN.RelayError
-ABS = "abs"  # store 上数据目录外的输入在那边的位置
+ABS = "abs"  # where inputs outside the store data dir go over there
 
 
 def plugin_of(spec):
@@ -37,12 +24,12 @@ def plugin_of(spec):
 
 
 def outs(spec):
-    """要拉回的文件夹（相对数据目录）：spec.outputs 的 outs（out，加上 fetch.also）。"""
+    """Output dirs to fetch back (relative to the data dir): spec.outputs' outs (out plus fetch.also)."""
     return S.outputs(spec)["outs"]
 
 
 def _sub(v, table):
-    """字符串里的绝对路径按 table（[(真, 换成)]，长的先换）换掉；路径两边不能紧挨着字母、数字、. - _。"""
+    """Replace absolute paths in a string by table ([(real, replacement)], longest first); a path must not touch a letter, digit, . - _."""
     if isinstance(v, str):
         for a, b in table:
             v = re.sub(r"(?<![\w.-])" + re.escape(a) + r"(?![\w.-])", lambda m, b=b: b, v)
@@ -69,7 +56,7 @@ def export_path(spec, root):
         if any(ch in sub for ch in "*?["):
             hits = sorted(p for p in glob.glob(os.path.join(base, sub)) if os.path.isfile(p))
             if not hits:
-                raise RelayError(f"store 上没有和 {i} 对得上的文件")
+                raise RelayError(f"no file on the store matches {i}")
             files += [(pre + os.path.relpath(p, base), os.path.realpath(p)) for p in hits]
             continue
         fs, v = RN.expand(base, sub)
@@ -88,8 +75,8 @@ def _put(dst, written, rel, srcp):
 
 
 PLUGINS = {"path": (export_path, None), **RN.PLUGINS}
-ACCEPTS = dict(RN.ACCEPTS)  # 插件 → 能不能送这个任务（参数 → bool）；没列的插件都能送
-VIEW_ROOTS = list(RN.VIEW_ROOTS)  # 插件建视图的文件夹（相对数据目录，下一级是一个视图）
+ACCEPTS = dict(RN.ACCEPTS)  # plugin -> can it take this task (params -> bool); plugins not listed accept any
+VIEW_ROOTS = list(RN.VIEW_ROOTS)  # dirs where a plugin builds views (relative to the data dir, one view per child)
 
 
 def accepts(plugin, params):
@@ -99,26 +86,26 @@ def accepts(plugin, params):
 def _pair(spec):
     t = PLUGINS.get(plugin_of(spec))
     if t is None:
-        raise RelayError(f"做法 {spec.get('recipe')} 不能送到执行机（relay={plugin_of(spec)}）")
+        raise RelayError(f"recipe {spec.get('recipe')} cannot be sent to an executor (relay={plugin_of(spec)})")
     return t
 
 
 def _call(spec, i, *a):
-    """调插件的 export（i=0）或 check（i=1）：插件报的 RelayError 照抛；别的错（读不到文件等）→ 一行原因（插件名、函数、错误）的
-    RelayError，送到 hub 的不带 traceback。"""
+    """Call the plugin's export (i=0) or check (i=1): its RelayError is re-raised; any other error (unreadable file,
+    etc.) becomes a one-line RelayError (plugin, function, error), so the hub gets no traceback."""
     f = _pair(spec)[i]
     try:
         return f(*a)
     except RelayError:
         raise
     except Exception as e:  # noqa: BLE001
-        raise RelayError(f"{spec.get('key')}：插件 {plugin_of(spec)} 的 {f.__name__} 出错：{type(e).__name__}: {e}") from None
+        raise RelayError(f"{spec.get('key')}: plugin {plugin_of(spec)} {f.__name__} failed: {type(e).__name__}: {e}") from None
 
 
 def _rel(spec, what, r, depth=1):
     r = os.path.normpath(r)
     if r.startswith("/") or ".." in r.split("/") or len(r.split("/")) < depth:
-        raise RelayError(f"{spec['key']} 的{what} {r} 不对（要在数据目录里{'、至少两层' if depth > 1 else ''}）")
+        raise RelayError(f"{spec['key']}: bad {what} {r} (must be inside the data dir{', at least two levels' if depth > 1 else ''})")
     return r
 
 
@@ -126,20 +113,20 @@ def export(spec, root):
     ex = _call(spec, 0, spec, root)
     files, seen = [], {}
     for a, p in ex["files"]:
-        a = _rel(spec, "文件", a)
+        a = _rel(spec, "file", a)
         if seen.setdefault(a, p) != p:
-            raise RelayError(f"{spec['key']}：{a} 对应 store 上两个不同的文件（{seen[a]}、{p}）")
+            raise RelayError(f"{spec['key']}: {a} maps to two different files on the store ({seen[a]}, {p})")
         if len(files) < len(seen):
             files.append((a, p))
-    views = list(dict.fromkeys(_rel(spec, "视图", v, 2) for v in ex.get("views") or []))
-    os_ = [_rel(spec, "结果文件夹", o, 2) for o in outs(spec)]
+    views = list(dict.fromkeys(_rel(spec, "view", v, 2) for v in ex.get("views") or []))
+    os_ = [_rel(spec, "output dir", o, 2) for o in outs(spec)]
     bad = [(v, o) for v in views for o in os_ if C.under(v, o) or C.under(o, v)]
     if bad:
-        raise RelayError(f"{spec['key']}：视图 {bad[0][0]} 和结果 {bad[0][1]} 重叠（同步视图时会删掉结果）")
+        raise RelayError(f"{spec['key']}: view {bad[0][0]} overlaps output {bad[0][1]} (syncing the view would delete results)")
     params = ex.get("params")
     if params is None:
         params = dict(spec["params"])
-    cleanup = [_rel(spec, "要删的文件夹", c, 2) for c in (ex["cleanup"] if "cleanup" in ex else os_)]
+    cleanup = [_rel(spec, "dir to delete", c, 2) for c in (ex["cleanup"] if "cleanup" in ex else os_)]
     return dict(params=params, files=files, texts=dict(ex.get("texts") or {}), views=views, outs=os_, cleanup=cleanup)
 
 
@@ -155,11 +142,11 @@ def import_(spec, src, dst, root, links=()):
         else:
             odd.append(rel)
     if odd:
-        raise RelayError(f"{spec['key']} 拉回的文件里有认不出的：{odd[:5]}")
+        raise RelayError(f"{spec['key']}: fetched files that do not belong here: {odd[:5]}")
     have = set(got) | set(links)
     miss = S.done_missing(o, lambda a: f"{out}/{a}" in have)
     if miss:
-        raise RelayError(f"{spec['key']} 拉回的结果不全：没有 {miss}")
+        raise RelayError(f"{spec['key']}: fetched results incomplete: missing {miss}")
     if _pair(spec)[1]:
         _call(spec, 1, spec, src, root)
     written = []

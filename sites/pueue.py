@@ -1,6 +1,6 @@
-"""pueue 执行机（机器表里 scheduler="pueue" 的）的适配器：读 worker 所在组的任务、开常驻 worker。
-和 slurm.py 对应：读状态 → 调用方定开不开（queue/relay.py 的 topup）→ start_worker 开。
-pueue 的原始输出由那边的状态脚本一次读回（site_ops.py 的 status），这里只解析。"""
+"""The pueue adapter (machines with scheduler="pueue" in the table): read the tasks in a worker's group and start
+resident workers. Counterpart of slurm.py: read state, the caller decides whether to start one (relay.py topup),
+then start_worker. pueue's raw output is read once by the remote status script (site_ops.py status); this only parses."""
 import json
 import os
 import shlex
@@ -17,8 +17,8 @@ from proto import ROOT  # noqa: E402
 
 
 def parse(raw, group):
-    """`pueue status --json` 的输出（文本或已解析的 dict）→ [[任务号, 标签, 状态, 结果或 None], …]（只要这个组的，group 可以是几个组的列表）；
-    读不出 → None。"""
+    """The output of `pueue status --json` (text or already parsed) → [[task id, label, status, result or None], ...]
+    (only this group; group may be a list of groups); unreadable → None."""
     groups = [group] if isinstance(group, str) or group is None else list(group)
     try:
         tasks = (json.loads(raw) if isinstance(raw, str) else raw)["tasks"]
@@ -36,16 +36,18 @@ def parse(raw, group):
 
 
 def workers(w, jobs):
-    """worker w（mtab.workers 的一项）的 pueue 任务（标签 worker:<id>），按任务号排。"""
+    """Worker w's (an mtab.workers item) pueue tasks (label worker:<id>), by task id."""
     return [j for j in jobs or [] if j[1] == f"{proto.WORKER_LABEL}{w['id']}"]
 
 
 
 def worker_cmd(name, w):
-    """开 worker w（mtab.workers 的一项）的 pueue add 命令。整条 bash -c 作为一个参数：pueue 把 -- 后面的参数用空格拼起来交给 sh。
-    前面加 exec：pueue 的子进程就是 worker 本身（不加时 sh 收到 pueue kill 的 SIGTERM 先退出，pueue 马上记为结束，worker 还在停训练、交还任务）。
-    pueue add 带上的是加任务那边的环境：先去掉 hub 自己的变量（proto.HUB_ONLY_ENV），和 hub 在同一台上的执行机的 worker
-    不会把 hub 的配置、队列当成自己的。"""
+    """The pueue add command that starts worker w (an mtab.workers item). The whole bash -c is one argument: pueue
+    joins the args after -- with spaces and hands them to sh. It starts with exec so pueue's child is the worker
+    itself; without it sh gets pueue kill's SIGTERM first, pueue marks the task done at once while the worker is still
+    stopping the task and releasing it. pueue add carries the environment of the side that adds: strip the hub's own
+    variables first (proto.HUB_ONLY_ENV), so a worker on the hub's machine does not take the hub's config and queue as
+    its own."""
     c = M.machine(name)
     env = {"TASKQ_MACHINE": name, **M.worker_env(w)}
     env = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
@@ -55,6 +57,6 @@ def worker_cmd(name, w):
 
 
 def start_worker(name, run, w):
-    """开 worker w → (成功与否, 输出)。run：fn(命令) → (退出码, 输出)。"""
+    """Start worker w → (ok, output). run: fn(command) → (exit code, output)."""
     rc, out = run(worker_cmd(name, w))
     return rc == 0, out.strip()[-200:]

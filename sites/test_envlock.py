@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""测 sites/envlock.py：假的 conda、pip（换掉 Locker 的 run、get），不联网。--real：真锁一个只有 six 的小描述
-（真的 conda、pip，下到临时目录）。
+"""Tests sites/envlock.py with fake conda and pip (Locker's run and get replaced), offline. --real: really lock a
+tiny spec with only six (real conda and pip, fetched into a temp dir).
 
     python3 sites/test_envlock.py [--real]
 """
@@ -53,7 +53,7 @@ def content(url):
     return url.encode()
 
 
-# 假的包索引：名 → (版本, 依赖, 种类)；种类 wheel / pure（只有源码包，纯 Python）/ compiled（只有源码包，要编译）
+# fake package index: name -> (version, deps, kind); kind wheel / pure (source only, pure Python) / compiled (source only, needs compiling)
 INDEX = {
     "six": ("1.16.0", [], "wheel"), "numpy": ("2.0.0", [], "wheel"), "newpkg": ("1.0", ["six"], "wheel"),
     "purepkg": ("1.0", ["six"], "pure"), "cext": ("2.0", [], "compiled"),
@@ -182,7 +182,7 @@ def fake_run(cmd, env=None):
                                   fn=url.rsplit("/", 1)[1], size=len(content(url)), md5="x", sha256=sha(content(url)),
                                   noarch=p["noarch"]))
             return 0, json.dumps(dict(success=True, actions=dict(LINK=link, FETCH=fetch))), ""
-        d = cmd[cmd.index("-p") + 1]  # 帮手 Python
+        d = cmd[cmd.index("-p") + 1]  # helper Python
         os.makedirs(os.path.join(d, "bin"), exist_ok=True)
         open(os.path.join(d, "bin", "python"), "w").close()
         return 0, "", ""
@@ -191,7 +191,7 @@ def fake_run(cmd, env=None):
         return 0, "", ""
     if cmd[1:3] == ["-m", "pip"]:
         return fake_pip(cmd, env)
-    raise AssertionError(f"没想到的命令 {cmd}")
+    raise AssertionError(f"unexpected command {cmd}")
 
 
 def fake_get(url, dest):
@@ -217,103 +217,103 @@ spec("ext", "base: base\npip_no_deps:\n  - https://gh/rel/mamba-1.0+cu12torch{to
 spec("bad", "python: \"3.11\"\nchannels: [conda-forge]\npip:\n  - cext==2.0\n")
 lk = L.Locker(conda="/x/bin/conda", run=fake_run, get=fake_get, home=os.path.join(d, "home"), log=lambda m: None)
 
-# ---------- 平台 ----------
+# ---------- platforms ----------
 pl = L.pip_platforms("2.34")
-ok("manylinux 梯子：2_34 起一个个往下到 2_17，再加 manylinux2014、老名字、linux_x86_64",
+ok("manylinux ladder: from 2_34 down to 2_17 one by one, then manylinux2014, the old names and linux_x86_64",
    pl[0] == "manylinux_2_34_x86_64" and "manylinux_2_28_x86_64" in pl and "manylinux_2_17_x86_64" in pl
    and "manylinux2014_x86_64" in pl and pl[-1] == "linux_x86_64" and len([p for p in pl if p.startswith("manylinux_2_")]) == 18 + 2)
-ok("梯子里没有比上限新的", not any(re.fullmatch(r"manylinux_2_(\d+)_x86_64", p) and int(p.split("_")[2]) > 34 for p in pl))
+ok("nothing in the ladder is newer than the cap", not any(re.fullmatch(r"manylinux_2_(\d+)_x86_64", p) and int(p.split("_")[2]) > 34 for p in pl))
 
-# ---------- 锁 base ----------
+# ---------- lock base ----------
 h0 = M.spec_hash("base")
 p, base = lk.lock("base")
 cmds = [c[1] for c in CALLS if c[0] == "install"]
-ok("conda：CONDA_OVERRIDE_GLIBC = 上限、dry-run、--override-channels",
+ok("conda: CONDA_OVERRIDE_GLIBC = the cap, dry run, --override-channels",
    any(c[0] == "conda" and c[2].get("CONDA_OVERRIDE_GLIBC") == "2.34" and "--override-channels" in c[1] for c in CALLS))
-ok("pip：每次都带 --only-binary :all:、--python-version 3.11、--abi cp311、整个平台梯子",
+ok("pip: every call has --only-binary :all:, --python-version 3.11, --abi cp311 and the whole platform ladder",
    cmds and all(" --only-binary :all: " in " ".join(c) + " " and "--python-version 3.11" in " ".join(c)
                 and "--abi cp311" in " ".join(c) and all(f"--platform {x}" in " ".join(c) for x in pl) for c in cmds))
-ok("torch 那一步只用变体的 index", any("https://dl/cu121" in c and "torch==2.5.1" in c for c in cmds))
-ok("锁的文件名 <名>.<变体>.lock.json", os.path.basename(p) == "base.default.lock.json")
-ok("锁的键（和 B 部分说好的）", set(L.P.LOCK_TOP) <= set(base) and base["format"] == 1 and base["base"] is None)
-ok("conda 照 LINK 的顺序，字段齐", [c["name"] for c in base["conda"]] == ["python", "pip"]
+ok("the torch step uses only the variant's index", any("https://dl/cu121" in c and "torch==2.5.1" in c for c in cmds))
+ok("lock file name <name>.<variant>.lock.json", os.path.basename(p) == "base.default.lock.json")
+ok("the lock keys", set(L.P.LOCK_TOP) <= set(base) and base["format"] == 1 and base["base"] is None)
+ok("conda in LINK order, all fields present", [c["name"] for c in base["conda"]] == ["python", "pip"]
    and all(set(L.P.LOCK_CONDA) <= set(c) for c in base["conda"]))
 names = [e["name"] for e in base["pip"]]
-ok("pip：torch、它的依赖、pip 的包都在；conda 装过的 pip 不重复", names == ["torch", "numpy", "six", "purepkg"], names)
-ok("pip 条目字段齐、sha256 是文件的", all(set(L.P.LOCK_PIP) <= set(e) for e in base["pip"])
+ok("pip: torch, its deps and the pip packages are there; pip packages already installed by conda are not repeated", names == ["torch", "numpy", "six", "purepkg"], names)
+ok("pip entries have all fields, sha256 is the file's", all(set(L.P.LOCK_PIP) <= set(e) for e in base["pip"])
    and all(os.path.isfile(lk.path(e["sha256"])) and C.sha256(lk.path(e["sha256"])) == e["sha256"] for e in base["pip"]))
 pp = next(e for e in base["pip"] if e["name"] == "purepkg")
-ok("只有源码包的纯 Python：本地建 wheel，url 为 null，built_from 是源码包", pp["url"] is None
+ok("pure Python with only a source package: wheel built locally, url null, built_from is the source package", pp["url"] is None
    and pp["built_from"] == "https://files/purepkg-1.0.tar.gz" and pp["fn"] == "purepkg-1.0-py3-none-any.whl"
    and open(lk.path(pp["sha256"]), "rb").read() == b"built purepkg")
-ok("建 wheel 时设了 SOURCE_DATE_EPOCH", ("wheel", L.SOURCE_EPOCH) in CALLS)
-ok("平台信息写进锁", base["platform"]["glibc_floor"] == "2.34" and base["platform"]["pip_platforms"] == pl
+ok("SOURCE_DATE_EPOCH is set when building the wheel", ("wheel", L.SOURCE_EPOCH) in CALLS)
+ok("platform info goes into the lock", base["platform"]["glibc_floor"] == "2.34" and base["platform"]["pip_platforms"] == pl
    and base["platform"]["python"] == "3.11" and base["platform"]["python_full"] == "3.11.9")
-ok("spec_sha256 = 描述的 sha256", base["spec_sha256"] == sha(open(os.path.join(SPECS, "base.yml"), "rb").read()))
+ok("spec_sha256 = the spec's sha256", base["spec_sha256"] == sha(open(os.path.join(SPECS, "base.yml"), "rb").read()))
 
-# ---------- 哈希 ----------
+# ---------- hashes ----------
 yml = open(os.path.join(SPECS, "base.yml"), "rb").read()
 canon = json.dumps({k: v for k, v in base.items() if k != "created"}, sort_keys=True, separators=(",", ":"),
                    ensure_ascii=False).encode()
-ok("有锁以后哈希 = sha256(描述 + 锁去掉 created)", M.spec_hash("base") == sha(yml + canon) != h0)
-ok("没有锁的变体：哈希只算描述", M.spec_hash("base", "cu128") == h0 == sha(yml))
-ok("没有的描述 → None", M.spec_hash("没有这个") is None)
+ok("with a lock the hash = sha256(spec + lock without created)", M.spec_hash("base") == sha(yml + canon) != h0)
+ok("a variant without a lock: the hash covers the spec only", M.spec_hash("base", "cu128") == h0 == sha(yml))
+ok("no such spec → None", M.spec_hash("no-such-spec") is None)
 first = open(p).read()
 os.utime(p)
 CALLS.clear()
 lk.lock("base")
 again = open(p).read()
 strip = lambda t: re.sub(r'"created": "[^"]*"', "", t)  # noqa: E731
-ok("同样的输入再锁一次：文件除 created 外一样，哈希不变", strip(first) == strip(again) and M.spec_hash("base") == sha(yml + canon))
-ok("第二次不再建 wheel（用 wheelhouse/built 里记下的）", not any(c[0] == "wheel" for c in CALLS))
-ok(".lock.json 不当描述", L.spec_names() == ["bad", "base", "ext", "layer"] and glob.glob(os.path.join(SPECS, "*.lock.json")))
+ok("locking the same input again: the file is the same except created, the hash does not change", strip(first) == strip(again) and M.spec_hash("base") == sha(yml + canon))
+ok("the second run builds no wheel (it uses the record in wheelhouse/built)", not any(c[0] == "wheel" for c in CALLS))
+ok(".lock.json is not taken as a spec", L.spec_names() == ["bad", "base", "ext", "layer"] and glob.glob(os.path.join(SPECS, "*.lock.json")))
 lk.lock("base", "cu128")
-ok("变体 cu128：torch 换成 cu128 的", next(e for e in json.load(open(M.lock_path("base", "cu128")))["pip"]
+ok("variant cu128: torch switched to the cu128 one", next(e for e in json.load(open(M.lock_path("base", "cu128")))["pip"]
                                          if e["name"] == "torch")["version"] == "2.7.1+cu128")
 
-# ---------- venv（base） ----------
+# ---------- venv (base) ----------
 p2, lay = lk.lock("layer")
-ok("venv：只记 base 里没有的（six 同版本不记）", [e["name"] for e in lay["pip"]] == ["newpkg"], lay["pip"])
-ok("venv：base 记名字、变体、base 锁的哈希", lay["base"] == dict(name="base", variant="default",
+ok("venv: records only what the base lacks (same six version is not recorded)", [e["name"] for e in lay["pip"]] == ["newpkg"], lay["pip"])
+ok("venv: base records name, variant and the base lock's hash", lay["base"] == dict(name="base", variant="default",
                                                                   lock_sha256=L.lock_digest(M.lock_path("base"))))
-ok("venv：没有 conda，Python 版本跟 base", lay["conda"] == [] and lay["platform"]["python_full"] == "3.11.9")
+ok("venv: no conda, Python version follows the base", lay["conda"] == [] and lay["platform"]["python_full"] == "3.11.9")
 try:
     lk.lock("layer", "nope")
-    ok("base 没有这个变体的锁 → 报错", False)
+    ok("no lock for that variant of base → error", False)
 except L.LockError as e:
-    ok("base 没有这个变体的锁 → 报错", "先锁 base" in str(e))
+    ok("no lock for that variant of base → error", "lock base first" in str(e))
 _, ext = lk.lock("ext")
 _, ext8 = lk.lock("ext", "cu128")
-ok("占位按 base 的 torch 填（{torch_mm}、{abi} 从 wheel 里读、{cp}）",
+ok("placeholders filled from the base's torch ({torch_mm}, {abi} read from the wheel, {cp})",
    ext["pip"][0]["url"] == "https://gh/rel/mamba-1.0+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
    and ext8["pip"][0]["url"] == "https://gh/rel/mamba-1.0+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl")
-ok("直接写网址的 wheel：报告里没有 sha256 时下载后算", ext["pip"][0]["sha256"] == sha(content(ext["pip"][0]["url"]))
+ok("a wheel given by URL: sha256 computed after download when the report has none", ext["pip"][0]["sha256"] == sha(content(ext["pip"][0]["url"]))
    and ext["pip"][0]["no_deps"] is True)
 
-# ---------- 要编译的源码包 ----------
+# ---------- source packages that need compiling ----------
 try:
     lk.lock("bad")
-    ok("只有源码包、要编译 → 报错，说出是哪个包", False)
+    ok("source package only and needs compiling → error naming the package", False)
 except L.LockError as e:
-    ok("只有源码包、要编译 → 报错，说出是哪个包", "cext 2.0" in str(e) and "要编译" in str(e), e)
-ok("失败时不写锁", not os.path.exists(M.lock_path("bad")))
+    ok("source package only and needs compiling → error naming the package", "cext 2.0" in str(e) and "needs compiling" in str(e), e)
+ok("a failure writes no lock", not os.path.exists(M.lock_path("bad")))
 
-# ---------- 机器上用哪个变体、--all ----------
+# ---------- which variant a machine uses, --all ----------
 SAVE = {k: dict(v) for k, v in M.MACHINES.items()}
 M.MACHINES["tl"] = dict(label="t", hostname=r"tl-host", ssh="fake-tl", scheduler="pueue", root="/r",
                         envs={"base": ("spec", "cu128"), "layer": "spec", "ext": "spec"}, workers=[dict(gpu="0")])
-ok("venv 跟着基础环境的变体（有那个变体的锁时），没有时 default",
+ok("a venv follows the base env's variant when that variant has a lock, else default",
    M.spec_variant("tl", "ext") == "cu128" and M.spec_variant("tl", "layer") == "default" and M.spec_variant("tl", "base") == "cu128")
-ok("就绪按这台的变体算哈希", M.ready_envs("tl", {"base": M.spec_hash("base", "cu128")}) >= {"base"}
+ok("readiness hashes by the variant used here", M.ready_envs("tl", {"base": M.spec_hash("base", "cu128")}) >= {"base"}
    and "base" not in M.ready_envs("tl", {"base": M.spec_hash("base")}))
 t = L.targets()
-ok("--all：基础环境在前；base 用 default 和机器上写的变体；有占位的 venv 两个变体都锁；别的 default",
+ok("--all: base envs first; base uses default and the variants written on machines; a venv with placeholders locks both variants; the rest default",
    t.index(("base", "default")) + 1 == t.index(("base", "cu128")) < min(t.index(("ext", "cu128")), t.index(("layer", "default")))
    and ("bad", "default") in t
    and ("layer", "cu128") not in t, t)
 del M.MACHINES["tl"]
 
-# ---------- taskq check：旧锁 ----------
+# ---------- taskq check: old locks ----------
 import check as CK  # noqa: E402
 
 
@@ -333,15 +333,15 @@ class R:
 
 r = R()
 CK.check_locks(r, M, L.spec_names())
-ok("check：锁都对得上时没问题", r.problems == [], r.problems)
-open(os.path.join(SPECS, "layer.yml"), "a").write("# 改了\n")
+ok("check: no problems when the locks match", r.problems == [], r.problems)
+open(os.path.join(SPECS, "layer.yml"), "a").write("# changed\n")
 r = R()
 CK.check_locks(r, M, L.spec_names())
-ok("check：描述改了、锁是旧的 → 报", len(r.problems) == 1 and "layer.default.lock.json" in r.problems[0], r.problems)
+ok("check: the spec changed and the lock is old → reported", len(r.problems) == 1 and "layer.default.lock.json" in r.problems[0], r.problems)
 M.MACHINES.clear()
 M.MACHINES.update(SAVE)
 
-# ---------- 真锁（--real）：python 3.11 + six ----------
+# ---------- real lock (--real): python 3.11 + six ----------
 if "--real" in sys.argv:
     rd = fixture.tmpdir(prefix="envlock-real.")
     M.SPECS = os.path.join(rd, "specs")
@@ -351,12 +351,12 @@ if "--real" in sys.argv:
     rl = L.Locker(home=os.path.join(rd, "home"))
     p, lock = rl.lock("tiny")
     six = [e for e in lock["pip"] if e["name"] == "six"]
-    ok("真锁：conda 有 python，pip 有 six 1.16.0，文件都在 wheelhouse、sha256 对",
+    ok("real lock: conda has python, pip has six 1.16.0, the files are in the wheelhouse with matching sha256",
        any(c["name"] == "python" and c["version"].startswith("3.11") for c in lock["conda"])
        and six and six[0]["version"] == "1.16.0" and six[0]["url"].startswith("https://")
        and all(C.sha256(rl.path(e["sha256"])) == e["sha256"] for e in lock["conda"] + lock["pip"]), lock["pip"])
     shutil.rmtree(rd, ignore_errors=True)
 
 shutil.rmtree(d, ignore_errors=True)
-print("全部通过" if not fails else f"{fails} 项失败")
+print("all passed" if not fails else f"{fails} failures")
 sys.exit(1 if fails else 0)

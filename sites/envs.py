@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-"""按 <配置文件夹>/specs/<名>.yml 在一台机器上建环境：hub 生成一段 bash，交给那台机器在 CPU 上跑（Slurm：CPU 分区的
-srun；pueue 类：nice、看不到卡的普通进程），不占 GPU。
-
-描述的写法：
-  python / channels / override_channels / conda   conda 环境：conda create -p <目录> python=… <conda 包>
-  base                                            venv 建在另一个环境上（--system-site-packages），先激活那个
-  torch: {变体: {index_url, packages}}            先从 index_url 装 torch（default，或机器条目 ("spec", 变体) 选的）
-  pip / pip_no_deps                               再装的 pip 包；{torch_mm}、{abi}、{cp} 按环境里的 torch、Python 填
-检查：<配置文件夹>/specs/<名>.check.py（在建好的环境里跑，参数是那台的代码目录）。
-
-那边的布局（root = 机器条目的 env_root）：<root>/<名>-<哈希前 12 位>/ 是这一版环境，<root>/<名> 是指向它的软链接（检查过了才换），
-<root>/<名>/.activate 是激活语句；状态目录里 <名>.ok、<名>.failed、<名>.building、<名>.log。
-哈希是描述加这台用的变体的锁（mtab.spec_hash、spec_variant）。
-描述一改哈希就变：新版建在新目录里，建好检查过才换软链接、写 .ok，旧版留着，在跑的任务不受影响。
-.ok 的内容是哈希（一行）；.failed 是"<哈希> <时间> rc <退出码>"或"<哈希> <时间> nospace <要的字节> <剩的字节>"。
-
-有锁文件 <名>.<变体>.lock.json（sites/envlock.py 写）时不联网建：锁里的 conda 包、pip 包按 sha256 存在 hub 的
-wheelhouse（状态文件夹下的 proto.wheel(sha256)）；执行机先经 relay 的 ensure_blobs 由 hub 送进根目录的 blobs（hub 上跑 site_ops push，
-要有根目录和 transfer；建的时候钉住，清理不删），
-那边硬链接成原来的文件名，conda create --offline --file（@EXPLICIT）、pip install --no-index --require-hashes；hub 直接用 wheelhouse。
-建之前按锁里的大小查空间（包 × SPACE_X，加一份临时的；有 cap 的执行机按 cap 减已占的算），不够不建、写 .failed。
+"""Build an env from <config dir>/specs/<name>.yml on a machine's CPU only (a Slurm CPU-partition srun, or a nice process
+that cannot see the GPUs), then run <name>.check.py in it. Locks from envlock.py make the build offline from the hub's
+wheelhouse (blobs on executors), otherwise it installs from the network. The env goes into <root>/<name>-<hash>/, with
+<name> a symlink, and <name>.ok / .failed / .building / .log in the state dir; a new hash leaves the old env alone.
 """
 import json
 import os
@@ -29,10 +12,10 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of this scheduler code
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
-REPO = cfg.REPO  # 使用者的仓库根
+REPO = cfg.REPO  # the user's repo root
 cfg.use_config()
 import proto  # noqa: E402
 from proto import ROOT  # noqa: E402
@@ -40,11 +23,11 @@ sys.path.insert(0, os.path.join(CORE, "monitor"))
 import mtab as M  # noqa: E402
 
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'
-BUILD_MIN = 60      # 那边建一次的时限（分钟）：Slurm 是作业时限（短一点好排：建一个环境一般几分钟），pueue 类是 timeout
-BUILD_TIMEOUT = 4 * 3600  # hub 上等一次建环境最多这么久
-STALE_S = BUILD_TIMEOUT  # .building 这么久没动就当已经停了
-RETRY_S = 6 * 3600  # 空间不够没建的，这么久以后自动再试
-SPACE_X = 2.5       # 装好的环境约为锁里的包的几倍
+BUILD_MIN = 60      # time limit for one build over there (minutes): on Slurm the job's limit (short jobs schedule sooner; a build takes a few minutes), on pueue a timeout
+BUILD_TIMEOUT = 4 * 3600  # how long the hub waits for one build at most
+STALE_S = BUILD_TIMEOUT  # .building untouched this long counts as stopped
+RETRY_S = 6 * 3600  # a build skipped for lack of space is retried after this long
+SPACE_X = 2.5       # a built env is about this many times the lock's package bytes
 NAME_RE = re.compile(r"[A-Za-z0-9._+!-]+")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -57,25 +40,25 @@ def load(env):
     import yaml
     p = os.path.join(M.SPECS, f"{env}.yml")
     if not os.path.isfile(p):
-        raise EnvError(f"没有环境描述 {os.path.relpath(p, REPO)}")
+        raise EnvError(f"no env spec {os.path.relpath(p, REPO)}")
     with open(p, encoding="utf-8") as f:
         sp = yaml.safe_load(f) or {}
     if not isinstance(sp, dict):
-        raise EnvError(f"{env}.yml 不是一张表")
+        raise EnvError(f"{env}.yml is not a table")
     bad = set(sp) - {"python", "channels", "override_channels", "conda", "base", "torch", "pip", "pip_no_deps"}
     if bad:
-        raise EnvError(f"{env}.yml 里不认识的字段：{'、'.join(sorted(bad))}")
+        raise EnvError(f"unknown fields in {env}.yml: {', '.join(sorted(bad))}")
     if sp.get("base") and (sp.get("python") or sp.get("conda") or sp.get("torch")):
-        raise EnvError(f"{env}.yml：有 base 的（venv）不能再写 python、conda、torch")
+        raise EnvError(f"{env}.yml: with base (a venv) there can be no python, conda or torch")
     if not sp.get("base") and not (sp.get("python") or sp.get("conda")):
-        raise EnvError(f"{env}.yml：要写 base（venv），或 python / conda（conda 环境）")
+        raise EnvError(f"{env}.yml: write base (a venv), or python / conda (a conda env)")
     return sp
 
 
 def check_file(env):
     p = os.path.join(M.SPECS, f"{env}.check.py")
     if not os.path.isfile(p):
-        raise EnvError(f"没有检查 {os.path.relpath(p, REPO)}")
+        raise EnvError(f"no check {os.path.relpath(p, REPO)}")
     return p
 
 
@@ -84,25 +67,26 @@ def variant(e):
 
 
 def variant_of(name, env):
-    """这台机器上 env 用的变体：条目是 "spec" 的按 mtab.spec_variant；还不是 "spec" 的（预建）、没有这个环境的 → default。"""
+    """Which variant of env this machine uses: mtab.spec_variant for a "spec" entry; default for entries not yet "spec"
+    (prebuild) and for unknown envs."""
     e = (M.machine(name).get("envs") or {}).get(env)
     return M.spec_variant(name, env) if M.is_spec(e) else "default"
 
 
 def vhash(env, v):
-    """描述加这个变体的锁的哈希：.ok 里写的、状态比对的都是它。"""
+    """Hash of the spec plus this variant's lock: what .ok records and states compare against."""
     return M.spec_hash(env, v)
 
 
 def entry(name, env):
     e = (M.machine(name).get("envs") or {}).get(env)
     if e is None:
-        raise EnvError(f"{name} 的 envs 里没有 {env}")
+        raise EnvError(f"{name}'s envs has no {env}")
     return e
 
 
 def sh_path(p):
-    """~ 开头的路径 → "$HOME"/… 的 shell 写法（引号里不展开 ~）。"""
+    """A path starting with ~ → shell form "$HOME"/... (~ does not expand inside quotes)."""
     p = p.rstrip("/")
     if p == "~" or p.startswith("~/"):
         return '"$HOME"' + shlex.quote(p[1:]) if len(p) > 1 else '"$HOME"'
@@ -114,16 +98,16 @@ def state_dir(m):
 
 
 def base_activation(name, base):
-    """venv 的基础环境的激活语句（那边建环境时用，写进 .activate）。基础环境是 "spec" 的用它的 .activate。"""
+    """Activation of a venv's base env (used over there when building, written into .activate). A "spec" base uses its .activate."""
     a = M.activate(name, base)
     if a is None:
-        raise EnvError(f"{name} 的 envs 里没有基础环境 {base}")
+        raise EnvError(f"{name}'s envs has no base env {base}")
     return a
 
 
 def own_base(name, env, v):
-    """venv env 的基础环境用不用这台按描述建的那个（env_root 下）：机器条目里 env 是 "spec"、锁里没写 base、基础环境的条目是
-    conda / venv 时用条目的，其余（预建、锁里写了 base、基础环境也是 "spec" 或条目里没有）用按描述建的。"""
+    """Should the venv env's base be the one built from its spec here (under env_root)? Yes unless the entry is "spec",
+    the lock records no base, and the base entry is conda / venv (then use that entry)."""
     envs = M.machine(name).get("envs") or {}
     b = load(env).get("base")
     lk = load_lock(env, v)
@@ -131,7 +115,8 @@ def own_base(name, env, v):
 
 
 def spec_activation(name, env):
-    """按描述建在 env_root 下的 env 的激活语句（不看机器条目：预建、锁里写了 base 时用）。"""
+    """Activation of an env built from its spec under env_root (ignores the machine entry: used for prebuilds and when
+    the lock records a base)."""
     return "\n".join([DEACT, f"source {sh_path(M.env_root(name))}/{shlex.quote(env)}/.activate"])
 
 
@@ -141,14 +126,14 @@ def heredoc(tag, text):
 
 
 def pip_lines(pkgs):
-    """{torch_mm} 这类占位换成 shell 变量（建环境时按环境里的 torch、Python 算）。"""
+    """Replace placeholders like {torch_mm} by shell variables (computed at build time from the env's torch and Python)."""
     return [p.replace("{torch_mm}", "${SPEC_TORCH_MM}").replace("{abi}", "${SPEC_ABI}").replace("{cp}", "${SPEC_CP}")
             for p in pkgs]
 
 
-# ---------------- 锁文件和 wheelhouse ----------------
+# ---------------- lock files and wheelhouse ----------------
 def load_lock(env, v):
-    """<名>.<变体>.lock.json → dict；没有 → None；格式不对 → EnvError。"""
+    """<name>.<variant>.lock.json → dict; none → None; wrong format → EnvError."""
     p = M.lock_path(env, v)
     if not os.path.isfile(p):
         return None
@@ -156,20 +141,20 @@ def load_lock(env, v):
     try:
         lk = json.load(open(p, encoding="utf-8"))
     except ValueError as e:
-        raise EnvError(f"{fn} 读不了：{e}") from None
+        raise EnvError(f"cannot read {fn}: {e}") from None
     if not isinstance(lk, dict) or lk.get("format") != proto.LOCK_FORMAT or lk.get("name") != env or lk.get("variant") != v:
-        raise EnvError(f"{fn}：format 不是 {proto.LOCK_FORMAT}，或 name、variant 对不上")
+        raise EnvError(f"{fn}: format is not {proto.LOCK_FORMAT}, or name / variant do not match")
     for x in lock_items(lk):
         if not (SHA_RE.fullmatch(str(x.get("sha256"))) and NAME_RE.fullmatch(str(x.get("fn"))) and isinstance(x.get("size"), int)):
-            raise EnvError(f"{fn}：{x.get('name')} 的 sha256、fn、size 不对")
+            raise EnvError(f"{fn}: bad sha256, fn or size for {x.get('name')}")
     for x in lk.get("conda") or []:
         if not re.fullmatch(r"[0-9a-f]{32}", str(x.get("md5"))):
-            raise EnvError(f"{fn}：{x.get('name')} 的 md5 不对")
+            raise EnvError(f"{fn}: bad md5 for {x.get('name')}")
     for x in lk.get("pip") or []:
         if not (NAME_RE.fullmatch(str(x.get("name"))) and NAME_RE.fullmatch(str(x.get("version")))):
-            raise EnvError(f"{fn}：pip 包 {x.get('name')} 的名字、版本不对")
+            raise EnvError(f"{fn}: bad name or version for pip package {x.get('name')}")
     if lk.get("conda") and lk.get("base"):
-        raise EnvError(f"{fn}：有 base 的（venv）不能有 conda 包")
+        raise EnvError(f"{fn}: an env with a base (venv) cannot have conda packages")
     return lk
 
 
@@ -182,24 +167,25 @@ def wheelhouse():
 
 
 def lock_files(lk, wh=None):
-    """锁里的包 → {sha256: wheelhouse 里的路径（proto.wheel）}；缺的 → EnvError。wh：别的 wheelhouse（测试用）。"""
+    """The lock's packages → {sha256: path in the wheelhouse (proto.wheel)}; missing → EnvError. wh: another wheelhouse (tests)."""
     out = {x["sha256"]: os.path.join(wh, x["sha256"][:2], x["sha256"]) if wh else cfg.state(proto.wheel(x["sha256"])) for x in lock_items(lk)}
     miss = [x["fn"] for x in lock_items(lk) if not os.path.isfile(out[x["sha256"]])]
     if miss:
-        raise EnvError(f"wheelhouse（{wh or wheelhouse()}）里缺 {len(miss)} 个包：{'、'.join(miss[:5])}")
+        raise EnvError(f"wheelhouse ({wh or wheelhouse()}) is missing {len(miss)} packages: {', '.join(miss[:5])}")
     return out
 
 
 def lock_need(lk):
-    """建这个锁要的空间（字节）：装好的环境（包 × SPACE_X）加一份临时的。"""
+    """Bytes needed to build this lock: the built env (packages x SPACE_X) plus one temporary copy."""
     total = sum({x["sha256"]: x["size"] for x in lock_items(lk)}.values())
     return int(total * SPACE_X + total)
 
 
-# ---------------- 建环境的脚本 ----------------
+# ---------------- the build script ----------------
 def wheel_name(x):
-    """锁里一个 wheel 放进临时目录用的文件名：版本那一段换成元数据里的版本（x["version"]）。有的 wheel 文件名带本地版本
-    （mamba_ssm-2.3.0+cu12torch2.5cxx11abiFALSE-…），元数据却是 2.3.0，pip 按文件名找时认为不一致、不装；内容和 sha256 不变。"""
+    """File name a lock wheel gets in the temporary dir: the version part becomes the metadata version (x["version"]).
+    Some wheel file names carry a local version (mamba_ssm-2.3.0+cu12torch2.5cxx11abiFALSE-...) while the metadata says
+    2.3.0, and pip refuses to install them when looking by file name; content and sha256 stay the same."""
     fn = x["fn"]
     if not fn.endswith(".whl"):
         return fn
@@ -210,21 +196,23 @@ def wheel_name(x):
 
 
 def build_script(name, env, v=None, store=None):
-    """→ 在那台机器上建 env 的 bash（自己带检查和状态文件）。v：变体（默认按机器条目）；store：有锁时那边放包的目录
-    （<前两位>/<sha256>：执行机的 blobs、hub 的 wheelhouse）。机器条目还不是 "spec" 的也能建（预建，不影响送任务）。"""
+    """→ the bash that builds env on that machine (it carries the check and the marker files). v: variant (default from
+    the table entry); store: where the packages are over there when there is a lock (<first two>/<sha256>: the
+    executor's blobs, the hub's wheelhouse). Also builds entries not yet "spec" in the table (prebuild, sending is
+    unaffected)."""
     m = M.machine(name)
     v = v or variant_of(name, env)
     sp, h = load(env), vhash(env, v)
     lk = load_lock(env, v)
     if lk and store is None:
-        raise EnvError(f"{env} 有锁文件，要给放包的目录")
+        raise EnvError(f"{env} has a lock file, so the package dir is needed")
     chk = open(check_file(env), encoding="utf-8").read()
     root, sd = sh_path(M.env_root(name)), sh_path(state_dir(m))
     conda = sh_path(m["conda"][0]) if m.get("conda") else None
     L = ["#!/bin/bash", "set -euo pipefail", "export CUDA_VISIBLE_DEVICES=", f"ROOT={root}", f"SD={sd}",
          f"N={shlex.quote(env)}", f"H={h}", 'P="$ROOT/$N-${H:0:12}"', "T=", 'mkdir -p "$ROOT" "$SD"',
          'export CONDA_PKGS_DIRS="$ROOT/.pkgs" PIP_CACHE_DIR="$ROOT/.pip-cache"',
-         'exec > >(tee -a "$SD/$N.log") 2>&1', f'echo "== $(date "+%F %T") 建 $N（{v}，$H）在 $(hostname -s)"',
+         'exec > >(tee -a "$SD/$N.log") 2>&1', f'echo "== $(date "+%F %T") building $N ({v}, $H) on $(hostname -s)"',
          'echo "$H $(date +%s)" > "$SD/$N.building"', 'rm -f "$SD/$N.failed"',
          "trap 'rc=$?; if [[ $rc != 0 ]]; then echo \"$H $(date +%s) rc $rc\" > \"$SD/$N.failed\"; fi; rm -f \"$SD/$N.building\"; "
          "if [[ -n $T ]]; then rm -rf \"$T\"; fi; exit $rc' EXIT"]
@@ -238,7 +226,7 @@ def build_script(name, env, v=None, store=None):
               'export CONDA_PKGS_DIRS="$T/pkgs" CONDA_OFFLINE=1 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null',
               "while read -r k h fn md5; do\n"
               '  s="$BL/${h:0:2}/$h"\n'
-              '  if [[ ! -f $s ]]; then echo "缺包 $fn（$s）"; exit 1; fi\n'
+              '  if [[ ! -f $s ]]; then echo "missing package $fn ($s)"; exit 1; fi\n'
               '  ln -f "$s" "$T/$k/$fn" 2>/dev/null || ln -sf "$s" "$T/$k/$fn"\n'
               '  if [[ $k == pkgs ]]; then echo "file://$T/pkgs/$fn#$md5" >> "$T/explicit.txt"; fi\n'
               "done " + heredoc("FILES_EOF", "\n".join(rows) or "#"),
@@ -250,7 +238,7 @@ def build_script(name, env, v=None, store=None):
               f'printf \'%s\\n\' {shlex.quote(act)} "source \'$P/bin/activate\'" > "$P/.activate"']
     else:
         if conda is None:
-            raise EnvError(f"{name} 的条目里没有 conda，建不了 conda 环境")
+            raise EnvError(f"{name}'s entry has no conda, cannot build a conda env")
         if lk:
             create = 'conda create --offline -y -p "$P" --file "$T/explicit.txt" < /dev/null'
         else:
@@ -272,18 +260,18 @@ def build_script(name, env, v=None, store=None):
     L += [f"python3 - {sh_path(code) if code else ''} {heredoc('CHECK_EOF', chk)}",
           'echo "$H" > "$P/.built"',
           'ln -sfn "$(basename "$P")" "$ROOT/.$N.new" && mv -T "$ROOT/.$N.new" "$ROOT/$N"',
-          'echo "$H" > "$SD/$N.ok"', 'echo "== $(date "+%F %T") $N 建好、检查过"']
+          'echo "$H" > "$SD/$N.ok"', 'echo "== $(date "+%F %T") $N built and checked"']
     return "\n".join(L) + "\n"
 
 
 def online_lines(env, sp, v):
-    """没有锁时联网装 torch 和 pip 包的几行。"""
+    """The lines that install torch and pip packages from the network when there is no lock."""
     L = []
     tv = sp.get("torch") or {}
     if tv:
         t = tv.get(v)
         if not t:
-            raise EnvError(f"{env}.yml 的 torch 里没有变体 {v}（有：{'、'.join(tv)}）")
+            raise EnvError(f"{env}.yml's torch has no variant {v} (have: {', '.join(tv)})")
         L += [f"python -m pip install --index-url {shlex.quote(t['index_url'])} {' '.join(shlex.quote(x) for x in t['packages'])}"]
     if sp.get("pip") or sp.get("pip_no_deps"):
         L += ["eval \"$(python - <<'PY_EOF'\n"
@@ -301,19 +289,20 @@ def online_lines(env, sp, v):
 
 
 def runner(name):
-    """→ (在那台机器上跑的命令, ssh 名（None = 本机）)。命令把标准输入存成状态目录里的临时文件再跑（建环境的 conda、pip 不会读到
-    脚本后面的内容），只在 CPU 上跑：Slurm 用条目的 env_job（没有就用 transfer_job；没写时限时加 BUILD_MIN）在 CPU 分区 srun（排着等，不设 -I），
-    其余 nice、看不到卡、最多 BUILD_MIN 分钟。"""
+    """→ (the command to run on that machine, ssh name (None = this machine)). The command saves stdin to a temp file in
+    the state dir before running it (conda and pip in the build must not read the rest of the script), and runs on the
+    CPU only: Slurm uses the entry's env_job (else transfer_job; BUILD_MIN is added when it has no time limit) in a
+    CPU-partition srun (queue and wait, no -I); anything else uses nice, sees no GPUs and stops after BUILD_MIN minutes."""
     m = M.machine(name)
     if m["scheduler"] == "slurm":
         job = m.get("env_job") or m.get("transfer_job")
         if not job:
-            raise EnvError(f"{name} 的条目里没有 env_job（CPU 分区的 srun 参数）")
+            raise EnvError(f"{name}'s entry has no env_job (the CPU partition's srun options)")
         args = shlex.split(job)
         if any(a in ("--gres", "-G") or a.startswith(("--gres=", "--gpus", "-G")) or "gpu" in a.lower() for a in args):
-            raise EnvError(f"{name} 的 env_job 要了 GPU：{job}")
+            raise EnvError(f"{name}'s env_job asks for a GPU: {job}")
         timed = any(a in ("-t", "--time") or a.startswith("--time=") for a in args)
-        # 一直排着等节点（不用 -I：排不上就放弃再交会把排队时间清零，更排不上）；最多等到 hub 这边的 BUILD_TIMEOUT
+        # keep waiting in the queue (no -I: giving up and resubmitting resets the wait time and schedules worse); the hub waits at most BUILD_TIMEOUT
         launch = f"srun {job}" + ("" if timed else f" -t {BUILD_MIN}")
     else:
         launch = f"timeout -k 60 {BUILD_MIN}m nice -n 10 env CUDA_VISIBLE_DEVICES="
@@ -324,8 +313,10 @@ def runner(name):
 
 
 def mark(name, env, h, mode, need=0, run_op=None):
-    """建之前（有锁时）在那台机器上跑 site_ops 的 env_mark → dict(ok, free, need)：按要的空间查那边剩多少（有 cap、env_root 在
-    根目录下的按 cap 减已占的算），够写 .building，不够写 .failed；clear：撤掉这次写的 .building。run_op：代替 relay_remote.op（测试用）。"""
+    """Before a build (with a lock) run site_ops' env_mark on that machine → dict(ok, free, need): check the free space
+    against what is needed (with a cap, and env_root under the root, from the cap minus what is used); enough writes
+    .building, not enough writes .failed; clear removes the .building written this time. run_op replaces
+    relay_remote.op (tests)."""
     import relay_remote as RM
     m = M.machine(name)
     cap = m.get("cap") if m.get("root") and M.env_root(name).startswith(m["root"].rstrip("/") + "/") else None
@@ -333,29 +324,30 @@ def mark(name, env, h, mode, need=0, run_op=None):
     try:
         return (run_op or RM.op)(name, "env_mark", data)
     except RuntimeError as e:
-        raise EnvError(f"查 {name} 的空间出错：{e}") from None
+        raise EnvError(f"could not check the free space on {name}: {e}") from None
 
 
 def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=print, run_op=None):
-    """在那台机器上建 env → (退出码, 输出的最后几行)。dry：只返回要跑的命令和脚本，不跑。v：变体（默认按机器条目）。
-    有锁时：先查空间（不够 → 不建、写 .failed、退出码 1），执行机先把包放进那边的 blobs（钉住到建完；CPU 作业排不上 →
-    EXIT["stage_later"]）。要 ssh 长连接的机器、长连接断着 → EnvError（不另起连接）。"""
+    """Build env on that machine → (exit code, the last lines of output). dry: return the command and script only. v:
+    variant (default from the table entry). With a lock: check the space first (not enough → no build, write .failed,
+    exit 1), and an executor first gets the packages into its blobs (pinned until the build ends; no CPU job slot →
+    EXIT["stage_later"]). A machine with an ssh master that is down → EnvError (no fresh connection)."""
     import relay_remote as RM
     m = M.machine(name)
     v = v or variant_of(name, env)
     lk = load_lock(env, v)
     relay = M.is_exec(name)
     if lk and m.get("ssh") and not relay:
-        raise EnvError(f"{env} 有锁文件，只在 hub 和执行机上建；{name} 两样都不是")
+        raise EnvError(f"{env} has a lock file, so it only builds on the hub and on executors; {name} is neither")
     store = (RM.root(name) + "/" + ROOT["blobs"] if relay else wheelhouse()) if lk else None
     files = lock_files(lk) if lk else {}
     script = build_script(name, env, v, store)
     cmd, host = runner(name)
     if dry:
-        pre = f"先把 {len(files)} 个包放进 {store}\n" if lk and relay else ""
-        return 0, pre + f"在 {host or '本机'} 上跑：{cmd}\n" + script
+        pre = f"first put {len(files)} packages into {store}\n" if lk and relay else ""
+        return 0, pre + f"run on {host or 'this machine'}: {cmd}\n" + script
     if RM.master_down(m):
-        raise EnvError(f"{name} 的 ssh 长连接断着，这次不建")
+        raise EnvError(f"the ssh master to {name} is down, not building this time")
     import common as C
     run = run or C.run
     h = vhash(env, v)
@@ -367,23 +359,23 @@ def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=pri
         return go()
     r = mark(name, env, h, "reserve", lock_need(lk), run_op)
     if not r.get("ok"):
-        return 1, f"{name} 空间不够，没建 {env}：要 {r['need'] / 1e9:.1f} GB，剩 {r['free'] / 1e9:.1f} GB"
+        return 1, f"{name} has no space, did not build {env}: needs {r['need'] / 1e9:.1f} GB, {r['free'] / 1e9:.1f} GB free"
     if not relay:
         return go()
     import relay_transfer as RT
     try:
         with RT.pinned(name, f"env.{env}", files, say):
-            RT.ensure_blobs(name, {h: [None, os.path.getsize(p), p] for h, p in files.items()}, say, src=M.hub(), what=f"{name} 的环境 {env}")
+            RT.ensure_blobs(name, {h: [None, os.path.getsize(p), p] for h, p in files.items()}, say, src=M.hub(), what=f"{name}'s env {env}")
             return go()
     except RM.NoSlot as e:
         mark(name, env, h, "clear", run_op=run_op)
-        return proto.EXIT["stage_later"], f"{e}；这次不建，下次检查再来"
+        return proto.EXIT["stage_later"], f"{e}; not building this time, will retry on the next check"
     except (RT.RN.RelayError, RuntimeError, OSError) as e:
         mark(name, env, h, "clear", run_op=run_op)
-        raise EnvError(f"包没放到 {name}：{e}") from None
+        raise EnvError(f"packages were not put on {name}: {e}") from None
 
 
-# ---------------- 状态 ----------------
+# ---------------- states ----------------
 STATUS_SH = r'''for n in "$@"; do
   ok=$(head -n1 "$SD/$n.ok" 2>/dev/null | tr -d '|' || true); fl=$(head -n1 "$SD/$n.failed" 2>/dev/null | tr -d '|' || true)
   bd=$(head -n1 "$SD/$n.building" 2>/dev/null | tr -d '|' || true); ln=0; [[ -e $ROOT/$n/.activate ]] && ln=1
@@ -395,7 +387,7 @@ echo "NOW|$(date +%s)"
 
 
 def rows_of(txt):
-    """STATUS_SH 的输出 → ({环境: dict(ok, failed, building, active, log)}, 那边的时间)。"""
+    """STATUS_SH's output → ({env: dict(ok, failed, building, active, log)}, the time over there)."""
     import base64
     now, rows = time.time(), {}
     for ln in txt.splitlines():
@@ -414,27 +406,28 @@ def rows_of(txt):
 
 
 def classify(rows, want, now):
-    """{环境: 那边的标志文件} + {环境: 变体} → {环境: 状态}。状态：ok、描述变了、没建、检查失败、空间不够、在建、在建（可能已停）。"""
+    """{env: the remote marker files} + {env: variant} → {env: state}. States: ok, spec changed, not built, check failed,
+    no space, building, building (may have stopped)."""
     out = {}
     for k, v in want.items():
         r = rows.get(k) or {}
         h, bd, fl = vhash(k, v), (r.get("building") or "").split(), (r.get("failed") or "").split()
         if bd:
             age = now - int(bd[1]) if len(bd) > 1 and bd[1].isdigit() else 0
-            out[k] = "在建" if age < STALE_S else "在建（可能已停）"
+            out[k] = "building" if age < STALE_S else "building (may have stopped)"
         elif (r.get("ok") or "").strip() == h and r.get("active"):
             out[k] = "ok"
         elif fl and fl[0] == h:
-            out[k] = "空间不够" if len(fl) > 2 and fl[2] == "nospace" else "检查失败"
+            out[k] = "no space" if len(fl) > 2 and fl[2] == "nospace" else "check failed"
         elif r.get("ok"):
-            out[k] = "描述变了"
+            out[k] = "spec changed"
         else:
-            out[k] = "没建"
+            out[k] = "not built"
     return out
 
 
 def read_rows(name, envs_, run=None):
-    """→ (那边的标志文件, 那边的时间)；连不上（或要的 ssh 长连接断着）→ None。"""
+    """→ (the remote marker files, the time over there); unreachable (or the ssh master down) → None."""
     m = M.machine(name)
     if not envs_:
         return {}, time.time()
@@ -450,10 +443,10 @@ def read_rows(name, envs_, run=None):
 
 
 def states(name, run=None):
-    """→ {环境: 状态}，只读。机器条目里是 conda、venv 的：不是按描述建的。连不上 → None。"""
+    """→ {env: state}, read only. conda / venv entries: not spec-built. Unreachable → None."""
     m = M.machine(name)
     envs = m.get("envs") or {}
-    out = {k: "不是按描述建的" for k, e in envs.items() if not M.is_spec(e)}
+    out = {k: "not spec-built" for k, e in envs.items() if not M.is_spec(e)}
     want = {k: M.spec_variant(name, k) for k, e in envs.items() if M.is_spec(e)}
     if not want:
         return out
@@ -465,14 +458,14 @@ def states(name, run=None):
 
 
 def oks_of(states_, name):
-    """name 的 states() 的结果 → ready_envs 用的 {环境: 哈希}（只放 ok 的）。"""
+    """name's states() → ready_envs' {env: hash} (only ok ones)."""
     return {k: M.spec_hash(k, M.spec_variant(name, k)) for k, v in (states_ or {}).items() if v == "ok"}
 
 
-# ---------------- 自动建（hub 的健康检查经 relay.py 调用） ----------------
+# ---------------- automatic builds (the hub's health check calls this through relay.py) ----------------
 def wanted(name, extra=()):
-    """这台机器要建的 {环境: 变体}（基础环境在前）：条目里 "spec" 的，加上 extra（预建：环境名或 (环境, 变体)）；
-    venv 的基础环境有描述的也算。没有描述的不算。"""
+    """{env: variant} to build on this machine (base envs first): the entries' "spec" envs plus extra (prebuild: env name
+    or (env, variant)); a venv's base also counts when it has a spec. Envs without a spec do not."""
     out = {}
     pre = [(x, variant_of(name, x)) if isinstance(x, str) else (x[0], x[1] if len(x) > 1 else "default") for x in extra]
     todo = [(k, M.spec_variant(name, k)) for k, e in (M.machine(name).get("envs") or {}).items() if M.is_spec(e)] + pre
@@ -484,7 +477,7 @@ def wanted(name, extra=()):
             b = load(k).get("base")
             if b and own_base(name, k, v):
                 add(b, variant_of(name, b), depth + 1)
-        except Exception:  # noqa: BLE001  描述、锁写错了：problems 报
+        except Exception:  # noqa: BLE001  a bad spec or lock: problems reports it
             pass
         out[k] = v
     for k, v in todo:
@@ -493,15 +486,17 @@ def wanted(name, extra=()):
 
 
 def next_build(want, st, rows, now, skip=()):
-    """→ 下一个要建的 (环境, 变体)；不建 → None。一台一次只建一个：有在建的就不建；基础环境没好的先等；
-    检查失败的不自动重建（描述改了哈希变了才再建）；空间不够的 RETRY_S 后再试；skip（建不了的，如 wheelhouse 缺包）不建。"""
-    if any(s == "在建" for s in st.values()):
+    """→ the next (env, variant) to build; none → None. One build per machine at a time: none while one is building;
+    wait until the base env is ok; a failed check is not rebuilt automatically (only a spec change, hence a new hash,
+    does that); a build skipped for lack of space is retried after RETRY_S; skip (cannot build, e.g. wheelhouse missing
+    packages) is not built."""
+    if any(s == "building" for s in st.values()):
         return None
     for k, v in want.items():
         s = st.get(k)
-        if s in ("ok", "检查失败") or k in skip:
+        if s in ("ok", "check failed") or k in skip:
             continue
-        if s == "空间不够":
+        if s == "no space":
             fl = ((rows.get(k) or {}).get("failed") or "").split()
             if len(fl) > 1 and fl[1].isdigit() and now - int(fl[1]) < RETRY_S:
                 continue
@@ -516,17 +511,18 @@ def next_build(want, st, rows, now, skip=()):
 
 
 def problems(name, want, st, rows):
-    """→ [(环境, 说明)]：检查失败（带日志最后几行）、空间不够、wheelhouse 里缺包、锁文件不对。"""
+    """→ [(env, explanation)]: check failed (with the last lines of the log), no space, wheelhouse missing packages,
+    bad lock file."""
     out = []
     for k, v in want.items():
         r = rows.get(k) or {}
-        if st.get(k) == "检查失败":
+        if st.get(k) == "check failed":
             tail = "\n".join((r.get("log") or "").strip().splitlines()[-8:])
-            out.append((k, f"{name} 上建环境 {k}（{v}）失败：{(r.get('failed') or '').strip()}" + (f"\n{tail}" if tail else "")))
-        elif st.get(k) == "空间不够":
+            out.append((k, f"building env {k} ({v}) on {name} failed: {(r.get('failed') or '').strip()}" + (f"\n{tail}" if tail else "")))
+        elif st.get(k) == "no space":
             fl = (r.get("failed") or "").split()
             gb = lambda x: f"{int(x) / 1e9:.1f} GB" if x.isdigit() else x  # noqa: E731
-            out.append((k, f"{name} 空间不够，没建环境 {k}（{v}）" + (f"：要 {gb(fl[3])}，剩 {gb(fl[4])}" if len(fl) > 4 else "")))
+            out.append((k, f"{name} has no space, did not build env {k} ({v})" + (f": needs {gb(fl[3])}, {gb(fl[4])} free" if len(fl) > 4 else "")))
         if st.get(k) != "ok":
             try:
                 load(k)
@@ -534,5 +530,5 @@ def problems(name, want, st, rows):
                 if lk:
                     lock_files(lk)
             except Exception as e:  # noqa: BLE001
-                out.append((k, f"{name} 的环境 {k}（{v}）建不了：{e}"))
+                out.append((k, f"cannot build env {k} ({v}) on {name}: {e}"))
     return out

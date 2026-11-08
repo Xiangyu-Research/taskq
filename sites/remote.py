@@ -1,10 +1,11 @@
-"""执行机共用的小工具：机器表里的一台、每台备几个任务、根目录的写法。"""
+"""Small helpers shared by executor adapters: one machine from the table, how many tasks to keep ready per machine,
+and how to quote a root path for the shell."""
 import os
 import shlex
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CORE = os.path.dirname(HERE)  # 调度代码的根
+CORE = os.path.dirname(HERE)  # root of this scheduler code
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 cfg.use_config()
@@ -13,17 +14,17 @@ import policy as P  # noqa: E402
 
 
 def conf(name):
-    """机器表里的一台（mtab.py 的 machine，没写的字段补上默认值）。"""
+    """One machine from the table (mtab.machine, defaults filled in)."""
     return M.machine(name)
 
 
 def ready(name):
-    """执行机那边备几个没人领的任务（每种 worker 各几个）：policy.py 的 READY，没写的 1。"""
+    """How many unclaimed tasks to keep ready on the executor (per worker kind): policy.py's READY, default 1."""
     return P.READY.get(name, 1)
 
 
 def q(path):
-    """路径的 shell 写法：开头的 ~ 留给那边展开（根目录里不写用户名），其余部分加引号。"""
+    """Shell form of a path: a leading ~ is left for the other side to expand (roots carry no user name), the rest is quoted."""
     if path == "~":
         return "~"
     if path.startswith("~/"):
