@@ -1,17 +1,17 @@
 #!/bin/bash
-# 测试用的步骤脚本（形状同真的推理 / 评测脚本）：--stage needs:<infer|eval|all> 只打印那个阶段要读的输入（相对数据目录，
-# 每行一个，带 * 的是通配），模型可以还不在这台机器上；别的阶段只记一行。
-#   bash step.sh [--stage infer|eval|all|needs[:<阶段>]] <模型文件夹> <第几份，如 0 或 "0 1 2 3 4">
+# Test step script (same shape as real inference / eval scripts): --stage needs:<infer|eval|all> only prints the inputs that
+# stage reads (relative to the data dir, one per line, * for wildcards); the model may not be on this machine yet. Other stages log one line.
+#   bash step.sh [--stage infer|eval|all|needs[:<stage>]] <model dir> <part, such as 0 or "0 1 2 3 4">
 set -euo pipefail
 STAGE=all
-if [[ ${1:-} == --stage ]]; then STAGE=${2:?--stage 后面要 infer 或 eval}; shift 2; fi
+if [[ ${1:-} == --stage ]]; then STAGE=${2:?--stage needs infer or eval}; shift 2; fi
 NEEDS=
 [[ $STAGE == needs ]] && STAGE=needs:infer
 if [[ $STAGE == needs:* ]]; then NEEDS=${STAGE#needs:}; STAGE=needs; fi
-case $STAGE in all | infer | eval | needs) ;; *) echo "--stage 只能是 infer、eval、all 或 needs:<阶段>：$STAGE" >&2; exit 2 ;; esac
-case $NEEDS in '' | infer | eval | all) ;; *) echo "needs: 后面只能是 infer、eval 或 all：$NEEDS" >&2; exit 2 ;; esac
-MODEL=${1:?用法：step.sh [--stage …] <模型文件夹> <第几份>}
-FRAGS=${2:?缺第几份}
+case $STAGE in all | infer | eval | needs) ;; *) echo "--stage must be infer, eval, all or needs:<stage>: $STAGE" >&2; exit 2 ;; esac
+case $NEEDS in '' | infer | eval | all) ;; *) echo "after needs: use infer, eval or all: $NEEDS" >&2; exit 2 ;; esac
+MODEL=${1:?usage: step.sh [--stage ...] <model dir> <part>}
+FRAGS=${2:?missing part}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DATA=${TASKQ_DATA:?}
 if [[ $STAGE == needs ]]; then MODEL=$(realpath -m "$MODEL"); else MODEL=$(cd "$MODEL" && pwd); fi
@@ -19,7 +19,7 @@ DS=$(basename "$(dirname "$MODEL")") VAR=$(basename "$MODEL")
 if [[ $(echo $FRAGS | wc -w) == 1 ]]; then TAG=frag_$FRAGS; else TAG=frags_$(echo $FRAGS | tr ' ' '-'); fi
 EXT=(B G-A G-B G-C G-D X)
 if [[ -z ${SKIP_EXT+x} && -z ${ONLY_EXT+x} ]]; then
-    X=$(python3 "$HERE/../../experiments.py" name-of "$MODEL" skip_ext only_ext) || { echo "或者设 SKIP_EXT / ONLY_EXT" >&2; exit 1; }
+    X=$(python3 "$HERE/../../experiments.py" name-of "$MODEL" skip_ext only_ext) || { echo "or set SKIP_EXT / ONLY_EXT" >&2; exit 1; }
     { IFS= read -r SKIP_EXT || true; IFS= read -r ONLY_EXT || true; } <<< "$X"
 fi
 KEEP=()
@@ -29,7 +29,7 @@ done
 if [[ $STAGE == needs ]]; then
     BT=$(mkdir -p "$DATA" && cd "$DATA" && pwd -P)/
     M=$MODEL/
-    [[ $M == "$BT"* ]] || { echo "模型不在 $DATA 下" >&2; exit 1; }
+    [[ $M == "$BT"* ]] || { echo "the model is not under $DATA" >&2; exit 1; }
     M=${M#"$BT"}
     P=preds/$DS/$VAR
     {

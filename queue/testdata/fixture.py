@@ -1,11 +1,12 @@
-"""调度核心的测试用的固定配置：机器表、policy（config/）、做法和插件（plugins/）、实验表（exps/demo/）、
-假的 conda 和 venv、步骤脚本（bin/）。
+"""Fixed config for core tests: machine table and policy (config/), recipes and plugins (plugins/), experiment table
+(exps/demo/), fake conda and venvs, step scripts (bin/).
 
     sys.path.insert(0, os.path.join(HERE, "testdata")); import fixture; fixture.use()
 
-use() 在 import 读配置的模块（machines、policy、recipes、relay_plugins、spec、experiments…）之前调用：设 TASKQ_CONFIG、
-TASKQ_PLUGINS 指到这里（覆盖已经设了的），并在 PATH 里真的 ssh 前面放 noremote/（ssh、scp 马上失败，测试忘了换假 ssh 时
-也连不到真的机器；测试自己的假 ssh 放在更前面照常用），子进程跟着继承。bash 的测试 source fixture.sh。
+Call use() before importing modules that read config (machines, policy, recipes, relay_plugins, spec, experiments...): it sets
+TASKQ_CONFIG and TASKQ_PLUGINS here (overriding existing values) and puts noremote/ before the real ssh on PATH (ssh and scp fail
+at once, so a test that forgets its fake ssh still cannot reach a real machine; a test's own fake ssh earlier on PATH works as
+usual); child processes inherit it. Bash tests source fixture.sh.
 """
 import atexit
 import os
@@ -23,7 +24,7 @@ NOREMOTE = os.path.join(FIX, "noremote")
 
 
 def _real_ssh(d):
-    """文件夹 d 里有真的 ssh（可执行的二进制文件；测试自己写的假 ssh 是脚本）。"""
+    """Dir d has a real ssh (an executable binary; a test's fake ssh is a script)."""
     p = os.path.join(d or ".", "ssh")
     try:
         with open(p, "rb") as f:
@@ -33,7 +34,7 @@ def _real_ssh(d):
 
 
 def guard_path(path):
-    """PATH → 在第一个有真的 ssh 的文件夹前面插上 NOREMOTE（已经有了、或者没有真的 ssh 时原样）。"""
+    """PATH -> insert NOREMOTE before the first dir with a real ssh (unchanged when already present or no real ssh)."""
     parts = path.split(os.pathsep) if path else []
     if NOREMOTE in parts:
         return path
@@ -47,7 +48,7 @@ def use():
     os.environ["TASKQ_CONFIG"] = CONFIG
     os.environ["TASKQ_PLUGINS"] = PLUGINS
     os.environ["PATH"] = guard_path(os.environ.get("PATH", ""))
-    if not os.environ.get("TASKQ_DB"):  # hub 的数据库、纯文字日志：测试里从不用真的
+    if not os.environ.get("TASKQ_DB"):  # the hub database and plain text logs: tests never use the real ones
         sys.path.insert(0, os.path.dirname(FIX)) if os.path.dirname(FIX) not in sys.path else None
         import proto
         d = tmpdir(prefix="taskq-logs-")
@@ -58,7 +59,7 @@ def use():
 
 
 def tmpdir(**kw):
-    """tempfile.mkdtemp(**kw)，建它的进程退出时（通过、失败、出错都算）删掉；测试改成读不了的先放开权限。"""
+    """tempfile.mkdtemp(**kw), removed when the process that made it exits (pass, fail or error); tests that made it unreadable chmod first."""
     d, pid = tempfile.mkdtemp(**kw), os.getpid()
 
     def rm():
@@ -70,10 +71,11 @@ def tmpdir(**kw):
 
 
 def store_bundle(root, plugins=(), config=None):
-    """store 上的操作（site_ops.py）真跑用的手搭代码包：root（store 的根目录，展开了的）/code/current 里 scripts/taskq 链到这份核心，
-    .taskq.toml 指到 config（默认 TASKQ_CONFIG）和 PLUGINS 加 plugins（本机跑时 hub 才有的变量去掉了，配置只从包里读）；
-    另搭一个临时的 conda（bin/python3 是跑测试的这个）。再调用只重写 .taskq.toml。→ conda 的目录（store 的 conda 指到它，
-    或把 relay_remote 的 py 换成 lambda name: <它>/bin/python3）。"""
+    """Hand-built bundle for running store operations (site_ops.py) for real: scripts/taskq in root (the store's expanded root)
+    /code/current links to this core, and .taskq.toml points at config (default TASKQ_CONFIG) and PLUGINS plus plugins (hub-only
+    variables are stripped when running locally, config is read from the bundle only); a temp conda is built too (bin/python3 is
+    the python running the tests). Later calls only rewrite .taskq.toml. -> the conda dir (point the store's conda at it, or
+    replace relay_remote's py with lambda name: <it>/bin/python3)."""
     import json
     if os.path.dirname(FIX) not in sys.path:
         sys.path.insert(0, os.path.dirname(FIX))
@@ -96,12 +98,12 @@ _CONDA = {}
 
 
 def dead_pid():
-    """一个已经结束、回收过的子进程的 pid（os.kill(pid, 0) 报 ProcessLookupError）。不用 999999 这类"多半不存在"的号：
-    有的沙箱对看不到的 pid 报 PermissionError，按 POSIX 那算"进程在"。"""
+    """pid of a finished, reaped child (os.kill(pid, 0) raises ProcessLookupError). Do not use a "probably unused" number such as
+    999999: some sandboxes raise PermissionError for pids they cannot see, which POSIX treats as "process exists"."""
     p = subprocess.Popen(["true"])
     p.wait()
     return p.pid
 
 
-if __name__ == "__main__" and sys.argv[1:2] == ["path"]:  # fixture.sh 用
+if __name__ == "__main__" and sys.argv[1:2] == ["path"]:  # used by fixture.sh
     print(guard_path(sys.argv[2] if len(sys.argv) > 2 else os.environ.get("PATH", "")))

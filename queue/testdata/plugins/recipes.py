@@ -1,9 +1,9 @@
-"""测试用的做法 toy：形状同真的领域插件里的训练做法（参数、结果文件夹、训完的标志、存档、进度、拉回、归档、中继），
-命令是 testdata/bin/toy_train.sh。字段见 queue/schema.py 的 RECIPE_FIELDS。"""
+"""Test recipe toy: same shape as a training recipe in a real domain plugin (params, result dir, done marker, checkpoint,
+progress, fetch, archive, relay); the command is testdata/bin/toy_train.sh. Fields in queue/schema.py's RECIPE_FIELDS."""
 import os
 
 from taskq_api import REQUIRED, rel
-QR = rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
+QR = rel("queue")  # scheduler code's queue/ under the repo root (scripts/taskq/queue when embedded, queue in a standalone checkout)
 
 RECIPES = {
     "toy": dict(
@@ -31,7 +31,7 @@ RECIPES = {
 
 
 def model_of(model_dir):
-    """结果文件夹 …/<ds>/<variant>__<plan>__<cfg> → model 参数（最后两级）。"""
+    """Result dir .../<ds>/<variant>__<plan>__<cfg> -> the model param (last two levels)."""
     return "/".join(os.path.normpath(model_dir).split(os.sep)[-2:])
 
 

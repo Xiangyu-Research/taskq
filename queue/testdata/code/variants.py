@@ -1,4 +1,4 @@
-"""测试用的训练变体（toy 做法的 variant）：读 SPLITS_DIR 的变体要仓库里的样本子集，中继插件不送（relay_plugins.repo_files）。"""
+"""Test training variants (the toy recipe's variant): variants reading SPLITS_DIR need sample subsets from the repo, so the relay plugin does not send them (relay_plugins.repo_files)."""
 
 
 class V_save:

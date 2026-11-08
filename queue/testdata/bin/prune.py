@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""测试用的删单份概率脚本（2026-11-03，接口同真的）：集成做完以后删各份的 .prob，在各份的 MANIFEST 里记 probabilities_removed。
-    prune.py <preds/<模型>> --frags "0 1 2 3 4" [--dry-run]
-先核对，不对就一个都不删、退出码 1：集成（frags_<…>）的 MANIFEST 在，每份的 MANIFEST 在。
+"""Test prune-per-part-probabilities script (same interface as the real one): after the ensemble finishes, delete each part's
+.prob and record probabilities_removed in each part's MANIFEST.
+    prune.py <preds/<model>> --frags "0 1 2 3 4" [--dry-run]
+Check first; on any mismatch delete nothing and exit 1: the ensemble's (frags_<...>) MANIFEST exists and each part's MANIFEST exists.
 """
 import argparse
 import glob
@@ -17,16 +18,16 @@ a = ap.parse_args()
 pred = os.path.abspath(a.pred)
 frags = a.frags.split()
 ens = os.path.join(pred, "frags_" + "-".join(frags), "MANIFEST.json")
-bad = [] if os.path.isfile(ens) else [f"集成没做完：没有 {ens}"]
-bad += [f"第 {k} 份：没有 MANIFEST" for k in frags if not os.path.isfile(os.path.join(pred, f"frag_{k}", "MANIFEST.json"))]
+bad = [] if os.path.isfile(ens) else [f"ensemble not finished: no {ens}"]
+bad += [f"part {k}: no MANIFEST" for k in frags if not os.path.isfile(os.path.join(pred, f"frag_{k}", "MANIFEST.json"))]
 if bad:
-    print(f"{pred}：核对没通过，一个都不删")
+    print(f"{pred}: check failed, deleting nothing")
     print("\n".join("  " + b for b in bad))
     sys.exit(1)
 for k in frags:
     d = os.path.join(pred, f"frag_{k}")
     probs = glob.glob(os.path.join(d, "*", "*.prob"))
-    print(f"第 {k} 份：{'要删' if a.dry_run else '删'} {len(probs)} 个")
+    print(f"part {k}: {'would delete' if a.dry_run else 'deleting'} {len(probs)}")
     if a.dry_run:
         continue
     mp = os.path.join(d, "MANIFEST.json")

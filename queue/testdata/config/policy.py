@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""测试用的"怎么用"：形状同真的 policy.py（字段见 queue/schema.py，taskq machines fields）。"""
+"""Test "how to use it": same shape as a real policy.py (fields in queue/schema.py, taskq machines fields)."""
 import os
 
-import cfg  # 读配置的是核心的模块，核心的 queue/ 已经在 sys.path 上
+import cfg  # the core module reads config; the core's queue/ is already on sys.path
 
-QR = cfg.rel("queue")  # 仓库根下调度代码的 queue/（嵌着时 scripts/taskq/queue，单独的检出时 queue）
+QR = cfg.rel("queue")  # scheduler code's queue/ under the repo root (scripts/taskq/queue when embedded, queue in a standalone checkout)
 
 AUTO = dict(advance=True, envs=True, revive=True, smoke=True)
 
@@ -14,7 +14,7 @@ PAUSE = {
 HOLD = [
 ]
 
-PLACE = {  # 没写的步骤 = "any"
+PLACE = {  # steps not listed = "any"
     "infer": ["site-slurm", "site-pueue"],
     "p1": ["site-slurm"],
     "p2": ["site-slurm"],
@@ -32,7 +32,7 @@ OUTPUTS = dict(
     entry="bin/loop.sh",
     cron=(("5,35 * * * *", "health"), ("30 8-20/2 * * *", "registry")),
     origin="git@example.org:demo/demo.git",
-    bundle=(os.path.dirname(cfg.CORE_REL) or ".",),  # 调度代码所在的文件夹（单独的检出时是整个仓库）
+    bundle=(os.path.dirname(cfg.CORE_REL) or ".",),  # the dir holding the scheduler code (the whole repo in a standalone checkout)
     experiments=QR + "/testdata/exps/*/experiments.py",
     code_dirs=(QR, QR + "/testdata/code"),
     bundle_check="base",

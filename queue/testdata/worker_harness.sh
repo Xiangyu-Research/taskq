@@ -1,25 +1,25 @@
-# worker（worker_start.sh → consume.py）的测试共用的假训练和小工具：先建 $T、设 TASKQ_DIR、TASKQ_DATA、TASKQ_MACHINE，再 source
-# WORKER_TEST_ONLY="<情况…>"：只跑这几个情况（want），没设时都跑
+# Fake training and helpers shared by worker tests (worker_start.sh -> consume.py): create $T, set TASKQ_DIR, TASKQ_DATA and TASKQ_MACHINE, then source this
+# WORKER_TEST_ONLY="<cases...>": run only these cases (want); all when unset
 export TASKQ_POLL=1 TASKQ_IDLE_MAX=2 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_SLOTS=2 TASKQ_ADD_AFTER=0 TASKQ_ERR_MAX=2
-export WORKER_TEST_GPU="50 10 20000 81920"   # 近 10 分钟使用率 50%、训练占 20GB
-export TASKQ_GPU_PAD_BASE=$T/nopad TMPDIR=$T/tmp   # 显存填充、本地副本不用 /tmp 下按作业号的路径
-export TASKQ_GPU_PAD=0   # worker_start.sh 不开真的显存填充（和填充的握手由 TASKQ_GPU_PAD_BASE 下的假文件模拟）
+export WORKER_TEST_GPU="50 10 20000 81920"   # 50% utilisation over the last 10 minutes, training uses 20GB
+export TASKQ_GPU_PAD_BASE=$T/nopad TMPDIR=$T/tmp   # keep the GPU pad and local copies out of /tmp job paths
+export TASKQ_GPU_PAD=0   # worker_start.sh starts no real GPU pad (the handshake is simulated by fake files under TASKQ_GPU_PAD_BASE)
 mkdir -p "$TASKQ_DIR" "$TASKQ_DATA" "$TMPDIR"
 touch "$TASKQ_DIR/ENABLED"
 cat > "$T/fake_train.sh" << 'EOT'
 #!/bin/bash
-# 假训练：参数 任务名；记下开始、结束时刻、环境，睡 ${FAKE_SECS:-1} 秒后写训完的文件
+# fake training: argument is the task name; record start, end and env, sleep ${FAKE_SECS:-1} seconds, then write the done file
 out=$TASKQ_DATA/runs/$1
 mkdir -p "$out"
-# 先装好收停止信号的处理，再记开始（测试看到 start 就可能马上发停止）
-if [[ ${FAKE_IGNORE:-} == "$1" ]]; then  # 不理停止信号
+# install the stop handler before recording start (a test may send a stop as soon as it sees start)
+if [[ ${FAKE_IGNORE:-} == "$1" ]]; then  # ignore stop signals
     trap 'echo "term $1" >> "$FAKE_LOG"' TERM
 else
     trap 'echo "term $1" >> "$FAKE_LOG"; exit 143' TERM
 fi
-echo "start $(date +%s.%N) $1 ${DEMO_ACTIVE_VENV:-无} ${CONDA_DEFAULT_ENV:-无} cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
+echo "start $(date +%s.%N) $1 ${DEMO_ACTIVE_VENV:-none} ${CONDA_DEFAULT_ENV:-none} cpus=${TASK_CPUS:-}" >> "$FAKE_LOG"
 [[ ${FAKE_IGNORE:-} == "$1" ]] && while :; do sleep 1; done
-if [[ ${FAKE_ESCAPE:-} == "$1" ]]; then  # 留下一个停不下来的进程：同一个会话、另一个进程组、不理 SIGTERM，FAKE_ESCAPE_SECS 秒后自己退出
+if [[ ${FAKE_ESCAPE:-} == "$1" ]]; then  # leave a process that will not stop: same session, another process group, ignores SIGTERM, exits after FAKE_ESCAPE_SECS
     python3 -c 'import os, signal, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 if os.fork():
@@ -28,12 +28,12 @@ os.setpgid(0, 0)
 open(sys.argv[1], "w").write(str(os.getpid()))
 time.sleep(float(sys.argv[2]))' "$FAKE_LOG.escape" "${FAKE_ESCAPE_SECS:-20}"
     sleep 120 & wait $!
-elif [[ ${FAKE_BUSY:-} == "$1" ]]; then  # 一直在写结果文件夹、不写日志（像概率图稀疏化）
+elif [[ ${FAKE_BUSY:-} == "$1" ]]; then  # keep writing the output dir without logging (like probability sparsification)
     for _ in $(seq "${FAKE_BUSY_SECS:-10}"); do touch "$out/progress"; sleep 1; done
 elif [[ ${FAKE_HANG:-} == "$1" ]]; then
     sleep 120 & wait $!
-elif [[ ${FAKE_EAGER:-} == "$1" ]]; then  # 子进程（sleep）一结束就写训完的文件，不管它怎么结束的；旁边一条 30 层深的进程链：
-    # 从叶子停进程树时会先停到 sleep、隔一会儿才停到训练本身（要整组一起停才不写训完的文件）
+elif [[ ${FAKE_EAGER:-} == "$1" ]]; then  # write the done file as soon as the child (sleep) ends, however it ended; next to it a 30-level process chain:
+    # stopping the tree from the leaves hits sleep first and the training itself only later (only stopping the whole group avoids the done file)
     sleep 60 & c=$!
     bash "$FAKE_CHAIN" 30 &
     wait $c
@@ -42,15 +42,15 @@ elif [[ ${FAKE_EAGER:-} == "$1" ]]; then  # 子进程（sleep）一结束就写�
     exit 0
 else
     sleep "${FAKE_SECS:-1}" & wait $!
-fi || { echo "term $1" >> "$FAKE_LOG"; exit 143; }  # 子进程先被停（停进程树时从叶子停起）：当作收到停止，不写训完的文件
-[[ " ${FAKE_FAIL:-} " == *" $1 "* ]] && { echo "fail $1" >> "$FAKE_LOG"; exit 1; }  # FAKE_FAIL：空格分开的任务名
+fi || { echo "term $1" >> "$FAKE_LOG"; exit 143; }  # the child stopped first (the tree stops from the leaves): treat as a stop, write no done file
+[[ " ${FAKE_FAIL:-} " == *" $1 "* ]] && { echo "fail $1" >> "$FAKE_LOG"; exit 1; }  # FAKE_FAIL: space-separated task names
 touch "$out/DONE"
 echo "end $(date +%s.%N) $1" >> "$FAKE_LOG"
 EOT
 chmod +x "$T/fake_train.sh"
 cat > "$T/chain.sh" << 'EOT'
 #!/bin/bash
-# $1 层深的进程链，最底下写 chain.ready 后睡 60 秒（FAKE_EAGER 用）
+# a process chain $1 levels deep; the leaf writes chain.ready then sleeps 60 seconds (for FAKE_EAGER)
 if (( $1 > 0 )); then bash "$0" $(( $1 - 1 )); else touch "$(dirname "$0")/chain.ready"; sleep 60; fi
 EOT
 export FAKE_CHAIN=$T/chain.sh
@@ -59,7 +59,7 @@ fails=0
 check() { if eval "$2"; then echo "PASS:$1"; else echo "FAIL:$1"; fails=$((fails + 1)); fi; }
 waitfor() { local i; for i in $(seq "$1"); do eval "$2" && return 0; sleep 1; done; return 1; }
 want() { [[ -z ${WORKER_TEST_ONLY:-} || " $WORKER_TEST_ONLY " == *" $1 "* ]]; }
-table() {  # 每行：任务名 环境 [device]
+table() {  # each line: task name env [device]
     : > "$TASKQ_DIR/tasks.jsonl"
     local i=0 name env dev
     while read -r name env dev; do

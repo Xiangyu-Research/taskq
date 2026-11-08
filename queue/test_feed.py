@@ -41,12 +41,12 @@ ok("hub queue unreadable: report nothing", F.nobody(None) == {})
 
 # ---------------- one entry point for sending tasks: feed.run_all hands off to relay.py ----------------
 rl, rcalls = types.ModuleType("relay"), []
-rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["site-pueue 领了 a/x/0"], {"site:site-pueue:x": "y"}))[1]
+rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["site-pueue claimed a/x/0"], {"site:site-pueue:x": "y"}))[1]
 sys.modules["relay"] = rl
 hub = F.M.hub()
 ev, st = F.run_all(dict(taskq={hub: q_}, ok={}), dry=False)
 ok("hands off to relay.run_all, merges messages and problems, adds feed:nobody, writes one line in feed.log pointing at ~/relay.log",
-   rcalls == [False] and ev == ["site-pueue 领了 a/x/0"] and set(st) == {"site:site-pueue:x", "feed:nobody:pueue-host"}
+   rcalls == [False] and ev == ["site-pueue claimed a/x/0"] and set(st) == {"site:site-pueue:x", "feed:nobody:pueue-host"}
    and "see ~/relay.log" in open(os.environ["FEED_LOG"]).read())
 n0 = len(open(os.environ["FEED_LOG"]).read())
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)

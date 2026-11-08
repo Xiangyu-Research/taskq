@@ -94,7 +94,7 @@ def test_train():
     ok("training export: real paths, only the files needed this time (splits_final_v1.json excluded), symlinks sent as their real files, params unchanged")
 
     wj(os.path.join(PRE, "splits_final.json"), [dict(train=CASES[2:], val=CASES[:2] + ["nobody"])])
-    fails(N.export, sp, ROOT, has="不一致")
+    fails(N.export, sp, ROOT, has="disagree")
     wj(os.path.join(PRE, "splits_final.json"), [dict(train=CASES[2:], val=CASES[:2]), dict(train=CASES[:2], val=CASES[2:])])
     ok("training export: fails when splits contain samples without gt")
 
@@ -116,7 +116,7 @@ def test_train():
     ok("training fetch: results, parent json (fetch.extra) and part logs land at the same relative paths")
 
     os.remove(os.path.join(out, "check", CASES[1] + ".dat"))
-    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="验证集对不上")
+    fails(N.import_, sp, src, os.path.join(TMP, "train_dst2"), ROOT, has="validation set does not match")
     assert not os.path.exists(os.path.join(TMP, "train_dst2"))
     wb(os.path.join(out, "check", CASES[1] + ".dat"), b"p")
     wj(os.path.join(out, "check", "summary.json"), dict(metric_per_case=[{}]))
@@ -197,7 +197,7 @@ def test_infer_needs():
     assert got[:3] == [f"{m}/dataset.json", f"{m}/plans.json", f"{m}/frag_0/final.ckpt"], got
     assert len(got) == 5 and all(g.startswith("raw/") and g.endswith("/inputs") for g in got[3:]), got
     ok("inference: runs the task's inputs_cmd (step.sh --stage needs:infer) with the task vars and lists model files and input dirs")
-    fails(REAL_INFER_INPUTS, S.resolve("command", q), ROOT, has="没有 inputs_cmd")
+    fails(REAL_INFER_INPUTS, S.resolve("command", q), ROOT, has="has no inputs_cmd")
     ok("inference: fails without inputs_cmd instead of guessing from the command")
 
 
@@ -227,9 +227,9 @@ def test_infer():
         assert not os.path.exists(os.path.join(TMP, "infer_dst2")), why
 
     p = os.path.join(out, "B", "B-004.prob")
-    bad("missing probability", "对不上", lambda: os.remove(p), lambda: wb(p, b"p"))
+    bad("missing probability", "does not match", lambda: os.remove(p), lambda: wb(p, b"p"))
     t = os.path.join(out, "B", "B-004.tmp.prob")
-    bad("half-written probability", "认不出", lambda: wb(t, b"p"), lambda: os.remove(t))
+    bad("half-written probability", "unrecognised files", lambda: wb(t, b"p"), lambda: os.remove(t))
     m = os.path.join(out, "MANIFEST.json")
     keep = open(m).read()
     man = json.loads(keep)
@@ -240,9 +240,9 @@ def test_infer():
     def back():
         open(m, "w").write(keep)
 
-    bad("different checkpoint", "存档", put(dict(man, checkpoints=[dict(sha256="0" * 64)])), back)
+    bad("different checkpoint", "checkpoints used for inference", put(dict(man, checkpoints=[dict(sha256="0" * 64)])), back)
     bad("MANIFEST misses a test set", "MANIFEST", put(dict(man, cohorts={k: v for k, v in man["cohorts"].items() if k != "B"})), back)
-    bad("MANIFEST counts are wrong", "对不上", put(dict(man, cohorts=dict(man["cohorts"], B=dict(n_outputs=2, n_probs=2)))), back)
+    bad("MANIFEST counts are wrong", "does not match", put(dict(man, cohorts=dict(man["cohorts"], B=dict(n_outputs=2, n_probs=2)))), back)
     gone = os.path.join(out, "B")
     bad("a test-set dir is missing", "MANIFEST", lambda: shutil.move(gone, gone + ".x"), lambda: shutil.move(gone + ".x", gone))
     d, keep = os.path.join(out, "MANIFEST.json"), open(os.path.join(out, "MANIFEST.json"), "rb").read()

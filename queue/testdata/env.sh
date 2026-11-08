@@ -1,4 +1,4 @@
-# 测试用的环境脚本（policy.py 的 OUTPUTS["env_script"]）：数据目录按机器表找，source 显存填充的启动器
+# Test env script (policy.py's OUTPUTS["env_script"]): find the data dir from the machine table and source the GPU pad launcher
 _fx=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TASKQ_DATA=${TASKQ_DATA:-$(TASKQ_CONFIG=${TASKQ_CONFIG:-$_fx/config} python3 "$_fx/../../sites/mtab.py" get . data 2> /dev/null)}
 export TASKQ_DATA

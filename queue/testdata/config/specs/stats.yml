@@ -1,4 +1,4 @@
-# 测试用：只有 conda 包
+# test: conda packages only
 channels: [conda-forge]
 override_channels: true
 conda:

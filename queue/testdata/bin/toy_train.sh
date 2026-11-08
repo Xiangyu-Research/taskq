@@ -1,5 +1,6 @@
 #!/bin/bash
-# 测试用的训练（toy 做法的命令）：在结果文件夹里写一份日志、存档和验证结果；DEMO_EPOCHS（默认 2）轮，每轮 DEMO_SLEEP 秒（默认 0）。
+# Test training (the toy recipe's command): write a log, checkpoint and validation result in the result dir; DEMO_EPOCHS
+# (default 2) rounds, DEMO_SLEEP seconds each (default 0).
 #   bash toy_train.sh <ds> <cfg> <frag> <plan> <variant>
 set -euo pipefail
 DS=$1 CFG=$2 FRAG=$3 PLAN=$4 VAR=$5

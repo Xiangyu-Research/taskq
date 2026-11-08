@@ -1,4 +1,4 @@
-# 测试用：建在 base 上的 venv
+# test: a venv built on base
 base: base
 pip:
   - six==1.16.0

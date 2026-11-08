@@ -1,5 +1,5 @@
-"""测试用的进度和设置读法（2026-11-02）：形状同真的领域插件（日志里 "Epoch N" 开始一轮、": Epoch time:" 训完一轮；
-设置在 debug.json）。做法里写 progress="toy_log"、info="toy_debug"。只用标准库。"""
+"""Test progress and settings readers: same shape as real domain plugins (a log line "Epoch N" starts a round, ": Epoch time:"
+finishes it; settings in debug.json). Recipes use progress="toy_log" and info="toy_debug". Standard library only."""
 import json
 import os
 import re
@@ -9,7 +9,7 @@ EPOCH_DONE = ": Epoch time:"
 
 
 def toy_log(path):
-    """train_log_*.txt（一个文件是一次启动）→ 开始、最后更新、训完的轮数；tl：每训完 10 轮记一个 [时间, 已训完轮数]。"""
+    """train_log_*.txt (one file per start) -> start, last update, finished rounds; tl: one [time, rounds done] entry per 10 finished rounds."""
     start = end = None
     done = 0
     cur = None
@@ -34,13 +34,13 @@ def toy_log(path):
 
 
 def toy_debug(fd):
-    """debug.json → 登记表的参数列。"""
+    """debug.json -> the registry's parameter columns."""
     try:
         d = json.load(open(os.path.join(fd, "debug.json")))
     except Exception:  # noqa: BLE001
         return {}
     return {"initial_lr": d.get("initial_lr"), "num_epochs": d.get("num_epochs"), "batch_size": d.get("batch_size"),
-            "机器": d.get("hostname"), "GPU": d.get("gpu_name")}
+            "machine": d.get("hostname"), "GPU": d.get("gpu_name")}
 
 
 PROGRESS = {"toy_log": toy_log}

@@ -13,11 +13,11 @@ ok=1
 check() { if eval "$2"; then echo "PASS:$1"; else echo "FAIL:$1"; ok=0; fi; }
 R="bash $HERE/run_task.sh"
 
-$R command key=toy/a 'cmd=echo "conda=${CONDA_DEFAULT_ENV:-无} venv=${DEMO_ACTIVE_VENV:-无}"; touch $TASKQ_DATA/toy/a/DONE' env=base out=toy/a 'done=["DONE"]' > "$T/o1"; rc=$?
+$R command key=toy/a 'cmd=echo "conda=${CONDA_DEFAULT_ENV:-none} venv=${DEMO_ACTIVE_VENV:-none}"; touch $TASKQ_DATA/toy/a/DONE' env=base out=toy/a 'done=["DONE"]' > "$T/o1"; rc=$?
 L=$T/logs/tasks/toy__a__test-1_part1.log
 check "done: exit 0" "(( rc == 0 ))"
 check "the first part log line records job, task, env and code" "head -1 '$L' | grep -q '^job test-1_1 @ .*task=toy/a, part 1, env base, code '"
-check "the command runs in the base env (machine table: local base is conda env base0)" "grep -q '^conda=base0 venv=无$' '$L'"
+check "the command runs in the base env (machine table: local base is conda env base0)" "grep -q '^conda=base0 venv=none$' '$L'"
 check "the log ends with done" "tail -1 '$L' | grep -q '^DONE'"
 $R command key=toy/a 'cmd=false' env=base out=toy/a 'done=["DONE"]' > "$T/o2"; rc=$?
 check "already done: not run again, exit 0" "(( rc == 0 )) && grep -q 'already done' '$T/o2'"
@@ -143,19 +143,19 @@ s += "MACHINES['site-pueue']['task_unset'] = ('DEMO_UNSET',)\n"
 open(p, "w").write(s)
 PY
 is_machine() { [[ $(TASKQ_CONFIG=$T/cfg_tv TASKQ_MACHINE=$1 python3 "$HERE/../sites/mtab.py" whoami) == "$1" ]]; }
-VC='cmd=echo "${DEMO_FAST:-无}/${DEMO_FAST_LOADER:-无}" > $TASKQ_DATA/toy/v.vars; echo "${DEMO_UNSET:-无}" > $TASKQ_DATA/toy/v.unset; touch $TASKQ_DATA/toy/v/DONE'
+VC='cmd=echo "${DEMO_FAST:-none}/${DEMO_FAST_LOADER:-none}" > $TASKQ_DATA/toy/v.vars; echo "${DEMO_UNSET:-none}" > $TASKQ_DATA/toy/v.unset; touch $TASKQ_DATA/toy/v/DONE'
 tvrun() { rm -rf "$T/toy/v"; env -u DEMO_FAST -u DEMO_FAST_LOADER DEMO_UNSET=job TASKQ_CONFIG=$T/cfg_tv TASKQ_MACHINE=$1 "${@:2}" $R command key=toy/v "$VC" env=base out=toy/v 'done=["DONE"]' > /dev/null; }
 check "test machine table copy: TASKQ_MACHINE resolves to site-pueue / hub / site-slurm" "is_machine site-pueue && is_machine hub && is_machine site-slurm"
 tvrun site-pueue; rc=$?
 check "site-pueue (task_vars in the machine table): exported to the task" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 1/1 ]]"
-check "site-pueue (task_unset in the machine table): set in the worker env, removed from the task" "[[ \$(cat $T/toy/v.unset) == 无 ]]"
+check "site-pueue (task_unset in the machine table): set in the worker env, removed from the task" "[[ \$(cat $T/toy/v.unset) == none ]]"
 tvrun site-pueue DEMO_FAST=0; rc=$?
 check "site-pueue: already set values kept, unset ones exported" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 0/1 ]]"
 tvrun hub; rc=$?
-check "hub (no task_vars): not exported" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+check "hub (no task_vars): not exported" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == none/none ]]"
 check "hub (no task_unset): passed to the task as usual" "[[ \$(cat $T/toy/v.unset) == job ]]"
 tvrun site-slurm; rc=$?
-check "site-slurm (no task_vars): not exported" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == 无/无 ]]"
+check "site-slurm (no task_vars): not exported" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == none/none ]]"
 
 # the task's command sees the core: TASKQ_LIB = the core's queue/, the core's bin/ first on PATH
 $R command key=toy/lib 'cmd=echo "$TASKQ_LIB|${PATH%%:*}" > $TASKQ_DATA/toy/lib.txt; touch $TASKQ_DATA/toy/lib/DONE' env=base out=toy/lib 'done=["DONE"]' > /dev/null; rc=$?

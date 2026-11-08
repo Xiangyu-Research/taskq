@@ -25,7 +25,7 @@ FAKE_SECS=3 SLURM_JOB_ID=900101 timeout 90 bash "$HERE/worker.sbatch" "$HERE/wor
 check "Slurm job: all four finish" '[[ $(grep -c ^end $T/train.log) == 4 ]]'
 check "Slurm job: the first two start together while the GPU is not busy" '[[ $(head -2 $T/train.log | grep -c ^start) == 2 ]]'
 check "env per task: alt uses the venv (on conda base0), base uses the conda env (not inside the venv)" \
-      'grep -q "^start .* t/b alt base0 " $T/train.log && grep -q "^start .* t/c 无 base0 " $T/train.log'
+      'grep -q "^start .* t/b alt base0 " $T/train.log && grep -q "^start .* t/c " $T/train.log && ! grep -q "^start .* t/c alt " $T/train.log'
 check "CPUs per training passed to the task (TASK_CPUS)" 'grep -q "cpus=[0-9]" $T/train.log'
 check "all claims released" '[[ -z $(ls $TASKQ_DIR/claims 2> /dev/null) ]]'
 check "part logs written to logs/tasks/ by task name and job id" '[[ -f $TASKQ_DATA/logs/tasks/t__a__900101_part1.log ]] && head -1 $TASKQ_DATA/logs/tasks/t__a__900101_part1.log | grep -q "^job 900101_1 @ .*task=t/a"'

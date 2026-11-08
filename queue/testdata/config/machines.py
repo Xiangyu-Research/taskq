@@ -1,9 +1,13 @@
-"""测试用的机器表：形状和字段同真的机器表（字段见 queue/schema.py，taskq machines fields），一台物理机器一项：
-  hub          总队列、store（结果的家）所在的机器（测试在哪台跑，哪台就是它）；根目录放 store 跑操作用的代码包
-  site-pueue   pueue 执行机：1 号卡全天、0 号卡按时段（别人用过要空满 60 分钟），另有一个 CPU worker
-  site-slurm   Slurm 执行机（GPU 和 CPU 作业），也放归档的备份
-  site-slurm2  另一个 Slurm 账号（只有 GPU 作业；和 site-slurm 主机名一样，靠 TASKQ_MACHINE 认）
-ssh 名字（fake-…）、环境名、目录、作业参数是虚构的。conda 指向 testdata/conda（假的 conda.sh：activate 只记下环境名）。
+"""Test machine table: same shape and fields as a real one (fields in queue/schema.py, taskq machines fields), one entry per
+physical machine:
+  hub          hub queue and store (home of results) (whichever machine runs the tests is this one); its root holds the bundle
+               used to run store operations
+  site-pueue   pueue executor: GPU 1 all day, GPU 0 in an hours window (60 minutes of quiet after someone else used it), plus
+               one CPU worker
+  site-slurm   Slurm executor (GPU and CPU jobs), also the archive backup
+  site-slurm2  another Slurm account (GPU jobs only; same hostname as site-slurm, told apart by TASKQ_MACHINE)
+ssh names (fake-...), env names, dirs and job options are made up. conda points at testdata/conda (fake conda.sh: activate only
+records the env name).
 """
 import os
 import re
@@ -32,7 +36,7 @@ MACHINES = {
                        conda=(FAKE_CONDA, "w0"), envs={"base": ("conda", "w0"), "alt": ("venv", FAKE + "/venv/alt", "base"),
                                                        "alt2": ("venv", FAKE + "/venv/alt2", "base")},
                        workers=[dict(gpu="1"),
-                                dict(gpu="0", hours=[("09:00", "09:00", None, None)], idle=60),  # 全天、首尾相接：结果和现在几点无关
+                                dict(gpu="0", hours=[("09:00", "09:00", None, None)], idle=60),  # all day, start = end: independent of the current time
                                 dict(cpus=8)],
                        disk=("/mnt/disk1", 40, 15), gpu_log=True, tunnel=("push", "pull"), budget=(100, 50),
                        task_vars=WS_TASK_VARS),
