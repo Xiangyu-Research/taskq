@@ -370,6 +370,13 @@ LOG_NOT_STARTED_RE = r"not started: (.*)"
 LOG_GPU_BUSY_FMT = "GPU %s busy%s, not running"
 LOG_GPU_BUSY_RE = r"GPU \S+ busy.*not running"
 LOG_UNREADABLE = "disk unreadable"           # prefix of the ENDED rest when the data dir cannot be read
+# full part-log line regexes: each writer format above plus the timestamp run_task.sh puts in front; readers use these
+LOG_TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+LOG_LINE_TS = r"^" + LOG_TS + r"(?:\.\d+)?:? ?(.*)$"
+LOG_ENDED = r"^" + LOG_TS + r" " + LOG_ENDED_RE + r"$"
+LOG_NOT_STARTED = r"^" + LOG_TS + r" " + LOG_NOT_STARTED_RE + r"$"
+LOG_GPU_BUSY = r"^" + LOG_TS + r" " + LOG_GPU_BUSY_RE + r"$"
+LOG_STALLED = r"^" + STALL_LINE + r" " + LOG_TS + r":? ?(.*)$"
 TASKLOG_TOP = ("version", "key", "data", "attempts", "events", "records")
 TASKLOG_ATTEMPT = ("file", "path", "job", "machine", "host", "part", "env", "code", "start", "end", "last", "state", "exit", "note")
 TASKLOG_EVENT = ("log", "time", "text")  # records: this key's entry in the hub's task records (tasks.json), as is

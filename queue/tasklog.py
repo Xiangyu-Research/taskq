@@ -28,12 +28,11 @@ import cfg  # noqa: E402
 import proto  # noqa: E402
 
 HEAD = re.compile(proto.LOG_HEAD)
-TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
-LINE_TS = re.compile(r"^" + TS + r"(?:\.\d+)?:? ?(.*)$")
-ENDED = re.compile(r"^" + TS + r" " + proto.LOG_ENDED_RE + r"$")
-NOT_STARTED = re.compile(r"^" + TS + r" " + proto.LOG_NOT_STARTED_RE + r"$")
-GPU_BUSY = re.compile(r"^" + TS + r" " + proto.LOG_GPU_BUSY_RE + r"$")
-STALLED = re.compile(r"^" + re.escape(proto.STALL_LINE) + r" " + TS + r":? ?(.*)$")
+LINE_TS = re.compile(proto.LOG_LINE_TS)
+ENDED = re.compile(proto.LOG_ENDED)
+NOT_STARTED = re.compile(proto.LOG_NOT_STARTED)
+GPU_BUSY = re.compile(proto.LOG_GPU_BUSY)
+STALLED = re.compile(proto.LOG_STALLED)
 
 
 def data_dir(arg=None):
@@ -84,7 +83,7 @@ def parse(path, key, now=None):
             if t:
                 cur["last"] = t.group(1)
             if ln.startswith(proto.DONE_LINE):
-                t = re.search(TS, ln)
+                t = re.search(proto.LOG_TS, ln)
                 cur.update(state="done", end=t.group(1) if t else cur["last"], exit=0)
             elif STALLED.match(ln):
                 m = STALLED.match(ln)

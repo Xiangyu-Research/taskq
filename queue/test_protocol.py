@@ -112,6 +112,14 @@ class ProtoAlone(unittest.TestCase):
         self.assertTrue(proto.claim_alive({"beat": 0}, 0, now, log_age=60))
         self.assertFalse(proto.claim_alive({"beat": 0}, 0, now, log_age=proto.FRESH_LOG + 1))
 
+    def test_part_log_lines(self):
+        ts = "2026-11-01 10:00:00"
+        self.assertEqual(re.fullmatch(proto.LOG_ENDED, f"{ts} " + proto.LOG_ENDED_FMT % (3, "rest")).groups(), (ts, "3", "rest"))
+        self.assertEqual(re.fullmatch(proto.LOG_NOT_STARTED, f"{ts} " + proto.LOG_NOT_STARTED_FMT % "why").groups(), (ts, "why"))
+        self.assertIsNotNone(re.fullmatch(proto.LOG_GPU_BUSY, f"{ts} " + proto.LOG_GPU_BUSY_FMT % (0, "")))
+        self.assertEqual(re.fullmatch(proto.LOG_STALLED, f"{proto.STALL_LINE} {ts}: log").groups(), (ts, "log"))
+        self.assertEqual(re.fullmatch(proto.LOG_LINE_TS, f"{ts} text").groups(), (ts, "text"))
+
 
 class NoCopies(unittest.TestCase):
     def test_env_registered(self):
