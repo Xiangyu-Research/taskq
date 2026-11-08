@@ -206,14 +206,14 @@ and `bin/taskq` mean the full suite):
 | `queue/db.py`, `queue/events.py`, `queue/tasklog.py` | `test_db.py`, `test_tasklog.py` |
 | `queue/cli_json.py` | `test_cli_json.py` |
 | `queue/migrate.py` | `test_migrate.py` |
-| `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_bundle_paths.py` |
+| `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_bundle_paths.py`, `test_e2e.py` (the Slurm chain) |
 | `sites/envs.py`, `sites/envs_cli.py` | `test_envs.py` |
 | `sites/envlock.py` | `test_envlock.py` |
 | `sync/tunnel.py`, `sync/tunnel_push.sh` | `test_tunnel.py` |
 | `monitor/health.py`, `monitor/notice.py`, `monitor/plain.py`, `monitor/push.py` | `test_health.py`, `test_probe.py`, `test_db.py` |
 | `monitor/overview.py` | `test_overview.py` |
 | `monitor/gpu_usage.py`, `monitor/gpu_log.sh` | `test_gpu_usage.py` |
-| anything crossing modules (send, transfer, finish, fetch in one round) | `test_e2e.py` |
+| anything crossing modules (send, transfer, finish, fetch in one round) | `test_e2e.py` (pueue, separate store and fake Slurm layouts) |
 <!-- /tests -->
 
 ## Example project

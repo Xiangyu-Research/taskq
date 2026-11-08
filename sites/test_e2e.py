@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """End-to-end test: add tasks → send to an executor → transfer data → train → fetch back → decide done → next step.
-Two layouts (together: the hub is also the store and a pueue executor; store: separate hub, store and executor) each run
-in their own subprocess. Everything (roots, data dirs, queue, machine table) lives in a temp dir; ssh is a local bash -c
-and pueue is a private pueued, so no real machine or state is touched.
+Three layouts (together: the hub is also the store and a pueue executor; store: separate hub, store and executor; slurm: a
+Slurm executor driven by fake sbatch/squeue commands) each run in their own subprocess. Everything (roots, data dirs, queue,
+machine table) lives in a temp dir; ssh is a local bash -c and pueue is a private pueued, so no real machine or state is
+touched.
 
-    python3 sites/test_e2e.py (E2E_LAYOUT=together|store runs one layout; E2E_TMP dir; E2E_KEEP=1 keeps it)"""
+    python3 sites/test_e2e.py (E2E_LAYOUT=together|store|slurm runs one layout; E2E_TMP dir; E2E_KEEP=1 keeps it)"""
 import datetime as dt
 import glob
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -17,12 +19,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # root of this scheduler code
-LAYOUTS = ("together", "store")
+LAYOUTS = ("together", "store", "slurm")
 LAYOUT = os.environ.get("E2E_LAYOUT")
 PUEUE = shutil.which("pueue") or os.path.expanduser("~/.local/bin/pueue")
 PUEUED = shutil.which("pueued") or os.path.expanduser("~/.local/bin/pueued")
@@ -146,10 +149,31 @@ os.makedirs(os.path.join(T, "r"))
 RLINK = os.path.join(SHORT, "r")
 os.symlink(os.path.join(T, "r"), RLINK)
 NAME = "site-pueue"
-PQS = pueue_home("site")
-SITE = dict(label="pueue", hostname=r"(?!)", ssh="fake-pueue-host", scheduler="pueue", root=RLINK, conda=(CONDA, "base"), envs=ENVS,
-            pueue=PQS["wrap"], workers=[dict(gpu="1")], tunnel=("push", "pull"), budget=(0, 0))
-if LAYOUT == "together":
+PQS = None
+SITE = None
+PQH = None
+SLURM_CONF = {}
+if LAYOUT == "slurm":
+    NAME = "site-slurm"
+    SR = os.path.join(T, "sr")  # the Slurm executor's root
+    HR, HD = os.path.join(T, "hr"), os.path.join(T, "hd")  # the hub is also the store
+    PQH = pueue_home("hub")
+    MACHINES = {
+        # the hub's hostname matches nothing: jobs run on this host but model a compute node, which is in no machine table
+        "hub": dict(label="hub", hostname=r"(?!)", ssh=None, roles=("hub", "store"), root=HR, data=HD, conda=(CONDA, "base"), envs=ENVS,
+                    pueue=PQH["wrap"], transfer=TRANSFER, budget=(0, 0)),
+        NAME: dict(label="slurm", hostname=r"node\d+", ssh="fake-slurm-host", scheduler="slurm", root=SR, conda=(CONDA, "base"), envs=ENVS,
+                   jobs=dict(gpu=dict(partition="gpu", gres="gpu:1", cpus=8, mem="8000M")), job_names="star",
+                   env_job="-p cpu -c 2", tunnel=("push", "pull"), budget=(0, 0)),
+    }
+    READY = {NAME: 3}
+    EXPS = None
+    SD = HD
+    SLURM_CONF = {NAME: dict(gpu={"gpu": ("02:00:00", 0)})}  # longer than MIN_LEFT, so a normal job may claim
+elif LAYOUT == "together":
+    PQS = pueue_home("site")
+    SITE = dict(label="pueue", hostname=r"(?!)", ssh="fake-pueue-host", scheduler="pueue", root=RLINK, conda=(CONDA, "base"), envs=ENVS,
+                pueue=PQS["wrap"], workers=[dict(gpu="1")], tunnel=("push", "pull"), budget=(0, 0))
     HR, HD = os.path.join(T, "hr"), os.path.join(T, "hd")  # the hub's root, data dir (the hub is also the store)
     PQH = pueue_home("hub")
     MACHINES = {
@@ -162,8 +186,10 @@ if LAYOUT == "together":
     EXPS = None
     SD = HD  # the store's data dir
 else:
+    PQS = pueue_home("site")
+    SITE = dict(label="pueue", hostname=r"(?!)", ssh="fake-pueue-host", scheduler="pueue", root=RLINK, conda=(CONDA, "base"), envs=ENVS,
+                pueue=PQS["wrap"], workers=[dict(gpu="1")], tunnel=("push", "pull"), budget=(0, 0))
     SR, SD = os.path.join(T, "sr"), os.path.join(T, "sd")  # the store's root, data dir
-    PQH = None
     MACHINES = {
         "hub": dict(label="hub", hostname=LOCAL, ssh=None, roles=("hub",)),
         "store": dict(label="store", hostname=r"(?!)", ssh="fake-store", roles=("store",), root=SR, data=SD, conda=(CONDA, "base"),
@@ -177,7 +203,7 @@ with open(os.path.join(CONF, "machines.py"), "w") as f:
 with open(os.path.join(CONF, "policy.py"), "w") as f:
     f.write(f'"""Policy for the end-to-end test ({LAYOUT}): written by test_e2e.py."""\nimport os\n\nimport cfg\n\n'
             'AUTO = dict(advance=True, envs=False, revive=False, smoke=False)\nPAUSE = {}\nHOLD = []\nPLACE = {}\n'
-            f'READY = {READY!r}\nSLURM = {{}}\n'
+            f'READY = {READY!r}\nSLURM = {SLURM_CONF!r}\n'
             f'OUTPUTS = dict(state={HS + "/"!r}, bundle=(os.path.dirname(cfg.CORE_REL) or ".",), experiments={EXPS!r}, name="e2e")\n')
 # env spec: a venv on a base env that has numpy (pip has nothing to download)
 with open(os.path.join(CONF, "specs", "toy.yml"), "w") as f:
@@ -195,6 +221,9 @@ os.environ.update(
     E2E_ORDER=ORDER, PYTHONPATH=HOOK)
 for v in ("TASKQ_DIR", "TASKQ_DATA", "TASKQ_ROOT", "TASKQ_MACHINE", "TASKQ_STATE", "TUNNEL_LOCK", "TUNNEL_URL", "TUNNEL_BIND"):
     os.environ.pop(v, None)
+if LAYOUT == "slurm":  # the hub's hostname matches nothing: this process is the hub only by name (see MACHINES above)
+    os.environ["TASKQ_MACHINE"] = "hub"
+os.environ.setdefault("USER", pwd.getpwuid(os.getuid()).pw_name)  # Slurm commands use $USER; run_tests.py does not pass it
 
 import cfg  # noqa: E402
 cfg.use_config()
@@ -213,6 +242,7 @@ import relay_transfer as RT  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import envs as E  # noqa: E402
 import pueue as PQ  # noqa: E402
+import slurm as SL  # noqa: E402
 
 HUB = M.hub()
 LOG, FAILS, DAEMONS = [], [], []
@@ -300,9 +330,10 @@ def setup_common():
         os.symlink(py, os.path.join(CONDA, "bin", n))
     wb(os.path.join(CONDA, "etc/profile.d/conda.sh"),
        f'conda() {{ if [[ ${{1:-}} == activate ]]; then export PATH="{CONDA}/bin:$PATH"; fi; }}\n')
-    start_pueued(PQS, ["gpu1"])
+    if PQS:
+        start_pueued(PQS, ["gpu1"])
     if PQH:
-        start_pueued(PQH, ["gpu1", "gpu0"])
+        start_pueued(PQH, ["gpu1", "gpu0"] if LAYOUT == "together" else [proto.IO_GROUP])
     relay.refill.add = fake_add
     # the bundle: this worktree's code (new files not in git yet go in through a temporary index, the real index is untouched); each machine gets it deployed by the check
     idx = os.path.join(T, "index")
@@ -747,6 +778,729 @@ def main_together():
 
 
 # ======================================================================================================
+# slurm: a Slurm executor; sbatch/squeue/sacctmgr/scancel are fakes driven by the test
+# ======================================================================================================
+SLDIR = os.path.join(T, "slurm")
+SL_JOBS = os.path.join(SLDIR, "jobs")
+SL_LIMIT = 2  # maxsubmitpu of the fake QOS "gpu"
+SL_PROCS, SL_PGIDS = {}, []
+SF = None  # the fake Slurm's state module, written and imported by main_slurm
+
+SL_FAKE = r'''"""State and command-line behaviour of the fake Slurm in sites/test_e2e.py: one JSON record per job under jobs/."""
+import json
+import os
+import signal
+import sys
+import time
+
+SL = os.path.dirname(os.path.abspath(__file__))
+JOBS = os.path.join(SL, "jobs")
+LIMITS = os.path.join(SL, "limits.json")
+
+
+def path(jid):
+    return os.path.join(JOBS, f"{int(jid)}.json")
+
+
+def load(jid):
+    with open(path(jid)) as f:
+        return json.load(f)
+
+
+def save(j):
+    os.makedirs(JOBS, exist_ok=True)
+    tmp = path(j["id"]) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(j, f)
+    os.replace(tmp, path(j["id"]))
+
+
+def remove(jid):
+    try:
+        os.remove(path(jid))
+    except OSError:
+        pass
+    import shutil
+    shutil.rmtree(os.path.join(JOBS, str(int(jid))), ignore_errors=True)
+
+
+def ids():
+    try:
+        return sorted(int(n[:-5]) for n in os.listdir(JOBS) if n.endswith(".json"))
+    except OSError:
+        return []
+
+
+def jobs():
+    return [load(i) for i in ids()]
+
+
+def limit(qos):
+    try:
+        with open(LIMITS) as f:
+            return json.load(f).get(qos)
+    except (OSError, ValueError):
+        return None
+
+
+def next_id():
+    return max(ids(), default=999) + 1
+
+
+def seconds(spec):
+    """--time value -> seconds (none: 1 hour)."""
+    if not spec:
+        return 3600
+    days = 0
+    if "-" in spec:
+        d, spec = spec.split("-", 1)
+        days = int(d)
+    p = [int(x) for x in spec.split(":")]
+    h, m, s = (p if len(p) == 3 else (0, p[0], p[1]) if len(p) == 2 else (0, 0, p[0]))
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
+def mb(spec):
+    """--mem value -> MiB (M/G suffix; plain numbers are MiB)."""
+    if not spec:
+        return 0
+    s = str(spec).upper()
+    try:
+        return int(float(s[:-1]) * (1024 if s.endswith("G") else 1)) if s[-1] in "MG" else int(float(s))
+    except ValueError:
+        return 0
+
+
+def alive(j):
+    """A pending job is alive; a running one is alive while its process is not a zombie."""
+    if j["state"] == "PENDING":
+        return True
+    if j["state"] != "RUNNING":
+        return False
+    try:
+        with open(f"/proc/{j['pid']}/stat") as f:
+            return f.read().split()[2] != "Z"
+    except OSError:
+        return False
+
+
+def stop(j, state, killwait=10.0):
+    """SIGTERM the job's process group, SIGKILL after killwait seconds, then mark it state."""
+    j["state"] = state
+    if j.get("start"):
+        j["end"] = time.time()
+    save(j)
+    pgid = j.get("pgid")
+    if not pgid:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    end = time.time() + killwait
+    while time.time() < end:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def elapsed(j):
+    if j["state"] != "RUNNING" or not j.get("start"):
+        return "0:00"
+    s = int(time.time() - j["start"])
+    if s >= 86400:
+        return f"{s // 86400}-{s % 86400 // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+    if s >= 3600:
+        return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def end_text(j):
+    if j["state"] != "RUNNING" or not j.get("start"):
+        return "N/A"
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(j["start"] + j["time_sec"]))
+
+
+def field(j, code):
+    return {"i": str(j["id"]), "j": j["name"], "T": j["state"], "M": elapsed(j), "q": j["qos"],
+            "R": "node1" if j["state"] == "RUNNING" else "(Priority)", "o": j["script_arg"],
+            "e": end_text(j), "A": str(j["id"]), "a": "0"}.get(code, code)
+
+
+def expand(fmt, j):
+    out = []
+    it = iter(range(len(fmt)))
+    for i in it:
+        if fmt[i] == "%" and i + 1 < len(fmt) and fmt[i + 1] != "%":
+            out.append(field(j, fmt[i + 1]))
+            next(it, None)
+        else:
+            out.append(fmt[i])
+    return "".join(out)
+
+
+def cmd_sbatch(argv):
+    opts = {"-J": "name", "--job-name": "name", "--qos": "qos", "--time": "time", "--chdir": "chdir",
+            "--output": "output", "--export": "export", "--partition": "partition", "--gres": "gres",
+            "--cpus-per-task": "cpus", "--mem": "mem", "--nodes": "nodes"}
+    o = dict(name=None, qos=None, time="01:00:00", chdir=None, output=None, export="ALL", partition=None,
+             gres=None, cpus=None, mem=None, nodes=None)
+    pos, i = [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--parsable":
+            i += 1
+            continue
+        key = a.split("=", 1)[0]
+        if key in opts:
+            if "=" in a:
+                v = a.split("=", 1)[1]
+            else:
+                i += 1
+                v = argv[i] if i < len(argv) else ""
+            o[opts[key]] = v
+        elif a.startswith("-"):
+            sys.stderr.write(f"sbatch: error: unrecognized option '{a}'\n")
+            return 1
+        else:
+            pos = argv[i:]
+            break
+        i += 1
+    if not pos:
+        sys.stderr.write("sbatch: error: no script given\n")
+        return 1
+    user = os.environ.get("USER", "")
+    live = [j for j in jobs() if j["state"] in ("PENDING", "RUNNING") and j["qos"] == o["qos"] and j["user"] == user]
+    lim = limit(o["qos"])
+    if lim is not None and len(live) >= lim:
+        sys.stderr.write("sbatch: error: QOSMaxSubmitJobPerUserLimit\n")
+        return 1
+    jid = next_id()
+    d = os.path.join(JOBS, str(jid))
+    os.makedirs(d)
+    copy = os.path.join(d, os.path.basename(pos[0]))
+    import shutil
+    shutil.copy2(pos[0], copy)
+    j = dict(id=jid, name=o["name"] or os.path.basename(pos[0]), qos=o["qos"], time=o["time"], time_sec=seconds(o["time"]),
+             chdir=o["chdir"], output=o["output"], export=o["export"], partition=o["partition"], gres=o["gres"],
+             cpus=int(o["cpus"]) if o["cpus"] else 0, mem=o["mem"], mem_mb=mb(o["mem"]), nodes=o["nodes"],
+             script=copy, script_arg=pos[0], args=pos[1:], argv=list(argv), cwd=os.getcwd(),
+             env=dict(os.environ), user=user, state="PENDING", start=None, end=None, pid=None, pgid=None)
+    save(j)
+    print(jid)
+    return 0
+
+
+def cmd_squeue(argv):
+    fmt, states, qos, ids_, user, header = "%i|%j|%T|%M|%q|%R", [], [], [], None, True
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "-h":
+            header = False
+        elif a in ("-r", "--array"):
+            pass
+        elif a in ("-u", "--user", "-j", "--jobs", "-q", "--qos", "-t", "--states", "-o", "--format", "-p", "--partition"):
+            i += 1
+            v = argv[i] if i < len(argv) else ""
+            if a in ("-u", "--user"):
+                user = v
+            elif a in ("-j", "--jobs"):
+                ids_ += v.split(",")
+            elif a in ("-q", "--qos"):
+                qos.append(v)
+            elif a in ("-t", "--states"):
+                states += v.split(",")
+            elif a in ("-o", "--format"):
+                fmt = v
+        elif a.startswith("-"):
+            sys.stderr.write(f"squeue: error: unrecognized option '{a}'\n")
+            return 1
+        i += 1
+    want = {"PD": "PENDING", "PENDING": "PENDING", "R": "RUNNING", "RUNNING": "RUNNING"}
+    states = [want.get(x, x) for x in states]
+    out = []
+    for j in jobs():
+        if not alive(j):
+            if j["state"] == "RUNNING":
+                j["state"], j["end"] = "COMPLETED", time.time()
+                save(j)
+            continue
+        if user and j["user"] != user:
+            continue
+        if ids_ and str(j["id"]) not in ids_:
+            continue
+        if qos and j["qos"] not in qos:
+            continue
+        if states and j["state"] not in states:
+            continue
+        out.append(expand(fmt, j))
+    if header and out:
+        print("JOBID NAME STATE TIME QOS NODELIST(REASON)")
+    print("\n".join(out))
+    return 0
+
+
+def cmd_sacctmgr(argv):
+    qos = argv[argv.index("qos") + 1] if "qos" in argv and argv.index("qos") + 1 < len(argv) else None
+    lim = limit(qos) if qos else None
+    print("" if lim is None else lim)
+    return 0 if lim is not None else 1
+
+
+def cmd_scancel(argv):
+    for a in argv:
+        if a.startswith("-"):
+            continue
+        for part in a.split(","):
+            try:
+                j = load(part)
+            except (OSError, ValueError):
+                continue
+            if j["state"] == "PENDING":
+                remove(part)
+            elif j["state"] == "RUNNING":
+                stop(j, "CANCELLED")
+    return 0
+
+
+def cmd_srun(argv):
+    """Run the job command here: skip srun options (and the -I wait), then exec the rest."""
+    skip = {"-I", "-p", "--partition", "-J", "--job-name", "-c", "--cpus-per-task", "-t", "--time", "--mem",
+            "-q", "--qos", "--gres", "--nodes", "-n", "--ntasks"}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in skip:
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        break
+    if i >= len(argv):
+        return 1
+    os.execvp(argv[i], argv[i:])
+    return 1
+
+
+def main(cmd, argv):
+    return {"sbatch": cmd_sbatch, "squeue": cmd_squeue, "sacctmgr": cmd_sacctmgr,
+            "scancel": cmd_scancel, "srun": cmd_srun}[cmd](argv)
+'''
+
+
+def setup_slurm_fake():
+    os.makedirs(SL_JOBS, exist_ok=True)
+    wb(os.path.join(SLDIR, "limits.json"), json.dumps({"gpu": SL_LIMIT}))
+    wb(os.path.join(SLDIR, "slurm_fake.py"), SL_FAKE)
+    for n in ("sbatch", "squeue", "sacctmgr", "scancel", "srun"):
+        p = os.path.join(BIN, n)
+        wb(p, f'#!/usr/bin/env python3\nimport sys\nsys.path.insert(0, {SLDIR!r})\nimport slurm_fake\n'
+              f'sys.exit(slurm_fake.main({n!r}, sys.argv[1:]))\n')
+        os.chmod(p, 0o755)
+
+
+def sjob(jid):
+    return SF.load(jid)
+
+
+def sjobs():
+    return SF.jobs()
+
+
+def sprobe():
+    """The hub's probe over the fake ssh → sites/slurm.parse's result."""
+    rc, out, err = RM.rsh(NAME, SL.probe(NAME))
+    return SL.parse(out + err) if rc == 0 else None
+
+
+def slurm_start(jid):
+    """Start a pending job: run its copied script in a new session with Slurm's environment."""
+    j = SF.load(jid)
+    assert j["state"] == "PENDING", j
+    env = dict(j["env"]) if str(j.get("export") or "ALL").split(",")[0] in ("ALL", "") else {}
+    for v in proto.HUB_ONLY_ENV:
+        env.pop(v, None)
+    for part in str(j.get("export") or "").split(",")[1:]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            env[k] = v
+    env.update(SLURM_JOB_ID=str(jid), SLURM_JOB_NAME=j["name"], SLURM_SUBMIT_DIR=j["cwd"],
+               SLURM_CPUS_ON_NODE=str(j["cpus"] or 1), SLURM_CPUS_PER_TASK=str(j["cpus"] or 1),
+               SLURM_MEM_PER_NODE=str(j["mem_mb"]), SLURMD_NODENAME="node1")
+    out = j["output"].replace("%x", j["name"]).replace("%j", str(jid)).replace("%A", str(jid))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    f = open(out, "a")
+    try:
+        p = subprocess.Popen(["bash", j["script"], *j["args"]], cwd=j["chdir"] or j["cwd"], env=env,
+                             stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    finally:
+        f.close()
+    j.update(state="RUNNING", start=time.time(), end=None, pid=p.pid, pgid=os.getpgid(p.pid))
+    SF.save(j)
+    SL_PROCS[jid] = p
+    SL_PGIDS.append(j["pgid"])
+    threading.Thread(target=slurm_reap, args=(jid, p), daemon=True).start()
+    return p
+
+
+def slurm_reap(jid, p):
+    rc = p.wait()
+    try:
+        j = SF.load(jid)
+        if j["state"] == "RUNNING":
+            j.update(state="COMPLETED", end=time.time(), rc=rc)
+            SF.save(j)
+    except OSError:
+        pass
+
+
+def slurm_wait(jid, timeout=60):
+    p = SL_PROCS.get(jid)
+    if p:
+        p.wait(timeout)
+
+
+def slurm_timeout(jid):
+    """The time limit: SIGTERM, then SIGKILL after a few seconds."""
+    j = SF.load(jid)
+    SF.stop(j, "TIMEOUT")
+    slurm_wait(jid)
+
+
+def slurm_node_fail(jid):
+    """The node died: SIGKILL at once, no release from the worker."""
+    j = SF.load(jid)
+    j.update(state="NODE_FAIL", end=time.time())
+    SF.save(j)
+    try:
+        os.killpg(j["pgid"], signal.SIGKILL)
+    except (ProcessLookupError, TypeError):
+        pass
+    slurm_wait(jid)
+
+
+def slurm_cancel(jid):
+    j = SF.load(jid)
+    if j["state"] == "PENDING":
+        SF.remove(jid)
+    else:
+        SF.stop(j, "CANCELLED")
+        slurm_wait(jid)
+
+
+def kill_running():
+    """Kill running jobs (they are idle after their task is done); pending jobs stay."""
+    for j in sjobs():
+        if j["state"] == "RUNNING":
+            slurm_node_fail(j["id"])
+
+
+def clear_jobs():
+    """Cancel every pending job and kill any left running (job failures keep no claims here)."""
+    for j in sjobs():
+        if j["state"] == "PENDING":
+            SF.remove(j["id"])
+    kill_running()
+
+
+def remote_tasks():
+    return {t["key"]: t for t in (relay.remote_status(NAME) or {}).get("taskq", {}).get("tasks", [])}
+
+
+def slurm_output(jid):
+    j = SF.load(jid)
+    p = j["output"].replace("%x", j["name"]).replace("%j", str(jid)).replace("%A", str(jid))
+    try:
+        return open(p, errors="replace").read()
+    except OSError:
+        return ""
+
+
+def add_slurm_task(key, pause=0, data="d1"):
+    name = key.rsplit("/", 1)[-1]
+    out = f"guest/e2e/r/{name}"
+    cmd = f"python3 {{data}}/guest/e2e/code/toy.py --data {{data}}/guest/e2e/{data} --out {{data}}/{out}"
+    if pause:
+        cmd += f" --pause {pause}"
+    p = os.path.join(T, "sheets", name + ".json")
+    wb(p, json.dumps([sheet(key, ["guest/e2e/code", f"guest/e2e/{data}"], cmd, out, [NAME])], ensure_ascii=False))
+    central(f"add --file {p}")
+    return out
+
+
+def wait_task_done(key, timeout=180):
+    wait(lambda: hub_tasks().get(key, {}).get("state") == "done", timeout, f"{key} done and fetched", every=1, act=check)
+
+
+def part_logs(key):
+    d = os.path.join(SR, proto.ROOT["data"], proto.TASK_LOGS)
+    return sorted(os.path.join(d, f) for f in os.listdir(d) if f.startswith(proto.safe(key) + proto.SAFE)) if os.path.isdir(d) else []
+
+
+def age_logs(key):
+    """Age everything the queue looks at for 'still running': the part log, the training log and the output dir."""
+    old = time.time() - 3600
+    for p in part_logs(key):
+        os.utime(p, (old, old))
+    out = ((remote_tasks().get(key) or {}).get("params") or {}).get("out")
+    d = os.path.join(SR, proto.ROOT["data"], out) if out else None
+    if d and os.path.isdir(d):
+        for dp, _, fs in os.walk(d):
+            for f in fs:
+                try:
+                    os.utime(os.path.join(dp, f), (old, old))
+                except OSError:
+                    pass
+
+
+def age_claim(key):
+    """Make a dead job's claim stale: age the heartbeat and the part log (no 20-minute wait)."""
+    d = os.path.join(SR, proto.ROOT["queue"], proto.QUEUE["claims"], proto.safe(key))
+    info = os.path.join(d, proto.CLAIM_INFO)
+    j = json.load(open(info))
+    j["beat"] = time.time() - 3600
+    wb(info, json.dumps(j))
+    age_logs(key)
+
+
+# The frozen launcher: the sbatch body queue/relay_bundle.py gen_sbatch generated at 85146e9 (no TASKQ_ROOT/TASKQ_MACHINE;
+# root and machine come from the launcher once that change is made). Kept as text because queued jobs on the cluster run it.
+OLD_LAUNCHER = '''#!/bin/bash
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:1
+R={root}
+REPO=$(readlink -f "$R/code/current")
+export TASKQ_DIR=$R/queue TASKQ_GPU_PAD_SWITCH=$R/queue/gpu_pad_DISABLED
+exec bash "$REPO/scripts/taskq/queue/worker_start.sh"
+'''
+
+
+def setup_slurm():
+    wb(os.path.join(HD, "guest/e2e/code/toy.py"), TOY)
+    for i in (1, 2):
+        wb(os.path.join(HD, f"guest/e2e/d{i}/a.txt"), text_of(i))
+
+
+def step_slurm_deploy(bid):
+    check(src_ok=False)
+    check()
+    roots = [m["root"] for m in M.MACHINES.values() if m.get("root")]
+    cur = {r: os.path.basename(os.path.realpath(os.path.join(r, proto.ROOT["current"]))) for r in roots}
+    step("first check: the bundle is deployed to the hub's store and to the Slurm executor",
+         all(v == bid for v in cur.values()), cur)
+    rs = relay.remote_status(NAME)
+    step("the Slurm executor's queue is enabled and empty, it uses this bundle, and squeue shows no jobs",
+         rs is not None and rs["bundle"] == bid and rs["taskq"]["enabled"] and rs["taskq"]["tasks"] == [] and rs["squeue"] == [], rs)
+
+
+def step_slurm_submit(bid):
+    K = "guest/e2e/sl1"
+    add_slurm_task(K)
+    check()  # stage only: topup reads the state from before the assignment
+    step("the first check stages the task and submits no job", not [j for j in sjobs() if j["state"] in ("PENDING", "RUNNING")], sjobs())
+    check()
+    js = [j for j in sjobs() if j["state"] in ("PENDING", "RUNNING")]
+    step(f"the next check submits worker jobs for the staged task, up to the QOS limit ({SL_LIMIT})", len(js) == SL_LIMIT,
+         [(j["id"], j["state"]) for j in js])
+    j = js[0]
+    a = j["argv"]
+    step("sbatch argv: the worker script and start script under code/current (path text, resolved when the job starts), "
+         "--export=ALL with TASKQ_ROOT and TASKQ_MACHINE, partition, cards, CPUs, memory, QOS and time",
+         a[0] == "--parsable" and a[-1].endswith("/queue/worker_start.sh") and "/code/current/" in a[-1]
+         and a[-2].endswith("/queue/worker.sbatch") and "/code/current/" in a[-2]
+         and f"--export=ALL,TASKQ_ROOT={SR},TASKQ_MACHINE={NAME}" in a and "--partition=gpu" in a and "--gres=gpu:1" in a
+         and "--cpus-per-task=8" in a and "--mem=8000M" in a and "--qos=gpu" in a and "--time=02:00:00" in a, a)
+    st = sprobe()
+    step("the job is PENDING and the probe counts two queued of two allowed", j["state"] == "PENDING"
+         and st is not None and st["counts"].get("gpu") == (SL_LIMIT, SL_LIMIT, SL_LIMIT), (j["state"], st))
+    check()
+    step("another check does not submit past the QOS limit",
+         len([x for x in sjobs() if x["state"] in ("PENDING", "RUNNING")]) == SL_LIMIT, [(x["id"], x["state"]) for x in sjobs()])
+    slurm_start(j["id"])
+    wait_task_done(K)
+    kill_running()  # the worker idles after finishing; leave only the pending job for the next case
+    res = json.load(open(os.path.join(HD, "guest/e2e/r/sl1/result.json")))
+    step("the started job claims the task, trains it and the hub fetches it back: real content",
+         res["text"] == text_of(1) and res["total"] == 3 * sum(text_of(1).encode()) and res["start"] == 0, res)
+    log = slurm_output(j["id"])
+    step("the worker log names the job id and the bundle it runs from", f"job {j['id']} @" in log and f"code {bid}" in log, log[-800:])
+    return j["id"]
+
+
+def step_slurm_bundle_switch(oldbid, pending):
+    """Switch bundles while a job is queued; it must start the new one (code/current is resolved then)."""
+    K = "guest/e2e/sl2"
+    add_slurm_task(K)
+    check()  # stage
+    check()  # one more job: one is still pending from the previous case
+    pend = [j for j in sjobs() if j["state"] == "PENDING"]
+    step("a queued job from before and a task staged now: the QOS is full again", len(pend) == SL_LIMIT,
+         [(j["id"], j["state"]) for j in pend])
+    with open(os.path.join(CONF, "policy.py"), "a") as f:  # harmless change: the bundle id changes
+        f.write("\n# bundle switch test\n")
+    nbid, _ = RB.build(None)
+    commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+    core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{commit}:{core}": nbid}))
+    check()  # deploy the new bundle
+    step("the executor switched to the new bundle while the job waits", relay.remote_status(NAME)["bundle"] == nbid,
+         (relay.remote_status(NAME) or {}).get("bundle"))
+    slurm_start(pending)
+    wait_task_done(K)
+    kill_running()
+    log = slurm_output(pending)
+    step("a job submitted before the switch starts the new bundle: the worker log shows its id", f"code {nbid}" in log, log[-800:])
+    r = subprocess.run([sys.executable, os.path.join(CORE, "queue", "tasklog.py"), K, "--json"], capture_output=True, text=True)
+    try:
+        attempts = json.loads(r.stdout).get("attempts") or []
+    except ValueError:
+        attempts = []
+    step("the task's part log records the new bundle as its code", r.returncode == 0 and attempts and attempts[0]["code"] == nbid,
+         (r.stdout + r.stderr)[-500:])
+    res = json.load(open(os.path.join(HD, "guest/e2e/r/sl2/result.json")))
+    step("the task finishes on the new bundle with real content", res["text"] == text_of(1) and res["start"] == 0, res)
+    return nbid
+
+
+def step_old_launcher():
+    """A job submitted by the old code (no TASKQ_ROOT/TASKQ_MACHINE) cannot find its root and machine yet: SKIP, not fail."""
+    clear_jobs()
+    p = os.path.join(T, "old_launcher.sbatch")
+    wb(p, OLD_LAUNCHER.format(root=SR))
+    cmd = (f"R={SR}; mkdir -p $R/{proto.ROOT['data']}/{proto.WORKER_LOGS} && sbatch --parsable -J old-pending --qos=gpu "
+           f"--time=00:30:00 --chdir=\"$R\" --output=$R/{proto.ROOT['data']}/{proto.WORKER_LOGS}/%x_%j.out --export=ALL {p}")
+    rc, out, err = RM.rsh(NAME, cmd)
+    step("an old launcher script submits through the fake sbatch", rc == 0 and out.strip().isdigit(), (rc, out, err))
+    jid = int(out.strip().splitlines()[-1])
+    slurm_start(jid)
+    slurm_wait(jid, 60)
+    log = slurm_output(jid)
+    if "has no conda for this machine" in log:
+        print("SKIP: old pending jobs need the launcher to find root and machine itself (not done yet)", flush=True)
+        return
+    step("unexpected: a job with the old launcher ran; that is a pass, but the case must be removed", "task queue worker (" in log, log[-800:])
+
+
+def step_slurm_timeout():
+    clear_jobs()
+    K = "guest/e2e/sl4"
+    add_slurm_task(K, pause=600)
+    check()  # stage
+    check()  # submit
+    pending = [j for j in sjobs() if j["state"] == "PENDING"]
+    j = pending[0]
+    slurm_start(j["id"])
+    wait(lambda: os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl4/ckpt_02.json")), 120, "training finishes round 2", every=0.2)
+    step("the job claims the task and trains", (remote_tasks().get(K) or {}).get("worker") == str(j["id"]), remote_tasks().get(K))
+    slurm_timeout(j["id"])
+    age_logs(K)  # a fresh part log counts as busy for FRESH_LOG; the test does not wait that long
+    rq = remote_tasks().get(K) or {}
+    log = slurm_output(j["id"])
+    fail = os.path.join(SR, proto.ROOT["queue"], proto.QUEUE["failures"], proto.safe(K))
+    step("time limit: the job says so, training stopped, the claim is released, the checkpoint stays, no failure record",
+         "got stop signal (likely the time limit)" in log and not os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl4/DONE"))
+         and not rq.get("worker") and rq.get("state") == proto.S_FREE
+         and os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl4/ckpt_02.json")) and not os.path.exists(fail),
+         (rq, log[-800:]))
+    slurm_start(pending[1]["id"])
+    wait_task_done(K)
+    res = json.load(open(os.path.join(HD, "guest/e2e/r/sl4/result.json")))
+    step("a second job resumes from the checkpoint and finishes", res["start"] > 0 and res["total"] == 3 * sum(text_of(1).encode()), res)
+
+
+def step_slurm_close_end():
+    clear_jobs()
+    K = "guest/e2e/sl5"
+    add_slurm_task(K, pause=600)
+    check()  # stage only
+    cmd = SL.submit_cmd(NAME, "gpu", "00:10:00", "gpu")  # 10 minutes < MIN_LEFT (60): the job must end at once
+    rc, out, err = RM.rsh(NAME, cmd)
+    step("a job with a short time limit is submitted by hand", rc == 0 and out.strip().isdigit(), (rc, out, err))
+    jid = int(out.strip().splitlines()[-1])
+    slurm_start(jid)
+    slurm_wait(jid, 60)
+    log = slurm_output(jid)
+    rq = remote_tasks().get(K) or {}
+    step("a job close to its time limit claims nothing and says so", "less than 60 minutes left; ending the job" in log
+         and not rq.get("worker") and not os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl5/ckpt_01.json")), (log[-800:], rq))
+    return K
+
+
+def step_slurm_node_fail(K):
+    clear_jobs()
+    check()  # topup sees the staged task from the previous case
+    pend = [j for j in sjobs() if j["state"] == "PENDING"]
+    j = pend[0]
+    slurm_start(j["id"])
+    wait(lambda: os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl5/ckpt_02.json")), 120, "training finishes round 2", every=0.2)
+    slurm_node_fail(j["id"])
+    rq = remote_tasks().get(K) or {}
+    step("node failure: nobody released the claim", rq.get("worker") == str(j["id"]) and rq.get("state") == proto.S_CLAIMED, rq)
+    fail = os.path.join(SR, proto.ROOT["queue"], proto.QUEUE["failures"], proto.safe(K))
+    step("node failure: no failure record (the worker never reported one; the claim only expires)",
+         not os.path.exists(fail), os.listdir(os.path.dirname(fail)) if os.path.isdir(os.path.dirname(fail)) else [])
+    age_claim(K)
+    check()  # the stale claim is claimable again
+    pend = [x for x in sjobs() if x["state"] == "PENDING"]
+    step("the hub submits for the stale task", bool(pend), [(x["id"], x["state"]) for x in sjobs()])
+    slurm_start(pend[0]["id"])
+    wait_task_done(K)
+    res = json.load(open(os.path.join(HD, "guest/e2e/r/sl5/result.json")))
+    step("a new job reclaims the task and resumes from the checkpoint", res["start"] > 0, res)
+
+
+def step_slurm_scancel():
+    clear_jobs()
+    K = "guest/e2e/sl7"
+    add_slurm_task(K, pause=600)
+    check()  # stage
+    check()  # submit
+    before = sprobe()["counts"]["gpu"][1]
+    j = [x for x in sjobs() if x["state"] == "PENDING"][0]
+    slurm_cancel(j["id"])
+    after = sprobe()["counts"]["gpu"][1]
+    step("scancel a pending job: the hub's next probe count drops", after == before - 1, (before, after))
+    j = [x for x in sjobs() if x["state"] == "PENDING"][0]
+    slurm_start(j["id"])
+    wait(lambda: os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl7/ckpt_02.json")), 120, "training finishes round 2", every=0.2)
+    slurm_cancel(j["id"])
+    age_logs(K)
+    rq = remote_tasks().get(K) or {}
+    step("scancel a running job follows the time-limit path: released, checkpoint kept, no failure",
+         not rq.get("worker") and rq.get("state") == proto.S_FREE
+         and os.path.exists(os.path.join(SR, "data/guest/e2e/r/sl7/ckpt_02.json"))
+         and not os.path.exists(os.path.join(SR, proto.ROOT["queue"], proto.QUEUE["failures"], proto.safe(K))), rq)
+
+
+def main_slurm():
+    global SF
+    setup_slurm_fake()
+    sys.path.insert(0, SLDIR)
+    import slurm_fake as SF  # noqa: E402  (written by setup_slurm_fake)
+    bid = setup_common()
+    setup_slurm()
+    step_slurm_deploy(bid)
+    rc, out = E.build(NAME, "toy", run=run_local)
+    step("the toy env is built on the Slurm executor", rc == 0 and os.path.isfile(os.path.join(SR, "state/envs/toy.ok")), out)
+    step_slurm_submit(bid)
+    pending = [j["id"] for j in sjobs() if j["state"] == "PENDING"][0]
+    step_slurm_bundle_switch(bid, pending)
+    step_old_launcher()
+    step_slurm_timeout()
+    left = step_slurm_close_end()
+    step_slurm_node_fail(left)
+    step_slurm_scancel()
+
+
+# ======================================================================================================
 # store: the hub, store and executor have different roots
 # ======================================================================================================
 KS = "guest/e2e/s1"
@@ -851,6 +1605,19 @@ def cleanup():
             p.wait(10)
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGKILL)
+    # jobs the fake Slurm started: only the process groups it recorded
+    for pgid in SL_PGIDS:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+    for p in list(SL_PROCS.values()):
+        try:
+            p.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
     # stop only processes started from this temp dir (workers, training, tunnel servers)
     pids = set()
     for pat in (T, SHORT):
@@ -866,7 +1633,12 @@ def cleanup():
 
 def main():
     try:
-        main_together() if LAYOUT == "together" else main_store()
+        if LAYOUT == "together":
+            main_together()
+        elif LAYOUT == "store":
+            main_store()
+        else:
+            main_slurm()
     except Exception as e:  # noqa: BLE001
         if not isinstance(e, AssertionError) or str(e) not in FAILS:
             print(f"FAIL:{type(e).__name__}: {e}")
