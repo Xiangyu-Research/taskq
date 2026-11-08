@@ -1,15 +1,15 @@
-"""插件用的核心接口：做法、中继插件只 import 这个模块，不 import 核心的其他模块（recipes、relay_plugins、spec…）。
-插件文件要导出哪些名字见 cfg.py 开头。
+"""The core interface for plugins: recipes and relay plugins import only this module, never other core modules (recipes,
+relay_plugins, spec, ...). Which names a plugin file exports is described at the top of cfg.py.
 
-  REQUIRED              做法的参数默认值写它 = 任务必须给
-  RelayError            中继插件准备输入、核对结果出错时报它
-  walk(p)               文件夹 p 下的文件（相对 p，跟着软链接走），排好序
-  expand(root, rel)     数据目录下的一个输入 → (files, 视图文件夹或 None)
-  sha256(p)             文件的 sha256
-  REPO                  使用者的仓库根（任务命令里的相对路径相对它）
-  rel(*parts)           调度代码里的文件相对 REPO 的路径
-  listed_inputs(spec, root)  任务说明的 inputs_cmd 真跑一次（{data} = root）→ 它打印的输入；没写 inputs_cmd → []
-只用标准库和 cfg.py、common.py（listed_inputs 用时才载入 spec.py）。"""
+  REQUIRED              write it as a recipe param default = the task must give it
+  RelayError            relay plugins raise it when preparing inputs or checking results fails
+  walk(p)               files under dir p (relative to p, following symlinks), sorted
+  expand(root, rel)     one input under the data dir -> (files, view dir or None)
+  sha256(p)             sha256 of a file
+  REPO                  the user's repo root (relative paths in task commands are relative to it)
+  rel(*parts)           path of a scheduler file relative to REPO
+  listed_inputs(spec, root)  run the spec's inputs_cmd once ({data} = root) -> the inputs it prints; no inputs_cmd -> []
+Standard library plus cfg.py and common.py only (spec.py is loaded when listed_inputs is used)."""
 import os
 import sys
 
@@ -29,7 +29,7 @@ class RelayError(Exception):
 
 
 def walk(p):
-    """文件夹 p 下的文件（相对 p，跟着软链接走），排好序。"""
+    """Files under dir p (relative to p, following symlinks), sorted."""
     out = []
     for dp, dns, fns in os.walk(p, followlinks=True):
         dns.sort()
@@ -38,16 +38,17 @@ def walk(p):
 
 
 def expand(root, rel):
-    """数据目录下的一个输入 → (files, 视图文件夹或 None)：文件夹里的文件都放进去、整个文件夹当视图；单个文件不当视图。"""
+    """One input under the data dir -> (files, view dir or None): every file in a dir goes in and the whole dir becomes a view; a
+    single file is not a view."""
     p = os.path.join(root, rel)
     if os.path.isdir(p):
         fs = walk(p)
         if not fs:
-            raise RelayError(f"输入 {rel} 是空的")
+            raise RelayError(f"input {rel} is empty")
         return [(f"{rel}/{f}", os.path.realpath(os.path.join(p, f))) for f in fs], rel
     if os.path.isfile(p):
         return [(rel, os.path.realpath(p))], None
-    raise RelayError(f"hub 上没有输入 {rel}")
+    raise RelayError(f"no input {rel} on the hub")
 
 
 def sha256(p):
@@ -61,4 +62,4 @@ def listed_inputs(spec, root):
     try:
         return S.listed_inputs(spec["inputs_cmd"], root, spec.get("vars"))
     except S.SpecError as e:
-        raise RelayError(f"{spec['key']}：{e}")
+        raise RelayError(f"{spec['key']}: {e}")

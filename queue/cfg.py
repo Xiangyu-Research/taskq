@@ -1,37 +1,39 @@
-"""配置、插件、状态在哪：TASKQ_CONFIG（machines.py、policy.py 所在的文件夹）、TASKQ_PLUGINS（做法、中继插件、
-进度读法所在的文件夹，可以用 : 隔开几个）、TASKQ_STATE（本机的状态文件夹）、TASKQ_ROOT（执行机上的进程：这台的根目录）。说明见 queue/README.md 的"开关和配置"。
+"""Where config, plugins and state live: TASKQ_CONFIG (the dir holding machines.py and policy.py), TASKQ_PLUGINS (dirs holding
+recipes, relay plugins and progress readers, several separated by :), TASKQ_STATE (this machine's state dir), TASKQ_ROOT (processes on
+an executor: that machine's root). See "Switches and config" in queue/README.md.
 
-    import cfg; cfg.use_config()     把配置文件夹加进 sys.path，之后 import policy；机器表用 cfg.mtab()（sites/mtab.py）
-    cfg.py get <键>                  policy.py 的 OUTPUTS 里的一项（给 bash 用；元组用空格连，元组的元组每项一行；没有时为空）
-    cfg.py state [名字…]             本机的状态文件夹（或其中的路径，~ 展开）
-    cfg.py data                      这个进程的数据目录（data_dir；没有时为空）
-    cfg.py log <名字>                日志文件 <名字>.log 的位置（~ 展开）
+    import cfg; cfg.use_config()     add the config dir to sys.path, then import policy; machine table via cfg.mtab() (sites/mtab.py)
+    cfg.py get <key>                 one entry of policy.py's OUTPUTS (for bash; a tuple joins with spaces, a tuple of tuples one per line; empty when absent)
+    cfg.py state [name...]           this machine's state dir (or a path in it, ~ expanded)
+    cfg.py data                      this process's data dir (data_dir; empty when absent)
+    cfg.py log <name>                where the log file <name>.log goes (~ expanded)
 
-插件：TASKQ_PLUGINS 的每个文件夹里按文件名找，每类插件只取下面这些名字（KINDS），别的名字（辅助函数、import 进来的）
-不进核心；一个也没导出时报错。插件里要用核心的东西只 import taskq_api（taskq_api.py），不 import 核心的其他模块。
-  recipes.py         RECIPES  {做法名: 做法}（字段见 recipes.py 开头）
-                     HOOKS    {钩子名: 函数}（可省；有哪些钩子见 recipes.py 的 HOOKS）
-  relay_plugins.py   PLUGINS  {插件名: (export, check)}（见 relay_plugins.py 开头）
-                     ACCEPTS  {插件名: 函数(参数) → 能不能送}（可省）
-                     VIEW_ROOTS  [建视图的文件夹]（可省）
-  consumers.py       CONSUMERS  {插件名: 消费者插件}（钩子见 consume.py、queue/README.md 的"消费者"）
-  smoke.py           SMOKE  {做法名: dict(by=[参数名], params={…}, vars={…})}（冒烟闸门，见 smoke_gate.py）
-  labels.py          STEPS  {步骤名: 中文名}（推送、进度报告的白话，monitor/plain.py）
-                     QUIET  [进度报告里不列的步骤]（可省）
-                     PLAN_TITLES  函数() → {分析编号: 标题}（可省；pueue 标签 <编号> 或 <编号>_… 说成"分析 <编号> <标题>"）
-  readers/*.py       PROGRESS、INFO、TRAINED（spec.py 读；只用标准库，经 ssh 送到别的机器上跑）
-各表合并时键重复报错；函数（核心里默认是 None 的名字）只能有一个插件给。
+Plugins: each TASKQ_PLUGINS dir is searched by filename and only the names below (KINDS) are taken for each kind; other names
+(helpers, imports) do not enter the core; a plugin exporting none is an error. A plugin imports only taskq_api (taskq_api.py) from
+the core, never other core modules.
+  recipes.py         RECIPES  {recipe name: recipe} (fields at the top of recipes.py)
+                     HOOKS    {hook name: function} (optional; hooks are listed in recipes.py's HOOKS)
+  relay_plugins.py   PLUGINS  {plugin name: (export, check)} (see the top of relay_plugins.py)
+                     ACCEPTS  {plugin name: function(params) -> can it be sent} (optional)
+                     VIEW_ROOTS  [dirs to build views from] (optional)
+  consumers.py       CONSUMERS  {plugin name: consumer plugin} (hooks in consume.py, "Consumers" in queue/README.md)
+  smoke.py           SMOKE  {recipe name: dict(by=[param names], params={...}, vars={...})} (smoke gate, see smoke_gate.py)
+  labels.py          STEPS  {step name: plain name} (pushes, progress report wording, monitor/plain.py)
+                     QUIET  [steps not listed in the progress report] (optional)
+                     PLAN_TITLES  function() -> {analysis number: title} (optional; a pueue label <number> or <number>_... becomes "analysis <number> <title>")
+  readers/*.py       PROGRESS, INFO, TRAINED (read by spec.py; stdlib only, sent to other machines over ssh)
+Merging duplicate keys is an error; a function (a name that is None in the core) may come from one plugin only.
 """
 import importlib.util
 import os
 import sys
 
-CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 调度代码的根（嵌在使用者的仓库里时是 <仓库>/scripts/taskq）
+CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # the scheduler code root (when embedded in the user's repo it is <repo>/scripts/taskq)
 _EMBED = os.path.join("scripts", "taskq")
 
 
 def _project():
-    """同一文件夹里的 project.py（按文件加载，不靠 sys.path，名字不和使用者的模块撞）。"""
+    """project.py in the same dir (loaded by file, not via sys.path, so its name cannot collide with a user module)."""
     m = sys.modules.get("taskq_project")
     if m is None:
         s = importlib.util.spec_from_file_location("taskq_project", os.path.join(os.path.dirname(os.path.abspath(__file__)), "project.py"))
@@ -42,8 +44,8 @@ def _project():
 
 
 def _user_repo():
-    """使用者的仓库根：TASKQ_REPO；没设时，嵌在 <仓库>/scripts/taskq 里就是那个仓库；否则 TASKQ_PROJECT 或从当前目录往上找到的
-    .taskq.toml 所在的文件夹（project.py）；都没有时是 CORE。"""
+    """The user's repo root: TASKQ_REPO; when unset, embedded as <repo>/scripts/taskq means that repo; otherwise TASKQ_PROJECT or
+    the dir holding the .taskq.toml found upwards from the current dir (project.py); when none, CORE."""
     v = os.environ.get("TASKQ_REPO")
     if v:
         return os.path.abspath(os.path.expanduser(v))
@@ -53,17 +55,18 @@ def _user_repo():
 
 
 REPO = _user_repo()
-CORE_REL = os.path.relpath(CORE, REPO)  # 使用者的仓库里调度代码的位置（给在仓库根目录下跑的命令用）
+CORE_REL = os.path.relpath(CORE, REPO)  # where the scheduler code sits in the user's repo (for commands run at the repo root)
 
 
 def rel(*parts):
-    """调度代码里的文件相对使用者仓库根的路径：嵌着时 scripts/taskq/…，单独的检出时 …（核心在仓库外时带 ..）。
-    只给在本机仓库根目录下跑的命令；执行机、代码包里的用 bundle_rel，hub 上排进 pueue 的用 local。"""
+    """Path of a scheduler file relative to the user's repo root: scripts/taskq/... when embedded, ... when a standalone checkout
+    (with .. when the core is outside the repo). Only for commands run at this machine's repo root; use bundle_rel for executors
+    and bundles, and local for commands queued in pueue on the hub."""
     return os.path.normpath(os.path.join(CORE_REL, *parts))
 
 
 def bundle_rel(*parts):
-    """调度代码里的文件在代码包里（相对包的根，即那边的 code/current）的路径：总是 proto.BUNDLE_CORE（scripts/taskq）/…"""
+    """Path of a scheduler file inside a bundle (relative to the bundle root, i.e. code/current there): always proto.BUNDLE_CORE (scripts/taskq)/..."""
     if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from proto import BUNDLE_CORE
@@ -71,19 +74,19 @@ def bundle_rel(*parts):
 
 
 def local(*parts):
-    """调度代码里的文件在本机的绝对路径（hub 上生成、在 hub 上跑的命令用）。"""
+    """Absolute path of a scheduler file on this machine (for commands generated and run on the hub)."""
     return os.path.join(CORE, *parts)
 
 
-# 状态文件夹：TASKQ_STATE > TASKQ_ROOT（执行机上的进程：根目录下，任务队列在 queue/，其余在 state/，proto.STATE_IN_ROOT）
-# > policy.py 的 OUTPUTS["state"]（没写时取 schema.OUTPUT_FIELDS 的默认）
+# State dir: TASKQ_STATE > TASKQ_ROOT (processes on an executor: under the root, the task queue in queue/ and the rest in state/,
+# proto.STATE_IN_ROOT) > policy.py's OUTPUTS["state"] (default from schema.OUTPUT_FIELDS when absent)
 
 
 _PROJECT = []
 
 
 def project_conf():
-    """使用者仓库根的 .taskq.toml（project.py）→ dict；没有这个文件 → None。"""
+    """The user's repo root .taskq.toml (project.py) -> dict; no such file -> None."""
     if not _PROJECT:
         pj = _project()
         _PROJECT.append(pj.load(REPO) if os.path.isfile(os.path.join(REPO, pj.NAME)) else None)
@@ -91,7 +94,7 @@ def project_conf():
 
 
 def config_dir():
-    """配置文件夹：TASKQ_CONFIG > 仓库根 .taskq.toml 的 config > 没有 .taskq.toml 时 <仓库>/config（同 example/）。"""
+    """Config dir: TASKQ_CONFIG > repo root .taskq.toml's config > <repo>/config when there is no .taskq.toml (like example/)."""
     v = os.environ.get("TASKQ_CONFIG")
     if v:
         return os.path.expanduser(v)
@@ -102,7 +105,7 @@ def config_dir():
 
 
 def mtab():
-    """机器表（核心的 sites/mtab.py，数据取配置文件夹里的 machines.py）。"""
+    """The machine table (core sites/mtab.py, data from machines.py in the config dir)."""
     d = os.path.join(CORE, "sites")
     if d not in sys.path:
         sys.path.insert(0, d)
@@ -117,11 +120,11 @@ def use_config():
 
 
 def outputs(key):
-    """policy.py 的 OUTPUTS[key]；没写、配置文件夹里没有 policy.py → schema.OUTPUT_FIELDS 的默认（不认识的 key → KeyError）。
-    写明的配置文件夹不在、policy.py 读不了 → 报错（不悄悄用默认的状态文件夹）。"""
+    """policy.py's OUTPUTS[key]; when absent or config dir has no policy.py -> schema.OUTPUT_FIELDS default (unknown key -> KeyError).
+    A stated config dir that is missing or a policy.py that cannot be read -> error (never silently fall back to the default state dir)."""
     from schema import OUTPUT_FIELDS
     if key not in OUTPUT_FIELDS:
-        raise KeyError(f"OUTPUTS 没有字段 {key}（有：{'、'.join(OUTPUT_FIELDS)}）")
+        raise KeyError(f"OUTPUTS has no field {key} (have: {', '.join(OUTPUT_FIELDS)})")
     default = OUTPUT_FIELDS[key][1]
     d = config_dir()
     if d not in sys.path:
@@ -132,18 +135,18 @@ def outputs(key):
         if e.name != "policy":
             raise
         if (os.environ.get("TASKQ_CONFIG") or project_conf() is not None) and not os.path.isdir(d):
-            raise ValueError(f"配置文件夹 {d} 不存在（TASKQ_CONFIG 或 .taskq.toml 的 config）") from None
+            raise ValueError(f"config dir {d} does not exist (TASKQ_CONFIG or .taskq.toml config)") from None
         return default
     return getattr(policy, "OUTPUTS", {}).get(key, default)
 
 
 def state_home():
-    """配置的状态文件夹（不展开 ~，以 / 结尾）：OUTPUTS["state"]。"""
+    """The configured state dir (without expanding ~, ending in /): OUTPUTS["state"]."""
     return outputs("state").rstrip("/") + "/"
 
 
 def state(*parts, expand=True):
-    """状态文件夹里的路径（见上面状态文件夹的说明）。"""
+    """A path in the state dir (see the state dir note above)."""
     rel = "/".join(parts)
     base, root = os.environ.get("TASKQ_STATE"), os.environ.get("TASKQ_ROOT")
     if root and not base:
@@ -159,8 +162,8 @@ def state(*parts, expand=True):
 
 
 def data_dir():
-    """这个进程的数据目录（展开 ~）：TASKQ_DATA（run_task.sh 给任务的命令设）> TASKQ_ROOT 下的 data（执行机上的进程）
-    > 本机是 store 时 store 的数据目录；都没有 → ""。"""
+    """This process's data dir (expands ~): TASKQ_DATA (set by run_task.sh for a task's command) > data under TASKQ_ROOT (processes
+    on an executor) > the store's data dir when this machine is the store; none -> ""."""
     v = os.environ.get("TASKQ_DATA")
     if v:
         return os.path.expanduser(v)
@@ -176,7 +179,7 @@ def data_dir():
 
 
 def log(name):
-    """日志文件 <name>.log：环境变量 <NAME>_LOG（给测试用）> OUTPUTS["logs"] 文件夹 > 家目录。"""
+    """The log file <name>.log: env var <NAME>_LOG (for tests) > OUTPUTS["logs"] dir > home."""
     v = os.environ.get(name.upper() + "_LOG")
     return os.path.expanduser(v or os.path.join(outputs("logs"), name + ".log"))
 
@@ -187,7 +190,7 @@ def env(name, default=None):
 
 
 def plugin_dirs():
-    """插件文件夹：TASKQ_PLUGINS（设了就算空的也用）> 仓库根 .taskq.toml 的 plugins > 没有 .taskq.toml 时没有插件。"""
+    """Plugin dirs: TASKQ_PLUGINS (even empty when set) > repo root .taskq.toml's plugins > no plugins without a .taskq.toml."""
     v = os.environ.get("TASKQ_PLUGINS")
     if v is None:
         conf = project_conf()
@@ -208,14 +211,15 @@ KINDS = {
 
 
 def plugins(name):
-    """各插件文件夹里的 <name>.py → [模块]。插件文件夹要是绝对路径；写明的（TASKQ_PLUGINS、.taskq.toml）不在 → 报错。"""
+    """<name>.py in each plugin dir -> [module]. Plugin dirs must be absolute; a stated one (TASKQ_PLUGINS, .taskq.toml) that is
+    missing -> error."""
     mods = []
     named = os.environ.get("TASKQ_PLUGINS") is not None or project_conf() is not None
     for i, d in enumerate(plugin_dirs()):
         if not os.path.isabs(d):
-            raise ValueError(f"插件文件夹要写绝对路径：{d}")
+            raise ValueError(f"a plugin dir must be an absolute path: {d}")
         if named and not os.path.isdir(d):
-            raise ValueError(f"插件文件夹 {d} 不存在（TASKQ_PLUGINS 或 .taskq.toml 的 plugins）")
+            raise ValueError(f"plugin dir {d} does not exist (TASKQ_PLUGINS or .taskq.toml plugins)")
         p = os.path.join(d, name + ".py")
         if not os.path.isfile(p):
             continue
@@ -229,30 +233,31 @@ def plugins(name):
 
 
 def extend(ns, name, tables=None):
-    """插件导出的表合进 ns 里的同名表（tables 默认 KINDS[name]）：字典插件的在前，键重复报错；列表接在后面、不重复。
-    ns 里是 None 的名字是函数：插件给的要能调用，只能有一个插件给。
-    只合这些表，插件的其他名字不进 ns；插件一张表也没导出、或表的类型不对时报错。"""
+    """Merge the tables a plugin exports into the same-named tables in ns (tables defaults to KINDS[name]): plugin dicts go first
+    and duplicate keys are an error; lists are appended without duplicates. A name that is None in ns is a function: a plugin's
+    value must be callable and only one plugin may supply it. Only these tables merge; other plugin names do not enter ns. A
+    plugin exporting none of the tables, or a table of the wrong type, is an error."""
     tables = tuple(tables or KINDS[name])
     add = {t: ({} if isinstance(ns[t], dict) else [] if isinstance(ns[t], list) else None) for t in tables}
     for m in plugins(name):
         got = [t for t in tables if t in vars(m)]
         if not got:
-            raise ValueError(f"插件 {m.__file__} 没有导出 {'、'.join(tables)} 里的任何一个")
+            raise ValueError(f"plugin {m.__file__} exports none of {', '.join(tables)}")
         for k in got:
             v = vars(m)[k]
             if ns[k] is None:
                 if not callable(v):
-                    raise ValueError(f"插件 {m.__file__} 的 {k} 要是函数")
+                    raise ValueError(f"{k} in plugin {m.__file__} must be a function")
                 if add[k] is not None:
-                    raise ValueError(f"插件 {m.__file__} 的 {k} 重名（另一个插件已经给了）")
+                    raise ValueError(f"{k} in plugin {m.__file__} is a duplicate (another plugin already supplies it)")
                 add[k] = v
                 continue
             if not isinstance(v, type(add[k])):
-                raise ValueError(f"插件 {m.__file__} 的 {k} 要是{'字典' if isinstance(add[k], dict) else '列表'}")
+                raise ValueError(f"{k} in plugin {m.__file__} must be a {'dict' if isinstance(add[k], dict) else 'list'}")
             if isinstance(add[k], dict):
                 dup = sorted(set(add[k]) & set(v) | set(ns[k]) & set(v))
                 if dup:
-                    raise ValueError(f"插件 {m.__file__} 的 {k} 里 {', '.join(map(str, dup))} 重名")
+                    raise ValueError(f"duplicate {', '.join(map(str, dup))} in {k} of plugin {m.__file__}")
                 add[k].update(v)
             else:
                 add[k] += [x for x in v if x not in add[k] and x not in ns[k]]
@@ -275,8 +280,8 @@ if __name__ == "__main__":
         try:
             v = outputs(a[1])
         except KeyError as e:
-            sys.exit(f"cfg.py get：{e.args[0]}")
-        if isinstance(v, (tuple, list)):  # 元组用空格连；元组的元组每项一行
+            sys.exit(f"cfg.py get: {e.args[0]}")
+        if isinstance(v, (tuple, list)):  # a tuple joins with spaces; a tuple of tuples one per line
             seq = (tuple, list)
             print(("\n" if any(isinstance(x, seq) for x in v) else " ").join(" ".join(map(str, x)) if isinstance(x, seq) else str(x) for x in v))
         else:

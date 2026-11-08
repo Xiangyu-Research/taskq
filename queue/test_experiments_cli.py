@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""测 experiments.py 的命令（2026-11-04）：list、tasks（--json）、name-of、env-of，固定配置。
+"""Test the experiments.py commands: list, tasks (--json), name-of, env-of, fixed config.
 
     python3 queue/test_experiments_cli.py
 """
@@ -32,41 +32,42 @@ def run(*a):
 
 rc, out, _ = run("list", "--json")
 d = json.loads(out)
-ok("list --json：一行、顶层字段 = proto.EXP_LIST_TOP", rc == 0 and out.count("\n") == 1 and tuple(d) == proto.EXP_LIST_TOP
+ok("list --json: one line, top-level fields = proto.EXP_LIST_TOP", rc == 0 and out.count("\n") == 1 and tuple(d) == proto.EXP_LIST_TOP
    and d["version"] == proto.VERSION)
-ok("list --json：实验和实验表的顺序一样", [e["id"] for e in d["experiments"]] == [e["id"] for e in E.load()[0]])
-ok("list --json：函数写成名字（能 JSON）", "<function" not in out)
+ok("list --json: experiments in experiment table order", [e["id"] for e in d["experiments"]] == [e["id"] for e in E.load()[0]])
+ok("list --json: functions written as names (JSON-ready)", "<function" not in out)
 rc, out, _ = run("list")
-ok("list：每个实验一行", rc == 0 and len(out.splitlines()) == len(E.load()[0]))
+ok("list: one line per experiment", rc == 0 and len(out.splitlines()) == len(E.load()[0]))
 
 first = E.load()[0][0]["id"]
 rc, out, _ = run("tasks", "--exp", first, "--json")
 d = json.loads(out)
-ok("tasks --json：顶层字段 = proto.EXP_TASKS_TOP，每个任务字段 = proto.EXP_TASK_FIELDS",
+ok("tasks --json: top-level fields = proto.EXP_TASKS_TOP, each task's fields = proto.EXP_TASK_FIELDS",
    rc == 0 and tuple(d) == proto.EXP_TASKS_TOP and all(tuple(t) == proto.EXP_TASK_FIELDS for t in d["tasks"]))
-ok("tasks --exp：只有这个实验的任务", {t["exp"] for t in d["tasks"]} == {first}
+ok("tasks --exp: only this experiment's tasks", {t["exp"] for t in d["tasks"]} == {first}
    and [t["key"] for t in d["tasks"]] == [k for k, t in E.tasks().items() if t["exp"] == first])
 rc, out, _ = run("tasks", "--json")
-ok("tasks --json：全部任务", rc == 0 and len(json.loads(out)["tasks"]) == len(E.tasks()))
+ok("tasks --json: every task", rc == 0 and len(json.loads(out)["tasks"]) == len(E.tasks()))
 rc, out, err = run("tasks", "--exp", "nope")
-ok("tasks --exp 不认识的实验 → 4，原因在 stderr", rc == proto.EXIT["gone"] and "nope" in err and not out)
+ok("tasks --exp with an unknown experiment -> 4, reason on stderr", rc == proto.EXIT["gone"] and "nope" in err and not out)
 
 key = next(iter(E.tasks()))
 rc, out, _ = run("name-of", key, "pueue")
 rc2, out2, _ = run("name-of", key)
-ok("name-of 照旧", rc in (0, proto.EXIT["gone"]) and rc2 == 2 and "用法" in (out2 + _))
+ok("name-of unchanged", rc in (0, proto.EXIT["gone"]) and rc2 == 2 and "usage" in (out2 + _))
 rc, out, err = run("name-of", "/no/such/model", "pueue")
-ok("name-of 实验表里没有的 → 4，原因在 stderr", rc == proto.EXIT["gone"] and not out and "/no/such/model" in err)
+ok("name-of for a model not in the tables -> 4, reason on stderr", rc == proto.EXIT["gone"] and not out and "/no/such/model" in err)
 rc, out, err = run("name-of")
-ok("直接跑：用法里是 experiments.py", rc == 2 and "experiments.py name-of" in err and "Traceback" not in err)
+ok("run directly: usage says experiments.py", rc == 2 and "experiments.py name-of" in err and "Traceback" not in err)
 rc, out, err = run("env-of", "nope")
-ok("env-of 不认识的 → 4", rc == proto.EXIT["gone"] and not out and "Traceback" not in err)
+ok("env-of unknown -> 4", rc == proto.EXIT["gone"] and not out and "Traceback" not in err)
 rc, out, err = run("bogus")
-ok("不认识的命令 → 2", rc == 2)
-ok("main(argv) 能直接调用", E.main(["list"]) == 0)
+ok("unknown command -> 2", rc == 2)
+ok("main(argv) is directly callable", E.main(["list"]) == 0)
 
-# 实验表会把自己的插件文件夹插到 sys.path[0]，里面有同名的 recipes.py；
-# check_fields 必须用核心的那份（11/4：剥离后 core 在仓库外，第一次 import 晚于插件，hub 任务全挂）
+# An experiment table adds its plugin dir to sys.path[0] with a same-named recipes.py there;
+# check_fields must use the core's copy (after stripping, core sits outside the repo and the first import came after the plugin,
+# which broke every hub task).
 shadow = fixture.tmpdir()
 with open(os.path.join(shadow, "recipes.py"), "w", encoding="utf-8") as f:
     f.write("RECIPES = {'shadow': {}}\nHOOKS = {}\n")
@@ -79,7 +80,7 @@ experiments.check_fields('x', types.SimpleNamespace(EXPERIMENTS=[], FINAL=[]))
 print('ok')
 """
 r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=os.environ.copy())
-ok("实验表插进插件文件夹后，check_fields 仍用核心的 recipes", r.returncode == 0 and "ok" in r.stdout)
+ok("after an experiment table inserts its plugin dir, check_fields still uses the core recipes", r.returncode == 0 and "ok" in r.stdout)
 
-print("全部通过" if not fails else f"{fails} 项失败")
+print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)
