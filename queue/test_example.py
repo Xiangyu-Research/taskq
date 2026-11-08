@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""示例项目（example/）的 README 里那几条命令照样能用：临时 HOME 里跑，不连别的机器。
-  python3 queue/test_example.py"""
+"""The commands in the example project's README work: run in a temp HOME, no other machines.
+  python3 queue/test_example.py
+"""
 import os
 import shutil
 import subprocess
@@ -31,26 +32,26 @@ def tq(*args):
 try:
     os.makedirs(os.path.join(HOME, "taskq-example", "data"))
     r = tq("check", "--quick")
-    ok("check --quick：没有问题", r.returncode == 0 and "没有问题" in r.stdout)
+    ok("check --quick: no problems", r.returncode == 0 and "no problems" in r.stdout)
     r = tq("exp", "tasks")
-    ok("exp tasks：两个实验展开成 5 个任务", r.returncode == 0 and len(r.stdout.split("\n")) - 1 == 5)
+    ok("exp tasks: two experiments expand to 5 tasks", r.returncode == 0 and len(r.stdout.split("\n")) - 1 == 5)
     r = tq("add", "--exp", "small")
-    ok("add --exp small：加了 2 个", r.returncode == 0 and r.stdout.count("加入：") == 2)
-    ok("队列在示例自己的状态文件夹里", os.path.isfile(os.path.join(HOME, ".local", "state", "taskq-example", "taskq", "tasks.jsonl")))
+    ok("add --exp small: 2 added", r.returncode == 0 and r.stdout.count("added:") == 2)
+    ok("the queue lives in the example's own state dir", os.path.isfile(os.path.join(HOME, ".local", "state", "taskq-example", "taskq", "tasks.jsonl")))
     r = tq("status")
-    ok("status：2 个任务", r.returncode == 0 and "任务 2 个" in r.stdout and "count/small/1" in r.stdout)
+    ok("status: 2 tasks", r.returncode == 0 and "2 tasks" in r.stdout and "count/small/1" in r.stdout)
     r = tq("show", "count/small/0")
-    ok("show：命令按做法填好", r.returncode == 0 and "bash bin/count.sh 100 {data}/results/small/seed_0" in r.stdout)
+    ok("show: the command is filled from the recipe", r.returncode == 0 and "bash bin/count.sh 100 {data}/results/small/seed_0" in r.stdout)
     r = tq("plan")
-    ok("plan：执行机连不上、store 上还没有代码包（查不了结果），什么都不动",
-       r.returncode == 0 and "连不上" in r.stdout and "查不了结果" in r.stdout and "这次不排" in r.stdout)
+    ok("plan: executors unreachable, no bundle on the store yet (cannot check results), nothing changes",
+       r.returncode == 0 and "unreachable" in r.stdout and "cannot check results" in r.stdout and "not queueing this round" in r.stdout)
     r = tq("rm", "count/small/0", "count/small/1")
-    ok("rm：删掉", r.returncode == 0 and "任务 0 个" in tq("status").stdout)
+    ok("rm: removed", r.returncode == 0 and "0 tasks" in tq("status").stdout)
     data = os.path.join(HOME, "taskq-example", "data", "results", "x")
     r = subprocess.run(["bash", "bin/count.sh", "25", data], cwd=EXAMPLE, capture_output=True, text=True)
-    ok("count.sh：数完写 DONE、进度", r.returncode == 0 and os.path.isfile(os.path.join(data, "DONE"))
+    ok("count.sh: writes DONE and progress when finished", r.returncode == 0 and os.path.isfile(os.path.join(data, "DONE"))
        and open(os.path.join(data, "PROGRESS.json")).read().strip() == '{"done": 25, "total": 25}')
 finally:
     shutil.rmtree(HOME, ignore_errors=True)
-print("\n全部通过" if not fails else f"\n{fails} 项失败")
+print("\nall pass" if not fails else f"\n{fails} failed")
 sys.exit(1 if fails else 0)

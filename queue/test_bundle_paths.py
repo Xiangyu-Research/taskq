@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""核心装在哪和命令里的路径：送到执行机、store 的命令（那边的 taskq.py、site_ops.py 的操作、交 Slurm 作业的 sbatch 和
-worker_start.sh、pueue 的 worker）只用代码包里的固定位置 proto.BUNDLE_CORE，不带 ..；hub 上排的命令（relay.py stage / fetch / archive、
-本机的 q）用核心的绝对路径，文件名不变。三种装法各跑一次：
-  嵌着（<仓库>/scripts/taskq，用指过来的链接摆出这个布局）、单独的检出（仓库就是核心）、核心在仓库外（TASKQ_REPO 指别处）。
-    python3 queue/test_bundle_paths.py
+"""Where the core sits and paths in commands: commands sent to executors and the store (taskq.py there, site_ops.py ops, the
+sbatch and worker_start.sh for Slurm jobs, the pueue worker) use only the bundle's fixed location proto.BUNDLE_CORE and no ..;
+commands queued on the hub (relay.py stage / fetch / archive, the local q) use the core's absolute path with the same filenames.
+Run once per install layout:
+  embedded (<repo>/scripts/taskq, this layout built from a symlink), a standalone checkout (the repo is the core), and the core
+  outside the repo (TASKQ_REPO points elsewhere).
 """
 import os
 import subprocess
@@ -50,7 +51,7 @@ def child():
         RM.store_op("done", dict(items={}))
     finally:
         RM.site_argv, RM.C.run = keep
-    remote["site_ops"], remote["store 的 site_ops"] = got
+    remote["site_ops"], remote["store site_ops"] = got
     assert all(f"{BC}/queue/site_ops.py" in c and f"/{proto.ROOT['current']} &&" in c for c in got), got
 
     got = []
@@ -60,7 +61,7 @@ def child():
         relay.submit("site-slurm", [("normal", "1:00:00", 1, "gpu"), ("normal", "1:00:00", 1, "cpu")])
     finally:
         RM.rsh = keep
-    remote["交 GPU 作业"], remote["交 CPU 作业"] = got
+    remote["submit GPU job"], remote["submit CPU job"] = got
     cur = f'"$R"/{proto.ROOT["current"]}'
     assert f"{cur}/{BC}/queue/worker.sbatch {cur}/{BC}/queue/worker_start.sh" in got[0], got
     assert f"{cur}/{BC}/queue/cpu_worker.sbatch {cur}/{BC}/queue/worker_start.sh" in got[1], got
@@ -80,8 +81,8 @@ def child():
     refill.q("hub", f"-g {proto.IO_GROUP} -- true", run=lambda c, ssh: got.append(c) or (0, "1"))
     qp = cfg.local("queue", "q")
     assert f" && {qp} -g {proto.IO_GROUP}" in got[0] and os.path.isfile(qp), got
-    print(f"PASS:{cfg.CORE_REL}：送到执行机、store 的命令（taskq.py、site_ops.py、交作业、pueue worker）只用 {BC}/…、不带 ..；"
-          "hub 上的命令用核心的绝对路径")
+    print(f"PASS:{cfg.CORE_REL}: commands sent to executors and the store (taskq.py, site_ops.py, job submission, pueue worker) use only {BC}/... and no ..; "
+          "hub commands use the core's absolute path")
 
 
 def main():
@@ -93,15 +94,15 @@ def main():
         os.symlink(core, os.path.join(T, "proj", "scripts", "taskq"))
         os.makedirs(os.path.join(T, "other"))
         e = {k: v for k, v in os.environ.items() if k != "TASKQ_REPO"}
-        ways = (("嵌着", os.path.join(T, "proj", "scripts", "taskq", "queue"), e),
-                ("单独的检出", HERE, e) if not core.endswith("/scripts/taskq") else ("嵌着（本来的）", HERE, e),
-                ("核心在仓库外", HERE, dict(e, TASKQ_REPO=os.path.join(T, "other"))))
+        ways = (("embedded", os.path.join(T, "proj", "scripts", "taskq", "queue"), e),
+                ("standalone checkout", HERE, e) if not core.endswith("/scripts/taskq") else ("embedded (native)", HERE, e),
+                ("core outside the repo", HERE, dict(e, TASKQ_REPO=os.path.join(T, "other"))))
         for what, here, env in ways:
             r = subprocess.run([sys.executable, os.path.join(here, "test_bundle_paths.py"), "--child"], env=env, capture_output=True,
                                text=True, cwd=T)
-            assert r.returncode == 0, f"{what}：\n{r.stdout}\n{r.stderr[-3000:]}"
-            print(r.stdout.strip().replace("PASS:", f"PASS:（{what}）"))  # run_tests 数"PASS:"开头的行
-    print("全部通过")
+            assert r.returncode == 0, f"{what}:\n{r.stdout}\n{r.stderr[-3000:]}"
+            print(r.stdout.strip().replace("PASS:", f"PASS: ({what})"))  # run_tests counts lines starting with "PASS:"
+    print("all pass")
 
 
 if __name__ == "__main__":

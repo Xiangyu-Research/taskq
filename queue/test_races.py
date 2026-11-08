@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""并发和中途FAIL:锁的抢占、hub 的 pueue 读不到时 relay 只续约、清理和 stage 抢钉子、等锁的超时。
-跑法：python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin|central_timeout]（不带参数全跑，各条独立报告）
-全部在临时目录里：HOME、TASKQ_STATE、TASKQ_DIR 指到临时目录，fixture 的配置，test_relay 的假 ssh；不连网络。"""
+"""Concurrency and half-failed cases: lock takeover, relay only renewing when the hub's pueue is unreadable, cleanup racing
+stage for pins, and lock wait timeouts.
+Run: python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin|central_timeout] (all without arguments,
+each reported separately).
+Everything is in temp dirs: HOME, TASKQ_STATE and TASKQ_DIR point there, with fixture config and test_relay's fake ssh; no network."""
 import json
 import os
 import shutil
@@ -19,9 +21,9 @@ TMP = fixture.tmpdir(prefix="test_review_conc_")
 os.environ["HOME"] = os.path.join(TMP, "home")
 os.makedirs(os.environ["HOME"])
 os.environ["TASKQ_DIR"] = os.path.join(TMP, "tq")
-os.environ["TASKQ_LOCK_WAIT"] = "0.05"  # 等锁的重试间隔
+os.environ["TASKQ_LOCK_WAIT"] = "0.05"  # lock retry interval
 sys.path.insert(0, HERE)
-import test_relay as TR  # noqa: E402  （fixture.use()、临时 TASKQ_STATE、假 ssh；只跑模块级的准备，不跑测试）
+import test_relay as TR  # noqa: E402  (fixture.use(), temp TASKQ_STATE, fake ssh; runs module setup only, not the tests)
 import common as C  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import mtab as M  # noqa: E402
@@ -33,8 +35,9 @@ assert taskq.TQ == os.environ["TASKQ_DIR"], taskq.TQ
 
 
 def test_lock():
-    """两个等锁的进程都看到同一把死锁过期：A 抢下并拿到新锁后，B 把 A 的新锁当成旧的再抢一次 → 两个同时持锁。
-    tmpfs（/tmp）不复用 inode 号，ext4 会把刚删的号马上给新目录：两种盘都跑。"""
+    """Two lock waiters both see the same dead lock as expired: A takes it and gets a new lock, then B takes A's new lock as old
+    and takes it again -> both hold the lock. tmpfs (/tmp) does not reuse inode numbers, ext4 hands a just-deleted one to a new
+    dir right away: both are exercised."""
     _lock_race(taskq.TQ)
     if os.path.isdir("/var/tmp"):
         disk = fixture.tmpdir(prefix="test_races_", dir="/var/tmp")
@@ -50,7 +53,7 @@ def _lock_race(base):
     p = subprocess.Popen(["true"])
     p.wait()
     os.mkdir(d)
-    with open(os.path.join(d, "owner"), "w") as f:  # 持锁的进程被 SIGKILL：本机、pid 已经不在
+    with open(os.path.join(d, "owner"), "w") as f:  # the lock holder was SIGKILLed: local pid already gone
         f.write(f"{socket.gethostname()}\t{p.pid}\tdeadbeef0000\n")
     old = time.time() - 200
     os.utime(d, (old, old))
@@ -61,7 +64,7 @@ def _lock_race(base):
 
     def hook(self):
         r = orig(self)
-        if self is B and not state["done"]:  # B 判断完"持有者死了"、还没 rename 时，A 抢下旧锁并拿到新锁
+        if self is B and not state["done"]:  # after B decides the owner is dead but before its rename, A takes the old lock and gets a new one
             state["done"] = True
             A.__enter__()
         return r
@@ -75,15 +78,16 @@ def _lock_race(base):
         except SystemExit:
             pass
         a_owner_now = open(os.path.join(d, "owner")).read() if os.path.exists(os.path.join(d, "owner")) else None
-        assert not both, (f"{base}：A 持锁期间 B 也拿到了锁（A={A.me!r}，B={B.me!r}，锁里现在记的是 {a_owner_now!r}）："
-                          "B 把 A 刚建的新锁当成过期的旧锁 rename 掉了")
+        assert not both, (f"{base}: B got the lock while A held it (A={A.me!r}, B={B.me!r}, the lock now records {a_owner_now!r}): "
+                          "B renamed A's freshly created lock as if it were an expired old one")
     finally:
         taskq.Lock._holder = orig
         shutil.rmtree(d, ignore_errors=True)
 
 
 def test_lock_noowner():
-    """拿到锁、owner 没写上（盘满等）：退出时只删还是自己建的那个目录；锁已被别人抢走、重新建过的不删。"""
+    """Lock taken but owner not written (disk full etc.): on exit delete only the dir we created; do not delete one that was
+    taken over and recreated by someone else."""
     _lock_noowner(taskq.TQ)
     if os.path.isdir("/var/tmp"):
         disk = fixture.tmpdir(prefix="test_races_", dir="/var/tmp")
@@ -100,7 +104,7 @@ def _lock_noowner(base):
 
     def bad(p, *a, **k):
         if str(p).endswith(os.sep + "owner") and "w" in (a[0] if a else k.get("mode", "r")):
-            raise OSError("写不了")
+            raise OSError("cannot write")
         return real_open(p, *a, **k)
     try:
         for taken in (False, True):
@@ -112,14 +116,14 @@ def _lock_noowner(base):
             finally:
                 del taskq.open
             assert A.me is None and os.path.isdir(d), A.me
-            if taken:  # A 卡住、锁过期：B 抢走（rename 后删掉）、刚 mkdir 了新锁，还没写 owner
+            if taken:  # A hung, lock expired: B took it over (renamed and removed), just mkdir'd a new lock, owner not written yet
                 os.rmdir(d)
                 os.mkdir(d)
             A.__exit__(None, None, None)
             if not taken:
-                assert not os.path.exists(d), f"{base}：owner 没写上的锁退出时没删"
+                assert not os.path.exists(d), f"{base}: a lock without owner was not removed on exit"
             else:
-                assert os.path.isdir(d), f"{base}：A 的 owner 没写上，退出时删了 B 刚建的锁"
+                assert os.path.isdir(d), f"{base}: A's owner was unwritten and exit removed B's fresh lock"
                 os.rmdir(d)
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -128,7 +132,7 @@ def _lock_noowner(base):
 def _plan_with_hub_error(mt, rt):
     K = "D1_x/tr/0"
     S = TR.S0([TR.mtask(K, mt)])
-    S["pueue"] = {M.hub(): {"error": "pueue 没有响应"}}  # health.gather：qs --json 失败或 hub 的 pueue 读不到时就是这样
+    S["pueue"] = {M.hub(): {"error": "pueue does not respond"}}  # health.gather: this is what a failed qs --json or unreadable hub pueue looks like
     RS = dict(taskq=dict(tasks=[TR.rtask(K, rt)], paused=False), tasks={}, free=500e9)
     old_lookup, old_down = RT.lookup, C.backup_down
     RT.lookup = lambda k: dict(archive=True)
@@ -140,21 +144,24 @@ def _plan_with_hub_error(mt, rt):
 
 
 def test_relay_err_release():
-    """hub 的 pueue 读不到（s["pueue"]["hub"] = {"error": …}，s["ok"]["hub"] 仍是 True）：要归档的折总队列显示训完 →
-    应当只续约、等下次；现在当成"从来没拉回过、不用归档"，删那边的结果并交还，归档永远不排。"""
+    """The hub's pueue is unreadable (s["pueue"]["hub"] = {"error": ...}, s["ok"]["hub"] still True): a task that needs archiving
+    shows done in the hub queue -> renew only and wait for next time; treating it as "never fetched, no archive needed" would
+    delete the results there, release, and never queue the archive."""
     K, (acts, stuck) = _plan_with_hub_error("done", "done")
-    assert "release" not in [a["op"] for a in acts], f"hub 的 pueue 读不到时交还了要归档的折：{TR.ops(acts)}，{acts}"
+    assert "release" not in [a["op"] for a in acts], f"released a task needing archive while the hub pueue was unreadable: {TR.ops(acts)}, {acts}"
 
 
 def test_relay_err_fetch():
-    """hub 的 pueue 读不到：那边训完、hub 上已有一个拉回在跑（读不到而已）→ 不应再排一个拉回；现在排 fetch。"""
+    """The hub's pueue is unreadable: the other side finished and a fetch is already running on the hub (just unreadable) -> do
+    not queue another fetch; this case would."""
     K, (acts, stuck) = _plan_with_hub_error("claimed", "done")
-    assert "fetch" not in [a["op"] for a in acts], f"hub 的 pueue 读不到时又排了拉回：{TR.ops(acts)}"
+    assert "fetch" not in [a["op"] for a in acts], f"queued another fetch while the hub pueue was unreadable: {TR.ops(acts)}"
 
 
 def test_gc_pin():
-    """清理读完钉子以后 stage 才写钉子（stage 在 hub 的核心组里跑，和健康检查里的清理并行）：
-    stage 的 missing 已认为这个 blob 在、不再传，清理照样删掉它 → 建视图时缺 blob。清理删每个 blob 前再看一次钉子。"""
+    """Cleanup reads the pins, then stage writes one (stage runs in the hub core group, parallel to the health check's cleanup):
+    stage's missing already saw this blob as present and will not send it, cleanup deletes it anyway -> the view lacks a blob.
+    Cleanup must check pins once more before deleting each blob."""
     R = os.path.join(TMP, "gcroot")
     h = "ab" + "0" * 62
     os.makedirs(os.path.join(R, "blobs", h[:2]))
@@ -170,24 +177,24 @@ def test_gc_pin():
     code = (f"import os,json,sys\nsys.path.insert(0,{HERE!r})\nimport site_ops\n_w=os.walk\n"
             f"def _walk(top,*a,**k):\n"
             f"    if os.path.realpath(top)==os.path.realpath({B!r}) and not os.path.exists({pin!r}):\n"
-            f"        json.dump([{h!r}],open({pin!r},'w'))\n"  # 清理读完钉子、开始挑 blob 时 stage 写了钉子
+            f"        json.dump([{h!r}],open({pin!r},'w'))\n"  # stage writes the pin after cleanup read pins and starts choosing blobs
             f"    return _w(top,*a,**k)\n"
             f"os.walk=_walk\nsite_ops.main(['gc'])\n")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=dict(os.environ, TASKQ_ROOT=R),
                        input=json.dumps(dict(soft_gb=1e6, keep=[], free=0, views=[], scan=["views/v"])))
     assert r.returncode == 0, r.stderr
-    assert os.path.exists(pin), "钩子没起作用"
-    assert os.path.exists(blob), (f"stage 在清理运行中写了钉子，清理仍删了这个 blob：{r.stdout.strip()}")
+    assert os.path.exists(pin), "the hook did not fire"
+    assert os.path.exists(blob), (f"stage pinned while cleanup was running and cleanup still deleted the blob: {r.stdout.strip()}")
 
 
 def test_central_timeout():
     import inspect
     wait = inspect.signature(taskq.Lock).parameters["tries"].default * 0.5
     t = inspect.signature(taskq.central).parameters["timeout"].default
-    assert t > wait + 30, f"central() 的超时 {t} 秒不比锁的最长等待 {wait} 秒长：锁被占着时调用方拿到 TimeoutExpired，而不是退出码"
+    assert t > wait + 30, f"central() timeout {t}s is not longer than the lock's max wait {wait}s: a held lock gives the caller TimeoutExpired instead of an exit code"
     import advance
     assert "timeout=TQ_TIMEOUT" in inspect.getsource(advance.taskq_add)
-    assert advance.TQ_TIMEOUT > wait + 30, f"advance.TQ_TIMEOUT {advance.TQ_TIMEOUT} 秒不比锁的最长等待 {wait} 秒长"
+    assert advance.TQ_TIMEOUT > wait + 30, f"advance.TQ_TIMEOUT {advance.TQ_TIMEOUT}s is not longer than the lock's max wait {wait}s"
 
 
 TESTS = dict(lock=test_lock, lock_noowner=test_lock_noowner, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,
@@ -205,7 +212,7 @@ if __name__ == "__main__":
             print(f"FAIL:{n}：{e}")
         except Exception:  # noqa: BLE001
             bad += 1
-            print(f"出错：{n}")
+            print(f"failed: {n}")
             traceback.print_exc()
     shutil.rmtree(TMP, ignore_errors=True)
     shutil.rmtree(TR.T, ignore_errors=True)
