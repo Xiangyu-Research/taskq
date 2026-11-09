@@ -66,6 +66,13 @@ M.MACHINES["tslurm"] = dict(label="test slurm", hostname=r"tslurm-host", ssh="ts
 a = M.activate("tsite", "alt")
 ok("a spec env activates through .activate under the root", "source /r/x1/envs/alt/.activate" in a)
 ok("a conda entry works as before", "conda activate o" in M.activate("tsite", "old"))
+M.MACHINES["tsite"]["conda"] = ("/opt/c", "w0")
+ok("worker env not in envs → a conda env of that install",
+   M.worker_activate("tsite") == "source /opt/c/etc/profile.d/conda.sh\nconda activate w0")
+M.MACHINES["tsite"]["conda"] = ("/opt/c", "alt")
+ok("worker env named in envs → activated as for tasks (spec: its .activate, no path to write)",
+   M.worker_activate("tsite") == M.activate("tsite", "alt"))
+M.MACHINES["tsite"]["conda"] = ("/opt/c", "base")
 ok("without .ok a spec env is not ready, a conda one is", M.ready_envs("tsite") == {"old"})
 h = M.spec_hash("base")
 ok("ready only when .ok matches", M.ready_envs("tsite", {"base": h}) == {"old", "base"})

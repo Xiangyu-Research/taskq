@@ -19,6 +19,8 @@ Commands:
                                  (used by queue/setup.sh); exit 4 when the machine is unknown
   mtab.py activate <env> [name|.] shell statements that activate the env (eval "$(...)"); exit 4 when the machine or
                                  env is unknown
+  mtab.py worker-activate [name|.] shell statements that activate the env the worker and GPU pad run in (conda's
+                                 second item, see worker_activate); exit 4 when the machine is unknown or has no conda
   mtab.py fields                 field tables for the machine table, workers and policy
   mtab.py fields --markdown [table...] the field tables as Markdown (schema.TABLES names, default all), with README markers
   (taskq machines show [name...]: values computed from the table by the core, one JSON line, in queue/cli_json.py)
@@ -378,6 +380,19 @@ def activate(name, env):
     return "\n".join(lines)
 
 
+def worker_activate(name):
+    """Shell statements that activate the env the worker (and the GPU pad) runs in: conda's second item, a name in envs
+    (activated the same way as for tasks, so a "spec" env needs no path) or else a conda env of that conda install;
+    no conda → None."""
+    m = machine(name)
+    c = m.get("conda")
+    if not c:
+        return None
+    if c[1] in (m["envs"] or {}):
+        return activate(name, c[1])
+    return "\n".join([f'source {c[0]}/etc/profile.d/conda.sh', f'conda activate {c[1]}'])
+
+
 # ---------------- command line ----------------
 
 EXPAND = ("conda", "repo", "root", "data", "code", "core", "backup", "pueue")  # fields mtab get expands ~ for on this machine
@@ -430,9 +445,9 @@ def main(argv):
         if name in (".", None):
             return err("cannot tell which machine this is", 1)
         return err(f"no {name} in the machine table (have: {', '.join(MACHINES)}; this machine: {me or 'unrecognised'})", EXIT["gone"])
-    usage = {"get": "<name|.> <field>", "q-env": "<group>", "activate": "<env> [name|.]", "groups": "[name|.]", "names": "[role|scheduler]"}
+    usage = {"get": "<name|.> <field>", "q-env": "<group>", "activate": "<env> [name|.]", "worker-activate": "[name|.]", "groups": "[name|.]", "names": "[role|scheduler]"}
     nargs = {"whoami": (0, 0), "get": (2, 2), "names": (0, 1), "backups": (0, 0), "q-env": (1, 1), "groups": (0, 1),
-             "activate": (1, 2), "fields": (0, len(schema.TABLES) + 1)}
+             "activate": (1, 2), "worker-activate": (0, 1), "fields": (0, len(schema.TABLES) + 1)}
     if cmd not in nargs:
         return err(f"unknown command ({prog} --help)", 2)
     lo, hi = nargs[cmd]
@@ -481,6 +496,14 @@ def main(argv):
         a = activate(name, args[0])
         if a is None:
             return err(f"no env {args[0]} on {name} (have: {', '.join(machine(name)['envs'] or {}) or 'none'})", EXIT["gone"])
+        print(a)
+    elif cmd == "worker-activate":
+        name = me if not args or args[0] == "." else args[0]
+        if name not in MACHINES:
+            return gone(name)
+        a = worker_activate(name)
+        if a is None:
+            return err(f"{name} has no conda in the machine table", EXIT["gone"])
         print(a)
     elif cmd == "groups":
         name = me if not args or args[0] == "." else args[0]

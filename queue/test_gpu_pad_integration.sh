@@ -46,8 +46,8 @@ if [[ -n $F ]]; then
 fi
 read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda 2> /dev/null) || true
 if [[ -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
-    source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate "$CONDA_ENV" || { echo "failed to activate conda env $CONDA_ENV; skipping"; exit 0; }
+    _act=$(python3 "$CORE/sites/mtab.py" worker-activate . 2> /dev/null) && eval "$_act" \
+        || { echo "failed to activate the worker env $CONDA_ENV; skipping"; exit 0; }
 fi
 python3 -c "import torch" 2> /dev/null || { echo "python3 has no torch (machine table conda: ${CONDA_BASE:-none} ${CONDA_ENV:-}); skipping"; exit 0; }
 used() { nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' '; }

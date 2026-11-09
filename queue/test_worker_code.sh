@@ -148,7 +148,17 @@ printf 'print("worker start")\n' > "$T/ws/queue/consume.py"
 printf 'MACHINES = {"ws": dict(hostname=r".*", ssh="fake-ws", scheduler="pueue", root="%s", conda=("%s", "env0"))}\n' "$T/wsroot" "$T/wsconda" > "$T/wscfg/machines.py"
 printf 'conda() { return 1; }\n' > "$T/wsconda/etc/profile.d/conda.sh"
 TASKQ_CONFIG=$T/wscfg TASKQ_MACHINE=ws bash "$T/ws/queue/worker_start.sh" > "$T/ws.out" 2>&1; rc=$?
-check "worker_start: conda activate fails, logs !!, worker still starts" '[[ $rc == 0 ]] && grep -q "!! conda activate env0 failed" $T/ws.out && grep -q "worker start" $T/ws.out'
+check "worker_start: conda activate fails, logs !!, worker still starts" '[[ $rc == 0 ]] && grep -q "!! activating the worker env env0 failed" $T/ws.out && grep -q "worker start" $T/ws.out'
+# conda's second item names an env in envs ("spec"): the worker activates it as tasks do, through <root>/envs/<name>/.activate
+mkdir -p "$T/wsroot/envs/wenv"
+printf 'export WS_WORKER_ENV=wenv\n' > "$T/wsroot/envs/wenv/.activate"
+printf 'import os\nprint("worker start in", os.environ.get("WS_WORKER_ENV"))\n' > "$T/ws/queue/consume.py"
+printf 'MACHINES = {"ws": dict(hostname=r".*", ssh="fake-ws", scheduler="pueue", root="%s", conda=("%s", "wenv"), envs={"wenv": "spec"})}\n' "$T/wsroot" "$T/wsconda" > "$T/wscfg/machines.py"
+TASKQ_CONFIG=$T/wscfg TASKQ_MACHINE=ws bash "$T/ws/queue/worker_start.sh" > "$T/ws2.out" 2>&1; rc=$?
+check "worker_start: a worker env named in envs is activated through its .activate" '[[ $rc == 0 ]] && grep -q "worker start in wenv" $T/ws2.out && ! grep -q "!!" $T/ws2.out'
+rm -r "$T/wsroot/envs/wenv"
+TASKQ_CONFIG=$T/wscfg TASKQ_MACHINE=ws bash "$T/ws/queue/worker_start.sh" > "$T/ws3.out" 2>&1; rc=$?
+check "worker_start: that env not built yet, logs !!, worker still starts" '[[ $rc == 0 ]] && grep -q "!! activating the worker env wenv failed" $T/ws3.out && grep -q "worker start in None" $T/ws3.out'
 fi
 
 # gpu_stats / pad_now read real files (fake nvidia-smi): these two functions in consume.py's plugins consumers/gpu_share.py and gpu_pad.py

@@ -19,7 +19,7 @@ MACHINE_FIELDS = {
     "ssh": ("str?", None, "ssh name the hub connects to; None = the machine the hub runs on"),
     "ssh_master": ("bool", False, "ssh only over a persistent connection (ControlMaster); do not connect while it is down"),
     "tz": ("str?", None, "this machine's time zone (IANA name, e.g. Asia/Kuala_Lumpur); worker hours use it; None = local time zone"),
-    "conda": ("pair", None, "(conda location, default env name)"),
+    "conda": ("pair", None, "(conda location, env the worker and GPU pad run in: a name in envs, else a conda env of that install)"),
     "pueue": ("str", "~/.local/bin/pueue", "pueue location"),
     "disk": ("disk?", None, "(dir to check, alert below this many GB free, urgent below this many GB or None)"),
     "gpu_log": ("bool", False, "record GPU use at boot (taskq gpu usage)"),

@@ -10,9 +10,10 @@ read -r CONDA_BASE CONDA_ENV < <(python3 "$CORE/sites/mtab.py" get . conda) || t
 if [[ ! -f ${CONDA_BASE:-}/etc/profile.d/conda.sh ]]; then
     echo "the machine table (machines.py) has no conda for this machine (${CONDA_BASE:-none})" >&2
     [[ -n ${TASKQ_HANDOFF:-} ]] || exit 1  # during a bundle switch: tasks are running and must not be dropped; keep going
-else
-    source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate "$CONDA_ENV" || echo "$(date '+%F %T') !! conda activate $CONDA_ENV failed ($CONDA_BASE): tasks still activate their own envs; the GPU pad most likely will not start"
+else  # the worker's env: a name in envs (activated as for tasks) or a conda env (mtab.worker_activate)
+    _act=$(python3 "$CORE/sites/mtab.py" worker-activate .) && eval "$_act" \
+        || echo "$(date '+%F %T') !! activating the worker env $CONDA_ENV failed ($CONDA_BASE): tasks still activate their own envs; the GPU pad most likely will not start"
+    unset _act
 fi
 TASKQ_DATA=$(python3 "$CORE/queue/cfg.py" data)  # executor data dir: data under the root (views, results, logs)
 export TASKQ_DATA
