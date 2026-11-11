@@ -105,6 +105,7 @@ STALE_BEAT = 20 * 60   # 领取的心跳这么久没续算过期
 FRESH_LOG = 15 * 60    # 分段日志这么久内更新过，算还在训（不领）
 HALF_CLAIM = 5 * 60    # 只建了目录、没有 info 的领取，这么久后算过期
 BEAT = 5 * 60          # worker 心跳间隔
+FAIL_RETRY = 60 * 60   # 任务失败或卡住交还后，同一个 worker 隔这么久再领（失败满 MAX_FAIL 次后队列记为 failed，谁都不再领）
 
 
 def claim_alive(info, made, now, log_age=None, stale=None, fresh=None, half=None):
@@ -271,7 +272,7 @@ ENV = dict(
 )
 # 消费者（consume.py）的阈值（tune），默认值在 consume.py 的 Worker.__init__
 for _k in ("ADD_AFTER", "UTIL_MAX", "MIN_LEFT", "PATIENCE", "ERR_MAX", "IDLE_MAX", "IDLE_POLL", "IDLE_EXIT", "EARLY_FAIL",
-           "FAIL_WINDOW", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
+           "FAIL_WINDOW", "FAIL_RETRY", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
     ENV["TASKQ_" + _k] = ("tune", "consume.py 的阈值，默认值在 Worker.__init__")
 # 消费者换代码包（11/5）：旧进程把手上的任务写成 JSON 放进 TASKQ_HANDOFF，exec 新包的 worker_start.sh，新进程接着管
 HANDOFF = 1                # 交接格式的版本；新进程只认同一版本，认不了的不接（领取过期后别人能领）

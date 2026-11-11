@@ -38,6 +38,20 @@ check "换包：训完的、失败的退出码在新进程里收到，交还" '[
 check "换包：新进程记的代码是新包" 'grep -q "，代码 b$" $T/wh.out'
 fi
 
+# retry. 失败交还后同一个 worker 隔 FAIL_RETRY 再领，第二次失败后队列记为 failed、不再领（11/11：lab1 只有一个常驻 worker，
+#   别人占卡导致推理失败一次后，原来永久不领，任务挂了 5 天）
+if want retry; then
+reset
+table << EOF
+t/r base
+EOF
+(WORKER_ID=pueue-host-r TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=6 TASKQ_EARLY_FAIL=0 TASKQ_FAIL_RETRY=2 FAKE_FAIL=t/r \
+  exec bash "$HERE/dicc_worker.sh") > "$T/wr.out" 2>&1 &
+wpid=$!
+waitfor 60 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "失败后隔一会儿再领，第二次失败后不再领" '[[ $rc == 0 && $(grep -c "^fail t/r$" $FAKE_LOG) == 2 && $(nclaims) == 0 ]] && grep -q "t/r 本作业 0 分钟后再领" $T/wr.out'
+fi
+
 # hs. 新包自检不过：留在旧包，接着领
 if want hs; then
 reset

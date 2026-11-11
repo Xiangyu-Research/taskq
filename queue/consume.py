@@ -169,6 +169,7 @@ class Worker:
         self.MAX_OWN_FAIL = 2
         self.EARLY_FAIL = num("TASKQ_EARLY_FAIL", 600)
         self.FAIL_WINDOW = num("TASKQ_FAIL_WINDOW", 3600)
+        self.FAIL_RETRY = num("TASKQ_FAIL_RETRY", proto.FAIL_RETRY)
         self.STALL_MAX = num("TASKQ_STALL_MAX", 1800)
         self.STALL_FAILS = 2
         self.GIVEUP = num("TASKQ_GIVEUP", 180)
@@ -307,6 +308,10 @@ class Worker:
         if key not in self.excl:
             self.excl.append(key)
 
+    def retry_later(self, key):
+        self.later[key] = time.time() + self.FAIL_RETRY
+        say(f"{key} 本作业 {self.FAIL_RETRY // 60} 分钟后再领")
+
     def own_fails(self):
         now = time.time()
         self.fail_at = [t for t in self.fail_at if now - t < self.FAIL_WINDOW]
@@ -314,7 +319,7 @@ class Worker:
 
     def fail(self, key, why, ran):
         self.tq("release", key, "--failed", why)
-        self.exclude(key)
+        self.retry_later(key)
         if ran >= self.EARLY_FAIL:
             return
         self.fail_at.append(time.time())
@@ -343,7 +348,7 @@ class Worker:
             self.fail(key, f"卡住（一周内第 {n} 次）", ran)
         else:
             self.tq("release", key)
-            self.exclude(key)
+            self.retry_later(key)
 
     def quiet_since(self, r):
         """任务的日志和结果文件夹多少秒没有变化；读不了 → None。"""
