@@ -276,7 +276,7 @@ for _k in ("ADD_AFTER", "UTIL_MAX", "MIN_LEFT", "PATIENCE", "ERR_MAX", "IDLE_MAX
     ENV["TASKQ_" + _k] = ("tune", "consume.py 的阈值，默认值在 Worker.__init__")
 # 消费者换代码包（11/5）：旧进程把手上的任务写成 JSON 放进 TASKQ_HANDOFF，exec 新包的 worker_start.sh，新进程接着管
 HANDOFF = 1                # 交接格式的版本；新进程只认同一版本，认不了的不接（领取过期后别人能领）
-HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks")
+HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks", "idle_since")  # idle_since（11/11）：手上空着的起点，换包后接着算 IDLE_EXIT；没有 → 从换包时算
 HANDOFF_TASK = ("pid", "key", "token", "started", "outdir", "safe", "jtag", "stalled", "why", "sid", "zomb", "ended")
 ENV["TASKQ_HANDOFF"] = ("run", "换代码包时旧的消费者交给新的：手上的任务（JSON，字段见 HANDOFF_TOP / HANDOFF_TASK）；worker_start.sh 见到它不再查总开关")
 ENV["TASKQ_SITE"] = ("run", "执行机的名字（sites/pueue.py 的 worker 命令设）；消费者的 window 插件按它查时段，没设时按 WORKER_ID 在机器表里反查")

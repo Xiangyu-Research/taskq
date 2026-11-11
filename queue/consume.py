@@ -212,6 +212,7 @@ class Worker:
         self.clean_old()
         self.commit = self.code_name()
         self.head0 = self.head_now()
+        self.idle_since = 0
         if self.bundle_cur():
             self.touch_repo()
         self.adopt()
@@ -581,7 +582,8 @@ class Worker:
         tasks = [dict(pid=r.pid, key=r.key, token=self.tok.get(r.key) or None, started=r.started, outdir=r.outdir, safe=r.safe,
                       jtag=r.jtag, stalled=r.stalled, why=r.why, sid=r.sid, zomb=z, ended=r.ended)
                  for z, rs in ((False, self.runs), (True, self.zomb)) for r in rs.values()]
-        return dict(v=proto.HANDOFF, t0=self.t0, changed=self.changed, excl=self.excl, later=self.later, fail_at=self.fail_at, tasks=tasks)
+        return dict(v=proto.HANDOFF, t0=self.t0, changed=self.changed, excl=self.excl, later=self.later, fail_at=self.fail_at,
+                    idle_since=0 if self.runs else self.idle_since, tasks=tasks)
 
     def adopt(self):
         h = os.environ.pop("TASKQ_HANDOFF", None)
@@ -598,6 +600,10 @@ class Worker:
             self.excl = list(d.get("excl") or [])
             self.later = dict(d.get("later") or {})
             self.fail_at = list(d.get("fail_at") or [])
+            s = int(d.get("idle_since") or 0)
+            if self.t0 <= s <= time.time():
+                self.idle_since = s
+                say(f"接着算空闲：已经空了 {int(time.time()) - s} 秒")
             for t in d.get("tasks") or []:
                 r = Run(int(t["pid"]), t["key"], started=t.get("started"), outdir=t.get("outdir"), safe=t.get("safe"),
                         jtag=t.get("jtag"), stalled=t.get("stalled"), why=t.get("why"), sid=t.get("sid"))
@@ -796,7 +802,7 @@ class Worker:
         restart = False
         last_beat = time.time()
         err_since = 0
-        idle_since = int(time.time())
+        self.idle_since = self.idle_since or int(time.time())
         last_why = ""
         while True:
             now = time.time()
@@ -847,9 +853,9 @@ class Worker:
                 say(f"先不再加训练：{self.why_not}")
             last_why = self.why_not
             if self.runs:
-                idle_since = 0
+                self.idle_since = 0
             else:
-                idle_since = idle_since or now
+                self.idle_since = self.idle_since or int(now)
                 if changed:
                     if self.new_core():
                         self.switch(head)
@@ -859,7 +865,7 @@ class Worker:
                         restart = True
                         break
                 f = next(self.each("idle"), None)
-                d = f(self, why, now, idle_since, err_since) if f else None
+                d = f(self, why, now, self.idle_since, err_since) if f else None
                 if d is None:
                     break
                 self.nap(d)
@@ -888,7 +894,7 @@ def selftest():
             compile(f.read(), s, "exec")
     w = Worker.__new__(Worker)
     w.t0 = w.changed = 1
-    w.excl, w.later, w.fail_at, w.tok = ["a/c"], {}, [], {"a/b": "t"}
+    w.excl, w.later, w.fail_at, w.tok, w.idle_since = ["a/c"], {}, [], {"a/b": "t"}, 0
     w.runs, w.zomb = {1: Run(1, "a/b", sid=2, why="stall")}, {}
     h = json.loads(json.dumps(w.handoff()))
     assert set(h) == set(proto.HANDOFF_TOP) and set(h["tasks"][0]) == set(proto.HANDOFF_TASK) and h["tasks"][0]["token"] == "t"

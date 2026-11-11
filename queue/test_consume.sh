@@ -70,6 +70,26 @@ waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "自检不过：记一句，留在旧包接着领、训" '[[ $rc == 0 ]] && grep -q "新代码包 b 自检没过（.*坏了），留在 a" $T/whs.out && grep -q "训完 t/s2" $T/whs.out && ! grep -q "新包的 start" $T/whs.out'
 fi
 
+# hi. 空着时换代码包：空闲的起点交给新进程，总共空满 IDLE_EXIT 就退出，不从换包时重新算（11/11：box 的 CPU worker
+#   每半小时换一次包、一直不退出，占着 cpu 组唯一的位置）
+if want hi; then
+reset
+table < /dev/null
+bundle
+t0=$(date +%s)
+(WORKER_ID=pueue-host-i TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=14 \
+  exec bash "$T/code/a/scripts/taskq/queue/dicc_worker.sh") > "$T/whi.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q "没有能领的任务" $T/whi.out'
+waitfor 10 '(( $(date +%s) - t0 >= 7 ))'
+ln -sfn b "$T/code/current"
+waitfor 20 'grep -q "新包的 start" $T/whi.out'
+t1=$(date +%s)
+waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+t2=$(date +%s)
+check "空着换包：空闲接着算，总共满 IDLE_EXIT 退出" '[[ $rc == 0 ]] && grep -q "接着算空闲：已经空了" $T/whi.out && sed -n "/新包的 start/,\$p" $T/whi.out | grep -q "退出（有备好的任务时下次检查再开）" && (( t2 - t1 < 11 && t2 - t0 < 22 ))'
+fi
+
 # old. 11/5 前的 bash worker 带着停不下来的训练（TASKQ_ZOMBIES）exec 到新包：consume.py 照样认
 if want old; then
 reset
