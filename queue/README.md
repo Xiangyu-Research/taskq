@@ -299,6 +299,8 @@ taskq show count/large/2
 # 改一个任务（会改变 key 的参数不能改，删掉重加）
 taskq set count/large/2 env=base
 # 停止一个任务（10/30）：分给执行机的由 relay.py 下次检查时在那边停（在训的 30 秒内停下）、交还；之后不再分，resume 撤销
+# 交还后那边队列里这一条留着（状态 stopped，结果留着），不会消失：停好没有看 taskq events --source relay 里的"交还"或总队列的状态
+# 交还前 resume：同一台接着训；交还后 resume：下次检查删掉那边的任务和结果，总队列按当前参数重新分（没开始的任务要按改过的参数重发时可以这样做，11/11）
 taskq stop --why 原因 count/large/2
 taskq resume count/large/2
 # hub 上加一次性任务；看各 pueue 机器的队列
