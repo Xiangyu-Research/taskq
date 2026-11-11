@@ -377,6 +377,21 @@ r = proj_sh(T, "--project", PJ)
 ok("project.py sh --project", r.returncode == 0 and f"export TASKQ_REPO={PJ}\n" in r.stdout)
 r = subprocess.run([sys.executable, os.path.join(HERE, "project.py")], capture_output=True, text=True)
 ok("project.py：参数不对 → 用法，退出码 2", r.returncode == 2 and "project.py sh" in r.stderr)
+# pueue-add（11/11）：调用处是临时工作区时，任务里的路径换到代码副本下，仓库外的不动
+_wt, _snap = os.path.join(T, "wt"), os.path.join(T, "snap")
+os.makedirs(os.path.join(_wt, "envs"), exist_ok=True)
+os.symlink(_wt, os.path.join(T, "wt_link"))
+_env = {"TASKQ_REPO": _wt, "TASKQ_CONFIG": os.path.join(_wt, "envs"), "TASKQ_DATA": os.path.join(_wt, "data"),
+        "TASKQ_PLUGINS": os.pathsep.join([os.path.join(_wt, "p1"), "/elsewhere/p2"])}
+ok("project.rebase：旧根下的换到新根下，: 隔开的逐段换，仓库外的和别的变量不动",
+   project.rebase(os.path.join(T, "wt_link"), _snap, _env) == {
+       "TASKQ_REPO": _snap, "TASKQ_CONFIG": os.path.join(_snap, "envs"),
+       "TASKQ_PLUGINS": os.pathsep.join([os.path.join(_snap, "p1"), "/elsewhere/p2"])})
+ok("project.rebase：同一个根 → 不改", project.rebase(_wt, _wt, _env) == {})
+ok("project.rebase：前缀相同的兄弟目录不算在旧根下", project.rebase(_wt, _snap, {"TASKQ_CONFIG": _wt + "2/envs"}) == {})
+r = subprocess.run([sys.executable, os.path.join(HERE, "project.py"), "rebase", _wt, _snap],
+                   env=dict({k: v for k, v in os.environ.items() if not k.startswith("TASKQ_")}, **_env), capture_output=True, text=True)
+ok("project.py rebase：打印改了的 export", r.returncode == 0 and f"export TASKQ_CONFIG={_snap}/envs\n" in r.stdout and "TASKQ_DATA" not in r.stdout)
 
 
 def cfg_in(cwd, code, layout="alone", **env):

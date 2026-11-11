@@ -9,6 +9,8 @@
 
     python3 project.py sh [--project 文件夹]   给 bash 的 export 语句（TASKQ_REPO、TASKQ_CONFIG、TASKQ_PLUGINS，已经设了的不输出）；
                                                找不到项目时什么也不输出、退出码 1
+    python3 project.py rebase <旧根> <新根>    TASKQ_REPO、TASKQ_PROJECT、TASKQ_CONFIG、TASKQ_PLUGINS 里在旧根下的路径换到新根下，
+                                               打印改了的 export 语句（pueue-add 用：任务按代码副本找配置，不带调用处的路径）
 """
 import os
 import re
@@ -106,7 +108,34 @@ def export(root, force=False):
     return new
 
 
+REBASE = ("TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_CONFIG", "TASKQ_PLUGINS")
+
+
+def rebase(old, new, env=None):
+    """env 里 REBASE 这几个变量中在 old 下的路径（: 隔开的每一段）换到 new 下 → 改了的 {名: 值}。old 按真实路径比较。"""
+    env = os.environ if env is None else env
+    o = os.path.realpath(old)
+    out = {}
+    for k in REBASE:
+        v = env.get(k)
+        if not v:
+            continue
+        parts = []
+        for p in v.split(os.pathsep):
+            r = os.path.realpath(p)
+            rel = os.path.relpath(r, o) if r == o or r.startswith(o + os.sep) else None
+            parts.append(p if rel is None else os.path.normpath(os.path.join(new, rel)))
+        nv = os.pathsep.join(parts)
+        if nv != v:
+            out[k] = nv
+    return out
+
+
 def main(argv):
+    if argv and argv[0] == "rebase" and len(argv) == 3:
+        for k, v in rebase(argv[1], argv[2]).items():
+            print(f"export {k}={shlex.quote(v)}")
+        return 0
     if not argv or argv[0] != "sh" or len(argv) not in (1, 3) or (len(argv) == 3 and argv[1] != "--project"):
         print(__doc__.split("\n\n")[3], file=sys.stderr)
         return 2

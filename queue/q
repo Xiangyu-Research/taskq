@@ -23,6 +23,7 @@ else
     REPO=$(readlink -f "$SRC")
 fi
 [[ -d $REPO ]] || { echo "$PROG：没有工作目录 $REPO" >&2; exit 2; }
+eval "$(python3 "$CORE/queue/project.py" rebase "$HERE" "$REPO")"  # 任务按工作目录这份代码找配置，不带调用处（可能是之后删掉的临时工作区）的路径
 echo "$PROG：任务用的代码 $(git -C "$REPO" rev-parse --short HEAD)（$REPO）"
 ENV=$(TASKQ_REPO=$REPO python3 "$CORE/sites/mtab.py" q-env "$G") || exit 2
 eval "$ENV"
