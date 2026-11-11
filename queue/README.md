@@ -279,7 +279,11 @@ there are records for failures, skips, missing inputs, releases and stops. Task 
 
 Claim order: lower nice first; within a nice, half-done tasks first (has a checkpoint, or this machine has part logs and no failure record);
 then arrival order. The whole queue pauses claiming after 3 failures in 3 hours. A `taskq stop`ped task stops and is released by the
-running worker within 30 seconds and is not claimed again; `taskq resume` undoes it.
+running worker within 30 seconds and is not claimed again; `taskq resume` undoes it. After the release the entry stays in the
+executor's queue as `stopped` (its results kept) and does not disappear: check that a stop has finished by the "released" line in
+`taskq events --source relay` or by the hub queue's state. Resumed before the release, the task continues on the same executor;
+resumed after it, the next check deletes the executor's copy and its results and the hub queue dispatches it again with its current
+params (a way to resend a not-yet-started task with changed params).
 
 ### Workers (consume.py) and consumers
 
