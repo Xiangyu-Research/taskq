@@ -911,6 +911,32 @@ def test_e2e():
     assert len(recs) == 1 and recs[0]["spec"] == want, recs
     ok("resend: replace remote queue specs with the current resolution, add no new tasks")
 
+    sp2 = S.resolve("toy", dict(sp["params"], code="other/code"))  # taskq set on the hub after staging, same key
+    RT.lookup = lambda k: sp2
+    said = []
+    RT.resend(NAME, say=said.append)
+    recs = [json.loads(x) for x in open(rq) if x.strip()]
+    assert len(recs) == 1 and recs[0]["spec"] == S.sendable(S.resolve("toy", sp2["params"])) and recs[0]["spec"] != want, (recs, said)
+    assert ST.keys_of(ST.load_state(), NAME)[sp["key"]]["params"] == sp2["params"]
+
+    def gone(k):
+        raise RT.Gone(k)
+    RT.lookup = gone
+    RT.resend(NAME, say=lambda m: None)
+    assert [json.loads(x) for x in open(rq) if x.strip()][0]["spec"] == recs[0]["spec"]
+    RT.lookup = lambda k: sp
+    real_op = RM.store_op
+    RM.store_op = lambda what, data, **kw: dict(real_op(what, data, **kw), views=["prepared/other"])
+    said.clear()
+    try:
+        RT.resend(NAME, say=said.append)
+    finally:
+        RM.store_op = real_op
+    assert [json.loads(x) for x in open(rq) if x.strip()][0]["spec"] == recs[0]["spec"] and any("inputs changed" in m for m in said), said
+    RT.resend(NAME, say=lambda m: None)
+    assert [json.loads(x) for x in open(rq) if x.strip()][0]["spec"] == want
+    ok("resend: takes the hub's current params (taskq set after staging) and records them; key gone from the hub → the recorded params; inputs changed since staging → not replaced")
+
     said.clear()
     assert RT.stage(NAME, sp["key"], nice=5, say=said.append) == sp["key"] and nblobs() == blobs
     assert any("0 missing over there" in m for m in said), said

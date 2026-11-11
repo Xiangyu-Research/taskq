@@ -15,7 +15,7 @@ executors; finally execute the plan and top up worker jobs. See queue/README.md 
     taskq internal archive <key>                   back up this task's store results to the backup machine and verify
     taskq site bundle <name> [--commit C]          build a bundle, push it and switch current
     taskq site status <name>                       remote queue
-    taskq site resend <name>                       re-resolve staged tasks and replace their specs in the remote queue
+    taskq site resend <name>                       replace staged tasks' specs in the remote queue with the hub's current ones
 """
 import argparse
 import hashlib
@@ -1009,7 +1009,7 @@ def main(argv):
     p.add_argument("name")
     p = sub.add_parser("status", help="remote queue")
     p.add_argument("name")
-    p = sub.add_parser("resend", help="re-resolve staged tasks and replace their specs in the remote queue")
+    p = sub.add_parser("resend", help="replace staged tasks' specs in the remote queue with the hub's current ones")
     p.add_argument("name")
     a = ap.parse_args(argv)
     if a.cmd == "archive":

@@ -570,13 +570,15 @@ def from_sent(text):
 
 
 def lookup(key):
-    """key -> spec: the experiment table first, then this machine's task queue (taskq.py show). Not found -> None."""
+    """key -> spec: this machine's task queue first (taskq.py show: its recipe and params, including taskq set changes), then the
+    experiment table (a task not queued here). Not found -> None."""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--json", key], capture_output=True, text=True)
+    s = json_in(r.stdout) if r.returncode == 0 else None
+    if s is not None:
+        return s
     import experiments as E
     t = E.tasks().get(key)
-    if t:
-        return t["spec"]
-    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "show", "--json", key], capture_output=True, text=True)
-    return json_in(r.stdout) if r.returncode == 0 else None
+    return t["spec"] if t else None
 
 
 SHELL_FIELDS = ("key", "env", "cmd", "out", "inputs", "res", "vars")
@@ -645,7 +647,7 @@ def _main(cmd, args):
     elif cmd in ("lookup", "outputs"):
         s = lookup(args[0])
         if s is None:
-            print(f"no {args[0]} in the experiment table or task queue", file=sys.stderr)
+            print(f"no {args[0]} in the task queue or the experiment table", file=sys.stderr)
             return 1
     else:
         print(f"spec.py: unknown command {cmd}", file=sys.stderr)

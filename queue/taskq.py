@@ -818,6 +818,9 @@ def cmd_set(a):
         print(f"{t['key']}: {json.dumps(t['params'], ensure_ascii=False)} -> {json.dumps(p, ensure_ascii=False)}")
         t["params"] = p
         write_tasks(tasks)
+    site = (claim_info(a.key) or {}).get("assigned")
+    if site:  # the executor holds the spec sent at staging
+        print(f"{a.key} is assigned to {site}: taskq site resend {site} to send the new spec there")
     return 0
 
 

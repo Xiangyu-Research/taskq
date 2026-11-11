@@ -36,7 +36,7 @@ class Gone(RN.RelayError):
 def lookup(key):
     s = S.lookup(key)
     if s is None:
-        raise Gone(f"no {key} in the experiment table or the hub queue")
+        raise Gone(f"no {key} in the hub queue or the experiment table")
     return s if s.get("exp") else S.resolve(s["recipe"], s["params"])
 
 
@@ -50,7 +50,7 @@ def stage(name, key, nice=None, add=True, say=print):
         BG.hold(name, key, *g)
         say(f"the bundle {g[0]} in use on {RM.conf(name)['label']} cannot run the spec for {key}, not sending yet: {g[1]}")
         return None
-    links = {rel: h for rel, h, *_ in ex["files"]}
+    links = layout(ex)["links"]
     with pinned(name, key, links.values(), say):  # remote cleanup will not remove these blobs before the view is built
         return _stage(name, key, nice, add, say, real, ex, links)
 
@@ -130,11 +130,19 @@ def check_overlap(name, key, paths):
         raise RN.RelayError(f"inputs for {key} overlap outputs of unfinished {', '.join(busy)} on {RM.conf(name)['label']}, not staging")
 
 
-def _stage(name, key, nice, add, say, real, ex, links):
+def layout(ex):
+    """export result → where its inputs sit over there: dict(links={relative path: sha256}, views, placed (files outside views),
+    outs, cleanup), all relative to R/data."""
+    links = {rel: h for rel, h, *_ in ex["files"]}
     views = [ST.safe_rel(v) for v in ex["views"]]
     placed = sorted({ST.safe_rel(r) for r in list(links) + list(ex["texts"])} - {r for r in links if any(r.startswith(v + "/") for v in views)})
-    outs = [ST.safe_rel(o) for o in ex["outs"]]
-    cleanup = [ST.safe_rel(c) for c in ex["cleanup"]]
+    return dict(links=links, views=views, placed=placed, outs=[ST.safe_rel(o) for o in ex["outs"]],
+                cleanup=[ST.safe_rel(c) for c in ex["cleanup"]])
+
+
+def _stage(name, key, nice, add, say, real, ex, links):
+    lay = layout(ex)
+    views, placed, outs, cleanup = lay["views"], lay["placed"], lay["outs"], lay["cleanup"]
     check_overlap(name, key, views + placed)
     try:
         ensure_blobs(name, {h: [inner, size, path] for _, h, size, inner, path in ex["files"]}, say, what=key, n=len(links))
@@ -168,22 +176,49 @@ def _stage(name, key, nice, add, say, real, ex, links):
 
 
 def resend(name, say=print):
-    """Re-resolve tasks staged to this machine and replace their specs in the remote queue (only existing ones, add nothing)."""
+    """Replace the specs of tasks staged to this machine in the remote queue (only existing ones, add nothing) with what staging
+    would send now: the hub's current recipe and params (same lookup as stage, so taskq set on the hub reaches the executor);
+    the params recorded at staging only when the key is gone from the hub. Not replaced: tasks whose inputs changed since staging
+    (the view over there is old; stage them again), and specs the bundle in use cannot run. The recorded params follow what was
+    sent."""
     keys = ST.keys_of(ST.load_state(), name)
-    specs, ids = [], in_use(name) if keys else []
-    for real, k in keys.items():
-        sp = S.sendable(S.resolve(k["recipe"], k["params"]))
+    specs, sent, ids = [], {}, in_use(name) if keys else []
+    for key, k in keys.items():
+        try:
+            real = lookup(key)
+            ex = RM.store_op("export", dict(spec=real))
+        except Gone:
+            rec, params = k["recipe"], k["params"]
+        except (RN.RelayError, RuntimeError, S.SpecError) as e:
+            say(f"{key} not updated: {e}")
+            continue
+        else:
+            lay = layout(ex)
+            moved = [f for f in ("links", "views", "placed") if f in k and lay[f] != k[f]]
+            if moved:
+                say(f"{key} not updated: its inputs changed since staging ({', '.join(moved)}); stage it again")
+                continue
+            rec, params = real["recipe"], ex["params"]
+        sp = S.sendable(S.resolve(rec, params))
         g = BG.check_all(sp, ids)
         if g:  # the bundle in use cannot run the new spec: keep the remote one
-            say(f"{real} not updated: the bundle {g[0]} in use cannot run the new spec ({g[1]})")
+            say(f"{key} not updated: the bundle {g[0]} in use cannot run the new spec ({g[1]})")
         else:
             specs.append(sp)
+            sent[key] = dict(recipe=rec, params=params)
     if not specs:
-        say("no staged tasks")
+        say("no staged tasks to update")
         return
     r = RM.rtq(name, "add --nice 0 --spec-stdin --update-only", input=json.dumps(specs))
     if r is None or r[0]:
         raise RuntimeError(f"could not replace specs on {RM.conf(name)['label']}: {RM.err_tail((r or [0, 'ssh unreachable'])[1])}")
+
+    def rec_sent(st):
+        have = ST.keys_of(st, name)
+        for key, v in sent.items():
+            if key in have:
+                have[key].update(v)
+    ST.update_state(rec_sent)
     say(r[1] or "nothing to replace")
 
 

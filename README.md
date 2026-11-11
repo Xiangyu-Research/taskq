@@ -92,7 +92,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 |---|---|
 | `taskq site status` | that machine's queue |
 | `taskq site bundle` | build, push and switch current |
-| `taskq site resend` | re-resolve sent tasks with current recipes and replace their specs there |
+| `taskq site resend` | replace the specs of sent tasks there with the hub's current recipe and params |
 | `taskq site env` | build envs on that machine and run checks |
 | `taskq site envs` | dry run: each env's state on that machine |
 | `taskq site setup` | pueue daemon, groups, crontab (no name: this machine) |
@@ -147,7 +147,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq spec shell` | shell statements for run_task.sh (expanded for this machine) |
 | `taskq spec done` | done exits 0, not done 1, bad spec 2, data dir unreadable 5 |
 | `taskq spec resolve` | resolved spec (one JSON line) |
-| `taskq spec lookup` | find a task by key (experiment table first, then the queue) and print its spec (JSON) |
+| `taskq spec lookup` | find a task by key (the queue first, then the experiment table) and print its spec (JSON) |
 | `taskq spec outputs` | this task's outputs (JSON); --sh: shell statements for archive_task.sh |
 | `taskq spec collect` | training state on this machine (for cross-version reads): one @@JSON line |
 | `taskq spec export` | what a relay plugin sends: files, views, fetched dirs (JSON) |

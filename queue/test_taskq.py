@@ -259,6 +259,9 @@ rc, _ = tq2("take", "--worker", "pueue-host", UM)
 check("take without --assign: argument error", rc == 2)
 rc, _ = tq2("take", "--worker", "other", "--assign", "--from", "pueue-host", UM)
 check("take has no --from (an assigned task cannot be reassigned in the queue): argument error", rc == 2)
+rc, out = tq2("set", UM, "env=alt")
+check("set on a task assigned to an executor: says how to send the new spec there", rc == 0 and "taskq site resend pueue-host" in out)
+tq2("set", UM, "env=")
 tq2("release", "--worker", "pueue-host", UM)
 rc, out = tq2("next", "--worker", "501", "--envs", ALL, "--exclude", "D101_alpha/V_s/0", "D116_gamma/V_save/4")
 check("after release a Slurm job can claim it again", rc == 0 and out.startswith(UM))
@@ -401,6 +404,10 @@ tq3("release", "--worker", "700", "D111_beta/V_save_n470/1")
 rc, out, _ = tq3("set", "D111_beta/V_save_n470/1", "env=alt2")
 ts = {t["key"]: t for t in taskq.read_tasks(os.path.join(TQ3, "tasks.jsonl"))}
 check("set: changes one task's params", rc == 0 and ts["D111_beta/V_save_n470/1"]["params"]["env"] == "alt2")
+os.environ["TASKQ_DIR"] = TQ3
+check("spec lookup: the queue (with taskq set changes) before the experiment table",
+      taskq.S.lookup("D111_beta/V_save_n470/1")["env"] == "alt2" != E.tasks()["D111_beta/V_save_n470/1"]["spec"]["env"])
+os.environ["TASKQ_DIR"] = TQ2
 rc, out, _ = tq3("next", "--worker", "705", "--envs", "alt2")
 check("next: after the env change it is claimed with the new env", rc == 0 and out.startswith("D111_beta/V_save_n470/1"))
 tq3("release", "--worker", "705", "D111_beta/V_save_n470/1")
