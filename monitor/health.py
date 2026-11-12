@@ -303,8 +303,13 @@ def check(s):
         if "error" in d:
             add(alert_id("pueued", name), f"{L(name)} 的 pueue 没有响应：{d['error'][:120]}")
             continue
+        ident = {t["id"]: C.identify(name, t, s.get("records") or []) for t in d["tasks"]}
+        newer = {}
+        for i, r in ident.items():
+            if r:
+                newer[r["step"], r["key"]] = max(i, newer.get((r["step"], r["key"]), i))
         for t in d["tasks"]:
-            r = C.identify(name, t, s.get("records") or [])
+            r = ident[t["id"]]
             kind, key = (r["step"], r["key"]) if r else (None, None)
             tname = t["label"] or f"#{t['id']}"
             st = t["status"]
@@ -325,6 +330,8 @@ def check(s):
                 continue
             end = C.local_time(t["end"])
             if end and now - end > timedelta(hours=24):
+                continue
+            if r and (kind, key) in newer and newer[kind, key] > t["id"]:  # 同一步、同一个任务后来又排过（出错后重排的）：只看最新的
                 continue
             add(alert_id("pueue", name, t["id"], str(t["end"])), f"{L(name)} 任务 {t['id']} {tname} {st}",
                 level="info" if stopped(t) else "normal", kind="event", data=dict(label=tname, status=st))

@@ -273,11 +273,17 @@ def test_plan():
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Running")], [rec]), NAME, RS(), {})
     assert ops(acts) == [("beat", K)] and not stuck, acts
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Failed")], [rec]), NAME, RS(), {})
+    assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
+    r3 = [dict(rec, id=i) for i in (5, 6, 7)]
+    f3 = [dict(id=i, label=rec["label"], status="Failed") for i in (5, 6, 7)]
+    acts, stuck = relay.plan(S0([mtask(K)], f3, r3), NAME, RS(), {})
+    assert ops(acts) == [("beat", K)] and f"relaystage:{K}" in stuck, (acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Killed", result="Killed")], [rec]), NAME, RS(), {})
     assert ops(acts) == [("beat", K)] and f"relaystage:{K}" in stuck, (acts, stuck)
     old = dict(rec, added=10.0)
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Failed")], [old]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
-    ok("还没放过去 → 排传数据；在传 → 等；出错 → 报、领取保留；领取之前的旧任务不算")
+    ok("还没放过去 → 排传数据；在传 → 等；出错 → 重排，满 3 次或手动停的 → 报、领取保留；领取之前的旧任务不算")
     ns = [dict(id=7, label=rec["label"], status=f"Failed ({relay.NOSLOT_RC})", code=relay.NOSLOT_RC)]
     acts, stuck = relay.plan(S0([mtask(K, since=time.time() - 600)], ns, [rec]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
@@ -300,8 +306,11 @@ def test_plan():
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=8, label=frec["label"], status="Running")], [frec]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K)] and not stuck, acts
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=8, label=frec["label"], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
-    assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, stuck
-    ok("那边训完 → 排一次拉回；在拉 → 等；出错 → 报")
+    assert ops(acts) == [("beat", K), ("fetch", K)] and not stuck, (acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=i, label=frec["label"], status="Failed") for i in (8, 9, 10)],
+                                [dict(frec, id=i) for i in (8, 9, 10)]), NAME, RS(rtask(A, "done")), st)
+    assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
+    ok("那边训完 → 排一次拉回；在拉 → 等；出错 → 重排，满 3 次才报")
 
     acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("drop", K), ("release", K)], acts
@@ -372,6 +381,9 @@ def test_plan():
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=9, label=srec["label"], status="Running")], [srec]), NAME, RS(ri), st)
     assert ops(acts) == [("beat", K)] and not stuck, acts
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=9, label=srec["label"], status="Failed")], [srec]), NAME, RS(ri), st)
+    assert ops(acts) == [("beat", K), ("restage", K)] and not stuck, (acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=i, label=srec["label"], status="Failed") for i in (9, 10, 11)],
+                                [dict(srec, id=i) for i in (9, 10, 11)]), NAME, RS(ri), st)
     assert ops(acts) == [("beat", K)] and f"relaystage:{K}" in stuck, (acts, stuck)
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=9, label=srec["label"], status="Failed")], [dict(srec, added=1500.0)]), NAME, RS(ri), st)
     assert ops(acts) == [("beat", K), ("restage", K)] and not stuck, (acts, stuck)

@@ -98,6 +98,11 @@ s = snap(pueue={"hub": {"groups": {}, "tasks": [
 P = H.check(s)
 ok("任务失败、依赖失败都报", any(p.startswith("pueue:hub:1:") for p in P) and any(p.startswith("pueue:hub:2:") for p in P))
 ok("24 小时前的失败不再报", not any(p.startswith("pueue:hub:3:") for p in P))
+_rr = [dict(machine="hub", id=i, label="relay_fetch:k", step="relay_fetch", key="k", added=0.0) for i in (21, 22)]
+_P2 = H.check(snap(records=_rr, pueue={"hub": {"groups": {}, "tasks": [
+    task(21, "wait", "Failed (1)", "x", "relay_fetch:k", end=NOW - timedelta(hours=1)),
+    task(22, "wait", "Running", "x", "relay_fetch:k")]}}))
+ok("出错后同一步又排过的旧任务不报", not any(p.startswith("pueue:hub:21:") for p in _P2))
 ok("手动停的（143、pueue kill）只记不推", [p["level"] for k, p in P.items() if k.startswith(("pueue:hub:4:", "pueue:hub:5:"))] == ["info"] * 2)
 ok("训练命令被信号杀掉（137，多半是内存不够）照常报", [p["level"] for k, p in P.items() if k.startswith("pueue:hub:6:")] == ["normal"])
 ok("调度停的 worker（时段结束、让卡）不报；worker 出错照常报", not any(p.startswith("pueue:hub:8:") for p in P)

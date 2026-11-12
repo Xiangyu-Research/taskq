@@ -17,7 +17,7 @@
        （policy.py 的 OFFLINE）时不等，直接交还；只是这次连不上时下次检查再排；
      - 那边失败：没有进度 → 交还（--skip，它以后不再领），删掉那边的任务；有进度 → 领取保留、报出来；
      - 总队列里停了（taskq.py stop）→ 那边也停，那边不再领着以后交还（那边的结果留着）；撤销停止后再领到时那边接着训；
-     - 传数据、拉回出错、验证集对不上 → 领取保留、报出来（处理后 pueue remove 那个 hub 任务，下次检查重排）。
+     - 传数据、拉回出错 → 下次检查自己重排，一共 XFER_TRIES 次还不行才领取保留、报出来（处理后 pueue remove 那个 hub 任务，下次检查重排）；验证集对不上 → 领取保留、报出来。
   3. 那边排着没人领的任务少于 policy.py 的 READY[名字] 时，按 refill.py 的挑法领下一个任务（只领插件接受的做法，
      数据传过去后放 blobs 的盘至少还剩 budget 的第二项（没有 budget 时 HARD_GB）；有 cap 的执行机，那边每个任务的输出另留
      refill.TRAIN_OUT_GB，cap 里留不出来就不领。blobs 可以是指到别的盘的链接（如 Slurm 执行机的 scratch 盘，11/4），输出和队列在根目录）；
@@ -86,6 +86,7 @@ VIEW_KEEP_S = 6 * 3600  # 建好这么久以内的视图不清理（任务刚传
 STATUS_S = 90  # 读状态的超时：那边的存储挂住时跳过这台，不等
 NOSLOT_RC = proto.EXIT["stage_later"]  # relay.py stage 这次排不上 CPU 作业（或存档的来源那边还领着）的退出码：下次检查再传，不报
 NOSLOT_ALERT_S = 3 * 3600  # 领了这么久还一直排不上就报
+XFER_TRIES = 3  # 传数据、拉回出错：下次检查自己重排，同一次领取里一共做这么多次还不行才报（11/12）
 PLANNED = {}  # 这次检查里各台已经计划传的 GB，按 (ssh, 盘) 记：同一个盘上的几台合起来算
 
 
@@ -185,14 +186,28 @@ def bundle(name, commit="origin/main", have=None, run_build=None):
 
 
 # ---------------- 每次检查 ----------------
-def box_task(s, step, key, since=0):
-    """hub 上 step 这一步、这个 key 的最新任务（任务记录在 since 之后加的）→ pueue 任务或 None。"""
-    hub, last = M.hub(), None
+def box_tasks(s, step, key, since=0):
+    """hub 上 step 这一步、这个 key 的任务（任务记录在 since 之后加的），按先后 → pueue 任务的列表。"""
+    hub, out = M.hub(), []
     for t in sorted((s["pueue"].get(hub) or {}).get("tasks", []), key=lambda t: t["id"]):
         r = C.identify(hub, t, s.get("records") or [])
         if r and r["step"] == step and r["key"] == key and r.get("added", 0) >= since - 60:
-            last = t
-    return last
+            out.append(t)
+    return out
+
+
+def box_task(s, step, key, since=0):
+    """box_tasks 里最新的一个，或 None。"""
+    return (box_tasks(s, step, key, since) or [None])[-1]
+
+
+def again(s, step, key, since=0):
+    """最新的这一步出错了（不是手动停的），而且出错的还不到 XFER_TRIES 次 → True：再排一次，不报。"""
+    def failed(t):
+        return (t["status"] not in LIVE and t["status"] != "Success" and t.get("code") != NOSLOT_RC
+                and not (t.get("result") == "Killed" or t.get("code") == 143))
+    ts = box_tasks(s, step, key, since)
+    return bool(ts) and failed(ts[-1]) and sum(map(failed, ts)) < XFER_TRIES
 
 
 progress = refill.site_progress  # 一个任务在一台执行机上有没有进度（11/7 起合到 refill）
@@ -313,7 +328,7 @@ def plan(s, name, rs, st, now=None):
         if a is None:
             sg = box_task(s, "relay_stage", key, since)
             noslot = sg is not None and sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC
-            if sg is None or sg["status"] == "Success" or noslot:
+            if sg is None or sg["status"] == "Success" or noslot or again(s, "relay_stage", key, since):
                 g, h = gate(name, rs, mtq, key), holds.get(key) or {}
                 if not g and h.get("bundle") in BG.in_use(name, rs.get("bundle"), rs.get("live")):
                     g = (h["bundle"], h.get("err"))  # stage 按要送的说明挡下的：同一个包还在用就不再排
@@ -342,7 +357,7 @@ def plan(s, name, rs, st, now=None):
             pass  # 做完的标志有了、worker 还领着：训练命令还在写结果，只续约，交还以后再拉回（11/3）；领取过期了（worker 没交还就没了）照常拉回
         elif ast == "done":
             ft = box_task(s, "relay_fetch", key, since)
-            if ft is None:
+            if ft is None or again(s, "relay_fetch", key, since):
                 acts.append(dict(op="fetch", key=key))
             elif ft["status"] == "Success":
                 end = C.local_time(ft.get("end"))
@@ -357,7 +372,8 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="rresume", key=key, rkey=a["key"]))
         elif ast == "input":  # 那边开训前查到输入不全（taskq.py missing）：只补传缺的、重建视图，再撤掉标记（11/1）
             sg = box_task(s, "relay_stage", key, a.get("input_since") or since)
-            if sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC):
+            if (sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC)
+                    or again(s, "relay_stage", key, a.get("input_since") or since)):
                 acts.append(dict(op="restage", key=key))
             elif sg["status"] not in LIVE:
                 stuck[alert_id("relaystage", key)] = alert(f"给 {L} 补传 {key} 缺的输入的 {M.hub()} 任务 {sg['id']} 出错了（{sg['status']}），领取保留；"
