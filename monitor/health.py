@@ -382,7 +382,7 @@ def drop_acked(P, db, dry=False):
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
-QUIET = ("notice",)  # 只列在 taskq problems 里、不推送的问题种类（11/6：手机只收故障，到期的提醒开工时看）
+QUIET = ("notice", "undeclared")  # 只列在 taskq problems 里、不推送的问题种类（11/6：手机只收故障，到期的提醒开工时看；11/12 加写到声明以外）
 
 
 def night(now):
@@ -488,7 +488,7 @@ def progress_snapshot(s, db):
 def from_step(v):
     """shift / feed（relay）/ advance 报的卡住：说明（str），或 dict(msg, data) → 问题。"""
     if isinstance(v, dict):
-        return problem(v["msg"], data=v.get("data"))
+        return problem(v["msg"], level=v.get("level", "normal"), data=v.get("data"))  # level="info"：只是在等，记下不推送
     return problem(v)
 
 

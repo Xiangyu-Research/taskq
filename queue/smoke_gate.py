@@ -253,9 +253,9 @@ class Gate:
             return self._hold(key, f"{m['kind']} 在这台上还没成功过，先只送一个（已有 {n} 个）") if n else None
         if pending(r, m, self.queue_keys()):
             if self.live and self.now - (r.get("t") or self.now) > QUEUED_ALERT_S:
-                self.alerts[alert_id("smoke", self.site, m["kid"])] = alert(
+                self.alerts[alert_id("smoke", self.site, m["kid"])] = dict(alert(
                     f"{self.site} 上 {m['kind']} 的冒烟 {r['key']} 排了 {(self.now - r['t']) / 3600:.0f} 小时还没做完",
-                    machine=self.site, kind=m["kind"], why="还没做完", key=r["key"])
+                    machine=self.site, kind=m["kind"], why="还没做完", key=r["key"]), level="info")  # 在排队，不是故障：只记不推（11/12）
             return self._hold(key, f"等冒烟 {r.get('key')}")
         if fresh(r, m) and r.get("state") == FAILED and (not self.bundle or r.get("bundle") == self.bundle):
             if self.live:

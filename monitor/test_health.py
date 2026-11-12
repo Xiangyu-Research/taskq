@@ -456,6 +456,8 @@ ok("白话：没有 data 的（旧状态文件里的）退回原来的说明",
    PL.problem("unread:pueue-host", dict(msg="原来的说明")) == "原来的说明" and PL.problem(f"site:site-pueue:fail:{MEN0}", dict(msg="m")) == "m")
 ok("执行机报的卡住可以是说明或 dict(msg, data)", H.from_step("m") == dict(msg="m", level="normal", kind="state", after=0)
    and H.from_step(dict(msg="m", data=dict(n=1)))["data"] == dict(n=1))
+ok("执行机报的只是在等的（level=info）只记不推；写到声明以外不推送",
+   H.from_step(dict(msg="m", data=dict(n=1), level="info"))["level"] == "info" and "undeclared" in H.QUIET)
 ok("白话：实验表里的步骤都有中文名（STEPS：核心的 + 插件 labels.py 的，或步骤的 zh）",
    all(PL.step_name(n) != n for n in PL.table_steps()) and PL.step_name("nope") == "nope")
 
