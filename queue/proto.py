@@ -116,6 +116,7 @@ HALF_CLAIM = 5 * 60    # a claim with only a dir and no info is stale after this
 BEAT = 5 * 60          # worker heartbeat interval
 FAIL_RETRY = 60 * 60   # after a task fails or stalls and is released, the same worker waits this long before claiming it again
                        # (after MAX_FAIL failures the queue marks it failed and nobody claims it)
+XFER_TRIES = 3         # a failed transfer (stage / fetch) is queued again at the next check; reported only after this many failures within one claim
 # old bundle cleanup (relay.deploy cleans the root's code/, relay_bundle.prune cleans bundles built on the hub)
 CODE_KEEP = 3                # keep the most recent bundles besides the one in use
 SWITCH_HOLD_S = 90           # self migrate: after switching an executor's bundle, keep unclaimed tasks aside this long (a worker of the old bundle that checked the bundle just before can still claim once)

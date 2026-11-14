@@ -63,7 +63,6 @@ LATE_S = 3600  # report when a fetch/archive succeeded this long ago but the hub
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # keep views built this recently (a task just staged, not added yet, or just released)
 STATUS_S = 90  # status timeout: skip this machine when its storage hangs instead of waiting
-XFER_TRIES = 3  # a failed stage / fetch is queued again at the next check; reported only after this many failures within one claim
 NOSLOT_RC = proto.EXIT["stage_later"]  # relay.py stage could not get a CPU job this time (or the checkpoint source is still claimed): retry next check without alerting
 NOSLOT_ALERT_S = 3 * 3600  # report when a claim this old still cannot get scheduled
 
@@ -249,12 +248,12 @@ def io_task(s, step, key, since=0):
 
 
 def again(s, step, key, since=0):
-    """The newest run of this step failed (not stopped by hand) and fewer than XFER_TRIES have failed -> True: queue it again, do not report."""
+    """The newest run of this step failed (not stopped by hand) and fewer than proto.XFER_TRIES have failed -> True: queue it again, do not report."""
     def failed(t):
         return (t["status"] not in LIVE and t["status"] != "Success" and t.get("code") != NOSLOT_RC
                 and not (t.get("result") == "Killed" or t.get("code") == 143))
     ts = io_tasks(s, step, key, since)
-    return bool(ts) and failed(ts[-1]) and sum(map(failed, ts)) < XFER_TRIES
+    return bool(ts) and failed(ts[-1]) and sum(map(failed, ts)) < proto.XFER_TRIES
 
 
 def smoke_step(name, mtq, t, a, k, now):

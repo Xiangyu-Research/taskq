@@ -204,14 +204,14 @@ ok("store unreachable: queue nothing, report advance:store", not todo and list(s
 
 # ---- 6. really run taskq.py add ----
 rc, out = A.taskq_add(-100, A.queue_params(INST["eval/t0_f1"]))
-r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json"], capture_output=True, text=True)
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json"], capture_output=True, text=True, env=dict(os.environ, TASKQ_DATA=DATA))
 rows = (S.json_in(r.stdout) or {}).get("tasks") or []
 row = next((t for t in rows if t["key"] == "eval/t0_f1"), None)
 ok(f"taskq.py add really runs: eval/t0_f1 is in the queue, recipe command, with step ({rc} {out[-200:]})",
    rc == 0 and row is not None and row["recipe"] == "command" and (row.get("spec") or {}).get("step") == "eval"
    and row.get("nice") == -100)
 rc, out = A.taskq_add(-100, A.queue_params(INST["eval/t0_f1"]))
-r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json"], capture_output=True, text=True)
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json"], capture_output=True, text=True, env=dict(os.environ, TASKQ_DATA=DATA))
 ok("same key added again: not duplicated", [t["key"] for t in S.json_in(r.stdout)["tasks"]].count("eval/t0_f1") == 1)
 sp = S.resolve("command", S.parse_kv(S.kv_args("command", A.queue_params(INST["infer/t0_f0"]))[1:]))
 ok("the step's spec becomes shell variables", bool(S.shell_lines(sp, "/d")))
