@@ -133,8 +133,9 @@ def claim_times(rs):
     return None if tasks is None else [t["since"] for t in tasks if t.get("since")]
 
 
-def deploy(name, bid, path, claims=None):
-    """Push the bundle and switch current (atomic mv -T); the first time, create dirs and enable the queue.
+def deploy(name, bid, path, claims=None, switch=True):
+    """Push the bundle and switch current (atomic mv -T; switch=False: only unpack it under code/, self migrate switches it);
+    the first time, create dirs and enable the queue; record the machine name in the root (proto.ROOT machine).
     Only unpack after receiving everything and matching sha256 (tar does not complain when ssh drops between two files); push
     one at a time per machine (flock), each with its own temp dir. Prune old bundles (claims: claim times of tasks still claimed
     over there, claim_times): keep current, the newest proto.CODE_KEEP, anything touched within CODE_KEEP_S (a running worker
@@ -149,14 +150,15 @@ def deploy(name, bid, path, claims=None):
     sha = hashlib.sha256(tar).hexdigest()
     cur = os.path.relpath(ROOT["current"], ROOT["code"])  # name under code/
     tq, en = f"$R/{ROOT['queue']}/{proto.QUEUE['tasks']}", f"$R/{ROOT['queue']}/{proto.QUEUE['enabled']}"
+    mf = f"$R/{ROOT['machine']}"
     cmd = (f"set -e; R={r}; mkdir -p {' '.join('$R/' + d for d in proto.MKDIRS)}; "
-           f"[ -e {tq} ] || {{ : > {tq}; touch {en}; }}; cd $R/{ROOT['code']}; "
+           f"[ -e {tq} ] || {{ : > {tq}; touch {en}; }}; echo {shlex.quote(name)} > {mf}.tmp.$$; mv -f {mf}.tmp.$$ {mf}; cd $R/{ROOT['code']}; "
            f"exec 9> $R/{ROOT['deploy_lock']}; flock -w 300 9; "
            "find . -maxdepth 1 -name '*.tmp.*' -mtime +0 -exec rm -rf {} + || true; "  # left by earlier interrupted deploys (nobody else pushes under the lock)
            f"t={b}.tmp.$$; rm -rf $t $t.tar; cat > $t.tar; "
            f"if [ \"$(sha256sum < $t.tar | cut -d' ' -f1)\" != {sha} ]; then rm -f $t.tar; echo 'bundle transfer incomplete' >&2; exit 3; fi; "
            f"if [ ! -d {b} ]; then mkdir $t; tar -xf $t.tar -C $t; mv -T $t {b}; fi; rm -f $t.tar; "
-           f"touch {b}; ln -sfn {b} {cur}.tmp.$$; mv -T {cur}.tmp.$$ {cur}")
+           f"touch {b}" + (f"; ln -sfn {b} {cur}.tmp.$$; mv -T {cur}.tmp.$$ {cur}" if switch else ""))
     if claims is not None:
         floor = int(min([time.time() - proto.CODE_KEEP_S] + [c - proto.CODE_CLAIM_SLACK for c in claims]))
         cmd += (f"; ls -1t | grep -vx {cur} | grep -v '\\.tmp' | tail -n +{proto.CODE_KEEP + 1} | "

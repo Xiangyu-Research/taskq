@@ -118,6 +118,15 @@ ok(F2.instances["adhoc/x"].scope == SOURCE and F2.instances["infer/t0_f0"].scope
    and not F2.errors,
    f"training tasks in the hub queue outside the experiment table are sources too: {F2.errors}")
 
+q2 = [dict(key="adhoc/a", recipe="command", params=dict(key="adhoc/a", cmd="c", env="base", out="shared/J", done="a")),
+      dict(key="adhoc/b", recipe="command", params=dict(key="adhoc/b", cmd="c", env="base", out="shared/J", done="b")),
+      dict(key="adhoc/c", recipe="command", params=dict(key="adhoc/c", cmd="c", env="base", out="shared/J/sub", done="c")),
+      dict(key="adhoc/d", recipe="command", params=dict(key="adhoc/d", cmd="c", env="base", out=ev.outputs[0], done="d"))]
+F3 = FC.build(queue_tasks=q2)
+ok(not [p for p in F3.errors if "shared/J" in p] and [p for p in F3.errors if "adhoc/d" in p],
+   f"tasks added to the hub queue by hand may share an output with each other, not with the experiment table: {F3.errors}")
+
+
 def step_of(exps, eid, name):
     e = next(x for x in exps if x["id"] == eid)
     return next(st for st in e["after"] + e["group_after"] if st["name"] == name)

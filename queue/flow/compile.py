@@ -73,7 +73,7 @@ def build(exps=None, final=None, queue_tasks=()):
     """-> Flow. queue_tasks: tasks in the hub queue (taskq status --json tasks); those with a recipe and not in the experiment table are sources too."""
     if exps is None:
         exps, final = E.load()
-    inst, errors = {}, []
+    inst, errors, adhoc = {}, [], set()
 
     def add(i):
         if i.id in inst:
@@ -113,7 +113,7 @@ def build(exps=None, final=None, queue_tasks=()):
         except S.SpecError:
             continue
         if not sp.get("step"):  # step instances are derived from the experiment table below
-            source(q["key"], None, q["recipe"], sp, q["key"])
+            adhoc.add(source(q["key"], None, q["recipe"], sp, q["key"]).id)
 
     for e in exps:
         for t in (t for t in table.values() if t["exp"] == e["id"]):
@@ -135,7 +135,7 @@ def build(exps=None, final=None, queue_tasks=()):
             outs.add(o, i.id)
         for o in i.shared:
             shared.add(o, i.id)
-    errors += overlaps(inst)
+    errors += overlaps(inst, adhoc)
     for i in inst.values():
         for p in i.inputs:
             own = [o for o in i.outputs if C.under(p, o) or C.under(o, p)]
@@ -149,19 +149,24 @@ def build(exps=None, final=None, queue_tasks=()):
     return Flow(instances=inst, errors=errors + cycles(inst))
 
 
-def overlaps(inst):
-    """Two instances have the same output, or one is inside the other -> [problems]."""
+def overlaps(inst, adhoc=()):
+    """Two instances have the same output, or one is inside the other -> [problems]. Two tasks that are both in adhoc (added to
+    the hub queue by hand, outside the experiment table) may share an output: that is history the experiment table cannot fix."""
     owner, probs = {}, []
+
+    def both_adhoc(a, b):
+        return a in adhoc and b in adhoc
+
     for i in inst.values():
         for o in i.outputs:
-            if o in owner and owner[o] != i.id:
+            if o in owner and owner[o] != i.id and not both_adhoc(owner[o], i.id):
                 probs.append(f"{o} is an output of both {owner[o]} and {i.id}")
             owner.setdefault(o, i.id)
     for o, iid in owner.items():
         parts = o.split("/")
         for n in range(1, len(parts)):
             up = "/".join(parts[:n])
-            if up in owner and owner[up] != iid:
+            if up in owner and owner[up] != iid and not both_adhoc(owner[up], iid):
                 probs.append(f"output {o} of {iid} is inside output {up} of {owner[up]} (a path belongs to one step only)")
     return probs
 

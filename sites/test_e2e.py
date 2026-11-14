@@ -669,7 +669,7 @@ def step_gc():
     top = sorted(os.listdir(RROOT))
     step("cleanup after everything is done (relay_store.gc): views and blobs removed, only worker logs left in the data dir, registered views cleared",
          not blobs and all(p.startswith("logs/workers/") for p in left) and not reg, (left[:10], blobs[:5], reg))
-    step("the root keeps only what is still needed: code, queue, blobs, data, tmp, state, envs", set(top) <= {"code", "queue", "blobs", "data", "tmp", "state", "envs"}
+    step("the root keeps only what is still needed: code, queue, blobs, data, tmp, state, envs, machine", set(top) <= {"code", "queue", "blobs", "data", "tmp", "state", "envs", proto.ROOT["machine"]}
          and os.path.isfile(os.path.join(RROOT, "state/envs/toy.ok")), top)
     relay.VIEW_KEEP_S = 6 * 3600
     M.MACHINES[NAME]["budget"] = (0, 0)
@@ -1371,11 +1371,12 @@ def step_slurm_bundle_switch(oldbid, pending):
 
 
 def step_old_launcher():
-    """A job submitted by the old code (no TASKQ_ROOT/TASKQ_MACHINE) cannot find its root and machine yet: SKIP, not fail."""
+    """A job queued by an older bundle's sbatch (no TASKQ_ROOT / TASKQ_MACHINE, only TASKQ_DIR) starts the bundle in use:
+    worker_start.sh finds the root from where the bundle sits and the machine from the root's machine file."""
     clear_jobs()
     p = os.path.join(T, "old_launcher.sbatch")
     wb(p, OLD_LAUNCHER.format(root=SR))
-    cmd = (f"R={SR}; mkdir -p $R/{proto.ROOT['data']}/{proto.WORKER_LOGS} && sbatch --parsable -J old-pending --qos=gpu "
+    cmd = (f"unset TASKQ_ROOT TASKQ_MACHINE; R={SR}; mkdir -p $R/{proto.ROOT['data']}/{proto.WORKER_LOGS} && sbatch --parsable -J old-pending --qos=gpu "
            f"--time=00:30:00 --chdir=\"$R\" --output=$R/{proto.ROOT['data']}/{proto.WORKER_LOGS}/%x_%j.out --export=ALL {p}")
     rc, out, err = RM.rsh(NAME, cmd)
     step("an old launcher script submits through the fake sbatch", rc == 0 and out.strip().isdigit(), (rc, out, err))
@@ -1383,10 +1384,8 @@ def step_old_launcher():
     slurm_start(jid)
     slurm_wait(jid, 60)
     log = slurm_output(jid)
-    if "has no conda for this machine" in log:
-        print("SKIP: old pending jobs need the launcher to find root and machine itself (not done yet)", flush=True)
-        return
-    step("unexpected: a job with the old launcher ran; that is a pass, but the case must be removed", "task queue worker (" in log, log[-800:])
+    step("a job queued by an older sbatch starts the worker in the bundle in use (root and machine found without TASKQ_ROOT / TASKQ_MACHINE)",
+         "task queue worker (" in log and "has no conda for this machine" not in log, log[-800:])
 
 
 def step_slurm_timeout():

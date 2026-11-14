@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # root of the scheduler code
@@ -173,6 +174,16 @@ def test_bundle(T):
     for f in (f"{BQ}/site_ops.py", f"{BQ}/schema.py", f"{BQ}/worker.sbatch", f"{BQ}/cpu_worker.sbatch", f"{BQ}/worker_start.sh",
               f"{BQ}/testdata/bin/toy_train.sh", STEP, f"{BQ}/testdata/exps/demo/experiments.py", B.VERSION, B.PROJECT_FILE):
         assert f in files, f
+    fwd = os.path.join(path, proto.OLD_LAUNCHER)
+    assert os.access(fwd, os.X_OK)
+    with tempfile.TemporaryDirectory() as d:  # the forwarder runs the real launcher next to it, with the same arguments
+        for f, body in ((proto.OLD_LAUNCHER, open(fwd).read()), (f"{B.BC}/queue/worker_start.sh", 'echo "real $*"\n')):
+            os.makedirs(os.path.dirname(os.path.join(d, f)), exist_ok=True)
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write(body)
+        r = run(["bash", os.path.join(d, proto.OLD_LAUNCHER), "a b"])
+        assert r.stdout == "real a b\n", (r.stdout, r.stderr)
+    ok("every bundle has the old launcher path forwarding to the real launcher (workers started from older bundles switch there)")
     for f, (raw, exe) in src.items():
         assert open(os.path.join(path, f), "rb").read() == raw, f"{f} differs from the worktree"
         assert os.access(os.path.join(path, f), os.X_OK) == (exe or f.endswith(".sh")), f

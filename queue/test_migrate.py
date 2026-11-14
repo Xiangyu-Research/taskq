@@ -57,6 +57,29 @@ ROOTS = {"hub": os.path.join(HOME, "demo_root"), "site-pueue": os.path.join(T, "
          "site-slurm": os.path.join(T, "roots", "slurm"), "site-slurm2": os.path.join(T, "roots", "slurm2")}
 OLD1 = os.path.join(T, "roots", "lab1_old")  # root of old name lab1, merged into site-pueue
 FAKE_SSH = os.path.join(T, "fake_ssh")
+NEWB = "newbundle0000001"  # the bundle self migrate pushes (relay.wanted_bundle / deploy replaced in the driver process)
+os.environ["TASKQ_SWITCH_HOLD"] = "0"
+
+
+def make_bundle(root, bid):
+    """Hand-built bundle <root>/code/<bid>: this core at proto.BUNDLE_CORE, .taskq.toml points to the test config and plugins."""
+    b = os.path.join(root, proto.ROOT["code"], bid)
+    if os.path.isdir(b):
+        return b
+    os.makedirs(os.path.dirname(os.path.join(b, proto.BUNDLE_CORE)))
+    os.symlink(CORE, os.path.join(b, proto.BUNDLE_CORE))
+    with open(os.path.join(b, ".taskq.toml"), "w", encoding="utf-8") as f:
+        f.write(f"config = {json.dumps(fixture.CONFIG)}\nplugins = {json.dumps([fixture.PLUGINS])}\n")
+    return b
+
+
+def fake_deploy(name, bid, path, claims=None, switch=True):
+    if os.path.exists(os.path.join(T, "unreachable_" + name)):
+        raise RuntimeError(f"cannot reach {name}")
+    r = os.path.expanduser(M.MACHINES[name]["root"])
+    make_bundle(r, bid)
+    with open(os.path.join(r, proto.ROOT["machine"]), "w") as f:
+        f.write(name + "\n")
 
 
 def patch():
@@ -71,6 +94,8 @@ def patch():
 patch()
 if DRIVER:
     import migrate  # noqa: E402
+    import relay  # noqa: E402
+    relay.wanted_bundle, relay.deploy = (lambda: (NEWB, None)), fake_deploy
     sys.exit(migrate.main(sys.argv[2:]))
 
 os.environ["RELAY_SSH"] = FAKE_SSH
@@ -97,11 +122,8 @@ with open(FAKE_SSH, "w") as f:  # skip -o options; -O check (persistent connecti
             "cd / && exec env " + " ".join(f"-u {v}" for v in proto.HUB_ONLY_ENV) + ' bash -c "$*"\n')
 os.chmod(FAKE_SSH, 0o755)
 for r in ROOTS.values():
-    cur = os.path.join(r, proto.ROOT["current"])
-    os.makedirs(os.path.dirname(os.path.join(cur, proto.BUNDLE_CORE)))
-    os.symlink(CORE, os.path.join(cur, proto.BUNDLE_CORE))
-    with open(os.path.join(cur, ".taskq.toml"), "w", encoding="utf-8") as f:
-        f.write(f"config = {json.dumps(fixture.CONFIG)}\nplugins = {json.dumps([fixture.PLUGINS])}\n")
+    make_bundle(r, "oldbundle")
+    os.symlink("oldbundle", os.path.join(r, proto.ROOT["current"]))
 
 
 def write(p, text):
@@ -343,12 +365,15 @@ write(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS, f"{sf(INF)
 
 
 def tree():
-    """Everything under the temp dir (no symlink following, skip __pycache__): path -> kind and content."""
+    """Everything under the temp dir (no symlink following, skip __pycache__): path -> kind and content. The new bundle and
+    the machine name file are left out (pushed beside the old bundle also when only listing; workers do not see them)."""
     out = {}
     for dp, dns, fns in os.walk(T):
-        dns[:] = [d for d in dns if d != "__pycache__"]
+        dns[:] = [d for d in dns if d != "__pycache__" and not (d == NEWB and os.path.basename(dp) == proto.ROOT["code"])]
         for n in dns + fns:
             p = os.path.join(dp, n)
+            if n == proto.ROOT["machine"] and os.path.realpath(dp) in {os.path.realpath(r) for r in ROOTS.values()}:
+                continue
             if os.path.islink(p):
                 out[p] = ("link", os.readlink(p))
             elif os.path.isdir(p):
@@ -412,8 +437,8 @@ claim = write(os.path.join(Q2, Q["claims"], sf(EV), proto.CLAIM_INFO), json.dump
 t1 = tree()
 rc, out, err = run("--apply", *REN, *MERGE)
 d = diff(t1, tree())
-ok(f"an executor (Slurm) queue has claimed tasks: exit 1, says which machine, disk unchanged ({d[:5]} {err.strip()[-200:]})",
-   rc == 1 and "Slurm" in err and "claimed tasks" in err and d == [])
+ok(f"an executor (Slurm) queue has a claimed task that would be renamed: exit 1, says which machine and task, disk unchanged ({d[:5]} {err.strip()[-200:]})",
+   rc == 1 and "Slurm" in err and "would be renamed or dropped" in err and EV in err and d == [])
 os.remove(claim)
 os.rmdir(os.path.dirname(claim))
 os.rmdir(os.path.dirname(os.path.dirname(claim)))
@@ -425,17 +450,19 @@ d = diff(t1, tree())
 ok(f"the --merge old root queue still has tasks: exit 1, disk unchanged ({d[:5]} {err.strip()[-200:]})",
    rc == 1 and f"{OLD1} still has 1 task(s) in its queue" in err and d == [])
 write(lab1_q, "")
-cur2 = os.path.join(ROOTS["site-slurm2"], proto.ROOT["current"])
-os.rename(cur2, cur2 + ".x")
+unreach = write(os.path.join(T, "unreachable_site-slurm2"), "")
 t1 = tree()
 rc, out, err = run("--apply", *REN, *MERGE)
 d = diff(t1, tree())
-ok(f"one machine has no new bundle (cannot run migrate.py root): exit 1, no traceback, says to install the bundle first, disk unchanged ({d[:5]} {err.strip()[-200:]})",
-   rc == 1 and "Traceback" not in err and "taskq site bundle site-slurm2" in err and "nothing has been changed yet" in err and d == [])
-os.rename(cur2 + ".x", cur2)
+ok(f"the new bundle cannot be pushed to one machine: exit 1, no traceback, says which, disk unchanged ({d[:5]} {err.strip()[-200:]})",
+   rc == 1 and "Traceback" not in err and "cannot push bundle" in err and "site-slurm2" in err and "nothing has been changed yet" in err and d == [])
+os.remove(unreach)
 ok("after all the Stop cases: disk is back to how it was", diff(t0, tree()) == [])
 
 # ---------------- 5. --apply ----------------
+# a training claimed by a worker of the old bundle (name unchanged) keeps running: claim, task and its open part log stay
+src_claim = write(os.path.join(Q2, Q["claims"], sf(SRC), proto.CLAIM_INFO), json.dumps(dict(worker="1234", token="tk")))
+src_log = write(os.path.join(L2, f"{sf(SRC)}__1234_part1.log"), old_head("1234", 1, SRC) + "\n")
 rc, out, err = run("--apply", *REN, *MERGE)
 ok(f"--apply: exit code 0 ({(err or out).strip()[-600:]})", rc == 0 and "migration complete" in out)
 ok("finally prints the command to delete the merged old root (the old root itself is kept)", f"rm -rf {OLD1}" in out and os.path.isdir(OLD1))
@@ -512,6 +539,13 @@ ok("executor queues: skip records keep only workers that still exist, files with
    and not os.path.exists(os.path.join(Q1, Q["skips"], sf(GONE)))
    and read(os.path.join(Q2, Q["skips"], sf(SRC))) == "2026-11-01 10:00:00\tsite-slurm-gpu\t放不下\n")
 
+ok("a claimed training whose name stays: claim untouched, still in the queue, its open part log left as it is",
+   read(src_claim) == json.dumps(dict(worker="1234", token="tk")) and SRC in q2 and read(src_log) == old_head("1234", 1, SRC) + "\n"
+   and "1 claimed task(s) keep running" in out)
+ok("executors switched to the new bundle, the machine name recorded in each root, no held tasks left",
+   all(os.readlink(os.path.join(ROOTS[n], proto.ROOT["current"])) == NEWB
+       and read(os.path.join(ROOTS[n], proto.ROOT["machine"])) == n + "\n"
+       and not os.path.exists(os.path.join(ROOTS[n], proto.ROOT["queue"], Q["held"])) for n in ("site-pueue", "site-slurm", "site-slurm2")))
 # part logs, merged roots, pin records
 ok(f"site-pueue part logs: renamed, _seg -> _part; job names with __ unchanged; existing targets not overwritten, both kept ({sorted(os.listdir(L1))})",
    sorted(os.listdir(L1)) == sorted([f"{sf(NINF)}__lab0-gpu_part1.log", f"{sf(INF)}__j2_part1.log", f"{sf(NINF)}__j2_part1.log",
@@ -530,7 +564,7 @@ ok("merged root: blobs on the same disk (including .st) hardlinked, existing one
    and os.path.samefile(os.path.join(OLD1, proto.blob(H2) + proto.BLOB_STAT), os.path.join(R1, proto.blob(H2) + proto.BLOB_STAT))
    and not os.path.samefile(os.path.join(OLD1, proto.blob(H1)), os.path.join(R1, proto.blob(H1))))
 ok("site-slurm, the store data dir, the store root's data dir: part logs renamed",
-   os.listdir(L2) == [f"{sf(NEV)}__dicc_part1.log"]
+   sorted(os.listdir(L2)) == sorted([f"{sf(NEV)}__dicc_part1.log", os.path.basename(src_log)])
    and os.listdir(os.path.join(DATA, proto.TASK_LOGS)) == [f"{sf(NEV)}__dicc_part1.log"]
    and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS)) == [f"{sf(NINF)}__x_part3.log"])
 ok("pin records: dropped for renamed tasks (executors and store), others kept",
@@ -562,7 +596,7 @@ rc, out, err = run("--apply", *REN, *MERGE)
 d = diff(t2, tree())
 ok(f"--apply again: exit code 0, nothing on disk changes ({d[:5]} {(err or '').strip()[-300:]})", rc == 0 and d == [])
 ok("run again: no renames or drops; unchanged records are not listed as kept (only the same-name file in the old root remains)",
-   "0 renamed to step instance names, 0 dropped" in out and "part logs" not in out
+   "0 renamed to step instance names, 0 dropped" in out and not re.search(r"renamed \d+ part logs|[1-9]\d* part logs rewritten", out)
    and [ln for ln in out.splitlines() if "kept" in ln and LO not in ln] == [])
 
 print("all passed" if not fails else f"{fails} failures")

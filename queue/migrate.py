@@ -6,8 +6,12 @@ By default it only lists what it would do, --apply does it.
       --merge   merge an old root into its new machine's root (same physical machine: move part logs, hardlink blobs on
                 the same disk; the old queue must be empty; the old root itself is kept, the delete command is printed)
 The hub side rewrites the queue, the relay ledger, smoke records, unused state-dir files and old config entries. Executors
-and the store run `migrate.py root` from their bundle through relay_remote.op: rename tasks and part logs, replace specs,
+and the store run `migrate.py root` from the new bundle through relay_remote.op: rename tasks and part logs, replace specs,
 merge roots, collect view links.
+Nothing has to stop: the new bundle is first unpacked beside the one in use (also when only listing); with --apply each
+executor switches to it with its unclaimed tasks set aside for a moment (hold_and_switch). Claimed tasks keep running under
+their workers, which hand them to the new bundle at their next chance; a claimed task that would be renamed or dropped stops
+the run (wait for it to end). Their part logs are left as they are; run self migrate again once they have ended.
 """
 import argparse
 import glob
@@ -15,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 
@@ -25,6 +30,7 @@ import common as C  # noqa: E402
 
 safe = proto.safe
 OLD_CODE = "before-migrate"  # bundle field of failure records from before the cutover (not a bundle in use, so it no longer counts after the switch, taskq.fail_lines)
+OLD_SNAPSHOTS = "code"  # <state dir>/code/<commit>: code snapshots of the old queue/q (old_snapshots)
 PER_KEY = ("claims", "failures", "skips", "inputs", "released", "stopped")  # per-task records in a queue (proto.QUEUE)
 OLD_PART = "_seg"  # old part log name <safe key>__<job>_seg<part>.log
 
@@ -73,11 +79,18 @@ def move(src, dst, say, dry):
     return True
 
 
-def rename_logs(D, keys, say, dry):
+def open_log(f, busy):
+    """Is part log file f one of a claimed task (busy: safe names)? (A safe name may itself contain proto.SAFE: a longer task
+    name sharing the prefix is skipped too, which only leaves it for a later run.)"""
+    return any(f.startswith(b + proto.SAFE) for b in busy)
+
+
+def rename_logs(D, keys, say, dry, busy=()):
+    """Rename part logs (log_rename); logs of claimed tasks (busy: safe names) stay, they are still being written."""
     d = os.path.join(D, proto.TASK_LOGS)
     n = 0
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-        nf = log_rename(f, keys)
+        nf = None if open_log(f, busy) else log_rename(f, keys)
         if nf:
             n += move(os.path.join(d, f), os.path.join(d, nf), say, dry)
     if n:
@@ -144,13 +157,18 @@ def english_line(ln):
     return ln
 
 
-def english_logs(D, say, dry):
-    """Rewrite part logs under <D>/logs/tasks from the old Chinese format to English. Idempotent; only matching lines change."""
+def english_logs(D, say, dry, busy=()):
+    """Rewrite part logs under <D>/logs/tasks from the old Chinese format to English. Idempotent; only matching lines change.
+    busy: safe names of claimed tasks: their logs are still being appended to (the old run_task.sh keeps writing its own
+    format), left alone until a later run of self migrate after they end (taskq log shows those lines as they are)."""
     d = os.path.join(D, proto.TASK_LOGS)
-    n = 0
+    n = skip = 0
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         p = os.path.join(d, f)
         if not f.endswith(".log") or not os.path.isfile(p):
+            continue
+        if open_log(f, busy):
+            skip += 1
             continue
         with open(p, encoding="utf-8", errors="surrogateescape") as fh:
             old = fh.read()
@@ -159,8 +177,8 @@ def english_logs(D, say, dry):
             n += 1
             if not dry:
                 C.atomic_write(p, new)
-    if n:
-        say(f"{d}: {n} part logs rewritten to English")
+    if n or skip:
+        say(f"{d}: {n} part logs rewritten to English" + (f", {skip} of claimed tasks left as they are (run self migrate again after they end)" if skip else ""))
 
 
 def english_failures(Q, say, dry):
@@ -233,15 +251,30 @@ def view_links(R, D, views):
     return out
 
 
+def claimed(Q):
+    """Safe names of the tasks claimed in queue dir Q."""
+    d = os.path.join(Q, proto.QUEUE["claims"])
+    return set(os.listdir(d)) if os.path.isdir(d) else set()
+
+
+def check_claimed(Q, keys, drop):
+    """On an executor, a claimed task keeps running under its worker (the old bundle's worker beats and releases it by name):
+    renaming or dropping it would stop it (the claim no longer found counts as lost). Such tasks -> Stop, listing them."""
+    busy = claimed(Q)
+    hit = sorted(k for k in set(drop) | {o for o, n in keys.items() if o != n} if safe(k) in busy)
+    if hit:
+        raise Stop(f"{Q}: {len(hit)} claimed task(s) would be renamed or dropped: {', '.join(hit[:5])}"
+                   + (" ..." if len(hit) > 5 else "") + "; wait for them to end (or release them) and run again")
+
+
 def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
     """Queue dir Q: rename tasks, fill in added, replace specs from specs {new task name: new spec}; delete tasks in drop
     with their records; rename per-task-name records; add the reason to release records; keep only skips of workers
-    that still exist."""
+    that still exist. On an executor (workers given) claimed tasks stay claimed and keep running (check_claimed)."""
     import taskq
     tp = os.path.join(Q, proto.QUEUE["tasks"])
-    busy = os.listdir(os.path.join(Q, proto.QUEUE["claims"])) if os.path.isdir(os.path.join(Q, proto.QUEUE["claims"])) else []
-    if busy and workers is not None:
-        raise Stop(f"{Q} still has {len(busy)} claimed tasks ({busy[0]} ...): release them first (taskq stop or stop the worker)")
+    if workers is not None:
+        check_claimed(Q, keys, drop)
     drop = set(drop)
     tasks = taskq.read_tasks(tp)
     gone = [t["key"] for t in tasks if t["key"] in drop]
@@ -294,6 +327,56 @@ def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
     english_failures(Q, say, dry)
 
 
+def this_bundle():
+    """The bundle dir this script runs from (<root>/code/<bundle>)."""
+    core = os.path.dirname(HERE)
+    if not core.endswith("/" + proto.BUNDLE_CORE):
+        raise Stop(f"{HERE} is not inside a bundle")
+    return core[:-len(proto.BUNDLE_CORE) - 1]
+
+
+def hold_and_switch(R, Q, name, keys, drop, say):
+    """Switch the root's bundle to this one without stopping anything: under the queue lock set the unclaimed tasks aside
+    (queue held file: nobody can claim them), record the machine name and switch code/current; then wait SWITCH_HOLD_S so a
+    worker of the old bundle that looked at the bundle just before cannot claim a rewritten task (once it sees the switch it
+    hands its running tasks to the new bundle before claiming). Running tasks stay claimed and keep running. Claimed tasks
+    that would be renamed or dropped -> Stop, nothing changed. The held tasks go back in put_back."""
+    import taskq
+    b = this_bundle()
+    if os.path.realpath(os.path.dirname(b)) != os.path.realpath(os.path.join(R, proto.ROOT["code"])):
+        raise Stop(f"bundle {b} is not under {R}/{proto.ROOT['code']}")
+    tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
+    cur = os.path.join(R, proto.ROOT["current"])
+    with taskq.Lock():
+        check_claimed(Q, keys, drop)
+        if not os.path.exists(hp):  # an interrupted earlier run already set them aside
+            busy = claimed(Q)
+            tasks = taskq.read_tasks(tp)
+            taskq.write_tasks([t for t in tasks if safe(t["key"]) not in busy], hp)
+            taskq.write_tasks([t for t in tasks if safe(t["key"]) in busy], tp)
+        C.atomic_write(os.path.join(R, proto.ROOT["machine"]), name + "\n")
+        tmp = f"{cur}.tmp.{os.getpid()}"
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        os.symlink(os.path.basename(b), tmp)
+        os.replace(tmp, cur)
+    hold = float(os.environ.get("TASKQ_SWITCH_HOLD") or proto.SWITCH_HOLD_S)
+    say(f"bundle switched to {os.path.basename(b)}; {len(taskq.read_tasks(hp))} unclaimed tasks set aside for {hold:g} s")
+    time.sleep(hold)
+
+
+def put_back(Q):
+    """Held tasks back into the queue (a task of the same name already there wins: released meanwhile). Call under the queue lock."""
+    import taskq
+    tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
+    if not os.path.exists(hp):
+        return
+    tasks = taskq.read_tasks(tp)
+    have = {t["key"] for t in tasks}
+    taskq.write_tasks(tasks + [t for t in taskq.read_tasks(hp) if t["key"] not in have], tp)
+    os.remove(hp)
+
+
 def op_root(A):
     """On this machine (TASKQ_ROOT is its root): A = dict(dry, keys {old task name: new}, merge [old root], views {task
     name: [views]}, data [extra data dirs], specs {new task name: spec resolved with the current recipes}, drop [old task
@@ -306,12 +389,24 @@ def op_root(A):
     me = M.whoami()
     for old_root in A["merge"]:
         merge_root(R, os.path.expanduser(old_root), log.append, dry)
+    busy = set()
     if M.is_exec(me):
-        fix_queue(cfg.state("taskq"), keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"], A["drop"])
+        import taskq
+        Q = cfg.state("taskq")
+        if dry:
+            fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"], A["drop"])
+        else:
+            hold_and_switch(R, Q, me, keys, A["drop"], log.append)
+            with taskq.Lock():
+                put_back(Q)
+                fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"], A["drop"])
+        busy = claimed(Q)
+        if busy:
+            log.append(f"{len(busy)} claimed task(s) keep running under their workers: " + ", ".join(sorted(busy)[:8]))
     D = os.path.join(R, proto.ROOT["data"])
     for d in [D] + [os.path.expanduser(x) for x in A["data"]]:
-        rename_logs(d, keys, log.append, dry)
-        english_logs(d, log.append, dry)
+        rename_logs(d, keys, log.append, dry, busy)
+        english_logs(d, log.append, dry, busy)
     pins = os.path.join(R, proto.ROOT["pins"])
     for old in keys:
         p = os.path.join(pins, safe(old) + ".json")
@@ -521,7 +616,7 @@ def leftovers(home):
     """First-level entries in the state dir not in proto.STATE_NAMES -> delete; also old backups left by earlier versions
     in relay/, health/ and files from before a migration."""
     out = [os.path.join(home, f) for f in sorted(os.listdir(home))
-           if not any(f == n or f.startswith((n + ".", n + "-")) for n in proto.STATE_NAMES)]
+           if f != OLD_SNAPSHOTS and not any(f == n or f.startswith((n + ".", n + "-")) for n in proto.STATE_NAMES)]
     for sub in ("relay", "health"):
         d = os.path.join(home, sub)
         for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
@@ -530,6 +625,40 @@ def leftovers(home):
     last = os.path.join(home, "last")
     out += sorted(glob.glob(os.path.join(last, "*")))  # "skip a repeat" records: clearing them only logs one extra line
     return out
+
+
+def old_snapshots(home):
+    """Code snapshots <state dir>/code/<commit> (git worktrees the old queue/q made for manual pueue tasks) -> (to delete,
+    kept: the working dir of a pueue task here that has not finished, or all of them when pueue cannot be read)."""
+    d = os.path.join(home, OLD_SNAPSHOTS)
+    snaps = sorted(os.path.join(d, f) for f in os.listdir(d)) if os.path.isdir(d) else []
+    if not snaps:
+        return [], []
+    try:
+        import cfg
+        M = cfg.mtab()
+        pq = os.path.expanduser(M._value(M.whoami(), "pueue") or "")
+        st = json.loads(subprocess.run([pq, "status", "--json"], capture_output=True, text=True, timeout=60).stdout)
+        used = {os.path.realpath(t["path"]) for t in st["tasks"].values()
+                if (next(iter(t["status"])) if isinstance(t["status"], dict) else t["status"]) != "Done"}
+    except Exception:  # noqa: BLE001
+        return [], snaps
+    keep = [p for p in snaps if os.path.realpath(p) in used]
+    return [p for p in snaps if p not in keep], keep
+
+
+def drop_snapshots(paths):
+    """Delete snapshot worktrees and prune them from their repos."""
+    gits = set()
+    for p in paths:
+        try:
+            g = open(os.path.join(p, ".git")).read().split("gitdir:", 1)[1].strip()
+            gits.add(g.split("/worktrees/")[0])
+        except (OSError, IndexError):
+            pass
+        shutil.rmtree(p, ignore_errors=True)
+    for g in sorted(gits):
+        subprocess.run(["git", "--git-dir", g, "worktree", "prune"], capture_output=True)
 
 
 def move_health_log(home, say, dry):
@@ -628,13 +757,23 @@ def main(argv):
         sys.exit(f"taskq self migrate: {', '.join(bad)} in --merge is not an executor in the machine table after renaming")
     roots = [n for n in M.MACHINES if M.MACHINES[n].get("root")]
 
+    import relay as RL
+
     def on(name, args, after):
-        """Run migrate.py root in that machine's new bundle; unreachable, old bundle or error -> Stop (saying how far it got)."""
+        """Run migrate.py root in the new bundle on that machine (pushed beside the one in use); unreachable or error -> Stop
+        (saying how far it got)."""
         try:
-            return RM.op(name, "root", args, timeout=3600, script="migrate.py")
+            return RM.op(name, "root", args, timeout=3600, script="migrate.py", bundle=bid)
         except RuntimeError as e:
-            raise Stop(f"{e} (install the new bundle first with taskq site bundle {name}, check it is reachable; {after})")
+            raise Stop(f"{e} (check {name} is reachable; {after})")
     try:
+        bid, path = RL.wanted_bundle()
+        for name in roots:  # unpack the new bundle beside the one in use (not switched: workers do not see it yet)
+            try:
+                RL.deploy(name, bid, path, switch=False)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                raise Stop(f"cannot push bundle {bid} to {name}: {e} (nothing has been changed yet)")
+        say(f"new bundle {bid} unpacked beside the one in use on {', '.join(roots)} (switched per machine with --apply)")
         with taskq.Lock():
             tasks, keys, dropped, notes = plan_hub(ren)
             drop = sorted(k for k, _ in dropped)
@@ -663,6 +802,10 @@ def main(argv):
             move_health_log(home, say, True)
             junk = leftovers(home)
             say(f"Unused items in state dir {home}: {len(junk)}" + "".join(f"\n  drop {p}" for p in junk))
+            snaps, kept = old_snapshots(home)
+            if snaps or kept:
+                say(f"Old code snapshots: delete {len(snaps)}, keep {len(kept)} (working dir of an unfinished pueue task; run self migrate again later)"
+                    + "".join(f"\n  keep {p}" for p in kept))
             copy_hashes(say, True)
             if not a.apply:
                 say("(listed only, nothing changed; add --apply when ready)")
@@ -678,6 +821,7 @@ def main(argv):
             move_health_log(home, quiet, False)
             for p in junk:
                 shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+            drop_snapshots(snaps)
     except Stop as e:
         print(f"taskq self migrate: {e}", file=sys.stderr)
         return 1

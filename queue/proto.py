@@ -26,9 +26,13 @@ ROOT = dict(
     deploy_lock="state/deploy.lock",  # lock for pushing bundles (relay.py deploy)
     tmp="tmp",                   # temp files for half-transferred files
     envs="envs",                 # envs installed on the executor (conda, venv)
+    machine="machine",           # this root's machine name, one line (relay.py deploy and self migrate write it): processes started without TASKQ_MACHINE read it (worker_start.sh)
 )
 # where the scheduler core sits inside a bundle (relative to the bundle root): queued Slurm jobs and worker commands find the launcher there
 BUNDLE_CORE = "scripts/taskq"
+# launcher path in bundles from before the core moved to BUNDLE_CORE: workers started from such a bundle switch to this path under
+# code/current; every bundle has a generated forwarder there (relay_bundle.contents) until no such worker runs
+OLD_LAUNCHER = "scripts/queue/worker_start.sh"
 IO_GROUP = "taskq"  # the core's own group on pueue machines, the hub and the store (transfers, fetches, archives, unbounded concurrency), sites/mtab.groups creates it
 WORKER_LABEL = "worker:"  # label prefix for worker tasks on pueue executors: worker:<id> (sites/pueue.py)
 MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/logs/workers")  # created when relay.py first makes the root
@@ -58,6 +62,7 @@ QUEUE = dict(
     enabled="ENABLED",        # master switch: a queued worker exits at start when it is absent (worker_start.sh)
     lock="lock",
     gpu_pad_off="gpu_pad_DISABLED",  # executor's GPU pad master switch (cfg.state("gpu_pad/DISABLED"), STATE_IN_ROOT)
+    held="tasks.held.jsonl",  # unclaimed tasks set aside while self migrate switches the bundle (nobody can claim them meanwhile)
 )
 CLAIM_INFO = "info"
 # fields of claims/<key>/info: claimed by a worker (executor queue) / assigned by the hub queue to an executor
@@ -113,6 +118,7 @@ FAIL_RETRY = 60 * 60   # after a task fails or stalls and is released, the same 
                        # (after MAX_FAIL failures the queue marks it failed and nobody claims it)
 # old bundle cleanup (relay.deploy cleans the root's code/, relay_bundle.prune cleans bundles built on the hub)
 CODE_KEEP = 3                # keep the most recent bundles besides the one in use
+SWITCH_HOLD_S = 90           # self migrate: after switching an executor's bundle, keep unclaimed tasks aside this long (a worker of the old bundle that checked the bundle just before can still claim once)
 CODE_KEEP_S = 4 * 86400      # bundles under the root's code/ touched within this long are kept (running workers touch theirs every round)
 CODE_CLAIM_SLACK = 3600      # also keep bundles touched since this long before the earliest claim among tasks still claimed: a task that keeps running after a switch still uses its claim's bundle
 
@@ -302,6 +308,7 @@ ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state dir>/taskq.
 HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_DATA", "TASKQ_DIR", "TASKQ_STATE",
                 "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_TASKS", "TASKQ_LAST")
 ENV["TASKQ_TEST_NOW"] = ("test", "a file holding a time (epoch seconds): the window plugin treats it as now")
+ENV["TASKQ_SWITCH_HOLD"] = ("test", "seconds self migrate keeps unclaimed tasks aside after switching a bundle (default SWITCH_HOLD_S)")
 # gpu_pad.py arguments (tune), defaults on its command line
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
            "SETTLE", "START_HOLD", "RETRY_DELAY", "MAX_FAILS", "RESET_AFTER"):

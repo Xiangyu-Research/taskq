@@ -293,10 +293,11 @@ def input_info(key):
 
 
 def released_info(key):
-    """Last release -> (time, worker, why proto.RELEASE_WHY); None if absent."""
+    """Last release -> (time, worker, why proto.RELEASE_WHY); None if absent. A worker of a bundle from before self migrate
+    writes no reason (it may run for weeks after the switch): counts as an ordinary release."""
     try:
         f = open(os.path.join(TQ, Q["released"], safe(key))).read().split()
-        return float(f[0]), f[1], f[2]
+        return float(f[0]), f[1], f[2] if len(f) > 2 else proto.RELEASE_WHY["back"]
     except (OSError, ValueError, IndexError):
         return None
 
