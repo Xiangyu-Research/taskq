@@ -101,7 +101,7 @@ REBASE = ("TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_CONFIG", "TASKQ_PLUGINS")
 
 
 def rebase(old, new, env=None):
-    """env 里 REBASE 这几个变量中在 old 下的路径（: 隔开的每一段）换到 new 下 → 改了的 {名: 值}。old 按真实路径比较。"""
+    """Paths under old in the REBASE variables of env (each :-separated part) moved under new -> {name: value} of the changed ones. old is compared by real path."""
     env = os.environ if env is None else env
     o = os.path.realpath(old)
     out = {}

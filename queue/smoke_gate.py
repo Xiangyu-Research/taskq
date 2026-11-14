@@ -269,9 +269,9 @@ class Gate:
             return self._hold(key, f"{m['kind']} has never succeeded on this executor, sending one first ({n} in flight)") if n else None
         if pending(r, m, self.queue_keys()):
             if self.live and self.now - (r.get("t") or self.now) > QUEUED_ALERT_S:
-                self.alerts[alert_id("smoke", self.site, m["kid"])] = alert(
+                self.alerts[alert_id("smoke", self.site, m["kid"])] = dict(alert(
                     f"{self.site}: smoke task {r['key']} for {m['kind']} has been queued for {(self.now - r['t']) / 3600:.0f} h and is not done",
-                    machine=self.site, kind=m["kind"], why="not done yet", key=r["key"])
+                    machine=self.site, kind=m["kind"], why="not done yet", key=r["key"]), level="info")  # queued, not a failure: recorded, not pushed
             return self._hold(key, f"waiting for smoke {r.get('key')}")
         if fresh(r, m) and r.get("state") == FAILED and (not self.bundle or r.get("bundle") == self.bundle):
             if self.live:

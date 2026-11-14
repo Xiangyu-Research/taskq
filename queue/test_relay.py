@@ -270,7 +270,7 @@ def test_plan():
     old = dict(rec, added=10.0)
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Failed")], [old]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
-    ok("not staged yet → queue staging; staging → wait; failure → alert and keep the claim; old tasks from before the claim do not count")
+    ok("not staged yet → queue staging; staging → wait; failure → queue again, after 3 or when stopped by hand → alert and keep the claim; old tasks from before the claim do not count")
     ns = [dict(id=7, label=rec["label"], status=f"Failed ({relay.NOSLOT_RC})", code=relay.NOSLOT_RC)]
     acts, stuck = relay.plan(S0([mtask(K, since=time.time() - 600)], ns, [rec]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
@@ -293,8 +293,11 @@ def test_plan():
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=8, label=frec["label"], status="Running")], [frec]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("beat", K)] and not stuck, acts
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=8, label=frec["label"], status="Failed")], [frec]), NAME, RS(rtask(A, "done")), st)
-    assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, stuck
-    ok("done over there → queue one fetch; fetching → wait; failure → alert")
+    assert ops(acts) == [("beat", K), ("fetch", K)] and not stuck, (acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K)], [dict(id=i, label=frec["label"], status="Failed") for i in (8, 9, 10)],
+                                [dict(frec, id=i) for i in (8, 9, 10)]), NAME, RS(rtask(A, "done")), st)
+    assert ops(acts) == [("beat", K)] and f"relayfetch:{K}" in stuck, (acts, stuck)
+    ok("done over there → queue one fetch; fetching → wait; failure → queue again, alert after 3")
 
     acts, _ = relay.plan(S0([mtask(K, "done")]), NAME, RS(rtask(A, "done")), st)
     assert ops(acts) == [("drop", K), ("release", K)], acts
@@ -368,7 +371,7 @@ def test_plan():
     (host, lab, step, k_, args), kw = added[0]
     assert host == M.hub() and step == "relay_stage" and kw == dict(to=NAME, group=proto.IO_GROUP), added
     assert args.startswith(proto.IO_GROUP + " ") and "--no-add" in args and "--nice" not in args and "restage" in msgs[0], (added, msgs)
-    ok("remote side reports missing inputs → queue a restage in the hub IO group (stage --no-add: only missing ones, clear the marker); restaging → wait; failure → alert; old tasks from before the marker do not count")
+    ok("remote side reports missing inputs → queue a restage in the hub IO group (stage --no-add: only missing ones, clear the marker); restaging → wait; failure → queue again, alert after 3; old tasks from before the marker do not count")
 
     def fail_add(*a, **k):
         raise RuntimeError("adding a hub task FAIL: git fetch failed")

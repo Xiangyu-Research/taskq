@@ -56,6 +56,40 @@ waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "selftest fails: one line, stay on the old bundle and keep claiming and training" '[[ $rc == 0 ]] && grep -q "new bundle b failed its selftest (.*broken); staying on a" $T/whs.out && grep -q "done t/s2" $T/whs.out && ! grep -q "new bundle start" $T/whs.out'
 fi
 
+# retry. after a failed release the same worker claims it again after FAIL_RETRY; after the second failure the queue marks it
+#   failed and nobody claims it (a single resident worker used to skip a task forever after one failure caused by someone
+#   else holding the GPU)
+if want retry; then
+reset
+table << EOF
+t/r base
+EOF
+(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=6 TASKQ_EARLY_FAIL=0 TASKQ_FAIL_RETRY=2 FAKE_FAIL=t/r \
+  exec bash "$HERE/worker_start.sh") > "$T/wr.out" 2>&1 &
+wpid=$!
+waitfor 60 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "retry: claimed again after a while, not after the second failure" '[[ $rc == 0 && $(grep -c "^fail t/r$" $FAKE_LOG) == 2 && $(nclaims) == 0 ]] && grep -q "t/r: this job claims it again in 0 minutes" $T/wr.out'
+fi
+
+# hi. bundle switch while idle: the idle start goes to the new process, which exits once idle for IDLE_EXIT in total instead
+#   of counting again from the switch (a CPU worker whose bundle changed every half hour never exited)
+if want hi; then
+reset
+table < /dev/null
+bundle
+t0=$(date +%s)
+(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=14 \
+  exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/whi.out" 2>&1 &
+wpid=$!
+waitfor 10 '(( $(date +%s) - t0 >= 7 ))'
+ln -sfn b "$T/code/current"
+waitfor 20 'grep -q "new bundle start" $T/whi.out'
+t1=$(date +%s)
+waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+t2=$(date +%s)
+check "idle switch: idle time carried over, exits once idle for IDLE_EXIT in total" '[[ $rc == 0 ]] && grep -q "idle time carried over: idle for" $T/whi.out && sed -n "/new bundle start/,\$p" $T/whi.out | grep -q "exiting (the next check starts it again" && (( t2 - t1 < 11 && t2 - t0 < 22 ))'
+fi
+
 # win. hours window (worker hours in the machine table): no claims outside, exit; claims inside; when it ends, stop what is running, release and exit 0
 if want win; then
 reset

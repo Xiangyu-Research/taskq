@@ -346,6 +346,9 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
    - failed there: no progress -> `release --skip` (this machine will not claim it again); with progress -> keep the claim and report it;
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
    - blocked by the bundle gate or smoke gate -> `hold`; unblocked -> `unhold`.
+   - a failed `stage` / `fetch` / `restage` (mostly not the task's fault: tunnel down, busy disk timing out) is queued again at the next
+     check, reported only after `XFER_TRIES` (`relay.py`) failures within one claim; stopped by hand is not retried; an old failed one
+     queued again later is not reported by the health check.
 3. **Assign** (`assign`, `refill.choose`): unclaimed tasks in the hub queue are assigned to machines in one pass. Order: nice -> half-done
    first -> arrival order. Each task's possible executors = intersection of `PLACE[step or recipe]` and the spec's `machines`, limited to
    machines with that worker kind (gpu / cpu); drop machines that skipped it (all skipped -> report `tqblocked`); a half-done task only goes

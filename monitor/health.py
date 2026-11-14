@@ -275,6 +275,7 @@ def check(s):
             if r:
                 newer[r["step"], r["key"]] = max(i, newer.get((r["step"], r["key"]), i))
         for t in d["tasks"]:
+            r = ident[t["id"]]
             tname = t["label"] or f"#{t['id']}"
             st = t["status"]
             if st in LIVE or st == "Success":
@@ -283,6 +284,8 @@ def check(s):
                 continue
             end = C.local_time(t["end"])
             if end and now - end > timedelta(hours=24):
+                continue
+            if r and newer[r["step"], r["key"]] > t["id"]:  # the same step and key queued again later (re-queued after a failure): only the newest counts
                 continue
             add(alert_id("pueue", name, t["id"], str(t["end"])), f"{L(name)} task {t['id']} {tname} {st}",
                 level="info" if stopped(t) else "normal", kind="event", data=dict(label=tname, status=st))
@@ -326,7 +329,7 @@ def drop_acked(P, db, dry=False):
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
-QUIET = ("notice",)  # problem kinds only listed in taskq problems, not pushed (the phone gets failures only; due notices are read at work time)
+QUIET = ("notice", "undeclared")  # problem kinds only listed in taskq problems, not pushed (the phone gets failures only; due notices are read at work time; writes outside the declared outputs)
 
 
 def night(now):
@@ -385,9 +388,9 @@ def progress_snapshot(s, db):
 
 
 def from_step(v):
-    """A stuck report from feed (relay) / advance: message (str), or dict(msg, data) -> problem."""
+    """A stuck report from feed (relay) / advance: message (str), or dict(msg, data[, level]) -> problem."""
     if isinstance(v, dict):
-        return problem(v["msg"], data=v.get("data"), after=v.get("after", 0))
+        return problem(v["msg"], level=v.get("level", "normal"), data=v.get("data"), after=v.get("after", 0))  # level="info": only waiting, recorded but not pushed
     return problem(v)
 
 

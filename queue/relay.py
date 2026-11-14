@@ -63,6 +63,7 @@ LATE_S = 3600  # report when a fetch/archive succeeded this long ago but the hub
 LIVE = refill.LIVE
 VIEW_KEEP_S = 6 * 3600  # keep views built this recently (a task just staged, not added yet, or just released)
 STATUS_S = 90  # status timeout: skip this machine when its storage hangs instead of waiting
+XFER_TRIES = 3  # a failed stage / fetch is queued again at the next check; reported only after this many failures within one claim
 NOSLOT_RC = proto.EXIT["stage_later"]  # relay.py stage could not get a CPU job this time (or the checkpoint source is still claimed): retry next check without alerting
 NOSLOT_ALERT_S = 3 * 3600  # report when a claim this old still cannot get scheduled
 
@@ -230,10 +231,9 @@ def prune_bundles(bid):
 
 
 # ---------------- each check ----------------
-def io_task(s, step, key, since=0):
-    """The newest task for step and key in the hub's IO group (proto.IO_GROUP) (records added after since) → pueue task or
-    None."""
-    hub, last = M.hub(), None
+def io_tasks(s, step, key, since=0):
+    """Tasks for step and key in the hub's IO group (proto.IO_GROUP) (records added after since), oldest first → list of pueue tasks."""
+    hub, out = M.hub(), []
     for t in sorted((s["pueue"].get(hub) or {}).get("tasks", []), key=lambda t: t["id"]):
         r = C.identify(hub, t, s.get("records") or [])
         if r and r["step"] == step and r["key"] == key and r.get("added", 0) >= since - 60:
@@ -241,17 +241,17 @@ def io_task(s, step, key, since=0):
     return out
 
 
-def box_task(s, step, key, since=0):
-    """box_tasks 里最新的一个，或 None。"""
-    return (box_tasks(s, step, key, since) or [None])[-1]
+def io_task(s, step, key, since=0):
+    """The newest of io_tasks, or None."""
+    return (io_tasks(s, step, key, since) or [None])[-1]
 
 
 def again(s, step, key, since=0):
-    """最新的这一步出错了（不是手动停的），而且出错的还不到 XFER_TRIES 次 → True：再排一次，不报。"""
+    """The newest run of this step failed (not stopped by hand) and fewer than XFER_TRIES have failed -> True: queue it again, do not report."""
     def failed(t):
         return (t["status"] not in LIVE and t["status"] != "Success" and t.get("code") != NOSLOT_RC
                 and not (t.get("result") == "Killed" or t.get("code") == 143))
-    ts = box_tasks(s, step, key, since)
+    ts = io_tasks(s, step, key, since)
     return bool(ts) and failed(ts[-1]) and sum(map(failed, ts)) < XFER_TRIES
 
 
@@ -399,7 +399,7 @@ def plan(s, name, rs, st, now=None):
             pass  # done marker exists but the worker still claims it: the command is still writing results, so only beat and fetch after release; an expired claim (worker died without releasing) fetches as usual
         elif ast == "done":
             ft = io_task(s, "relay_fetch", key, since)
-            if ft is None:
+            if ft is None or again(s, "relay_fetch", key, since):
                 acts.append(dict(op="fetch", key=key))
             elif ft["status"] == "Success":
                 end = C.local_time(ft.get("end"))
@@ -414,7 +414,8 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="rresume", key=key, rkey=a["key"]))
         elif ast == "input":  # remote side found missing inputs before starting (taskq.py missing): restage only the missing ones, rebuild views, then clear the marker
             sg = io_task(s, "relay_stage", key, a.get("input_since") or since)
-            if sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC):
+            if (sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC)
+                    or again(s, "relay_stage", key, a.get("input_since") or since)):
                 acts.append(dict(op="restage", key=key))
             elif sg["status"] not in LIVE:
                 stuck[alert_id("relaystage", key)] = alert(f"restaging missing inputs for {key} to {L} failed on {M.hub()} task {sg['id']} ({sg['status']}); claim kept."

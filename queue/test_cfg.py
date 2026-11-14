@@ -422,6 +422,22 @@ os.remove(os.path.join(EMB, ".taskq.toml"))
 ok("cfg: embedded, no .taskq.toml at the repo root -> <repo>/config",
    cfg_in(os.path.join(PJ, "a"), "(cfg.REPO, cfg.config_dir())", layout="embed") == repr((EMB, os.path.join(EMB, "config"))))
 
+# pueue-add: when the caller is a temporary worktree, the task's paths move under the working dir; paths outside the repo stay
+_wt, _snap = os.path.join(T, "wt"), os.path.join(T, "snap")
+os.makedirs(os.path.join(_wt, "envs"), exist_ok=True)
+os.symlink(_wt, os.path.join(T, "wt_link"))
+_env = {"TASKQ_REPO": _wt, "TASKQ_CONFIG": os.path.join(_wt, "envs"), "TASKQ_DATA": os.path.join(_wt, "data"),
+        "TASKQ_PLUGINS": os.pathsep.join([os.path.join(_wt, "p1"), "/elsewhere/p2"])}
+ok("project.rebase: under the old root -> under the new one, each :-separated part; outside the repo and other variables unchanged",
+   project.rebase(os.path.join(T, "wt_link"), _snap, _env) == {
+       "TASKQ_REPO": _snap, "TASKQ_CONFIG": os.path.join(_snap, "envs"),
+       "TASKQ_PLUGINS": os.pathsep.join([os.path.join(_snap, "p1"), "/elsewhere/p2"])})
+ok("project.rebase: same root -> nothing changed", project.rebase(_wt, _wt, _env) == {})
+ok("project.rebase: a sibling dir with the same prefix is not under the old root", project.rebase(_wt, _snap, {"TASKQ_CONFIG": _wt + "2/envs"}) == {})
+r = subprocess.run([sys.executable, os.path.join(HERE, "project.py"), "rebase", _wt, _snap],
+                   env=dict({k: v for k, v in os.environ.items() if not k.startswith("TASKQ_")}, **_env), capture_output=True, text=True)
+ok("project.py rebase: prints export for the changed ones", r.returncode == 0 and f"export TASKQ_CONFIG={_snap}/envs\n" in r.stdout and "TASKQ_DATA" not in r.stdout)
+
 setenv(TASKQ_PLUGINS=None, TASKQ_CONFIG=None)
 print(f"\n{'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)

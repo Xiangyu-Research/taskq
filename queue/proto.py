@@ -109,6 +109,8 @@ STALE_BEAT = 20 * 60   # a claim whose heartbeat has not been renewed for this l
 FRESH_LOG = 15 * 60    # a part log updated within this long counts as still running (not claimed)
 HALF_CLAIM = 5 * 60    # a claim with only a dir and no info is stale after this long
 BEAT = 5 * 60          # worker heartbeat interval
+FAIL_RETRY = 60 * 60   # after a task fails or stalls and is released, the same worker waits this long before claiming it again
+                       # (after MAX_FAIL failures the queue marks it failed and nobody claims it)
 # old bundle cleanup (relay.deploy cleans the root's code/, relay_bundle.prune cleans bundles built on the hub)
 CODE_KEEP = 3                # keep the most recent bundles besides the one in use
 CODE_KEEP_S = 4 * 86400      # bundles under the root's code/ touched within this long are kept (running workers touch theirs every round)
@@ -284,11 +286,12 @@ ENV = dict(
 )
 # consumer (consume.py) thresholds (tune), defaults in consume.py's Worker.__init__
 for _k in ("ADD_AFTER", "UTIL_MAX", "MIN_LEFT", "PATIENCE", "ERR_MAX", "IDLE_MAX", "IDLE_POLL", "IDLE_EXIT", "EARLY_FAIL",
-           "FAIL_WINDOW", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
+           "FAIL_WINDOW", "FAIL_RETRY", "STALL_MAX", "GIVEUP", "BEAT", "POLL", "STOP_POLL", "STOP_WAIT", "TERM_WAIT"):
     ENV["TASKQ_" + _k] = ("tune", "consume.py threshold, default in Worker.__init__")
 # consumer bundle switch: the old process writes its tasks as JSON into TASKQ_HANDOFF and execs the new bundle's worker_start.sh, which takes over
 HANDOFF = 1                # handoff format version; a new process accepts only the same version, otherwise the claim expires and someone else can take it
-HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks")
+HANDOFF_TOP = ("v", "t0", "changed", "excl", "later", "fail_at", "tasks", "idle_since")  # idle_since: when the worker went idle,
+# so IDLE_EXIT keeps counting across a bundle switch; missing → counted from the switch
 HANDOFF_TASK = ("pid", "key", "token", "started", "outdir", "safe", "jtag", "stalled", "why", "sid", "zomb", "ended")
 ENV["TASKQ_HANDOFF"] = ("run", "tasks handed by the old consumer to the new one on a bundle switch (JSON, fields in HANDOFF_TOP / HANDOFF_TASK); worker_start.sh skips the master switch when set")
 ENV["TASKQ_ADMITTED"] = ("run", "1 = the consumer checked the GPU before claiming (gpu_idle plugin); run_task.sh no longer waits for it")

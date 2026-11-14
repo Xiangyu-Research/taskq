@@ -96,7 +96,7 @@ def tree(pid):
 
 
 def kill(pid, sig):
-    if not isinstance(pid, int) or pid <= 1:  # 0、1、负数会打到自己的进程组或账号的所有进程
+    if not isinstance(pid, int) or pid <= 1:  # 0 / 1 / negative would hit our own group or every process of the account
         return
     try:
         os.kill(pid, sig)
@@ -312,7 +312,7 @@ class Worker:
 
     def retry_later(self, key):
         self.later[key] = time.time() + self.FAIL_RETRY
-        say(f"{key} 本作业 {self.FAIL_RETRY // 60} 分钟后再领")
+        say(f"{key}: this job claims it again in {self.FAIL_RETRY // 60} minutes")
 
     def own_fails(self):
         now = time.time()
@@ -406,7 +406,7 @@ class Worker:
         """Signal the training's process group and session first, then run_task.sh and anything outside the session along the process tree."""
         if not r.ended:
             self.sid_of(r)
-        if isinstance(r.sid, int) and r.sid > 1:  # killpg(1) 就是 kill(-1)：账号的所有进程
+        if isinstance(r.sid, int) and r.sid > 1:  # killpg(1) is kill(-1): every process of the account
             try:
                 os.killpg(r.sid, sig)
             except OSError:
@@ -604,7 +604,7 @@ class Worker:
             s = int(d.get("idle_since") or 0)
             if self.t0 <= s <= time.time():
                 self.idle_since = s
-                say(f"接着算空闲：已经空了 {int(time.time()) - s} 秒")
+                say(f"idle time carried over: idle for {int(time.time()) - s} s")
             for t in d.get("tasks") or []:
                 r = Run(int(t["pid"]), t["key"], started=t.get("started"), outdir=t.get("outdir"), safe=t.get("safe"),
                         jtag=t.get("jtag"), stalled=t.get("stalled"), why=t.get("why"), sid=t.get("sid"))

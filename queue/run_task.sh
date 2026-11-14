@@ -108,18 +108,20 @@ wait_gpu() {  # GPU free -> 0; still busy after TASK_WAIT_GPU minutes -> 1. Ever
 }
 kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
 gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # neither the training process group nor the process itself remains
-pid=
+# the training process (group leader). Its own name: bash scoping is dynamic, so a trap firing inside a function sees that
+# function's locals; gpu_free's pid (from nvidia-smi) once made on_term signal pid 1, i.e. every process of the account
+train_pid=
 on_term() {  # SIGTERM the whole process group, SIGKILL after 8 seconds (checkpoints are written atomically), exit once it is gone
-    if [[ -n $pid ]]; then
+    if [[ $train_pid =~ ^[0-9]+$ ]] && (( train_pid > 1 )); then
         echo "$(ts) got stop signal, stopping training"
-        kill -TERM -- -"$pid" 2> /dev/null; kill_tree "$pid"
-        for _ in $(seq "$STOP_WAIT"); do gone "$pid" && break; sleep 1; done
-        if ! gone "$pid"; then
+        kill -TERM -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid"
+        for _ in $(seq "$STOP_WAIT"); do gone "$train_pid" && break; sleep 1; done
+        if ! gone "$train_pid"; then
             echo "$(ts) training did not stop within $STOP_WAIT seconds, forcing" | tee -a "$LOG"
-            kill -KILL -- -"$pid" 2> /dev/null; kill_tree "$pid" KILL
-            for _ in 1 2 3; do gone "$pid" && break; sleep 1; done
+            kill -KILL -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid" KILL
+            for _ in 1 2 3; do gone "$train_pid" && break; sleep 1; done
         fi
-        gone "$pid" || echo "$(ts) training process still there after the force kill (likely stuck in I/O)" | tee -a "$LOG"
+        gone "$train_pid" || echo "$(ts) training process still there after the force kill (likely stuck in I/O)" | tee -a "$LOG"
     fi
     exit "$TQ_EXIT_RUN_TERM"
 }

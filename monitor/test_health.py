@@ -95,6 +95,11 @@ s = snap(pueue={PH: {"groups": {}, "tasks": [
 P = H.check(s)
 ok("failed tasks and dependency failures are both reported", any(p.startswith(f"pueue:{PH}:1:") for p in P) and any(p.startswith(f"pueue:{PH}:2:") for p in P))
 ok("failures older than 24 hours are not reported", not any(p.startswith(f"pueue:{PH}:3:") for p in P))
+_rr = [dict(machine=PH, id=i, label="relay_fetch:k", step="relay_fetch", key="k", added=0.0) for i in (21, 22)]
+_P2 = H.check(snap(records=_rr, pueue={PH: {"groups": {}, "tasks": [
+    task(21, "wait", "Failed (1)", "x", "relay_fetch:k", end=NOW - timedelta(hours=1)),
+    task(22, "wait", "Running", "x", "relay_fetch:k")]}}))
+ok("an old failed task whose step and key were queued again later is not reported", not any(p.startswith(f"pueue:{PH}:21:") for p in _P2))
 ok("stopped by hand (143, pueue kill) is logged but not pushed", [p["level"] for k, p in P.items() if k.startswith((f"pueue:{PH}:4:", f"pueue:{PH}:5:"))] == ["info"] * 2)
 ok("a job killed by a signal (137, usually out of memory) is still reported", [p["level"] for k, p in P.items() if k.startswith(f"pueue:{PH}:6:")] == ["normal"])
 ok("a worker stopped by the scheduler (hours end, card yield) is not reported; a worker error is", not any(p.startswith(f"pueue:{PH}:8:") for p in P)
@@ -444,6 +449,8 @@ ok("plain: without data it falls back to the message",
    PL.problem("unread:hub", dict(msg="original message")) == "original message" and PL.problem(f"site:{PH}:fail:{MEN0}", dict(msg="m")) == "m")
 ok("a stuck report from an executor may be a message or dict(msg, data)", H.from_step("m") == dict(msg="m", level="normal", kind="state", after=0)
    and H.from_step(dict(msg="m", data=dict(n=1)))["data"] == dict(n=1))
+ok("an executor report that is only waiting (level=info) is recorded, not pushed; writes outside the declared outputs are not pushed",
+   H.from_step(dict(msg="m", data=dict(n=1), level="info"))["level"] == "info" and "undeclared" in H.QUIET)
 ok("plain: every step in the experiment table has a display name (core + plugin labels.py STEPS)",
    all(PL.step_name(n) != n for n in PL.table_steps()) and PL.step_name("nope") == "nope")
 
