@@ -64,7 +64,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq nice` | change nice (order) |
 | `taskq show` | one task's full spec and state |
 | `taskq log` | one task's training parts (part logs), event log rows about it, hub task records |
-| `taskq status` | the queue (--all: every task's state, machine, progress, estimated finish) |
+| `taskq status` | on the hub: a one-screen summary (--all: every task by state; <machine>: one machine; <words>: matching tasks) |
 | `taskq stop` | stop a task (running one stops and releases within 30 seconds; not claimed again afterwards) |
 | `taskq resume` | undo a stop |
 | `taskq rm` | remove an unclaimed task |
@@ -212,6 +212,7 @@ and `bin/taskq` mean the full suite):
 | `sync/tunnel.py`, `sync/tunnel_push.sh` | `test_tunnel.py` |
 | `monitor/health.py`, `monitor/notice.py`, `monitor/plain.py`, `monitor/push.py` | `test_health.py`, `test_probe.py`, `test_db.py` |
 | `monitor/overview.py` | `test_overview.py` |
+| `monitor/summary.py` | `test_summary.py` |
 | `monitor/gpu_usage.py`, `monitor/gpu_log.sh` | `test_gpu_usage.py` |
 | anything crossing modules (send, transfer, finish, fetch in one round) | `test_e2e.py` (pueue, separate store and fake Slurm layouts) |
 <!-- /tests -->

@@ -276,6 +276,16 @@ def snapshot(db, tasks, t=None):
     return len(rows)
 
 
+def transitions(db, since, states):
+    """Tasks that changed into one of states at or after since (a task's first record is not a change) -> [dict(t, key, state)] oldest first."""
+    if not D.has(db, "progress"):
+        return []
+    marks = ",".join("?" * len(states))
+    sql = ("SELECT t, key, state FROM (SELECT t, key, state, LAG(state) OVER (PARTITION BY key ORDER BY t) AS prev FROM progress)"
+           f" WHERE t>=? AND state IN ({marks}) AND prev IS NOT NULL AND prev NOT IN ({marks}) ORDER BY t")
+    return [dict(t=t, key=k, state=st) for t, k, st in db.execute(sql, [since, *states, *states])]
+
+
 def progress_rows(db, key=None, since=None):
     w, a = [], []
     if key:

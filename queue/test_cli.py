@@ -135,7 +135,7 @@ class Routing(unittest.TestCase):
         self.assertEqual(len(json.loads(a.stdout[len("@@JSON "):])["tasks"]), len(TASKS))
 
     def test_status_text_same_as_script(self):
-        self.assertEqual(taskq("status").stdout, old("queue/taskq.py", "status").stdout)
+        self.assertEqual(taskq("status", "--queue").stdout, old("queue/taskq.py", "status").stdout)
 
     def test_nice_and_rm(self):
         r = taskq("nice", "--nice", "3", "D1/V/1")

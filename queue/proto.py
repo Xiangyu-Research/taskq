@@ -225,6 +225,8 @@ OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "h
 OVERVIEW_COPY = ("where", "source", "final", "epochs", "start", "last", "runs", "metrics", "debug", "resumable")
 OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part log: job, part number, machine, at least one round done, code commit
 OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain: push text in plain words (plain.problem)
+SUMMARY_WINDOW = 24 * 3600  # taskq status (monitor/summary.py): "due in the next" / "last" window
+SUMMARY_OVERDUE = 3600  # a running task this far past its estimated finish is listed under "Needs you"
 TOTAL_INFO = "num_epochs"  # key in INFO for "total rounds" (used when runs have no total; overview total, progress, eta)
 
 # ---------------- alerts (problem ids in health.py; plain.py explains them by kind) ----------------

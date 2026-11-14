@@ -813,7 +813,7 @@ def submit(name, subs):
 
 
 def site_view(name, rs, st):
-    """Remote status → {real key: dict(state, worker, runs, final, resumable, debug)} (tasks in status.json)."""
+    """Remote status → {real key: dict(state, worker, runs, final, resumable, debug, since)} (tasks in status.json; since: when a worker there claimed it)."""
     rt = {t["key"]: t for t in (rs.get("taskq") or {}).get("tasks") or []}
     out = {}
     for real in ST.keys_of(st, name):
@@ -821,7 +821,7 @@ def site_view(name, rs, st):
         if a:
             f = (rs.get("tasks") or {}).get(real) or {}
             out[real] = dict(state=a["state"], worker=a.get("worker"), runs=f.get("runs") or [], final=f.get("final"),
-                             resumable=f.get("resumable"), ran=a.get("progress"), debug=f.get("debug") or {})
+                             resumable=f.get("resumable"), ran=a.get("progress"), debug=f.get("debug") or {}, since=a.get("since"))
     return out
 
 

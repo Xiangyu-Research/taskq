@@ -144,9 +144,13 @@ def sh(rel):
 
 
 def cmd_status(argv, prog):
-    if "--all" in argv:
+    tq = load("taskq")
+    hub = tq.here() == tq.queue_host()
+    if "--all" in argv and ("--json" in argv or not hub):
         return call("overview", [a for a in argv if a != "--all"], prog)
-    return call("taskq", ["status", *argv], "taskq")
+    if hub and not {"--json", "--queue", "--internal"} & set(argv):
+        return call("summary", argv, prog)
+    return call("taskq", ["status", *[a for a in argv if a != "--queue"]], "taskq")
 
 
 def cmd_plan(argv, prog):
@@ -259,8 +263,11 @@ TREE = {
     "nice": Cmd("change nice (order)", py("taskq", "nice"), own_help=True),
     "show": Cmd("one task's full spec and state", py("taskq", "show"), own_help=True),
     "log": Cmd("one task's training parts (part log), event log rows about it, hub task records", py("tasklog", prog="taskq log"), own_help=True),
-    "status": Cmd("the queue (--all: every task's state, machine, progress, estimated finish)", cmd_status, "[--all] [--json]",
-                  "without --all: this machine's queue (taskq.py status); --json: one @@JSON line.\n--all: every task's state summed up from each machine"),
+    "status": Cmd("on the hub: a one-screen summary (--all: every task by state; <machine>: one machine; <words>: matching tasks)", cmd_status,
+                  "[--all] [--json] [--queue] [machine | words...]",
+                  "on the hub: what needs you, what runs where, when results are due, progress per step (as of the last health check;\n"
+                  "monitor/summary.py). --all: every task grouped by state; <machine>: one machine's tasks; <words>: tasks whose key has every word.\n"
+                  "--queue, or not on the hub: this machine's queue (taskq.py status); --json: one @@JSON line; --all --json: overview.py --json"),
     "stop": Cmd("stop a task (a running one stops and releases within 30 seconds; not claimed again afterwards)", py("taskq", "stop"), own_help=True),
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
     "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
