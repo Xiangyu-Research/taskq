@@ -108,9 +108,20 @@ fi
 gpu 99 "$$, 3000" 3000
 $G $R command key=toy/w4 'cmd=touch $TASKQ_DATA/toy/w4/DONE' env=base out=toy/w4 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "卡上只有自己的进程（worker、显存填充）：不等" "(( rc == 0 )) && ! grep -q 等它空出来 $T/logs/tasks/toy__w4__test-1_part1.log"
-gpu 99 "1, 1000" 1000
+gpu 99 "99999999, 1000" 1000
 $G SLURM_JOB_ID=1 $R command key=toy/w5 'cmd=touch $TASKQ_DATA/toy/w5/DONE' env=base out=toy/w5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "Slurm 里不查卡" "(( rc == 0 )) && [[ ! -e $T/gpu/n ]]"
+# 查卡（gpu_free）时收到 TERM（11/14）：gpu_free 的 local pid 曾遮住训练进程号，停的是卡上列出的进程；没开训时什么都不停
+mkdir -p "$T/binh"
+printf '#!/bin/bash\ncase "$*" in *query-compute-apps*) cat %q; echo $$ > %q; exec sleep 30 ;; *query-gpu*) echo 10 ;; esac\nexit 0\n' "$T/gpu/hang_apps" "$T/gpu/hang_pid" > "$T/binh/nvidia-smi"; chmod +x "$T/binh/nvidia-smi"
+sleep 313 & victim=$!
+echo "$victim, 10" > "$T/gpu/hang_apps"; rm -f "$T/gpu/hang_pid"
+env PATH=$T/binh:$PATH CUDA_VISIBLE_DEVICES=0 $R command key=toy/w6 'cmd=touch $TASKQ_DATA/toy/w6/DONE' env=base out=toy/w6 'done=["DONE"]' > /dev/null & rp=$!
+for _ in $(seq 100); do [[ -s $T/gpu/hang_pid ]] && break; sleep 0.1; done; sleep 0.5
+kill -TERM $rp; wait $rp; rc=$?
+alive=0; kill -0 $victim 2> /dev/null && alive=1
+kill $victim $(cat "$T/gpu/hang_pid" 2> /dev/null) 2> /dev/null; wait $victim 2> /dev/null
+check "查卡时收到 TERM：退出码 143、命令没跑、卡上列出的进程没被停" "(( rc == 143 && alive == 1 )) && [[ -s $T/gpu/hang_pid && ! -e $T/toy/w6/DONE ]]"
 # 空满 TASK_GPU_IDLE 分钟才跑（11/2）：GPU 使用记录（gpu_log.sh 的格式）里最近有别人 → 不跑
 mkdir -p "$T/gl"; GL="$T/gl/gpu_$(date +%Y-%m).csv"
 glrow() { echo "time,gpu,util_pct,mem_used_mib,mem_total_mib,user,pid,proc_mem_mib,program" > "$GL"; echo "$(date -d "-$1 min" '+%F %T'),$2,90,16000,32000,$3,123,16000,train.py" >> "$GL"; echo "$(date '+%F %T'),0,0,100,32000,,,," >> "$GL"; }

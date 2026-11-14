@@ -97,6 +97,8 @@ def tree(pid):
 
 
 def kill(pid, sig):
+    if not isinstance(pid, int) or pid <= 1:  # 0、1、负数会打到自己的进程组或账号的所有进程
+        return
     try:
         os.kill(pid, sig)
     except OSError:
@@ -405,7 +407,7 @@ class Worker:
         """先发给训练的进程组和会话，再按进程树补发给 run_task.sh 和不在会话里的。"""
         if not r.ended:
             self.sid_of(r)
-        if r.sid:
+        if isinstance(r.sid, int) and r.sid > 1:  # killpg(1) 就是 kill(-1)：账号的所有进程
             try:
                 os.killpg(r.sid, sig)
             except OSError:

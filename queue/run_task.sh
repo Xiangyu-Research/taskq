@@ -103,18 +103,20 @@ wait_gpu() {  # 卡空出来 → 0；等满 TASK_WAIT_GPU 分钟还被占 → 1�
 }
 kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
 gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # 训练的进程组和它本身都不在了
-pid=
+# 训练进程（进程组组长）。名字不能和函数里的局部变量重名：bash 是动态作用域，信号在函数里到时 on_term 看到的是那个函数的局部变量；
+# 原来叫 pid，和 gpu_free 读 nvidia-smi 的 pid 重名，测试里读到 1 时 on_term 给 1 号发信号，等于给账号的所有进程发（11/14 测试时把整个账号的进程都杀了）
+train_pid=
 on_term() {  # 先 SIGTERM 整个进程组，8 秒没停下就 SIGKILL（存档是原子写的），确认停下了才退出（11/1）
-    if [[ -n $pid ]]; then
+    if [[ $train_pid =~ ^[0-9]+$ ]] && (( train_pid > 1 )); then
         echo "$(ts) 收到停止信号，停训练"
-        kill -TERM -- -"$pid" 2> /dev/null; kill_tree "$pid"
-        for _ in $(seq "$STOP_WAIT"); do gone "$pid" && break; sleep 1; done
-        if ! gone "$pid"; then
+        kill -TERM -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid"
+        for _ in $(seq "$STOP_WAIT"); do gone "$train_pid" && break; sleep 1; done
+        if ! gone "$train_pid"; then
             echo "$(ts) 训练 $STOP_WAIT 秒没停下，强制停" | tee -a "$LOG"
-            kill -KILL -- -"$pid" 2> /dev/null; kill_tree "$pid" KILL
-            for _ in 1 2 3; do gone "$pid" && break; sleep 1; done
+            kill -KILL -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid" KILL
+            for _ in 1 2 3; do gone "$train_pid" && break; sleep 1; done
         fi
-        gone "$pid" || echo "$(ts) 训练进程强制停之后还在（多半卡在读写上）" | tee -a "$LOG"
+        gone "$train_pid" || echo "$(ts) 训练进程强制停之后还在（多半卡在读写上）" | tee -a "$LOG"
     fi
     exit "$TQ_EXIT_RUN_TERM"
 }
@@ -153,8 +155,8 @@ for (( try = 1; ; try++ )); do
     [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # 消费者领之前已经看过卡
     # 自己一个进程组，停的时候整组停；任务的命令用核心的库（TASKQ_LIB）和命令（bin/ 在 PATH 最前面，11/4）
     ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
-    pid=$!
-    wait "$pid"; rc=$?; pid=
+    train_pid=$!
+    wait "$train_pid"; rc=$?; train_pid=
     done_ "$@"; drc=$?
     if (( drc == TQ_EXIT_DONE_YES )); then
         echo "$TQ_DONE_LINE $(ts)" >> "$LOG"; echo "$(ts) 训完：$TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"

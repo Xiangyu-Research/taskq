@@ -150,7 +150,7 @@ table << EOF
 t/i base
 EOF
 mkdir -p "$T/bini" "$T/gpulog"
-printf '#!/bin/bash\n[[ "$*" == *compute-apps* && -e %q ]] && echo "1, 900"\nexit 0\n' "$T/busy" > "$T/bini/nvidia-smi"; chmod +x "$T/bini/nvidia-smi"
+printf '#!/bin/bash\n[[ "$*" == *compute-apps* && -e %q ]] && echo "99999999, 900"\nexit 0\n' "$T/busy" > "$T/bini/nvidia-smi"; chmod +x "$T/bini/nvidia-smi"
 f=$T/gpulog/$(date +gpu_%Y-%m.csv)
 echo "$(date -d '-5 min' '+%F %T'),1,50,9000,24576,someone,4242,9000,python" > "$f"
 (WORKER_ID=pueue-host-i CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
