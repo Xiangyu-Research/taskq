@@ -44,7 +44,7 @@ def lookup(key):
 def stage(name, key, nice=None, add=True, say=print):
     """Store data → remote (same relative paths as the store data dir); when add, also add it to the remote queue. → key."""
     real = lookup(key)
-    ex = RM.store_op("export", dict(spec=real))
+    ex = RM.store_op("export", dict(spec=real), timeout=MOVE_TIMEOUT)  # first export of new inputs hashes them all (can be tens of GB)
     ids = in_use(name) if add else []
     g = ids and BG.check_all(S.sendable(S.resolve(real["recipe"], ex["params"])), ids)
     if g:  # the bundle in use over there cannot run the spec to send: do not stage or add, keep the claim (queue/bundle_gate.py)
