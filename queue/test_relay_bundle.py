@@ -174,6 +174,12 @@ def test_bundle(T):
     for f in (f"{BQ}/site_ops.py", f"{BQ}/schema.py", f"{BQ}/worker.sbatch", f"{BQ}/cpu_worker.sbatch", f"{BQ}/worker_start.sh",
               f"{BQ}/testdata/bin/toy_train.sh", STEP, f"{BQ}/testdata/exps/demo/experiments.py", B.VERSION, B.PROJECT_FILE):
         assert f in files, f
+    remote = set()  # scripts the core runs over there through relay_remote.op(script=...): they must be in the bundle
+    for d, _, fs in os.walk(CORE):
+        for f in fs:
+            if f.endswith(".py") and not f.startswith("test_"):
+                remote |= set(re.findall(r'script="([^"]+)"', open(os.path.join(d, f), encoding="utf-8").read()))
+    assert remote and all(f"{BQ}/{x}" in files for x in remote), sorted(remote)
     fwd = os.path.join(path, proto.OLD_LAUNCHER)
     assert os.access(fwd, os.X_OK)
     with tempfile.TemporaryDirectory() as d:  # the forwarder runs the real launcher next to it, with the same arguments
