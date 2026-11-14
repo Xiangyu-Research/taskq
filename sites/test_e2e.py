@@ -349,7 +349,7 @@ def setup_common():
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
     core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
     relay.BUNDLE_REF = commit  # a push to main elsewhere during the test does not rebuild
-    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{commit}:{core}": bid}))
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({relay.bundle_key(commit, core): bid}))
     return bid
 
 
@@ -1349,7 +1349,7 @@ def step_slurm_bundle_switch(oldbid, pending):
     nbid, _ = RB.build(None)
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
     core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
-    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({f"{commit}:{core}": nbid}))
+    ST.update_state(lambda st: st.setdefault("bundle_for", {}).update({relay.bundle_key(commit, core): nbid}))
     check()  # deploy the new bundle
     step("the executor switched to the new bundle while the job waits", relay.remote_status(NAME)["bundle"] == nbid,
          (relay.remote_status(NAME) or {}).get("bundle"))

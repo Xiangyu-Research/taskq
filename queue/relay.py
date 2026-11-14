@@ -170,18 +170,27 @@ def deploy(name, bid, path, claims=None, switch=True):
 BUNDLE_REF = "origin/main"  # commit to build bundles from (pinned in tests; pushing main elsewhere does not change it)
 
 
+def bundle_key(commit, core):
+    """Cache key of the bundle built from commit and core: also the bundle rules (dirs / skips), so a bundle built under other
+    rules is never reused."""
+    rules = hashlib.sha256(repr(RB.rules(commit or BUNDLE_REF)).encode()).hexdigest()[:12]
+    return f"{commit}:{core}:{rules}"
+
+
 def wanted_bundle():
     """The bundle every executor should use (the same everywhere) → (name, path on the hub): built from BUNDLE_REF in the
-    project repo and RB.CORE_REF in the core repo. When neither commit changed and the bundle still exists, reuse the recorded
-    one (bundle_for in state.json) instead of rebuilding."""
+    project repo and RB.CORE_REF in the core repo. When the key (bundle_key) is unchanged and the bundle still exists, reuse
+    the recorded one (bundle_for in state.json) instead of rebuilding."""
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", BUNDLE_REF], capture_output=True, text=True).stdout.strip()
     core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
-    key = f"{commit}:{core}"
-    bid = (ST.load_state().get("bundle_for") or {}).get(key)
+    key = bundle_key(commit, core)
+    had = ST.load_state().get("bundle_for") or {}
+    bid = had.get(key)
     path = os.path.join(os.path.expanduser(RB.OUT), bid) if bid else None
     if not path or not os.path.isdir(path):
         bid, path = RB.build(commit or BUNDLE_REF, core=core or RB.CORE_REF)
-        ST.update_state(lambda x: x.update(bundle_for={key: bid}))
+        new = {} if bid in had.values() else dict(bundle_since=time.time())  # the code changed: failed transfers get fresh tries (again)
+        ST.update_state(lambda x: x.update(bundle_for={key: bid}, **new))
     return bid, path
 
 
@@ -247,13 +256,14 @@ def io_task(s, step, key, since=0):
     return (io_tasks(s, step, key, since) or [None])[-1]
 
 
-def again(s, step, key, since=0):
-    """The newest run of this step failed (not stopped by hand) and fewer than proto.XFER_TRIES have failed -> True: queue it again, do not report."""
+def again(s, step, key, since=0, code=0):
+    """The newest run of this step failed (not stopped by hand) and fewer than proto.XFER_TRIES have failed since the code last
+    changed (code: state bundle_since; a new bundle may fix what failed) -> True: queue it again, do not report."""
     def failed(t):
         return (t["status"] not in LIVE and t["status"] != "Success" and t.get("code") != NOSLOT_RC
                 and not (t.get("result") == "Killed" or t.get("code") == 143))
     ts = io_tasks(s, step, key, since)
-    return bool(ts) and failed(ts[-1]) and sum(map(failed, ts)) < proto.XFER_TRIES
+    return bool(ts) and failed(ts[-1]) and sum(map(failed, io_tasks(s, step, key, max(since, code)))) < proto.XFER_TRIES
 
 
 def smoke_step(name, mtq, t, a, k, now):
@@ -290,6 +300,7 @@ def plan(s, name, rs, st, now=None):
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = RM.conf(name)["label"], ST.keys_of(st, name)
+    code = st.get("bundle_since") or 0
     mine = [t for t in (mtq or {}).get("tasks", []) if t.get("worker") == name]
     acts, stuck = [], {}
     if not mtq or not mtq.get("enabled"):
@@ -371,7 +382,7 @@ def plan(s, name, rs, st, now=None):
         if a is None:
             sg = io_task(s, "relay_stage", key, since)
             noslot = sg is not None and sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC
-            if sg is None or sg["status"] == "Success" or noslot or again(s, "relay_stage", key, since):
+            if sg is None or sg["status"] == "Success" or noslot or again(s, "relay_stage", key, since, code):
                 g, h = gate(name, rs, mtq, key), holds.get(key) or {}
                 if not g and h.get("bundle") in BG.in_use(name, rs.get("bundle"), rs.get("live")):
                     g = (h["bundle"], h.get("err"))  # held by stage for this spec: do not queue again while the same bundle is still in use
@@ -400,7 +411,7 @@ def plan(s, name, rs, st, now=None):
             pass  # done marker exists but the worker still claims it: the command is still writing results, so only beat and fetch after release; an expired claim (worker died without releasing) fetches as usual
         elif ast == "done":
             ft = io_task(s, "relay_fetch", key, since)
-            if ft is None or again(s, "relay_fetch", key, since):
+            if ft is None or again(s, "relay_fetch", key, since, code):
                 acts.append(dict(op="fetch", key=key))
             elif ft["status"] == "Success":
                 end = C.local_time(ft.get("end"))
@@ -416,7 +427,7 @@ def plan(s, name, rs, st, now=None):
         elif ast == "input":  # remote side found missing inputs before starting (taskq.py missing): restage only the missing ones, rebuild views, then clear the marker
             sg = io_task(s, "relay_stage", key, a.get("input_since") or since)
             if (sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC)
-                    or again(s, "relay_stage", key, a.get("input_since") or since)):
+                    or again(s, "relay_stage", key, a.get("input_since") or since, code)):
                 acts.append(dict(op="restage", key=key))
             elif sg["status"] not in LIVE:
                 stuck[alert_id("relaystage", key)] = alert(f"restaging missing inputs for {key} to {L} failed on {M.hub()} task {sg['id']} ({sg['status']}); claim kept."

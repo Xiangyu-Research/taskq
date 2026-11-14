@@ -32,6 +32,13 @@ def run(*a, env=None):
     return r.returncode, r.stdout, r.stderr
 
 
+import check as C  # noqa: E402
+import relay_bundle as B  # noqa: E402
+PLUG = os.path.relpath(os.path.join(HERE, "testdata", "plugins", "relay_plugins.py"), B.REPO)
+_files = B.contents(None)
+ok("bundle: plugin modules left out of the bundle (bundle_skip) are reported; the full bundle misses none",
+   C.missing_plugins(_files) == [] and C.missing_plugins({k: v for k, v in _files.items() if k != PLUG}) == [PLUG])
+
 FAST = ("machines", "policy", "plugins", "experiments", "flow", "tasks", "steps")
 rc, out, err = run("--quick")
 ok("fixed config: exit 0, every --quick group checked, no ERROR", rc == 0 and "ERROR [" not in err and all(g in out for g in FAST))

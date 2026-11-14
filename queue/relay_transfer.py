@@ -3,6 +3,7 @@ machine, and drop a remote task and its results. The hub only coordinates: every
 store or the executor (relay_remote.op / store_op, queue/site_ops.py), and data moves directly between them, never through the
 hub's disk. Remote paths match the store's data dir; data is stored as blobs by sha256 (see relay_remote.py)."""
 import contextlib
+import fcntl
 import json
 import os
 import shlex
@@ -83,12 +84,43 @@ def pinned(name, key, hashes, say=print):
             say(f"could not clear the pin for {key} ({e}); cleanup stops honouring it after 12 hours")
 
 
+_tl = threading.local()  # .held: executors whose target_lock this thread holds
+
+
+@contextlib.contextmanager
+def target_lock(name, say=print):
+    """Blob work for one executor (missing → ingest → push → view) runs one at a time across hub processes: two stagings
+    sharing files would otherwise both send the same blob and one replaces it under the other's check or view. Nested use in
+    one thread does not lock again."""
+    held = _tl.__dict__.setdefault("held", set())
+    if name in held:
+        yield
+        return
+    os.makedirs(ST.DIR, exist_ok=True)
+    with open(os.path.join(ST.DIR, proto.STAGE_LOCK.format(proto.safe(name))), "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            say(f"another transfer to {RM.conf(name)['label']} is running, waiting for it")
+            fcntl.flock(f, fcntl.LOCK_EX)
+        held.add(name)
+        try:
+            yield
+        finally:
+            held.discard(name)
+
+
 def ensure_blobs(name, files, say=print, src=None, what=None, n=None):
     """Files on src (default the store) as {sha256: [path relative to src's data dir or None, bytes, path on src]} → they all
     exist in the remote blobs → {sha256: remote path (R/blobs/<first two>/<sha256>, ~ not expanded)}. First ask what is
     missing; for those, try data dirs already on that machine (relay_remote.same_disk_srcs: by relative path, matching size and
     sha256, hard link on the same disk); the rest is sent by src (site_ops push). Caller pins first so cleanup leaves them alone.
-    No CPU job slot → RM.NoSlot; not transferred → RelayError."""
+    No CPU job slot → RM.NoSlot; not transferred → RelayError. Holds target_lock."""
+    with target_lock(name, say):
+        return _ensure_blobs(name, files, say, src, what, n)
+
+
+def _ensure_blobs(name, files, say, src, what, n):
     miss = RM.op(name, "missing", sorted(files))
     say(f"{what or name}: {len(files) if n is None else n} files, {len(miss)} missing over there")
     if miss:
@@ -144,17 +176,18 @@ def _stage(name, key, nice, add, say, real, ex, links):
     lay = layout(ex)
     views, placed, outs, cleanup = lay["views"], lay["placed"], lay["outs"], lay["cleanup"]
     check_overlap(name, key, views + placed)
-    try:
-        ensure_blobs(name, {h: [inner, size, path] for _, h, size, inner, path in ex["files"]}, say, what=key, n=len(links))
-    except RM.NoSlot as e:
-        say(f"{e}; not staging this time, will retry on the next check")
-        return None
-    now = time.time()
-    ST.update_state(lambda st: st.setdefault("views", {}).setdefault(name, {}).update({v: now for v in views}))
-    others = [k for r, k in ST.keys_of(ST.load_state(), name).items() if r != key]
-    used = set().union(*[ST.paths_of(k) for k in others]) if others else set()
-    clean = [v for v in views if not ST.overlaps(v, used, ST.ancestors(used))]  # extra old links in a view go only when no other task uses that view
-    n = RM.op(name, "view", dict(views=views, clean=clean, links=links, texts=ex["texts"]))
+    with target_lock(name, say):  # the blobs stay as checked until the view links them
+        try:
+            ensure_blobs(name, {h: [inner, size, path] for _, h, size, inner, path in ex["files"]}, say, what=key, n=len(links))
+        except RM.NoSlot as e:
+            say(f"{e}; not staging this time, will retry on the next check")
+            return None
+        now = time.time()
+        ST.update_state(lambda st: st.setdefault("views", {}).setdefault(name, {}).update({v: now for v in views}))
+        others = [k for r, k in ST.keys_of(ST.load_state(), name).items() if r != key]
+        used = set().union(*[ST.paths_of(k) for k in others]) if others else set()
+        clean = [v for v in views if not ST.overlaps(v, used, ST.ancestors(used))]  # extra old links in a view go only when no other task uses that view
+        n = RM.op(name, "view", dict(views=views, clean=clean, links=links, texts=ex["texts"]))
     say(f"inputs placed over there ({n} files, views {', '.join(views) or 'none'})")
 
     def rec(st):

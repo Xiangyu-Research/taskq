@@ -654,7 +654,8 @@ def check_bundle(r):
     r.checked(g)
     out = tempfile.mkdtemp(prefix="check_bundle.")
     try:
-        tests = sorted(f for f in B.contents(None) if any(fnmatch.fnmatch(f, p) for p in skip))
+        files = B.contents(None)
+        tests = sorted(f for f in files if any(fnmatch.fnmatch(f, p) for p in skip))
         B.build(None, out=out)
     except Exception as e:  # noqa: BLE001
         r.bad(g, f"cannot build a bundle: {e}")
@@ -663,6 +664,20 @@ def check_bundle(r):
         shutil.rmtree(out, ignore_errors=True)
     if tests:
         r.note(g, f"the bundle has test files ({len(tests)}, e.g. {tests[0]}); add unwanted ones to OUTPUTS bundle_skip")
+    for f in missing_plugins(files):
+        r.bad(g, f"plugin {f} is not in the bundle (OUTPUTS bundle / bundle_skip): executors and the store load plugins from their bundle")
+
+
+def missing_plugins(files):
+    """Plugin modules in the project repo that a bundle with these files leaves out (path relative to the repo)."""
+    import relay_bundle as B
+    out = []
+    for d in cfg.plugin_dirs():
+        rel = os.path.relpath(os.path.realpath(d), os.path.realpath(B.REPO))
+        if rel == ".." or rel.startswith("../") or not os.path.isdir(d):
+            continue
+        out += [f for f in (os.path.normpath(os.path.join(rel, x)) for x in sorted(os.listdir(d)) if x.endswith(".py")) if f not in files]
+    return out
 
 
 CHECKS = dict(machines=check_machines, policy=check_policy, plugins=check_plugins, experiments=check_experiments, flow=check_flow,

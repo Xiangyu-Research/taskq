@@ -415,6 +415,7 @@ GPU_USAGE_TOTAL = ("gpu", "user", "hours")
 
 # ---------------- hub database and event log (queue/db.py, queue/events.py) ----------------
 DB = "taskq.db"  # under the state dir
+STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: one blob transfer (missing → ingest → push → view) at a time
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tasks.json", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
                WHEELHOUSE, "envlock", DB)

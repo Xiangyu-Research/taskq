@@ -48,10 +48,10 @@ def conf_path(name):
     return f"{conf_rel()}/{name}" if conf_rel() else name
 
 
-def _tops():
+def _tops(outputs):
     """Dirs or files in the project repo that go into the bundle: policy.py's OUTPUTS["bundle"], plus the config dir when it is
     not already inside it."""
-    tops = list(getattr(P, "OUTPUTS", {}).get("bundle", ()) or ())
+    tops = list(outputs.get("bundle", ()) or ())
     c = conf_rel() or "."
     if config_in_repo() and not any(t in ("", ".") or c == t.rstrip("/") or c.startswith(t.rstrip("/") + "/") for t in tops):
         tops.append(c)
@@ -63,8 +63,24 @@ def config_in_repo():
     return not (r == ".." or r.startswith("../"))
 
 
-TOPS = _tops()
+TOPS = _tops(getattr(P, "OUTPUTS", {}) or {})
 SKIP = tuple(getattr(P, "OUTPUTS", {}).get("bundle_skip", ()))  # globs kept out of the bundle (fnmatch, * crosses dirs)
+
+
+def rules(commit):
+    """(TOPS, SKIP) for a bundle of commit: read from policy.py as of that commit, so the dirs and skips always match the files
+    taken from it (a process that loaded an older policy.py still builds the right bundle). The loaded ones when commit is None
+    or the config dir is outside the repo (config_files then copies the loaded config)."""
+    if commit is None or not config_in_repo():
+        return TOPS, SKIP
+    path = conf_path("policy.py")
+    ns = {"__name__": "policy_at_commit", "__file__": os.path.join(cfg.config_dir(), "policy.py")}
+    try:
+        exec(compile(read(commit, path), f"{commit}:{path}", "exec"), ns)
+    except Exception as err:
+        raise BundleError(f"cannot read OUTPUTS from {path} at {commit}: {type(err).__name__}: {err}") from None
+    out = ns.get("OUTPUTS") or {}
+    return _tops(out), tuple(out.get("bundle_skip", ()))
 BC = proto.BUNDLE_CORE  # where the core sits in the bundle (fixed, independent of where the local core lives)
 CORE_REF = "HEAD"  # core files come from this commit of the core repo (the installed checkout)
 # Scheduler files executors need (relative to the core root; placed under BC/ in the bundle): worker entry point and loop,
@@ -113,15 +129,15 @@ def git(*args, binary=False, input=None, repo=None):
     return r.stdout if binary else r.stdout.decode()
 
 
-def _wanted(path, size):
-    """path: path in the bundle."""
+def _wanted(path, size, skip=None):
+    """path: path in the bundle; skip: bundle_skip globs (default SKIP)."""
     if "__pycache__" in path:
         return False
     if path in RUNTIME_B:
         return True
     if not (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX):
         return False
-    return not any(fnmatch.fnmatchcase(path, x) for x in SKIP)
+    return not any(fnmatch.fnmatchcase(path, x) for x in (SKIP if skip is None else skip))
 
 
 RUNTIME_B = frozenset(f"{BC}/{f}" for f in RUNTIME)
@@ -204,22 +220,23 @@ def _core_owned(path):
     return path == BC or path.startswith(BC + "/")
 
 
-def project_entries(commit, specs=None):
+def project_entries(commit, specs=None, tops=None):
     """Files in the project repo (specs defaults to TOPS, relative to the repo root, placed at the same path in the bundle). Skip
     the core when it is a submodule; BC/ in the bundle belongs to the core. When the core is this repo (a standalone checkout
     running the core's tests), take it as usual."""
     cr = core_in_repo()
-    specs = list(TOPS) if specs is None else specs
+    specs = list(TOPS if tops is None else tops) if specs is None else specs
     if cr == ".":
         return _entries(commit, specs, REPO)
     return [e for e in _entries(commit, specs, REPO, skip={x for x in (cr, BC) if x}) if not _core_owned(e[0])]
 
 
-def core_entries(core):
+def core_entries(core, tops=None):
     """Core files from the core repo (core is a commit; None = worktree), placed under BC/ in the bundle: RUNTIME plus whatever
     in TOPS falls inside the core (when the core is in the project repo, such as test config)."""
     cr = core_in_repo()
-    extra = [] if cr is None else list(TOPS) if cr == "." else _inside(TOPS, cr)
+    tops = TOPS if tops is None else tops
+    extra = [] if cr is None else list(tops) if cr == "." else _inside(tops, cr)
     return _entries(core, list(RUNTIME) + extra, CORE, prefix=BC + "/")
 
 
@@ -227,7 +244,8 @@ def source_files(commit, core=CORE_REF):
     """{path in the bundle: (content bytes, executable)}: files from the project repo at commit + files from the core repo at
     core (commit None reads both worktrees)."""
     core = None if commit is None else core
-    ents = [e for e in project_entries(commit) + core_entries(core) if e[1].startswith("100") and _wanted(e[0], e[3])]
+    tops, skip = rules(commit)
+    ents = [e for e in project_entries(commit, tops=tops) + core_entries(core, tops) if e[1].startswith("100") and _wanted(e[0], e[3], skip)]
     return dict(sorted(_load(ents).items()))
 
 
@@ -263,13 +281,13 @@ def config_files():
     return {conf_path(f): (open(os.path.join(d, f), "rb").read(), False) for f in sorted(os.listdir(d)) if f.endswith(".py")}
 
 
-def gen_project():
+def gen_project(tops=None):
     """Generate .taskq.toml in the bundle when the project has none (config comes from TASKQ_CONFIG): config at conf_rel(),
     plus the plugins that made it into the bundle."""
     plug = []
     for d in cfg.plugin_dirs():
         rel = os.path.relpath(os.path.realpath(d), os.path.realpath(REPO))
-        if not rel.startswith("..") and any(t.rstrip("/") in ("", ".") or rel == t or rel.startswith(t.rstrip("/") + "/") for t in TOPS):
+        if not rel.startswith("..") and any(t.rstrip("/") in ("", ".") or rel == t or rel.startswith(t.rstrip("/") + "/") for t in (TOPS if tops is None else tops)):
             plug.append(rel)
     return f"config = {conf_rel() or '.'!r}\nplugins = {plug!r}\n".replace("'", '"')
 
@@ -326,7 +344,7 @@ def contents(commit="origin/main", core=CORE_REF):
         if conf_path(f) not in out:
             raise BundleError(f"the bundle has no config dir {f} ({conf_path(f)}): the config dir must be tracked by git")
     toml = project_file(commit)
-    out[PROJECT_FILE] = (toml if toml is not None else gen_project(), False)
+    out[PROJECT_FILE] = (toml if toml is not None else gen_project(rules(commit)[0]), False)
     hits = secret_hits(out)
     if hits:
         raise BundleError("the bundle contains something that looks like a secret: " + "; ".join(f"{f}:{n} {w}…" for f, n, w in hits[:10]))

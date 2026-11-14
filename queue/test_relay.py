@@ -270,7 +270,10 @@ def test_plan():
     old = dict(rec, added=10.0)
     acts, stuck = relay.plan(S0([mtask(K)], [dict(id=7, label=rec["label"], status="Failed")], [old]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
-    ok("not staged yet → queue staging; staging → wait; failure → queue again, after 3 or when stopped by hand → alert and keep the claim; old tasks from before the claim do not count")
+    acts, stuck = relay.plan(S0([mtask(K)], f3, r3), NAME, RS(), dict(bundle_since=3000.0))
+    assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
+    ok("not staged yet → queue staging; staging → wait; failure → queue again, after 3 or when stopped by hand → alert and keep the claim; old tasks from before the claim do not count; "
+       "failures before the code last changed (bundle_since) do not count")
     ns = [dict(id=7, label=rec["label"], status=f"Failed ({relay.NOSLOT_RC})", code=relay.NOSLOT_RC)]
     acts, stuck = relay.plan(S0([mtask(K, since=time.time() - 600)], ns, [rec]), NAME, RS(), {})
     assert ops(acts) == [("beat", K), ("stage", K)] and not stuck, (acts, stuck)
@@ -1485,6 +1488,68 @@ def test_ingest():
     ok("ingest: with blobs on another disk, do not read the source or compute sha256, just skip (the store sends it)")
 
 
+def test_bundle_since():
+    """A new bundle (the code changed) records bundle_since; the same bundle rebuilt (pruned dir) does not move it."""
+    built = iter([("b1", T), ("b1", T), ("b2", T)])
+    saved = ST.load_state()
+    try:
+        ST.update_state(lambda x: (x.pop("bundle_for", None), x.pop("bundle_since", None)))
+        with patched(relay.RB, build=lambda *a, **kw: next(built), OUT="/nonexistent"):
+            relay.wanted_bundle()
+            t1 = ST.load_state().get("bundle_since")
+            relay.wanted_bundle()  # same bundle rebuilt (dir gone)
+            t2 = ST.load_state().get("bundle_since")
+            time.sleep(0.01)
+            relay.wanted_bundle()
+            t3 = ST.load_state().get("bundle_since")
+    finally:
+        ST.update_state(lambda x: (x.clear(), x.update(saved)))
+    assert t1 and t2 == t1 and t3 > t1, (t1, t2, t3)
+    ok("bundle_since moves only when the wanted bundle changes")
+
+
+def test_parallel_same_target():
+    """Two stagings sending the same new file to one executor at once (hub processes, here threads): blob work for one executor
+    runs one at a time, so the file is pushed once and the second finds it there (no "changed since ingest", no second push
+    replacing a blob under the first one's view)."""
+    import threading
+    src = os.path.join(T, "shared.bin")
+    open(src, "wb").write(os.urandom(4096))
+    hh = relay.C.sha256(src)
+    files = {hh: [None, os.path.getsize(src), src]}
+    calls, real, got, errs = [], RM.op, [], []
+
+    def op(name, what, data=None, **kw):
+        calls.append(("start", what, threading.get_ident()))
+        if what == "push":
+            time.sleep(0.5)  # a slow transfer: the other staging would ask "missing" in the meantime
+        try:
+            return real(name, what, data, **kw)
+        finally:
+            calls.append(("end", what, threading.get_ident()))
+
+    def one():
+        try:
+            got.append(RT.ensure_blobs(NAME, files, say=lambda m: None))
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+    with patched(RM, op=op):
+        ths = [threading.Thread(target=one) for _ in range(2)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+    pushes = [c for c in calls if c[:2] == ("start", "push")]
+    first_end = next(i for i, c in enumerate(calls) if c[:2] == ("end", "push"))
+    later = [c for c in calls[first_end:] if c[:2] == ("start", "missing")]
+    assert not errs and len(got) == 2 and got[0] == got[1], (errs, got)
+    assert len(pushes) == 1 and len(later) == 1 and later[0][2] != pushes[0][2], calls
+    assert open(os.path.join(RROOT, proto.blob(hh)), "rb").read() == open(src, "rb").read()
+    with RT.target_lock(NAME), RT.target_lock(NAME):  # nested in one thread: no self-deadlock
+        pass
+    ok("two stagings sending the same file to one executor at once: one at a time, pushed once, both get the blob")
+
+
 def test_pin_refresh():
     """While staging, rewrite the pin periodically (remote cleanup honours pins for 12 hours) and clear it when done."""
     import threading
@@ -1619,6 +1684,8 @@ if __name__ == "__main__":
     test_logs_exact()
     test_ingest()
     test_pin_refresh()
+    test_parallel_same_target()
+    test_bundle_since()
     test_deploy_cleanup()
     test_deploy_safety()
     shutil.rmtree(T)

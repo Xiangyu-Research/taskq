@@ -602,5 +602,52 @@ ok("run again: no renames or drops; unchanged records are not listed as kept (on
    "0 renamed to step instance names, 0 dropped" in out and not re.search(r"renamed \d+ part logs|[1-9]\d* part logs rewritten", out)
    and [ln for ln in out.splitlines() if "kept" in ln and LO not in ln] == [])
 
+# ---------------- 7. pueue groups, done results nobody claims ----------------
+import migrate as MG  # noqa: E402
+import relay_remote as RMT  # noqa: E402
+have = {"gpu1": dict(status="Paused", parallel_tasks=1), "gpu0": dict(status="Running", parallel_tasks=2),
+        "cpu": dict(status="Running", parallel_tasks=1), "q-env": dict(status="Paused", parallel_tasks=1)}
+ran, said = [], []
+
+
+def fake_rsh(name, cmd, input=None, timeout=300):
+    ran.append((name, cmd))
+    return (0, json.dumps(have), "") if cmd.endswith("group --json") else (0, "", "")
+
+
+saved_rsh, RMT.rsh = RMT.rsh, fake_rsh
+saved_m = M.MACHINES["site-pueue"].get("manual_groups")
+M.MACHINES["site-pueue"]["manual_groups"] = {"q-env": (1, None, {})}
+try:
+    MG.pueue_groups("site-pueue", True, said.append)
+    listed, n_listed = list(said), len(ran)
+    said.clear()
+    MG.pueue_groups("site-pueue", False, said.append)
+finally:
+    RMT.rsh = saved_rsh
+    M.MACHINES["site-pueue"]["manual_groups"] = saved_m
+done = ran[-1][1].split(" && ")
+ok(f"self migrate: missing pueue groups are added, paused / mis-sized worker groups resumed and fixed, manual groups left alone ({listed} {done})",
+   n_listed == 1 and "add taskq (parallel 0)" in listed[0] and "gpu1: Paused -> resume" in listed[0] and "gpu0: parallel 2 -> 1" in listed[0]
+   and "q-env" not in listed[0] and not said
+   and sorted(x.split("pueue ", 1)[1] for x in done) == sorted(["group add taskq", "parallel -g taskq 0", "parallel -g gpu0 1", "start -g gpu1"]))
+ran.clear()
+RMT.rsh = lambda name, cmd, input=None, timeout=300: (255, "", "ssh: connect to host x: Connection refused")
+try:
+    said.clear()
+    MG.pueue_groups("site-pueue", False, said.append)
+finally:
+    RMT.rsh = saved_rsh
+ok("pueue groups: unreachable machine → said, nothing run", len(said) == 1 and "cannot read" in said[0])
+saved_op, got = RMT.store_op, {}
+RMT.store_op = lambda what, data, **kw: (got.update(data["items"]), {k: [] if k == "a" else ["x"] for k in data["items"]})[1]
+try:
+    kept = MG.done_dropped([dict(key="a", params=dict(out="{data}/old/a", done=[".a_done|A"])), dict(key="b", params=dict(out="old/b", done=["B"])),
+                            dict(key="c", params={})], [("a", "why"), ("b", "why"), ("c", "why")])
+finally:
+    RMT.store_op = saved_op
+ok("dropped tasks whose outputs are done on the store are listed (results no step claims any more)",
+   kept == [("a", "old/a")] and got == {"a": dict(out="old/a", done=[[".a_done", "A"]]), "b": dict(out="old/b", done=[["B"]])})
+
 print("all passed" if not fails else f"{fails} failures")
 sys.exit(1 if fails else 0)

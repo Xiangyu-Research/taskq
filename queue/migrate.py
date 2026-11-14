@@ -524,6 +524,60 @@ def plan_hub(ren):
     return new, keys, drop, say
 
 
+def done_dropped(tasks, drop):
+    """Dropped tasks whose outputs are done on the store → [(key, out)]: results no step claims any more. When a step now writes
+    them elsewhere (its out moved in the experiment table), that step runs again unless they are moved there first."""
+    import relay_remote as RM
+    by, items = {t["key"]: t for t in tasks}, {}
+    for k, _ in drop:
+        p = (by.get(k) or {}).get("params") or {}
+        out = str(p.get("out") or "").replace("{data}/", "")
+        if out and p.get("done"):
+            items[k] = dict(out=out, done=[str(d).split("|") for d in p["done"]])
+    miss = RM.store_op("done", dict(items=items)) if items else {}
+    return sorted((k, items[k]["out"]) for k, m in miss.items() if not m)
+
+
+def pueue_groups(name, dry, say):
+    """This machine's pueue groups (mtab groups: workers, the core's IO group, manual_groups): create missing ones; set the
+    parallel count and resume paused ones except manual groups (older versions paused worker groups outside their hours;
+    workers now follow their hours themselves). dry: say the plan; otherwise do it and say only failures. Unreachable → said,
+    nothing changed."""
+    import mtab as M
+    import relay_remote as RM
+    want, manual = M.groups(name), set(M.machine(name).get("manual_groups") or {})
+    P = M.machine(name)["pueue"]
+    rc, out, err = RM.rsh(name, f"{P} group --json", timeout=60)
+    try:
+        have = json.loads(out) if rc == 0 else None
+    except ValueError:
+        have = None
+    if have is None:
+        say(f"  pueue groups on {name}: cannot read ({RM.err_tail(err or out)}); run taskq site setup {name} later")
+        return
+    cmds, lines = [], []
+    for g, (n, _, _) in want.items():
+        h = have.get(g)
+        if h is None:
+            cmds += [f"{P} group add {g}", f"{P} parallel -g {g} {n}"]
+            lines.append(f"add {g} (parallel {n})")
+            continue
+        if g in manual:
+            continue
+        if h.get("parallel_tasks") != n:
+            cmds.append(f"{P} parallel -g {g} {n}")
+            lines.append(f"{g}: parallel {h.get('parallel_tasks')} -> {n}")
+        if h.get("status") != "Running":
+            cmds.append(f"{P} start -g {g}")
+            lines.append(f"{g}: {h.get('status')} -> resume")
+    if dry:
+        say(f"  pueue groups on {name}: " + ("; ".join(lines) if lines else "as in the machine table"))
+    if cmds and not dry:
+        rc, out, err = RM.rsh(name, " && ".join(cmds), timeout=120)
+        if rc:
+            say(f"  pueue groups on {name}: failed ({RM.err_tail(err or out)}); run taskq site setup {name}")
+
+
 def fix_hub_queue(Q, tasks, keys, drop, ren, say, dry):
     """Hub queue: write the new task list; rename per-task-name records and delete those of dropped tasks; rename machines
     in claims, releases, failures and skips; add the reason to release records."""
@@ -796,6 +850,14 @@ def main(argv):
             drop = sorted(k for k, _ in dropped)
             for n in notes:
                 say(n)
+            try:
+                kept = done_dropped(taskq.read_tasks(), dropped)
+            except RuntimeError as e:
+                say(f"cannot ask the store which dropped tasks are done ({e})")
+                kept = []
+            if kept:
+                say(f"Done results no step claims any more ({len(kept)}): when a step now writes them elsewhere, move them there on the store"
+                    " before cron runs again, or that step runs again" + "".join(f"\n  {k}: {o}" for k, o in kept))
             views = {}
             for old, recs in (st.get("keys") or {}).items():
                 if old not in merge:
@@ -824,6 +886,9 @@ def main(argv):
                 say(f"Old code snapshots: delete {len(snaps)}, keep {len(kept)} (working dir of an unfinished pueue task; run self migrate again later)"
                     + "".join(f"\n  keep {p}" for p in kept))
             copy_hashes(say, True)
+            say("Pueue groups:")
+            for name in M.pueue_hosts():
+                pueue_groups(name, True, say)
             if not a.apply:
                 say("(listed only, nothing changed; add --apply when ready)")
                 return 0
@@ -835,6 +900,8 @@ def main(argv):
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, quiet, False)
             fix_smoke(taskq.TQ, ren, quiet, False)
             copy_hashes(quiet, False)
+            for name in M.pueue_hosts():
+                pueue_groups(name, False, say)  # says only what failed
             move_health_log(home, quiet, False)
             for p in junk:
                 shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)

@@ -31,7 +31,8 @@ each part runs, where files live, and how to add things.
 - One machine can hold several roles; the one with `ssh=None` is the hub's machine and can also be an executor (commands run locally,
   transfers copy locally).
 - Executors run bundles built by the hub (`queue/relay_bundle.py`: the core files executors need go into `scripts/taskq/` inside the
-  bundle, plus the project's config dir and the dirs listed in `OUTPUTS["bundle"]`); the bundle name is a content hash; it is pushed to
+  bundle, plus the project's config dir and the dirs listed in `OUTPUTS["bundle"]`, minus `bundle_skip`, both read from `policy.py` at
+  the commit being bundled); the bundle name is a content hash; it is pushed to
   `R/code/<bundle>` and `R/code/current` points at the one in use.
 
 ## Switches and config
@@ -347,8 +348,10 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
    - blocked by the bundle gate or smoke gate -> `hold`; unblocked -> `unhold`.
    - a failed `stage` / `fetch` / `restage` (mostly not the task's fault: tunnel down, busy disk timing out) is queued again at the next
-     check, reported only after `XFER_TRIES` (`relay.py`) failures within one claim; stopped by hand is not retried; an old failed one
-     queued again later is not reported by the health check.
+     check, reported only after `XFER_TRIES` (`relay.py`) failures within one claim since the bundle last changed (a new bundle gets
+     fresh tries); stopped by hand is not retried; an old failed one queued again later is not reported by the health check. Blob work
+     for one executor (`missing` -> `ingest` -> `push` -> `view`) runs one transfer at a time (a lock per executor on the hub), so
+     stagings sharing files do not send the same blob twice.
 3. **Assign** (`assign`, `refill.choose`): unclaimed tasks in the hub queue are assigned to machines in one pass. Order: nice -> half-done
    first -> arrival order. Each task's possible executors = intersection of `PLACE[step or recipe]` and the spec's `machines`, limited to
    machines with that worker kind (gpu / cpu); drop machines that skipped it (all skipped -> report `tqblocked`); a half-done task only goes
@@ -473,7 +476,9 @@ write checkpoints under `out`.
 
 When an on-disk format changes, run `taskq self migrate` once in a cutover (stop cron, hand back running tasks, push the code, switch every
 executor to the new bundle) (lists by default, `--apply` changes; `--rename old=new`, `--merge old=old root`): the hub queue, relay
-bookkeeping and smoke records on the hub, and queues and part logs in each executor and store root.
+bookkeeping and smoke records on the hub, and queues and part logs in each executor and store root; it also creates missing pueue groups
+and resumes paused ones (manual groups left alone), and lists dropped tasks whose results are done on the store (when a step now writes
+them elsewhere, move them there first, or it runs again).
 
 ## File layout
 

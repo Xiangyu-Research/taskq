@@ -135,6 +135,22 @@ def test_source_files_submodule(T):
        f"{BC}/; commit=None reads both worktrees; with the core outside the repo only RUNTIME is taken")
 
 
+def test_rules_from_commit():
+    """Bundle dirs and skips come from policy.py at the commit being bundled, not from the policy this process loaded (a hub
+    that loaded an older policy.py builds the bundle the commit describes); commit None uses the loaded ones."""
+    f = f"{BQ}/testdata/exps/demo/experiments.py"
+    saved = B.TOPS, B.SKIP
+    B.TOPS, B.SKIP = ("no_such_dir",), (f,)
+    try:
+        at_commit, wd = B.source_files("HEAD"), B.source_files(None)
+        tops, skip = B.rules("HEAD")
+    finally:
+        B.TOPS, B.SKIP = saved
+    assert f in at_commit and f not in wd, (f in at_commit, f in wd)
+    assert tops == B.TOPS and skip == B.SKIP, (tops, skip)
+    ok("bundle dirs and bundle_skip are read from policy.py at the bundled commit; commit None uses the loaded policy")
+
+
 def test_secrets():
     sk = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
     tok = "ghp_" + "a1" * 18
@@ -384,6 +400,7 @@ def main():
     T = fixture.tmpdir(prefix="test_relay_bundle.")
     try:
         test_source_files_from_commit()
+        test_rules_from_commit()
         test_secrets()
         test_source_files_submodule(T)
         bid, path = test_bundle(T)
