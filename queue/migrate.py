@@ -478,6 +478,18 @@ def renamed_params(params):
     return p
 
 
+def current_params(recipe, params):
+    """Parameters the recipe no longer has (fields of older versions, e.g. oldlogs) are dropped -> (params, [dropped names]);
+    unknown recipe or an open recipe -> unchanged (resolve reports it)."""
+    import recipes as R
+    import schema
+    r = R.RECIPES.get(recipe)
+    if not r or r.get("open"):
+        return params, []
+    gone = [k for k in params if k not in r["params"] and k not in schema.RECIPE_FIELDS]
+    return {k: v for k, v in params.items() if k not in gone}, gone
+
+
 def plan_hub(ren):
     """Queue -> (new task list, {old: new}, [(dropped old, why)], [lines to say])."""
     import experiments as E
@@ -485,7 +497,7 @@ def plan_hub(ren):
     tasks = taskq.read_tasks()
     keys, params, drop = key_map(tasks)
     gone = {k for k, _ in drop}
-    new, say = [], []
+    new, say, stale = [], [], {}
     for t in tasks:
         if t["key"] in gone:
             continue
@@ -493,7 +505,9 @@ def plan_hub(ren):
         if t["key"] in keys:
             t["key"], t["params"], t["exp"] = keys[t["key"]], params[keys[t["key"]]], None
         else:
-            t["params"] = renamed_params(t["params"])
+            t["params"], gone = current_params(t["recipe"], renamed_params(t["params"]))
+            for g in gone:
+                stale[g] = stale.get(g, 0) + 1
         if t["params"].get("machines"):
             t["params"]["machines"] = sorted({ren.get(m, m) for m in t["params"]["machines"]})
         if t.get("added") is None:
@@ -505,6 +519,8 @@ def plan_hub(ren):
         new.append(t)
     say.append(f"Queue: {len(tasks)} tasks, {sum(o != n for o, n in keys.items())} renamed to step instance names, {len(drop)} dropped")
     say += [f"  dropped {k}: {why}" for k, why in drop]
+    if stale:
+        say.append("Parameters the recipes no longer have, removed from queued tasks: " + ", ".join(f"{k} ({n})" for k, n in sorted(stale.items())))
     return new, keys, drop, say
 
 
@@ -722,6 +738,7 @@ def new_specs(st):
     out = {}
     for name in st.get("keys") or {}:
         for k, r in ST.keys_of(st, name).items():
+            r["params"] = current_params(r["recipe"], r["params"])[0]  # the ledger keeps current parameters too
             try:
                 out.setdefault(name, {})[k] = S.sendable(S.resolve(r["recipe"], r["params"]))
             except S.SpecError as e:

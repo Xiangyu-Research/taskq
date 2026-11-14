@@ -269,7 +269,7 @@ H2 = hashlib.sha256(B2).hexdigest()
 
 # queue
 write(os.path.join(TQ, Q["tasks"]), jl([
-    dict(order=1, nice=0, key=SRC, exp="t0", recipe="toy", params=dict(TOY["params"], machines=["lab0", "lab1"])),
+    dict(order=1, nice=0, key=SRC, exp="t0", recipe="toy", params=dict(TOY["params"], machines=["lab0", "lab1"], oldlogs=dict(dir="x"))),
     dict(order=2, nice=-100, key=INF, exp=None, recipe="command", params=P_INF),
     dict(order=3, nice=-100, key=EV, exp=None, recipe="command", params=P_EV, added=1234.5),
     dict(order=4, nice=-100, key=DUP, exp=None, recipe="command", params=P_DUP),
@@ -294,7 +294,7 @@ write(os.path.join(SM, "lab0.json.lock"), "")
 REC_INF = dict(recipe="command", params=P_INF, data=["raw/in"], staged=1.0, views=[VIEW], inputs=[], outs=[INST[NINF].outputs[0]],
                cleanup=[], unq=7)
 REC_EV = dict(recipe="command", params=P_EV, data=[], staged=2.0, views=[], inputs=[], outs=[INST[NEV].outputs[0]], cleanup=[], unq=2)
-REC_SRC = dict(recipe="toy", params=TOY["spec"]["params"], data=[], staged=3.0, views=["prepared/D101_alpha"], inputs=[],
+REC_SRC = dict(recipe="toy", params=dict(TOY["spec"]["params"], oldlogs=dict(dir="x")), data=[], staged=3.0, views=["prepared/D101_alpha"], inputs=[],
                outs=[TOY["spec"]["out"]], cleanup=[], links={"prepared/D101_alpha/x.dat": "ab" * 32})
 write(os.path.join(STATE, "relay", "state.json"), json.dumps(dict(
     keys={"lab0": {INF: REC_INF}, "lab1": {GONE: dict(recipe="command", params=P_GONE, views=[], unq=1)},
@@ -470,6 +470,9 @@ ok("finally prints the command to delete the merged old root (the old root itsel
 # queue
 hub = {t["key"]: t for t in tasks_of(os.path.join(TQ, Q["tasks"]))}
 ok(f"queue: old tasks renamed to step instance names, unmatched and duplicate ones dropped ({sorted(hub)})", sorted(hub) == sorted([SRC, NINF, NEV]))
+ok("parameters the recipe no longer has (oldlogs) removed from the hub queue and the relay ledger",
+   "oldlogs" not in hub[SRC]["params"] and hub[SRC]["params"].get("machines")
+   and "oldlogs" not in json.load(open(os.path.join(STATE, "relay", "state.json")))["keys"]["site-slurm"][SRC]["params"])
 ok("renamed tasks: parameters from advance.queue_params, no experiment",
    hub[NINF]["params"] == A.queue_params(INST[NINF]) and hub[NEV]["params"] == A.queue_params(INST[NEV])
    and hub[NINF]["exp"] is None and hub[NINF]["recipe"] == "command")
