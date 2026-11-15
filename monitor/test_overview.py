@@ -82,6 +82,14 @@ ok("problems are empty when there is no health record", o["health"] == dict(chec
 ok("JSON is one line and reads back", "\n" not in line and json.loads(line)["version"] == proto.VERSION)
 ok("the text table has every task", all(k in O.text(o) for k in keys))
 
+# the store's machine is also an executor: relay's record of its root has the same label as the store read directly
+_lab = (O.M.MACHINES["hub"] or {}).get("label", "hub")
+o = O.build(s, relay=dict(relay, **{_lab: dict(name="hub", time=NOW.timestamp(), tasks={}, seglogs=[])}))
+T = {t["key"]: t for t in o["tasks"]}
+ok("a relay record sharing the store's label does not hide the store's copies (finished task still found there)",
+   T[B]["copy"] and T[B]["copy"]["final"] and T[B]["copy"]["where"] == _lab and T[B]["copy"]["source"] == "hub"
+   and T[A]["copy"]["where"] == "relay-site-pueue")
+
 # problems recorded by the health check, relay's status.json
 import health as H  # noqa: E402
 H.NT.save_problems(H.NT.open_db(), {"p:1": dict(msg="m", level="normal", kind="k", first=1, active=True, notified=None, data={})}, "x")

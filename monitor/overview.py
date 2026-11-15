@@ -56,7 +56,7 @@ def tz_of(name):
 
 def best_copy(sources, key):
     """The same task in several places: the finished one, then most rounds done, then last update (first wins on a tie; each
-    machine's times in local time here, spec.local_time) -> (label, content) or (None, None)."""
+    machine's times in local time here, spec.local_time) -> (source id, content) or (None, None)."""
     best, where = None, None
     for lab, data in sources.items():
         f = (data.get("tasks") or {}).get(key)
@@ -122,13 +122,14 @@ def build(s, relay=None):
     rank = {t["key"]: i + 1 for i, t in enumerate(t for t in queue if t.get("state") != proto.S_DONE)}
     qt = {t["key"]: t for t in queue}
     seen = [n for n in M.MACHINES if n in (s.get("ok") or {})]
+    # by (kind, name), not label: the store read directly and the same machine's executor root read by relay share a label
     sources, src_info = {}, []
     for n in seen:
         if n in (s.get("src") or {}):
-            sources[L(n)] = dict(s["src"][n], name=n)
+            sources[("machine", n)] = dict(s["src"][n], name=n, label=L(n))
             src_info.append(dict(name=n, label=L(n), kind="machine", time=None))
     for lab, r in (relay if relay is not None else relay_sources(now.timestamp())).items():
-        sources[lab] = r
+        sources[("relay", r.get("name") or lab)] = dict(r, label=lab)
         src_info.append(dict(name=r.get("name"), label=lab, kind="relay", time=r.get("time")))
     seglogs = list({x["name"]: x for src in sources.values() for x in src.get("seglogs") or []}.values())
     machines = [dict(name=n, label=L(n), scheduler=M.MACHINES[n].get("scheduler"), ok=bool(s["ok"].get(n)), why=(s.get("why") or {}).get(n),
@@ -139,7 +140,8 @@ def build(s, relay=None):
         x = qt.get(key)
         where, best = best_copy(sources, key)
         f = best[1] if best else None
-        pg = S.progress_of(f, tz_of(sources[where].get("name")) if where else None)
+        src = sources[where] if where else {}
+        pg = S.progress_of(f, tz_of(src.get("name")))
         total, epochs, eta = pg["total"], pg["epochs"], pg["eta"]
         runs = (f or {}).get("runs") or []
         o = S.outputs(sp)
@@ -149,7 +151,7 @@ def build(s, relay=None):
             names=E.jsonable(sp.get("names") or {}), owner=sp.get("owner"), out=o["outs"][0],
             checkpoint=os.path.join(o["outs"][0], sp["checkpoint"]) if sp.get("checkpoint") else None,
             queue=dict(rank=rank.get(key), **{k: x.get(k) for k in proto.OVERVIEW_TASK_QUEUE if k != "rank"}) if x else None,
-            copy=dict(where=where, source=next((i["name"] for i in src_info if i["label"] == where), None), final=bool(f.get("final")),
+            copy=dict(where=src.get("label"), source=src.get("name"), final=bool(f.get("final")),
                       epochs=epochs,
                       start=min([r["start"] for r in runs if r.get("start")] or [None], key=lambda v: v or ""),
                       last=best[0][2] or None, runs=runs, metrics=f.get("metrics") or {}, debug=f.get("debug") or {},
