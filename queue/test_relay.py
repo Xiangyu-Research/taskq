@@ -903,9 +903,11 @@ def test_e2e():
     assert [(t["key"], t["state"]) for t in rs["taskq"]["tasks"]] == [(sp["key"], "free")], rs["taskq"]["tasks"]
     k = ST.keys_of(ST.load_state(), NAME)[sp["key"]]
     assert k["views"] == [f"prepared/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
-    assert k["links"] and all(SO.HASH_RE.fullmatch(h) for h in k["links"].values()), k
+    lk = ST.links_of(k)
+    assert "links" not in k and lk and all(SO.HASH_RE.fullmatch(h) for h in lk.values()) and ST.links_id(lk) == k["linkset"], k
+    assert os.listdir(ST.LINKS) == [k["linkset"] + ".json"], os.listdir(ST.LINKS)
     assert os.path.isfile(os.path.join(HROOT, proto.ROOT["hashes"])) and not os.path.exists(os.path.join(TN.ROOT, ".relay_in"))
-    ok(f"staging: {blobs} files stored by content, symlinks at the same paths as the store, key and params unchanged, added to the remote queue; sha256 cached in the store state/hashes.db")
+    ok(f"staging: {blobs} files stored by content, symlinks at the same paths as the store, key and params unchanged, added to the remote queue; sha256 cached in the store state/hashes.db; input links kept in a link set file named by the key record")
 
     rq = os.path.join(RROOT, "queue", "tasks.jsonl")
     recs = [json.loads(x) for x in open(rq) if x.strip()]
@@ -944,6 +946,13 @@ def test_e2e():
     finally:
         RM.store_op = real_op
     assert [json.loads(x) for x in open(rq) if x.strip()][0]["spec"] == recs[0]["spec"] and any("inputs changed" in m for m in said), said
+    RM.store_op = lambda what, data, **kw: (lambda r: dict(r, files=r["files"][:-1]))(real_op(what, data, **kw))
+    said.clear()
+    try:
+        RT.resend(NAME, say=said.append)
+    finally:
+        RM.store_op = real_op
+    assert [json.loads(x) for x in open(rq) if x.strip()][0]["spec"] == recs[0]["spec"] and any("since staging (links)" in m for m in said), said
     RT.resend(NAME, say=lambda m: None)
     assert [json.loads(x) for x in open(rq) if x.strip()][0]["spec"] == want
     ok("resend: takes the hub's current params (taskq set after staging) and records them; key gone from the hub → the recorded params; inputs changed since staging → not replaced")

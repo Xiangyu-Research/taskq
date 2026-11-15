@@ -461,7 +461,8 @@ STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: o
 RELAY_STATUS = "status.json"  # under the hub's relay state dir: each executor's tasks as relay last read them (taskq status reads it)
 # live names in the hub's relay/ and health/ state dirs (each also with its .lock); taskq self migrate (cron stopped) deletes
 # the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate)
-RELAY_NAMES = ("bundles", "state.json", RELAY_STATUS)
+RELAY_LINKS = "linksets"  # under the hub's relay state dir: <id>.json per distinct set of input links {relative path: sha256} (key records name theirs)
+RELAY_NAMES = ("bundles", "state.json", RELAY_STATUS, RELAY_LINKS)
 HEALTH_NAMES = (PUEUE_SEEN, "health.log")
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tasks.json", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",

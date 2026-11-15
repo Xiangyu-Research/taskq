@@ -619,10 +619,12 @@ def fix_hub_queue(Q, tasks, keys, drop, ren, say, dry):
 
 
 def fix_smoke(Q, ren, say, dry):
-    """Smoke records smoke/<machine>.json: rename; when several machines merge, keep the newest record per kind."""
+    """Smoke records smoke/<machine>.json: rename; kind names as smoke_gate.kind_of writes them (no repeated part); when
+    several machines or kinds merge, keep the newest record per kind."""
     d = os.path.join(Q, proto.SMOKE_DIR)
     if not os.path.isdir(d):
         return
+    import smoke_gate as SG
     merged = {}
     for f in sorted(glob.glob(os.path.join(d, "*.json"))):
         old = os.path.basename(f)[:-5]
@@ -632,9 +634,13 @@ def fix_smoke(Q, ren, say, dry):
             recs = {}
         to = merged.setdefault(ren.get(old, old), {})
         for k, r in recs.items():
+            k = SG.kind_of(k.split("|"))
+            r = dict(r, kind=k)
             if k not in to or (r.get("t") or 0) > (to[k].get("t") or 0):
                 to[k] = r
-    say(f"Smoke records: {sorted(os.path.basename(f)[:-5] for f in glob.glob(os.path.join(d, '*.json')))} -> {sorted(merged)}")
+    n = sum(len(json.load(open(f))) for f in glob.glob(os.path.join(d, "*.json")))
+    say(f"Smoke records: {sorted(os.path.basename(f)[:-5] for f in glob.glob(os.path.join(d, '*.json')))} -> {sorted(merged)},"
+        f" {n} -> {sum(map(len, merged.values()))} kinds")
     if dry:
         return
     for f in glob.glob(os.path.join(d, "*.json")) + glob.glob(os.path.join(d, "*.json.lock")):
@@ -645,10 +651,12 @@ def fix_smoke(Q, ren, say, dry):
 
 
 def fix_relay(st, keys, params, ren, links, merged, drop, say):
-    """Relay ledger state.json (edited in place): rename machines and tasks, replace recipe parameters, drop unq, fill in
-    links; drop records of merged old roots and of tasks gone from the queue; clear bundle-gate holds (held, recorded
-    under the old bundle) so the new bundle is judged afresh."""
-    out = {}
+    """Relay ledger state.json (edited in place): rename machines and tasks, replace recipe parameters, drop unq, move input
+    links into link sets (relay_store.put_links; filled in from the views when a record has none); drop records of merged
+    old roots and of tasks gone from the queue; clear bundle-gate holds (held, recorded under the old bundle) so the new
+    bundle is judged afresh. -> {link set id: links} to store with the new state (relay_store.put_links)."""
+    import relay_store as ST
+    out, sets = {}, {}
     for old, recs in (st.get("keys") or {}).items():
         if old in merged:
             say(f"relay ledger: dropping {len(recs)} records of {old} (root merged into {ren.get(old, old)}, queue empty)")
@@ -663,9 +671,14 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
                 r["placed"], r["inputs"] = r.pop("inputs", []), r.pop("data")
             nk = keys.get(k, k)
             r["params"] = params[nk] if nk in params else renamed_params(r.get("params") or {})
-            r.setdefault("links", (links.get(ren.get(old, old)) or {}).get(nk, {}))
+            if "linkset" not in r:
+                lk = r.pop("links", None) or (links.get(ren.get(old, old)) or {}).get(nk, {})
+                r["linkset"] = ST.links_id(lk)
+                sets[r["linkset"]] = lk
             to[nk] = r
     st["keys"] = out
+    if sets:
+        say(f"relay ledger: input links of {sum(map(len, out.values()))} records go into {len(sets)} link sets under {proto.RELAY_LINKS}/")
     for f in ("views", "last_ok"):
         v = {}
         for old, x in (st.get(f) or {}).items():
@@ -680,6 +693,7 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
     st.pop("bundle_for", None)
     st.pop("held", None)
     say(f"relay ledger: { {n: len(r) for n, r in out.items()} } records; bundles will be rebuilt from the current commit")
+    return sets
 
 
 def leftovers(home):
@@ -866,7 +880,7 @@ def main(argv):
             for old, recs in (st.get("keys") or {}).items():
                 if old not in merge:
                     for k, r in recs.items():
-                        if not r.get("links"):
+                        if "linkset" not in r and not r.get("links"):
                             views.setdefault(ren.get(old, old), {})[keys.get(k, k)] = r.get("views") or []
             links = {}
             for name in roots:  # look only, change nothing on any machine until all of them can be handled
@@ -876,7 +890,7 @@ def main(argv):
                 links[name] = res["links"]
                 say(f"== {RM.conf(name)['label']}" + "".join("\n  " + ln for ln in res["log"]))
             params = {t["key"]: t["params"] for t in tasks if t["key"] in keys.values()}
-            fix_relay(st, keys, params, ren, links, set(merge), set(drop), say)
+            sets = fix_relay(st, keys, params, ren, links, set(merge), set(drop), say)
             specs = new_specs(st)
             say(f"Specs in executor queues replaced with the current recipes: {sum(map(len, specs.values()))}")
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, say, True)
@@ -900,7 +914,7 @@ def main(argv):
                 res = on(name, root_args(name, keys, merge, ren, {}, False, specs, drop), "machines before this one are already changed, fix this and run again")
                 if res.get("stop"):
                     raise Stop(f"{RM.conf(name)['label']}: {res['stop']} (machines before this one are already changed, fix this and run again)")
-            ST.update_state(lambda x: (x.clear(), x.update(st)))
+            ST.update_state(lambda x: (x.clear(), x.update(st), [ST.put_links(lk) for lk in sets.values()]))
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, quiet, False)
             fix_smoke(taskq.TQ, ren, quiet, False)
             copy_hashes(quiet, False)

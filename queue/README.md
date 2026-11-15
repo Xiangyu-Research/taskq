@@ -496,7 +496,8 @@ Executor and store root R (the machine table's `root`, `proto.ROOT`):
 | `tmp/` | half-transferred files |
 | `envs/` | envs built on this machine |
 
-Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (relay bookkeeping, `status.json`; `proto.RELAY_NAMES`), `health/`
+Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (relay bookkeeping `state.json` with one record per staged task, `linksets/` holding each distinct set of staged input links
+once, `status.json`; `proto.RELAY_NAMES`), `health/`
 (`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; the health check compacts it when mostly free
 pages), `wheelhouse/`, `tunnel*` etc. `taskq self migrate` deletes other entries there.
 

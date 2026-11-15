@@ -366,6 +366,20 @@ def store_smoke(what, data):
         cfg.extend = ext
 
 
+def test_kind_name():
+    sp = S.resolve("toy", dict(ds="D1", frag="0", variant="V_save"))
+    env = f"env={','.join(S.envs_of(sp))}"
+    saved = SG.SMOKE["toy"]
+    try:
+        SG.SMOKE["toy"] = dict(DEF, by=["variant", "env"])
+        m = SG.mark(NAME, dict(sp, names=dict(sp.get("names") or {}, env=",".join(S.envs_of(sp)))))
+    finally:
+        SG.SMOKE["toy"] = saved
+    assert m["kind"].split("|").count(env) == 1, m["kind"]
+    assert SG.kind_of(["r", "env=a", "x=1", "env=a"]) == "r|env=a|x=1" and SG.kind_of(["r", "env=a", "env=b"]) == "r|env=a|env=b"
+    ok("smoke kind: env given as a by parameter and as the env suffix appears once")
+
+
 def test_callable():
     seen = []
 
@@ -462,6 +476,7 @@ def main():
         test_canary()
         test_hidden()
         test_off()
+        test_kind_name()
         test_callable()
         test_race()
     finally:

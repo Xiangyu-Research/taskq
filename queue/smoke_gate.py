@@ -109,6 +109,16 @@ def env_id(site, sp):
     return ",".join(out)
 
 
+def kind_of(parts):
+    """Smoke kind from its parts (recipe, by values, swapped parameters, env): a part already there is not repeated (env
+    given as a by parameter and as the env suffix is one part)."""
+    out = []
+    for p in parts:
+        if p not in out:
+            out.append(p)
+    return "|".join(out)
+
+
 def mark(site, sp):
     """Spec -> dict(kind, kid, env, defn, canary). kind = recipe + the values of by parameters + parameters the smoke task
     swaps in (without {smoke}) + env name: tasks with the same by but different swapped data (different channel, say) are
@@ -124,7 +134,7 @@ def mark(site, sp):
     by = (d or {}).get("by") or (SMOKE.get(rec) or {}).get("by") or []
     swap = [f"{p}={v}" for p, v in sorted(((d or {}).get("params") or {}).items())
             if p not in by and TAG not in json.dumps(v, ensure_ascii=False)]
-    kind = "|".join([str(rec)] + [f"{p}={names.get(p)}" for p in by] + swap + [f"env={','.join(S.envs_of(sp))}"])
+    kind = kind_of([str(rec)] + [f"{p}={names.get(p)}" for p in by] + swap + [f"env={','.join(S.envs_of(sp))}"])
     return dict(kind=kind, kid=h12(kind), env=env_id(site, sp), defn=h12({"error": err}) if err else h12(d) if d else "",
                 canary=d is None and err is None, recipe=rec, defs=d, error=err)
 

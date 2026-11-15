@@ -193,7 +193,7 @@ def _stage(name, key, nice, add, say, real, ex, links):
     def rec(st):
         st.setdefault("keys", {}).setdefault(name, {})[key] = dict(
             recipe=real["recipe"], params=ex["params"], inputs=real.get("inputs") or [], staged=time.time(), views=views,
-            placed=placed, outs=outs, cleanup=cleanup, links=links)
+            placed=placed, outs=outs, cleanup=cleanup, linkset=ST.put_links(links))
     ST.update_state(rec)
     if add:
         r = RM.rtq(name, f"add --nice {int(nice)} --spec-stdin", input=json.dumps([S.sendable(S.resolve(real["recipe"], ex["params"]))]))
@@ -227,7 +227,7 @@ def resend(name, say=print):
             continue
         else:
             lay = layout(ex)
-            moved = [f for f in ("links", "views", "placed") if f in k and lay[f] != k[f]]
+            moved = (["links"] if ST.links_id(lay["links"]) != k.get("linkset") else []) + [f for f in ("views", "placed") if lay[f] != k.get(f)]
             if moved:
                 say(f"{key} not updated: its inputs changed since staging ({', '.join(moved)}); stage it again")
                 continue
@@ -266,7 +266,7 @@ def fetch(name, key, say=print):
     o = S.outputs(real)
     try:
         res = RM.op(name, "list", dict(out=real["out"], done=o["done"], exclude=o["exclude"], extra=o["extra"],
-                                       outs=k.get("outs") or o["outs"], key=key, links=k.get("links") or {}))
+                                       outs=k.get("outs") or o["outs"], key=key, links=ST.links_of(k)))
     except RuntimeError as e:
         raise RN.RelayError(f"could not list outputs of {key}: {e}") from None
     if not res["done"]:

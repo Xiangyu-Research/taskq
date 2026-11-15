@@ -285,8 +285,8 @@ write(os.path.join(TQ, Q["stopped"], sf(EV)), "2026-11-01 10:00:00\t不要了\n"
 write(os.path.join(TQ, Q["released"], sf(GONE)), "1700000002.0 lab1\n")  # record of a dropped task: deleted too
 write(os.path.join(TQ, Q["claims"], sf(DUP), proto.CLAIM_INFO), json.dumps(dict(worker="lab1")))
 SM = os.path.join(TQ, proto.SMOKE_DIR)
-write(os.path.join(SM, "lab0.json"), json.dumps({"k1": dict(t=100, ok=True), "k2": dict(t=300, ok=True)}))
-write(os.path.join(SM, "lab1.json"), json.dumps({"k1": dict(t=200, ok=False)}))
+write(os.path.join(SM, "lab0.json"), json.dumps({"k1": dict(t=100, ok=True), "k2": dict(t=300, ok=True), "r|env=e|a=1|env=e": dict(t=50, ok=True)}))
+write(os.path.join(SM, "lab1.json"), json.dumps({"k1": dict(t=200, ok=False), "r|env=e|a=1": dict(t=60, ok=False)}))
 write(os.path.join(SM, "site-slurm.json"), json.dumps({"k3": dict(t=5, ok=True)}))
 write(os.path.join(SM, "lab0.json.lock"), "")
 
@@ -509,10 +509,11 @@ ok("missing-input and stopped records: new task name",
    and not os.path.exists(os.path.join(TQ, Q["inputs"], sf(INF))) and not os.path.exists(os.path.join(TQ, Q["stopped"], sf(EV))))
 
 # smoke
-ok("smoke records: old names merged into new ones, newest t per kind; old files and .lock deleted",
+ok("smoke records: old names merged into new ones, kind names without a repeated part (env given twice), newest t per kind; old files and .lock deleted",
    sorted(os.listdir(SM)) == ["site-pueue.json", "site-slurm.json"]
-   and json.load(open(os.path.join(SM, "site-pueue.json"))) == {"k1": dict(t=200, ok=False), "k2": dict(t=300, ok=True)}
-   and json.load(open(os.path.join(SM, "site-slurm.json"))) == {"k3": dict(t=5, ok=True)})
+   and json.load(open(os.path.join(SM, "site-pueue.json"))) == {"k1": dict(t=200, ok=False, kind="k1"), "k2": dict(t=300, ok=True, kind="k2"),
+                                                               "r|env=e|a=1": dict(t=60, ok=False, kind="r|env=e|a=1")}
+   and json.load(open(os.path.join(SM, "site-slurm.json"))) == {"k3": dict(t=5, ok=True, kind="k3")})
 
 # relay ledger
 st = json.load(open(os.path.join(STATE, "relay", "state.json")))
@@ -527,8 +528,16 @@ ok("relay ledger: old data becomes inputs, old inputs (files placed there) becom
    ri["inputs"] == ["raw/in"] and ri["placed"] == [] and not any("data" in r for r in (ri, re_, rs))
    and MG.renamed_params(dict(cmd="c", data=["x"])) == dict(cmd="c", inputs=["x"])
    and MG.renamed_params(dict(dataset="d", data=["y"])) == dict(dataset="d", inputs=["y"]) and MG.renamed_params(dict(a=1)) == dict(a=1))
-ok(f"relay ledger: links filled in (symlinks in views pointing at this machine's blobs -> sha256; links elsewhere and regular files not counted), existing ones unchanged ({ri.get('links')})",
-   ri.get("links") == {f"{VIEW}/frag_0/final.ckpt": H1} and re_.get("links") == {} and rs["links"] == REC_SRC["links"])
+LS = os.path.join(STATE, "relay", proto.RELAY_LINKS)
+
+
+def linkset(r):
+    return json.load(open(os.path.join(LS, r["linkset"] + ".json")))
+
+
+ok(f"relay ledger: links filled in (symlinks in views pointing at this machine's blobs -> sha256; links elsewhere and regular files not counted), existing ones unchanged, all moved into link set files ({ri})",
+   linkset(ri) == {f"{VIEW}/frag_0/final.ckpt": H1} and linkset(re_) == {} and linkset(rs) == REC_SRC["links"]
+   and not any("links" in r for r in (ri, re_, rs)) and sorted(os.listdir(LS)) == sorted({r["linkset"] + ".json" for r in (ri, re_, rs)}))
 ok("relay ledger: views merged (merged old roots dropped), last_ok max, bundle_for removed",
    st.get("views") == {"site-pueue": {VIEW: 10}, "site-slurm": {"v/dicc": 30, "prepared/D101_alpha": 40}}
    and st.get("last_ok") == {"site-pueue": 200, "site-slurm": 300} and "bundle_for" not in st and "held" not in st)
