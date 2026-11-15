@@ -171,6 +171,8 @@ calls = []
 A.run(snap(), tq=lambda n, p: (calls.append(p["key"]) or (0, "")))
 ok("run: delete *.prob on the store, leave other files (predictions, done)",
    not os.path.exists(prob) and os.path.exists(keep) and os.path.exists(os.path.join(DATA, inf.outputs[0], "MANIFEST.json")))
+ok("temp files already gone: not planned again (taskq plan does not list it, the store is not asked to delete)",
+   not [t for t in A.plan(snap())[0] if t["op"] == "temp" and t["id"] == "infer/t0_f0"])
 
 # ---- 5. HOLD, AUTO, errors ----
 os.remove(os.path.join(DATA, INST["eval/t0_f1"].outputs[0], "report/report.md"))

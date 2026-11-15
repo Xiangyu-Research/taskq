@@ -96,5 +96,18 @@ ok("problems carry plain wording (unknown kind falls back to msg)", o["health"][
 ok("relay status.json: only entries within 2 hours count", T[C]["copy"]["where"] == "L1" and T[C]["copy"]["epochs"] == 5)
 ok("the problem appears in the text table", "p:1" in O.text(o))
 
+# best copy across machines in different time zones: compare the moments, not the strings each machine wrote
+_m = list(O.M.MACHINES)[:2]
+_tz = O.M.tz_of
+O.M.tz_of = lambda n: __import__("zoneinfo").ZoneInfo("Etc/GMT-14") if n == _m[0] else None  # UTC+14 for the first
+try:
+    _src = {"far": dict(name=_m[0], tasks={A: prog(epochs=50, end=NOW + timedelta(hours=1))}),  # later on its clock, earlier here
+            "near": dict(name=_m[1], tasks={A: prog(epochs=50, end=NOW)})}
+    _local_far = S.local_time(ts(NOW + timedelta(hours=1)), O.M.tz_of(_m[0]))
+    ok("best copy: the same rounds done -> the later update in local time wins, whatever each machine's clock says",
+       O.best_copy(_src, A)[0] == ("near" if _local_far < ts(NOW) else "far"))
+finally:
+    O.M.tz_of = _tz
+
 print("All passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)

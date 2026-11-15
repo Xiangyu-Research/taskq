@@ -115,7 +115,7 @@ def build(d, now):
                         where=(x.get("assigned") or x.get("host")) if word == RUNNING else None, since=None, frac=None, eta=None, last=None)
     machines = []
     attention = [dict(id=p["id"], text=p["plain"] or p["msg"], since=p.get("first")) for p in d["problems"]
-                 if p["id"].split(":")[0] != "notice"]  # due notices (problem notice:<name>) are listed under Notes
+                 if P.alert_type(p["id"]) != "notice"]  # due notices are listed under Notes
     for n in M.executors():
         r = relay.get(n) if isinstance(relay.get(n), dict) else {}
         age = now.timestamp() - (r.get("time") or 0)

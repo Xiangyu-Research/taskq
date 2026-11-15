@@ -116,7 +116,8 @@ def problem_rows(probs, everything=False):
             pl = PL.problem(pid, p) if PL else p.get("msg")
         except Exception:  # noqa: BLE001
             pl = p.get("msg")
-        rows.append(dict(id=pid, **{k: p.get(k) for k in proto.OVERVIEW_PROBLEM if k not in ("id", "plain")}, plain=pl))
+        rows.append(dict(id=pid, **{k: p.get(k) for k in proto.OVERVIEW_PROBLEM if k not in ("id", "plain", "type")}, plain=pl,
+                         type=proto.alert_type(pid)))
     return rows
 
 

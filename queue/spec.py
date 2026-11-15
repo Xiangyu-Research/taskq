@@ -373,6 +373,19 @@ def total_of(f):
     return t if isinstance(t, (int, float)) and t > 0 else None
 
 
+def local_time(d, tz):
+    """A naive time recorded on a machine in time zone tz (None: this machine's) -> the same moment as naive local time here;
+    accepts a datetime or a "%Y-%m-%d %H:%M:%S" string and returns the same type ("" / None as given)."""
+    if not d or tz is None:
+        return d
+    s = isinstance(d, str)
+    try:
+        x = (datetime.strptime(d, "%Y-%m-%d %H:%M:%S") if s else d).replace(tzinfo=tz).astimezone().replace(tzinfo=None)
+    except ValueError:
+        return d
+    return x.strftime("%Y-%m-%d %H:%M:%S") if s else x
+
+
 def progress_of(f, tz=None):
     """A task record (collect / one_task, or an executor's entry relay keeps) -> dict(frac, eta, last, epochs, total): the only
     progress rule. frac: done -> 1.0, total known -> epochs / total (0.0 before the first epoch), else None; eta: when the
@@ -392,10 +405,7 @@ def progress_of(f, tz=None):
     elif total:
         out["frac"] = min(out["epochs"] / total, 1.0)
         out["eta"] = eta_at(runs, total)
-    if tz is not None:
-        for k in ("eta", "last"):
-            if out[k] is not None:
-                out[k] = out[k].replace(tzinfo=tz).astimezone().replace(tzinfo=None)
+    out["eta"], out["last"] = local_time(out["eta"], tz), local_time(out["last"], tz)
     return out
 
 

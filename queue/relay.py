@@ -1062,7 +1062,15 @@ def main(argv):
             print(f"cannot read {a.name}", file=sys.stderr)
             return 1
         print(taskq.queue_text(rs["taskq"]))
-        print(f"{rs['free'] / 1e9:.0f} GB free; code {rs['bundle']}; jobs {rs['squeue']}")
+        jobs = rs.get("squeue")
+        if jobs is not None:  # Slurm rows: id, name, state, time, partition, reason (node when running)
+            why = {}
+            for j in jobs:
+                if j[2] != "RUNNING":
+                    why[j[-1].strip("()")] = why.get(j[-1].strip("()"), 0) + 1
+            n = sum(j[2] == "RUNNING" for j in jobs)
+            jobs = f"; jobs {n} running, {len(jobs) - n} queued" + (f" ({', '.join(f'{k} {v}' for k, v in sorted(why.items()))})" if why else "")
+        print(f"{rs['free'] / 1e9:.0f} GB free; code {rs['bundle']}{jobs or ''}")
     return 0
 
 

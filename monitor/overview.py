@@ -50,15 +50,21 @@ def machine_of(job):
     return M.machine_of_jobtag(job)
 
 
+def tz_of(name):
+    return M.tz_of(name) if name in M.MACHINES else None
+
+
 def best_copy(sources, key):
-    """The same task in several places: the finished one, then most rounds done, then last update (first wins on a tie) -> (label, content) or (None, None)."""
+    """The same task in several places: the finished one, then most rounds done, then last update (first wins on a tie; each
+    machine's times in local time here, spec.local_time) -> (label, content) or (None, None)."""
     best, where = None, None
     for lab, data in sources.items():
         f = (data.get("tasks") or {}).get(key)
         if not f:
             continue
         runs = f.get("runs") or []
-        score = (bool(f.get("final")), max([r.get("epochs_done") or 0 for r in runs] or [0]), max([r.get("end") or "" for r in runs] or [""]))
+        end = S.local_time(max([r.get("end") or "" for r in runs] or [""]), tz_of(data.get("name")))
+        score = (bool(f.get("final")), max([r.get("epochs_done") or 0 for r in runs] or [0]), end)
         if best is None or score > best[0]:
             best, where = (score, f), lab
     return (where, best) if best else (None, None)
@@ -119,7 +125,7 @@ def build(s, relay=None):
     sources, src_info = {}, []
     for n in seen:
         if n in (s.get("src") or {}):
-            sources[L(n)] = s["src"][n]
+            sources[L(n)] = dict(s["src"][n], name=n)
             src_info.append(dict(name=n, label=L(n), kind="machine", time=None))
     for lab, r in (relay if relay is not None else relay_sources(now.timestamp())).items():
         sources[lab] = r
@@ -127,14 +133,13 @@ def build(s, relay=None):
     seglogs = list({x["name"]: x for src in sources.values() for x in src.get("seglogs") or []}.values())
     machines = [dict(name=n, label=L(n), scheduler=M.MACHINES[n].get("scheduler"), ok=bool(s["ok"].get(n)), why=(s.get("why") or {}).get(n),
                      gpus=(s.get("gpus") or {}).get(n, []), pueue=pueue_view((s.get("pueue") or {}).get(n))) for n in seen]
-    name_of = {i["label"]: i["name"] for i in src_info}
     tasks = []
     for t in S.all_tasks(queue):
         key, sp, e = t["key"], t["spec"], t["e"]
         x = qt.get(key)
         where, best = best_copy(sources, key)
         f = best[1] if best else None
-        pg = S.progress_of(f, M.tz_of(name_of[where]) if name_of.get(where) in M.MACHINES else None)
+        pg = S.progress_of(f, tz_of(sources[where].get("name")) if where else None)
         total, epochs, eta = pg["total"], pg["epochs"], pg["eta"]
         runs = (f or {}).get("runs") or []
         o = S.outputs(sp)

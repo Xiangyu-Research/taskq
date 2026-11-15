@@ -259,7 +259,7 @@ OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "che
 OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank: position among unfinished tasks in the hub queue (1-based)
 OVERVIEW_COPY = ("where", "source", "final", "epochs", "start", "last", "runs", "metrics", "debug", "resumable")
 OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part log: job, part number, machine, at least one round done, code commit
-OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain: push text in plain words (plain.problem)
+OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain", "type")  # kind: event | state; plain: push text in plain words (plain.problem); type: alert_type(id)
 SUMMARY_WINDOW = 24 * 3600  # taskq status (monitor/summary.py): "due in the next" / "last" window
 SUMMARY_OVERDUE = 3600  # a running task this far past its estimated finish is listed under "Needs you"
 HELD_PATIENCE = 2 * 86400  # a task held only by an older bundle still used by running workers (it clears when they switch at their next claim) is reported (not just recorded) after this long
@@ -279,7 +279,14 @@ ALERTS = dict(
 
 
 def alert_id(kind, *args):
+    """A problem's id: its type (a key of ALERTS, such as notice or site), then its parts, joined by ':'."""
     return ":".join([kind] + [str(a) for a in args if a not in (None, "")])
+
+
+def alert_type(pid):
+    """A problem id -> its type (the first part, alert_id's kind): the only way to tell problems apart by what they are about.
+    A problem's kind field says something else: event (happened once, can be acknowledged) or state (lasts until solved)."""
+    return str(pid).split(":", 1)[0]
 
 
 # a problem's value: message text (str), or dict(msg=text, data={…}, after=minutes before reporting, level="info" (recorded, not

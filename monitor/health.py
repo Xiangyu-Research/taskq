@@ -17,7 +17,7 @@ CORE = os.path.dirname(HERE)  # root of the scheduling code
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg  # noqa: E402
 import proto  # noqa: E402
-from proto import alert_id  # noqa: E402
+from proto import alert_id, alert_type  # noqa: E402
 REPO = cfg.REPO  # root of the user's repo
 cfg.use_config()
 TQS = cfg.state("taskq", expand=False)
@@ -326,7 +326,7 @@ def drop_acked(P, db, dry=False):
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
-QUIET = ("notice", "undeclared")  # problem kinds only listed in taskq problems, not pushed (the phone gets failures only; due notices are read at work time; writes outside the declared outputs)
+QUIET = ("notice", "undeclared")  # problem types (proto.alert_type) only listed in taskq problems, not pushed (the phone gets failures only; due notices are read at work time; writes outside the declared outputs)
 
 
 def night(now):
@@ -345,7 +345,7 @@ def update(P, now, db, dry=False):
         p["notified"] = o.get("notified", False)
         age = (now - datetime.strptime(p["first"], "%Y-%m-%d %H:%M")).total_seconds() / 60
         p["active"] = age >= p["after"]
-        if p["active"] and not p["notified"] and p["level"] != "info" and pid.split(":")[0] not in QUIET \
+        if p["active"] and not p["notified"] and p["level"] != "info" and alert_type(pid) not in QUIET \
                 and (p["level"] == "urgent" or not night(now)):
             msgs.append((pid, p))
         if pid not in old:

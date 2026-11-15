@@ -133,6 +133,13 @@ def plan(s):
         if users and all(u in done for u in users) and not g.descendants(i.id) & set(reruns):
             pats = [S.fill(f"{i.outputs[0]}/{t}", i.names) for t in i.step["temp"]]
             todo.append(dict(op="temp", id=i.id, pats=pats))
+    temp = sorted({p for t in todo if t["op"] == "temp" for p in t["pats"]})
+    if temp:  # temp files already deleted: nothing to do (neither listed by taskq plan nor sent to the store again)
+        try:
+            left = RM.store_op("probe", dict(pats=temp))
+            todo = [t for t in todo if t["op"] != "temp" or any((left.get(p) or {}).get("n", 1) for p in t["pats"])]
+        except RuntimeError as e:
+            NOTES.append(f"cannot count temp files on the store ({e}), trying to delete them all")
     return todo, stuck
 
 
