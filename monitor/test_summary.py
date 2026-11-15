@@ -54,10 +54,12 @@ relay = {"site-pueue": dict(time=NOW.timestamp() - 600, label="pueue", tasks={RU
          "site-slurm": dict(time=NOW.timestamp() - 600, label="Slurm",
                             tasks={LATE: train(500, last=NOW - timedelta(hours=10)), BACK: dict(state="done", runs=[])},
                             squeue=[["1", "a", "RUNNING", "1:00", "q", "n1"], ["2", "b", "PENDING", "0:00", "q", "(Priority)"]],
-                            held={HELD: dict(why="bundle-incompatible")}),
+                            bundle="b2", held={HELD: dict(why="bundle-incompatible", bundle="b1", since=(NOW - timedelta(hours=3)).timestamp())}),
          "site-slurm2": dict(time=NOW.timestamp() - 5 * 3600, label="Slurm2", tasks={}, squeue=[], held={})}
 probs = [dict(id="site:x", msg="m", plain="something broke", level="normal", kind="site", first=1, active=True, notified=None),
-         dict(id="notice:board", msg="n", plain="a note", level="normal", kind="notice", first=1, active=True, notified=None)]
+         dict(id="notice:board", msg="n", plain="a note", level="normal", kind="notice", first=1, active=True, notified=None),
+         dict(id=proto.alert_id("bundlegate", "site-slurm", HELD), msg="g", plain="held by the bundle", level="normal", kind="state",
+              first=1, active=True, notified=None)]
 d = dict(queue=queue, relay=relay, problems=probs, checked="2026-10-16 11:35", notices=["board"],
          changes=[dict(t=0, key=DONE, state="done"), dict(t=0, key=FAIL, state="failed"), dict(t=0, key="_smoke/a/b", state="done")])
 o = SU.build(d, NOW)
@@ -73,7 +75,8 @@ ok("a training past its estimated finish by over an hour is overdue and listed u
 ok("Needs you: active problems but not notices; an executor with no news for over 2 hours",
    "something broke" in o["attention"] and "a note" not in o["attention"] and any("no news from Slurm2" in a for a in o["attention"]))
 Mx = {m["name"]: m for m in o["machines"]}
-ok("pueue machine: free slots = worker slots - running", Mx["site-pueue"]["slots"] == 3 and Mx["site-pueue"]["count"][SU.RUNNING] == 1)
+ok("pueue machine: free slots = worker slots - running", Mx["site-pueue"]["slots"] == 3 and Mx["site-pueue"]["count"][SU.RUNNING] == 1
+   and Mx["site-pueue"]["later"] == 0)
 ok("Slurm machine: jobs running / queued from squeue, no slots", Mx["site-slurm"]["jobs"] == (1, 1) and Mx["site-slurm"]["slots"] is None)
 ok("due in the next 24 hours: only running tasks with a future estimate", [t["key"] for t in o["soon"]] == [RUN])
 ok("last 24 hours: done and failed changes, smoke left out", (o["done"], o["failed"]) == (1, 1))
@@ -84,7 +87,25 @@ ok("summary text: head counts what needs you, machines, due list, progress, note
    txt.splitlines()[0].endswith("3 things need you") and "Machines" in txt and "Due in the next 24 hours (1)" in txt
    and "Progress (done / all)" in txt and "Notes (1): board" in txt and "taskq status --all" in txt)
 ok("machine heads: free slots on pueue, jobs on Slurm, held tasks listed",
-   "free 2/3" in txt and "jobs 1 running, 1 queued" in txt and f"held: {HELD} (bundle-incompatible)" in txt)
+   "free 2/3" in txt and "more slot" not in txt and "jobs 1 running, 1 queued" in txt and f"held: {HELD} (bundle-incompatible: waits for" in txt)
+ok("a hold by an older bundle that running workers still use is not under Needs you (it clears when they switch)",
+   "held by the bundle" not in o["attention"])
+old = dict(relay, **{"site-slurm": dict(relay["site-slurm"], held={HELD: dict(why="bundle-incompatible", bundle="b1", since=(NOW - timedelta(days=3)).timestamp())})})
+ok("... but it is once held longer than SUMMARY_HELD_PATIENCE", "held by the bundle" in SU.build(dict(d, relay=old), NOW)["attention"])
+cur = dict(relay, **{"site-slurm": dict(relay["site-slurm"], held={HELD: dict(why="bundle-incompatible", bundle="b2", since=NOW.timestamp())})})
+o3 = SU.build(dict(d, relay=cur), NOW)
+ok("a hold by the current bundle needs a new bundle: under Needs you at once, said on the held line",
+   "held by the bundle" in o3["attention"] and "the current bundle b2 cannot run it; needs a new bundle" in SU.text(o3))
+_workers = SU.M.workers
+SU.M.workers = lambda n, kind=None: [dict(w, hours=[("21:00", "09:00", None, None)]) if w.get("gpu") == "0" else w for w in _workers(n, kind)]
+try:
+    day, night = SU.build(d, NOW), SU.build(d, NOW.replace(hour=22))
+finally:
+    SU.M.workers = _workers
+dm = {m["name"]: m for m in day["machines"]}["site-pueue"]
+ok("a worker outside its hours is not a free slot now; the head names how many come later and when",
+   (dm["slots"], dm["later"]) == (2, 1) and "free 1/2, 1 more slot 21:00–09:00" in SU.text(day)
+   and {m["name"]: m for m in night["machines"]}["site-pueue"]["slots"] == 3 and "more slot" not in SU.text(night))
 lst = SU.listing(o, list(T.values()), "every task")
 ok("listing: grouped by state in screen order, overdue first", lst.index("overdue (1)") < lst.index("running (1)") < lst.index("done (1)"))
 ok("listing of nothing says so", SU.listing(o, [], "x").endswith("no such task"))

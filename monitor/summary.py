@@ -84,11 +84,47 @@ def progress_of(f):
     return frac, (S.eta_at(runs, total) if total else None), last
 
 
+def held_wait(h, r, now):
+    """A hold that clears by itself: the bundle that cannot run the spec is an older one that running workers there still use
+    (they switch to current at their next claim), not current, and the hold is younger than SUMMARY_HELD_PATIENCE."""
+    return (h.get("why") == P.HELD["bundle"] and bool(h.get("bundle")) and bool(r.get("bundle")) and h["bundle"] != r["bundle"]
+            and now.timestamp() - (h.get("since") or 0) < P.SUMMARY_HELD_PATIENCE)
+
+
+def held_line(k, h, r, now):
+    why = h.get("why")
+    if why == P.HELD["bundle"] and h.get("bundle"):
+        since = f", since {when(h['since'], now)}" if h.get("since") else ""
+        if h["bundle"] == r.get("bundle"):
+            why = f"{why}: the current bundle {h['bundle']} cannot run it; needs a new bundle{since}"
+        else:
+            why = f"{why}: waits for the workers still on the older bundle {h['bundle']} to switch at their next claim{since}"
+    return f"    held: {k} ({why})"
+
+
+def slot_plan(n, now):
+    """pueue machine -> (slots of workers inside their hours now, slots outside them, their windows as written, in that machine's
+    time zone when it differs from here)."""
+    t = now.timestamp()
+    on = off = 0
+    wins = []
+    for w in M.workers(n):
+        if M.working(n, w, t):
+            on += w.get("slots") or 1
+        else:
+            off += w.get("slots") or 1
+            wins.append(M.in_hours(w["hours"], M.now_at(n, t))[1])
+    tz = M.now_at(n, t).utcoffset() != datetime.fromtimestamp(t).astimezone().utcoffset()
+    return on, off, " / ".join(dict.fromkeys(wins)) + (f" ({label(n)} time)" if wins and tz else "")
+
+
 def build(d, now):
     """read_local() -> dict(now, checked, attention, notices, machines, tasks, steps, changes)."""
     q = d["queue"]
     qt = {t["key"]: t for t in (q or {}).get("tasks") or [] if not P.is_smoke(t["key"])}
     relay = d["relay"]
+    waits = {P.alert_id("bundlegate", n, k) for n, r in relay.items() if isinstance(r, dict)
+             for k, h in (r.get("held") or {}).items() if held_wait(h, r, now)}
     tasks = {}
     for t in S.all_tasks(list(qt.values())):
         k, sp = t["key"], t["spec"]
@@ -96,7 +132,7 @@ def build(d, now):
         tasks[k] = dict(key=k, step=sp.get("step") or sp.get("recipe") or "?", word=HUB_WORDS.get((x or {}).get("state"), NOT_QUEUED),
                         where=None, since=None, frac=None, eta=None, last=None)
     machines = []
-    attention = [p["plain"] or p["msg"] for p in d["problems"] if not p["id"].startswith("notice:")]
+    attention = [p["plain"] or p["msg"] for p in d["problems"] if not p["id"].startswith("notice:") and p["id"] not in waits]
     for n in M.executors():
         r = relay.get(n) if isinstance(relay.get(n), dict) else {}
         age = now.timestamp() - (r.get("time") or 0)
@@ -125,12 +161,13 @@ def build(d, now):
                 t["word"] = WAITING
         mine = [t for t in tasks.values() if t["where"] == n]
         count = {w: sum(t["word"] == w for t in mine) for w in ORDER}
-        ws = M.workers(n)
-        slots = sum(w.get("slots") or 1 for w in ws) if M.MACHINES[n].get("scheduler") == "pueue" else None
+        slots, later, wins = slot_plan(n, now) if M.MACHINES[n].get("scheduler") == "pueue" else (None, 0, "")
         jobs = [j[2] for j in r.get("squeue") or []]
         machines.append(dict(name=n, label=label(n), paused=M.paused(n), age=age if r else None, stale=not r or age >= O.RELAY_FRESH,
-                             count=count, slots=slots, jobs=(jobs.count("RUNNING"), jobs.count("PENDING")) if r.get("squeue") is not None else None,
-                             held=held, running=[t for t in mine if t["word"] in (RUNNING, OVERDUE)]))
+                             count=count, slots=slots, later=later, windows=wins,
+                             jobs=(jobs.count("RUNNING"), jobs.count("PENDING")) if r.get("squeue") is not None else None,
+                             held=[held_line(k, h, r, now) for k, h in sorted(held.items())],
+                             running=[t for t in mine if t["word"] in (RUNNING, OVERDUE)]))
         if r and age >= O.RELAY_FRESH:
             attention.append(f"no news from {label(n)} for {ago(age)} (last recorded {when(r['time'], now)})")
     steps = {}
@@ -165,6 +202,8 @@ def machine_head(m):
     bits = [f"running {run}"]
     if m["slots"] is not None:
         bits.append(f"free {max(0, m['slots'] - run)}/{m['slots']}")
+    if m.get("later"):
+        bits.append(f"{m['later']} more slot{'s' if m['later'] > 1 else ''} {m['windows']}")
     if m["jobs"] is not None:
         bits.append(f"jobs {m['jobs'][0]} running, {m['jobs'][1]} queued")
     wait = c[WAITING] + c[SENDING] + c[HELD]
@@ -188,7 +227,7 @@ def text(o):
     for m in o["machines"]:
         out.append(machine_head(m))
         out += [task_line(t, now) for t in sorted(m["running"], key=lambda t: t["key"])]
-        out += [f"    held: {k} ({h.get('why')})" for k, h in sorted(m["held"].items())]
+        out += m["held"]
     if o["soon"]:
         out += ["", f"Due in the next {P.SUMMARY_WINDOW // 3600} hours ({len(o['soon'])})"]
         out += [f"  {when(t['eta'].timestamp(), now):<12} {label(t['where']):<7} {t['key']}" for t in o["soon"]]

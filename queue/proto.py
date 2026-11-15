@@ -227,6 +227,7 @@ OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part 
 OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain: push text in plain words (plain.problem)
 SUMMARY_WINDOW = 24 * 3600  # taskq status (monitor/summary.py): "due in the next" / "last" window
 SUMMARY_OVERDUE = 3600  # a running task this far past its estimated finish is listed under "Needs you"
+SUMMARY_HELD_PATIENCE = 2 * 86400  # a task held only by an older bundle still used by running workers (it clears when they switch at their next claim) goes under "Needs you" after this long
 TOTAL_INFO = "num_epochs"  # key in INFO for "total rounds" (used when runs have no total; overview total, progress, eta)
 
 # ---------------- alerts (problem ids in health.py; plain.py explains them by kind) ----------------
