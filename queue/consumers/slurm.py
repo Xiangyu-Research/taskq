@@ -68,7 +68,7 @@ def idle(w, why, now, since, err_since):
         w.say(f"nothing running for {m(now - since)} minutes ({w.blocked if why == 'admit' else why or ''}); ending the job and giving the GPU back (some clusters cancel jobs whose GPU utilization stays low)")
     else:
         msg = {"nothing": f"no claimable tasks; waiting, checking every {w.POLL} seconds, at most {m(w.IDLE_MAX)} minutes",
-               "paused": f"the queue is paused (too many failures within 3 hours); waiting, at most {m(w.IDLE_MAX)} minutes",
+               "paused": f"the queue is paused (too many failures within {proto.hours(proto.PAUSE_WINDOW)}); waiting, at most {m(w.IDLE_MAX)} minutes",
                "wait": f"a task ahead just stopped; waiting for it (at most {m(w.PATIENCE)} minutes after start)"}.get(why)
         if msg and why not in w.said:
             w.say(msg)

@@ -25,11 +25,10 @@ import plain as PL  # noqa: E402
 import spec as S  # noqa: E402
 
 M = H.M
-RELAY_FRESH = 2 * 3600  # executor state recorded by relay.py counts for this long
 
 
 def relay_status_file():
-    return cfg.state("relay", "status.json")
+    return cfg.state("relay", proto.RELAY_STATUS)
 
 
 def relay_sources(now_ts):
@@ -40,10 +39,10 @@ def relay_sources(now_ts):
         return {}
     out = {}
     for name, r in st.items():
-        if not isinstance(r, dict) or now_ts - (r.get("time") or 0) >= RELAY_FRESH:
+        if not isinstance(r, dict) or now_ts - (r.get("time") or 0) >= proto.SITE_FRESH:
             continue
         tasks = {k: dict(f, metrics={}, resumable=None) for k, f in (r.get("tasks") or {}).items()}
-        out[r.get("label") or name] = dict(name=name, time=r.get("time"), tasks=tasks, seglogs=[])
+        out[r.get("label") or name] = dict(name=name, time=r.get("time"), tasks=tasks, seglogs=r.get("seglogs") or [])
     return out
 
 
@@ -80,14 +79,6 @@ def parts_of(seglogs, key, sp):
         out.append(dict(name=n, job=m.group(1), part=int(m.group(2)), machine=machine_of(m.group(1)), trained=bool(s.get("trained", True)),
                         commit=c.group(1) if c else None))
     return out
-
-
-def total_of(f):
-    runs = (f or {}).get("runs") or []
-    t = max([r.get("total") or 0 for r in runs] or [0])
-    if not t:
-        t = ((f or {}).get("debug") or {}).get(proto.TOTAL_INFO) or 0
-    return t if isinstance(t, (int, float)) and t > 0 else None
 
 
 def pueue_view(d):
@@ -142,11 +133,9 @@ def build(s, relay=None):
         x = qt.get(key)
         where, best = best_copy(sources, key)
         f = best[1] if best else None
-        total = total_of(f)
-        epochs = best[0][1] if best else 0
+        pg = S.progress_of(f)
+        total, epochs, eta = pg["total"], pg["epochs"], pg["eta"]
         runs = (f or {}).get("runs") or []
-        progress = 1.0 if f and f.get("final") else (min(epochs / total, 1.0) if total and f else None)
-        eta = S.eta_at(runs, total) if f and not f.get("final") and total else None
         o = S.outputs(sp)
         parts = parts_of(seglogs, key, sp)
         tasks.append(dict(
@@ -159,7 +148,7 @@ def build(s, relay=None):
                       start=min([r["start"] for r in runs if r.get("start")] or [None], key=lambda v: v or ""),
                       last=best[0][2] or None, runs=runs, metrics=f.get("metrics") or {}, debug=f.get("debug") or {},
                       resumable=f.get("resumable")) if f else None,
-            total=total, progress=progress, eta=eta.strftime("%Y-%m-%d %H:%M") if eta else None,
+            total=total, progress=pg["frac"], eta=eta.strftime("%Y-%m-%d %H:%M") if eta else None,
             parts=parts, commits=list(dict.fromkeys(p["commit"] for p in parts if p["commit"] and p["trained"]))))
     return dict(version=proto.VERSION, now=now.strftime("%Y-%m-%d %H:%M:%S"), hub=hub,
                 data=dict(machine=M.store(), path=M.data()),

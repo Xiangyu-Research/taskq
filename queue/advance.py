@@ -26,12 +26,12 @@ import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
 import relay_remote as RM  # noqa: E402
-import refill  # noqa: E402
 from flow import compile as FC  # noqa: E402
 from flow.graph import Graph  # noqa: E402
 from flow.model import SOURCE  # noqa: E402
 
 NOTES = []  # why nothing was queued this round (written to ~/advance.log, not reported as a problem)
+STORED = None  # keys whose results are on the store, from the last plan() that could read the store (run() saves it in taskq.db)
 TQ_TIMEOUT = 420  # longer than the longest queue-lock wait (300 s): a lock timeout returns an exit code, not a timeout
 
 
@@ -40,7 +40,7 @@ def done_items(inst):
     if inst.scope == SOURCE:
         o = S.outputs(inst.spec)
         return dict(out=o["outs"][0], done=o["done"])
-    return dict(out=inst.outputs[0], done=[d.split("|") for d in inst.step["done"]])
+    return dict(out=inst.outputs[0], done=proto.done_items(inst.step["done"]))
 
 
 def fetching(s):
@@ -49,14 +49,14 @@ def fetching(s):
     out = set()
     for t in (s.get("pueue", {}).get(hub) or {}).get("tasks") or []:
         r = C.identify(hub, t, s.get("records") or [])
-        if r and r["step"] == "relay_fetch" and t["status"] in refill.LIVE:
+        if r and r["step"] == "relay_fetch" and t["status"] in proto.PUEUE_LIVE:
             out.add(r["key"])
     return out
 
 
 def done_files(i):
     """Every done alternative of a step instance (relative to the data dir)."""
-    return [f"{i.outputs[0]}/{a}" for d in i.step["done"] for a in d.split("|")]
+    return [f"{i.outputs[0]}/{a}" for d in proto.done_items(i.step["done"]) for a in d]
 
 
 def queue_params(i):
@@ -76,7 +76,9 @@ def queue_params(i):
 
 def plan(s):
     """-> (todo [dict(op=add|rerun|temp, id, ...)], stuck {problem id: explanation})."""
+    global STORED
     NOTES.clear()
+    STORED = None
     hub = M.hub()
     mq = (s.get("taskq") or {}).get(hub)
     if not mq:
@@ -109,6 +111,7 @@ def plan(s):
             if pr and newest(i.inputs) > newest(files[i.id]) and g.ancestors(i.id) <= done:
                 done.discard(i.id)
                 reruns[i.id] = files[i.id]
+    STORED = set(done)
     todo, stuck = [], {}
     for k in g.order():
         i = inst[k]
@@ -190,7 +193,22 @@ def run(s, dry=False, tq=None, store=None):
     lines += [f"not queued: {x}" for x in NOTES]
     if not dry:
         log(lines, stuck, live)
+        save_stored()
     return did, stuck
+
+
+def save_stored():
+    """taskq status shows tasks whose results are on the store as done even when they are not in the queue (events.stored)."""
+    if STORED is None:
+        return
+    import db as D
+    import events
+    db = D.connect()
+    if db is not None and D.has(db, "stored"):
+        try:
+            events.set_stored(db, STORED)
+        finally:
+            db.close()
 
 
 def log(lines, stuck, live):

@@ -191,7 +191,14 @@ def test_plan(new, old):
         acts, stuck = relay.plan(S0([mtask(K, TMPL)]), NAME, rs, {})
         assert ops(acts) == [("beat", K), ("hold", K)] and acts[-1]["bundle"] == old, acts
         assert list(stuck) == [f"bundlegate:{NAME}:{K}"] and proto.alert_data(stuck[f"bundlegate:{NAME}:{K}"])["key"] == K, stuck
-    ok("plan: current or a running Slurm worker's bundle cannot run it -> do not send, hold, report bundlegate:<name>:<key>, claim renewed")
+        lv = stuck[f"bundlegate:{NAME}:{K}"].get("level")
+        assert lv == (None if rs["bundle"] == old else "info"), (rs, lv)
+    ok("plan: current or a running Slurm worker's bundle cannot run it -> do not send, hold, report bundlegate:<name>:<key>, claim renewed;"
+       " only an older bundle still in use (clears when workers switch) is info")
+    _, st2 = relay.plan(S0([mtask(K, TMPL)]), NAME, RS(new, [old]),
+                        dict(held={NAME: {K: dict(why=proto.HELD["bundle"], bundle=old, since=time.time() - proto.HELD_PATIENCE - 60)}}))
+    assert st2[f"bundlegate:{NAME}:{K}"].get("level") is None, st2
+    ok("... held by that older bundle longer than HELD_PATIENCE: reported (normal level)")
     msgs = relay.execute(NAME, [a for a in acts if a["op"] == "hold"], S0([]))
     st = ST.load_state()
     h = BG.held(st, NAME)[K]

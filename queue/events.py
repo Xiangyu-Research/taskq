@@ -277,13 +277,37 @@ def snapshot(db, tasks, t=None):
 
 
 def transitions(db, since, states):
-    """Tasks that changed into one of states at or after since (a task's first record is not a change) -> [dict(t, key, state)] oldest first."""
+    """Tasks that changed into one of states at or after since -> [dict(t, key, state)] oldest first. A task's first record is
+    not a change; from no state (not in the hub queue) is."""
     if not D.has(db, "progress"):
         return []
     marks = ",".join("?" * len(states))
-    sql = ("SELECT t, key, state FROM (SELECT t, key, state, LAG(state) OVER (PARTITION BY key ORDER BY t) AS prev FROM progress)"
-           f" WHERE t>=? AND state IN ({marks}) AND prev IS NOT NULL AND prev NOT IN ({marks}) ORDER BY t")
-    return [dict(t=t, key=k, state=st) for t, k, st in db.execute(sql, [since, *states, *states])]
+    sql = ("SELECT t, key, state FROM (SELECT t, key, state, LAG(state, 1, ?) OVER (PARTITION BY key ORDER BY t) AS prev FROM progress)"
+           f" WHERE t>=? AND state IN ({marks}) AND prev IS NOT ? AND (prev IS NULL OR prev NOT IN ({marks})) ORDER BY t")
+    first = "\x00first"
+    return [dict(t=t, key=k, state=st) for t, k, st in db.execute(sql, [first, since, *states, first, *states])]
+
+
+def failed_since(db, since):
+    """Failures since then -> [dict(t, key, site)] oldest first: a hub queue task that became failed, or a task that failed on an
+    executor and was released there (proto.EV_FAILED; it goes back to the queue, so the hub state never says failed)."""
+    rows = [dict(t=c["t"], key=c["key"], site=None) for c in transitions(db, since, (proto.S_FAILED,))]
+    rows += [dict(t=r["t"], key=r["key"], site=r["site"]) for r in query(db, since=since, kind=proto.EV_FAILED) if r.get("key")]
+    return sorted(rows, key=lambda r: r["t"])
+
+
+# ---------------- results on the store (advance checks every step's done files each round) ----------------
+def set_stored(db, keys, t=None):
+    """Replace the set of task / step keys whose done files are on the store (not being fetched)."""
+    t = time.time() if t is None else t
+    with D.tx(db):
+        db.execute("DELETE FROM stored")
+        db.executemany("INSERT INTO stored(key, t) VALUES(?, ?)", [(k, t) for k in sorted(keys)])
+
+
+def stored(db):
+    """-> set of keys whose results were on the store at the last advance round (empty before the first one)."""
+    return {k for (k,) in db.execute("SELECT key FROM stored")} if D.has(db, "stored") else set()
 
 
 def progress_rows(db, key=None, since=None):

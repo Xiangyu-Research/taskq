@@ -57,17 +57,24 @@ relay = {"site-pueue": dict(time=NOW.timestamp() - 600, label="pueue", tasks={RU
                             bundle="b2", held={HELD: dict(why="bundle-incompatible", bundle="b1", since=(NOW - timedelta(hours=3)).timestamp())}),
          "site-slurm2": dict(time=NOW.timestamp() - 5 * 3600, label="Slurm2", tasks={}, squeue=[], held={})}
 probs = [dict(id="site:x", msg="m", plain="something broke", level="normal", kind="site", first=1, active=True, notified=None),
-         dict(id="notice:board", msg="n", plain="a note", level="normal", kind="notice", first=1, active=True, notified=None),
-         dict(id=proto.alert_id("bundlegate", "site-slurm", HELD), msg="g", plain="held by the bundle", level="normal", kind="state",
-              first=1, active=True, notified=None)]
+         dict(id="notice:board", msg="n", plain="a note", level="normal", kind="notice", first=1, active=True, notified=None)]
+GATE = dict(id=proto.alert_id("bundlegate", "site-slurm", HELD), msg="g", plain="held by the bundle", level="normal", kind="state",
+            first=1, active=True, notified=None)  # relay records it as info (not here) while only an older bundle in use holds it
 d = dict(queue=queue, relay=relay, problems=probs, checked="2026-10-16 11:35", notices=["board"],
-         changes=[dict(t=0, key=DONE, state="done"), dict(t=0, key=FAIL, state="failed"), dict(t=0, key="_smoke/a/b", state="done")])
+         changes=[dict(t=0, key=DONE, state="done"), dict(t=0, key="_smoke/a/b", state="done")],
+         failed=[dict(t=0, key=FAIL, site=None), dict(t=1, key=FAIL, site="site-slurm"), dict(t=0, key="_smoke/a/b", site="site-pueue")],
+         stored={keys[21]})
 o = SU.build(d, NOW)
 T = o["tasks"]
 ok("words: running / being sent / held / waiting there / done, coming back / failed / not sent yet / done",
    [T[k]["word"] for k in (RUN, SEND, HELD, WAIT, BACK, FAIL, FREE, DONE)]
    == [SU.RUNNING, SU.SENDING, SU.HELD, SU.WAITING, SU.BACK, SU.FAILED, SU.NOT_SENT, SU.DONE])
-ok("a task in the experiment table but not in the hub queue: not queued yet", T[keys[20]]["word"] == SU.NOT_QUEUED)
+ok("a task in the experiment table but not in the hub queue: not queued yet; done when its results are on the store",
+   T[keys[20]]["word"] == SU.NOT_QUEUED and T[keys[21]]["word"] == SU.DONE)
+_q2 = dict(queue, tasks=queue["tasks"] + [dict(q(keys[22], "claimed"), host="hubhost"), q(keys[23], "busy")])
+_T2 = SU.build(dict(d, queue=_q2), NOW)["tasks"]
+ok("claimed by a worker on the hub itself, or unclaimed with its log still changing (busy): running",
+   (_T2[keys[22]]["word"], _T2[keys[22]]["where"], _T2[keys[23]]["word"]) == (SU.RUNNING, "hubhost", SU.RUNNING))
 ok("smoke tasks are left out", not any(proto.is_smoke(k) for k in T))
 ok("a running training has progress and an estimated finish", abs(T[RUN]["frac"] - 0.5) < 1e-9 and T[RUN]["eta"] > NOW)
 ok("a training past its estimated finish by over an hour is overdue and listed under Needs you",
@@ -79,21 +86,18 @@ ok("pueue machine: free slots = worker slots - running", Mx["site-pueue"]["slots
    and Mx["site-pueue"]["later"] == 0)
 ok("Slurm machine: jobs running / queued from squeue, no slots", Mx["site-slurm"]["jobs"] == (1, 1) and Mx["site-slurm"]["slots"] is None)
 ok("due in the next 24 hours: only running tasks with a future estimate", [t["key"] for t in o["soon"]] == [RUN])
-ok("last 24 hours: done and failed changes, smoke left out", (o["done"], o["failed"]) == (1, 1))
+ok("last 24 hours: done changes and failed tasks (hub queue or released by an executor, once per task), smoke left out",
+   (o["done"], o["failed"]) == (1, 1))
 steps = o["steps"]["toy"]
-ok("progress per step (recipe when there is no step): totals add up", steps["total"] == sum(steps[w] for w in SU.ORDER) and steps[SU.DONE] == 1)
+ok("progress per step (recipe when there is no step): totals add up", steps["total"] == sum(steps[w] for w in SU.ORDER) and steps[SU.DONE] == 2)
 txt = SU.text(o)
 ok("summary text: head counts what needs you, machines, due list, progress, notes, pointers",
    txt.splitlines()[0].endswith("3 things need you") and "Machines" in txt and "Due in the next 24 hours (1)" in txt
    and "Progress (done / all)" in txt and "Notes (1): board" in txt and "taskq status --all" in txt)
 ok("machine heads: free slots on pueue, jobs on Slurm, held tasks listed",
    "free 2/3" in txt and "more slot" not in txt and "jobs 1 running, 1 queued" in txt and f"held: {HELD} (bundle-incompatible: waits for" in txt)
-ok("a hold by an older bundle that running workers still use is not under Needs you (it clears when they switch)",
-   "held by the bundle" not in o["attention"])
-old = dict(relay, **{"site-slurm": dict(relay["site-slurm"], held={HELD: dict(why="bundle-incompatible", bundle="b1", since=(NOW - timedelta(days=3)).timestamp())})})
-ok("... but it is once held longer than SUMMARY_HELD_PATIENCE", "held by the bundle" in SU.build(dict(d, relay=old), NOW)["attention"])
 cur = dict(relay, **{"site-slurm": dict(relay["site-slurm"], held={HELD: dict(why="bundle-incompatible", bundle="b2", since=NOW.timestamp())})})
-o3 = SU.build(dict(d, relay=cur), NOW)
+o3 = SU.build(dict(d, relay=cur, problems=probs + [GATE]), NOW)
 ok("a hold by the current bundle needs a new bundle: under Needs you at once, said on the held line",
    "held by the bundle" in o3["attention"] and "the current bundle b2 cannot run it; needs a new bundle" in SU.text(o3))
 _workers = SU.M.workers
@@ -107,7 +111,7 @@ ok("a worker outside its hours is not a free slot now; the head names how many c
    (dm["slots"], dm["later"]) == (2, 1) and "free 1/2, 1 more slot 21:00–09:00" in SU.text(day)
    and {m["name"]: m for m in night["machines"]}["site-pueue"]["slots"] == 3 and "more slot" not in SU.text(night))
 lst = SU.listing(o, list(T.values()), "every task")
-ok("listing: grouped by state in screen order, overdue first", lst.index("overdue (1)") < lst.index("running (1)") < lst.index("done (1)"))
+ok("listing: grouped by state in screen order, overdue first", lst.index("overdue (1)") < lst.index("running (1)") < lst.index("done (2)"))
 ok("listing of nothing says so", SU.listing(o, [], "x").endswith("no such task"))
 o2 = SU.build(dict(d, problems=[], relay={n: dict(r, time=NOW.timestamp()) for n, r in relay.items()},
                    queue=dict(queue, tasks=[t for t in queue["tasks"] if t["key"] != LATE])), NOW)

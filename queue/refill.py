@@ -34,7 +34,6 @@ class Why:
 
 _ENTRY = cfg.outputs("entry")  # main loop entry point (relative to the hub repo; policy.py OUTPUTS)
 KICK = _ENTRY and (_ENTRY if _ENTRY.startswith(("/", "~")) else M.MACHINES[M.hub()]["repo"] + "/" + _ENTRY)  # kick and the timer share one lock; wait at most 5 minutes
-LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 
 def info(tq, key):

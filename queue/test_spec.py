@@ -197,6 +197,33 @@ o3 = S.outputs(dict(out="r", done=["a", "b|c"]))
 ok("done_with: every item required, one alternative in an item suffices", S.done_with(o3, {"a", "c"}.__contains__) and not S.done_with(o3, {"b", "c"}.__contains__))
 ok("done_missing: lists missing items (original form)", S.done_missing(o3, {"a"}.__contains__) == ["b|c"])
 ok("done_with: empty done -> caller's empty", S.done_with(o2, lambda a: False) and not S.done_with(o2, lambda a: False, empty=False))
+import site_ops as SO  # noqa: E402
+ok("done rule: proto.done_items takes a string or a list, None is empty", proto.done_items("x|y") == [["x", "y"]]
+   and proto.done_items(["a", "b|c"]) == [["a"], ["b", "c"]] and proto.done_items(None) == [])
+_dd = fixture.tmpdir()
+os.makedirs(os.path.join(_dd, "r"))
+open(os.path.join(_dd, "r", "c"), "w").close()
+ok("done rule: spec (on outputs) and site_ops (on files) give the same answer as proto.done_missing",
+   S.done_missing(o3, lambda a: os.path.exists(os.path.join(_dd, "r", a))) == SO.done_missing(_dd, "r", o3["done"])
+   == proto.done_missing(o3["done"], {"c"}.__contains__) == ["a"])
+_now = 10 ** 9
+ok("worker_holds: a worker with a fresh beat or a fresh task log holds the task; no worker or both stale does not",
+   proto.worker_holds(dict(worker="w", beat=_now - 10), _now)
+   and proto.worker_holds(dict(worker="w", beat=0, task_log_age=1), _now)
+   and not proto.worker_holds(dict(worker="w", beat=0, task_log_age=proto.FRESH_LOG + 1), _now)
+   and not proto.worker_holds(dict(beat=_now), _now))
+ok("hours: durations for people", proto.hours(3 * 3600) == "3 hours" and proto.hours(3600) == "1 hour" and proto.hours(5400) == "1.5 hours")
+_tl = [["2026-01-01 00:00:00", 10], ["2026-01-01 01:00:00", 20]]
+_pg = S.progress_of(dict(final=False, runs=[dict(epochs_done=20, total=40, end="x", tl=_tl)]))
+ok("progress_of: fraction from epochs / total, ETA from the latest run's speed, last point",
+   _pg["frac"] == 0.5 and _pg["epochs"] == 20 and _pg["total"] == 40 and str(_pg["eta"]) == "2026-01-01 03:00:00"
+   and str(_pg["last"]) == "2026-01-01 01:00:00")
+_p0 = S.progress_of(dict(final=False, runs=[dict(epochs_done=0, total=40, end=None)]))
+ok("progress_of: before the first epoch 0.0 (total known); done -> 1.0 and no ETA; no total -> None; no record -> empty",
+   _p0["frac"] == 0.0 and S.progress_of(dict(final=True, runs=[dict(epochs_done=40, total=40, end="x", tl=_tl)]))["frac"] == 1.0
+   and S.progress_of(dict(final=True, runs=[dict(epochs_done=40, total=40, end="x", tl=_tl)]))["eta"] is None
+   and S.progress_of(dict(final=False, runs=[dict(epochs_done=3, end=None)]))["frac"] is None
+   and S.progress_of(None) == dict(frac=None, eta=None, last=None, epochs=0, total=None))
 _os = dict(S.sendable(S.resolve("command", dict(G, archive=True, fetch=dict(extra=["*.json"])))))
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "outputs", "--spec", json.dumps(_os), "--sh"], capture_output=True, text=True)
 _sh = _r.stdout.splitlines()

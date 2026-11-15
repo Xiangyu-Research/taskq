@@ -660,7 +660,7 @@ def step_finish():
 
 def step_gc():
     M.MACHINES[NAME]["budget"] = (1e6, 0)  # a soft limit out of reach: delete everything possible
-    relay.VIEW_KEEP_S = 0
+    relay.proto.VIEW_KEEP = 0
     check()
     D = os.path.join(RROOT, "data")
     left = [os.path.relpath(os.path.join(dp, f), D) for dp, _, fs in os.walk(D) for f in fs]
@@ -671,7 +671,7 @@ def step_gc():
          not blobs and all(p.startswith("logs/workers/") for p in left) and not reg, (left[:10], blobs[:5], reg))
     step("the root keeps only what is still needed: code, queue, blobs, data, tmp, state, envs, machine", set(top) <= {"code", "queue", "blobs", "data", "tmp", "state", "envs", proto.ROOT["machine"]}
          and os.path.isfile(os.path.join(RROOT, "state/envs/toy.ok")), top)
-    relay.VIEW_KEEP_S = 6 * 3600
+    relay.proto.VIEW_KEEP = 6 * 3600
     M.MACHINES[NAME]["budget"] = (0, 0)
 
 

@@ -30,7 +30,6 @@ import notice as NT  # noqa: E402
 OUT = getattr(policy, "OUTPUTS", {})
 HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
 NAME = OUT.get("name", "taskq")
-NIGHT = (22, 8)  # 22:00-08:00: only urgent pushes
 
 
 from push import push  # noqa: E402
@@ -41,7 +40,7 @@ def load_failed(e, dry=False):
     (the same error is not pushed again; at night wait until morning)."""
     msg = f"Health check cannot run: loading the experiment table or plugins failed; sending, fetching and downstream steps are stopped.\n{type(e).__name__}: {e}"
     print(msg, file=sys.stderr)
-    if dry or not NIGHT[1] <= datetime.now().hour < NIGHT[0]:
+    if dry or not proto.NIGHT[1] <= datetime.now().hour < proto.NIGHT[0]:
         return
     db = NT.open_db()
     if db is None or not NT.D.writable(db) or NT.D.get_meta(db, "load_error") != msg:
@@ -69,8 +68,6 @@ def stopped(t):
     """Stopped by hand (pueue kill, or SIGTERM giving exit code 143): only logged, not pushed."""
     return t.get("result") == "Killed" or t.get("code") == 143
 
-
-LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")
 
 GPU_PROBE = r"""timeout 20 nvidia-smi --query-gpu=index,uuid,utilization.gpu,memory.used --format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU|/'
 timeout 20 nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | while IFS=, read u p m; do
@@ -278,7 +275,7 @@ def check(s):
             r = ident[t["id"]]
             tname = t["label"] or f"#{t['id']}"
             st = t["status"]
-            if st in LIVE or st == "Success":
+            if st in proto.PUEUE_LIVE or st == "Success":
                 continue
             if stopped(t) and tname.startswith(proto.WORKER_LABEL):  # worker stopped at hours end or to yield a card; worker errors are reported by relay as site:<machine>:worker
                 continue
@@ -333,7 +330,7 @@ QUIET = ("notice", "undeclared")  # problem kinds only listed in taskq problems,
 
 
 def night(now):
-    return now.hour >= NIGHT[0] or now.hour < NIGHT[1]
+    return now.hour >= proto.NIGHT[0] or now.hour < proto.NIGHT[1]
 
 
 def update(P, now, db, dry=False):
@@ -410,6 +407,12 @@ def main(argv=None):
             events.flush(db)
         except Exception as e:  # noqa: BLE001
             print(f"event spool not imported into the database: {e}", file=sys.stderr)
+        try:
+            n = NT.D.compact(db)
+            if n:
+                events.add("health", f"compacted {NT.D.path()}: {n / 1e6:.0f} MB of free pages given back", db=db)
+        except Exception as e:  # noqa: BLE001  locked by a reader right now: next round
+            print(f"database not compacted: {e}", file=sys.stderr)
     if a.test:
         push("test: a health check push reaches the phone", tags="tada")
         print("test message pushed")

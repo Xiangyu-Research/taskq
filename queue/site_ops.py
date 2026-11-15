@@ -62,9 +62,8 @@ def exists(p):
 
 
 def done_missing(D, out, done):
-    """Each item in done ([alternative, ...]), under out (relative to the data dir), has at least one match → []; otherwise
-    the missing items (written as a|b). This is the only done rule: both list on an executor and done on the store use it."""
-    return ["|".join(alts) for alts in done if not any(exists(os.path.join(D, out, a)) for a in alts)]
+    """proto.done_missing for files under data dir D / out (done: proto.done_items form)."""
+    return proto.done_missing(done, lambda a: exists(os.path.join(D, out, a)))
 
 
 def lock(R):
@@ -388,7 +387,7 @@ def op_status(A):
     bfree = free
     if bdev != dev:
         bfree = capped_free(B, A.get("blob_cap"))
-    return dict(taskq=st, tasks=col.get("tasks"), sched_raw=raw, free=free, dev=dev, envs_ok=oks, envs_st=envs_st, now=int(time.time()),
+    return dict(taskq=st, tasks=col.get("tasks"), seglogs=col.get("seglogs") or [], sched_raw=raw, free=free, dev=dev, envs_ok=oks, envs_st=envs_st, now=int(time.time()),
                 out_used=out_used, blob_dev=bdev, blob_free=bfree,
                 bundle=os.path.basename(os.path.realpath(sub(R, "current"))), live=live)
 

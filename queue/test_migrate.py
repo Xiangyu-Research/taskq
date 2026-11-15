@@ -308,6 +308,9 @@ JUNK = [write(os.path.join(STATE, "shift.json"), "{}"), write(os.path.join(STATE
         write(os.path.join(STATE, "relay", "push_lab0.log"), "x"), os.path.dirname(write(os.path.join(STATE, "relay", "old", "a"), "x")),
         write(os.path.join(STATE, "health", "status.json"), "{}"), write(os.path.join(STATE, "health", "probs.json.migrated"), "{}"),
         write(os.path.join(STATE, "last", "a"), "x"), write(os.path.join(STATE, "last", "b"), "x"),
+        write(os.path.join(STATE, "relay", "names.json.lock"), ""), write(os.path.join(STATE, "relay", "stage_gone.lock"), ""),
+        write(os.path.join(STATE, "health", "report.json"), "{}"), os.path.dirname(write(os.path.join(STATE, "health", "notices", "a"), "x")),
+        write(os.path.join(STATE, "health", "problems.json"), "{}"),
         os.path.dirname(write(os.path.join(STATE, MG.OLD_SNAPSHOTS, ".lock"), ""))]  # old snapshot dir with no snapshot left
 ok("old snapshot dir holding only files: no snapshots to delete (so not reported every run); the dir itself is unused",
    MG.old_snapshots(STATE) == ([], []) and os.path.join(STATE, MG.OLD_SNAPSHOTS) in MG.leftovers(STATE))
@@ -315,8 +318,10 @@ SNAP = os.path.join(T, "snap")
 os.makedirs(os.path.join(SNAP, MG.OLD_SNAPSHOTS, "abc"))
 write(os.path.join(SNAP, MG.OLD_SNAPSHOTS, ".lock"), "")
 ok("... while a snapshot dir is left, it is not unused", os.path.join(SNAP, MG.OLD_SNAPSHOTS) not in MG.leftovers(SNAP))
-KEEP = [write(os.path.join(STATE, "tasks.json"), "{}"), write(os.path.join(STATE, "health", "problems.json"), "{}"),
+KEEP = [write(os.path.join(STATE, "tasks.json"), "{}"), write(os.path.join(STATE, "health", "pueue_seen.json"), "{}"),
         write(os.path.join(STATE, "relay", "status.json"), "{}"),  # live: relay.py writes it each round, taskq status reads it
+        write(os.path.join(STATE, "relay", "state.json.lock"), ""),
+        write(os.path.join(STATE, "relay", f"stage_{next(iter(__import__('cfg').mtab().MACHINES))}.lock"), ""),
         write(os.path.join(STATE, "relay", "bundles", "x", "f"), "x")]
 OLD_HLOG = write(os.path.join(STATE, "health", "health.log"), "2026-11-01 00:00:00 an old line\n")
 

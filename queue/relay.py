@@ -57,14 +57,9 @@ import names as N  # noqa: E402
 import envs as EV  # noqa: E402
 from common import write_json  # noqa: E402
 
-STATUS = os.path.join(ST.DIR, "status.json")
-DOWN_S = 2 * 3600  # report when a machine with claimed tasks has been unreachable this long
-LATE_S = 3600  # report when a fetch/archive succeeded this long ago but the hub still does not see the task as done
-LIVE = refill.LIVE
-VIEW_KEEP_S = 6 * 3600  # keep views built this recently (a task just staged, not added yet, or just released)
-STATUS_S = 90  # status timeout: skip this machine when its storage hangs instead of waiting
+STATUS = os.path.join(ST.DIR, proto.RELAY_STATUS)
+LIVE = proto.PUEUE_LIVE
 NOSLOT_RC = proto.EXIT["stage_later"]  # relay.py stage could not get a CPU job this time (or the checkpoint source is still claimed): retry next check without alerting
-NOSLOT_ALERT_S = 3 * 3600  # report when a claim this old still cannot get scheduled
 
 
 def relayable(i):
@@ -95,7 +90,7 @@ def remote_status(name):
         return None
     try:
         rs = RM.op(name, "status", dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap"), blob_cap=c.get("blob_cap"), env_root=M.env_root(name),
-                                             envs=sorted(EV.wanted(name, envs_switch(name)[1]))), timeout=STATUS_S)
+                                             envs=sorted(EV.wanted(name, envs_switch(name)[1]))), timeout=proto.SITE_STATUS_TIMEOUT)
     except RuntimeError:
         return None
     return parse_sched(name, rs)
@@ -273,9 +268,7 @@ def smoke_step(name, mtq, t, a, k, now):
     over = SG.finished(name, key)
     res = None
     if a is not None:
-        held = a.get("worker") and (now - (a.get("beat") or 0) < proto.STALE_BEAT
-                                    or (a.get("task_log_age") is not None and a["task_log_age"] < proto.FRESH_LOG))
-        if a["state"] == "done" and not held:
+        if a["state"] == "done" and not proto.worker_holds(a, now):
             res = (True, "")
         elif a["state"] in (proto.S_FAILED, proto.S_BAD):
             res = (False, f"{a['state']}: {a.get('note') or ''}")
@@ -310,13 +303,13 @@ def plan(s, name, rs, st, now=None):
     if rs is None:
         acts = [dict(op="beat", key=t["key"]) for t in mine if t["state"] != "done"]
         last = (st.get("last_ok") or {}).get(name, 0)
-        if acts and now - last > DOWN_S:
+        if acts and now - last > proto.SITE_FRESH:
             stuck[alert_id("site", name, "down")] = alert(
                 f"cannot read {L}'s status{f' for {(now - last) / 3600:.0f} h' if last else ''} (ssh down, or its storage hangs);"
                 f" it has {len(acts)} claimed tasks and their progress is invisible", hours=round((now - last) / 3600, 1) if last else None, tasks=len(acts))
         return acts, stuck
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
-    tasks = rs.get("tasks") or {}
+    view = site_view(name, rs, st)  # half-done is judged on these entries (they carry ran), never on raw rs["tasks"]
     owned, holds, gated = set(), BG.held(st, name), set()
     for t in mine:
         key = t["key"]
@@ -390,12 +383,13 @@ def plan(s, name, rs, st, now=None):
                     gated.add(key)
                     if h.get("bundle") != g[0]:
                         acts.append(dict(op="hold", key=key, bundle=g[0], err=g[1]))
-                    stuck[alert_id("bundlegate", name, key)] = alert(
+                    older = bool(rs.get("bundle")) and g[0] != rs["bundle"] and now - (h.get("since") or now) < proto.HELD_PATIENCE
+                    stuck[alert_id("bundlegate", name, key)] = alert(  # only an older bundle still used by running workers: it clears when they switch, so only record it for a while
                         f"the bundle {g[0]} in use on {L} cannot run the spec for {key} ({g[1]}); not sending yet and keeping the claim until it switches bundles",
-                        machine=name, key=key, bundle=g[0], err=g[1])
+                        level="info" if older else None, machine=name, key=key, bundle=g[0], err=g[1])
                     continue
                 acts.append(dict(op="stage", key=key, nice=t["nice"]))
-                if noslot and now - since > NOSLOT_ALERT_S:
+                if noslot and now - since > proto.NOSLOT_ALERT:
                     stuck[alert_id("site", name, "stage")] = alert(
                         f"{key} for {L} has not been staged for {(now - since) / 3600:.0f} h (no CPU job slot, or the checkpoint source is still claimed)"
                         f" ({M.hub()} task {sg['id']}, retried every check)", key=key, hours=round((now - since) / 3600, 1), task=sg["id"])
@@ -405,9 +399,7 @@ def plan(s, name, rs, st, now=None):
                                                            machine=name, step="stage", task=sg["id"], status=sg["status"])
             continue
         ast = a["state"]
-        held = a.get("worker") and (now - (a.get("beat") or 0) < proto.STALE_BEAT
-                                    or (a.get("task_log_age") is not None and a["task_log_age"] < proto.FRESH_LOG))
-        if ast == "done" and held:
+        if ast == "done" and proto.worker_holds(a, now):
             pass  # done marker exists but the worker still claims it: the command is still writing results, so only beat and fetch after release; an expired claim (worker died without releasing) fetches as usual
         elif ast == "done":
             ft = io_task(s, "relay_fetch", key, since)
@@ -415,7 +407,7 @@ def plan(s, name, rs, st, now=None):
                 acts.append(dict(op="fetch", key=key))
             elif ft["status"] == "Success":
                 end = C.local_time(ft.get("end"))
-                if end is not None and now - end.timestamp() > LATE_S:
+                if end is not None and now - end.timestamp() > proto.FETCH_LATE:
                     stuck[alert_id("relayfetch", key)] = alert(f"{key} on {L} was fetched and archived successfully ({M.hub()} task {ft['id']}), but {M.hub()} still does not see it as done;"
                                                                f" check the result dir on {M.hub()}", machine=name, step="late", task=ft["id"], status=ft["status"])
             elif ft["status"] not in LIVE:
@@ -434,13 +426,14 @@ def plan(s, name, rs, st, now=None):
                                                            f" See pueue log {sg['id']}, then pueue remove {sg['id']} to retry next check",
                                                            machine=name, step="restage", task=sg["id"], status=sg["status"])
         elif ast == "failed":
-            if refill.site_progress(tasks.get(a["key"])):
+            if refill.site_progress(view.get(key)):
                 stuck[alert_id("site", name, "fail", key)] = alert(
                     f"{key} ({a['key']}) failed {a.get('failures')} times on {L} with progress; claim kept."
                     f" Check {proto.TASK_LOGS}/ over there; to give up: taskq.py release --worker {name} {key}",
                     state="failed", progress=True, failures=a.get("failures"))
             else:
-                acts[-1] = dict(op="release", key=key, skip=f"failed on {L}", why=f"failed on {L} with no progress; released so {L} will not claim it again")
+                acts[-1] = dict(op="release", key=key, skip=f"failed on {L}", failed=True,
+                                why=f"failed on {L} with no progress; released so {L} will not claim it again")
                 acts.append(dict(op="drop", key=key, rkey=a["key"]))
         elif ast == proto.S_BAD:
             stuck[alert_id("site", name, "fail", key)] = alert(f"{a['key']} ({key}) in the {L} queue is {ast}: {a.get('note')}",
@@ -462,14 +455,14 @@ def plan(s, name, rs, st, now=None):
             acts.append(dict(op="drop", key=real, rkey=a["key"]))
         elif a["state"] != "stopped":
             acts.append(dict(op="rstop", key=real, rkey=a["key"]))
-        elif m["state"] != proto.S_STOPPED and not m.get("worker") and not refill.site_progress(tasks.get(a["key"])):
+        elif m["state"] != proto.S_STOPPED and not m.get("worker") and not refill.site_progress(view.get(real)):
             acts.append(dict(op="drop", key=real, rkey=a["key"]))  # resumed in the hub queue unassigned, stopped over there with no progress → drop
     for real, k in keys.items():  # remote task dropped but paths left (drop_remote recorded dropped): remove them again
         if real not in mk and real not in rt and k.get("dropped"):
             acts.append(dict(op="drop", key=real, rkey=real, gone=True))
     acts += [dict(op="unhold", key=k) for k in holds if k not in gated]
     if rs["taskq"].get("paused"):
-        stuck[alert_id("site", name, "fail")] = alert(f"the {L} task queue failed {rs['taskq'].get('recent_failures')} times in 3 hours; claiming is paused",
+        stuck[alert_id("site", name, "fail")] = alert(f"the {L} task queue failed {rs['taskq'].get('recent_failures')} times in {proto.hours(proto.PAUSE_WINDOW)}; claiming is paused",
                                                       paused=True, failures=rs["taskq"].get("recent_failures"))
     return acts, stuck
 
@@ -493,9 +486,11 @@ def site_for(name, rs, st, mtq):
         a = remote(t)
         return a is None or a["state"] in (proto.S_FREE, proto.S_STALE, proto.S_STOPPED, proto.S_INPUT)
 
+    view = site_view(name, rs, st)
+
     def idle(t):  # staged over there, unclaimed and no progress: may yield to a higher-priority task (never one with progress)
         a = remote(t)
-        return a is not None and a["state"] == proto.S_FREE and not a.get("worker") and not refill.site_progress((rs.get("tasks") or {}).get(t["key"]))
+        return a is not None and a["state"] == proto.S_FREE and not a.get("worker") and not refill.site_progress(view.get(t["key"]))
     have, mine = {k: 0 for k in kinds}, []
     for t in mtq.get("tasks", []):
         if t.get("worker") == name and t["state"] not in ("done", "stopped") and waiting(t):
@@ -725,6 +720,9 @@ def execute(name, acts, s, run_add=None, stuck=None):
             elif a["op"] == "release":
                 r = master(f"release --worker {name} {shlex.quote(k)}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
                 msgs.append(f"{L} released {k}: {a['why']}" if r and r[0] == 0 else f"{L} failed to release {k}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
+                if r and r[0] == 0 and a.get("failed"):  # counted as a failure (taskq status: last 24 hours)
+                    import events
+                    events.add("relay", f"{k} failed on {L}", kind=proto.EV_FAILED, key=k, site=name)
             elif a["op"] == "take":
                 r = master(f"take --worker {name} --assign {shlex.quote(k)}")
                 if r is None or r[0]:
@@ -827,11 +825,13 @@ def site_view(name, rs, st):
 
 def write_status(name, rs, st):
     out = site_view(name, rs, st)
+    mine = tuple(proto.safe(k) + proto.SAFE for k in out)  # part logs of the tasks recorded here (taskq log, taskq status --all --json parts)
+    segs = [x for x in rs.get("seglogs") or [] if mine and x.get("name", "").startswith(mine)]
     try:
         allst = json.load(open(STATUS))
     except (OSError, ValueError):
         allst = {}
-    allst[name] = dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, squeue=rs.get("squeue"), free=rs.get("free"),
+    allst[name] = dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, seglogs=segs, squeue=rs.get("squeue"), free=rs.get("free"),
                        bundle=rs.get("bundle"), live=rs.get("live"), held=BG.held(st, name), envs_ok=rs.get("envs_ok"))
     write_json(STATUS, allst)
 
@@ -872,7 +872,7 @@ def env_builds(s, name, rows, now, dry, stuck):
     if "tasks" not in d:  # hub pueue unreadable: cannot tell whether one is queued, so skip this time
         return []
     lab = f"{proto.ENV_BUILD}:{name}:{env}"
-    if any((t.get("label") or "").startswith(f"{proto.ENV_BUILD}:{name}:") and t.get("status") in refill.LIVE for t in d["tasks"]):
+    if any((t.get("label") or "").startswith(f"{proto.ENV_BUILD}:{name}:") and t.get("status") in LIVE for t in d["tasks"]):
         return []
     what = f"env {env} on {L} ({v}, {st[env]})"
     if dry:
@@ -963,7 +963,7 @@ def prepare(s, name, dry):
             st = ST.load_state()
             reg = (st.get("views") or {}).get(name) or {}
             keep = {v for k in ST.keys_of(st, name).values() for v in ST.paths_of(k)}
-            keep |= {v for v, t in reg.items() if time.time() - t < VIEW_KEEP_S}
+            keep |= {v for v, t in reg.items() if time.time() - t < proto.VIEW_KEEP}
             g = ST.gc(name, keep, RM.op, views=reg, free=rs.get("free") if RM.conf(name).get("cap") else None,
                       blob_free=rs.get("blob_free") if RM.conf(name).get("blob_cap") else None)
             if g and g["removed_views"]:

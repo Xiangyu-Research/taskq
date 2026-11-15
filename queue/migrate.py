@@ -533,7 +533,7 @@ def done_dropped(tasks, drop):
         p = (by.get(k) or {}).get("params") or {}
         out = str(p.get("out") or "").replace("{data}/", "")
         if out and p.get("done"):
-            items[k] = dict(out=out, done=[str(d).split("|") for d in p["done"]])
+            items[k] = dict(out=out, done=proto.done_items(p["done"]))
     miss = RM.store_op("done", dict(items=items)) if items else {}
     return sorted((k, items[k]["out"]) for k, m in miss.items() if not m)
 
@@ -683,16 +683,18 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
 
 
 def leftovers(home):
-    """First-level entries in the state dir not in proto.STATE_NAMES -> delete; also old backups left by earlier versions
-    in relay/, health/ and files from before a migration (health/status.json is an old file; relay/status.json is live)."""
+    """First-level entries in the state dir not in proto.STATE_NAMES -> delete; likewise entries of relay/ and health/ not in
+    proto.RELAY_NAMES / HEALTH_NAMES (old backups, files of earlier versions, stage locks of machines no longer in the table)."""
     snap = os.path.join(home, OLD_SNAPSHOTS)
     out = [os.path.join(home, f) for f in sorted(os.listdir(home))
            if (f != OLD_SNAPSHOTS or not os.path.isdir(snap) or not any(os.path.isdir(os.path.join(snap, x)) for x in os.listdir(snap)))
            and not any(f == n or f.startswith((n + ".", n + "-")) for n in proto.STATE_NAMES)]  # code/: once no snapshot is left
-    for sub in ("relay", "health"):
+    import cfg
+    locks = tuple(proto.STAGE_LOCK.format(proto.safe(n)) for n in cfg.mtab().MACHINES)
+    for sub, names in (("relay", proto.RELAY_NAMES + locks), ("health", proto.HEALTH_NAMES)):
         d = os.path.join(home, sub)
         for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-            if f.endswith(".migrated") or ".bak" in f or f == "old" or (sub, f) == ("health", "status.json") or f.startswith("push_"):
+            if not any(f in (n, n + ".lock") for n in names):
                 out.append(os.path.join(d, f))
     last = os.path.join(home, "last")
     out += sorted(glob.glob(os.path.join(last, "*")))  # "skip a repeat" records: clearing them only logs one extra line

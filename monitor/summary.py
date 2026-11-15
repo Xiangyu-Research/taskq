@@ -31,8 +31,10 @@ RUNNING, OVERDUE, SENDING, HELD, WAITING, BACK = "running", "overdue", "being se
 FAILED, MISSING, STOPPED, BAD, NOT_SENT, NOT_QUEUED, DONE = ("failed", "missing inputs", "stopped", "spec unreadable", "not sent yet",
                                                              "not queued yet", "done")
 ORDER = (OVERDUE, RUNNING, SENDING, HELD, WAITING, BACK, FAILED, MISSING, STOPPED, BAD, NOT_SENT, NOT_QUEUED, DONE)
+# hub queue state -> word; a task claimed for an executor gets its word from what that executor reports (build); claimed by a
+# worker on the hub itself, or unclaimed but its log still changing (busy), it is running
 HUB_WORDS = {P.S_FAILED: FAILED, P.S_INPUT: MISSING, P.S_STOPPED: STOPPED, P.S_BAD: BAD, P.S_DONE: DONE,
-             P.S_FREE: NOT_SENT, P.S_STALE: NOT_SENT, P.S_BUSY: NOT_SENT}
+             P.S_FREE: NOT_SENT, P.S_STALE: NOT_SENT, P.S_BUSY: RUNNING, P.S_CLAIMED: RUNNING}
 
 
 def label(n):
@@ -52,7 +54,7 @@ def ago(sec):
 
 # ---------------- reading ----------------
 def read_local(now):
-    """Everything the summary uses, from this machine only -> dict(queue, relay, problems, checked, notices, changes)."""
+    """Everything the summary uses, from this machine only -> dict(queue, relay, problems, checked, notices, changes, failed, stored)."""
     import taskq
     try:
         queue = taskq.local_status()
@@ -65,32 +67,13 @@ def read_local(now):
     db = NT.open_db(write=False)
     probs, checked = NT.problems(db) if db else ({}, None)
     import events
-    changes = events.transitions(db, now.timestamp() - P.SUMMARY_WINDOW, (P.S_DONE, P.S_FAILED)) if db else []
-    return dict(queue=queue, relay=relay, problems=NT.problem_rows(probs), checked=checked,
-                notices=sorted(NT.notices(db)) if db else [], changes=changes)
+    since = now.timestamp() - P.SUMMARY_WINDOW
+    return dict(queue=queue, relay=relay, problems=NT.problem_rows(probs), checked=checked, notices=sorted(NT.notices(db)) if db else [],
+                changes=events.transitions(db, since, (P.S_DONE,)) if db else [], failed=events.failed_since(db, since) if db else [],
+                stored=events.stored(db) if db else set())
 
 
 # ---------------- building ----------------
-def progress_of(f):
-    """An executor's record of a task (relay status.json) -> (fraction or None, eta datetime or None, last progress datetime or None)."""
-    runs = f.get("runs") or []
-    total = O.total_of(f)
-    done = max([r.get("epochs_done") or 0 for r in runs] or [0])
-    if f.get("final"):
-        return 1.0, None, None
-    tl = max(runs, key=lambda r: r.get("end") or "").get("tl") if runs else None
-    last = datetime.strptime(tl[-1][0], "%Y-%m-%d %H:%M:%S") if tl else None
-    frac = min(done / total, 1.0) if total and done else None
-    return frac, (S.eta_at(runs, total) if total else None), last
-
-
-def held_wait(h, r, now):
-    """A hold that clears by itself: the bundle that cannot run the spec is an older one that running workers there still use
-    (they switch to current at their next claim), not current, and the hold is younger than SUMMARY_HELD_PATIENCE."""
-    return (h.get("why") == P.HELD["bundle"] and bool(h.get("bundle")) and bool(r.get("bundle")) and h["bundle"] != r["bundle"]
-            and now.timestamp() - (h.get("since") or 0) < P.SUMMARY_HELD_PATIENCE)
-
-
 def held_line(k, h, r, now):
     why = h.get("why")
     if why == P.HELD["bundle"] and h.get("bundle"):
@@ -123,16 +106,15 @@ def build(d, now):
     q = d["queue"]
     qt = {t["key"]: t for t in (q or {}).get("tasks") or [] if not P.is_smoke(t["key"])}
     relay = d["relay"]
-    waits = {P.alert_id("bundlegate", n, k) for n, r in relay.items() if isinstance(r, dict)
-             for k, h in (r.get("held") or {}).items() if held_wait(h, r, now)}
     tasks = {}
     for t in S.all_tasks(list(qt.values())):
         k, sp = t["key"], t["spec"]
         x = qt.get(k)
-        tasks[k] = dict(key=k, step=sp.get("step") or sp.get("recipe") or "?", word=HUB_WORDS.get((x or {}).get("state"), NOT_QUEUED),
-                        where=None, since=None, frac=None, eta=None, last=None)
+        word = HUB_WORDS.get(x.get("state"), NOT_QUEUED) if x else DONE if k in d.get("stored", ()) else NOT_QUEUED
+        tasks[k] = dict(key=k, step=sp.get("step") or sp.get("recipe") or "?", word=word,
+                        where=(x.get("assigned") or x.get("host")) if word == RUNNING else None, since=None, frac=None, eta=None, last=None)
     machines = []
-    attention = [p["plain"] or p["msg"] for p in d["problems"] if not p["id"].startswith("notice:") and p["id"] not in waits]
+    attention = [p["plain"] or p["msg"] for p in d["problems"] if not p["id"].startswith("notice:")]
     for n in M.executors():
         r = relay.get(n) if isinstance(relay.get(n), dict) else {}
         age = now.timestamp() - (r.get("time") or 0)
@@ -152,7 +134,8 @@ def build(d, now):
                 t["word"] = BACK
             elif st == P.S_CLAIMED:
                 t["word"], t["since"] = RUNNING, f.get("since")
-                t["frac"], t["eta"], t["last"] = progress_of(f)
+                pg = S.progress_of(f)
+                t["frac"], t["eta"], t["last"] = pg["frac"], pg["eta"], pg["last"] if not f.get("final") else None
                 if t["eta"] and t["eta"].timestamp() < now.timestamp() - P.SUMMARY_OVERDUE:
                     t["word"] = OVERDUE
                     last = f", last progress {t['last']:%m-%d %H:%M}" if t["last"] else ""
@@ -163,12 +146,12 @@ def build(d, now):
         count = {w: sum(t["word"] == w for t in mine) for w in ORDER}
         slots, later, wins = slot_plan(n, now) if M.MACHINES[n].get("scheduler") == "pueue" else (None, 0, "")
         jobs = [j[2] for j in r.get("squeue") or []]
-        machines.append(dict(name=n, label=label(n), paused=M.paused(n), age=age if r else None, stale=not r or age >= O.RELAY_FRESH,
+        machines.append(dict(name=n, label=label(n), paused=M.paused(n), age=age if r else None, stale=not r or age >= proto.SITE_FRESH,
                              count=count, slots=slots, later=later, windows=wins,
                              jobs=(jobs.count("RUNNING"), jobs.count("PENDING")) if r.get("squeue") is not None else None,
                              held=[held_line(k, h, r, now) for k, h in sorted(held.items())],
                              running=[t for t in mine if t["word"] in (RUNNING, OVERDUE)]))
-        if r and age >= O.RELAY_FRESH:
+        if r and age >= proto.SITE_FRESH:
             attention.append(f"no news from {label(n)} for {ago(age)} (last recorded {when(r['time'], now)})")
     steps = {}
     for t in tasks.values():
@@ -178,19 +161,20 @@ def build(d, now):
     soon = sorted((t for t in tasks.values() if t["eta"] and 0 <= t["eta"].timestamp() - now.timestamp() <= P.SUMMARY_WINDOW),
                   key=lambda t: t["eta"])
     ch = [c for c in d["changes"] if not P.is_smoke(c["key"])]
+    failed = {c["key"] for c in d.get("failed") or [] if not P.is_smoke(c["key"])}
     return dict(now=now, checked=d["checked"], queue_ok=q is not None, attention=attention, notices=d["notices"], machines=machines,
-                tasks=tasks, steps=steps, soon=soon, done=sum(c["state"] == P.S_DONE for c in ch), failed=sum(c["state"] == P.S_FAILED for c in ch))
+                tasks=tasks, steps=steps, soon=soon, done=sum(c["state"] == P.S_DONE for c in ch), failed=len(failed))
 
 
 # ---------------- text ----------------
 def task_line(t, now, where=False):
     """where=True (listings grouped by state): a machine column instead of the state word."""
     bits = [] if where else [t["word"]]
-    if t["frac"] is not None:
+    if t["frac"]:
         bits.append(f"{100 * t['frac']:.0f}%")
     if t["eta"] and t["word"] == RUNNING:
         bits.append(f"done ~{when(t['eta'].timestamp(), now)}")
-    elif t["since"] and t["word"] in (RUNNING, OVERDUE) and t["frac"] is None:
+    elif t["since"] and t["word"] in (RUNNING, OVERDUE) and not t["frac"]:
         bits.append(f"for {ago(now.timestamp() - t['since'])}")
     w = f"{label(t['where']):<7}" if where and t["where"] else (" " * 7 if where else "")
     return f"    {w}{t['key']:<58} {'  '.join(bits)}".rstrip()

@@ -370,7 +370,9 @@ name that is not an executor are reported by `feed.py`.
 #### Bundle gate
 
 Before sending a spec, run what the executor does with the spec on the hub using the bundle in use there (`queue/bundle_gate.py`); if it
-fails, do not send (`hold`, report `bundlegate`) and check again after that machine switches bundles.
+fails, do not send (`hold`, report `bundlegate`) and check again after that machine switches bundles. When only an older bundle that
+running workers still use cannot run it (they switch at their next claim), the report is recorded as info for `proto.HELD_PATIENCE`
+before it is pushed.
 
 ### After training: advance and flow
 
@@ -494,8 +496,9 @@ Executor and store root R (the machine table's `root`, `proto.ROOT`):
 | `tmp/` | half-transferred files |
 | `envs/` | envs built on this machine |
 
-Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (relay bookkeeping, `status.json`), `health/`, `taskq.db` (events,
-problems, progress), `wheelhouse/`, `tunnel*` etc.
+Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (relay bookkeeping, `status.json`; `proto.RELAY_NAMES`), `health/`
+(`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; the health check compacts it when mostly free
+pages), `wheelhouse/`, `tunnel*` etc. `taskq self migrate` deletes other entries there.
 
 Core source:
 

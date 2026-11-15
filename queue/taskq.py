@@ -32,8 +32,6 @@ FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", proto.FRESH_LOG))    # a part 
 LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", 0.5))  # retry interval while waiting for the lock (seconds; env var for tests only)
 LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = 120, 600, 900  # take a lock dir untouched this long: holder dead / on another host (liveness unknown) / alive here (pid may be reused)
 HALF_CLAIM = proto.HALF_CLAIM  # a claim that only made the dir, no info, is stale after this long
-MAX_FAIL = 2
-PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # pause claiming when the whole queue has this many failures in this window
 X = proto.EXIT
 NOTHING, WAIT, PAUSED = X["nothing"], X["wait"], X["paused"]   # claim exit codes
 REFUSED, GONE = X["refused"], X["gone"]  # remove exit codes: refused (claimed, assigned, another task needs it) / gone
@@ -313,7 +311,7 @@ def _mark_released(key, worker, why):
         f.write(f"{time.time()} {worker} {proto.RELEASE_WHY[why]}\n")
 
 
-def recent_failures(window=PAUSE_WINDOW):
+def recent_failures(window=proto.PAUSE_WINDOW):
     """Number of countable failures in the whole queue in the last window seconds (fail_lines)."""
     cut = time.time() - window
     return sum(t >= cut for t, _, _ in fail_lines())
@@ -341,7 +339,7 @@ def state(t, f):
         rel = released_at(t["key"])
         if rel is None or time.time() - age > rel + 5:  # the log moved on after the release (or was never released): someone outside the queue is training
             return "busy", f"part log updated {age / 60:.0f} minutes ago"
-    if failures(t["key"]) >= MAX_FAIL:
+    if failures(t["key"]) >= proto.MAX_FAIL:
         return "failed", f"failed {failures(t['key'])} times"
     return "free", ""
 
@@ -380,7 +378,7 @@ def _claim(a, pick):
         except DiskError as e:  # check the disk first: an unreadable disk is the likely cause of the failure
             print(e, file=sys.stderr)
             return PAUSED, None
-        if recent_failures() >= PAUSE_N:
+        if recent_failures() >= proto.PAUSE_N:
             return PAUSED, None
         for t in sorted((t for t in tasks if t["key"] in F), key=lambda t: (t["nice"], not has_progress(t, F[t["key"]]), t["order"])):
             if t["key"] in a.exclude:
@@ -967,7 +965,7 @@ def local_status():
                         skipped_by=sorted({w for _, w, _ in skips(t["key"])}), progress=has_progress(t, f)))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
-    return dict(enabled=os.path.exists(os.path.join(TQ, Q["enabled"])), tasks=out, recent_failures=nf, paused=nf >= PAUSE_N,
+    return dict(enabled=os.path.exists(os.path.join(TQ, Q["enabled"])), tasks=out, recent_failures=nf, paused=nf >= proto.PAUSE_N,
                 recent_skips={w: day.count(w) for w in set(day)})
 
 
@@ -1010,7 +1008,7 @@ def cmd_status(a):
         S.json_out({"version": proto.VERSION, **s})
         return 0
     print(f"master switch: {'on' if s['enabled'] else 'off'}; {len(s['tasks'])} tasks"
-          + (f"; {s.get('recent_failures')} failures in the last {PAUSE_WINDOW // 3600} hours, claiming paused" if s.get("paused") else ""))
+          + (f"; {s.get('recent_failures')} failures in the last {proto.hours(proto.PAUSE_WINDOW)}, claiming paused" if s.get("paused") else ""))
     n = {}
     for t in s["tasks"]:
         n[t["state"]] = n.get(t["state"], 0) + 1

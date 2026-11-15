@@ -2,6 +2,8 @@
 No claims, errors or too many failures do not exit at once; it exits 0 only after IDLE_EXIT seconds with nothing running."""
 import os
 
+import proto
+
 
 def active(w):
     return not os.environ.get("SLURM_JOB_ID")
@@ -37,7 +39,7 @@ def idle(w, why, now, since, err_since):
                 "own": f"this worker had {w.own} tasks fail shortly after starting within {w.FAIL_WINDOW // 60} minutes; not claiming until the window passes",
                 "nothing": f"no claimable tasks; checking again every {w.IDLE_POLL} seconds",
                 "error": f"no claimable tasks; checking again every {w.IDLE_POLL} seconds",
-                "paused": "the queue is paused (too many failures within 3 hours); waiting",
+                "paused": f"the queue is paused (too many failures within {proto.hours(proto.PAUSE_WINDOW)}); waiting",
                 "wait": f"a task ahead just stopped; waiting for it (at most {w.PATIENCE // 60} minutes after start)"}.get(msg)
         if text:
             w.say(text)

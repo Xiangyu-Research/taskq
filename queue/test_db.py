@@ -21,6 +21,7 @@ os.environ["TASKQ_DB"] = os.path.join(T, "hub", "taskq.db")
 sys.path.insert(0, HERE)
 import db as D  # noqa: E402
 import events as EV  # noqa: E402
+import proto  # noqa: E402
 
 fails = 0
 
@@ -114,6 +115,34 @@ n2 = EV.snapshot(db, [dict(key="k1", state="running", progress=0.1, site="s"), d
 n3 = EV.snapshot(db, [dict(key="k1", state="running", progress=0.2, site="s"), dict(key="k2", state="queued", progress=None)], t=t0 + 2)
 ok("progress: a row only when state, progress or site changed", (n1, n2, n3) == (2, 0, 1)
    and [r["progress"] for r in EV.progress_rows(db, key="k1")] == [0.1, 0.2])
+
+# changes into done / failed, failures released on executors, results on the store
+t1 = t0 + 100
+EV.snapshot(db, [dict(key="a", state=None), dict(key="b", state="free"), dict(key="c", state="done")], t=t1)
+EV.snapshot(db, [dict(key="a", state="done"), dict(key="b", state="done"), dict(key="c", state="done")], t=t1 + 1)
+ok("transitions: from not queued (no state) or another state counts, a task's first record does not",
+   sorted(c["key"] for c in EV.transitions(db, t1, ("done",))) == ["a", "b"])
+EV.snapshot(db, [dict(key="b", state="failed")], t=t1 + 2)
+EV.add("relay", "x failed on site-a", kind=proto.EV_FAILED, key="x", site="site-a", db=db, t=t1 + 3)
+ok("failed_since: hub queue failures and failures released by an executor, oldest first",
+   [(r["key"], r["site"]) for r in EV.failed_since(db, t1)] == [("b", None), ("x", "site-a")])
+ok("schema 3: stored is empty before the first advance round, then holds exactly the last set", EV.stored(db) == set()
+   and (EV.set_stored(db, {"a", "b"}), EV.set_stored(db, {"b", "c"}), EV.stored(db))[-1] == {"b", "c"})
+
+# compaction: only when most of the file is free pages
+_cp = os.path.join(T, "compact.db")
+_c = D.connect(create=True, p=_cp)
+ok("compact: a database with no free pages is left alone", D.compact(_c) == 0)
+_c.execute("CREATE TABLE big(x BLOB)")
+_c.executemany("INSERT INTO big VALUES(?)", [(b"x" * 4000,) for _ in range(3000)])
+_c.execute("DROP TABLE big")
+_saved = proto.DB_COMPACT
+proto.DB_COMPACT = (0.5, 1 << 20)
+_n = D.compact(_c)
+proto.DB_COMPACT = _saved
+ok("compact: mostly free pages (a dropped table) -> VACUUM gives them back, tables kept",
+   _n > 10e6 and _c.execute("PRAGMA freelist_count").fetchone()[0] == 0 and D.has(_c, "log"))
+_c.close()
 
 # the sha256 cache is on the store (site_ops.hashes), not in the hub database
 ok("schema 2: no hash table in the hub database",

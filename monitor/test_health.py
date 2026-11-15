@@ -51,7 +51,7 @@ def prog(final=False, epochs=100, end=NOW):
 def fields(status):
     """result and code qs splits out of status (e.g. "Failed (143)" -> Failed, 143)."""
     m = re.fullmatch(r"(\w+)(?: \((-?\d+)\))?", status)
-    done = m[1] not in H.LIVE
+    done = m[1] not in H.proto.PUEUE_LIVE
     return dict(result=m[1] if done else None, code=int(m[2]) if m[2] else 0 if m[1] == "Success" else None)
 
 

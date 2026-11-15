@@ -348,13 +348,18 @@ def test_plan():
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
+    import events
+    rel, logged = [a for a in acts if a["op"] == "release"], []
+    with patched(relay.taskq, central=lambda args, timeout=300: (0, "", "")), patched(events, add=lambda *a, **kw: logged.append((a, kw))):
+        relay.execute(NAME, rel, S0([]))
+    assert [(kw["kind"], kw["key"], kw["site"]) for _, kw in logged] == [(proto.EV_FAILED, K, NAME)], logged
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed"), tasks={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, acts
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "bad")), st)
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:fail:{K}" in stuck, stuck
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "claimed", "123"), paused=True), st)
     assert f"site:{NAME}:fail" in stuck, stuck
-    ok("remote FAIL: no progress → release (--skip) and drop; progress or bad → keep and alert site:<name>:fail:<key>; remote paused → site:<name>:fail")
+    ok("remote FAIL: no progress → release (--skip, recorded as a failure event) and drop; progress or bad → keep and alert site:<name>:fail:<key>; remote paused → site:<name>:fail")
 
     ri = dict(rtask(A, "input"), input_since=5000.0)
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(ri), st)
@@ -1005,7 +1010,8 @@ def test_e2e():
     relay.write_status(NAME, relay.remote_status(NAME), ST.load_state())
     st = json.load(open(relay.STATUS))[NAME]
     assert sp["key"] in st["tasks"] and st["tasks"][sp["key"]]["final"], st
-    ok("the task is in status.json")
+    assert [x["name"] for x in st["seglogs"]] == [log] and log.startswith(proto.safe(sp["key"]) + proto.SAFE), st["seglogs"]
+    ok("the task is in status.json, with its part logs over there (taskq status --all --json parts)")
     return pre
 
 

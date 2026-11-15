@@ -187,6 +187,18 @@ did, _ = A.run(snap(), dry=True, tq=lambda n, p: (calls.append(p["key"]) or (0, 
 ok("dry: likewise adds nothing", not calls and "would queue eval/t0_f1" in did)
 did, stuck = A.run(snap(), tq=lambda n, p: (1, "lock timeout"))
 ok("adding to the queue fails: reported", any("eval/t0_f1" in v and "lock timeout" in v for v in stuck.values()))
+import db as D  # noqa: E402
+import events as EV  # noqa: E402
+os.environ["TASKQ_DB"] = os.path.join(fixture.tmpdir(), "taskq.db")
+D.connect(create=True).close()
+A.run(snap(), dry=True, tq=lambda n, p: (0, ""))
+_db = D.connect()
+ok("dry run: the results-on-the-store set is not saved", EV.stored(_db) == set())
+A.run(snap(), tq=lambda n, p: (0, ""))
+ok("run: saves the keys whose done files are on the store (taskq status shows unqueued ones as done), not the missing one",
+   EV.stored(_db) == A.STORED and "eval/t0_f1" not in A.STORED and len(A.STORED) > 0)
+_db.close()
+del os.environ["TASKQ_DB"]
 saved = A.FC.build
 A.FC.build = lambda **kw: type("F", (), dict(errors=["output a of x is also b's"], instances={}))()
 todo, stuck = A.plan(snap())

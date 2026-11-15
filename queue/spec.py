@@ -255,18 +255,14 @@ def outputs(s):
       archive  whether to back up to the backup machine after fetching to the store (archive_task.sh)
       logs     part log filename prefix (relative to the data dir)"""
     f = s.get("fetch") or {}
-    done = s.get("done") or []
-    if isinstance(done, str):
-        done = [done]
     return dict(outs=[os.path.normpath(o.strip("/")) for o in [s["out"]] + list(f.get("also") or [])],
-                done=[d.split("|") for d in done], exclude=list(f.get("exclude") or []), extra=list(f.get("extra") or []),
+                done=P.done_items(s.get("done")), exclude=list(f.get("exclude") or []), extra=list(f.get("extra") or []),
                 archive=bool(s.get("archive")), logs=f"{P.TASK_LOGS}/{safe(s['key'])}{SAFE}" if s.get("key") else None)
 
 
 def done_missing(o, exists):
-    """Items still missing from outputs' done (the "a|b" form); exists(path relative to out) is supplied by the caller (local
-    files, fetched files, ...)."""
-    return ["|".join(item) for item in o["done"] if not any(exists(a) for a in item)]
+    """Items still missing from outputs' done (proto.done_missing; exists takes a path relative to out)."""
+    return P.done_missing(o["done"], exists)
 
 
 def done_with(o, exists, empty=True):
@@ -366,6 +362,35 @@ def eta_at(runs, nep, hours=3):
     if rate <= 0 or b[1] >= nep:
         return None
     return b[0] + timedelta(seconds=(nep - b[1]) / rate)
+
+
+def total_of(f):
+    """A task record (collect / one_task) -> total epochs (latest runs, else the debug info the task reported); unknown -> None."""
+    runs = (f or {}).get("runs") or []
+    t = max([r.get("total") or 0 for r in runs] or [0])
+    if not t:
+        t = ((f or {}).get("debug") or {}).get(P.TOTAL_INFO) or 0
+    return t if isinstance(t, (int, float)) and t > 0 else None
+
+
+def progress_of(f):
+    """A task record (collect / one_task, or an executor's entry relay keeps) -> dict(frac, eta, last, epochs, total): the only
+    progress rule. frac: done -> 1.0, total known -> epochs / total (0.0 before the first epoch), else None; eta: when the
+    latest run reaches total (eta_at); last: time of the latest progress point. No record -> all empty."""
+    out = dict(frac=None, eta=None, last=None, epochs=0, total=None)
+    if not f:
+        return out
+    runs = f.get("runs") or []
+    out["total"] = total = total_of(f)
+    out["epochs"] = max([r.get("epochs_done") or 0 for r in runs] or [0])
+    tl = max(runs, key=lambda r: r.get("end") or "").get("tl") if runs else None
+    out["last"] = datetime.strptime(tl[-1][0], "%Y-%m-%d %H:%M:%S") if tl else None
+    if f.get("final"):
+        out["frac"] = 1.0
+    elif total:
+        out["frac"] = min(out["epochs"] / total, 1.0)
+        out["eta"] = eta_at(runs, total)
+    return out
 
 
 def progress_json(fd):

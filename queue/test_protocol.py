@@ -79,6 +79,9 @@ LITERALS = {
     "spec changed": r"""['"]spec changed['"]""",
     "not built": r"""['"]not built['"]""",
     "not spec-built": r"""['"]not spec-built['"]""",
+    # time windows and status sets with one definition (proto.PAUSE_WINDOW / proto.hours, proto.PUEUE_LIVE)
+    "3 hours": r"\b3 hours\b",
+    "pueue live statuses": r"""['"]Running['"],\s*['"]Queued['"],\s*['"]Stashed['"]""",
 }
 # places the migration has not reached yet: (file relative to CORE, name). Only shrinks
 KNOWN = set()

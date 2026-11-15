@@ -207,7 +207,7 @@ def problem(pid, p):
             if sub == "worker":
                 return f"A worker on {site} failed and stopped; its GPUs will idle, check the log and restart it"
             if sub == "fail" and not key:
-                return f"{site} failed too many jobs in the last 3 hours; claiming new tasks is paused"
+                return f"{site} failed too many jobs in the last {proto.hours(proto.PAUSE_WINDOW)}; claiming new tasks is paused"
             if sub == "fail" and "progress" in d:
                 if d["progress"]:
                     return f"{key_name(key)} failed on {site} with progress; decide whether to resume or drop it"

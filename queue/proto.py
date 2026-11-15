@@ -122,6 +122,41 @@ CODE_KEEP = 3                # keep the most recent bundles besides the one in u
 SWITCH_HOLD_S = 90           # self migrate: after switching an executor's bundle, keep unclaimed tasks aside this long (a worker of the old bundle that checked the bundle just before can still claim once)
 CODE_KEEP_S = 4 * 86400      # bundles under the root's code/ touched within this long are kept (running workers touch theirs every round)
 CODE_CLAIM_SLACK = 3600      # also keep bundles touched since this long before the earliest claim among tasks still claimed: a task that keeps running after a switch still uses its claim's bundle
+MAX_FAIL = 2                 # a task that failed this many times (on the bundle in use) is failed in that queue; nobody claims it
+PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # a queue stops claiming when it has this many failures within this window
+# hub side
+SITE_FRESH = 2 * 3600        # executor state recorded by relay counts as current for this long; a machine with claimed tasks unreadable this long is reported
+FETCH_LATE = 3600            # a fetch/archive that succeeded this long ago while the hub still does not see the task done is reported
+NOSLOT_ALERT = 3 * 3600      # a claim this old that still cannot be staged (no CPU job slot) is reported
+VIEW_KEEP = 6 * 3600         # input views built this recently are kept (a task just staged, not added yet, or just released)
+SITE_STATUS_TIMEOUT = 90     # reading an executor's status: skip it this round when its storage hangs this long
+NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are pushed
+PUEUE_LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")  # pueue task statuses that are not finished
+
+
+def hours(sec):
+    """A duration for people: 10800 -> "3 hours"."""
+    h = sec / 3600
+    return f"{h:g} hour{'' if h == 1 else 's'}"
+
+
+def worker_holds(a, now):
+    """A task entry of taskq status (local_status) is still held by a worker there: it names a worker whose heartbeat or task
+    log is fresh (the claim_alive rule on what status reports). A done marker under a held task means results are still being written."""
+    return bool(a.get("worker")) and (now - (a.get("beat") or 0) < STALE_BEAT
+                                      or (a.get("task_log_age") is not None and a["task_log_age"] < FRESH_LOG))
+
+
+# ---------------- done rule (the only one: executors, the store, the hub and every tool use it) ----------------
+def done_items(done):
+    """A step's done field (a string or a list of "a|b" strings) -> [[alternative, ...], ...]."""
+    return [str(d).split("|") for d in ([done] if isinstance(done, str) else done or [])]
+
+
+def done_missing(items, exists):
+    """Items (from done_items) with no alternative present, written back as "a|b"; exists(alternative) -> bool is supplied by
+    the caller (local files under out, a listing fetched from another machine, ...). Done means this is empty."""
+    return ["|".join(alts) for alts in items if not any(exists(a) for a in alts)]
 
 
 def claim_alive(info, made, now, log_age=None, stale=None, fresh=None, half=None):
@@ -143,7 +178,7 @@ STATES = dict(
     claimed="claimed (or assigned to an executor)",
     busy="unclaimed, but its training log changed within 15 minutes",
     stale="claim expired",
-    failed="failed twice",
+    failed=f"failed {MAX_FAIL} times",
     input="missing inputs",
     stopped="stopped",
     bad="spec cannot be parsed",
@@ -227,7 +262,7 @@ OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part 
 OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain")  # plain: push text in plain words (plain.problem)
 SUMMARY_WINDOW = 24 * 3600  # taskq status (monitor/summary.py): "due in the next" / "last" window
 SUMMARY_OVERDUE = 3600  # a running task this far past its estimated finish is listed under "Needs you"
-SUMMARY_HELD_PATIENCE = 2 * 86400  # a task held only by an older bundle still used by running workers (it clears when they switch at their next claim) goes under "Needs you" after this long
+HELD_PATIENCE = 2 * 86400  # a task held only by an older bundle still used by running workers (it clears when they switch at their next claim) is reported (not just recorded) after this long
 TOTAL_INFO = "num_epochs"  # key in INFO for "total rounds" (used when runs have no total; overview total, progress, eta)
 
 # ---------------- alerts (problem ids in health.py; plain.py explains them by kind) ----------------
@@ -247,11 +282,14 @@ def alert_id(kind, *args):
     return ":".join([kind] + [str(a) for a in args if a not in (None, "")])
 
 
-# a problem's value: message text (str), or dict(msg=text, data={…}, after=minutes before reporting) (plain.py reads data, never parses text)
-def alert(msg, after=0, **data):
+# a problem's value: message text (str), or dict(msg=text, data={…}, after=minutes before reporting, level="info" (recorded, not
+# pushed, not under "Needs you") / "urgent") (plain.py reads data, never parses text)
+def alert(msg, after=0, level=None, **data):
     v = dict(msg=msg, data=data) if data else {"msg": msg}
     if after:
         v["after"] = after
+    if level:
+        v["level"] = level
     return v if len(v) > 1 else msg
 
 
@@ -418,11 +456,18 @@ GPU_USAGE_TOTAL = ("gpu", "user", "hours")
 
 # ---------------- hub database and event log (queue/db.py, queue/events.py) ----------------
 DB = "taskq.db"  # under the state dir
+DB_COMPACT = (0.5, 64 << 20)  # the hub tick compacts the database (VACUUM) when free pages are over this share and this many bytes
 STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: one blob transfer (missing → ingest → push → view) at a time
+RELAY_STATUS = "status.json"  # under the hub's relay state dir: each executor's tasks as relay last read them (taskq status reads it)
+# live names in the hub's relay/ and health/ state dirs (each also with its .lock); taskq self migrate (cron stopped) deletes
+# the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate)
+RELAY_NAMES = ("bundles", "state.json", RELAY_STATUS)
+HEALTH_NAMES = (PUEUE_SEEN, "health.log")
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tasks.json", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
                WHEELHOUSE, "envlock", DB)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
+EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
 # source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
 TEXT_LOGS = {"relay": "relay", "feed": "feed", "advance": "advance", "health": "health"}
 PROGRESS_TOP = ("version", "rows")  # taskq progress --json

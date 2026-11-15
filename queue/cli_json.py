@@ -133,7 +133,7 @@ def step_row(i, lv, done, data):
     except Exception as e:  # noqa: BLE001
         row["error"] = f"cannot fill cmd: {e}"
     if done:
-        row["done"] = not SO.done_missing(data, i.outputs[0], [d.split("|") for d in st["done"]])
+        row["done"] = not SO.done_missing(data, i.outputs[0], proto.done_items(st["done"]))
     return row
 
 

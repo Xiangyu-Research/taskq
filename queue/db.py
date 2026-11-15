@@ -33,6 +33,10 @@ SCHEMA = [
     """
     DROP TABLE hash;
     """,
+    # 3: keys whose done files are on the store (advance writes the whole set each round; taskq status reads it for tasks not in the queue)
+    """
+    CREATE TABLE stored(key TEXT PRIMARY KEY, t REAL NOT NULL);
+    """,
 ]
 VERSION = len(SCHEMA)
 
@@ -138,6 +142,18 @@ def get_meta(db, k, default=None):
         return default
     r = db.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
     return json.loads(r[0]) if r else default
+
+
+def compact(db):
+    """VACUUM when most of the file is free pages (left by dropped tables or deleted rows; SQLite does not shrink the file by
+    itself) -> bytes given back (0 when not needed)."""
+    pages, free, size = (db.execute(f"PRAGMA {x}").fetchone()[0] for x in ("page_count", "freelist_count", "page_size"))
+    share, least = proto.DB_COMPACT
+    if not pages or free < pages * share or free * size < least:
+        return 0
+    db.execute("VACUUM")
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # in WAL mode the file shrinks only once the log is written back
+    return (pages - db.execute("PRAGMA page_count").fetchone()[0]) * size
 
 
 def set_meta(db, k, v):
