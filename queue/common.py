@@ -199,28 +199,16 @@ def changed(name, value):
 
 
 # ---------------- task records: the only way to know who a pueue task the core added (transfer, fetch, archive, env build in the hub core group) is ----------------
-def tasks_path():
-    return os.path.expanduser(os.environ.get("TASKQ_TASKS") or _cfg().state("tasks.json", expand=False))  # env var for tests only
-
-
+# (kept in the hub database, hubstate.records; none elsewhere)
 def load_records():
-    try:
-        d = json.load(open(tasks_path()))
-        return d if isinstance(d, list) else []
-    except (OSError, ValueError):
-        return []
+    import hubstate
+    return hubstate.records()
 
 
 def update_records(fn):
-    """fn(records) -> new list, under a lock read-modify-write -> new list."""
-    import fcntl
-    p = tasks_path()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p + ".lock", "a") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
-        recs = fn(load_records())
-        write_json(p, recs)
-    return recs
+    """fn(records) -> new list, read-modify-write in one transaction -> new list."""
+    import hubstate
+    return hubstate.update_records(fn)
 
 
 def new_record(machine, label, step, key, **kw):

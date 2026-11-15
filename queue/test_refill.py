@@ -14,7 +14,6 @@ import fixture  # noqa: E402
 
 fixture.use()
 sys.path.insert(0, HERE)
-os.environ["TASKQ_TASKS"] = os.path.join(fixture.tmpdir(), "tasks.json")  # do not touch the real task records
 os.environ["TASKQ_LAST"] = os.path.join(fixture.tmpdir(), "last")
 import refill as R  # noqa: E402
 

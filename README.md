@@ -203,7 +203,7 @@ and `bin/taskq` mean the full suite):
 | `queue/relay_plugins.py`, `sites/names.py` | `test_relay_plugins.py` |
 | `queue/smoke_gate.py` | `test_smoke.py` |
 | `queue/archive_task.sh` | `test_archive_task.sh` |
-| `queue/db.py`, `queue/events.py`, `queue/tasklog.py` | `test_db.py`, `test_tasklog.py` |
+| `queue/db.py`, `queue/events.py`, `queue/tasklog.py`, `queue/hubstate.py` | `test_db.py`, `test_tasklog.py`, `test_common.py`, `test_relay.py` |
 | `queue/cli_json.py` | `test_cli_json.py` |
 | `queue/migrate.py` | `test_migrate.py` |
 | `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_bundle_paths.py`, `test_e2e.py` (the Slurm chain) |

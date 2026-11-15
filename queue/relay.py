@@ -19,7 +19,6 @@ executors; finally execute the plan and top up worker jobs. See queue/README.md 
 """
 import argparse
 import hashlib
-import json
 import os
 import shlex
 import subprocess
@@ -50,14 +49,13 @@ import relay_plugins as RN  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
+import hubstate as HS  # noqa: E402
 import relay_transfer as RT  # noqa: E402
 import bundle_gate as BG  # noqa: E402
 import smoke_gate as SG  # noqa: E402
 import names as N  # noqa: E402
 import envs as EV  # noqa: E402
-from common import write_json  # noqa: E402
 
-STATUS = os.path.join(ST.DIR, proto.RELAY_STATUS)
 LIVE = proto.PUEUE_LIVE
 NOSLOT_RC = proto.EXIT["stage_later"]  # relay.py stage could not get a CPU job this time (or the checkpoint source is still claimed): retry next check without alerting
 
@@ -175,7 +173,7 @@ def bundle_key(commit, core):
 def wanted_bundle():
     """The bundle every executor should use (the same everywhere) → (name, path on the hub): built from BUNDLE_REF in the
     project repo and RB.CORE_REF in the core repo. When the key (bundle_key) is unchanged and the bundle still exists, reuse
-    the recorded one (bundle_for in state.json) instead of rebuilding."""
+    the recorded one (bundle_for in relay's bookkeeping) instead of rebuilding."""
     commit = subprocess.run(["git", "-C", REPO, "rev-parse", BUNDLE_REF], capture_output=True, text=True).stdout.strip()
     core = subprocess.run(["git", "-C", cfg.CORE, "rev-parse", RB.CORE_REF], capture_output=True, text=True).stdout.strip()
     key = bundle_key(commit, core)
@@ -223,14 +221,10 @@ def update_code(stuck):
 
 
 def prune_bundles(bid):
-    """Keep on the hub only the wanted bundle, the ones executors use (bundle and live in status.json), ones held by the
-    send gate, and the newest few (relay_bundle.prune)."""
-    try:
-        allst = json.load(open(STATUS))
-    except (OSError, ValueError):
-        return []
+    """Keep on the hub only the wanted bundle, the ones executors use (bundle and live of each executor's hubstate.sites
+    row), ones held by the send gate, and the newest few (relay_bundle.prune)."""
     keep = {bid}
-    for d in allst.values():
+    for d in HS.sites().values():
         keep |= {d.get("bundle")} | set(d.get("live") or ()) | {h.get("bundle") for h in (d.get("held") or {}).values()}
     return RB.prune(keep - {None})
 
@@ -446,7 +440,7 @@ def plan(s, name, rs, st, now=None):
         real = a["key"] if a["key"] in keys else None
         m = mt.get(real) if real else None
         if real is None:
-            stuck[alert_id("site", name, "orphan", a["key"])] = alert(f"cannot map {a['key']} in the {L} queue to a task (not in {ST.DIR}/state.json)",
+            stuck[alert_id("site", name, "orphan", a["key"])] = alert(f"cannot map {a['key']} in the {L} queue to a task (no placement record on the hub)",
                                                                       unknown=True, state=a["state"])
         elif a["state"] in ("claimed", "busy"):
             stuck[alert_id("site", name, "orphan", real)] = alert(f"{L} is running {real}, but the hub queue does not have it claimed there; compare the hub queue and the {L} queue",
@@ -517,14 +511,10 @@ def site_for(name, rs, st, mtq):
 
 
 def held_all(ctxs):
-    """Half-done tasks on each executor → {key: [executors]} (refill.holders): use what was read this round, and status.json
-    from the last check for the rest; paused (policy.py PAUSE) or non-executor machines do not count (their tasks are opened
-    up to others to start over)."""
-    try:
-        allst = json.load(open(STATUS))
-    except (OSError, ValueError):
-        allst = {}
-    views = {n: (d or {}).get("tasks") or {} for n, d in allst.items()}
+    """Half-done tasks on each executor → {key: [executors]} (refill.holders): use what was read this round, and what was
+    read at the last check for the rest (hubstate.sites); paused (policy.py PAUSE) or non-executor machines do not count
+    (their tasks are opened up to others to start over)."""
+    views = {n: (d or {}).get("tasks") or {} for n, d in HS.sites().items()}
     views.update({n: site_view(n, c["rs"], c["st"]) for n, c in ctxs.items() if c.get("rs") is not None})
     return refill.holders(views, lambda n: M.is_exec(n) and not M.paused(n))
 
@@ -811,7 +801,7 @@ def submit(name, subs):
 
 
 def site_view(name, rs, st):
-    """Remote status → {real key: dict(state, worker, runs, final, resumable, debug, since)} (tasks in status.json; since: when a worker there claimed it)."""
+    """Remote status → {real key: dict(state, worker, runs, final, resumable, debug, since)} (tasks of hubstate.sites; since: when a worker there claimed it)."""
     rt = {t["key"]: t for t in (rs.get("taskq") or {}).get("tasks") or []}
     out = {}
     for real in ST.keys_of(st, name):
@@ -827,13 +817,9 @@ def write_status(name, rs, st):
     out = site_view(name, rs, st)
     mine = tuple(proto.safe(k) + proto.SAFE for k in out)  # part logs of the tasks recorded here (taskq log, taskq status --all --json parts)
     segs = [x for x in rs.get("seglogs") or [] if mine and x.get("name", "").startswith(mine)]
-    try:
-        allst = json.load(open(STATUS))
-    except (OSError, ValueError):
-        allst = {}
-    allst[name] = dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, seglogs=segs, squeue=rs.get("squeue"), free=rs.get("free"),
-                       bundle=rs.get("bundle"), live=rs.get("live"), held=BG.held(st, name), envs_ok=rs.get("envs_ok"))
-    write_json(STATUS, allst)
+    HS.put_site(name, dict(time=time.time(), label=RM.conf(name)["label"], tasks=out, seglogs=segs, squeue=rs.get("squeue"),
+                           free=rs.get("free"), bundle=rs.get("bundle"), live=rs.get("live"), held=BG.held(st, name),
+                           envs_ok=rs.get("envs_ok")))
 
 
 def log(lines):

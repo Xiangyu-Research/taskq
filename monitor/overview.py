@@ -16,8 +16,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(CORE, "queue"))
 sys.path.insert(0, HERE)
-import cfg  # noqa: E402
 import proto  # noqa: E402
+import hubstate as HS  # noqa: E402
 import health as H  # noqa: E402
 import common as C  # noqa: E402
 import experiments as E  # noqa: E402
@@ -27,16 +27,10 @@ import spec as S  # noqa: E402
 M = H.M
 
 
-def relay_status_file():
-    return cfg.state("relay", proto.RELAY_STATUS)
-
-
 def relay_sources(now_ts):
-    """Executor progress recorded by relay.py on each check -> {label: dict(name, time, tasks, seglogs)} (within 2 hours)."""
-    try:
-        st = json.load(open(relay_status_file()))
-    except (OSError, ValueError):
-        return {}
+    """Executor progress recorded by relay.py on each check (hubstate.sites) -> {label: dict(name, time, tasks, seglogs)}
+    (within proto.SITE_FRESH)."""
+    st = HS.sites()
     out = {}
     for name, r in st.items():
         if not isinstance(r, dict) or now_ts - (r.get("time") or 0) >= proto.SITE_FRESH:
@@ -113,7 +107,7 @@ def health_view():
 
 
 def build(s, relay=None):
-    """gather() result -> summary (proto.OVERVIEW_TOP). relay: executor progress (default: relay.py's status.json)."""
+    """gather() result -> summary (proto.OVERVIEW_TOP). relay: executor progress (default: what relay.py last read, hubstate.sites)."""
     now = s.get("now") or datetime.now()
     hub = M.hub()
     L = lambda n: (M.MACHINES.get(n) or {}).get("label", n)  # noqa: E731

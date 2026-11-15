@@ -14,7 +14,6 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
 import fixture  # noqa: E402
 fixture.use()
-os.environ["TASKQ_TASKS"] = os.path.join(fixture.tmpdir(), "tasks.json")  # do not touch real task records
 os.environ["TASKQ_LAST"] = os.path.join(fixture.tmpdir(), "last")
 os.environ["TASKQ_STATE"] = fixture.tmpdir()  # health's own state (pueue_seen, ...) does not land in HOME either
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "queue"))

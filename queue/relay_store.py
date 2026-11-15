@@ -1,11 +1,10 @@
-"""Relay bookkeeping on the hub (relay/state.json in the state dir, cfg.state: paths placed per machine and task, views,
-bundles) and cleanup of executor roots.
+"""Relay bookkeeping on the hub (in the hub database, hubstate.relay: paths placed per machine and task, views, bundles) and
+cleanup of executor roots.
 Cleanup below the soft limit removes views the hub queue no longer wants (registered per-task views plus dirs under the dirs
 where plugins build views, VIEW_ROOTS in sites/names.py; never half-built ones), then blobs with no symlink pointing at them,
 least recently used first (never ones hard-linked elsewhere or pinned by a running stage), until free space is back above the
 limit. Only touch things inside the root R, take the view lock when removing views, and compare real paths when R is reached
 through a symlink."""
-import fcntl
 import hashlib
 import json
 import os
@@ -16,39 +15,22 @@ CORE = os.path.dirname(HERE)  # root of the scheduler code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 cfg.use_config()
-import proto  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
 import relay_plugins as RN  # noqa: E402
-from common import write_json  # noqa: E402
+import hubstate as HS  # noqa: E402
 
-DIR = cfg.state("relay")
-STATE = os.path.join(DIR, "state.json")
-LINKS = os.path.join(DIR, proto.RELAY_LINKS)
+DIR = cfg.state("relay")  # on the hub: bundles and stage locks
 
 
-# ---------------- state file ----------------
+# ---------------- bookkeeping ----------------
 def update_state(fn):
-    """Change state.json under its lock (fn edits the dict in place); then remove link sets no key record names."""
-    os.makedirs(DIR, exist_ok=True)
-    with open(STATE + ".lock", "a") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
-        st = load_state()
-        out = fn(st)
-        write_json(STATE, st)
-        used = {r.get("linkset") for recs in (st.get("keys") or {}).values() for r in recs.values()}
-        for f in os.listdir(LINKS) if os.path.isdir(LINKS) else []:
-            if f.endswith(".json") and f[:-5] not in used:
-                os.remove(os.path.join(LINKS, f))
-    return out
+    """Change relay's bookkeeping in one transaction (fn edits the dict in place); link sets no key record names are removed."""
+    return HS.update_relay(fn)
 
 
 def load_state():
-    try:
-        with open(STATE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return HS.relay()
 
 
 def keys_of(st, name):
@@ -65,20 +47,14 @@ def links_id(links):
 def put_links(links):
     """Store a link set (call inside update_state's fn, so the cleanup there sees the record naming it) -> its id."""
     i = links_id(links)
-    p = os.path.join(LINKS, i + ".json")
-    if not os.path.exists(p):
-        os.makedirs(LINKS, exist_ok=True)
-        write_json(p, links)
+    HS.put_links(i, links)
     return i
 
 
 def links_of(k):
     """A key record's input links {relative path: sha256} ({} when it has none or the set is gone)."""
-    try:
-        with open(os.path.join(LINKS, k["linkset"] + ".json")) as f:
-            return json.load(f)
-    except (KeyError, TypeError, OSError, ValueError):
-        return {}
+    i = (k or {}).get("linkset")
+    return HS.links(i) if i else {}
 
 
 def paths_of(k):

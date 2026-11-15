@@ -1,4 +1,5 @@
-"""Hub database (proto.DB under the state dir): event log, health problems, notices, acks, progress snapshots.
+"""Hub database (proto.DB under the state dir): event log, health problems, notices, acks, progress snapshots, results on the
+store, and the hub's bookkeeping (hubstate.py: what relay read from each executor, task records, relay's placement records).
 
 Only exists on the hub. Only create=True calls (a real tick, `taskq db migrate`) create or migrate; other calls open an existing file only and return None, so executor bundles never create it. Not used on network filesystems (SQLite locking is unreliable there). A database newer than this code opens read-only.
 """
@@ -36,6 +37,15 @@ SCHEMA = [
     # 3: keys whose done files are on the store (advance writes the whole set each round; taskq status reads it for tasks not in the queue)
     """
     CREATE TABLE stored(key TEXT PRIMARY KEY, t REAL NOT NULL);
+    """,
+    # 4: hub bookkeeping that lived in JSON files (hubstate.py; taskq self migrate moves relay/state.json, relay/linksets/,
+    # relay/status.json and tasks.json in)
+    """
+    CREATE TABLE site(name TEXT PRIMARY KEY, body TEXT NOT NULL);
+    CREATE TABLE record(seq INTEGER PRIMARY KEY, body TEXT NOT NULL);
+    CREATE TABLE placed(site TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(site, key));
+    CREATE TABLE linkset(id TEXT PRIMARY KEY, links TEXT NOT NULL);
+    CREATE TABLE relay(name TEXT PRIMARY KEY, body TEXT NOT NULL);
     """,
 ]
 VERSION = len(SCHEMA)

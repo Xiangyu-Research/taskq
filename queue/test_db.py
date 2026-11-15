@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hub database (db.py) and event log (events.py): never created by readers, refused on a network filesystem, spool when it
 cannot be written, concurrent writers, a newer schema opens read-only, TEXT_LOGS sources also get a text line, progress rows only on
-change, no sha256 cache in the hub database (it is on the store: site_ops.hashes).
+change, no sha256 cache in the hub database (it is on the store: site_ops.hashes), the hub bookkeeping (hubstate.py).
 
     python3 queue/test_db.py
 """
@@ -162,12 +162,54 @@ ok("site_ops.hashes: an unchanged file is not read again", SO.hashes(R, [f])[f] 
 open(f, "wb").write(b"abcd")
 ok("site_ops.hashes: a changed file (size, mtime) is hashed again", SO.hashes(R, [f])[f].startswith("88d4266f") and len(rows()) == 2)
 
+# hub bookkeeping (hubstate.py)
+import hubstate as HS  # noqa: E402
+HS.put_site("a", dict(time=1, tasks={"k": {"ran": True}}))
+HS.put_site("a", dict(time=2, tasks={}))
+ok("sites: one row per executor, the last write wins", HS.sites() == {"a": dict(time=2, tasks={})})
+
+
+def place(st):
+    st.setdefault("keys", {}).setdefault("a", {})["k1"] = dict(recipe="r", linkset=HS.put_links("L1", {"p": "h"}) or "L1")
+    st["keys"]["a"]["k2"] = dict(recipe="r", linkset="L2")
+    HS.put_links("L2", {"q": "h"})
+    HS.put_links("L9", {"z": "h"})  # named by no record
+    st["views"] = {"a": {"v": 1}}
+    return "out"
+
+
+ok("update_relay: returns what fn returned; records, views and the link sets they name are kept, others removed",
+   HS.update_relay(place) == "out" and HS.relay() == dict(keys={"a": {"k1": dict(recipe="r", linkset="L1"), "k2": dict(recipe="r", linkset="L2")}},
+                                                         views={"a": {"v": 1}})
+   and HS.links("L1") == {"p": "h"} and HS.links("L9") == {} and HS.links("nope") == {})
+
+
+def bad(st):
+    st["keys"]["a"].pop("k2")
+    raise RuntimeError("half way")
+
+
+try:
+    HS.update_relay(bad)
+except RuntimeError:
+    pass
+ok("update_relay: fn fails half way -> nothing changes (one transaction)", set(HS.relay()["keys"]["a"]) == {"k1", "k2"} and HS.links("L2") == {"q": "h"})
+HS.update_relay(lambda st: st["keys"]["a"].pop("k2"))
+ok("update_relay: a dropped record goes, and so does the link set only it named", set(HS.relay()["keys"]["a"]) == {"k1"} and HS.links("L2") == {})
+ok("records: read-modify-write -> the new list", HS.update_records(lambda r: r + [dict(id=1)]) == [dict(id=1)] and HS.records() == [dict(id=1)])
+
 # newer schema → read-only
 db.execute(f"PRAGMA user_version={D.VERSION + 1}")
 nd = D.connect(create=True)
 ok("database newer than the code: opened read-only, never migrated down", nd is not None and not D.writable(nd))
 EV.add("relay", "after newer")
 ok("events.add on a newer database: spooled, not lost", "after newer" in open(EV.spool_path()).read())
+try:
+    HS.put_site("a", {})
+    refused = False
+except RuntimeError as e:
+    refused = "newer" in str(e)
+ok("hubstate writers on a newer database: refused with a clear error (not written to a schema they do not know)", refused)
 db.execute(f"PRAGMA user_version={D.VERSION}")
 
 print("all passed" if not fails else f"{fails} failed")

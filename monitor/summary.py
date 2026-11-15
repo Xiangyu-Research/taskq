@@ -5,11 +5,10 @@
     taskq status --all         every task, grouped by state, each group by machine
     taskq status <word>...     one machine (name or label), or the tasks whose key contains every word
 
-Reads only what is on the hub: the hub queue, executor state recorded by relay.py each round (relay status.json), problems,
+Reads only what is on the hub: the hub queue, executor state recorded by relay.py each round (hubstate.sites), problems,
 notices and progress snapshots in the hub database. Nothing connects to other machines, so the numbers are as of the last
 health round (shown at the top). --json output stays with taskq status --json (the queue) and taskq status --all --json (overview).
 """
-import json
 import os
 import sys
 from datetime import datetime
@@ -21,7 +20,7 @@ import cfg  # noqa: E402
 import proto  # noqa: E402
 import spec as S  # noqa: E402
 import notice as NT  # noqa: E402
-import overview as O  # noqa: E402
+import hubstate as HS  # noqa: E402
 
 M = cfg.mtab()
 P = proto
@@ -60,10 +59,7 @@ def read_local(now):
         queue = taskq.local_status()
     except taskq.DiskError:
         queue = None
-    try:
-        relay = json.load(open(O.relay_status_file()))
-    except (OSError, ValueError):
-        relay = {}
+    relay = HS.sites()
     db = NT.open_db(write=False)
     probs, checked = NT.problems(db) if db else ({}, None)
     import events

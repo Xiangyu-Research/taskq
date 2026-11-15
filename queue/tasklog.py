@@ -11,7 +11,7 @@ to read.
 Data dir: --data, else cfg.data_dir(). On the hub, parts trained on executors appear only after the fetch (the fetch brings
 this task's part logs); for parts still on an executor see taskq status --all --json's parts, or taskq log --data
 <root>/data there.
-The event log (hub database) and task records (tasks.json) exist only on the hub; elsewhere they are empty.
+The event log (hub database) and task records (hubstate.records) exist only on the hub; elsewhere they are empty.
 --json: one JSON line, fields in proto's TASKLOG_*.
 """
 import argparse

@@ -50,7 +50,7 @@ s.bind(("127.0.0.1", 0))
 PORT = s.getsockname()[1]
 s.close()
 os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}",
-                  TUNNEL_POLL="0.1", TUNNEL_LOCK=os.path.join(T, "lock"), TASKQ_TASKS=os.path.join(T, "tasks.json"),
+                  TUNNEL_POLL="0.1", TUNNEL_LOCK=os.path.join(T, "lock"),
                   TASKQ_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
                   PATH=BIN + ":" + os.environ["PATH"])
 
@@ -67,6 +67,8 @@ import relay_store as ST  # noqa: E402
 import relay_transfer as RT  # noqa: E402
 import relay_bundle  # noqa: E402
 import site_ops as SO  # noqa: E402
+import hubstate as HS  # noqa: E402
+import db as HDB  # noqa: E402
 
 assert M.machine("hub")["root"] == HROOT and M.data() == TN.ROOT, "the copied config was not used"
 NAME = "site-slurm2"
@@ -85,6 +87,24 @@ os.makedirs(os.path.join(CONDA, "bin"))
 os.symlink(relay_bundle.check_python() or sys.executable, os.path.join(CONDA, "bin", "python3"))
 Q = "hub"  # machine holding the hub queue (taskq.queue_host())
 assert relay.taskq.queue_host() == Q
+
+
+@contextlib.contextmanager
+def sites_as(rows):
+    """What relay last read on each executor (hubstate.sites) is exactly rows inside the block; put back after."""
+    def put(d):
+        db = HDB.connect(create=True)
+        with HDB.tx(db):
+            db.execute("DELETE FROM site")
+        db.close()
+        for n, r in d.items():
+            HS.put_site(n, r)
+    old = HS.sites()
+    put(rows)
+    try:
+        yield
+    finally:
+        put(old)
 
 
 def ok(msg):
@@ -454,10 +474,7 @@ def test_assign():
         stuck = {}
         out, why = relay.assign(s or S0(mt), {n: dict(rs=rs, st=c) for n, (rs, c) in ctxs.items()}, stuck, {})
         return {n: [(a["op"], a["key"]) for a in v] for n, v in out.items()}, why, stuck
-    status0 = open(relay.STATUS).read() if os.path.exists(relay.STATUS) else None
-    if status0 is not None:
-        os.remove(relay.STATUS)
-    with patched(relay.RM, store_op=probe), pdict(relay.P.AUTO, smoke=False), pdict(relay.P.READY):
+    with sites_as({}), patched(relay.RM, store_op=probe), pdict(relay.P.AUTO, smoke=False), pdict(relay.P.READY):
         out, why, _ = run([mtask(K)] + cands, {NAME: (RS(rtask(K, "claimed", "1")), st)})
         assert out == {NAME: [("take", K2), ("take", K3)]}, (out, why)
         assert probed[-1] == ["prepared/D2_y", "prepared/D3_z"], probed  # do not measure what is already over there (D1_x)
@@ -558,8 +575,6 @@ def test_assign():
         out, why, _ = run([mtask(K)] + cands, {NAME: (None, st)})
         assert out == {} and why[NAME] == "unreachable", (out, why)
         ok("no assignment to machines with all workers outside their hours window, or unreachable")
-    if status0 is not None:
-        open(relay.STATUS, "w").write(status0)
 
 
 def test_refcount():
@@ -705,26 +720,18 @@ def test_paused():
 
 
 def test_held_by():
-    """Half-done tasks return to their original machine: use what was read this round and status.json for the rest; open them
-    up when that machine is paused or not an executor."""
+    """Half-done tasks return to their original machine: use what was read this round and at the last check for the rest; open
+    them up when that machine is paused or not an executor."""
     other = next(n for n in M.executors() if n != NAME)
-    old = open(relay.STATUS).read() if os.path.exists(relay.STATUS) else None
-    try:
-        os.makedirs(os.path.dirname(relay.STATUS), exist_ok=True)
-        json.dump({other: {"tasks": {"h/x": {"resumable": True}, "h/y": {}}}, NAME: {"tasks": {"h/old": {"ran": True}}},
-                   "gone-site": {"tasks": {"h/z": {"ran": True}}}}, open(relay.STATUS, "w"))
+    with sites_as({other: {"tasks": {"h/x": {"resumable": True}, "h/y": {}}}, NAME: {"tasks": {"h/old": {"ran": True}}},
+                   "gone-site": {"tasks": {"h/z": {"ran": True}}}}):
         with patched(relay, site_view=lambda n, rs, st: {"h/me": {"ran": True}}):
             h = relay.held_all({NAME: dict(rs={}, st={})})
             assert h == {"h/x": [other], "h/me": [NAME]}, h
             with pdict(relay.P.PAUSE, **{other: (None, "test")}):
                 assert relay.held_all({NAME: dict(rs={}, st={})}) == {"h/me": [NAME]}
             assert relay.held_all({NAME: dict(rs=None, st={})}) == {"h/x": [other], "h/old": [NAME]}
-    finally:
-        if old is None:
-            os.remove(relay.STATUS)
-        else:
-            open(relay.STATUS, "w").write(old)
-    ok("half-done tasks return to their original machine: use this round's read (or status.json when unreadable); open them up when the machine is paused or gone from the table")
+    ok("half-done tasks return to their original machine: use this round's read (or the last one when unreadable); open them up when the machine is paused or gone from the table")
 
 
 def test_tilde_root():
@@ -905,9 +912,11 @@ def test_e2e():
     assert k["views"] == [f"prepared/{TN.DS}"] and k["outs"] == [sp["out"]] and k["params"] == sp["params"], k
     lk = ST.links_of(k)
     assert "links" not in k and lk and all(SO.HASH_RE.fullmatch(h) for h in lk.values()) and ST.links_id(lk) == k["linkset"], k
-    assert os.listdir(ST.LINKS) == [k["linkset"] + ".json"], os.listdir(ST.LINKS)
+    db = HDB.connect()
+    assert [i for (i,) in db.execute("SELECT id FROM linkset")] == [k["linkset"]]
+    db.close()
     assert os.path.isfile(os.path.join(HROOT, proto.ROOT["hashes"])) and not os.path.exists(os.path.join(TN.ROOT, ".relay_in"))
-    ok(f"staging: {blobs} files stored by content, symlinks at the same paths as the store, key and params unchanged, added to the remote queue; sha256 cached in the store state/hashes.db; input links kept in a link set file named by the key record")
+    ok(f"staging: {blobs} files stored by content, symlinks at the same paths as the store, key and params unchanged, added to the remote queue; sha256 cached in the store state/hashes.db; input links kept in a link set named by the key record")
 
     rq = os.path.join(RROOT, "queue", "tasks.jsonl")
     recs = [json.loads(x) for x in open(rq) if x.strip()]
@@ -1017,10 +1026,10 @@ def test_e2e():
     ok("fetch with symlinks: links to inputs (straight to a blob or into a view) become relative links to that input on the store; output links stay as is")
 
     relay.write_status(NAME, relay.remote_status(NAME), ST.load_state())
-    st = json.load(open(relay.STATUS))[NAME]
+    st = HS.sites()[NAME]
     assert sp["key"] in st["tasks"] and st["tasks"][sp["key"]]["final"], st
     assert [x["name"] for x in st["seglogs"]] == [log] and log.startswith(proto.safe(sp["key"]) + proto.SAFE), st["seglogs"]
-    ok("the task is in status.json, with its part logs over there (taskq status --all --json parts)")
+    ok("the task is in what relay read there (hubstate.sites), with its part logs over there (taskq status --all --json parts)")
     return pre
 
 

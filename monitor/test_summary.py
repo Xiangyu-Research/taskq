@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test summary.py (taskq status on the hub): fixed config, a fake hub queue, relay status.json and database; no machines."""
+"""Test summary.py (taskq status on the hub): fixed config, a fake hub queue, what relay read and database; no machines."""
 import os
 import sys
 import time
@@ -10,7 +10,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
 import fixture  # noqa: E402
 fixture.use()
-os.environ["HOME"] = fixture.tmpdir()  # hub database and relay status.json (cfg.state) live under the temp HOME
+os.environ["HOME"] = fixture.tmpdir()  # hub database (cfg.state) live under the temp HOME
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import summary as SU  # noqa: E402
 import proto  # noqa: E402
@@ -33,7 +33,7 @@ def ts(dt):
 
 
 def train(epochs, total=1000, last=NOW, per_10=600, final=False):
-    """A training record as relay status.json keeps it: one run with 10-epoch points every per_10 seconds up to last."""
+    """A training record as relay keeps it (hubstate.sites): one run with 10-epoch points every per_10 seconds up to last."""
     tl = [[ts(last - timedelta(seconds=per_10 * i)), epochs - 10 * i] for i in range(10, -1, -1)]
     return dict(state="claimed", worker="w", runs=[dict(start=tl[0][0], end=ts(last), epochs_done=epochs, total=total, tl=tl)],
                 final=final, resumable=True, ran=True, debug={}, since=(last - timedelta(hours=3)).timestamp())

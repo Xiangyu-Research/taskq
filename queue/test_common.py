@@ -2,7 +2,6 @@
 """Tests for common.py: reading/writing task records, recovering task ids, cleanup; pueue times. Temp files, no machines.
     python3 queue/test_common.py
 """
-import json
 import os
 import sys
 import threading
@@ -10,7 +9,7 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata"))
 import fixture  # noqa: E402
 T = fixture.tmpdir()
-os.environ["TASKQ_TASKS"] = os.path.join(T, "tasks.json")
+os.environ["TASKQ_DB"] = os.path.join(T, "taskq.db")  # task records live in the hub database
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common as C  # noqa: E402
 
@@ -61,8 +60,8 @@ ok("task id reused by another task (different label): record deleted", C.sync_re
 ok("pueue-host unreadable (error): its records are not deleted",
    C.sync_records({"pueue-host": {"error": "ssh"}}, [dict(r1, machine="pueue-host")]) == [dict(r1, machine="pueue-host")])
 
-# writing files
-C.write_json(C.tasks_path(), [])
+# writing records (hub database)
+ok("no database yet: no records, nothing created", C.load_records() == [] and not os.path.exists(os.environ["TASKQ_DB"]))
 a = C.new_record("pueue-host", "infer:t16_f3", "infer", "k3", group="gpu1")
 C.set_record_id(a, 30)
 b = C.new_record("pueue-host", "infer:t16_f3", "infer", "k3", group="gpu1")
@@ -72,10 +71,17 @@ C.new_record("hub", "eval:t3_f1", "eval", "k1", src=None)
 ok("fields with value None are not written", "src" not in C.load_records()[-1])
 C.drop_records(lambda r: r["machine"] == "pueue-host")
 ok("drop_records: delete by predicate", [r["machine"] for r in C.load_records()] == ["hub"])
-open(C.tasks_path(), "w").write('[{"machine": "hub", "id": 3')
-ok("half-written file (unreadable): treated as no records, no error", C.load_records() == [])
-open(C.tasks_path(), "w").write('{"a": 1}')
-ok("file is not a list: treated as no records", C.load_records() == [])
+
+def boom(recs):
+    recs.append(dict(machine="hub", id=9))
+    raise RuntimeError("x")
+
+
+try:
+    C.update_records(boom)
+except RuntimeError:
+    pass
+ok("a writer that fails changes nothing (one transaction)", [r["machine"] for r in C.load_records()] == ["hub"])
 
 
 def many(n):
@@ -83,11 +89,11 @@ def many(n):
         C.new_record("hub", f"x{threading.get_ident()}_{i}", "eval", f"k{i}")
 
 
-C.write_json(C.tasks_path(), [])
+C.update_records(lambda recs: [])
 ths = [threading.Thread(target=many, args=(20,)) for _ in range(4)]
 [t.start() for t in ths]
 [t.join() for t in ths]
-ok("several processes adding at once: locked read-modify-write, none lost", len(C.load_records()) == 80 and isinstance(json.load(open(C.tasks_path())), list))
+ok("several processes adding at once: locked read-modify-write, none lost", len(C.load_records()) == 80)
 
 # commands on another machine are time-limited there too: after this side times out, no stuck process is left there
 _sp = __import__("subprocess")

@@ -105,6 +105,7 @@ import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 from flow.compile import build  # noqa: E402
 import migrate as MG  # noqa: E402
+import hubstate as HS  # noqa: E402
 
 fails = 0
 
@@ -306,7 +307,9 @@ write(os.path.join(SM, "lab0.json.lock"), "")
 # relay ledger
 REC_INF = dict(recipe="command", params=P_INF, data=["raw/in"], staged=1.0, views=[VIEW], inputs=[], outs=[INST[NINF].outputs[0]],
                cleanup=[], unq=7)
-REC_EV = dict(recipe="command", params=P_EV, data=[], staged=2.0, views=[], inputs=[], outs=[INST[NEV].outputs[0]], cleanup=[], unq=2)
+EV_LINKS = {"x/y.dat": "cd" * 32}  # a link set the old files already hold, named by its record
+REC_EV = dict(recipe="command", params=P_EV, data=[], staged=2.0, views=[], inputs=[], outs=[INST[NEV].outputs[0]], cleanup=[], unq=2,
+              linkset="e0")
 REC_SRC = dict(recipe="toy", params=dict(TOY["spec"]["params"], oldlogs=dict(dir="x")), data=[], staged=3.0, views=["prepared/D101_alpha"], inputs=[],
                outs=[TOY["spec"]["out"]], cleanup=[], links={"prepared/D101_alpha/x.dat": "ab" * 32})
 write(os.path.join(STATE, "relay", "state.json"), json.dumps(dict(
@@ -315,6 +318,14 @@ write(os.path.join(STATE, "relay", "state.json"), json.dumps(dict(
     views={"lab0": {VIEW: 10}, "lab1": {"v/lab1": 20}, "dicc": {"v/dicc": 30}, "site-slurm": {"prepared/D101_alpha": 40}},
     last_ok={"lab0": 100, "lab1": 200, "dicc": 300, "site-slurm": 50},
     bundle_for={"site-slurm": "abc"}, held={GONE: 1.0})))
+# the rest of the hub's bookkeeping files from before the database held them (taskq self migrate reads them in, then deletes them)
+OLD_LS = os.path.dirname(write(os.path.join(STATE, "relay", "linksets", "e0.json"), json.dumps(EV_LINKS)))
+write(os.path.join(OLD_LS, "dead.json"), json.dumps({"a": "ef" * 32}))  # named by no record: not kept
+OLD_SITES = {"site-pueue": dict(time=5.0, label="L1", tasks={}, seglogs=[], bundle="b1")}
+OLD_RECS = [dict(machine="hub", id=4, label="fetch:x", added=1.0, step="fetch", key=SRC)]
+OLD_HUB = [os.path.join(STATE, "relay", "state.json"), OLD_LS, write(os.path.join(STATE, "relay", "status.json"), json.dumps(OLD_SITES)),
+           write(os.path.join(STATE, "tasks.json"), json.dumps(OLD_RECS)), write(os.path.join(STATE, "tasks.json.lock"), ""),
+           write(os.path.join(STATE, "relay", "state.json.lock"), "")]
 
 # unused and kept entries in the state dir
 JUNK = [write(os.path.join(STATE, "shift.json"), "{}"), write(os.path.join(STATE, "relay", "state.json.bak"), "{}"),
@@ -330,9 +341,7 @@ SNAP = os.path.join(T, "snap")
 os.makedirs(os.path.join(SNAP, MG.OLD_SNAPSHOTS, "abc"))
 write(os.path.join(SNAP, MG.OLD_SNAPSHOTS, ".lock"), "")
 ok("... while a snapshot dir is left, it is not unused", os.path.join(SNAP, MG.OLD_SNAPSHOTS) not in MG.leftovers(SNAP))
-KEEP = [write(os.path.join(STATE, "tasks.json"), "{}"), write(os.path.join(STATE, "health", "pueue_seen.json"), "{}"),
-        write(os.path.join(STATE, "relay", "status.json"), "{}"),  # live: relay.py writes it each round, taskq status reads it
-        write(os.path.join(STATE, "relay", "state.json.lock"), ""),
+KEEP = [write(os.path.join(STATE, "health", "pueue_seen.json"), "{}"),
         write(os.path.join(STATE, "relay", f"stage_{next(iter(__import__('cfg').mtab().MACHINES))}.lock"), ""),
         write(os.path.join(STATE, "relay", "bundles", "x", "f"), "x"),
         write(os.path.join(STATE, "last", "a.json"), "[]")]  # "skip a repeat" records (common.changed): live, kept
@@ -458,7 +467,8 @@ ok("lists: what each machine does (renamed part logs, existing target kept, merg
    and "skip records of workers that no longer exist" in out and "drop pin record" in out)
 ok("lists: smoke records, state-dir drops, sha256 cache, and says nothing was changed",
    "Smoke records: ['lab0', 'lab1', 'site-slurm'] -> ['site-pueue', 'site-slurm']" in out
-   and all(f"drop {p}" in out for p in JUNK) and not any(f"drop {p}" in out for p in KEEP)
+   and all(f"drop {p}" in out for p in JUNK + OLD_HUB) and not any(f"drop {p}" in out for p in KEEP)
+   and "task records: from tasks.json into the hub database" in out and "on 1 executors: from relay/status.json" in out
    and "2 sha256 cache rows" in out and "listed only, nothing changed" in out)
 
 # ---------------- 4. Stop: a machine has something that cannot be handled automatically ----------------
@@ -501,7 +511,7 @@ hub = {t["key"]: t for t in tasks_of(os.path.join(TQ, Q["tasks"]))}
 ok(f"queue: old tasks renamed to step instance names, unmatched and duplicate ones dropped ({sorted(hub)})", sorted(hub) == sorted([SRC, NINF, NEV]))
 ok("parameters the recipe no longer has (oldlogs) removed from the hub queue and the relay ledger",
    "oldlogs" not in hub[SRC]["params"] and hub[SRC]["params"].get("machines")
-   and "oldlogs" not in json.load(open(os.path.join(STATE, "relay", "state.json")))["keys"]["site-slurm"][SRC]["params"])
+   and "oldlogs" not in HS.relay()["keys"]["site-slurm"][SRC]["params"])
 ok("renamed tasks: parameters from advance.queue_params, no experiment",
    hub[NINF]["params"] == A.queue_params(INST[NINF]) and hub[NEV]["params"] == A.queue_params(INST[NEV])
    and hub[NINF]["exp"] is None and hub[NINF]["recipe"] == "command")
@@ -532,7 +542,7 @@ ok("smoke records: old names merged into new ones, kind names without a repeated
    and json.load(open(os.path.join(SM, "site-slurm.json"))) == {"k3": dict(t=5, ok=True, kind="k3")})
 
 # relay ledger
-st = json.load(open(os.path.join(STATE, "relay", "state.json")))
+st = HS.relay()
 ks = st.get("keys") or {}
 ok(f"relay ledger: machines renamed, old names merged, records of the merged old root (lab1) dropped ({ {n: sorted(r) for n, r in ks.items()} })",
    {n: sorted(r) for n, r in ks.items()} == {"site-pueue": [NINF], "site-slurm": sorted([SRC, NEV])})
@@ -544,16 +554,20 @@ ok("relay ledger: old data becomes inputs, old inputs (files placed there) becom
    ri["inputs"] == ["raw/in"] and ri["placed"] == [] and not any("data" in r for r in (ri, re_, rs))
    and MG.renamed_params(dict(cmd="c", data=["x"])) == dict(cmd="c", inputs=["x"])
    and MG.renamed_params(dict(dataset="d", data=["y"])) == dict(dataset="d", inputs=["y"]) and MG.renamed_params(dict(a=1)) == dict(a=1))
-LS = os.path.join(STATE, "relay", proto.RELAY_LINKS)
 
 
 def linkset(r):
-    return json.load(open(os.path.join(LS, r["linkset"] + ".json")))
+    return HS.links(r["linkset"])
 
 
+con = sqlite3.connect(os.environ["TASKQ_DB"])
+LSIDS = sorted(i for (i,) in con.execute("SELECT id FROM linkset"))
+con.close()
 ok(f"relay ledger: links filled in (symlinks in views pointing at this machine's blobs -> sha256; links elsewhere and regular files not counted), existing ones unchanged, all moved into link set files ({ri})",
-   linkset(ri) == {f"{VIEW}/frag_0/final.ckpt": H1} and linkset(re_) == {} and linkset(rs) == REC_SRC["links"]
-   and not any("links" in r for r in (ri, re_, rs)) and sorted(os.listdir(LS)) == sorted({r["linkset"] + ".json" for r in (ri, re_, rs)}))
+   linkset(ri) == {f"{VIEW}/frag_0/final.ckpt": H1} and linkset(re_) == EV_LINKS and linkset(rs) == REC_SRC["links"]
+   and not any("links" in r for r in (ri, re_, rs)) and LSIDS == sorted({r["linkset"] for r in (ri, re_, rs)}))
+ok("hub bookkeeping files read into the database: what relay last read, task records; the files are gone",
+   HS.sites() == OLD_SITES and HS.records() == OLD_RECS and not any(os.path.lexists(p) for p in OLD_HUB))
 ok("relay ledger: views merged (merged old roots dropped), last_ok max, bundle_for removed",
    st.get("views") == {"site-pueue": {VIEW: 10}, "site-slurm": {"v/dicc": 30, "prepared/D101_alpha": 40}}
    and st.get("last_ok") == {"site-pueue": 200, "site-slurm": 300} and "bundle_for" not in st and "held" not in st)

@@ -33,6 +33,11 @@ OLD_CODE = "before-migrate"  # bundle field of failure records from before the c
 OLD_SNAPSHOTS = "code"  # <state dir>/code/<commit>: code snapshots of the old queue/q (old_snapshots)
 PER_KEY = ("claims", "failures", "skips", "inputs", "released", "stopped")  # per-task records in a queue (proto.QUEUE)
 OLD_PART = "_seg"  # old part log name <safe key>__<job>_seg<part>.log
+# hub bookkeeping files from before it moved into the hub database (hubstate.py), under the state dir: read in, then deleted
+OLD_RELAY_STATE = os.path.join("relay", "state.json")
+OLD_LINKSETS = os.path.join("relay", "linksets")  # <id>.json per link set
+OLD_SITES = os.path.join("relay", "status.json")
+OLD_RECORDS = "tasks.json"
 
 # old on-disk text (only this rewrite step reads it; no reader keeps accepting it)
 OLD_TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
@@ -659,7 +664,7 @@ def fix_smoke(Q, ren, say, dry):
 
 
 def fix_relay(st, keys, params, ren, links, merged, drop, say):
-    """Relay ledger state.json (edited in place): rename machines and tasks, replace recipe parameters, drop unq, move input
+    """Relay ledger (edited in place): rename machines and tasks, replace recipe parameters, drop unq, move input
     links into link sets (relay_store.put_links; filled in from the views when a record has none); drop records of merged
     old roots and of tasks gone from the queue; clear bundle-gate holds (held, recorded under the old bundle) so the new
     bundle is judged afresh. -> {link set id: links} to store with the new state (relay_store.put_links)."""
@@ -686,7 +691,7 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
             to[nk] = r
     st["keys"] = out
     if sets:
-        say(f"relay ledger: input links of {sum(map(len, out.values()))} records go into {len(sets)} link sets under {proto.RELAY_LINKS}/")
+        say(f"relay ledger: input links of {sum(map(len, out.values()))} records go into {len(sets)} link sets")
     for f in ("views", "last_ok"):
         v = {}
         for old, x in (st.get(f) or {}).items():
@@ -702,6 +707,34 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
     st.pop("held", None)
     say(f"relay ledger: { {n: len(r) for n, r in out.items()} } records; bundles will be rebuilt from the current commit")
     return sets
+
+
+def old_hub_files(home):
+    """Hub bookkeeping still in files (OLD_*) -> dict(relay, sets {link set id: links}, sites, records), each None when its
+    file is absent (already in the database)."""
+    def load(p, kind):
+        try:
+            with open(os.path.join(home, p)) as f:
+                v = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as e:
+            raise Stop(f"cannot read {os.path.join(home, p)} ({e}); fix or remove it and run again")
+        if not isinstance(v, kind):
+            raise Stop(f"{os.path.join(home, p)} is not a {kind.__name__}; fix or remove it and run again")
+        return v
+    d = os.path.join(home, OLD_LINKSETS)
+    sets = {f[:-5]: load(os.path.join(OLD_LINKSETS, f), dict) for f in sorted(os.listdir(d)) if f.endswith(".json")} if os.path.isdir(d) else {}
+    return dict(relay=load(OLD_RELAY_STATE, dict), sets=sets, sites=load(OLD_SITES, dict), records=load(OLD_RECORDS, list))
+
+
+def hub_files_say(old, say):
+    if old["relay"] is not None:
+        say(f"relay ledger and {len(old['sets'])} link sets: from {OLD_RELAY_STATE} and {OLD_LINKSETS}/ into the hub database")
+    if old["sites"] is not None:
+        say(f"what relay last read on {len(old['sites'])} executors: from {OLD_SITES} into the hub database")
+    if old["records"] is not None:
+        say(f"{len(old['records'])} task records: from {OLD_RECORDS} into the hub database")
 
 
 def leftovers(home):
@@ -838,10 +871,17 @@ def main(argv):
     import mtab as M
     import relay_remote as RM
     import relay_store as ST
+    import hubstate as HS
     import taskq
     say, quiet = print, (lambda _: None)
     ren, merge = parse_pairs(a.rename, "--rename"), parse_pairs(a.merge, "--merge")
-    st = ST.load_state()
+    home = cfg.state().rstrip("/")
+    try:
+        files = old_hub_files(home)
+    except Stop as e:
+        print(f"taskq self migrate: {e}", file=sys.stderr)
+        return 1
+    st = files["relay"] if files["relay"] is not None else ST.load_state()
     seen = set(st.get("keys") or {}) | set(st.get("views") or {}) | set(st.get("last_ok") or {})
     seen |= {os.path.basename(f)[:-5] for f in glob.glob(os.path.join(taskq.TQ, proto.SMOKE_DIR, "*.json"))}
     unknown = sorted(n for n in seen if ren.get(n, n) not in M.MACHINES)
@@ -901,7 +941,7 @@ def main(argv):
             say(f"Specs in executor queues replaced with the current recipes: {sum(map(len, specs.values()))}")
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, say, True)
             fix_smoke(taskq.TQ, ren, say, True)
-            home = cfg.state().rstrip("/")
+            hub_files_say(files, say)
             move_health_log(home, say, True)
             junk = leftovers(home)
             say(f"Unused items in state dir {home}: {len(junk)}" + "".join(f"\n  drop {p}" for p in junk))
@@ -920,10 +960,16 @@ def main(argv):
                 res = on(name, root_args(name, keys, merge, ren, {}, False, specs, drop), "machines before this one are already changed, fix this and run again")
                 if res.get("stop"):
                     raise Stop(f"{RM.conf(name)['label']}: {res['stop']} (machines before this one are already changed, fix this and run again)")
-            ST.update_state(lambda x: (x.clear(), x.update(st), [ST.put_links(lk) for lk in sets.values()]))
+            copy_hashes(quiet, False)  # before the bookkeeping below opens the hub database, which migrates it (dropping the hash table)
+            sets = {**files["sets"], **sets}  # link sets records already name, from the old files, and the ones made now
+            ST.update_state(lambda x: (x.clear(), x.update(st), [HS.put_links(i, lk) for i, lk in sets.items()]))
+            for n, rec in (files["sites"] or {}).items():
+                if isinstance(rec, dict):
+                    HS.put_site(n, rec)
+            if files["records"] is not None:
+                HS.update_records(lambda recs: files["records"] + recs)
             fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, quiet, False)
             fix_smoke(taskq.TQ, ren, quiet, False)
-            copy_hashes(quiet, False)
             for name in M.pueue_hosts():
                 pueue_groups(name, False, say)  # says only what failed
             move_health_log(home, quiet, False)

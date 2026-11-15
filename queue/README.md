@@ -262,7 +262,7 @@ Merging tables with duplicate keys is an error.
 | what happened | `taskq events` (`--key`, `--site`, `--source`, `-f`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default home: `relay.log` etc.) |
 | one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` |
 | what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
-| one executor | `taskq site status <machine>` (its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); `relay/status.json` in the hub state dir |
+| one executor | `taskq site status <machine>` (its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); what relay last read there is a `site` row in the hub database |
 | the worker itself | `data/logs/workers/` under the executor root (worker, GPU pad, Slurm job output); `pueue log` on a pueue executor |
 | training output | part log `data/logs/tasks/<key>__<job>_part<part>.log` (on the executor; the fetch brings it to the same place in the store) |
 | whether config is right | `taskq check` (`--quick` does not contact the store) |
@@ -496,10 +496,11 @@ Executor and store root R (the machine table's `root`, `proto.ROOT`):
 | `tmp/` | half-transferred files |
 | `envs/` | envs built on this machine |
 
-Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (relay bookkeeping `state.json` with one record per staged task, `linksets/` holding each distinct set of staged input links
-once, `status.json`; `proto.RELAY_NAMES`), `health/`
-(`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; the health check compacts it when mostly free
-pages), `wheelhouse/`, `tunnel*` etc. `taskq self migrate` deletes other entries there.
+Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (bundles and stage locks; `proto.RELAY_NAMES`), `health/`
+(`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; and the hub's bookkeeping, `queue/hubstate.py`:
+what relay last read on each executor, the task records of pueue tasks the core added, relay's placement record per staged task and
+each distinct set of staged input links once; the health check compacts it when mostly free pages), `wheelhouse/`, `tunnel*` etc.
+`taskq self migrate` deletes other entries there.
 
 Core source:
 

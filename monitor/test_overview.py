@@ -10,7 +10,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue", "testdata"))
 import fixture  # noqa: E402
 fixture.use()
-os.environ["HOME"] = fixture.tmpdir()  # health state and relay status.json (cfg.state) live under the temp HOME
+os.environ["HOME"] = fixture.tmpdir()  # health state (cfg.state) live under the temp HOME
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import overview as O  # noqa: E402
 import proto  # noqa: E402
@@ -90,18 +90,16 @@ ok("a relay record sharing the store's label does not hide the store's copies (f
    T[B]["copy"] and T[B]["copy"]["final"] and T[B]["copy"]["where"] == _lab and T[B]["copy"]["source"] == "hub"
    and T[A]["copy"]["where"] == "relay-site-pueue")
 
-# problems recorded by the health check, relay's status.json
+# problems recorded by the health check, what relay last read on each executor (hubstate.sites)
 import health as H  # noqa: E402
 H.NT.save_problems(H.NT.open_db(), {"p:1": dict(msg="m", level="normal", kind="k", first=1, active=True, notified=None, data={})}, "x")
-os.makedirs(os.path.dirname(O.relay_status_file()), exist_ok=True)
-json.dump({"site-pueue": dict(time=NOW.timestamp() - 60, label="L1", tasks={C: prog(epochs=5)}),
-           "site-slurm": dict(time=NOW.timestamp() - 3 * 3600, label="L0", tasks={C: prog(epochs=9)})},
-          open(O.relay_status_file(), "w"))
+O.HS.put_site("site-pueue", dict(time=NOW.timestamp() - 60, label="L1", tasks={C: prog(epochs=5)}))
+O.HS.put_site("site-slurm", dict(time=NOW.timestamp() - 3 * 3600, label="L0", tasks={C: prog(epochs=9)}))
 o = O.build(s)
 T = {t["key"]: t for t in o["tasks"]}
 ok("problems carry id and the fields in proto.OVERVIEW_PROBLEM", [tuple(p) for p in o["health"]["problems"]] == [proto.OVERVIEW_PROBLEM])
 ok("problems carry plain wording (unknown kind falls back to msg)", o["health"]["problems"][0]["plain"] == "m")
-ok("relay status.json: only entries within 2 hours count", T[C]["copy"]["where"] == "L1" and T[C]["copy"]["epochs"] == 5)
+ok("what relay read: only entries within 2 hours count", T[C]["copy"]["where"] == "L1" and T[C]["copy"]["epochs"] == 5)
 ok("the problem appears in the text table", "p:1" in O.text(o))
 
 # best copy across machines in different time zones: compare the moments, not the strings each machine wrote

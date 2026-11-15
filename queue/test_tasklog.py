@@ -16,7 +16,6 @@ fixture.use()
 T = fixture.tmpdir()
 for n in ("relay", "feed", "advance", "health"):
     os.environ[n.upper() + "_LOG"] = os.path.join(T, n + ".log")
-os.environ["TASKQ_TASKS"] = os.path.join(T, "tasks.json")
 os.environ.pop("TASKQ_DATA", None)
 sys.path.insert(0, HERE)
 import proto  # noqa: E402
@@ -69,6 +68,7 @@ write(f"{proto.safe('demo/b/0')}__2003_part1.log", head(2003, 1, key="demo/b/0")
 
 import db as DB  # noqa: E402
 import events as EV  # noqa: E402
+import common as C  # noqa: E402
 DB.connect(create=True).close()
 _t = lambda *x: time.mktime(x + (0, 0, -1))  # noqa: E731
 EV.add("relay", f"site-pueue claimed {KEY} (gpu1 group)", t=_t(2026, 11, 1, 9, 0, 0))  # rows without a key match on text
@@ -77,9 +77,8 @@ EV.add("relay", f"site-pueue claimed {KEY}/x (not counted)", t=_t(2026, 11, 1, 9
 EV.add("advance", f"queued fetch: {KEY}", key=KEY, t=_t(2026, 10, 31, 8, 0, 0))
 EV.add("note", "looked at it", key=KEY, kind="fix", t=_t(2026, 11, 2, 9, 0, 0))
 EV.add("note", "other task", key=KEY + "/x")
-with open(os.environ["TASKQ_TASKS"], "w") as f:
-    json.dump([dict(machine="hub", id=5, label="fetch:a0", added=1762300000.0, step="fetch", key=KEY, src="site-pueue"),
-               dict(machine="hub", id=6, label="fetch:b0", added=1762300001.0, step="fetch", key="demo/b/0")], f)
+C.update_records(lambda _: [dict(machine="hub", id=5, label="fetch:a0", added=1762300000.0, step="fetch", key=KEY, src="site-pueue"),
+                             dict(machine="hub", id=6, label="fetch:b0", added=1762300001.0, step="fetch", key="demo/b/0")])
 
 r = L.collect(KEY, D)
 A = r["attempts"]

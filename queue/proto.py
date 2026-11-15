@@ -251,7 +251,7 @@ RELAY_IMPORT_TOP = ("version", "written")
 # overview.py --json: all state a summary like the ledger needs, one JSON line
 OVERVIEW_TOP = ("version", "now", "hub", "data", "queue", "sources", "machines", "tasks", "health", "code")
 OVERVIEW_QUEUE_TOP = ("enabled", "readable")               # hub queue enabled, readable
-OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # where training state was collected; kind: machine (gather) / relay (relay.py status.json)
+OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # where training state was collected; kind: machine (gather) / relay (what relay.py last read, hubstate.sites)
 OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus: [{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
 OVERVIEW_PUEUE = ("groups", "tasks", "error")              # each task: qs --json fields plus start_ts, end_ts (seconds), about (plain.label: [experiment, what, short] or null)
 OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
@@ -334,7 +334,6 @@ ENV = dict(
     TASKQ_GPU_PAD_BASE=("test", "replaces /tmp/gpu_pad_<job>"),
     TASKQ_TEST_FAKEBIN=("test", "dir holding fake commands"),
     TASKQ_LAST=("test", "replaces the state dir's last"),
-    TASKQ_TASKS=("test", "replaces the state dir's tasks.json (task records)"),
     TASKQ_LOCK_WAIT=("test", "retry interval while waiting for a lock (seconds, default 0.5)"),
     TASKQ_STALE_BEAT=("test", "replaces STALE_BEAT"),
     TASKQ_FRESH_LOG=("test", "replaces FRESH_LOG"),
@@ -355,7 +354,7 @@ ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state dir>/taskq.
 # local executor (a machine in machines.py with ssh=None that is also the hub): the hub process's own variables are not passed to it (as when
 # sshing elsewhere), otherwise its worker and taskq.py would use the hub's config, data dir and queue. relay_remote.site_argv and sites/pueue.py worker commands strip them
 HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_DATA", "TASKQ_DIR", "TASKQ_STATE",
-                "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_TASKS", "TASKQ_LAST")
+                "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_LAST")
 ENV["TASKQ_TEST_NOW"] = ("test", "a file holding a time (epoch seconds): the window plugin treats it as now")
 ENV["TASKQ_SWITCH_HOLD"] = ("test", "seconds self migrate keeps unclaimed tasks aside after switching a bundle (default SWITCH_HOLD_S)")
 # gpu_pad.py arguments (tune), defaults on its command line
@@ -438,7 +437,7 @@ LOG_GPU_BUSY = r"^" + LOG_TS + r" " + LOG_GPU_BUSY_RE + r"$"
 LOG_STALLED = r"^" + STALL_LINE + r" " + LOG_TS + r":? ?(.*)$"
 TASKLOG_TOP = ("version", "key", "data", "attempts", "events", "records")
 TASKLOG_ATTEMPT = ("file", "path", "job", "machine", "host", "part", "env", "code", "start", "end", "last", "state", "exit", "note")
-TASKLOG_EVENT = ("log", "time", "text")  # records: this key's entry in the hub's task records (tasks.json), as is
+TASKLOG_EVENT = ("log", "time", "text")  # records: this key's entry in the hub's task records (hubstate.records), as is
 TASKLOG_STATES = dict(
     done="done",
     not_done="command exited normally but training did not finish",
@@ -465,14 +464,13 @@ GPU_USAGE_TOTAL = ("gpu", "user", "hours")
 DB = "taskq.db"  # under the state dir
 DB_COMPACT = (0.5, 64 << 20)  # the hub tick compacts the database (VACUUM) when free pages are over this share and this many bytes
 STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: one blob transfer (missing → ingest → push → view) at a time
-RELAY_STATUS = "status.json"  # under the hub's relay state dir: each executor's tasks as relay last read them (taskq status reads it)
 # live names in the hub's relay/ and health/ state dirs (each also with its .lock); taskq self migrate (cron stopped) deletes
-# the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate)
-RELAY_LINKS = "linksets"  # under the hub's relay state dir: <id>.json per distinct set of input links {relative path: sha256} (key records name theirs)
-RELAY_NAMES = ("bundles", "state.json", RELAY_STATUS, RELAY_LINKS)
+# the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate).
+# Relay's bookkeeping, what it read from each executor and the task records are in the hub database (hubstate.py)
+RELAY_NAMES = ("bundles",)
 HEALTH_NAMES = (PUEUE_SEEN, "health.log")
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
-STATE_NAMES = ("taskq", "relay", "health", "last", "tasks.json", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
+STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
                WHEELHOUSE, "envlock", DB)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
 EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
