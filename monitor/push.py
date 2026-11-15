@@ -40,7 +40,7 @@ def main(argv):
     ap.add_argument("--tags", default="", help="ntfy tags, comma separated")
     ap.add_argument("--kind", help="event kind to log it as (optional)")
     ap.add_argument("--data", help="JSON object stored with the event (e.g. numbers the next report compares against)")
-    a = ap.parse_args(argv)
+    a = ap.parse_intermixed_args(argv)  # text on both sides of options (plain parse_args before Python 3.13 rejects the part after)
     text = " ".join(a.text).strip()
     if not a.text and not sys.stdin.isatty():
         text = sys.stdin.read().strip()

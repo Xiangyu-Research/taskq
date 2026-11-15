@@ -1411,13 +1411,16 @@ def test_list():
     ok("list before fetch: output symlinks become logical paths (blob links map back through this task's views to the input path; data-dir links by path); "
        "other blobs and paths outside the data dir → bad; excluded or half-written names are filtered first and their links not fetched")
 
-    os.chmod(os.path.join(out, "part"), 0)
-    try:
-        rc, res, err = run(["out/k"])
-    finally:
-        os.chmod(os.path.join(out, "part"), 0o755)
-    assert rc != 0 and res is None, (rc, res, err)
-    ok("list before fetch: unreadable subdir → error (no fetch, not done)")
+    if os.geteuid() == 0:  # root reads a mode-0 dir anyway
+        print("SKIP: list before fetch: unreadable subdir (running as root)")
+    else:
+        os.chmod(os.path.join(out, "part"), 0)
+        try:
+            rc, res, err = run(["out/k"])
+        finally:
+            os.chmod(os.path.join(out, "part"), 0o755)
+        assert rc != 0 and res is None, (rc, res, err)
+        ok("list before fetch: unreadable subdir → error (no fetch, not done)")
 
 
 def test_logs_exact():

@@ -238,7 +238,7 @@ def cmd_note(argv):
     ap.add_argument("--uid", help="unique id: a second row with the same uid is not recorded (for imports)")
     ap.add_argument("--data", help="JSON object stored with this row (visible in taskq events --json)")
     ap.add_argument("--source", default="note", help=argparse.SUPPRESS)
-    a = ap.parse_args(argv)
+    a = ap.parse_intermixed_args(argv)  # text on both sides of options (plain parse_args before Python 3.13 rejects the part after)
     text = " ".join(a.text).strip()
     if not a.text and not sys.stdin.isatty():
         text = sys.stdin.read().strip()

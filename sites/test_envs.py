@@ -373,8 +373,13 @@ def local_op(name, what, data=None, timeout=600, job=None, say=None):
 SAVE_OP, SAVE_HUBROOT = RM.op, M.MACHINES[M.hub()]["root"]
 RM.op = local_op
 M.MACHINES[M.hub()]["root"] = f"{LD}/hubroot"  # the temp dir the hub uses for push lives under its root: never touch the real home
-pyd = next(p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
-           if subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0)
+pyd = next((p for p in (os.path.expanduser("~/miniforge3/bin"), os.path.dirname(sys.executable))
+            if os.access(f"{p}/python3", os.X_OK)
+            and subprocess.run([f"{p}/python3", "-c", "import venv, ensurepip"], capture_output=True).returncode == 0), None)
+if pyd is None:  # the local builds below need a Python that can make venvs with pip
+    RM.op, M.MACHINES[M.hub()]["root"] = SAVE_OP, SAVE_HUBROOT
+    print("SKIP: no Python with venv and ensurepip (~/miniforge3/bin or this one): local env builds not checked")
+    sys.exit(1 if fails else 77)
 E.base_activation = lambda name, base: f'export PATH={pyd}:"$PATH"'
 open(f"{LD}/specs/tiny.check.py", "w").write("import tinypkg, sys\nprint('tinypkg', tinypkg.VERSION, sys.prefix)\n")
 M.MACHINES["toff"] = dict(label="local", hostname=r"toff-host", ssh=None, scheduler="pueue", root=f"{LD}/root", conda=None,

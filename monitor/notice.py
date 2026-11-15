@@ -152,7 +152,11 @@ def main(argv):
     p.add_argument("ids", nargs="+", metavar="ID", help="problem id or prefix (e.g. boot:hub)")
     p = sub.add_parser("list", help="active notices")
     p.add_argument("--json", action="store_true", help="one line of JSON (proto.NOTICE_TOP, NOTICE_FIELDS)")
-    a = ap.parse_args(argv)
+    a, rest = ap.parse_known_args(argv)
+    if rest and (a.cmd != "set" or any(x.startswith("-") for x in rest)):
+        ap.error(f"unrecognized arguments: {' '.join(rest)}")
+    if rest:  # set's text after --at (before Python 3.13 argparse stops filling text at the first option)
+        a.text += rest
     bad = [n for n in ([a.name] if a.cmd == "set" else a.names if a.cmd == "clear" else []) if not valid(n)]
     if bad:
         print(f"Names may use only letters, digits, _ and -: {', '.join(bad)}", file=sys.stderr)

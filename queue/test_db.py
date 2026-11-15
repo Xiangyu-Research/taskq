@@ -77,11 +77,11 @@ ok("4 processes × 50 rows at once: all there, no spool", rcs == [0] * 4 and len
    and not os.path.exists(EV.spool_path()))
 
 # notes
-r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "--key", "demo/c/1", "--kind", "fix",
-                    "--uid", "u1", "fixed", "it"], capture_output=True, text=True, env=os.environ, timeout=60)
+r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "fixed", "--key", "demo/c/1", "--kind", "fix",
+                    "--uid", "u1", "it"], capture_output=True, text=True, env=os.environ, timeout=60)
 r2 = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "note", "--uid", "u1", "again"],
                     capture_output=True, text=True, env=os.environ, timeout=60)
-ok("taskq note: written with key and kind; same uid ignored", r.returncode == 0 and r2.returncode == 0
+ok("taskq note: written with key and kind (text on both sides of options); same uid ignored", r.returncode == 0 and r2.returncode == 0
    and [(x["kind"], x["msg"]) for x in EV.query(db, source="note")] == [("fix", "fixed it")])
 r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "bin", "taskq"), "events", "--since", "all", "--key", "demo/c/1",
                     "--json"], capture_output=True, text=True, env=os.environ, timeout=60)
