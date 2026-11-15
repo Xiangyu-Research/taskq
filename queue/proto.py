@@ -255,13 +255,18 @@ OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # where training stat
 OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus: [{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
 OVERVIEW_PUEUE = ("groups", "tasks", "error")              # each task: qs --json fields plus start_ts, end_ts (seconds), about (plain.label: [experiment, what, short] or null)
 OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
-                 "eta", "parts", "commits")
+                 "eta", "parts", "commits", "word", "where")  # word, where: taskstate.py (as taskq status shows it)
 OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank: position among unfinished tasks in the hub queue (1-based)
 OVERVIEW_COPY = ("where", "source", "final", "epochs", "start", "last", "runs", "metrics", "debug", "resumable")
 OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part log: job, part number, machine, at least one round done, code commit
 OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain", "type")  # kind: event | state; plain: push text in plain words (plain.problem); type: alert_type(id)
 SUMMARY_WINDOW = 24 * 3600  # taskq status (monitor/summary.py): "due in the next" / "last" window
 SUMMARY_OVERDUE = 3600  # a running task this far past its estimated finish is listed under "Needs you"
+# where a task is, in plain words (queue/taskstate.py, the one rule; taskq status, taskq status --all --json word, the progress
+# snapshot); in this order on the screen
+TASK_WORDS = dict(overdue="overdue", running="running", sending="being sent", held="held", waiting="waiting there",
+                  back="done, coming back", failed="failed", missing="missing inputs", stopped="stopped", bad="spec unreadable",
+                  not_sent="not sent yet", not_queued="not queued yet", done="done")
 HELD_PATIENCE = 2 * 86400  # a task held only by an older bundle still used by running workers (it clears when they switch at their next claim) is reported (not just recorded) after this long
 TOTAL_INFO = "num_epochs"  # key in INFO for "total rounds" (used when runs have no total; overview total, progress, eta)
 

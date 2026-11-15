@@ -18,22 +18,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
-import spec as S  # noqa: E402
 import notice as NT  # noqa: E402
 import hubstate as HS  # noqa: E402
 
 M = cfg.mtab()
 P = proto
 
-# plain words for where a task is (first match wins, in this order on the screen)
-RUNNING, OVERDUE, SENDING, HELD, WAITING, BACK = "running", "overdue", "being sent", "held", "waiting there", "done, coming back"
-FAILED, MISSING, STOPPED, BAD, NOT_SENT, NOT_QUEUED, DONE = ("failed", "missing inputs", "stopped", "spec unreadable", "not sent yet",
-                                                             "not queued yet", "done")
-ORDER = (OVERDUE, RUNNING, SENDING, HELD, WAITING, BACK, FAILED, MISSING, STOPPED, BAD, NOT_SENT, NOT_QUEUED, DONE)
-# hub queue state -> word; a task claimed for an executor gets its word from what that executor reports (build); claimed by a
-# worker on the hub itself, or unclaimed but its log still changing (busy), it is running
-HUB_WORDS = {P.S_FAILED: FAILED, P.S_INPUT: MISSING, P.S_STOPPED: STOPPED, P.S_BAD: BAD, P.S_DONE: DONE,
-             P.S_FREE: NOT_SENT, P.S_STALE: NOT_SENT, P.S_BUSY: RUNNING, P.S_CLAIMED: RUNNING}
+import taskstate as TS  # noqa: E402
+from taskstate import (OVERDUE, RUNNING, SENDING, HELD, WAITING, BACK, FAILED, MISSING, NOT_SENT, NOT_QUEUED, DONE,  # noqa: E402
+                       ORDER)
 
 
 def label(n):
@@ -102,44 +95,20 @@ def build(d, now):
     q = d["queue"]
     qt = {t["key"]: t for t in (q or {}).get("tasks") or [] if not P.is_smoke(t["key"])}
     relay = d["relay"]
-    tasks = {}
-    for t in S.all_tasks(list(qt.values())):
-        k, sp = t["key"], t["spec"]
-        x = qt.get(k)
-        word = HUB_WORDS.get(x.get("state"), NOT_QUEUED) if x else DONE if k in d.get("stored", ()) else NOT_QUEUED
-        tasks[k] = dict(key=k, step=sp.get("step") or sp.get("recipe") or "?", word=word,
-                        where=(x.get("assigned") or x.get("host")) if word == RUNNING else None, since=None, frac=None, eta=None, last=None)
+    tasks = TS.compute(list(qt.values()), relay, d.get("stored", ()), now)
     machines = []
     attention = [dict(id=p["id"], text=p["plain"] or p["msg"], since=p.get("first")) for p in d["problems"]
                  if P.alert_type(p["id"]) != "notice"]  # due notices are listed under Notes
     for n in M.executors():
         r = relay.get(n) if isinstance(relay.get(n), dict) else {}
         age = now.timestamp() - (r.get("time") or 0)
-        there = r.get("tasks") or {}
         held = r.get("held") or {}
-        for k, x in qt.items():
-            if x.get("state") != P.S_CLAIMED or x.get("assigned") != n or k not in tasks:
-                continue
-            t = tasks[k]
-            t["where"] = n
-            f = there.get(k)
-            if f is None:
-                t["word"] = HELD if k in held else SENDING
-                continue
-            st = f.get("state")
-            if st == P.S_DONE:
-                t["word"] = BACK
-            elif st == P.S_CLAIMED:
-                t["word"], t["since"] = RUNNING, f.get("since")
-                pg = S.progress_of(f, M.tz_of(n))
-                t["frac"], t["eta"], t["last"] = pg["frac"], pg["eta"], pg["last"] if not f.get("final") else None
-                if t["eta"] and t["eta"].timestamp() < now.timestamp() - P.SUMMARY_OVERDUE:
-                    t["word"] = OVERDUE
-                    last = f", last progress {t['last']:%m-%d %H:%M}" if t["last"] else ""
-                    attention.append(dict(id=f"overdue:{k}", since=None,
-                                          text=f"{k} on {label(n)}: past its estimated finish ({t['eta']:%m-%d %H:%M}){last}"))
-            else:
-                t["word"] = WAITING
+        for k in qt:
+            t = tasks.get(k)
+            if t and t["where"] == n and t["word"] == OVERDUE:
+                last = f", last progress {t['last']:%m-%d %H:%M}" if t["last"] else ""
+                attention.append(dict(id=f"overdue:{k}", since=None,
+                                      text=f"{k} on {label(n)}: past its estimated finish ({t['eta']:%m-%d %H:%M}){last}"))
         mine = [t for t in tasks.values() if t["where"] == n]
         count = {w: sum(t["word"] == w for t in mine) for w in ORDER}
         slots, later, wins = slot_plan(n, now) if M.MACHINES[n].get("scheduler") == "pueue" else (None, 0, "")

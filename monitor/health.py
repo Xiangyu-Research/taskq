@@ -376,11 +376,12 @@ def update(P, now, db, dry=False):
 
 
 def progress_snapshot(s, db):
-    """Each task's state, progress and where its best copy is -> the progress table (only what changed)."""
+    """Each task's hub queue state, progress, machine and word (taskstate.py, as taskq status shows it) -> the progress table
+    (only what changed). Machine: where taskstate puts it, else where its best copy is; progress likewise."""
     import events
     import overview
-    tasks = [dict(key=t["key"], state=(t["queue"] or {}).get("state"), progress=t["progress"], site=(t["copy"] or {}).get("where"),
-                  data=dict(epochs=(t["copy"] or {}).get("epochs"), total=t["total"])) for t in overview.build(s)["tasks"]]
+    tasks = [dict(key=t["key"], state=(t["queue"] or {}).get("state"), progress=t["progress"], site=t["where"] or (t["copy"] or {}).get("source"),
+                  data=dict(epochs=(t["copy"] or {}).get("epochs"), total=t["total"], word=t["word"])) for t in overview.build(s)["tasks"]]
     return events.snapshot(db, tasks)
 
 

@@ -265,12 +265,19 @@ def cmd_note(argv):
 
 # ---------------- progress snapshots ----------------
 def snapshot(db, tasks, t=None):
-    """tasks: [dict(key, state, progress, site, data)] -> one row per task whose state, progress or machine changed. -> rows written."""
+    """tasks: [dict(key, state, progress, site, data)] -> one row per task whose state, progress, machine or word (data.word,
+    taskstate.py) changed. -> rows written."""
     t = time.time() if t is None else t
-    last = {k: (s, p, w) for k, s, p, w in db.execute(
-        "SELECT key, state, progress, site FROM progress p WHERE t=(SELECT max(t) FROM progress WHERE key=p.key)")}
+
+    def word(d):
+        try:
+            return (json.loads(d) or {}).get("word") if isinstance(d, str) else (d or {}).get("word")
+        except (ValueError, AttributeError):
+            return None
+    last = {k: (s, p, w, word(d)) for k, s, p, w, d in db.execute(
+        "SELECT key, state, progress, site, data FROM progress p WHERE t=(SELECT max(t) FROM progress WHERE key=p.key)")}
     rows = [(t, x["key"], x.get("state"), x.get("progress"), x.get("site"), json.dumps(x.get("data"), ensure_ascii=False))
-            for x in tasks if last.get(x["key"]) != (x.get("state"), x.get("progress"), x.get("site"))]
+            for x in tasks if last.get(x["key"]) != (x.get("state"), x.get("progress"), x.get("site"), word(x.get("data")))]
     with D.tx(db):
         db.executemany("INSERT OR REPLACE INTO progress(t, key, state, progress, site, data) VALUES(?, ?, ?, ?, ?, ?)", rows)
     return len(rows)
@@ -341,7 +348,8 @@ def cmd_progress(argv):
         return 0
     for r in rows:
         p = f"{100 * r['progress']:.0f}%" if r["progress"] is not None else "-"
-        print(f"{r['time']}  {r['key']}  {r['state'] or '-'}  {p}  {r['site'] or ''}")
+        w = (r["data"] or {}).get("word") if isinstance(r["data"], dict) else None
+        print(f"{r['time']}  {r['key']}  {r['state'] or '-'}{f' ({w})' if w else ''}  {p}  {r['site'] or ''}")
     return 0
 
 

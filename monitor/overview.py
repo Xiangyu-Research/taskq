@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(CORE, "queue"))
 sys.path.insert(0, HERE)
 import proto  # noqa: E402
 import hubstate as HS  # noqa: E402
+import taskstate as TS  # noqa: E402
 import health as H  # noqa: E402
 import common as C  # noqa: E402
 import experiments as E  # noqa: E402
@@ -106,6 +107,13 @@ def health_view():
     return dict(checked=checked, problems=H.NT.problem_rows(probs, everything=True))
 
 
+def stored():
+    """Keys whose results were on the store at the last advance round (events.stored)."""
+    import events
+    db = H.NT.open_db(write=False)
+    return events.stored(db) if db else set()
+
+
 def build(s, relay=None):
     """gather() result -> summary (proto.OVERVIEW_TOP). relay: executor progress (default: what relay.py last read, hubstate.sites)."""
     now = s.get("now") or datetime.now()
@@ -128,6 +136,7 @@ def build(s, relay=None):
     seglogs = list({x["name"]: x for src in sources.values() for x in src.get("seglogs") or []}.values())
     machines = [dict(name=n, label=L(n), scheduler=M.MACHINES[n].get("scheduler"), ok=bool(s["ok"].get(n)), why=(s.get("why") or {}).get(n),
                      gpus=(s.get("gpus") or {}).get(n, []), pueue=pueue_view((s.get("pueue") or {}).get(n))) for n in seen]
+    words = TS.compute(queue, HS.sites(), stored(), now)
     tasks = []
     for t in S.all_tasks(queue):
         key, sp, e = t["key"], t["spec"], t["e"]
@@ -151,7 +160,8 @@ def build(s, relay=None):
                       last=best[0][2] or None, runs=runs, metrics=f.get("metrics") or {}, debug=f.get("debug") or {},
                       resumable=f.get("resumable")) if f else None,
             total=total, progress=pg["frac"], eta=eta.strftime("%Y-%m-%d %H:%M") if eta else None,
-            parts=parts, commits=list(dict.fromkeys(p["commit"] for p in parts if p["commit"] and p["trained"]))))
+            parts=parts, commits=list(dict.fromkeys(p["commit"] for p in parts if p["commit"] and p["trained"])),
+            word=(words.get(key) or {}).get("word"), where=(words.get(key) or {}).get("where")))
     return dict(version=proto.VERSION, now=now.strftime("%Y-%m-%d %H:%M:%S"), hub=hub,
                 data=dict(machine=M.store(), path=M.data()),
                 queue=dict(enabled=bool(q and q.get("enabled")), readable=q is not None), sources=src_info, machines=machines,

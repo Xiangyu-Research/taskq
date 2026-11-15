@@ -59,6 +59,7 @@ line = json.dumps(o, ensure_ascii=False, default=str)
 ok("top-level fields = proto.OVERVIEW_TOP, version matches", tuple(o) == proto.OVERVIEW_TOP and o["version"] == proto.VERSION)
 T = {t["key"]: t for t in o["tasks"]}
 ok("each task has the fields in proto.OVERVIEW_TASK", all(tuple(t) == proto.OVERVIEW_TASK for t in o["tasks"]))
+ok("each task has a word from taskstate (as taskq status shows it)", all(t["word"] in proto.TASK_WORDS.values() for t in o["tasks"]))
 ok("all experiment-table tasks are there, plus ones only in the hub queue", set(keys) <= set(T) and "extra/key" in T)
 ok("the copy with the most rounds wins (executor 300 > store 200)", T[A]["copy"]["where"] == "relay-site-pueue" and T[A]["copy"]["epochs"] == 300
    and T[A]["copy"]["source"] == "site-pueue" and tuple(T[A]["copy"]) == proto.OVERVIEW_COPY)

@@ -212,7 +212,7 @@ and `bin/taskq` mean the full suite):
 | `sync/tunnel.py`, `sync/tunnel_push.sh` | `test_tunnel.py` |
 | `monitor/health.py`, `monitor/notice.py`, `monitor/plain.py`, `monitor/push.py` | `test_health.py`, `test_probe.py`, `test_db.py` |
 | `monitor/overview.py` | `test_overview.py` |
-| `monitor/summary.py` | `test_summary.py` |
+| `monitor/summary.py`, `queue/taskstate.py` | `test_summary.py`, `test_overview.py` |
 | `monitor/gpu_usage.py`, `monitor/gpu_log.sh` | `test_gpu_usage.py` |
 | anything crossing modules (send, transfer, finish, fetch in one round) | `test_e2e.py` (pueue, separate store and fake Slurm layouts) |
 <!-- /tests -->

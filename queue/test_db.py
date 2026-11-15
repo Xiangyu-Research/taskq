@@ -115,6 +115,10 @@ n2 = EV.snapshot(db, [dict(key="k1", state="running", progress=0.1, site="s"), d
 n3 = EV.snapshot(db, [dict(key="k1", state="running", progress=0.2, site="s"), dict(key="k2", state="queued", progress=None)], t=t0 + 2)
 ok("progress: a row only when state, progress or site changed", (n1, n2, n3) == (2, 0, 1)
    and [r["progress"] for r in EV.progress_rows(db, key="k1")] == [0.1, 0.2])
+w1 = EV.snapshot(db, [dict(key="k1", state="claimed", progress=0.2, site="s", data=dict(word="being sent"))], t=t0 + 3)
+w2 = EV.snapshot(db, [dict(key="k1", state="claimed", progress=0.2, site="s", data=dict(word="being sent", epochs=3))], t=t0 + 4)
+w3 = EV.snapshot(db, [dict(key="k1", state="claimed", progress=0.2, site="s", data=dict(word="running"))], t=t0 + 5)
+ok("progress: a change of word alone (taskstate: being sent -> running) is a row too; other data alone is not", (w1, w2, w3) == (1, 0, 1))
 
 # changes into done / failed, failures released on executors, results on the store
 t1 = t0 + 100

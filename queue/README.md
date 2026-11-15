@@ -260,7 +260,8 @@ Merging tables with duplicate keys is an error.
 |---|---|
 | what is wrong now | `taskq problems` (the "Needs you" list of `taskq status`, each item with its id for `taskq notice ack`, then due notices; `--all` also lists info problems and ones not yet due for a push) |
 | what happened | `taskq events` (`--key`, `--site`, `--source`, `-f`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default home: `relay.log` etc.) |
-| one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` |
+| one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` (each change of hub queue state, progress, machine or word) |
+| what a state word means | `queue/taskstate.py` holds the one rule (words in `proto.TASK_WORDS`): `taskq status`, `taskq status --all --json` (`word`, `where`) and the progress snapshot each health round all use it |
 | what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
 | one executor | `taskq site status <machine>` (its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); what relay last read there is a `site` row in the hub database |
 | the worker itself | `data/logs/workers/` under the executor root (worker, GPU pad, Slurm job output); `pueue log` on a pueue executor |
