@@ -301,12 +301,14 @@ _pj = json.loads(rp.stdout)
 ok("taskq problems --json: proto.PROBLEMS_TOP, each problem proto.OVERVIEW_PROBLEM",
    tuple(_pj) == H.proto.PROBLEMS_TOP and [p["id"] for p in _pj["problems"]] == ["disk:hub"]
    and all(tuple(p) == H.proto.OVERVIEW_PROBLEM for p in _pj["problems"]))
-NT.save_problems(_wdb, {"disk:hub": dict(H.problem("y"), active=True, first="2026-11-05 13:00"), "gone:hub": H.problem("z")}, "2026-11-05 14:00")
+NT.save_problems(_wdb, {"disk:hub": dict(H.problem("y"), active=True, first="2026-11-05 13:00"), "gone:hub": H.problem("z"),
+                        "notice:board2": dict(H.check(snap(notices={"board2": "a note for the user"}))["notice:board2"], active=True, first="x")},
+                "2026-11-05 14:00")  # the notice's problem as health.check makes it
 tqn("set", "board2", "a note for the user")
 _rt = subprocess.run([sys.executable, TQ, "problems"], capture_output=True, text=True, env=_nenv, timeout=60)
 _ra = subprocess.run([sys.executable, TQ, "problems", "--all"], capture_output=True, text=True, env=_nenv, timeout=60)
 ok("taskq problems: the Needs you list of taskq status, each item with its id; due notices under Notes, not under Needs you",
-   _rt.returncode == 0 and "Needs you\n  ! y\n      disk:hub (since " in _rt.stdout and "Notes (1)\n  board2: a note for the user" in _rt.stdout
+   _rt.returncode == 0 and "Needs you\n  ! y\n      disk:hub (since " in _rt.stdout and "! a note" not in _rt.stdout and "Notes (1)\n  board2: a note for the user" in _rt.stdout
    and "Info and not reported yet" not in _rt.stdout and _ra.returncode == 0 and "Info and not reported yet (1)" in _ra.stdout
    and "gone:hub" in _ra.stdout and "gone:hub" not in _rt.stdout)
 tqn("clear", "board2")

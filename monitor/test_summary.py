@@ -57,7 +57,7 @@ relay = {"site-pueue": dict(time=NOW.timestamp() - 600, label="pueue", tasks={RU
                             bundle="b2", held={HELD: dict(why="bundle-incompatible", bundle="b1", since=(NOW - timedelta(hours=3)).timestamp())}),
          "site-slurm2": dict(time=NOW.timestamp() - 5 * 3600, label="Slurm2", tasks={}, squeue=[], held={})}
 probs = [dict(id="site:x", msg="m", plain="something broke", level="normal", kind="site", first=1, active=True, notified=None),
-         dict(id="notice:board", msg="n", plain="a note", level="normal", kind="notice", first=1, active=True, notified=None)]
+         dict(id="notice:board", msg="n", plain="a note", level="normal", kind="state", first=1, active=True, notified=None)]  # as health.check records it
 GATE = dict(id=proto.alert_id("bundlegate", "site-slurm", HELD), msg="g", plain="held by the bundle", level="normal", kind="state",
             first=1, active=True, notified=None)  # relay records it as info (not here) while only an older bundle in use holds it
 d = dict(queue=queue, relay=relay, problems=probs, checked="2026-10-16 11:35", notices=["board"],
