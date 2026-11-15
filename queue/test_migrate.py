@@ -24,6 +24,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)
@@ -356,8 +357,11 @@ write(os.path.join(Q1, Q["released"], sf(INF)), "1700000000.0 site-pueue-gpu1\n"
 write(os.path.join(Q1, Q["skips"], sf(INF)), "2026-11-01 10:00:00\tsite-pueue-gpu1\t放不下\n2026-11-01 10:00:00\tlab0-gpu\t放不下\n")
 write(os.path.join(Q1, Q["skips"], sf(GONE)), "2026-11-01 10:00:00\tlab0-gpu\t放不下\n")
 write(os.path.join(Q1, Q["failures"], sf(INF)), "2026-11-01 10:00:00\t作业 lab0-gpu\tboom\n")
-write(os.path.join(R1, proto.ROOT["pins"], sf(INF) + ".json"), "{}")
+os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(INF) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))
 write(os.path.join(R1, proto.ROOT["pins"], "other.json"), "{}")
+os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(DUP) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))  # dropped task, lapsed: deleted
+os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(SRC) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))  # keeps its name: kept
+write(os.path.join(R1, proto.ROOT["pins"], sf(EV) + ".json"), "{}")  # renamed but fresh (a transfer may be running): kept
 write(os.path.join(L1, f"{sf(INF)}__lab0-gpu_seg1.log"), "a")
 write(os.path.join(L1, f"{sf(INF)}__j2_part1.log"), "old")
 write(os.path.join(L1, f"{sf(NINF)}__j2_part1.log"), "new")  # target exists already: do not overwrite
@@ -384,7 +388,7 @@ write(os.path.join(Q2, Q["tasks"]), jl([dict(order=1, nice=0, key=SRC, exp="t0",
 write(os.path.join(Q2, Q["skips"], sf(SRC)), "2026-11-01 10:00:00\tsite-slurm-gpu\t放不下\n2026-11-01 10:00:00\tdicc-gpu\t放不下\n")
 write(os.path.join(L2, f"{sf(EV)}__dicc_seg1.log"), "f")
 # store (the hub entry): root pin records, part logs fetched into the data dir
-write(os.path.join(ROOTS["hub"], proto.ROOT["pins"], sf(INF) + ".json"), "{}")
+os.utime(write(os.path.join(ROOTS["hub"], proto.ROOT["pins"], sf(INF) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))
 write(os.path.join(DATA, proto.TASK_LOGS, f"{sf(EV)}__dicc_seg1.log"), "g")
 write(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS, f"{sf(INF)}__x_seg3.log"), "h")
 
@@ -604,8 +608,8 @@ ok("site-slurm, the store data dir, the store root's data dir: part logs renamed
    sorted(os.listdir(L2)) == sorted([f"{sf(NEV)}__dicc_part1.log", os.path.basename(src_log)])
    and os.listdir(os.path.join(DATA, proto.TASK_LOGS)) == [f"{sf(NEV)}__dicc_part1.log"]
    and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS)) == [f"{sf(NINF)}__x_part3.log"])
-ok("pin records: dropped for renamed tasks (executors and store), others kept",
-   os.listdir(os.path.join(R1, proto.ROOT["pins"])) == ["other.json"]
+ok("pin records: dropped for renamed tasks once lapsed (executors and store); fresh ones (a transfer may be running) and those of tasks keeping their name kept",
+   sorted(os.listdir(os.path.join(R1, proto.ROOT["pins"]))) == sorted(["other.json", sf(SRC) + ".json", sf(EV) + ".json"])
    and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["pins"])) == [])
 
 # state dir, database

@@ -410,12 +410,18 @@ def op_root(A):
         rename_logs(d, keys, log.append, dry, busy)
         english_logs(d, log.append, dry, busy)
     pins = os.path.join(R, proto.ROOT["pins"])
-    for old in keys:
+    for old in [k for k in keys if keys[k] != k] + list(A["drop"]):
         p = os.path.join(pins, safe(old) + ".json")
-        if os.path.exists(p):
-            log.append(f"drop pin record {p} (only exists before the view is built; a renamed task is pinned again on its next transfer)")
-            if not dry:
-                os.remove(p)
+        try:
+            age = time.time() - os.path.getmtime(p)
+        except OSError:
+            continue
+        if age < proto.PIN_TTL:  # a transfer may still be running and refreshing it; it lapses by itself after PIN_TTL
+            log.append(f"keep pin record {p} (written {age / 60:.0f} min ago: a transfer may be running)")
+            continue
+        log.append(f"drop pin record {p} (renamed or dropped task, lapsed; a renamed task is pinned again on its next transfer)")
+        if not dry:
+            os.remove(p)
     return dict(log=log, links={k: view_links(R, D, v) for k, v in A["views"].items()})
 
 
