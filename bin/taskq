@@ -153,25 +153,6 @@ def cmd_status(argv, prog):
     return call("taskq", ["status", *[a for a in argv if a != "--queue"]], "taskq")
 
 
-def cmd_plan(argv, prog):
-    import argparse
-    ap = argparse.ArgumentParser(prog=prog, description="Dry run: what this round would do for downstream steps (advance) and sending tasks (feed -> relay), in health-check order")
-    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="dry run (this is the default)")
-    ap.parse_args(argv)
-    paths()
-    import health as H
-    import feed
-    import advance
-    from proto import alert_msg
-    s = H.gather()
-    after = advance.describe(*advance.plan(s))
-    ev, st = feed.run_all(s, dry=True)
-    parts = [("downstream steps (advance)", after),
-             ("send tasks (feed -> relay)", ev + [f"stuck: {alert_msg(v)}" for v in st.values()] or ["nothing"])]
-    print("\n\n".join(f"== {t}\n" + "\n".join(lines) for t, lines in parts))
-    return OK
-
-
 def cmd_exp(sub):
     def fn(argv, prog):
         E = load("experiments")
@@ -272,9 +253,11 @@ TREE = {
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
     "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
     # scheduling
-    "tick": Cmd("one health check (really does it: push, queue downstream steps, send tasks)",
+    "tick": Cmd("one health check (really does it: push, queue downstream steps, send tasks; -n is taskq plan)",
                 lambda argv, prog: script(os.path.join("monitor", "health.py"), argv, prog), own_help=True),
-    "plan": Cmd("dry run: what this round would queue downstream and which tasks it would send", cmd_plan, own_help=True),
+    "plan": Cmd("dry run of one health check: problems it would find, what it would queue downstream, which tasks it would send",
+                lambda argv, prog: script(os.path.join("monitor", "health.py"), ["-n", *[x for x in argv if x not in ("-n", "--dry-run")]], prog),
+                own_help=True),
     "boot": Cmd("boot (@reboot): start pueued, put interrupted tasks back", sh("queue/on_boot.sh"), "[--gpu-log]",
                 "--gpu-log: also start GPU usage logging (when omitted, follow gpu_log in the machine table)"),
     # executor
@@ -296,11 +279,11 @@ TREE = {
     "note": Cmd("record a line in the event log (what happened, what was done)", py("events", "note", prog="taskq"), own_help=True),
     "progress": Cmd("task progress over time ([--key K] [--since T] [--json])", py("events", "progress", prog="taskq"), own_help=True),
     "notify": Cmd("push a message to a phone (ntfy) and record it in the event log", py("push", prog="taskq"), own_help=True),
-    "problems": Cmd("problems found by the last health check ([--all] [--json])", py("notice", "problems", prog="taskq"), own_help=True),
+    "problems": Cmd("what needs you (the same list as taskq status, with ids for notice ack) and due notices ([--all] [--json])", py("notice", "problems", prog="taskq"), own_help=True),
     "notice": Group("notices attached to the health check (listed in taskq problems, not pushed; gone when cleared)", {
         "set": Cmd("post or edit text (<name> [text...]; reads stdin without text)", py("notice", "set", prog="taskq notice"), own_help=True),
         "clear": Cmd("remove (<name>...)", py("notice", "clear", prog="taskq notice"), own_help=True),
-        "list": Cmd("posted notices ([--json])", py("notice", "list", prog="taskq notice"), own_help=True),
+        "list": Cmd("every posted notice, also those waiting for --at (due ones are under Notes in taskq problems; [--json])", py("notice", "list", prog="taskq notice"), own_help=True),
         "ack": Cmd("acknowledge \"things that happened\" reported by the health check (such as a reboot; <problem id or prefix>...), not listed again",
                    py("notice", "ack", prog="taskq notice"), own_help=True),
     }),

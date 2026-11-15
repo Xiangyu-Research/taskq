@@ -224,6 +224,12 @@ ok("progress_of: before the first epoch 0.0 (total known); done -> 1.0 and no ET
    and S.progress_of(dict(final=True, runs=[dict(epochs_done=40, total=40, end="x", tl=_tl)]))["eta"] is None
    and S.progress_of(dict(final=False, runs=[dict(epochs_done=3, end=None)]))["frac"] is None
    and S.progress_of(None) == dict(frac=None, eta=None, last=None, epochs=0, total=None))
+from zoneinfo import ZoneInfo  # noqa: E402
+_far = ZoneInfo("Etc/GMT-14")  # UTC+14: no test machine's local zone
+_pz = S.progress_of(dict(final=False, runs=[dict(epochs_done=20, total=40, end="x", tl=_tl)]), _far)
+_shift = lambda d: d.replace(tzinfo=_far).astimezone().replace(tzinfo=None)  # noqa: E731
+ok("progress_of with the executor's time zone: eta and last moved into this machine's local time (the summary's 'done ~' is local)",
+   _pz["eta"] == _shift(_pg["eta"]) and _pz["last"] == _shift(_pg["last"]) and _pz["eta"] != _pg["eta"] and _pz["frac"] == _pg["frac"])
 _os = dict(S.sendable(S.resolve("command", dict(G, archive=True, fetch=dict(extra=["*.json"])))))
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "outputs", "--spec", json.dumps(_os), "--sh"], capture_output=True, text=True)
 _sh = _r.stdout.splitlines()

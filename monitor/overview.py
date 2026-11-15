@@ -127,13 +127,14 @@ def build(s, relay=None):
     seglogs = list({x["name"]: x for src in sources.values() for x in src.get("seglogs") or []}.values())
     machines = [dict(name=n, label=L(n), scheduler=M.MACHINES[n].get("scheduler"), ok=bool(s["ok"].get(n)), why=(s.get("why") or {}).get(n),
                      gpus=(s.get("gpus") or {}).get(n, []), pueue=pueue_view((s.get("pueue") or {}).get(n))) for n in seen]
+    name_of = {i["label"]: i["name"] for i in src_info}
     tasks = []
     for t in S.all_tasks(queue):
         key, sp, e = t["key"], t["spec"], t["e"]
         x = qt.get(key)
         where, best = best_copy(sources, key)
         f = best[1] if best else None
-        pg = S.progress_of(f)
+        pg = S.progress_of(f, M.tz_of(name_of[where]) if name_of.get(where) in M.MACHINES else None)
         total, epochs, eta = pg["total"], pg["epochs"], pg["eta"]
         runs = (f or {}).get("runs") or []
         o = S.outputs(sp)

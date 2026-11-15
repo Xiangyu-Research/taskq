@@ -114,7 +114,8 @@ def build(d, now):
         tasks[k] = dict(key=k, step=sp.get("step") or sp.get("recipe") or "?", word=word,
                         where=(x.get("assigned") or x.get("host")) if word == RUNNING else None, since=None, frac=None, eta=None, last=None)
     machines = []
-    attention = [p["plain"] or p["msg"] for p in d["problems"] if not p["id"].startswith("notice:")]
+    attention = [dict(id=p["id"], text=p["plain"] or p["msg"], since=p.get("first")) for p in d["problems"]
+                 if p.get("kind") != "notice"]  # due notices are listed under Notes
     for n in M.executors():
         r = relay.get(n) if isinstance(relay.get(n), dict) else {}
         age = now.timestamp() - (r.get("time") or 0)
@@ -134,12 +135,13 @@ def build(d, now):
                 t["word"] = BACK
             elif st == P.S_CLAIMED:
                 t["word"], t["since"] = RUNNING, f.get("since")
-                pg = S.progress_of(f)
+                pg = S.progress_of(f, M.tz_of(n))
                 t["frac"], t["eta"], t["last"] = pg["frac"], pg["eta"], pg["last"] if not f.get("final") else None
                 if t["eta"] and t["eta"].timestamp() < now.timestamp() - P.SUMMARY_OVERDUE:
                     t["word"] = OVERDUE
                     last = f", last progress {t['last']:%m-%d %H:%M}" if t["last"] else ""
-                    attention.append(f"{k} on {label(n)}: past its estimated finish ({t['eta']:%m-%d %H:%M}){last}")
+                    attention.append(dict(id=f"overdue:{k}", since=None,
+                                          text=f"{k} on {label(n)}: past its estimated finish ({t['eta']:%m-%d %H:%M}){last}"))
             else:
                 t["word"] = WAITING
         mine = [t for t in tasks.values() if t["where"] == n]
@@ -152,7 +154,8 @@ def build(d, now):
                              held=[held_line(k, h, r, now) for k, h in sorted(held.items())],
                              running=[t for t in mine if t["word"] in (RUNNING, OVERDUE)]))
         if r and age >= proto.SITE_FRESH:
-            attention.append(f"no news from {label(n)} for {ago(age)} (last recorded {when(r['time'], now)})")
+            attention.append(dict(id=f"stale:{n}", since=None,
+                                  text=f"no news from {label(n)} for {ago(age)} (last recorded {when(r['time'], now)})"))
     steps = {}
     for t in tasks.values():
         s = steps.setdefault(t["step"], dict(total=0, **{w: 0 for w in ORDER}))
@@ -167,6 +170,17 @@ def build(d, now):
 
 
 # ---------------- text ----------------
+def attention_lines(o, ids=False):
+    """The "Needs you" section, shared by taskq status and taskq problems; ids=True adds each item's id (for taskq notice ack)
+    and since when."""
+    out = []
+    for a in o["attention"]:
+        out.append(f"  ! {a['text']}")
+        if ids:
+            out.append(f"      {a['id']}" + (f" (since {a['since']})" if a.get("since") else ""))
+    return ["", "Needs you"] + out if out else []
+
+
 def task_line(t, now, where=False):
     """where=True (listings grouped by state): a machine column instead of the state word."""
     bits = [] if where else [t["word"]]
@@ -205,8 +219,7 @@ def text(o):
     n = len(o["attention"])
     head = "running normally" if n == 0 and o["queue_ok"] else (f"{n} things need you" if n != 1 else "1 thing needs you") if o["queue_ok"] else "hub queue unreadable"
     out = [f"taskq  {now:%Y-%m-%d %H:%M}   {head}", f"as of the health check at {o['checked'] or '(none yet)'}"]
-    if o["attention"]:
-        out += ["", "Needs you"] + [f"  ! {a}" for a in o["attention"]]
+    out += attention_lines(o)
     out += ["", "Machines"]
     for m in o["machines"]:
         out.append(machine_head(m))
@@ -224,7 +237,7 @@ def text(o):
         out.append(f"  {s:<10} {c[DONE]:>4} / {c['total']:<5}" + ("  " + ", ".join(extra) if extra else ""))
     out += ["", f"Last {P.SUMMARY_WINDOW // 3600} hours: {o['done']} done, {o['failed']} failed"]
     if o["notices"]:
-        out.append(f"Notes ({len(o['notices'])}): {', '.join(o['notices'])}   (taskq notice list)")
+        out.append(f"Notes ({len(o['notices'])}): {', '.join(o['notices'])}   (taskq problems)")
     out.append("More: taskq status --all | taskq status <machine> | taskq status <part of a key>")
     return "\n".join(out)
 

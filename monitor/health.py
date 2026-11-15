@@ -393,7 +393,8 @@ def from_step(v):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="One health check round: check machines, push problems, queue downstream steps, send tasks")
-    ap.add_argument("-n", "--dry-run", action="store_true", help="only print problems found this round; push nothing, change no file")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="what this round would do (taskq plan): problems, downstream steps, "
+                    "tasks to send; push nothing, change no file")
     ap.add_argument("--test", action="store_true", help="push a test message")
     a = ap.parse_args(argv)
     if LOAD_ERROR is not None:
@@ -436,10 +437,10 @@ def main(argv=None):
             P[pid] = dict(P[pid], msg=f"{P[pid]['msg']}; {why}")
     # An error in these steps (including an import error) must not stop the health check itself (alerts and the ledger depend on it):
     # report it and carry on.
-    events, stuck = list(revived), {}
+    events, stuck, after = list(revived), {}, []
     try:  # queue downstream steps first, so what this round queues is sent this round
         import advance  # queue/advance.py: queue the next step per experiment table
-        done, stuck2 = advance.run(s, dry=a.dry_run)
+        done, stuck2 = advance.run(s, dry=a.dry_run, say=after)
         if done and not a.dry_run:
             try:
                 s["taskq"][M.hub()] = taskq.local_status()
@@ -467,11 +468,13 @@ def main(argv=None):
         except Exception as e:  # noqa: BLE001
             print(f"progress snapshot not recorded: {type(e).__name__}: {e}", file=sys.stderr)
     if a.dry_run:
+        probs = []
         for pid, p in sorted(P.items()):
             wait = f" / reported after {p['after']} min" if p["after"] else ""
-            print(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
-        print("\nSending, topping up workers: " + "; ".join(events))
-        print(f"{M.hub()} advance by state: " + ("; ".join(done) or "nothing to queue"))
+            probs.append(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
+        parts = [(f"problems this round ({len(probs)})", probs or ["none"]), ("downstream steps (advance)", after or ["nothing to queue"]),
+                 ("send tasks, top up workers (feed -> relay)", events or ["nothing"])]
+        print("\n\n".join(f"== {t}\n" + "\n".join(lines) for t, lines in parts))
     return 0
 
 

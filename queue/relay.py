@@ -9,12 +9,12 @@ Every health check (monitor/health.py, every 30 minutes) calls run_all through q
 for sending tasks): read remote state with one ssh; plan stage/fetch/archive/release per task; then assign unclaimed tasks to
 executors; finally execute the plan and top up worker jobs. See queue/README.md for the full flow.
 
-    python3 queue/relay.py                         show what it would do now (changes nothing; taskq plan also shows downstream steps)
+    taskq plan                                     what this round would do (the health check's dry run), sending included
     taskq internal stage <name> <key> --nice N [--no-add]   stage inputs and add to the remote queue (--no-add: only stage, clear the missing-input marker)
     taskq internal fetch <name> <key>              fetch a finished task, verify it and put it in the store data dir
     taskq internal archive <key>                   back up this task's store results to the backup machine and verify
     taskq site bundle <name> [--commit C]          build a bundle, push it and switch current
-    taskq site status <name>                       remote queue
+    taskq site status <name>                       remote queue (the format of taskq status --queue)
     taskq site resend <name>                       replace staged tasks' specs in the remote queue with the hub's current ones
 """
 import argparse
@@ -33,7 +33,7 @@ import cfg  # noqa: E402
 REPO = cfg.REPO  # project repo root
 cfg.use_config()
 import proto  # noqa: E402
-from proto import ROOT, alert, alert_id, alert_msg  # noqa: E402
+from proto import ROOT, alert, alert_id  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "sync"))
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, os.path.join(CORE, "sites"))
@@ -1005,9 +1005,8 @@ def finish(s, name, c, more, why, snotes, dry):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Relay for executors. Without a command: show what each executor would do now")
-    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="only show (the default without a command)")
-    sub = ap.add_subparsers(dest="cmd")
+    ap = argparse.ArgumentParser(description="Relay for executors (taskq plan shows what each executor would do now)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("stage", help="stage inputs and add to the remote queue")
     p.add_argument("name")
     p.add_argument("key")
@@ -1035,7 +1034,7 @@ def main(argv):
     if a.cmd == "bundle" and a.name in code_only():
         print(bundle(a.name, current_bundle(a.name), claims=[]) or "unchanged")
         return 0
-    if a.cmd and not M.is_exec(a.name):
+    if not M.is_exec(a.name):
         print(f"{ap.prog} {a.cmd}: no executor {a.name} (have: {', '.join(M.executors()) or 'none'})", file=sys.stderr)
         return 2 if a.cmd == "stage" else proto.EXIT["gone"]
     if a.cmd in ("stage", "fetch"):
@@ -1062,13 +1061,8 @@ def main(argv):
         if rs is None:
             print(f"cannot read {a.name}", file=sys.stderr)
             return 1
-        for t in rs["taskq"]["tasks"]:
-            print(f"  {t['nice']:>5} {t['key']:50} {t['state']} {t['note']}")
+        print(taskq.queue_text(rs["taskq"]))
         print(f"{rs['free'] / 1e9:.0f} GB free; code {rs['bundle']}; jobs {rs['squeue']}")
-    else:
-        import health as H
-        ev, st = run_all(H.gather(), dry=True)
-        print("\n".join(ev + [f"stuck: {alert_msg(v)}" for v in st.values()]))
     return 0
 
 

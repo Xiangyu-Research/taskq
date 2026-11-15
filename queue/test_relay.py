@@ -1675,6 +1675,31 @@ def test_deploy_safety():
     ok("concurrent pushes (same and different bundles): all complete, current points at a complete bundle")
 
 
+def test_site_status_format():
+    """taskq site status prints an executor's queue in the one format of taskq status --queue (taskq.queue_text)."""
+    import taskq
+    sp = dict(env="e1")
+    rs = dict(taskq=dict(enabled=True, tasks=[dict(key="a/b", nice=3, state="claimed", note="", spec=sp),
+                                             dict(key="a/c", nice=0, state="done", note="", spec=sp),
+                                             dict(key=proto.SMOKE_PREFIX + "x/y", nice=0, state="free", note="", spec=sp)]),
+              free=5e9, bundle="b1", squeue=[])
+    saved = relay.remote_status
+    buf = io.StringIO()
+    try:
+        relay.remote_status = lambda name: rs
+        with contextlib.redirect_stdout(buf):
+            assert relay.main(["status", M.executors()[0]]) == 0
+    finally:
+        relay.remote_status = saved
+    out = buf.getvalue()
+    assert out.startswith(taskq.queue_text(rs["taskq"]) + "\n"), out
+    lines = taskq.queue_text(rs["taskq"]).splitlines()
+    assert lines[0] == "master switch: on; 2 tasks" and len(lines) == 3 and "a/b" in lines[1] and "a/c" not in out, lines
+    assert lines[2] == "claimed 1; done 1; 1 smoke (taskq smoke status)", lines
+    assert "5 GB free; code b1" in out, out
+    assert len(taskq.queue_text(rs["taskq"], internal=True).splitlines()) == 4
+
+
 if __name__ == "__main__":
     test_drop_refused()
     test_beat_lost()
@@ -1706,6 +1731,7 @@ if __name__ == "__main__":
     test_bundle_since()
     test_deploy_cleanup()
     test_deploy_safety()
+    test_site_status_format()
     shutil.rmtree(T)
     shutil.rmtree(STATE_DIR)
     print("all passed")

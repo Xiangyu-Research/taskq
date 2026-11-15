@@ -15,6 +15,7 @@ sys.path.insert(0, HERE)
 
 fixture.use()
 import feed as F  # noqa: E402
+from proto import alert_msg  # noqa: E402
 
 fails = 0
 
@@ -34,8 +35,8 @@ q_ = dict(tasks=[ct("a/x/0", "claimed", assigned="pueue-host"), ct("a/x/1", "cla
                  ct("a/x/2", "claimed", assigned="site-slurm"), ct("a/x/3", "done", assigned="old")])
 nb = F.nobody(q_)
 ok("assigned to pueue-host (not an executor) reports feed:nobody:pueue-host with the release command; relay executors and done tasks are not reported",
-   list(nb) == ["feed:nobody:pueue-host"] and "release --worker pueue-host" in F.alert_msg(nb["feed:nobody:pueue-host"])
-   and "a/x/0" in F.alert_msg(nb["feed:nobody:pueue-host"]))
+   list(nb) == ["feed:nobody:pueue-host"] and "release --worker pueue-host" in alert_msg(nb["feed:nobody:pueue-host"])
+   and "a/x/0" in alert_msg(nb["feed:nobody:pueue-host"]))
 ok("feed:nobody has structured data: worker, n, keys", nb["feed:nobody:pueue-host"]["data"] == dict(worker="pueue-host", n=1, keys=["a/x/0"]))
 ok("hub queue unreadable: report nothing", F.nobody(None) == {})
 

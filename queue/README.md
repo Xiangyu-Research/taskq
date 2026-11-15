@@ -258,11 +258,11 @@ Merging tables with duplicate keys is an error.
 
 | want to know | look at |
 |---|---|
-| what is wrong now | `taskq problems` (found by the last health check; `--all` also lists notices and ones not yet due for a push) |
+| what is wrong now | `taskq problems` (the "Needs you" list of `taskq status`, each item with its id for `taskq notice ack`, then due notices; `--all` also lists info problems and ones not yet due for a push) |
 | what happened | `taskq events` (`--key`, `--site`, `--source`, `-f`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default home: `relay.log` etc.) |
 | one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` |
-| what this round would do | `taskq plan` (read-only) |
-| one executor | `taskq site status <machine>` (its queue), `taskq site envs <machine>` (envs); `relay/status.json` in the hub state dir |
+| what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
+| one executor | `taskq site status <machine>` (its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); `relay/status.json` in the hub state dir |
 | the worker itself | `data/logs/workers/` under the executor root (worker, GPU pad, Slurm job output); `pueue log` on a pueue executor |
 | training output | part log `data/logs/tasks/<key>__<job>_part<part>.log` (on the executor; the fetch brings it to the same place in the store) |
 | whether config is right | `taskq check` (`--quick` does not contact the store) |

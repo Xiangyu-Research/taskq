@@ -2,9 +2,7 @@
 """The only entry point for sending tasks: the hub's health check (monitor/health.py, every 30 minutes) calls run_all,
 which hands off to queue/relay.py to handle the executors in the machine table (pueue and Slurm executors; details go to
 ~/relay.log, with one line in ~/feed.log pointing there). It also checks tasks in the hub queue assigned to a name that is not
-an executor (left over after a machine was renamed or removed) and reports feed:nobody.
-
-    python3 queue/feed.py [-n]       show what it would do (changes nothing; -n / --dry-run / --dry are the same; taskq plan includes it)
+an executor (left over after a machine was renamed or removed) and reports feed:nobody.taskq plan shows what this round would send (health.py -n).
 """
 import os
 import sys
@@ -17,7 +15,7 @@ cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
-from proto import alert, alert_id, alert_msg  # noqa: E402
+from proto import alert, alert_id  # noqa: E402
 
 
 
@@ -50,18 +48,3 @@ def run_all(s, dry=False):
     stuck = dict(stuck)
     stuck.update(nobody((s.get("taskq") or {}).get(M.hub())))
     return events, stuck
-
-
-def main(argv=None):
-    import argparse
-    ap = argparse.ArgumentParser(description="Send tasks to executors (run_all, called by every health check); here it only reads")
-    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="only show what it would do (the default)")
-    ap.parse_args(argv)
-    import health as H  # noqa: E402
-    ev, st = run_all(H.gather(), dry=True)
-    print("\n".join(ev + [f"stuck: {alert_msg(v)}" for v in st.values()]))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

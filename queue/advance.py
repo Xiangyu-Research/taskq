@@ -3,9 +3,7 @@
 
 The order comes from flow/compile.py. Each round: queue instances whose dependencies are done; rerun a step when an input
 is newer than its done file; delete temp files once every user is done and fetched. HOLD is skipped; with policy.py
-AUTO["advance"] false only what would be queued is written.
-
-    python3 queue/advance.py      show what would be queued (changes nothing; taskq plan also shows sending)
+AUTO["advance"] false only what would be queued is written.taskq plan shows what this round would do (health.py -n).
 """
 import fnmatch
 import os
@@ -17,7 +15,7 @@ CORE = os.path.dirname(HERE)  # root of the scheduling code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
-from proto import alert_id, alert_msg  # noqa: E402
+from proto import alert_id  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, os.path.join(CORE, "sites"))
@@ -145,8 +143,9 @@ def taskq_add(nice, params):
     return r.returncode, (r.stdout + r.stderr).strip()
 
 
-def run(s, dry=False, tq=None, store=None):
-    """Called by health.py -> (list of what was done ("would ..." when only looking), stuck {problem id: explanation})."""
+def run(s, dry=False, tq=None, store=None, say=None):
+    """Called by health.py -> (list of what was done ("would ..." when only looking), stuck {problem id: explanation});
+    say: a list that receives the lines for people (taskq plan prints them)."""
     tq = tq or taskq_add
     store = store or RM.store_op
     todo, stuck = plan(s)
@@ -191,6 +190,8 @@ def run(s, dry=False, tq=None, store=None):
             did.append(f"would queue {t['id']}")
             lines.append(f"would queue {what}")
     lines += [f"not queued: {x}" for x in NOTES]
+    if say is not None:
+        say += lines
     if not dry:
         log(lines, stuck, live)
         save_stored()
@@ -223,34 +224,3 @@ def log(lines, stuck, live):
     if out:
         import events
         events.lines("advance", out, kind=None if live else "dry")
-
-
-def describe(todo, stuck):
-    """plan() result -> lines for people."""
-    out = []
-    for t in todo:
-        if t["op"] == "add" and not t["queued"]:
-            out.append(f"would queue {t['id']:36} nice {t['nice']:<5} {t['params']['cmd']}")
-        elif t["op"] == "rerun":
-            out.append(f"would redo {t['id']:34} delete {', '.join(t['files'])}")
-        elif t["op"] == "temp":
-            out.append(f"would delete temp files of {t['id']:36}: {', '.join(t['pats'])}")
-    out += [f"not queued: {x}" for x in NOTES]
-    out += [f"stuck: {alert_msg(v)}" for v in stuck.values()]
-    if not out:
-        out.append("nothing to queue")
-    return out
-
-
-def main(argv=None):
-    import argparse
-    ap = argparse.ArgumentParser(description="Downstream steps: show what would be queued (the health check calls run to queue for real)")
-    ap.add_argument("-n", "--dry-run", "--dry", action="store_true", help="only look (the default)")
-    ap.parse_args(argv)
-    import health as H  # noqa: E402
-    print("\n".join(describe(*plan(H.gather()))))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

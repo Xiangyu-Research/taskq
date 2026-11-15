@@ -46,7 +46,8 @@ try:
     ok("show: the command is filled from the recipe", r.returncode == 0 and "bash bin/count.sh 100 {data}/results/small/seed_0" in r.stdout)
     r = tq("plan")
     ok("plan: executors unreachable, no bundle on the store yet (cannot check results), nothing changes",
-       r.returncode == 0 and "unreachable" in r.stdout and "cannot check results" in r.stdout and "not queueing this round" in r.stdout)
+       r.returncode == 0 and "unreachable" in r.stdout and "cannot check results" in r.stdout and "not queueing this round" in r.stdout
+       and all(f"== {x}" in r.stdout for x in ("problems this round", "downstream steps", "send tasks")))
     r = tq("rm", "count/small/0", "count/small/1")
     ok("rm: removed", r.returncode == 0 and "0 tasks" in tq("status", "--queue").stdout)
     data = os.path.join(HOME, "taskq-example", "data", "results", "x")

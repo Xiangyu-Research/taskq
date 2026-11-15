@@ -73,13 +73,13 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 
 | command | what it does |
 |---|---|
-| `taskq tick` | one health check (really does it: push, queue downstream steps, send tasks) |
-| `taskq plan` | dry run: what this round would queue downstream and which tasks it would send |
+| `taskq tick` | one health check (really does it: push, queue downstream steps, send tasks; -n is taskq plan) |
+| `taskq plan` | dry run of one health check: problems it would find, what it would queue downstream, which tasks it would send |
 | `taskq boot` | boot (@reboot): start pueued, put interrupted tasks back |
-| `taskq problems` | problems found by the last health check ([--all] [--json]) |
+| `taskq problems` | what needs you (the same list as taskq status, with ids for notice ack) and due notices ([--all] [--json]) |
 | `taskq notice set` | post or edit text (<name> [text...]; reads stdin without text) |
 | `taskq notice clear` | remove (<name>...) |
-| `taskq notice list` | posted notices ([--json]) |
+| `taskq notice list` | every posted notice, also those waiting for --at (due ones are under Notes in taskq problems; [--json]) |
 | `taskq notice ack` | acknowledge "things that happened" reported by the health check (such as a reboot; <problem id or prefix>...), not listed again |
 | `taskq events` | event log: what happened (--since --key --site --source --kind --grep, -f, --json) |
 | `taskq note` | record a line in the event log (what happened, what was done) |

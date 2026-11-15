@@ -184,7 +184,8 @@ def groups(name):
     return out
 
 
-def _tz(name):
+def tz_of(name):
+    """This machine's time zone from the machine table (tz), or None for the local one."""
     t = machine(name).get("tz")
     if not t:
         return None
@@ -196,7 +197,7 @@ def now_at(name, t=None):
     """Local time at this machine (by tz), with timezone. t: seconds (None = now)."""
     import time
     t = time.time() if t is None else t
-    tz = _tz(name)
+    tz = tz_of(name)
     return dt.datetime.fromtimestamp(t, tz) if tz else dt.datetime.fromtimestamp(t).astimezone()
 
 

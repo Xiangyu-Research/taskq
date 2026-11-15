@@ -66,6 +66,7 @@ d = dict(queue=queue, relay=relay, problems=probs, checked="2026-10-16 11:35", n
          stored={keys[21]})
 o = SU.build(d, NOW)
 T = o["tasks"]
+AT = [a["text"] for a in o["attention"]]
 ok("words: running / being sent / held / waiting there / done, coming back / failed / not sent yet / done",
    [T[k]["word"] for k in (RUN, SEND, HELD, WAIT, BACK, FAIL, FREE, DONE)]
    == [SU.RUNNING, SU.SENDING, SU.HELD, SU.WAITING, SU.BACK, SU.FAILED, SU.NOT_SENT, SU.DONE])
@@ -78,9 +79,15 @@ ok("claimed by a worker on the hub itself, or unclaimed with its log still chang
 ok("smoke tasks are left out", not any(proto.is_smoke(k) for k in T))
 ok("a running training has progress and an estimated finish", abs(T[RUN]["frac"] - 0.5) < 1e-9 and T[RUN]["eta"] > NOW)
 ok("a training past its estimated finish by over an hour is overdue and listed under Needs you",
-   T[LATE]["word"] == SU.OVERDUE and any(LATE in a and "past its estimated finish" in a for a in o["attention"]))
+   T[LATE]["word"] == SU.OVERDUE and any(LATE in a and "past its estimated finish" in a for a in AT))
 ok("Needs you: active problems but not notices; an executor with no news for over 2 hours",
-   "something broke" in o["attention"] and "a note" not in o["attention"] and any("no news from Slurm2" in a for a in o["attention"]))
+   "something broke" in AT and "a note" not in AT and any("no news from Slurm2" in a for a in AT))
+ok("each item under Needs you has an id: the problem's, overdue:<key>, stale:<machine>",
+   [a["id"] for a in o["attention"]] == ["site:x", f"overdue:{LATE}", "stale:site-slurm2"] and o["attention"][0]["since"] == 1)
+_ids = SU.attention_lines(o, ids=True)
+ok("attention_lines: the same items for taskq status and taskq problems; with ids for notice ack",
+   SU.attention_lines(o)[:3] == ["", "Needs you", "  ! something broke"] and _ids[3] == "      site:x (since 1)"
+   and len(_ids) == 2 + 2 * len(AT) and SU.attention_lines(dict(o, attention=[])) == [])
 Mx = {m["name"]: m for m in o["machines"]}
 ok("pueue machine: free slots = worker slots - running", Mx["site-pueue"]["slots"] == 3 and Mx["site-pueue"]["count"][SU.RUNNING] == 1
    and Mx["site-pueue"]["later"] == 0)
@@ -93,13 +100,13 @@ ok("progress per step (recipe when there is no step): totals add up", steps["tot
 txt = SU.text(o)
 ok("summary text: head counts what needs you, machines, due list, progress, notes, pointers",
    txt.splitlines()[0].endswith("3 things need you") and "Machines" in txt and "Due in the next 24 hours (1)" in txt
-   and "Progress (done / all)" in txt and "Notes (1): board" in txt and "taskq status --all" in txt)
+   and "Progress (done / all)" in txt and "Notes (1): board   (taskq problems)" in txt and "taskq status --all" in txt)
 ok("machine heads: free slots on pueue, jobs on Slurm, held tasks listed",
    "free 2/3" in txt and "more slot" not in txt and "jobs 1 running, 1 queued" in txt and f"held: {HELD} (bundle-incompatible: waits for" in txt)
 cur = dict(relay, **{"site-slurm": dict(relay["site-slurm"], held={HELD: dict(why="bundle-incompatible", bundle="b2", since=NOW.timestamp())})})
 o3 = SU.build(dict(d, relay=cur, problems=probs + [GATE]), NOW)
 ok("a hold by the current bundle needs a new bundle: under Needs you at once, said on the held line",
-   "held by the bundle" in o3["attention"] and "the current bundle b2 cannot run it; needs a new bundle" in SU.text(o3))
+   "held by the bundle" in [a["text"] for a in o3["attention"]] and "the current bundle b2 cannot run it; needs a new bundle" in SU.text(o3))
 _workers = SU.M.workers
 SU.M.workers = lambda n, kind=None: [dict(w, hours=[("21:00", "09:00", None, None)]) if w.get("gpu") == "0" else w for w in _workers(n, kind)]
 try:

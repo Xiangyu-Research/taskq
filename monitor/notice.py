@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Problems, notices and acknowledgements from the health check, stored in the hub database (queue/db.py).
 
-    taskq problems [--all] [--json]           problems found by the last health check
+    taskq problems [--all] [--json]           what needs you (the same list as taskq status) and due notices
     taskq notice set <name> [--at T] [text...]  add a notice (reads stdin when no text); --at: start reporting then
     taskq notice clear <name>...              remove notices (a missing one is not an error)
     taskq notice list [--json]                active notices, including those still waiting for --at
@@ -131,9 +131,21 @@ def cmd_problems(argv):
     if a.json:
         print(json.dumps(dict(version=proto.VERSION, checked=checked, problems=rows), ensure_ascii=False))
         return 0
-    print(f"Health check {checked or 'not run yet'}: {len(rows)} problems")
-    for r in rows:
-        print(f"  [{r['level']}] {r['id']} (since {r['first']})\n      {r['plain'] or r['msg']}")
+    sys.path.insert(0, HERE)
+    import summary as SU  # the same "Needs you" list as taskq status (problems, overdue tasks, executors with no news)
+    from datetime import datetime
+    now = datetime.now()
+    o = SU.build(SU.read_local(now), now)
+    out = [f"as of the health check at {checked or '(none yet)'}"] + (SU.attention_lines(o, ids=True) or ["", "Nothing needs you"])
+    notes = notices(db) if db else {}
+    if notes:
+        out += ["", f"Notes ({len(notes)})"] + [f"  {n}: {v['text']}" for n, v in notes.items()]
+    if a.all:
+        seen = {x["id"] for x in o["attention"]} | {proto.alert_id("notice", n) for n in notes}
+        rest = [r for r in rows if r["id"] not in seen]
+        out += ["", f"Info and not reported yet ({len(rest)})"] + [f"  [{r['level']}] {r['plain'] or r['msg']}\n      {r['id']} (since {r['first']})"
+                                                                for r in rest] if rest else []
+    print("\n".join(out))
     return 0
 
 

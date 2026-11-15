@@ -1000,23 +1000,31 @@ def cmd_status(a):
     except DiskError as e:
         print(f"cannot read queue state: {e}", file=sys.stderr)
         return 1
-    smoke = 0
-    if not a.internal:  # smoke tasks (taskq smoke status) are listed only with --internal
-        smoke = sum(proto.is_smoke(t["key"]) for t in s["tasks"])
-        s["tasks"] = [t for t in s["tasks"] if not proto.is_smoke(t["key"])]
     if a.json:
+        if not a.internal:
+            s["tasks"] = [t for t in s["tasks"] if not proto.is_smoke(t["key"])]
         S.json_out({"version": proto.VERSION, **s})
         return 0
-    print(f"master switch: {'on' if s['enabled'] else 'off'}; {len(s['tasks'])} tasks"
-          + (f"; {s.get('recent_failures')} failures in the last {proto.hours(proto.PAUSE_WINDOW)}, claiming paused" if s.get("paused") else ""))
-    n = {}
-    for t in s["tasks"]:
-        n[t["state"]] = n.get(t["state"], 0) + 1
-        if t["state"] not in ("done",):
-            env = ",".join(S.envs_of(t.get("spec"))) or "?"
-            print(f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}")
-    print("; ".join(f"{k} {v}" for k, v in sorted(n.items())) + (f"; {smoke} smoke (taskq smoke status)" if smoke else ""))
+    print(queue_text(s, internal=a.internal))
     return 0
+
+
+def queue_text(s, internal=False):
+    """A queue's status (local_status(), or an executor's read over ssh) as text, the one format of taskq status --queue and
+    taskq site status: the head, one line per task not done (nice, key, env, state, note), counts per state; smoke tasks
+    (taskq smoke status) are only counted unless internal."""
+    tasks = [t for t in s["tasks"] if internal or not proto.is_smoke(t["key"])]
+    smoke = len(s["tasks"]) - len(tasks)
+    out = [f"master switch: {'on' if s.get('enabled') else 'off'}; {len(tasks)} tasks"
+           + (f"; {s.get('recent_failures')} failures in the last {proto.hours(proto.PAUSE_WINDOW)}, claiming paused" if s.get("paused") else "")]
+    n = {}
+    for t in tasks:
+        n[t["state"]] = n.get(t["state"], 0) + 1
+        if t["state"] != proto.S_DONE:
+            env = ",".join(S.envs_of(t.get("spec"))) or "?"
+            out.append(f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}".rstrip())
+    out.append("; ".join(f"{k} {v}" for k, v in sorted(n.items())) + (f"; {smoke} smoke (taskq smoke status)" if smoke else ""))
+    return "\n".join(out)
 
 
 def main(argv):

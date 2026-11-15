@@ -373,10 +373,12 @@ def total_of(f):
     return t if isinstance(t, (int, float)) and t > 0 else None
 
 
-def progress_of(f):
+def progress_of(f, tz=None):
     """A task record (collect / one_task, or an executor's entry relay keeps) -> dict(frac, eta, last, epochs, total): the only
     progress rule. frac: done -> 1.0, total known -> epochs / total (0.0 before the first epoch), else None; eta: when the
-    latest run reaches total (eta_at); last: time of the latest progress point. No record -> all empty."""
+    latest run reaches total (eta_at); last: time of the latest progress point. No record -> all empty. Records carry the
+    executor's local time; tz: that machine's time zone (mtab.tz_of) when it differs, so eta and last are in this machine's
+    local time."""
     out = dict(frac=None, eta=None, last=None, epochs=0, total=None)
     if not f:
         return out
@@ -390,6 +392,10 @@ def progress_of(f):
     elif total:
         out["frac"] = min(out["epochs"] / total, 1.0)
         out["eta"] = eta_at(runs, total)
+    if tz is not None:
+        for k in ("eta", "last"):
+            if out[k] is not None:
+                out[k] = out[k].replace(tzinfo=tz).astimezone().replace(tzinfo=None)
     return out
 
 

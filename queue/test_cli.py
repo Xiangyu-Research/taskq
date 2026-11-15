@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Tests for bin/taskq: every command's --help exits 0 and touches no files; commands routed to modules match the old scripts; --version,
 path, project lookup, self update and install.sh (temp HOME, local origin repo). Connects to no machine.  python3 queue/test_cli.py"""
-import contextlib
 import importlib.machinery
 import importlib.util
-import io
 import json
 import os
 import shutil
@@ -191,33 +189,20 @@ class Routing(unittest.TestCase):
         self.assertEqual(taskq().returncode, 2)
         self.assertEqual(taskq("--bogus").returncode, 2)
 
-    def test_plan_sections_read_only(self):
-        """plan: the same gather() goes to feed and advance, both dry."""
+    def test_plan_is_health_dry_run(self):
+        """plan is the health check's dry run (health.py -n): one round's problems, downstream steps and sending, nothing changed."""
         fixture.use()
         os.environ.update(TASKQ_DIR=TQ, TASKQ_DATA=DATA)
         m = cli()
-        m.paths()
-        import health
-        import feed
-        import advance
-        calls, s = [], {"x": 1}
-        saved = health.gather, feed.run_all, advance.plan, advance.describe
+        calls = []
+        saved = m.script
         try:
-            health.gather = lambda: s
-            feed.run_all = lambda st, dry=False: calls.append(("feed", st is s, dry)) or (["send a"], {"x": "stuck b"})
-            advance.plan = lambda st: calls.append(("advance", st is s, True)) or ([], {})
-            advance.describe = lambda *a: ["nothing to queue"]
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                rc = m.main(["plan", "-n"])
+            m.script = lambda rel, argv, prog: calls.append((rel, argv)) or 0
+            for argv in (["plan"], ["plan", "-n"]):
+                self.assertEqual(m.main(argv), 0)
         finally:
-            health.gather, feed.run_all, advance.plan, advance.describe = saved
-        self.assertEqual(rc, 0)
-        self.assertEqual(sorted(calls), [("advance", True, True), ("feed", True, True)])
-        out = buf.getvalue()
-        for x in ("== send tasks", "send a", "stuck: stuck b", "== downstream steps", "nothing to queue"):
-            self.assertIn(x, out)
-        self.assertNotIn("hours window", out)
+            m.script = saved
+        self.assertEqual(calls, [(os.path.join("monitor", "health.py"), ["-n"])] * 2)
 
 
 class Errors(unittest.TestCase):
