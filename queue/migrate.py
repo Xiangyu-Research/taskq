@@ -684,13 +684,15 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
 
 def leftovers(home):
     """First-level entries in the state dir not in proto.STATE_NAMES -> delete; also old backups left by earlier versions
-    in relay/, health/ and files from before a migration."""
+    in relay/, health/ and files from before a migration (health/status.json is an old file; relay/status.json is live)."""
+    snap = os.path.join(home, OLD_SNAPSHOTS)
     out = [os.path.join(home, f) for f in sorted(os.listdir(home))
-           if f != OLD_SNAPSHOTS and not any(f == n or f.startswith((n + ".", n + "-")) for n in proto.STATE_NAMES)]
+           if (f != OLD_SNAPSHOTS or not os.path.isdir(snap) or not any(os.path.isdir(os.path.join(snap, x)) for x in os.listdir(snap)))
+           and not any(f == n or f.startswith((n + ".", n + "-")) for n in proto.STATE_NAMES)]  # code/: once no snapshot is left
     for sub in ("relay", "health"):
         d = os.path.join(home, sub)
         for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-            if f.endswith(".migrated") or ".bak" in f or f in ("old", "status.json") or f.startswith("push_"):
+            if f.endswith(".migrated") or ".bak" in f or f == "old" or (sub, f) == ("health", "status.json") or f.startswith("push_"):
                 out.append(os.path.join(d, f))
     last = os.path.join(home, "last")
     out += sorted(glob.glob(os.path.join(last, "*")))  # "skip a repeat" records: clearing them only logs one extra line
@@ -701,7 +703,7 @@ def old_snapshots(home):
     """Code snapshots <state dir>/code/<commit> (git worktrees the old queue/q made for manual pueue tasks) -> (to delete,
     kept: the working dir of a pueue task here that has not finished, or all of them when pueue cannot be read)."""
     d = os.path.join(home, OLD_SNAPSHOTS)
-    snaps = sorted(os.path.join(d, f) for f in os.listdir(d)) if os.path.isdir(d) else []
+    snaps = sorted(os.path.join(d, f) for f in os.listdir(d) if os.path.isdir(os.path.join(d, f))) if os.path.isdir(d) else []
     if not snaps:
         return [], []
     try:
