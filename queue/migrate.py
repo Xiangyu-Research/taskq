@@ -167,18 +167,20 @@ def english_logs(D, say, dry, busy=()):
         p = os.path.join(d, f)
         if not f.endswith(".log") or not os.path.isfile(p):
             continue
-        if open_log(f, busy):
-            skip += 1
-            continue
         with open(p, encoding="utf-8", errors="surrogateescape") as fh:
             old = fh.read()
         new = "".join(english_line(ln) for ln in old.splitlines(keepends=True))
-        if new != old:
-            n += 1
-            if not dry:
-                C.atomic_write(p, new)
+        if new == old:
+            continue
+        if open_log(f, busy):  # only logs that still have old lines count: one already in English needs no later run
+            skip += 1
+            continue
+        n += 1
+        if not dry:
+            C.atomic_write(p, new)
     if n or skip:
-        say(f"{d}: {n} part logs rewritten to English" + (f", {skip} of claimed tasks left as they are (run self migrate again after they end)" if skip else ""))
+        say(f"{d}: {n} part logs rewritten to English" + (f", {skip} logs of claimed tasks still in the old format left as they are"
+                                                          " (run self migrate again after they end)" if skip else ""))
 
 
 def english_failures(Q, say, dry):
@@ -710,8 +712,6 @@ def leftovers(home):
         for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
             if not any(f in (n, n + ".lock") for n in names):
                 out.append(os.path.join(d, f))
-    last = os.path.join(home, "last")
-    out += sorted(glob.glob(os.path.join(last, "*")))  # "skip a repeat" records: clearing them only logs one extra line
     return out
 
 

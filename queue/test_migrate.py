@@ -218,6 +218,18 @@ ok("english_logs: a half-rewritten log comes out fully new",
    read(HALF) == (proto.LOG_HEAD_FMT % ("j_1", "node1", "half/key", 1, "base", "abc1234", "2026-11-01 10:00:00") + "\n"
                   + "DONE 2026-11-01 11:00:00\n" + "2026-11-01 11:01:00 command ended (exit 0), not done (attempt 1)\n"))
 
+BUSY_OLD = write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('busy/old')}__j_part1.log"),
+                 old_head("j", 1, "busy/old") + "2026-11-01 10:03:00 命令结束（退出码 1），没训完（第 1 次）\n")
+BUSY_NEW = write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('busy/new')}__j_part1.log"), read(HALF))
+said = []
+MG.english_logs(ED, said.append, False, busy=[proto.safe("busy/old"), proto.safe("busy/new")])
+OLD_TEXT = read(BUSY_OLD)
+said_new = []
+MG.english_logs(ED, said_new.append, False, busy=[proto.safe("busy/new")])
+ok(f"english_logs: logs of claimed tasks are not touched; only those still in the old format are reported as left for a later run ({said})",
+   len(said) == 1 and "1 logs of claimed tasks still in the old format" in said[0] and "命令结束" in OLD_TEXT
+   and said_new == [f"{os.path.join(ED, proto.TASK_LOGS)}: 1 part logs rewritten to English"] and "命令结束" not in read(BUSY_OLD))
+
 FQ = os.path.join(EL, "queue")
 write(os.path.join(FQ, proto.QUEUE["failures"], proto.safe("k/a")),
       "2026-11-01 10:00:00\t作业 1\tboom\tA\n2026-11-01 10:01:00\tjob 2\tboom\tB\n")
@@ -307,7 +319,6 @@ write(os.path.join(STATE, "relay", "state.json"), json.dumps(dict(
 JUNK = [write(os.path.join(STATE, "shift.json"), "{}"), write(os.path.join(STATE, "relay", "state.json.bak"), "{}"),
         write(os.path.join(STATE, "relay", "push_lab0.log"), "x"), os.path.dirname(write(os.path.join(STATE, "relay", "old", "a"), "x")),
         write(os.path.join(STATE, "health", "status.json"), "{}"), write(os.path.join(STATE, "health", "probs.json.migrated"), "{}"),
-        write(os.path.join(STATE, "last", "a"), "x"), write(os.path.join(STATE, "last", "b"), "x"),
         write(os.path.join(STATE, "relay", "names.json.lock"), ""), write(os.path.join(STATE, "relay", "stage_gone.lock"), ""),
         write(os.path.join(STATE, "health", "report.json"), "{}"), os.path.dirname(write(os.path.join(STATE, "health", "notices", "a"), "x")),
         write(os.path.join(STATE, "health", "problems.json"), "{}"),
@@ -322,7 +333,8 @@ KEEP = [write(os.path.join(STATE, "tasks.json"), "{}"), write(os.path.join(STATE
         write(os.path.join(STATE, "relay", "status.json"), "{}"),  # live: relay.py writes it each round, taskq status reads it
         write(os.path.join(STATE, "relay", "state.json.lock"), ""),
         write(os.path.join(STATE, "relay", f"stage_{next(iter(__import__('cfg').mtab().MACHINES))}.lock"), ""),
-        write(os.path.join(STATE, "relay", "bundles", "x", "f"), "x")]
+        write(os.path.join(STATE, "relay", "bundles", "x", "f"), "x"),
+        write(os.path.join(STATE, "last", "a.json"), "[]")]  # "skip a repeat" records (common.changed): live, kept
 OLD_HLOG = write(os.path.join(STATE, "health", "health.log"), "2026-11-01 00:00:00 an old line\n")
 
 # hub database (version 1, with a sha256 cache)
@@ -597,9 +609,8 @@ ok("pin records: dropped for renamed tasks (executors and store), others kept",
    and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["pins"])) == [])
 
 # state dir, database
-ok("state dir: unused entries dropped, needed ones kept",
-   not any(os.path.lexists(p) for p in JUNK) and all(os.path.exists(p) for p in KEEP)
-   and os.path.isdir(os.path.join(STATE, "last")) and os.listdir(os.path.join(STATE, "last")) == [])
+ok("state dir: unused entries dropped, needed ones kept (last/ records too)",
+   not any(os.path.lexists(p) for p in JUNK) and all(os.path.exists(p) for p in KEEP))
 ok("health check plain-text log: the one in the state dir's health/ is appended to cfg.log's health.log",
    not os.path.exists(OLD_HLOG) and "an old line" in open(cfg.log("health")).read())
 con = sqlite3.connect(os.environ["TASKQ_DB"])
