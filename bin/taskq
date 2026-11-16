@@ -251,6 +251,7 @@ TREE = {
                   "--queue, or not on the hub: this machine's queue (taskq.py status); --json: one @@JSON line; --all --json: overview.py --json"),
     "stop": Cmd("stop a task (a running one stops and releases within 30 seconds; not claimed again afterwards)", py("taskq", "stop"), own_help=True),
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
+    "unskip": Cmd("let executors that released a task claim it again (--worker: only that one)", py("taskq", "unskip"), own_help=True),
     "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
     # scheduling
     "tick": Cmd("one health check (really does it: push, queue downstream steps, send tasks; -n is taskq plan)",
@@ -361,7 +362,7 @@ TREE = {
     }, hidden=True),
 }
 
-SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "rm"]),
+SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "unskip", "rm"]),
             ("scheduling", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
             ("executors and experiments", ["site", "env", "smoke", "exp"]),
             ("dependencies", ["who", "dag"]),
