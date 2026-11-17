@@ -29,6 +29,7 @@ for d in ("sites", "monitor", "sync"):
     sys.path.insert(0, os.path.join(CORE, d))
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+import common as C  # noqa: E402
 import proto as PR  # noqa: E402
 cfg.use_config()
 # Import core modules first: a project's experiment table may add plugin dirs to sys.path with same-named recipes.py or relay_plugins.py
@@ -248,12 +249,34 @@ def check_machines(r):
     if len(local) > 1:
         r.bad(g, f"at most one executor may have ssh=None (same machine as the hub), now {local}")
     if st and M.MACHINES[st].get("data"):
-        real = lambda p: os.path.realpath(os.path.expanduser(p))  # noqa: E731
-        for n in M.executors():
-            if n != st and M.MACHINES[n].get("ssh") is None and M.MACHINES[st].get("ssh") is None \
-                    and (real(M.MACHINES[n]["root"]) + "/").startswith(real(M.MACHINES[st]["data"]).rstrip("/") + "/"):
-                r.bad(g, f"root of MACHINES[{n!r}] is inside the store's data dir: an executor's data must be separate from the home of results")
+        check_data_dirs(r, M, st)
     check_specs(r, M)
+
+
+def check_data_dirs(r, M, st):
+    """An executor that sees the store's files (the store itself, or both on the hub's machine, or the same ssh host): its
+    root is not inside the store's data dir, and its data dir (<root>/data) and the store's data dir do not overlap either way
+    (one is the other or inside it), paths compared after resolving (~ and symlinks, for machines on this one). With an
+    overlap a worker's done markers make the results count as already on the store, and the hub deletes the executor's copy:
+    the only one."""
+    g = "machines"
+    ssh = lambda n: M.MACHINES[n].get("ssh")  # noqa: E731
+
+    def where(n, p):
+        return os.path.realpath(os.path.expanduser(p)) if ssh(n) is None else os.path.normpath(p)
+
+    sd = where(st, M.MACHINES[st]["data"])
+    for n in M.executors():
+        if n != st and ssh(n) != ssh(st):
+            continue
+        root = M.MACHINES[n]["root"].rstrip("/")
+        rd, ed = where(n, root), where(n, f"{root}/{PR.ROOT['data']}")
+        if C.under(rd, sd):
+            r.bad(g, f"root of MACHINES[{n!r}] is inside the store's data dir: an executor's data must be separate from the home of results")
+        elif C.under(ed, sd) or C.under(sd, ed):
+            r.bad(g, f"MACHINES[{n!r}]: its data dir {ed} and the store's data dir {sd} overlap (one is the other or inside it): "
+                     "results written there would count as already on the store and the executor's copy, the only one, would be "
+                     "deleted; give the store a data dir of its own")
 
 
 PLACEHOLDERS = {"torch_mm", "abi", "cp"}  # placeholders allowed in pip packages of an env description (sites/envs.py pip_lines)

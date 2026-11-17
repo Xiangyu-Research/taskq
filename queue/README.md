@@ -29,7 +29,9 @@ each part runs, where files live, and how to add things.
   and puts the task in that executor's own queue (`R/queue`, same key as the hub queue); the worker there claims, trains and releases;
   when the hub sees it finished, it fetches the results to the store. Executors do not talk to each other.
 - One machine can hold several roles; the one with `ssh=None` is the hub's machine and can also be an executor (commands run locally,
-  transfers copy locally).
+  transfers copy locally). An executor that sees the store's files keeps its data dir (`R/data`) apart from the store's data dir: neither
+  may be the other or inside it (`taskq check`), or finished results there would count as already on the store and the executor's copy,
+  the only one, would be deleted.
 - Executors run bundles built by the hub (`queue/relay_bundle.py`: the core files executors need go into `scripts/taskq/` inside the
   bundle, plus the project's config dir and the dirs listed in `OUTPUTS["bundle"]`, minus `bundle_skip`, both read from `policy.py` at
   the commit being bundled); the bundle name is a content hash; it is pushed to
