@@ -107,7 +107,7 @@ G=$TASKQ_DATA/gpu
 case "$*" in
     *query-compute-apps*) n=$(cat "$G/n" 2> /dev/null || echo 0); echo $(( n + 1 )) > "$G/n"
                           (( n < $(cat "$G/busy") )) && cat "$G/apps" ;;
-    *query-gpu*) cat "$G/used" ;;
+    *query-gpu=index,memory.used*) echo "0, $(cat "$G/used")" ;;
 esac
 exit 0
 FAKE
@@ -136,7 +136,7 @@ check "no GPU check in Slurm" "(( rc == 0 )) && [[ ! -e $T/gpu/n ]]"
 # TERM while checking the GPU (gpu_free): its local pid used to shadow the training pid, so the process listed on the GPU was
 #   stopped instead; before training starts nothing is stopped
 mkdir -p "$T/binh"
-printf '#!/bin/bash\ncase "$*" in *query-compute-apps*) cat %q; echo $$ > %q; exec sleep 30 ;; *query-gpu*) echo 10 ;; esac\nexit 0\n' "$T/gpu/hang_apps" "$T/gpu/hang_pid" > "$T/binh/nvidia-smi"; chmod +x "$T/binh/nvidia-smi"
+printf '#!/bin/bash\ncase "$*" in *query-compute-apps*) cat %q; echo $$ > %q; exec sleep 30 ;; *query-gpu=index,memory.used*) echo \"0, 10\" ;; esac\nexit 0\n' "$T/gpu/hang_apps" "$T/gpu/hang_pid" > "$T/binh/nvidia-smi"; chmod +x "$T/binh/nvidia-smi"
 sleep 313 & victim=$!
 echo "$victim, 10" > "$T/gpu/hang_apps"; rm -f "$T/gpu/hang_pid"
 env PATH=$T/binh:$PATH CUDA_VISIBLE_DEVICES=0 $R command key=toy/w6 'cmd=touch $TASKQ_DATA/toy/w6/DONE' env=base out=toy/w6 'done=["DONE"]' > /dev/null & rp=$!
@@ -164,6 +164,51 @@ check "only ourselves in the records: run as usual" "(( rc == 0 ))"
 gpu 0 "" 0; glrow 10 0 someoneelse
 $G GPU_LOG_DIR=$T/gl $R command key=toy/q5 'cmd=touch $TASKQ_DATA/toy/q5/DONE' env=base out=toy/q5 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null; rc=$?
 check "TASK_GPU_IDLE unset: records are not consulted" "(( rc == 0 ))"
+# every GPU in CUDA_VISIBLE_DEVICES (by index or UUID) must be free, and a GPU nvidia-smi cannot tell about is not free. The fake
+#   answers -i <gpu> from $T/gpus/<gpu>/{index,used,apps}; no dir: exit 6 (no such GPU); a fail file: exit 9
+mkdir -p "$T/binm"
+cat > "$T/binm/nvidia-smi" << 'FAKE'
+#!/bin/bash
+d=$TASKQ_DATA/gpus/$2
+[[ $1 == -i && -d $d ]] || exit 6
+[[ -e $d/fail ]] && exit 9
+case "$*" in
+    *query-compute-apps*) cat "$d/apps" ;;
+    *query-gpu=index,memory.used*) echo "$(cat "$d/index"), $(cat "$d/used")" ;;
+esac
+exit 0
+FAKE
+chmod +x "$T/binm/nvidia-smi"
+mgpu() { rm -rf "$T/gpus/$1"; mkdir -p "$T/gpus/$1"; echo "$2" > "$T/gpus/$1/index"; echo "$3" > "$T/gpus/$1/used"; : > "$T/gpus/$1/apps"; }
+M="env PATH=$T/binm:$PATH RUN_TASK_GPU_POLL=1"
+mrun() { local k=$1; shift; $M "$@" $R command key=toy/$k "cmd=touch \$TASKQ_DATA/toy/$k/DONE" env=base out=toy/$k 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null 2>&1; }
+mlog() { cat "$T/logs/tasks/toy__$1__test-1_part1.log" 2> /dev/null; }
+mgpu 0 0 0; mgpu 1 1 2000
+mrun m1 CUDA_VISIBLE_DEVICES=0,1; rc=$?
+check "CUDA_VISIBLE_DEVICES=0,1, someone else's memory on GPU 1: busy, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m1/DONE ]] && mlog m1 | grep -q 'GPU 0,1 busy, waited 0 minutes, not running'"
+mgpu 1 1 300
+mrun m2 CUDA_VISIBLE_DEVICES=0,1; rc=$?
+check "CUDA_VISIBLE_DEVICES=0,1, both free: run" "(( rc == 0 ))"
+touch "$T/gpus/1/fail"
+mrun m3 CUDA_VISIBLE_DEVICES=0,1; rc=$?
+check "nvidia-smi fails for one GPU: not free (cannot tell), not run, the log says why" "(( rc == 1 )) && [[ ! -e $T/toy/m3/DONE ]] && mlog m3 | grep -q 'GPU 0,1 busy (cannot tell: nvidia-smi failed for GPU 1 (exit 9)), waited 0 minutes, not running'"
+mgpu 1 1 '[N/A]'
+mrun m4 CUDA_VISIBLE_DEVICES=0,1; rc=$?
+check "unreadable nvidia-smi output: not free, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m4/DONE ]] && mlog m4 | grep -q \"cannot tell: nvidia-smi gave '1, \\[N/A\\]' for GPU 1\""
+mrun m5 CUDA_VISIBLE_DEVICES=7; rc=$?
+check "a GPU nvidia-smi does not know: not free, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m5/DONE ]] && mlog m5 | grep -q 'nvidia-smi failed for GPU 7 (exit 6)'"
+NOSMI=$(tr ':' '\n' <<< "$PATH" | while read -r d; do [[ -n $d && ! -e $d/nvidia-smi ]] && echo "$d"; done | paste -sd:)
+env PATH="$NOSMI" CUDA_VISIBLE_DEVICES=0 $R command key=toy/m6 'cmd=touch $TASKQ_DATA/toy/m6/DONE' env=base out=toy/m6 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null 2>&1; rc=$?
+check "no nvidia-smi at all: not free, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m6/DONE ]] && mlog m6 | grep -q 'nvidia-smi failed for GPU 0 (exit 127)'"
+mgpu 1 1 0; mgpu GPU-abc 3 0
+glrow 10 3 someoneelse
+mrun m7 CUDA_VISIBLE_DEVICES=GPU-abc GPU_LOG_DIR=$T/gl TASK_GPU_IDLE=60; rc=$?
+check "CUDA_VISIBLE_DEVICES by UUID: the usage records of that GPU's index count" "(( rc == 1 )) && [[ ! -e $T/toy/m7/DONE ]] && mlog m7 | grep -q 'needs 60 minutes free'"
+glrow 10 1 someoneelse
+mrun m8 CUDA_VISIBLE_DEVICES=GPU-abc GPU_LOG_DIR=$T/gl TASK_GPU_IDLE=60; rc=$?
+check "CUDA_VISIBLE_DEVICES by UUID: someone on another GPU, run" "(( rc == 0 ))"
+mrun m9 CUDA_VISIBLE_DEVICES=0,1 GPU_LOG_DIR=$T/gl TASK_GPU_IDLE=60; rc=$?
+check "CUDA_VISIBLE_DEVICES=0,1: someone on GPU 1 in the records, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m9/DONE ]] && mlog m9 | grep -q 'needs 60 minutes free'"
 
 # machine table task_vars: exported to tasks only on this machine (TASKQ_MACHINE, set by bundles and workers); already set (non-empty) values are kept; task_unset: removed from the task env.
 # in the test machine table site-pueue has task_vars (WS_TASK_VARS); the cfg_tv copy also gives it task_unset=("DEMO_UNSET",)

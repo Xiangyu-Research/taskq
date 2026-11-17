@@ -326,7 +326,7 @@ of what has stopped, runs `on_exit` and exits 1.
 | `resident` | resident worker in a pueue group: worker id as the name, cores and concurrency from the machine table's worker, exit after an idle period (exit 0, the hub starts it again next round) |
 | `gpu_pad` | with a GPU pad: grow it to floor before training, subtract its memory when computing free GPU memory |
 | `window` | the machine table worker's `hours`: do not claim outside the window; at the end of the window stop and release current tasks and exit |
-| `gpu_idle` | claim only when no one else's processes are on the GPU and the usage records show no one else in the last `idle` minutes |
+| `gpu_idle` | claim only when, on every GPU in `CUDA_VISIBLE_DEVICES` (by index or UUID), no one else's processes are there and the usage records show no one else in the last `idle` minutes; a GPU nvidia-smi cannot tell about (missing, failing, timing out, unreadable output) is not free (`run_task.sh` waits the same way when started by hand) |
 | `gpu_share` | a second task on one GPU: after the first has trained for a while, claim another when average utilisation is low and half the memory is still free |
 
 How many tasks share a GPU and when to top up follow only this live state, never a model classification.

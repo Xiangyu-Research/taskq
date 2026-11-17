@@ -96,8 +96,8 @@ with open(FAKE, "w") as f:
     f.write('#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\nhost=$1; shift\n'
             f'export TMPDIR={T}/tmp_$host; mkdir -p "$TMPDIR"\n'
             f'cd "$HOME" && exec env {" ".join("-u " + v for v in proto.HUB_ONLY_ENV)} bash -c "$*"\n')
-with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # never touch the real GPUs
-    f.write("#!/bin/bash\nexit 0\n")
+with open(os.path.join(BIN, "nvidia-smi"), "w") as f:  # never touch the real GPUs: every GPU asked for is free (index, memory used)
+    f.write('#!/bin/bash\n[[ $1 == -i && $* == *query-gpu=index,memory.used* ]] && echo "$2, 0"\nexit 0\n')
 for p in (FAKE, os.path.join(BIN, "nvidia-smi")):
     os.chmod(p, 0o755)
 with open(os.path.join(HOOK, "sitecustomize.py"), "w") as f:  # record only, change nothing: which machine ran which site_ops op; os.replace targets during pull

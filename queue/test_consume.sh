@@ -131,7 +131,8 @@ table << EOF
 t/i base
 EOF
 mkdir -p "$T/bini" "$T/gpulog"
-printf '#!/bin/bash\n[[ "$*" == *compute-apps* && -e %q ]] && echo "99999999, 900"\nexit 0\n' "$T/busy" > "$T/bini/nvidia-smi"; chmod +x "$T/bini/nvidia-smi"
+printf '#!/bin/bash\n[[ -e %q ]] && exit 9\ncase "$*" in\n    *compute-apps*) [[ -e %q ]] && echo "99999999, 900" ;;\n    *query-gpu=index,memory.used*) echo "1, 0" ;;\nesac\nexit 0\n' \
+  "$T/smifail" "$T/busy" > "$T/bini/nvidia-smi"; chmod +x "$T/bini/nvidia-smi"
 f=$T/gpulog/$(date +gpu_%Y-%m.csv)
 echo "$(date -d '-5 min' '+%F %T'),1,50,9000,24576,someone,4242,9000,python" > "$f"
 (WORKER_ID=site-pueue-gpu1 CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
@@ -143,7 +144,11 @@ check "someone just used the GPU: no claim, and no idle exit" 'kill -0 $wpid && 
 : > "$f"; touch "$T/busy"
 waitfor 20 'grep -q "GPU 1 busy, waiting for it" $T/widle.out'
 check "someone else's process on the GPU: no claim" '[[ ! -s $T/train.log && $(nclaims) == 0 ]]'
-rm -f "$T/busy"
+rm -f "$T/busy"; touch "$T/smifail"
+waitfor 20 'grep -q "GPU 1 cannot be checked (nvidia-smi failed for GPU 1); not claiming until it can" $T/widle.out'
+sleep 2
+check "nvidia-smi fails: the GPU does not count as free, no claim, no exit" 'kill -0 $wpid && [[ ! -s $T/train.log && $(nclaims) == 0 ]]'
+rm -f "$T/smifail"
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "GPU free: claim and finish" '[[ $rc == 0 ]] && grep -q "done t/i" $T/widle.out'
 touch "$T/busy"
@@ -308,6 +313,46 @@ assert w.can_add() == (False, "consumer plugin bad: admit failed"), w.can_add()
 assert w.idle_wait("nothing", 1050, 0) == 7 and w.idle_wait("nothing", 1200, 0) is None
 w.zomb = {1: None}
 assert w.idle_wait("nothing", 1200, 0) == 7
+# gpu_idle: every GPU in CUDA_VISIBLE_DEVICES (index or UUID) must be free; nvidia-smi failing or saying nothing readable is not free
+idle = load("gpu_idle")
+Q, A = "--query-gpu=index,memory.used", "--query-compute-apps=pid,used_memory"
+smi = {("0", Q): "0, 100\n", ("0", A): "", ("1", Q): "1, 2000\n", ("1", A): "", ("GPU-abc", Q): "3, 0\n", ("GPU-abc", A): ""}
+idle._smi = lambda g, *q: smi.get((g, q[0]))
+assert idle.probe("0") == ("free", ["0"], ""), idle.probe("0")
+assert idle.probe("0,1") == ("busy", ["0"], ""), idle.probe("0,1")  # someone else's memory on the second GPU
+assert idle.probe("GPU-abc") == ("free", ["3"], "")                  # by UUID: its index for the usage records
+smi[("1", Q)], smi[("1", A)] = "1, 2300\n", f"{os.getpid()}, 2000\n"
+assert idle.probe("0, 1") == ("free", ["0", "1"], ""), idle.probe("0, 1")  # our own process does not count
+smi[("1", A)] = "99999999, 5\n"
+assert idle.probe("0,1")[0] == "busy"                                # a process that is not ours (or gone)
+for q, out, why in ((A, None, "nvidia-smi failed listing the processes on GPU 1"), (A, "x, 5\n", "nvidia-smi listed 'x, 5' on GPU 1"),
+                    (Q, None, "nvidia-smi failed for GPU 1"), (Q, "", "nvidia-smi gave '' for GPU 1"),
+                    (Q, "1, [N/A]\n", "nvidia-smi gave '1, [N/A]' for GPU 1")):
+    smi[("1", Q)], smi[("1", A)] = "1, 0\n", ""
+    smi[("1", q)] = out
+    assert idle.probe("0,1") == ("unknown", ["0"], why), (q, out, idle.probe("0,1"))
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"; os.environ.pop("TASK_GPU_IDLE", None)
+said.clear(); w = types.SimpleNamespace(say=said.append, gpu_wait=None)
+assert idle.admit(w) == "GPU cannot be checked (nvidia-smi gave '1, [N/A]' for GPU 1)", idle.admit(w)
+assert said == ["GPU 0,1 cannot be checked (nvidia-smi gave '1, [N/A]' for GPU 1); not claiming until it can (waited 0 minutes)"], said
+smi[("1", Q)] = "1, 0\n"
+assert idle.admit(w) is None and w.gpu_wait is None
+import proto, subprocess
+os.makedirs(t + "/gl", exist_ok=True); os.environ["GPU_LOG_DIR"] = t + "/gl"
+with open(t + "/gl/" + time.strftime(proto.GPU_LOG_FILE), "w") as f:
+    f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 300)) + ",3,90,16000,32000,someoneelse,123,16000,train.py\n")
+assert idle.gpu_seen(["0", "3"], "60") and idle.gpu_seen(["0", "1"], "60") is None  # GPUs by index, as in the records
+real = load("gpu_idle")  # its own _smi: nonzero exit, timeout and a missing nvidia-smi are all "cannot tell"
+def failed(*a, **k):
+    return types.SimpleNamespace(returncode=9, stdout="0, 0\n")
+def late(*a, **k):
+    raise subprocess.TimeoutExpired("nvidia-smi", 60)
+for run in (failed, late):
+    real.subprocess = types.SimpleNamespace(run=run, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError)
+    assert real._smi("0", Q) is None, run
+real.subprocess = subprocess; path = os.environ["PATH"]; os.environ["PATH"] = t + "/nowhere"
+assert real._smi("0", Q) is None
+os.environ["PATH"] = path
 print("ok")
 EOT
 check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'

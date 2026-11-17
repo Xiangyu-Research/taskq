@@ -6,7 +6,8 @@
 # run the command at the repo root. Command output goes to the part log <data dir>/logs/tasks/<key>__<job>_part<part>.log (part number
 # TASK_PART); the first line records job, machine, task and code version (read by taskq log and the user's ledger). Job = TASK_JOBTAG
 # (worker sets it: the job id in Slurm, "worker id-time" for a resident worker), else "hostname-time".
-# Outside Slurm, with CUDA_VISIBLE_DEVICES set (pueue GPU group), wait while the GPU is busy, checking every minute; with the task's
+# Outside Slurm, with CUDA_VISIBLE_DEVICES set (pueue GPU group), wait while any GPU in it is busy (or nvidia-smi cannot tell: missing,
+# failing, timing out, unreadable output), checking every minute; with the task's
 # res.wait_gpu minutes, wait at most that long and then fail (exit 1), otherwise wait forever; with TASKQ_ADMITTED=1 set by the worker,
 # do not wait (it checked the GPU before claiming); with TASK_GPU_IDLE (minutes, a group env var in machines.py), also require that the
 # GPU usage records (monitor/gpu_log.sh, location in proto.py's GPU_LOG_DIR) show no one else on this GPU for that long.
@@ -68,18 +69,41 @@ POLL=${RUN_TASK_POLL:-300}        # tests only
 GPU_POLL=${RUN_TASK_GPU_POLL:-60} # tests only
 STOP_WAIT=${RUN_TASK_STOP_WAIT:-8} # tests only
 
-gpu_free() {  # no one else's processes on the GPU, others' memory <= 500 MiB (our own account's processes do not count)
-    [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
-    local used mine=0 pid pm
-    used=$(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-gpu=memory.used --format=csv,noheader,nounits 2> /dev/null | tr -d ' ')
-    while IFS=', ' read -r pid pm; do
-        [[ -z $pid ]] && continue
-        [[ $(ps -o user= -p "$pid" 2> /dev/null | tr -d ' ') == "$(id -un)" ]] || return 1
-        mine=$(( mine + ${pm:-0} ))
-    done < <(nvidia-smi -i "$CUDA_VISIBLE_DEVICES" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2> /dev/null)
-    (( ${used:-0} - mine <= 500 ))
+smi() {  # SMI_OUT = output of nvidia-smi "$@" (at most 60 seconds); nonzero (exit code in SMI_RC) when it failed, timed out or is
+    # missing. Read with read, which a stop signal interrupts at once ($(...) would hold the trap until nvidia-smi exits)
+    local all=
+    IFS= read -r -d '' all < <(timeout 60 nvidia-smi "$@" 2> /dev/null; printf '\n%s' "$?")
+    SMI_OUT=${all%$'\n'*} SMI_RC=${all##*$'\n'}
+    [[ $SMI_RC == 0 ]]
 }
-gpu_quiet() {  # no one else on this GPU in the last TASK_GPU_IDLE minutes of GPU usage records; if there is, GPU_SEEN gets the last time. No log files -> only look now
+GPU_IDX= GPU_WHY=
+gpu_free() {  # 0 when every GPU in CUDA_VISIBLE_DEVICES (indices or UUIDs, as given) has no one else's processes and others' memory
+    # on it is <= 500 MiB (our own account's processes do not count); 1 busy; 2 nvidia-smi cannot tell (missing, failed, timed out,
+    # unreadable output; GPU_WHY says which), not free either. GPU_IDX gets the GPUs' indices (the usage records name GPUs by index)
+    GPU_IDX= GPU_WHY=
+    [[ -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
+    local gpus gpu gidx gused grest apid amem amine me
+    me=$(id -un)
+    IFS=, read -r -a gpus <<< "$CUDA_VISIBLE_DEVICES"
+    for gpu in "${gpus[@]}"; do
+        gpu=${gpu// /}; [[ -n $gpu ]] || continue
+        smi -i "$gpu" --query-gpu=index,memory.used --format=csv,noheader,nounits || { GPU_WHY="nvidia-smi failed for GPU $gpu (exit $SMI_RC)"; return 2; }
+        IFS=', ' read -r gidx gused grest <<< "$SMI_OUT"
+        [[ $gidx =~ ^[0-9]+$ && $gused =~ ^[0-9]+$ && -z $grest ]] || { GPU_WHY="nvidia-smi gave '${SMI_OUT%%$'\n'*}' for GPU $gpu"; return 2; }
+        smi -i "$gpu" --query-compute-apps=pid,used_memory --format=csv,noheader,nounits || { GPU_WHY="nvidia-smi failed listing the processes on GPU $gpu (exit $SMI_RC)"; return 2; }
+        amine=0
+        while IFS=', ' read -r apid amem; do
+            [[ -z $apid ]] && continue
+            [[ $apid =~ ^[0-9]+$ ]] || { GPU_WHY="nvidia-smi listed '$apid $amem' on GPU $gpu"; return 2; }
+            [[ $(ps -o user= -p "$apid" 2> /dev/null | tr -d ' ') == "$me" ]] || return 1
+            [[ $amem =~ ^[0-9]+$ ]] && amine=$(( amine + amem ))
+        done <<< "$SMI_OUT"
+        (( gused - amine <= 500 )) || return 1
+        GPU_IDX+="$gidx "
+    done
+    [[ -n $GPU_IDX ]] || { GPU_WHY="no GPU in CUDA_VISIBLE_DEVICES"; return 2; }
+}
+gpu_quiet() {  # no one else on these GPUs (GPU_IDX) in the last TASK_GPU_IDLE minutes of GPU usage records; if there is, GPU_SEEN gets the last time. No log files -> only look now
     GPU_SEEN=
     [[ -z ${TASK_GPU_IDLE:-} || ${TASK_GPU_IDLE} == 0 || -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
     local dir=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}} since files f
@@ -87,19 +111,25 @@ gpu_quiet() {  # no one else on this GPU in the last TASK_GPU_IDLE minutes of GP
     files=("$dir/$(date -d "-$TASK_GPU_IDLE min" +"$TQ_GPU_LOG_FILE")")
     f="$dir/$(date +"$TQ_GPU_LOG_FILE")"; [[ $f == "${files[0]}" ]] || files+=("$f")
     GPU_SEEN=$(for f in "${files[@]}"; do [[ -f $f ]] && tail -n 20000 "$f"; done |
-        awk -F, -v s="$since" -v g="$CUDA_VISIBLE_DEVICES" -v me="$(id -un)" '$1 >= s && $2 == g && $6 != "" && $6 != me {t = $1} END {print t}')
+        awk -F, -v s="$since" -v g="$GPU_IDX" -v me="$(id -un)" 'BEGIN {n = split(g, a, " "); for (i = 1; i <= n; i++) G[a[i]] = 1}
+            $1 >= s && ($2 in G) && $6 != "" && $6 != me {t = $1} END {print t}')
     [[ -z $GPU_SEEN ]]
 }
-wait_gpu() {  # GPU free -> 0; still busy after TASK_WAIT_GPU minutes -> 1. Every check writes a line to the task log (the worker uses the log to spot stalls)
-    local waited=0 extra
-    while GPU_SEEN=; ! { gpu_free && gpu_quiet; }; do
+wait_gpu() {  # GPUs free -> 0; still busy (or not checkable) after TASK_WAIT_GPU minutes -> 1. Every check writes a line to the task log (the worker uses the log to spot stalls)
+    local waited=0 extra st
+    while :; do
+        GPU_SEEN=; gpu_free; st=$?
+        (( st == 0 )) && gpu_quiet && return 0
         if [[ -n ${TASK_WAIT_GPU:-} ]] && (( waited >= TASK_WAIT_GPU * 60 )); then
             extra=", waited $TASK_WAIT_GPU minutes"
             [[ -z ${GPU_SEEN:-} ]] || extra=" (free, someone $GPU_SEEN still using it, needs $TASK_GPU_IDLE minutes free), waited $TASK_WAIT_GPU minutes"
+            (( st == 2 )) && extra=" (cannot tell: $GPU_WHY), waited $TASK_WAIT_GPU minutes"
             printf "$(ts) $TQ_LOG_GPU_BUSY_FMT\n" "$CUDA_VISIBLE_DEVICES" "$extra" | tee -a "$LOG"
             return 1
         fi
-        if [[ -n ${GPU_SEEN:-} ]]; then
+        if (( st == 2 )); then
+            echo "$(ts) GPU $CUDA_VISIBLE_DEVICES cannot be checked ($GPU_WHY); waiting until it can (waited $(( waited / 60 )) minutes${TASK_WAIT_GPU:+, at most $TASK_WAIT_GPU minutes})" | tee -a "$LOG"
+        elif [[ -n ${GPU_SEEN:-} ]]; then
             echo "$(ts) GPU $CUDA_VISIBLE_DEVICES free, but someone $GPU_SEEN still used it; waiting $TASK_GPU_IDLE minutes of quiet (waited $(( waited / 60 )) minutes)" | tee -a "$LOG"
         else
             echo "$(ts) GPU $CUDA_VISIBLE_DEVICES busy, waiting for it (waited $(( waited / 60 )) minutes${TASK_WAIT_GPU:+, at most $TASK_WAIT_GPU minutes})" | tee -a "$LOG"
