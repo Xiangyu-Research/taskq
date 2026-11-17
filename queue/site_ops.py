@@ -844,7 +844,8 @@ def op_smoke(A):
 def op_archive(A):
     """spec, dry: back up this task's store results to the backup machine and verify (archive_task.sh) → True; failure → Bad.
     Output goes to stderr."""
-    p = subprocess.run(["bash", os.path.join(HERE, "archive_task.sh"), "--spec", json.dumps(A["spec"])] + (["--dry-run"] if A.get("dry") else []),
+    p = subprocess.run(["bash", os.path.join(HERE, "archive_task.sh"), "--spec", "-"] + (["--dry-run"] if A.get("dry") else []),
+                       input=json.dumps(A["spec"]), text=True,  # on stdin: a spec (tokens in vars) never goes on a command line
                        env=dict(os.environ, TASKQ_DATA=store_dir(A)), stdout=sys.stderr)
     if p.returncode:
         raise Bad(f"archive failed (archive_task.sh exit code {p.returncode})")

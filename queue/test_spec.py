@@ -346,6 +346,31 @@ ok("spec.py outputs --spec <JSON> --sh: KEY, OUTS, EXTRA, TEST, ARCHIVE for arch
    and "ARCHIVE=1" in _sh and any(x.startswith("TEST=") and "DONE" in x for x in _sh))
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "outputs", "--spec", json.dumps(_os)], capture_output=True, text=True)
 ok("spec.py outputs --spec <JSON>: JSON same as outputs()", _r.returncode == 0 and json.loads(_r.stdout) == S.outputs(_os))
+# --stdin: the arguments (a JSON list) or the spec (a JSON object) on stdin instead of the command line
+_ss = dict(S.sendable(S.resolve("command", dict(G, vars={"TOKEN": "s3cr3t"}))))
+_sp = [sys.executable, os.path.join(HERE, "spec.py")]
+
+
+def _sp_run(*a, inp=None, **kw):
+    return subprocess.run(_sp + list(a), input=inp, capture_output=True, text=True, **kw)
+
+
+_want = _sp_run("shell", "--spec", json.dumps(_ss))
+_got = [_sp_run("shell", "--stdin", inp=json.dumps(["--spec", json.dumps(_ss)])), _sp_run("shell", "--stdin", inp=json.dumps(_ss)),
+        _sp_run("shell", "--stdin", inp=json.dumps(S.kv_args("command", dict(G, vars={"TOKEN": "s3cr3t"}))))]
+ok("spec.py shell --stdin: a JSON list of the arguments (either form) or a spec object on stdin, same shell lines as on the command line",
+   _want.returncode == 0 and "s3cr3t" in _want.stdout and all((x.returncode, x.stdout) == (0, _want.stdout) for x in _got))
+_gd = fixture.tmpdir()
+_dn = [_sp_run("done", "--stdin", inp=json.dumps(["--spec", json.dumps(_ss)]), env=dict(os.environ, TASKQ_DATA=_gd))]
+os.makedirs(os.path.join(_gd, "guest/x"))
+open(os.path.join(_gd, "guest/x/DONE"), "w").close()
+_dn.append(_sp_run("done", "--stdin", inp=json.dumps(_ss), env=dict(os.environ, TASKQ_DATA=_gd)))
+_o = _sp_run("outputs", "--stdin", "--sh", inp=json.dumps(_os))
+ok("spec.py done / outputs --sh --stdin: same answers as with --spec", [x.returncode for x in _dn] == [1, 0]
+   and _o.returncode == 0 and _o.stdout.splitlines() == _sh)
+ok("spec.py shell --stdin: not JSON, an empty list or a list of non-strings -> exit 2, no traceback",
+   all(r.returncode == 2 and "Traceback" not in r.stderr and not r.stdout
+       for r in (_sp_run("shell", "--stdin", inp="nope"), _sp_run("shell", "--stdin", inp="[]"), _sp_run("shell", "--stdin", inp="[1]"))))
 
 
 # ---------------- experiment table ----------------

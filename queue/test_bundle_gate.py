@@ -7,6 +7,7 @@ Checks for the old bundle are skipped in a shallow clone without the old commit.
     python3 queue/test_bundle_gate.py
 """
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -137,7 +138,7 @@ def test_cache_timeout(new):
     finally:
         BG.subprocess.run = real
     assert err and "Argument list too long" in err, err
-    ok("spec.py cannot even start (a spec too long for one argument): that spec is blocked with the reason, nothing raises")
+    ok("spec.py cannot even start: that spec is blocked with the reason, nothing raises")
 
 
 def test_current():
@@ -288,6 +289,25 @@ def test_stage(new):
     ok("stage: check again before sending; cannot run -> do not transfer, do not add, hold (retry next check); unreachable -> no check")
 
 
+def test_argv():
+    """The gate hands a bundle's spec.py the spec on stdin; that spec.py still sees `<command> --spec <JSON>` in sys.argv (the form
+    every bundle takes) and its own dir first on sys.path, while no command line holds the spec."""
+    bid = "d" * 16
+    p = os.path.join(OUT, bid, BG.SPEC_PY)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    seen = os.path.join(TMP, "argv_seen")
+    with open(p, "w") as f:
+        f.write(f"import json, sys\nopen({seen!r}, 'a').write(json.dumps([open('/proc/self/cmdline').read(), sys.argv, sys.path[0]]) + '\\n')\n"
+                f"sys.exit({proto.EXIT['done_no']} if sys.argv[1] == 'done' else 0)\n")
+    sp = dict(CMD, key="job/argv", vars={"TOKEN": "s3cr3t-gate"})
+    assert BG.check(sp, bid) is None
+    with open(seen) as f:
+        rows = [json.loads(x) for x in f]
+    assert [r[1][1] for r in rows] == ["shell", "done"] and all(r[1][2:] == ["--spec", json.dumps(sp, ensure_ascii=False)] for r in rows), rows
+    assert not any("s3cr3t" in r[0] for r in rows) and all(r[2] == os.path.dirname(p) for r in rows), rows
+    ok("a bundle's spec.py gets `shell|done --spec <JSON>` in sys.argv from stdin, its dir first on sys.path; no command line holds the spec")
+
+
 def picky():
     """Fake bundle: specs with {other} cannot run (spec.py exits 2), others can. plan and assign tests need a bundle that blocks only some specs."""
     bid = "f" * 16
@@ -307,6 +327,7 @@ def main():
         test_pass_through(new)
         test_current()
         test_cache_timeout(new)
+        test_argv()
         test_plan(new, picky())
         test_assign(new, picky())
         test_stage(new)

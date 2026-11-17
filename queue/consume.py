@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -613,8 +614,14 @@ class Worker:
                 env = e
         sys.stdout.flush()
         try:
-            targs = shlex.split(args)
-            proc = subprocess.Popen(["bash", RUN_TASK, *targs], stdin=subprocess.DEVNULL, env=env)
+            # run_task.sh (and spec.py from it) get the arguments on stdin, from a file only this account can read that is already
+            # unlinked: the spec (tokens in vars) never goes on a command line, which every user of the node can read
+            arg = json.dumps(shlex.split(args), ensure_ascii=False)
+            with tempfile.TemporaryFile("w+", encoding="utf-8") as f:
+                f.write(arg)
+                f.flush()
+                f.seek(0)
+                proc = subprocess.Popen(["bash", RUN_TASK, "--stdin"], stdin=f, env=env)
         except (OSError, ValueError, TypeError) as e:  # TypeError: an env hook put in a value that is not a string
             say(f"!! {key}: cannot start run_task.sh ({type(e).__name__}: {e}); releasing and recording a failure")
             self.fail(key, f"cannot start run_task.sh: {type(e).__name__}: {e}", 0)
@@ -622,8 +629,8 @@ class Worker:
         r = Run(proc.pid, key, proc=proc, jtag=jt)  # registered before anything else can fail: the run is always followed
         self.runs[proc.pid] = r
         self.changed = int(time.time())
-        say(f"started {key} (pid {proc.pid}: run_task.sh {args})")
-        sh = out_of([PY, os.path.join(HERE, "spec.py"), "shell", *targs], any_rc=True) or ""
+        say(f"started {key} (pid {proc.pid})")  # the task name only: the spec does not go into logs either
+        sh = out_of([PY, os.path.join(HERE, "spec.py"), "shell", "--stdin"], any_rc=True, input=arg) or ""
         for ln in sh.split("\n"):
             m = re.match(r"(TASK_OUT|TASK_SAFE)=(.*)$", ln)
             if m:

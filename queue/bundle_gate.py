@@ -29,9 +29,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import remote as R  # noqa: E402
 
 TIMEOUT = 10  # max seconds per command; timeout allows
-# what an executor does with a sent spec: run_task.sh and the worker (consume.py) call spec.py shell / done --spec (taskq.py add --spec-stdin parses like shell)
+# what an executor does with a sent spec: run_task.sh and the worker (consume.py) call spec.py shell / done with it (taskq.py add --spec-stdin parses like shell)
 CMDS = dict(shell=(0,), done=(proto.EXIT["done_yes"], proto.EXIT["done_no"]))  # command -> exit codes that count as runnable
 SPEC_PY = cfg.bundle_rel("queue", "spec.py")
+# runs a bundle's spec.py as `spec.py <command> --spec <JSON>` with the spec read from stdin into its argv inside the process: every
+# bundle takes that form, and the spec (tokens in vars) never goes on a command line, which every user of the machine can read
+RUNNER = ("import os, runpy, sys; p, c = sys.argv[1], sys.argv[2]; sys.path[0] = os.path.dirname(p); "
+          "sys.argv = [p, c, '--spec', sys.stdin.read()]; runpy.run_path(p, run_name='__main__')")
 WHY = proto.HELD["bundle"]
 _CACHE = {}
 
@@ -55,11 +59,11 @@ def run(d, spec):
     arg = json.dumps(spec, ensure_ascii=False)
     for c, good in CMDS.items():
         try:
-            r = subprocess.run([sys.executable, os.path.join(d, SPEC_PY), c, "--spec", arg], cwd=d, env=env,
+            r = subprocess.run([sys.executable, "-c", RUNNER, os.path.join(d, SPEC_PY), c], input=arg, cwd=d, env=env,
                                capture_output=True, text=True, timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             return False, None
-        except OSError as e:  # e.g. a spec too long for one command-line argument: this spec cannot run there
+        except OSError as e:  # python cannot start: this spec cannot be checked there
             return True, f"cannot run spec.py {c}: {e}"
         if r.returncode not in good or "Traceback" in r.stderr:
             last = (r.stderr.strip() or r.stdout.strip()).splitlines()[-1:]

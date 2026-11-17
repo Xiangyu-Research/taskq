@@ -8,6 +8,9 @@ Commands:
                                       this machine; then drops this machine's machines.py task_unset and adds task_vars not yet set)
   spec.py done <recipe> k=v...        exit 0 when done, 1 when not
   spec.py shell|done --spec <JSON>    same, with a spec already resolved (the hub resolves it when sending; executors do not look up recipes)
+  spec.py shell|done|outputs --stdin [--sh]  same, with the arguments on stdin: one JSON list (["--spec", "<JSON>"] or
+                                      ["<recipe>", "k=v", ...]) or a resolved spec (a JSON object); run_task.sh and the worker pass
+                                      them so, as a spec (tokens in vars) must not appear on a command line
   spec.py resolve <recipe> k=v...     the resolved spec (JSON, one line)
   spec.py lookup <key>                find a task by key (experiment table (experiments.py) first, then the task queue), print its spec (JSON)
   spec.py outputs <key>|--spec <JSON> [--sh]  this task's outputs (outputs(), JSON); --sh: shell statements for archive_task.sh
@@ -208,11 +211,12 @@ def settable(recipe, r):
 
 
 def _size_ok(sent):
-    """A sent spec must fit in one command-line argument (P.SPEC_MAX) -> SpecError."""
+    """A sent spec must stay within P.SPEC_MAX (so it fits in one command-line argument, as run_task.sh --spec <JSON> by hand
+    takes it) -> SpecError."""
     n = len(json.dumps(sent, ensure_ascii=False, separators=(",", ":")).encode())
     if n > P.SPEC_MAX:
-        raise SpecError(f"the spec is {n // 1024} KB, an executor gets it as one command-line argument (at most {P.SPEC_MAX // 1024} KB): "
-                        "put long lists in a file")
+        raise SpecError(f"the spec is {n // 1024} KB, at most {P.SPEC_MAX // 1024} KB (one command-line argument for run_task.sh --spec "
+                        "by hand): put long lists in a file")
 
 
 RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
@@ -849,7 +853,22 @@ def main(argv):
 DISK_RC = P.EXIT["done_unreadable"]  # spec.py done cannot read the disk (all exit codes live in proto.EXIT)
 
 
+def stdin_args():
+    """--stdin: the arguments on stdin, one JSON list of strings, or a resolved spec (a JSON object, as --spec <JSON>) -> list."""
+    try:
+        got = json.loads(sys.stdin.read())
+    except ValueError as e:
+        raise SpecError(f"--stdin takes JSON: {e}") from None
+    if isinstance(got, dict):
+        return ["--spec", json.dumps(got, ensure_ascii=False)]
+    if isinstance(got, list) and got and all(isinstance(x, str) for x in got):
+        return got
+    raise SpecError("--stdin takes a JSON list of arguments or a spec (a JSON object)")
+
+
 def _main(cmd, args):
+    if cmd in ("shell", "done", "outputs") and args[:1] == ["--stdin"]:
+        args = stdin_args() + args[1:]
     if cmd in ("shell", "done", "resolve", "lookup", "outputs") and not args:
         raise SpecError(f"{cmd} needs arguments")
     if cmd == "collect":

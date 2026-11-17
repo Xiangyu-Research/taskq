@@ -2,6 +2,9 @@
 # Run one training task: shared by all machines (an executor's worker consume.py, or manually).
 #   run_task.sh <recipe> k=v...   (e.g. run_task.sh command key=demo/a 'cmd=python3 train.py' env=<env> out=demo/a done=DONE)
 #   run_task.sh --spec <JSON>     run a resolved spec (sent to an executor queue by the hub, the format spec.py resolve makes)
+#   run_task.sh --stdin           either form's arguments as one JSON list on stdin (["--spec", "<JSON>"] or ["<recipe>", "k=v", ...]):
+#                                 the worker starts it so, as the spec (tokens in vars) must not appear on a command line, which every
+#                                 user of the node can read; this script hands them to spec.py on stdin too
 # From the task spec (queue/spec.py, recipes in queue/recipes.py): activate the env (machine table machines.py's envs), set env vars,
 # run the command at the repo root. Command output goes to the part log <data dir>/logs/tasks/<key>__<job>_part<part>.log (part number
 # TASK_PART); the first line records job, machine, task and code version (read by taskq log and the user's ledger). Job = TASK_JOBTAG
@@ -22,10 +25,13 @@
 # started this script (TASK_JOBTAG set), a watcher stops the training once the worker is gone (killed) or this script was killed.
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ARGS_JSON=  # this task's arguments as a JSON list: spec.py gets them on stdin, never on its command line
+if [[ ${1:-} == --stdin ]]; then IFS= read -r -d '' ARGS_JSON; exec < /dev/null; fi  # read first; nothing after reads this stdin
 eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "cannot read $HERE/proto.py" >&2; exit 2; }  # shared names and exit codes TQ_*
 CORE=$(cd "$HERE/.." && pwd)  # scheduler core root; the user's repo root REPO (TASKQ_REPO, else like cfg.py)
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
-(( $# >= 1 )) || { echo "usage: run_task.sh <recipe> k=v... or run_task.sh --spec <JSON>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
+(( $# >= 1 )) && [[ $1 != --stdin || $# == 1 ]] || { echo "usage: run_task.sh <recipe> k=v... | --spec <JSON> | --stdin (the arguments as a JSON list on stdin)" >&2; exit "$TQ_EXIT_RUN_BAD"; }
+[[ $1 == --stdin ]] || ARGS_JSON=$(printf '%s\0' "$@" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split("\0")[:-1]))')
 DATA=$(python3 "$CORE/queue/cfg.py" data)
 [[ -n $DATA ]] || { echo "no data dir here (not the store, and not running under an executor root); export TASKQ_DATA=<data dir>" >&2; exit "$TQ_EXIT_RUN_BAD"; }
 export TASKQ_DATA=$DATA
@@ -39,24 +45,24 @@ if [[ $(git -C "$REPO" rev-parse --show-toplevel 2> /dev/null) == "$(readlink -f
 else
     COMMIT=$(basename "$(readlink -f "$REPO")")  # bundle (relay_bundle.py): the name is a content hash (16 chars)
 fi
-ARGS=("$@")
+spec_py() { python3 "$HERE/spec.py" "$1" --stdin <<< "$ARGS_JSON"; }  # spec.py shell / done with this task's arguments
 early() {  # stop before training: write the reason to stderr and this task's part log
     echo "$1" >&2
     local k=${TASK_KEY:-}
     [[ -n $k ]] || k=$(python3 -c 'import json, sys
-a = sys.argv[1:]
-print(json.loads(a[1]).get("key") or "" if a[0] == "--spec" else next((x[4:] for x in a[1:] if x.startswith("key=")), ""))' "${ARGS[@]}" 2> /dev/null)
+a = json.loads(sys.stdin.read())
+print(json.loads(a[1]).get("key") or "" if a[0] == "--spec" else next((x[4:] for x in a[1:] if x.startswith("key=")), ""))' <<< "$ARGS_JSON" 2> /dev/null)
     [[ -n $k ]] || return 0
     mkdir -p "$DATA/$TQ_TASK_LOGS" 2> /dev/null
     { printf "$TQ_LOG_HEAD_FMT\n" "${JOBTAG}_${PART}" "$(hostname -s)" "$k" "$PART" "${TASK_ENV:-unknown}" "$COMMIT" "$(ts)"
       printf "$(ts) $TQ_LOG_NOT_STARTED_FMT\n" "$1"; } 2> /dev/null >> "$DATA/$TQ_TASK_LOGS/${TASK_SAFE:-${k//\//$TQ_SAFE}}$TQ_SAFE${JOBTAG}_$TQ_LOG_PART${PART}.log"
 }
-if ! SH=$(python3 "$HERE/spec.py" shell "$@" 2> /dev/null); then
-    early "bad task spec: $(python3 "$HERE/spec.py" shell "$@" 2>&1 > /dev/null | tail -n 1)"; exit "$TQ_EXIT_RUN_BAD"
+if ! SH=$(spec_py shell 2> /dev/null); then
+    early "bad task spec: $(spec_py shell 2>&1 > /dev/null | tail -n 1)"; exit "$TQ_EXIT_RUN_BAD"
 fi
 eval "$SH"
-done_() { python3 "$HERE/spec.py" done "$@"; }
-done_ "$@"; rc=$?
+done_() { spec_py done; }
+done_; rc=$?
 (( rc == TQ_EXIT_DONE_YES )) && { echo "$(ts) already done: $TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"; }
 (( rc == TQ_EXIT_DONE_UNREADABLE )) && { early "disk unreadable, cannot tell whether training finished"; exit "$TQ_EXIT_RUN_UNREADABLE"; }
 ACT=$(python3 "$CORE/sites/mtab.py" activate "$TASK_ENV") || { early "this machine has no env $TASK_ENV (machine table machines.py)"; exit "$TQ_EXIT_RUN_BAD"; }
@@ -223,7 +229,7 @@ for (( try = 1; ; try++ )); do
         stop_session "$train_pid"
     fi
     train_pid=
-    done_ "$@"; drc=$?
+    done_; drc=$?
     if (( drc == TQ_EXIT_DONE_YES )); then
         echo "$TQ_DONE_LINE $(ts)" >> "$LOG"; echo "$(ts) done: $TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"
     elif (( drc == TQ_EXIT_DONE_UNREADABLE )); then

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Simulated tests for consume.py (the consumer) and its plugins: taking over running tasks on a bundle switch, hours window, waiting for a free GPU, Slurm, user plugins, failing hooks
+# Simulated tests for consume.py (the consumer) and its plugins: taking over running tasks on a bundle switch, hours window, waiting for a free GPU, Slurm, user plugins, failing hooks, the spec kept off command lines
 #   bash queue/test_consume.sh        WORKER_TEST_ONLY="h win" runs only these cases
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -356,6 +356,59 @@ os.environ["PATH"] = path
 print("ok")
 EOT
 check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
+fi
+
+# secret. a spec with a token in vars: the worker hands it to run_task.sh and spec.py on stdin (a 0600 file already unlinked), so
+#   it is on no command line (every user of the node can read those), and the worker log names only the task
+if want secret; then
+python3 - "$HERE" << 'EOT' > "$T/secret_unit.out" 2>&1
+import json, os, shlex, stat, sys
+sys.path.insert(0, sys.argv[1])
+import consume
+said, calls = [], {}
+consume.say = said.append
+class Proc:
+    pid = 4242
+def popen(cmd, stdin=None, env=None):
+    st = os.fstat(stdin.fileno())
+    calls["popen"] = (cmd, stdin.read(), stat.S_IMODE(st.st_mode), st.st_nlink, env.get("TASK_KEY"))
+    return Proc()
+def out_of(cmd, timeout=60, any_rc=False, **kw):
+    calls["shell"] = (cmd, kw.get("input"))
+    return "TASK_OUT=/d/out\nTASK_SAFE=t__x\n"
+consume.subprocess.Popen, consume.out_of = popen, out_of
+w = consume.Worker.__new__(consume.Worker)
+w.plugins, w.hook_err, w.task_cpus, w.tok, w.runs, w.changed = [], {}, 1, {}, {}, 0
+args = ["--spec", json.dumps(dict(key="t/x", vars={"TOKEN": "s3cr3t"}))]
+w.start("t/x\n" + " ".join(shlex.quote(a) for a in args) + "\ntok1", "job-1")
+cmd, data, mode, nlink, key = calls["popen"]
+assert cmd == ["bash", consume.RUN_TASK, "--stdin"] and json.loads(data) == args and key == "t/x", calls["popen"]
+assert mode == 0o600 and nlink == 0, (oct(mode), nlink)  # readable only by this account, no name in any directory
+assert "s3cr3t" not in " ".join(calls["shell"][0]) and json.loads(calls["shell"][1]) == args, calls["shell"]
+assert said == ["started t/x (pid 4242)"], said
+assert (w.runs[4242].outdir, w.runs[4242].safe, w.tok["t/x"]) == ("/d/out", "t__x", "tok1"), vars(w.runs[4242])
+print("ok")
+EOT
+check "start: run_task.sh --stdin gets the arguments from a 0600 unlinked file, spec.py shell on stdin, the log line names only the task" \
+  'grep -qx ok $T/secret_unit.out || { cat $T/secret_unit.out; false; }'
+reset
+SECRET=sec-$RANDOM$RANDOM$RANDOM  # its own token: ps sees other tests' processes too
+python3 - "$TASKQ_DIR/tasks.jsonl" "$T" "$HERE" "$SECRET" << 'EOT'
+import json, sys
+p, t, here, secret = sys.argv[1:]
+sys.path.insert(0, here)
+import spec as S
+cmd = (f'tr "\\0" " " < /proc/$PPID/cmdline > {t}/rt_cmdline; ps -eo args > {t}/ps_seen; printf %s "$TOKEN" > {t}/token_seen; '
+       'mkdir -p "$TASKQ_DATA/runs/t/sec"; touch "$TASKQ_DATA/runs/t/sec/DONE"')
+params = dict(key="t/sec", cmd=cmd, env="base", out="runs/t/sec", done=["DONE"], device="gpu", vars={"TOKEN": secret})
+open(p, "w").write(json.dumps(dict(order=1, nice=0, key="t/sec", exp=None, recipe="command", params=params,
+                                   spec=S.sendable(S.resolve("command", params)))) + "\n")
+EOT
+(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wsec.out" 2>&1
+rc=$?
+check "spec with a token: done, the command gets it, run_task.sh's command line is only --stdin, nothing running holds the token on its command line" \
+  '[[ $rc == 0 && $(cat $T/token_seen) == "$SECRET" ]] && grep -q "done t/sec" $T/wsec.out && [[ $(cat $T/rt_cmdline) == "bash $HERE/run_task.sh --stdin " ]] && ! grep -q "$SECRET" $T/ps_seen'
+check "spec with a token: the worker log names the task, not its spec" 'grep -q "started t/sec (pid [0-9]*)$" $T/wsec.out && ! grep -q "$SECRET" $T/wsec.out'
 fi
 
 (( fails == 0 )) && echo "all passed" || { echo "$fails checks failed"; exit 1; }
