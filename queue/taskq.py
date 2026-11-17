@@ -36,7 +36,7 @@ LOCK_KEEP = float(os.environ.get("TASKQ_LOCK_KEEP", proto.LOCK_KEEP))  # a holde
 HALF_CLAIM = proto.HALF_CLAIM  # a claim that only made the dir, no info, is stale after this long
 X = proto.EXIT
 NOTHING, WAIT, PAUSED = X["nothing"], X["wait"], X["paused"]   # claim exit codes
-REFUSED, GONE = X["refused"], X["gone"]  # remove exit codes: refused (claimed, assigned, another task needs it) / gone
+REFUSED, GONE = X["refused"], X["gone"]  # remove exit codes: refused (assigned, claimed, busy, files unreadable) / gone
 LOST = X["lost"]  # beat --strict: some claims are no longer ours
 safe = proto.safe
 

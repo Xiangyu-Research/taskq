@@ -254,7 +254,7 @@ Exit codes (`proto.EXIT`):
 |---|---|
 | `taskq` itself | 0 fine; 1 error; 2 usage error, no project found, not on the hub and no local queue; 5 data dir unreadable (not created, disk not mounted) |
 | `taskq show`, `set`, `stop`, `nice`, `add --exp` | 4 not in the queue (or experiment table) (several keys: 4 when any is missing) |
-| `taskq rm` | 0 removed; 3 not removed (claimed, assigned, another task waits for it); 4 none of them in the queue |
+| `taskq rm` | 0 removed; 3 not removed (assigned to an executor, claimed, its part log just changed, or its files could not be read); 4 none of them in the queue. Tasks waiting for it are not checked, and a step instance the experiment table still wants is queued again by the next advance (`HOLD` keeps it out) |
 | `taskq status` | 1 queue unreadable |
 | `taskq worker next` | 0 claimed; 10 nothing to claim; 11 wait first (leave room for queued, recently stopped tasks); 12 paused (3 failures in 3 hours across the queue, or data dir unreadable) |
 | `taskq worker beat --strict` | 13 some claims are no longer ours |
