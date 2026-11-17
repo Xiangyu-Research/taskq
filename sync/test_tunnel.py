@@ -413,6 +413,25 @@ ok("another process on bind (not ours, cannot answer with our key): the transfer
    r.returncode != 0 and "is taken by a process that is not this account's file server" in r.stdout + r.stderr and alive_
    and all(ln == "GET / -" for ln in open(flog).read().split("\n")[:-1]) and not [f for f in os.listdir(SRV) if f.endswith(".json")])
 
+# our server in the moment it exits when idle: shutdown() has stopped answering, server_close() has not run yet (bind still
+# listens, connections wait unanswered and are reset when it closes) and the pid file may already be gone
+EXITING = os.path.join(T, "exiting.py")
+with open(EXITING, "w") as f:
+    f.write("import socket, sys, time\nh, p = sys.argv[1].rsplit(':', 1)\ns = socket.socket()\n"
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind((h, int(p)))\ns.listen(16)\n"
+            "time.sleep(float(sys.argv[2]))\ns.close()\n")
+p = subprocess.Popen([sys.executable, EXITING, f"127.0.0.1:{PORT}", "1"])
+time.sleep(0.3)
+shutil.rmtree(dst, ignore_errors=True)
+r = run("push", HOST, src, "st/pushed", lst)
+stop(p)
+ok("bind held a moment without an answer (our server exiting when idle): not taken for another process, the transfer starts a server and works",
+   r.returncode == 0 and same(src, dst, FILES) and "is taken by a process" not in r.stdout + r.stderr)
+try:
+    os.kill(server_pid(), signal.SIGKILL)
+except (ProcessLookupError, TypeError):
+    pass
+
 ok("public address check: https anywhere, plain http only to this machine",
    tunnel.url_ok("https://t.example.org") and tunnel.url_ok("http://127.0.0.1:1") and tunnel.url_ok("http://localhost:8")
    and not tunnel.url_ok("http://t.example.org") and not tunnel.url_ok("ftp://t.example.org") and not tunnel.url_ok("https://"))

@@ -43,6 +43,7 @@ POLL = float(os.environ.get("TUNNEL_POLL", 60))
 SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
 LOCK = os.environ.get("TUNNEL_LOCK")
 IDLE = float(os.environ.get("TUNNEL_IDLE", 300))
+EXITING = 3  # seconds our server that is exiting (idle) may still hold bind without answering; "other" only if it lasts
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,}")
 UA = {"User-Agent": "xfer/1"}
 STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
@@ -458,8 +459,13 @@ class Session:
         """Make sure our file server runs on bind → True when it answers as ours now. Nothing there: start one (of two started at
         once, the second cannot bind and exits). Our server of an older version (or ours not answering): stop it and start
         this one; sessions live in files, so transfers of this version continue (their requests retry), an older version's
-        transfers fail and are queued again. Anything else on bind: RuntimeError, nothing is sent to it."""
+        transfers fail and are queued again. Anything else on bind (for longer than EXITING, the moment our server takes to
+        exit): RuntimeError, nothing is sent to it."""
         who = probe(self.bind, self.dir, self.key)
+        until = time.time() + EXITING
+        while who == "other" and time.time() < until:  # our server exiting when idle: listening, no answer, pid file gone
+            time.sleep(0.2)
+            who = probe(self.bind, self.dir, self.key)
         if who == "ours":
             return True
         if who == "other":
