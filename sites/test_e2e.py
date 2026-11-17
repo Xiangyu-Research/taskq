@@ -1352,10 +1352,10 @@ def step_slurm_submit(bid):
     j = js[0]
     a = j["argv"]
     step("sbatch argv: the worker script and start script under code/current (path text, resolved when the job starts), "
-         "--export=ALL with TASKQ_ROOT, TASKQ_MACHINE and TASKQ_SLOTS (default 1), partition, cards, CPUs, memory, QOS and time",
+         "--export=ALL with TASKQ_ROOT and TASKQ_MACHINE (no TASKQ_SLOTS: the worker reads slots from the machine table), partition, cards, CPUs, memory, QOS and time",
          a[0] == "--parsable" and a[-1].endswith("/queue/worker_start.sh") and "/code/current/" in a[-1]
          and a[-2].endswith("/queue/worker.sbatch") and "/code/current/" in a[-2]
-         and f"--export=ALL,TASKQ_ROOT={SR},TASKQ_MACHINE={NAME},TASKQ_SLOTS=1" in a and "--partition=gpu" in a and "--gres=gpu:1" in a
+         and f"--export=ALL,TASKQ_ROOT={SR},TASKQ_MACHINE={NAME}" in a and not any("TASKQ_SLOTS" in x for x in a) and "--partition=gpu" in a and "--gres=gpu:1" in a
          and "--cpus-per-task=8" in a and "--mem=8000M" in a and "--qos=gpu" in a and "--time=02:00:00" in a, a)
     st = sprobe()
     step("the job is PENDING and the probe counts two queued of two allowed", j["state"] == "PENDING"

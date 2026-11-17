@@ -1,5 +1,5 @@
-"""Worker in a Slurm job: the job id is the worker name, slots from TASKQ_SLOTS (the machine table jobs entry's slots, passed by
-sites/slurm.py submit_cmd), else that jobs entry's slots read here (a job submitted without TASKQ_SLOTS), default 1; memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
+"""Worker in a Slurm job: the job id is the worker name, slots from this machine's jobs entry for its device, read from the
+machine table when the job starts (default 1; TASKQ_SLOTS overrides it by hand or in tests, submit_cmd does not pass it); memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
 import os
 import re
 import shutil
@@ -27,12 +27,13 @@ def setup(w):
 
 
 def table_slots(w):
-    """This machine's jobs entry for the worker's device (gpu / cpu): its slots (mtab.workers), None when unreadable."""
+    """This machine's jobs entry for the worker's device (gpu / cpu): its slots (mtab.workers); None (and said) when unreadable."""
     try:
         import cfg
         m = cfg.mtab()
         return next((x["slots"] for x in m.workers(m.whoami()) if x["kind"] == w.device), None)
-    except Exception:  # noqa: BLE001  an unreadable machine table leaves the default
+    except Exception as e:  # noqa: BLE001  an unreadable machine table leaves the default
+        w.say(f"!! cannot read this job's slots from the machine table ({type(e).__name__}: {e}); 1 at once")
         return None
 
 

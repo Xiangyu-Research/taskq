@@ -52,8 +52,8 @@ results), `backup` (archive). An entry with `root` and `scheduler` is an executo
   in order: with a GPU it is `gpu<number>`, without it `cpu` (`cpu<number>` when several); the id is `<machine>-<name>` and the pueue group
   has the same name.
 - `scheduler="slurm"`: write `jobs=dict(gpu=..., cpu=...)` (sbatch options); how many, QOS and time limits are in `policy.py`'s `SLURM`.
-  An entry's `slots` (default 1) is how many trainings one job runs at once (passed to the job as `TASKQ_SLOTS`, not to sbatch; a job
-  submitted without it reads the entry when it starts); each
+  An entry's `slots` (default 1) is how many trainings one job runs at once (not an sbatch option: the worker reads the entry from the
+  machine table when the job starts, so a change applies to jobs already queued); each
   task then gets its share of the job's cores and memory.
 
 Pueue executors, the hub and the store all have the core's own pueue group `taskq` (`proto.IO_GROUP`: transfer, fetch, archive, env build,
@@ -371,7 +371,7 @@ of what has stopped, runs `on_exit` and exits 1.
 
 | plugin | what it does |
 |---|---|
-| `slurm` | in a Slurm job: job id as the worker name, concurrency from the jobs entry's `slots` (`TASKQ_SLOTS`, default 1), job time limit, node-local staging dir, exit after an idle period |
+| `slurm` | in a Slurm job: job id as the worker name, concurrency from the jobs entry's `slots` (read when the job starts, default 1), job time limit, node-local staging dir, exit after an idle period |
 | `resident` | resident worker in a pueue group: worker id as the name, cores and concurrency from the machine table's worker, exit after an idle period (exit 0, the hub starts it again next round) |
 | `gpu_pad` | with a GPU pad: grow it to floor before training, subtract its memory when computing free GPU memory |
 | `window` | the machine table worker's `hours`: do not claim outside the window; at the end of the window stop and release current tasks and exit |

@@ -279,14 +279,14 @@ def main():
             assert r.returncode == 0 and r.stdout.strip() == "4713", r
             assert a[:2] == ["--parsable", "-J"] and "--qos=long" in a and "--time=3-00:00:00" in a and f"--chdir={R_}" in a, a
             assert f"--output={logs}/%x_%j.out" in a and os.path.isdir(logs), a
-            assert f"--export=ALL,TASKQ_ROOT={R_},TASKQ_MACHINE={name},TASKQ_SLOTS={slots or 1}" in a, a
+            assert f"--export=ALL,TASKQ_ROOT={R_},TASKQ_MACHINE={name}" in a and not any("TASKQ_SLOTS" in x for x in a), a
             assert all(x in a for x in want) and a[-2:] == [f"{cur}/{QR}/{SL.FILES[kind]}", f"{cur}/{QR}/worker_start.sh"], a
             assert not any("slots" in x for x in a if x.startswith("--") and not x.startswith("--export=")), a
             assert [w["slots"] for w in wk] == [slots or 1], wk
         ok("slurm.submit_cmd: submits the core's fixed worker.sbatch / cpu_worker.sbatch, partition, cards, cpus, memory (jobs), QOS, time limit, logs, "
-           "TASKQ_ROOT, TASKQ_MACHINE and TASKQ_SLOTS all on the command line; worker_start.sh is found through code/current only when the job starts; "
+           "TASKQ_ROOT and TASKQ_MACHINE on the command line; worker_start.sh is found through code/current only when the job starts; "
            "the log dir is created first")
-        ok("slurm jobs entry slots: passed to the job as TASKQ_SLOTS (default 1, also in mtab.workers), never as an sbatch option")
+        ok("slurm jobs entry slots: in mtab.workers (default 1), where the worker reads it; neither an sbatch option nor passed as TASKQ_SLOTS")
         assert SL.kind_of(f"/home/user/a/q/code/current/{QR}/worker.sbatch") == "gpu" and SL.kind_of("cpu_worker.sbatch") == "cpu" \
             and SL.kind_of("/bin/sh") is None and SL.kind_of("/x/worker.sbatch.bak") is None and SL.kind_of(None) is None
         pr = SL.probe("site-slurm")
