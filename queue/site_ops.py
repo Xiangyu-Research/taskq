@@ -345,19 +345,20 @@ def capped_free(path, cap, top=None):
 
 def env_states(R, A):
     ed = sub(R, "envs_ok")
-    oks = {f[:-3]: open(os.path.join(ed, f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith(".ok")}
+    sfx = proto.ENV_MARK["ok"]
+    oks = {f[:-len(sfx)]: open(os.path.join(ed, f)).read().strip() for f in (os.listdir(ed) if os.path.isdir(ed) else []) if f.endswith(sfx)}
     st = {}
     er = os.path.expanduser(A.get("env_root") or sub(R, "envs"))
     for n in A.get("envs") or []:
         d = st[n] = dict(active=os.path.exists(os.path.join(er, n, ".activate")), log="")
         for x in ("ok", "failed", "building"):
             try:
-                d[x] = open(os.path.join(ed, n + "." + x)).readline().strip()
+                d[x] = open(os.path.join(ed, n + proto.ENV_MARK[x])).readline().strip()
             except OSError:
                 d[x] = ""
         if d["failed"]:
             try:
-                d["log"] = open(os.path.join(ed, n + ".log"), "rb").read()[-2000:].decode("utf-8", "replace")
+                d["log"] = open(os.path.join(ed, n + proto.ENV_MARK["log"]), "rb").read()[-2000:].decode("utf-8", "replace")
             except OSError:
                 pass
     return oks, st
@@ -541,7 +542,7 @@ def op_env_mark(A):
     E, SD, n = os.path.expanduser(A["env_root"]), os.path.expanduser(A["sd"]), A["env"]
     os.makedirs(SD, exist_ok=True)
     if A["mode"] == "clear":
-        p = os.path.join(SD, n + ".building")
+        p = os.path.join(SD, n + proto.ENV_MARK["building"])
         try:
             if open(p).read().split()[0] == A["hash"]:
                 os.remove(p)
@@ -554,8 +555,8 @@ def op_env_mark(A):
     free = capped_free(p, A.get("cap"), root() if A.get("cap") else None)
     now = int(time.time())
     ok = free >= A["need"]
-    with open(os.path.join(SD, n + (".building" if ok else ".failed")), "w") as f:
-        f.write("%s %d\n" % (A["hash"], now) if ok else "%s %d nospace %d %d\n" % (A["hash"], now, A["need"], free))
+    with open(os.path.join(SD, n + proto.ENV_MARK["building" if ok else "failed"]), "w") as f:
+        f.write((proto.ENV_BUILDING_FMT % (A["hash"], now) if ok else proto.ENV_NOSPACE_FMT % (A["hash"], now, A["need"], free)) + "\n")
     return dict(ok=ok, free=free, need=A["need"])
 
 

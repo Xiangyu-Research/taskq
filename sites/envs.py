@@ -19,15 +19,16 @@ REPO = cfg.REPO  # the user's repo root
 cfg.use_config()
 import proto  # noqa: E402
 from proto import ENV_STATE as ES  # noqa: E402
+from proto import ENV_MARK as MK  # noqa: E402
 from proto import ROOT  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 import mtab as M  # noqa: E402
 
 DEACT = 'if [[ -n ${VIRTUAL_ENV:-} ]]; then PATH=${PATH//"$VIRTUAL_ENV/bin:"/}; unset VIRTUAL_ENV; fi'
-BUILD_MIN = 60      # time limit for one build over there (minutes): on Slurm the job's limit (short jobs schedule sooner; a build takes a few minutes), on pueue a timeout
-BUILD_TIMEOUT = 4 * 3600  # how long the hub waits for one build at most
-STALE_S = BUILD_TIMEOUT  # .building untouched this long counts as stopped
-RETRY_S = 6 * 3600  # a build skipped for lack of space is retried after this long
+BUILD_MIN = proto.ENV_BUILD_MIN  # time limit for one build over there (minutes): on Slurm the job's limit (short jobs schedule sooner; a build takes a few minutes), on pueue a timeout
+BUILD_TIMEOUT = proto.ENV_BUILD_TIMEOUT  # how long the hub waits for one build at most
+STALE_S = proto.ENV_STALE  # .building untouched this long counts as stopped
+RETRY_S = proto.ENV_RETRY  # a build skipped for lack of space is retried after this long
 SPACE_X = 2.5       # a built env is about this many times the lock's package bytes
 NAME_RE = re.compile(r"[A-Za-z0-9._+!-]+")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
@@ -215,13 +216,15 @@ def build_script(name, env, v=None, store=None):
     chk = open(check_file(env), encoding="utf-8").read()
     root, sd = sh_path(M.env_root(name)), sh_path(state_dir(m))
     conda = sh_path(m["conda"][0]) if m.get("conda") else None
+    mb, mf = (shlex.quote(f + "\\n") for f in (proto.ENV_BUILDING_FMT, proto.ENV_FAILED_FMT))  # printf formats of .building / .failed
     L = ["#!/bin/bash", "set -euo pipefail", "export CUDA_VISIBLE_DEVICES=", f"ROOT={root}", f"SD={sd}",
          f"N={shlex.quote(env)}", f"H={h}", 'P="$ROOT/$N-${H:0:12}"', "T=", 'mkdir -p "$ROOT" "$SD"',
          'export CONDA_PKGS_DIRS="$ROOT/.pkgs" PIP_CACHE_DIR="$ROOT/.pip-cache"',
-         'exec > >(tee -a "$SD/$N.log") 2>&1', f'echo "== $(date "+%F %T") building $N ({v}, $H) on $(hostname -s)"',
-         'echo "$H $(date +%s)" > "$SD/$N.building"', 'rm -f "$SD/$N.failed"',
-         "trap 'rc=$?; if [[ $rc != 0 ]]; then echo \"$H $(date +%s) rc $rc\" > \"$SD/$N.failed\"; fi; rm -f \"$SD/$N.building\"; "
-         "if [[ -n $T ]]; then rm -rf \"$T\"; fi; exit $rc' EXIT"]
+         f'exec > >(tee -a "$SD/$N{MK["log"]}") 2>&1', f'echo "== $(date "+%F %T") building $N ({v}, $H) on $(hostname -s)"',
+         f"MB={mb} MF={mf}",
+         f'printf "$MB" "$H" "$(date +%s)" > "$SD/$N{MK["building"]}"', f'rm -f "$SD/$N{MK["failed"]}"',
+         f"trap 'rc=$?; if [[ $rc != 0 ]]; then printf \"$MF\" \"$H\" \"$(date +%s)\" \"$rc\" > \"$SD/$N{MK['failed']}\"; fi; "
+         f"rm -f \"$SD/$N{MK['building']}\"; if [[ -n $T ]]; then rm -rf \"$T\"; fi; exit $rc' EXIT"]
     if lk:
         rows = [f"pkgs {x['sha256']} {x['fn']} {x['md5']}" for x in lk.get("conda") or []] + \
                [f"wheels {x['sha256']} {wheel_name(x)} -" for x in lk.get("pip") or []]
@@ -266,7 +269,7 @@ def build_script(name, env, v=None, store=None):
     L += [f"python3 - {sh_path(code) if code else ''} {heredoc('CHECK_EOF', chk)}",
           'echo "$H" > "$P/.built"',
           'ln -sfn "$(basename "$P")" "$ROOT/.$N.new" && mv -T "$ROOT/.$N.new" "$ROOT/$N"',
-          'echo "$H" > "$SD/$N.ok"', 'echo "== $(date "+%F %T") $N built and checked"']
+          f'echo "$H" > "$SD/$N{MK["ok"]}"', 'echo "== $(date "+%F %T") $N built and checked"']
     return "\n".join(L) + "\n"
 
 
@@ -382,10 +385,10 @@ def build(name, env, dry=False, run=None, timeout=BUILD_TIMEOUT, v=None, say=pri
 
 
 # ---------------- states ----------------
-STATUS_SH = r'''for n in "$@"; do
-  ok=$(head -n1 "$SD/$n.ok" 2>/dev/null | tr -d '|' || true); fl=$(head -n1 "$SD/$n.failed" 2>/dev/null | tr -d '|' || true)
-  bd=$(head -n1 "$SD/$n.building" 2>/dev/null | tr -d '|' || true); ln=0; [[ -e $ROOT/$n/.activate ]] && ln=1
-  lg=; [[ -n $fl ]] && lg=$(tail -c 2000 "$SD/$n.log" 2>/dev/null | base64 -w0 || true)
+STATUS_SH = rf'''for n in "$@"; do
+  ok=$(head -n1 "$SD/$n{MK['ok']}" 2>/dev/null | tr -d '|' || true); fl=$(head -n1 "$SD/$n{MK['failed']}" 2>/dev/null | tr -d '|' || true)
+  bd=$(head -n1 "$SD/$n{MK['building']}" 2>/dev/null | tr -d '|' || true); ln=0; [[ -e $ROOT/$n/.activate ]] && ln=1
+  lg=; [[ -n $fl ]] && lg=$(tail -c 2000 "$SD/$n{MK['log']}" 2>/dev/null | base64 -w0 || true)
   echo "ENV|$n|$ok|$fl|$bd|$ln|$lg"
 done
 echo "NOW|$(date +%s)"
@@ -423,7 +426,7 @@ def classify(rows, want, now):
         elif (r.get("ok") or "").strip() == h and r.get("active"):
             out[k] = ES["ok"]
         elif fl and fl[0] == h:
-            out[k] = ES["nospace"] if len(fl) > 2 and fl[2] == "nospace" else ES["failed"]
+            out[k] = ES["nospace"] if len(fl) > 2 and fl[2] == proto.ENV_NOSPACE else ES["failed"]
         elif r.get("ok"):
             out[k] = ES["changed"]
         else:

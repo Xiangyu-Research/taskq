@@ -401,6 +401,18 @@ ok("offline build on this machine: .ok holds the hash, state ok, no temp dir lef
 r = subprocess.run(["bash", "-c", M.activate("toff", "tiny") + "\npython -c 'import tinypkg; print(tinypkg.__file__)'"],
                    capture_output=True, text=True)
 ok("offline build on this machine: the wheelhouse package imports after activation", r.returncode == 0 and f"{LD}/root/envs/tiny-" in r.stdout, r.stdout + r.stderr)
+SAVE_CHECK = open(f"{LD}/specs/tiny.check.py").read()
+open(f"{LD}/specs/tiny.check.py", "w").write("raise SystemExit(3)\n")
+open(f"{LD}/specs/tiny.yml", "a").write("# check fails\n")
+write_lock(M.SPECS, "tiny", "default", pip=[wpk])
+rc, out = E.build("toff", "tiny")
+fl = open(f"{LD}/root/state/envs/tiny{proto.ENV_MARK['failed']}").read() if os.path.isfile(f"{LD}/root/state/envs/tiny.failed") else ""
+ok("failed check on this machine: .failed is one line in proto.ENV_FAILED_FMT (hash, time, rc), .building removed, state check failed, "
+   "the old env stays in use", rc == 3 and len(fl.split()) > 1 and fl.split()[1].isdigit()
+   and fl == proto.ENV_FAILED_FMT % (E.vhash("tiny", "default"), int(fl.split()[1]), 3) + "\n"
+   and not os.path.exists(f"{LD}/root/state/envs/tiny.building")
+   and E.states("toff")["tiny"] == proto.ENV_STATE["failed"] and os.path.isfile(f"{LD}/root/envs/tiny/.activate"), (rc, fl, out))
+open(f"{LD}/specs/tiny.check.py", "w").write(SAVE_CHECK)
 hb = "0" * 64  # content does not match the hash in the lock
 os.makedirs(f"{WH}/00", exist_ok=True)
 shutil.copy(whl, f"{WH}/00/{hb}")
