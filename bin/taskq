@@ -227,11 +227,11 @@ def rsync_help(argv):
 
 
 SPEC_DOC = {
-    "shell": ("<recipe> k=v... | --spec <JSON>", "shell line for run_task.sh (expanded for this machine)"),
-    "done": ("<recipe> k=v... | --spec <JSON>", "0 when done, 1 not done, 2 bad spec, 5 data dir unreadable"),
+    "shell": ("<recipe> k=v... | --spec <JSON> | --stdin", "shell line for run_task.sh (expanded for this machine)"),
+    "done": ("<recipe> k=v... | --spec <JSON> | --stdin", "0 when done, 1 not done, 2 bad spec, 5 data dir unreadable"),
     "resolve": ("<recipe> k=v...", "resolved spec (JSON, one line)"),
     "lookup": ("<key>", "find a task by key (experiment table first, then the queue) and print its spec (JSON)"),
-    "outputs": ("<key>|--spec <JSON> [--sh]", "outputs of this task (JSON); --sh: shell line for archive_task.sh"),
+    "outputs": ("<key>|--spec <JSON>|--stdin [--sh]", "outputs of this task (JSON); --sh: shell line for archive_task.sh"),
     "collect": ("--json < input.json", "this machine's training state (for cross-version reads): prints one @@JSON line"),
 }
 

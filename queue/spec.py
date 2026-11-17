@@ -8,6 +8,9 @@ Commands:
                                       this machine; then drops this machine's machines.py task_unset and adds task_vars not yet set)
   spec.py done <recipe> k=v...        exit 0 when done, 1 when not
   spec.py shell|done --spec <JSON>    same, with a spec already resolved (the hub resolves it when sending; executors do not look up recipes)
+  spec.py shell|done|outputs --stdin [--sh]  same, with the arguments on stdin: one JSON list (["--spec", "<JSON>"] or
+                                      ["<recipe>", "k=v", ...]) or a resolved spec (a JSON object); run_task.sh and the worker pass
+                                      them so, as a spec (tokens in vars) must not appear on a command line
   spec.py resolve <recipe> k=v...     the resolved spec (JSON, one line)
   spec.py lookup <key>                find a task by key (experiment table (experiments.py) first, then the task queue), print its spec (JSON)
   spec.py outputs <key>|--spec <JSON> [--sh]  this task's outputs (outputs(), JSON); --sh: shell statements for archive_task.sh
@@ -63,21 +66,25 @@ class SpecError(ValueError):
     pass
 
 
-_REF = re.compile(r"(?<!\$)\{(\w+)\}")
+_REF = re.compile(r"(?<!\$)\{(\w+)(:q)?\}")  # {name} puts the value in as is, {name:q} shell-quoted (one word)
+VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # an env var name in vars (it becomes a shell variable)
+_PLAIN = re.compile(r"[\w@%+=:,./ -]*")  # a value a closed recipe's command takes as is ({name}): no shell syntax
+PLAIN_DESC = "letters, digits, spaces and _@%+=:,./-"
 
 
 def fill(v, names, keep=BUILTIN):
-    """Replace {name} with its value (lists and dicts recursively). ${X} belongs to the shell and is left alone; names in keep
-    stay as they are. If the whole value is one {name} and that value is not a string (e.g. done is a list), return the value itself."""
+    """Replace {name} with its value and {name:q} with its value shell-quoted (one shell word whatever it holds); lists and dicts
+    recursively. ${X} belongs to the shell and is left alone; names in keep stay as they are. If the whole value is one {name} and
+    that value is not a string (e.g. done is a list), return the value itself."""
     if isinstance(v, str):
         m = _REF.fullmatch(v)
-        if m and m.group(1) in names and not isinstance(names[m.group(1)], str):
+        if m and not m.group(2) and m.group(1) in names and not isinstance(names[m.group(1)], str):
             return names[m.group(1)]
 
         def sub(m):
             k = m.group(1)
             if k in names:
-                return str(names[k])
+                return shlex.quote(str(names[k])) if m.group(2) else str(names[k])
             if k in keep:
                 return m.group(0)
             raise SpecError(f"unknown {{{k}}} (have: {', '.join(sorted(names))})")
@@ -97,10 +104,11 @@ def resolve(recipe, params, exp=None):
     if recipe not in R.RECIPES:
         raise SpecError(f"unknown recipe {recipe} (have: {', '.join(R.RECIPES)})")
     r = R.RECIPES[recipe]
-    odd = sorted(set(r) - set(schema.RECIPE_FIELDS) - {"params", "open"})
+    odd = sorted(set(r) - set(schema.RECIPE_FIELDS) - set(schema.RECIPE_KEYS))
     if odd:
         raise SpecError(f"unknown field {', '.join(odd)} in recipe {recipe} (see RECIPE_FIELDS in queue/schema.py)")
     fields = list(schema.RECIPE_FIELDS)
+    may = settable(recipe, r)
     over = {k: v for k, v in params.items() if k in fields and k not in r["params"]}
     p = {k: v for k, v in r["params"].items()}
     extra = [k for k in params if k not in p and k not in over]
@@ -108,17 +116,23 @@ def resolve(recipe, params, exp=None):
     if taken:
         raise SpecError(f"a param cannot be named {', '.join(taken)} ({{{taken[0]}}} is expanded per executor; write inputs in inputs)")
     if extra and not r.get("open"):
-        raise SpecError(f"recipe {recipe} has no params {', '.join(extra)} (have: {', '.join(list(p) + fields)})")
+        raise SpecError(f"recipe {recipe} has no params {', '.join(extra)} (have: {', '.join(list(p) + sorted(may))})")
+    shut = sorted(set(over) - may)
+    if shut:
+        raise SpecError(f"recipe {recipe} does not let a task set {', '.join(shut)} (a task may set its params {', '.join(p) or 'none'} "
+                        f"and the fields {', '.join(sorted(may))}; the recipe lists further fields its tasks may set in override)")
     p.update({k: v for k, v in params.items() if k not in over})
     missing = [k for k, v in p.items() if v is R.REQUIRED]
     if missing:
         raise SpecError(f"recipe {recipe} is missing params {', '.join(missing)}")
     p = {k: (str(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v) for k, v in p.items()}
-    for _ in range(5):  # a default referring to another param (e.g. model)
-        q = {k: fill(v, p) for k, v in p.items()}
-        if q == p:
-            break
-        p = q
+    if not r.get("open"):
+        for k in sorted(raw_names(r) & set(params)):
+            bad = sorted({c for c in str(p[k]) if not _PLAIN.fullmatch(c)})
+            if bad:
+                raise SpecError(f"recipe {recipe} puts param {k} into its command as is ({{{k}}}), so its value may hold only {PLAIN_DESC} "
+                                f"(it holds {''.join(bad)!r}); the recipe can write {{{k}:q}} to take any value as one word")
+    p = fill_params(p)  # a default referring to another param (e.g. model)
     s = {}
     for k in fields:
         if k not in r and schema.RECIPE_FIELDS[k][1] is schema.REQUIRED:
@@ -135,12 +149,74 @@ def resolve(recipe, params, exp=None):
     return s
 
 
+def refs(v, raw=False):
+    """Template names in v (str, list or dict) -> list; raw: only those put in as is ({name}, not {name:q})."""
+    if isinstance(v, str):
+        return [m.group(1) for m in _REF.finditer(v) if not (raw and m.group(2))]
+    if isinstance(v, (list, tuple)):
+        return [n for x in v for n in refs(x, raw)]
+    if isinstance(v, dict):
+        return [n for x in v.values() for n in refs(x, raw)]
+    return []
+
+
+def fill_params(p):
+    """Params whose values refer to other params ({name}, e.g. a default model="{ds}/{variant}") -> every value filled once, from the
+    filled values of the params it names; text filled in is never read as a template again (a quoted {x:q} stays quoted). Params that
+    refer to each other in a loop -> SpecError."""
+    out, busy = {}, []
+
+    def get(k):
+        if k in out:
+            return
+        if k in busy:
+            raise SpecError(f"params refer to each other in a loop: {' -> '.join(busy[busy.index(k):] + [k])}")
+        busy.append(k)
+        for n in refs(p[k]):
+            if n in p:
+                get(n)
+        out[k] = fill(p[k], {**p, **out})
+        busy.pop()
+    for k in p:
+        get(k)
+    return {k: out[k] for k in p}
+
+
+def raw_names(r):
+    """The params recipe r's cmd and inputs_cmd (schema.OPEN_ONLY) put in as is, directly or through other params' defaults -> set."""
+    import schema
+    todo, seen = [n for k in schema.OPEN_ONLY for n in refs(r.get(k), raw=True)], set()
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo += refs((r.get("params") or {}).get(n), raw=True)
+    return seen
+
+
+def settable(recipe, r):
+    """The spec fields a task's params may set on recipe r -> set: every field on an open recipe; otherwise schema.TASK_SETS plus
+    the recipe's override, which may not name schema.OPEN_ONLY (code a task would bring along) -> SpecError."""
+    import schema
+    if r.get("open"):
+        return set(schema.RECIPE_FIELDS)
+    extra = r.get("override") or ()
+    if isinstance(extra, str) or not isinstance(extra, (list, tuple)) or not all(x in schema.RECIPE_FIELDS for x in extra):
+        raise SpecError(f"recipe {recipe}: override must be a list of field names (RECIPE_FIELDS in queue/schema.py): {extra!r}")
+    code = sorted(set(extra) & set(schema.OPEN_ONLY))
+    if code:
+        raise SpecError(f"recipe {recipe} lists {', '.join(code)} in override: a recipe whose tasks bring their own command is open "
+                        "(open=True)")
+    return set(schema.TASK_SETS) | set(extra)
+
+
 def _size_ok(sent):
-    """A sent spec must fit in one command-line argument (P.SPEC_MAX) -> SpecError."""
+    """A sent spec must stay within P.SPEC_MAX (so it fits in one command-line argument, as run_task.sh --spec <JSON> by hand
+    takes it) -> SpecError."""
     n = len(json.dumps(sent, ensure_ascii=False, separators=(",", ":")).encode())
     if n > P.SPEC_MAX:
-        raise SpecError(f"the spec is {n // 1024} KB, an executor gets it as one command-line argument (at most {P.SPEC_MAX // 1024} KB): "
-                        "put long lists in a file")
+        raise SpecError(f"the spec is {n // 1024} KB, at most {P.SPEC_MAX // 1024} KB (one command-line argument for run_task.sh --spec "
+                        "by hand): put long lists in a file")
 
 
 RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
@@ -192,7 +268,10 @@ def _check(s, progress=True):
             _rel_ok(alt, "done marker (relative to out)")
     for k, typ in (("vars", dict), ("fetch", dict), ("res", dict), ("log", str)):
         if s.get(k) is not None and not isinstance(s[k], typ):
-            raise SpecError(f"{k} must be a {'dict' if typ is dict else 'string'}: {s[k]!r}")
+            raise SpecError(f"{k} must be a {'dict' if typ is dict else 'string'}" + ("" if k == "vars" else f": {s[k]!r}"))
+    for n in s.get("vars") or {}:  # each becomes a shell variable in run_task.sh (export NAME=value)
+        if not VAR_NAME.fullmatch(str(n)):
+            raise SpecError(f"vars name {n!r} is not a shell variable name (letters, digits and _, not starting with a digit)")
     for k, name in (("also", False), ("extra", True), ("exclude", True)):
         v = (s.get("fetch") or {}).get(k)
         if v is not None and not isinstance(v, list):
@@ -722,13 +801,18 @@ SHELL_FIELDS = ("key", "env", "cmd", "out", "inputs", "res", "vars")
 
 def shell_lines(s, data, repo=REPO):
     """For run_task.sh: turn the spec into shell variables (expanded for this machine's data dir and repo). Only the used fields
-    are expanded: params hold the original params and may carry other {names}."""
+    are expanded: params hold the original params and may carry other {names}. Every value is shell-quoted (or a number); a vars
+    name that is not a shell variable name -> SpecError (run_task.sh evaluates these lines)."""
+    bad = [k for k in s.get("vars") or {} if not VAR_NAME.fullmatch(str(k))]
+    if bad:
+        raise SpecError(f"vars name {bad[0]!r} is not a shell variable name (letters, digits and _, not starting with a digit)")
     e = expand({k: s[k] for k in SHELL_FIELDS if k in s}, data, repo)
-    lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote((envs_of(e) or [''])[0])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
-             f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
-             f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
-             "TASK_INPUTS=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["inputs"]) + ")",
-             f"TASK_LOCAL={int(bool(e['res'].get('local_inputs')))}"]
+    V = P.SHELL_VARS
+    lines = [f"{V['key']}={shlex.quote(e['key'])}", f"{V['env']}={shlex.quote((envs_of(e) or [''])[0])}", f"{V['cmd']}={shlex.quote(e['cmd'])}",
+             f"{V['out']}={shlex.quote(os.path.join(data, e['out']))}", f"{V['safe']}={shlex.quote(safe(e['key']))}",
+             f"{V['wait_gpu']}={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
+             f"{V['inputs']}=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["inputs"]) + ")",
+             f"{V['local']}={int(bool(e['res'].get('local_inputs')))}"]
     lines += [f"export {k}={shlex.quote(str(v))}" for k, v in e["vars"].items()]
     return "\n".join(lines)
 
@@ -743,8 +827,8 @@ def machine_vars(m=None):
         me = M.whoami()
         m = (M.MACHINES.get(me) or {}) if me else {}
     tv = m.get("task_vars") or {}
-    return ([f"unset {k}" for k in (m.get("task_unset") or ()) if re.fullmatch(r"[A-Za-z_]\w*", k)]
-            + [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items()])
+    return ([f"unset {k}" for k in (m.get("task_unset") or ()) if VAR_NAME.fullmatch(str(k))]
+            + [f"[[ -n ${{{k}:-}} ]] || export {k}={shlex.quote(str(v))}" for k, v in tv.items() if VAR_NAME.fullmatch(str(k))])
 
 
 def main(argv):
@@ -770,7 +854,22 @@ def main(argv):
 DISK_RC = P.EXIT["done_unreadable"]  # spec.py done cannot read the disk (all exit codes live in proto.EXIT)
 
 
+def stdin_args():
+    """--stdin: the arguments on stdin, one JSON list of strings, or a resolved spec (a JSON object, as --spec <JSON>) -> list."""
+    try:
+        got = json.loads(sys.stdin.read())
+    except ValueError as e:
+        raise SpecError(f"--stdin takes JSON: {e}") from None
+    if isinstance(got, dict):
+        return ["--spec", json.dumps(got, ensure_ascii=False)]
+    if isinstance(got, list) and got and all(isinstance(x, str) for x in got):
+        return got
+    raise SpecError("--stdin takes a JSON list of arguments or a spec (a JSON object)")
+
+
 def _main(cmd, args):
+    if cmd in ("shell", "done", "outputs") and args[:1] == ["--stdin"]:
+        args = stdin_args() + args[1:]
     if cmd in ("shell", "done", "resolve", "lookup", "outputs") and not args:
         raise SpecError(f"{cmd} needs arguments")
     if cmd == "collect":

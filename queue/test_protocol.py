@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The protocol is defined only in proto.py: no other core file hard-codes proto names; every TASKQ_* is registered in proto.ENV;
-proto uses the standard library only and runs standalone."""
+"""The protocol is defined only in proto.py: no other core file hard-codes proto names; every TASKQ_* is registered in proto.ENV and
+every worker / task env var (WORKER_*, TASK_*, RUN_TASK_*) in proto.RUN_ENV; proto uses the standard library only and runs standalone."""
 import ast
 import os
 import re
@@ -164,6 +164,23 @@ class NoCopies(unittest.TestCase):
                     seen.setdefault(k, f"{os.path.relpath(p, CORE)}:{i}")
         self.assertIn("revive", seen)  # the scan finds them
         self.assertEqual({k: f for k, f in seen.items() if k not in proto.ALERTS}, {}, "alert types must be in proto.ALERTS")
+
+    def test_run_env_registered(self):
+        """Env vars of workers and tasks: every WORKER_* / TASK_* / RUN_TASK_* name in the core is in proto.RUN_ENV, or a shell
+        variable spec.py shell prints (proto.SHELL_VARS), or the name of a proto / schema constant (TASK_LOGS, WORKER_FIELDS, ...);
+        queue/README.md lists every proto.RUN_ENV name."""
+        import schema
+        known = set(proto.RUN_VARS.values()) | set(proto.SHELL_VARS.values())
+        seen = {}
+        for p in core_files():
+            for v in re.findall(r"\b(?:TASK|WORKER|RUN_TASK)_[A-Z][A-Z0-9_]*\b", read(p)):
+                seen.setdefault(v, os.path.relpath(p, CORE))
+        missing = {v: f for v, f in seen.items() if v not in known and not hasattr(proto, v) and not hasattr(schema, v)}
+        self.assertEqual(missing, {}, "worker and task env vars must be registered in proto.RUN_ENV (spec.py shell's in proto.SHELL_VARS)")
+        self.assertLessEqual({"WORKER_ID", "TASK_KEY", "TASK_JOBTAG", "TASK_INPUTS_ROOT", "TASK_OUT"}, set(seen), "the scan finds them")
+        self.assertTrue(all(len(v) == 3 and v[1] in ("run", "test") and v[2] for v in proto.RUN_ENV.values()))
+        readme = read(os.path.join(HERE, "README.md"))
+        self.assertEqual([n for n in proto.RUN_VARS.values() if f"`{n}`" not in readme], [], "queue/README.md lists every proto.RUN_ENV name")
 
     def test_no_handwritten_literals(self):
         bad = []

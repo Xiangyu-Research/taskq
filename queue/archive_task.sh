@@ -3,7 +3,8 @@
 # dir) and verify it. Runs on the store (queue/site_ops.py's archive; the hub's relay queues relay_archive in the IO group); the
 # data dir is TASKQ_DATA.
 #   archive_task.sh --spec <resolved spec JSON> [--dry-run]
-# Result dirs and files to back up come from the task's outputs (queue/spec.py outputs --spec): outs, extra files in the parent,
+#   archive_task.sh --spec - [--dry-run]     the spec on stdin (site_ops passes it so: a spec never goes on a command line)
+# Result dirs and files to back up come from the task's outputs (queue/spec.py outputs --stdin): outs, extra files in the parent,
 # and part logs.
 # Steps:
 #   1. store -> backup machine: outs, extra files in the parent, part logs (<data dir>/logs/tasks/<key filename>__*).
@@ -13,9 +14,10 @@
 #      checksums; do not read a lot from the backup's login node).
 # Exit non-zero on mismatch (the health check reports it).
 set -euo pipefail
-USAGE="usage: archive_task.sh --spec <spec JSON> [--dry-run]"
+USAGE="usage: archive_task.sh --spec <spec JSON>|- [--dry-run]"
 [[ ${1:-} == --spec && -n ${2:-} ]] || { echo "$USAGE" >&2; exit 2; }
 SPEC=$2 DRY=${3:-}
+if [[ $SPEC == - ]]; then SPEC=$(cat); exec < /dev/null; fi  # read the spec first; nothing after reads this stdin
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root
 M="python3 $CORE/sites/mtab.py"
 HOST=$($M names store | head -1)
@@ -23,7 +25,7 @@ LD=${TASKQ_DATA:?run on the store: TASKQ_DATA is the data dir of the store}
 BK=$($M backups | grep -vx "$HOST" | head -1)
 [[ -n $BK ]] || { echo "the machine table (machines.py) has no backup machine (role backup) other than $HOST" >&2; exit 2; }
 BKH=$($M get "$BK" ssh) BKD=$($M get "$BK" backup 2> /dev/null || $M get "$BK" data)
-SH=$(python3 "$CORE/queue/spec.py" outputs --spec "$SPEC" --sh) || { echo "bad spec: ${SPEC:0:200}" >&2; exit 2; }
+SH=$(python3 "$CORE/queue/spec.py" outputs --stdin --sh <<< "$SPEC") || { echo "bad spec (spec.py outputs failed, above)" >&2; exit 2; }
 eval "$SH"
 (( ARCHIVE )) || { echo "the recipe for $KEY does not archive (no archive in the spec)" >&2; exit 2; }
 OUT=${OUTS[0]}

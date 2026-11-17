@@ -103,7 +103,7 @@ EXP_FIELDS = {
     "hours": ("num?", None, "hours each task counts as (ledger total progress)"),
     "recipe": ("str", REQUIRED, "training recipe (recipes.py); PLACE places training tasks by it"),
     "params": ("dict", {}, "recipe params"),
-    "fields": ("dict", {}, "extra spec fields to override (e.g. metrics, vars, inputs)"),
+    "fields": ("dict", {}, "extra spec fields to set (e.g. metrics, vars, inputs); the recipe must let tasks set them (its override)"),
     "each": ("dict", {}, "{param: [values...]}: expand into one task per combination; absent = one task"),
     "after": ("steps", (), "steps after each task is done (STEP_FIELDS), done in order"),
     "group_after": ("steps", (), "experiment-wide steps (STEP_FIELDS); order follows inputs and outputs"),
@@ -135,8 +135,9 @@ STEP_FIELDS = {
 
 
 # ---------------- a recipe (each RECIPES entry in recipes.py) and a task spec ----------------
-# Fields of a recipe other than params and open; all may use {param}, plus {data} (the executor's data dir) and {repo} (the project
-# in the bundle). A task param with the same name overrides the field (dicts merge, everything else is replaced). A recipe that
+# Fields of a recipe other than params, open and override (RECIPE_KEYS); all may use {param}, plus {data} (the executor's data dir)
+# and {repo} (the project in the bundle). A task param named after a field sets that field (dicts merge, everything else is
+# replaced) only where the recipe lets tasks set it (TASK_SETS, the recipe's override; every field on an open recipe). A recipe that
 # omits a field takes the default here.
 RECIPE_FIELDS = {
     "key": ("str", REQUIRED, "task name (queue, claims, ledger all use it; must be unique): parts separated by /, none empty, . or ..; no spaces; not starting with -"),
@@ -144,7 +145,7 @@ RECIPE_FIELDS = {
     "cmd": ("str", REQUIRED, "command run with bash in the project root in the bundle; a rerun continues from the last run (after release another worker continues from the checkpoint)"),
     "out": ("str", REQUIRED, "output dir (relative to the data dir): fetch, archive and ledger all look here"),
     "done": ("strs", REQUIRED, "done markers: files under out, every item required; 'a|b' needs one"),
-    "vars": ("dict", {}, "env vars set before running"),
+    "vars": ("dict", {}, "env vars set before running (names: letters, digits and _, not starting with a digit)"),
     "log": ("str?", "*.log", "logs under out (glob): how long since the last update judges whether someone is working"),
     "progress": ("str?", None, "progress reader (spec.py PROGRESS, readers/ plugins; progress_json = out/PROGRESS.json)"),
     "resume": ("strs?", None, "checkpoints under out (glob): any one means progress, kept there on release for the same machine to continue; None = none"),
@@ -164,6 +165,13 @@ RECIPE_FIELDS = {
     "step": ("str?", None, "experiment step name (steps added by advance have it; training is None): PLACE, HOLD and the board use it"),
     "out_gb": ("num?", None, "roughly how many GB of output (leaves room when choosing a machine); None = proto.OUT_GB"),
 }
+# a recipe's own keys besides the fields: params (params and defaults), open (True = a task may carry any params and set any field),
+# override (more fields its tasks may set, beyond TASK_SETS)
+RECIPE_KEYS = ("params", "open", "override")
+# fields a task's params may set on any recipe: its name, where and when it runs, whose it is
+TASK_SETS = ("key", "machines", "res", "device", "out_gb", "owner")
+# code run on executors and on the store: a task brings its own only on an open recipe (a closed recipe cannot list them in override)
+OPEN_ONLY = ("cmd", "inputs_cmd")
 
 
 def defaults(table, entry):

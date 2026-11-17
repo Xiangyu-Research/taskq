@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -154,8 +155,8 @@ class Worker:
         self.t0 = int(time.time())
         self.repo = cfg.REPO
         self.qdir = os.environ.get("TASKQ_DIR") or cfg.state("taskq")
-        self.device = os.environ.get("WORKER_DEVICE") or "gpu"
-        self.W = os.environ.get("WORKER_ID", "")
+        self.device = os.environ.get(proto.RUN_VARS["device"]) or "gpu"
+        self.W = os.environ.get(proto.RUN_VARS["worker"], "")
         self.host = socket.gethostname().split(".")[0]
         self._m = None
         self.data = cfg.data_dir()
@@ -225,7 +226,7 @@ class Worker:
                 if self.get_end is not had:
                     self.end_by = name
         if not self.W:
-            print("set WORKER_ID (a worker in machines.py in the config dir)", file=sys.stderr)
+            print(f"set {proto.RUN_VARS['worker']} (a worker in machines.py in the config dir)", file=sys.stderr)
             sys.exit(1)
         if self.slots is None or self.device == "cpu":
             self.slots = 1
@@ -606,15 +607,22 @@ class Worker:
         self.tok[key] = tok
         for pname, f in self.hooks("before_start"):
             self.guard(pname, "before_start", f, self)
-        env = dict(os.environ, TASK_KEY=key, TASK_JOBTAG=jt, TASK_PART="1", TASK_CPUS=str(self.task_cpus), TASKQ_ADMITTED="1")
+        V = proto.RUN_VARS
+        env = dict(os.environ, **{V["key"]: key, V["jobtag"]: jt, V["part"]: "1", V["cpus"]: str(self.task_cpus)}, TASKQ_ADMITTED="1")
         for pname, f in self.hooks("env"):
             e = dict(env)  # a hook that fails half way leaves nothing behind
             if self.guard(pname, "env", f, self, e)[0]:
                 env = e
         sys.stdout.flush()
         try:
-            targs = shlex.split(args)
-            proc = subprocess.Popen(["bash", RUN_TASK, *targs], stdin=subprocess.DEVNULL, env=env)
+            # run_task.sh (and spec.py from it) get the arguments on stdin, from a file only this account can read that is already
+            # unlinked: the spec (tokens in vars) never goes on a command line, which every user of the node can read
+            arg = json.dumps(shlex.split(args), ensure_ascii=False)
+            with tempfile.TemporaryFile("w+", encoding="utf-8") as f:
+                f.write(arg)
+                f.flush()
+                f.seek(0)
+                proc = subprocess.Popen(["bash", RUN_TASK, "--stdin"], stdin=f, env=env)
         except (OSError, ValueError, TypeError) as e:  # TypeError: an env hook put in a value that is not a string
             say(f"!! {key}: cannot start run_task.sh ({type(e).__name__}: {e}); releasing and recording a failure")
             self.fail(key, f"cannot start run_task.sh: {type(e).__name__}: {e}", 0)
@@ -622,16 +630,17 @@ class Worker:
         r = Run(proc.pid, key, proc=proc, jtag=jt)  # registered before anything else can fail: the run is always followed
         self.runs[proc.pid] = r
         self.changed = int(time.time())
-        say(f"started {key} (pid {proc.pid}: run_task.sh {args})")
-        sh = out_of([PY, os.path.join(HERE, "spec.py"), "shell", *targs], any_rc=True) or ""
+        say(f"started {key} (pid {proc.pid})")  # the task name only: the spec does not go into logs either
+        sh = out_of([PY, os.path.join(HERE, "spec.py"), "shell", "--stdin"], any_rc=True, input=arg) or ""
+        out_var, safe_var = proto.SHELL_VARS["out"], proto.SHELL_VARS["safe"]
         for ln in sh.split("\n"):
-            m = re.match(r"(TASK_OUT|TASK_SAFE)=(.*)$", ln)
+            m = re.match(rf"({out_var}|{safe_var})=(.*)$", ln)
             if m:
                 try:
                     v = (shlex.split(m.group(2)) or [""])[0]
                 except ValueError:
                     v = ""
-                if m.group(1) == "TASK_OUT":
+                if m.group(1) == out_var:
                     r.outdir = v
                 elif v:
                     r.safe = v

@@ -40,6 +40,35 @@ $R --spec '{"key": "x"}' > /dev/null 2>&1; rc=$?
 check "--spec with missing fields: exit 2" "(( rc == 2 ))"
 check "bad spec: the reason goes into the task's part log (header line as usual)" "head -1 $T/logs/tasks/x__test-1_part1.log | grep -q 'task=x,' && grep -q 'not started: bad task spec: .' $T/logs/tasks/x__test-1_part1.log"
 check "missing env: the reason goes into the part log" "grep -q 'not started: this machine has no env nosuchenv' $T/logs/tasks/toy__d__test-1_part1.log"
+SPV=$(python3 -c 'import json, sys
+s = json.loads(sys.argv[1]); s.update(key="toy/v1", out="toy/v1", vars={"A; touch " + sys.argv[2] + "; B": "1"}); print(json.dumps(s))' "$SP" "$T/pwned")
+$R --spec "$SPV" > /dev/null 2>&1; rc=$?
+check "a vars name that is not a shell variable name: exit 2, none of it runs" "(( rc == 2 )) && [[ ! -e $T/pwned ]] && grep -q 'not started: bad task spec: .*vars name' $T/logs/tasks/toy__v1__test-1_part1.log"
+$R command key=toy/v2 'cmd=printf %s "$V" > $TASKQ_DATA/toy/v2.txt; touch $TASKQ_DATA/toy/v2/DONE' env=base out=toy/v2 'done=["DONE"]' \
+  "vars={\"V\": \"\$(touch $T/pwned) \`touch $T/pwned\` ; it's\"}" > /dev/null; rc=$?
+check "vars values reach the command literally (run_task.sh evaluates quoted shell lines)" "(( rc == 0 )) && [[ ! -e $T/pwned && \$(cat $T/toy/v2.txt) == \"\\\$(touch $T/pwned) \\\`touch $T/pwned\\\` ; it's\" ]]"
+# --stdin (how a worker starts it): the arguments as a JSON list on stdin, handed on to spec.py on stdin; no command line holds the
+#   spec. python3 on PATH is a spy that records the command line of every python3 run_task.sh starts
+mkdir -p "$T/spy"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' "$T/spy.log" "$(command -v python3)" > "$T/spy/python3"; chmod +x "$T/spy/python3"
+SPS=$(python3 "$HERE/spec.py" resolve command key=toy/st 'cmd=printf %s "$TOKEN" > {data}/toy/st.txt; touch {data}/toy/st/DONE' env=base out=toy/st \
+      'done=["DONE"]' 'vars={"TOKEN": "s3cr3t-st"}')
+python3 -c 'import json, sys; print(json.dumps(["--spec", sys.argv[1]]))' "$SPS" > "$T/st.json"
+: > "$T/spy.log"; PATH=$T/spy:$PATH $R --stdin < "$T/st.json" > /dev/null; rc=$?
+check "--stdin: runs the spec from stdin, the command gets its vars" "(( rc == 0 )) && [[ \$(cat $T/toy/st.txt) == s3cr3t-st && -e $T/toy/st/DONE ]]"
+check "--stdin: spec.py shell and done get the spec on stdin, no python3 command line holds it" \
+  "grep -q 'spec.py shell --stdin' $T/spy.log && grep -q 'spec.py done --stdin' $T/spy.log && ! grep -q s3cr3t $T/spy.log"
+python3 -c 'import json; print(json.dumps(["command", "key=toy/st2", "cmd=printf %s \"$TOKEN\" > $TASKQ_DATA/toy/st2.txt; touch $TASKQ_DATA/toy/st2/DONE",
+                                           "env=base", "out=toy/st2", "done=[\"DONE\"]", "vars={\"TOKEN\": \"s3cr3t-st2\"}"]))' > "$T/st2.json"
+: > "$T/spy.log"; PATH=$T/spy:$PATH $R --stdin < "$T/st2.json" > /dev/null; rc=$?
+check "--stdin with <recipe> k=v... arguments: runs, nothing on a python3 command line" "(( rc == 0 )) && [[ \$(cat $T/toy/st2.txt) == s3cr3t-st2 ]] && ! grep -q s3cr3t $T/spy.log"
+SPS3=$(python3 -c 'import json, sys; s = json.loads(sys.argv[1]); s.update(key="toy/st3", out="toy/st3", cmd="touch {data}/toy/st3/DONE"); print(json.dumps(s))' "$SPS")
+: > "$T/spy.log"; PATH=$T/spy:$PATH $R --spec "$SPS3" > /dev/null; rc=$?
+check "--spec <JSON> by hand: spec.py still gets it on stdin" "(( rc == 0 )) && [[ -e $T/toy/st3/DONE ]] && grep -q 'spec.py shell --stdin' $T/spy.log && ! grep -q s3cr3t $T/spy.log"
+echo '["--spec", "{\"key\": \"st4\"}"]' | $R --stdin > /dev/null 2>&1; rc=$?
+check "--stdin with a bad spec: exit 2, the reason in the part log of the key it names" "(( rc == 2 )) && grep -q 'not started: bad task spec: .' $T/logs/tasks/st4__test-1_part1.log"
+$R --stdin extra < "$T/st.json" > /dev/null 2>&1; rc=$?
+check "--stdin with more arguments: usage, exit 2" "(( rc == 2 ))"
 # unreadable disk (spec.py done exits 5): the copy's spec.py exits 5 from done while the FAKE_DONE5 file exists
 mkdir -p "$T/core"; cp -r "$HERE" "$T/core/queue"; cp -r "$HERE/../sites" "$T/core/sites"
 sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)' "$T/core/queue/spec.py"

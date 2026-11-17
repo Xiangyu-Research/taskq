@@ -5,6 +5,8 @@ import subprocess
 import time
 from collections import deque
 
+import proto
+
 
 def active(w):
     return w.device == "gpu"
@@ -30,7 +32,7 @@ def admit(w):
 
 def gpu_stats(csv, nvsel=()):
     """→ (average utilization of the last 10 records, count, memory used, total) in MiB."""
-    t = os.environ.get("WORKER_TEST_GPU")
+    t = os.environ.get(proto.RUN_VARS["test_gpu"])
     if t:
         return tuple(int(x) for x in t.split()[:4])
     u = []

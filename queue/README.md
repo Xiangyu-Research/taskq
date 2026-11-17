@@ -174,7 +174,7 @@ The file `OUTPUTS["experiments"]` points to holds `EXPERIMENTS = [dict(...), ...
 | `hours` | `num?` | `None` | hours each task counts as (ledger total progress) |
 | `recipe` | `str` | required | training recipe (recipes.py); PLACE places training tasks by it |
 | `params` | `dict` | `{}` | recipe params |
-| `fields` | `dict` | `{}` | extra spec fields to override (e.g. metrics, vars, inputs) |
+| `fields` | `dict` | `{}` | extra spec fields to set (e.g. metrics, vars, inputs); the recipe must let tasks set them (its override) |
 | `each` | `dict` | `{}` | {param: [values...]}: expand into one task per combination; absent = one task |
 | `after` | `steps` | `()` | steps after each task is done (STEP_FIELDS), done in order |
 | `group_after` | `steps` | `()` | experiment-wide steps (STEP_FIELDS); order follows inputs and outputs |
@@ -206,7 +206,9 @@ Steps (each entry in `after`, `group_after`, `FINAL`):
 | `only` | `dict?` | `None` | per-task steps: only for tasks where each takes these values ({param: [values...]}) |
 <!-- /fields -->
 
-Names usable in templates: recipe params, `each` values, `names`, and `{data}` (the data dir on the executor). Instance ids: a per-task step
+Names usable in templates: recipe params, `each` values, `names`, and `{data}` (the data dir on the executor). `{name}` puts the value
+in as is (in a command the shell splits it at spaces and reads any shell syntax in it); `{name:q}` puts it in shell-quoted, as one word
+whatever it holds (use it for values that may hold spaces, quotes, `;`, `$` and the like). Instance ids: a per-task step
 is `<step>/<experiment id>_<short>`, an experiment-level one is `<step>/<experiment id>`, and a `FINAL` one is `<step>`. `taskq exp steps`
 lists expanded steps, `taskq dag` shows the order, and `taskq who <file>` tells whose output a file is.
 
@@ -215,8 +217,14 @@ lists expanded steps, `taskq dag` shows the order, and `taskq who <file>` tells 
 A recipe (`command` in `queue/recipes.py`, plus `RECIPES` in the project's `recipes.py`) is a template for a kind of task: `params` are
 parameters and defaults (`REQUIRED` = must be given, defaults may use `{other param}`), `open=True` lets a task carry params not listed
 here; the other fields form the task spec (templates, `{param}` replaced by the value).
-When a task's param name is a field in the table below and the recipe's `params` lacks it, it directly overrides that spec field (such as
-`res`, `machines`, `out_gb`).
+A task param named after a field in the table below (and not in the recipe's `params`) sets that spec field only where the recipe lets
+tasks set it, otherwise the task is refused: on any recipe `key`, `machines`, `res`, `device`, `out_gb`, `owner` (`schema.TASK_SETS`);
+the fields the recipe lists in `override` (such as `override=["vars", "inputs"]`); every field on an open recipe. The experiment
+table's `fields` and a smoke definition's `vars` reach the spec the same way, so the recipe lists them in `override`. `cmd` and
+`inputs_cmd` (code run on executors and the store, `schema.OPEN_ONLY`) cannot be listed: only an open recipe takes them from a task.
+On a closed recipe a value a task gives that `cmd` or `inputs_cmd` puts in as is (`{name}`, directly or through another param's
+default) may hold only letters, digits, spaces and `_@%+=:,./-`, so it cannot add shell syntax to the command; the recipe writes
+`{name:q}` where any value should pass as one word.
 
 <!-- fields:RECIPE_FIELDS -->
 | field | type | default | description |
@@ -226,7 +234,7 @@ When a task's param name is a field in the table below and the recipe's `params`
 | `cmd` | `str` | required | command run with bash in the project root in the bundle; a rerun continues from the last run (after release another worker continues from the checkpoint) |
 | `out` | `str` | required | output dir (relative to the data dir): fetch, archive and ledger all look here |
 | `done` | `strs` | required | done markers: files under out, every item required; 'a\|b' needs one |
-| `vars` | `dict` | `{}` | env vars set before running |
+| `vars` | `dict` | `{}` | env vars set before running (names: letters, digits and _, not starting with a digit) |
 | `log` | `str?` | `'*.log'` | logs under out (glob): how long since the last update judges whether someone is working |
 | `progress` | `str?` | `None` | progress reader (spec.py PROGRESS, readers/ plugins; progress_json = out/PROGRESS.json) |
 | `resume` | `strs?` | `None` | checkpoints under out (glob): any one means progress, kept there on release for the same machine to continue; None = none |
@@ -302,12 +310,41 @@ A worker is `queue/consume.py` (`queue/worker_start.sh` activates the worker env
 and starts it; a name in `envs` is activated the same way as for tasks): it claims tasks from this
 machine's queue, starts `queue/run_task.sh`, collects exit codes, sends heartbeats, stops and releases. `run_task.sh` activates the env
 from the spec, sets env vars and runs the command at the project root inside the bundle, writing output to the part log; the training
-command must resume from its checkpoint (after a release another worker continues from it). Training never outlives its task: the
+command must resume from its checkpoint (after a release another worker continues from it). A spec may hold tokens in `vars`, so it
+never goes on a command line, which any user of the node can list: the worker starts `run_task.sh --stdin` with the task's arguments
+on stdin (from a file only its account can read, already unlinked), `run_task.sh` hands them to `spec.py` on stdin, the store's
+`archive_task.sh` and the bundle gate get the spec the same way, and the worker log records only the task name. Training never outlives its task: the
 command runs in its own session, whatever it leaves there when it exits is stopped, and a watcher stops the training once the worker
 that started `run_task.sh` is gone (killed) or `run_task.sh` itself was killed, so a killed worker never leaves training on the GPU
 for a new worker to stack another task onto. Stops the worker sends itself (`taskq stop`, its own stop signal or hours window, stall
 handling, a claim taken over) release the task without a failure; a task whose training or `run_task.sh` dies of a signal the worker
 did not send (an out-of-memory killer, an admin) is released as a failure, so one killed every time reaches the failure limit.
+
+#### Env vars of workers and tasks
+
+A worker inherits these from its launcher, `run_task.sh` from the worker, and the task's command from `run_task.sh` (names in
+`proto.RUN_ENV`, the `TASKQ_*` ones in `proto.ENV`):
+
+| env var | set by | meaning |
+|---|---|---|
+| `WORKER_ID` | the pueue worker command (`sites/mtab.py` worker_env) | the worker's name, `<machine>-<worker>`; a Slurm worker takes its job id instead |
+| `WORKER_DEVICE` | the pueue worker command; `queue/cpu_worker.sbatch` sets `cpu` | which tasks the worker claims: `gpu` (unset) or `cpu` |
+| `CUDA_VISIBLE_DEVICES` | the pueue worker command | the worker's GPU (the machine table worker's `gpu`) |
+| `TASK_GPU_IDLE` | the pueue worker command | minutes no one else may have used the GPU in the GPU usage records before a task starts (the worker's `idle`): the `gpu_idle` plugin checks it before claiming, `run_task.sh` started by hand waits for it |
+| `TASK_WAIT_GPU` | `spec.py shell` in `run_task.sh` | most minutes `run_task.sh` waits for a busy GPU, from the task's `res.wait_gpu` (empty = wait forever); it replaces the worker's `wait` that the pueue worker command sets |
+| `TASK_KEY` | the worker | the task's name |
+| `TASK_JOBTAG` | the worker | the job name in the part log name and first line: the worker's name, plus `-<start time>` for a resident worker; set means started by a worker (one try, and the training stops once the worker is gone); unset: `<hostname>-<time>` |
+| `TASK_PART` | the worker | the part number in the part log name (`1`; unset: `1`) |
+| `TASK_CPUS` | the worker | cores for this task: the worker's cores divided by its slots |
+| `TASKQ_ADMITTED` | the worker | `1`: the worker checked the GPU before claiming, `run_task.sh` does not wait for it again |
+| `TASKQ_STAGE_ROOT` | the `slurm` consumer plugin | node-local staging root: with `res.local_inputs` the inputs are copied there |
+| `TASK_INPUTS_ROOT` | `run_task.sh` | where the command reads its inputs, at the same relative paths as in the data dir: the data dir, or the node-local copy |
+| `TASKQ_DATA`, `TASKQ_LIB` | `run_task.sh` | the data dir; the core's `queue/` (the core's `bin/` comes first on `PATH`) |
+| the spec's `vars`, the machine table's `task_vars` | `run_task.sh` | exported for the command (minus `task_unset`; a `task_vars` entry set already keeps its value) |
+
+`RUN_TASK_TRIES`, `RUN_TASK_POLL`, `RUN_TASK_GPU_POLL`, `RUN_TASK_STOP_WAIT`, `RUN_TASK_BOSS_POLL` and `WORKER_TEST_GPU` replace
+timings and GPU records in tests only. The shell variables `spec.py shell` prints for `run_task.sh` (`TASK_CMD`, `TASK_OUT`, ...)
+are in `proto.SHELL_VARS`.
 
 #### Consumers
 

@@ -6,6 +6,7 @@
 import itertools
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -52,6 +53,42 @@ s2 = S.resolve("toy", {"ds": "D101_alpha", "frag": "0", "env": "alt2", "vars": {
 ok("a param overrides a same-named field: env replaced, vars merged", s2["env"] == "alt2" and s2["vars"]["SPLITS_DIR"] == "x" and "DEMO_RESULTS" in s2["vars"])
 ok("a plan param goes into the model dir", S.resolve("toy", {"ds": "D101_alpha", "frag": "0", "plan": "PlanP"})["out"]
    == "results/D101_alpha/V_save__PlanP__full/frag_0")
+
+# ---------------- what a task may set on a closed recipe ----------------
+import recipes as RCP  # noqa: E402
+RCP.RECIPES["closed"] = dict(params=dict(name=RCP.REQUIRED, seed=RCP.REQUIRED, n="100"),
+                             key="closed/{name}/{seed}", env="base", cmd="bash bin/count.sh {n} {data}/closed/{name}/seed_{seed}",
+                             out="closed/{name}/seed_{seed}", done=["DONE"], resume=["ckpt.json"])
+CL = dict(name="a", seed="0")
+ok("closed recipe: a task cannot set cmd, inputs_cmd, vars, resume, out, done, inputs, env (the recipe's override does not list them)",
+   all(raises(lambda f=f, v=v: S.resolve("closed", dict(CL, **{f: v}))) for f, v in
+       (("cmd", "echo pwned"), ("inputs_cmd", "echo x"), ("vars", {"BASH_ENV": "/tmp/x"}), ("resume", ["*"]), ("out", "x/y"),
+        ("done", ["x"]), ("inputs", ["raw"]), ("env", "alt"))))
+_cl = S.resolve("closed", dict(CL, key="closed/b/0", machines=["site-pueue"], res={"cpus": 2}, device="cpu", out_gb="3", owner="bob"))
+ok("closed recipe: a task may set key, machines, res, device, out_gb, owner (schema.TASK_SETS)",
+   (_cl["key"], _cl["machines"], _cl["res"], _cl["device"], _cl["out_gb"], _cl["owner"])
+   == ("closed/b/0", ["site-pueue"], {"cpus": 2}, "cpu", "3", "bob") and _cl["cmd"].startswith("bash bin/count.sh 100 "))
+try:
+    S.resolve("closed", dict(CL, cmd="echo pwned"))
+    _why = ""
+except S.SpecError as e:
+    _why = str(e)
+ok("closed recipe: the refusal names the field and what the task may set", "cmd" in _why and "override" in _why and "machines" in _why)
+RCP.RECIPES["closed"]["override"] = ["vars", "resume"]
+_cv = S.resolve("closed", dict(CL, vars={"X": "1"}, resume=["last.ckpt"]))
+ok("override: the fields a recipe lists may be set by its tasks (vars, resume)", _cv["vars"] == {"X": "1"} and _cv["resume"] == ["last.ckpt"]
+   and raises(lambda: S.resolve("closed", dict(CL, done=["x"]))))
+for _bad in (["cmd"], ["vars", "inputs_cmd"], "vars", ["nope"]):
+    RCP.RECIPES["closed"]["override"] = _bad
+    ok(f"override {_bad!r}: the recipe is refused (cmd, inputs_cmd only on an open recipe; a list of field names)",
+       raises(lambda: S.resolve("closed", CL)))
+del RCP.RECIPES["closed"]
+ok("open recipe (command): a task sets any field, its command included", S.resolve("command", dict(
+    key="o/a", cmd="echo hi; true", env="base", out="o/a", done="DONE", resume="c*", inputs_cmd="echo x"))["inputs_cmd"] == "echo x")
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "resolve", "toy", "ds=D1", "frag=0", "cmd=echo pwned"],
+                    capture_output=True, text=True)
+ok("spec.py resolve (as taskq add --recipe): cmd on the closed toy recipe -> exit 2, nothing printed",
+   _r.returncode == 2 and not _r.stdout and "does not let a task set cmd" in _r.stderr)
 
 # ---------------- command recipe ----------------
 c = S.resolve("command", {"key": "misc/a", "cmd": "python x.py --out {data}/misc/a", "env": "base", "out": "misc/a",
@@ -169,6 +206,58 @@ src = {"src": {"pueue-host": {"tasks": {"guest/x": dict(final=False, runs=[dict(
                "slurm-login": {"tasks": {}}}}
 ok("refill.progress: a checkpoint alone counts as progress, per machine", RF.progress(src, "guest/x", "pueue-host") and not RF.progress(src, "guest/x", "slurm-login"))
 
+# ---------------- template values in commands, env var names ----------------
+ok("fill: {name} as is, {name:q} shell-quoted (one word); ${X} left to the shell; a plain word is not quoted",
+   S.fill("echo {x:q} {x} ${x} {y:q}", {"x": "a b; c", "y": "plain"}) == "echo 'a b; c' a b; c ${x} plain"
+   and S.fill("{d:q}", {"d": ["a", "b"]}) == shlex.quote(str(["a", "b"])) and S.fill("{d}", {"d": ["a", "b"]}) == ["a", "b"])
+ok("fill: {data:q} is kept at resolve and expanded quoted on the executor",
+   S.fill("ls {data:q}", {}) == "ls {data:q}" and S.expand("ls {data:q} {data}", "/d d") == "ls '/d d' /d d")
+ok("fill: an unknown {name:q} is an error like {name}", raises(lambda: S.fill("x {nope:q}", {"a": "1"})))
+_pw = os.path.join(fixture.tmpdir(), "pwned")
+RCP.RECIPES["closed"] = dict(params=dict(x=RCP.REQUIRED, y="", model="{x}/m", qm="{x:q}"), key="closed/k", env="base",
+                             cmd="printf '%s|' {y:q} {model}", out="closed/k", done=["DONE"])
+ok("closed recipe: a value its command takes as is ({x}, here through the default of model) may not hold shell syntax",
+   all(raises(lambda v=v: S.resolve("closed", dict(x=v))) for v in (f"a; touch {_pw}", f"$(touch {_pw})", "`id`", "a|b", "a>b",
+                                                                   "a&b", "a\nb", "~", "*", "a'b", '"', "a#")))
+try:
+    S.resolve("closed", dict(x="a;b"))
+    _why = ""
+except S.SpecError as e:
+    _why = str(e)
+ok("closed recipe: the refusal names the param, the characters and {x:q}", "param x" in _why and "';'" in _why and "{x:q}" in _why)
+_cq = S.resolve("closed", dict(x="D1/a-b.c_d+e@f%g=h:i,j k", y=f"it's $(touch {_pw}); `id` \"q\""))
+_out = subprocess.run(["bash", "-c", _cq["cmd"]], capture_output=True, text=True).stdout
+ok("closed recipe: plain values pass as is; {y:q} takes any value as one word, the shell runs none of it",
+   _out == f"it's $(touch {_pw}); `id` \"q\"|D1/a-b.c_d+e@f%g=h:i,j|k/m|" and not os.path.exists(_pw))
+RCP.RECIPES["closed"]["cmd"] = "printf '%s|' {qm}"
+_cq = S.resolve("closed", dict(x=f"a; touch {_pw}"))
+ok("closed recipe: a default that quotes ({x:q}) is safe to use as is",
+   subprocess.run(["bash", "-c", _cq["cmd"]], capture_output=True, text=True).stdout == f"a; touch {_pw}|" and not os.path.exists(_pw))
+_cq = S.resolve("closed", dict(x="{y}", y=f"'; touch {_pw}; '"))
+ok("params are filled once: a value given as {y} takes y's value, and text filled in is not read as a template again (quoting holds)",
+   _cq["names"]["x"] == f"'; touch {_pw}; '" and subprocess.run(["bash", "-c", _cq["cmd"]], capture_output=True, text=True).stdout
+   == f"'; touch {_pw}; '|" and not os.path.exists(_pw))
+ok("params that refer to each other in a loop -> error", raises(lambda: S.resolve("closed", dict(x="{qm}"))))
+RCP.RECIPES["closed"]["cmd"], RCP.RECIPES["closed"]["out"] = "true", "closed/{x}"
+ok("closed recipe: params not in the command are not limited this way (out is checked as a path)",
+   S.resolve("closed", dict(x="a b"))["out"] == "closed/a b")
+del RCP.RECIPES["closed"]
+ok("open recipe (command): the task's own command is taken as is", S.resolve("command", dict(G, cmd="echo a; echo b | cat"))["cmd"]
+   == "echo a; echo b | cat")
+_bv = {"A; touch " + _pw + "; B": "1"}
+ok("vars names must be shell variable names: at resolve, in a sent spec, in shell lines",
+   raises(lambda: S.resolve("command", dict(G, vars=_bv))) and raises(lambda: S.resolve("command", dict(G, vars={"1A": "x"})))
+   and raises(lambda: S.from_sent(dict(S.sendable(g), vars=_bv))) and raises(lambda: S.shell_lines(dict(g, vars=_bv), "/d"))
+   and S.resolve("command", dict(G, vars={"_A1": "x", "b": "y"}))["vars"] == {"_A1": "x", "b": "y"})
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", json.dumps(dict(S.sendable(g), vars=_bv))],
+                    capture_output=True, text=True)
+ok("spec.py shell --spec: a bad vars name -> exit 2, no shell lines", _r.returncode == 2 and not _r.stdout and not os.path.exists(_pw))
+_sv = dict(g, vars={"V": f"$(touch {_pw}) `id` ; x'y\"z"})
+_out = subprocess.run(["bash", "-c", S.shell_lines(_sv, "/d") + '\nprintf "%s" "$V"'], capture_output=True, text=True).stdout
+ok("shell lines: vars values stay literal when run_task.sh evaluates them", _out == f"$(touch {_pw}) `id` ; x'y\"z" and not os.path.exists(_pw))
+ok("machine table task_vars / task_unset: names that are not shell variable names are left out",
+   S.machine_vars({"task_vars": {"OK": "a b", "A;B": "1"}, "task_unset": ["Z", "X Y"]}) == ["unset Z", "[[ -n ${OK:-} ]] || export OK='a b'"])
+
 # ---------------- done check ----------------
 root = fixture.tmpdir()
 out = os.path.join(root, s["out"])
@@ -257,6 +346,31 @@ ok("spec.py outputs --spec <JSON> --sh: KEY, OUTS, EXTRA, TEST, ARCHIVE for arch
    and "ARCHIVE=1" in _sh and any(x.startswith("TEST=") and "DONE" in x for x in _sh))
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "outputs", "--spec", json.dumps(_os)], capture_output=True, text=True)
 ok("spec.py outputs --spec <JSON>: JSON same as outputs()", _r.returncode == 0 and json.loads(_r.stdout) == S.outputs(_os))
+# --stdin: the arguments (a JSON list) or the spec (a JSON object) on stdin instead of the command line
+_ss = dict(S.sendable(S.resolve("command", dict(G, vars={"TOKEN": "s3cr3t"}))))
+_sp = [sys.executable, os.path.join(HERE, "spec.py")]
+
+
+def _sp_run(*a, inp=None, **kw):
+    return subprocess.run(_sp + list(a), input=inp, capture_output=True, text=True, **kw)
+
+
+_want = _sp_run("shell", "--spec", json.dumps(_ss))
+_got = [_sp_run("shell", "--stdin", inp=json.dumps(["--spec", json.dumps(_ss)])), _sp_run("shell", "--stdin", inp=json.dumps(_ss)),
+        _sp_run("shell", "--stdin", inp=json.dumps(S.kv_args("command", dict(G, vars={"TOKEN": "s3cr3t"}))))]
+ok("spec.py shell --stdin: a JSON list of the arguments (either form) or a spec object on stdin, same shell lines as on the command line",
+   _want.returncode == 0 and "s3cr3t" in _want.stdout and all((x.returncode, x.stdout) == (0, _want.stdout) for x in _got))
+_gd = fixture.tmpdir()
+_dn = [_sp_run("done", "--stdin", inp=json.dumps(["--spec", json.dumps(_ss)]), env=dict(os.environ, TASKQ_DATA=_gd))]
+os.makedirs(os.path.join(_gd, "guest/x"))
+open(os.path.join(_gd, "guest/x/DONE"), "w").close()
+_dn.append(_sp_run("done", "--stdin", inp=json.dumps(_ss), env=dict(os.environ, TASKQ_DATA=_gd)))
+_o = _sp_run("outputs", "--stdin", "--sh", inp=json.dumps(_os))
+ok("spec.py done / outputs --sh --stdin: same answers as with --spec", [x.returncode for x in _dn] == [1, 0]
+   and _o.returncode == 0 and _o.stdout.splitlines() == _sh)
+ok("spec.py shell --stdin: not JSON, an empty list or a list of non-strings -> exit 2, no traceback",
+   all(r.returncode == 2 and "Traceback" not in r.stderr and not r.stdout
+       for r in (_sp_run("shell", "--stdin", inp="nope"), _sp_run("shell", "--stdin", inp="[]"), _sp_run("shell", "--stdin", inp="[1]"))))
 
 
 # ---------------- experiment table ----------------

@@ -113,5 +113,20 @@ check "site_ops.py archive: backups and verifies, one @@JSON true line" "(( rc =
 echo error > "$T/fail"; rm -rf "$T/bk"; mkdir -p "$T/bk"
 TASKQ_DATA=$T/nosuch python3 "$HERE/site_ops.py" archive <<< "$OPIN" > "$T/o7" 2>&1; rc=$?
 check "site_ops.py archive: transfer fails -> non-zero exit, says archive failed" "(( rc != 0 )) && grep -q 'archive failed' '$T/o7'"
+# the spec reaches archive_task.sh and spec.py on stdin, never on a command line: bash and python3 on PATH are spies recording the
+#   command line of every start
+world
+mkdir -p "$T/spy"
+for x in bash python3; do
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' "$T/spy.log" "$(command -v $x)" > "$T/spy/$x"; chmod +x "$T/spy/$x"
+done
+OPIN=$(python3 -c 'import sys, json; s = json.loads(sys.argv[1]); s["vars"]["TOKEN"] = "s3cr3t-arc"; print(json.dumps(dict(spec=s, data=sys.argv[2])))' "$SPEC" "$T/hub")
+: > "$T/spy.log"; OPOUT=$(TASKQ_DATA=$T/nosuch PATH=$T/spy:$PATH python3 "$HERE/site_ops.py" archive <<< "$OPIN" 2> "$T/o8"); rc=$?
+check "site_ops.py archive: the spec goes to archive_task.sh (--spec -) and spec.py (--stdin) on stdin, on no command line" \
+  "(( rc == 0 )) && [[ \$OPOUT == '@@JSON true' ]] && grep -q 'archive_task.sh --spec -' $T/spy.log && grep -q 'spec.py outputs --stdin --sh' $T/spy.log && ! grep -q s3cr3t $T/spy.log"
+world
+A_IN() { bash "$HERE/archive_task.sh" --spec - "$@" <<< "$SPEC"; }
+A_IN > "$T/o9" 2>&1; rc=$?
+check "archive_task.sh --spec - by hand: the spec read from stdin, backup matches the store" "(( rc == 0 )) && diff -r '$T/hub/$OUT' '$T/bk/$OUT' > /dev/null"
 
 (( ok )) && echo "all pass" || { echo "failed"; exit 1; }

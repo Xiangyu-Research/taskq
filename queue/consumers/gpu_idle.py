@@ -20,7 +20,7 @@ def setup(w):
 
 def admit(w):
     cvd = os.environ["CUDA_VISIBLE_DEVICES"]
-    idle_min = os.environ.get("TASK_GPU_IDLE", "")
+    idle_min = os.environ.get(proto.RUN_VARS["gpu_idle"], "")
     seen = None
     state, idx, why = probe(cvd)
     if state == "free":

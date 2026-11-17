@@ -148,7 +148,7 @@ NOSLOT_ALERT = 3 * 3600      # a claim this old that still cannot be staged (no 
 VIEW_KEEP = 6 * 3600         # input views built this recently are kept (a task just staged, not added yet, or just released)
 SITE_STATUS_TIMEOUT = 90     # reading an executor's status: skip it this round when its storage hangs this long
 NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are pushed
-SPEC_MAX = 120 * 1024        # bytes: a sent spec reaches run_task.sh as one command-line argument (Linux allows 128 KB per argument)
+SPEC_MAX = 120 * 1024        # bytes: most a sent spec holds (workers pass it on stdin; it still fits in one command-line argument, Linux allows 128 KB, for run_task.sh --spec <JSON> by hand)
 TICK_SLOW = 25 * 60          # a health check round longer than this is reported (cron starts one every 30 minutes)
 TICK_STUCK = 2 * 3600        # a round still running after this long: the rounds it makes skip push an alert
 PROBLEM_KEEP = 6 * 3600      # a state problem that went away is remembered this long: back within it (flapping) it is not pushed again;
@@ -392,6 +392,39 @@ ENV["TASKQ_SWITCH_HOLD"] = ("test", "seconds self migrate keeps unclaimed tasks 
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
            "SETTLE", "START_HOLD", "RETRY_DELAY", "MAX_FAILS", "RESET_AFTER"):
     ENV["TASKQ_GPU_PAD_" + _k] = ("tune", "gpu_pad.py argument, default on its command line")
+
+# ---------------- env vars of workers and tasks (not TASKQ_*: a task's own command reads several of them) ----------------
+# role -> (name, kind as in ENV, who sets it and what it means). A worker inherits them from its launcher, run_task.sh from the worker,
+# the task's command from run_task.sh. Python reads and sets them as RUN_VARS[role]; bash scripts write the names; queue/README.md
+# lists them; test_protocol.py checks every WORKER_* / TASK_* / RUN_TASK_* name in the core is here or in SHELL_VARS
+RUN_ENV = dict(
+    worker=("WORKER_ID", "run", "the worker's name: its machine table id <machine>-<worker> (its pueue worker command sets it, "
+                                "sites/mtab.worker_env); a Slurm worker takes its job id instead"),
+    device=("WORKER_DEVICE", "run", "gpu or cpu: which tasks the worker claims (pueue worker command; cpu_worker.sbatch sets cpu); unset = gpu"),
+    gpu_idle=("TASK_GPU_IDLE", "run", "minutes no one else may have used the worker's GPU in the GPU usage records before a task starts: "
+                                      "the machine table worker's idle (pueue worker command); the gpu_idle plugin checks it before "
+                                      "claiming, run_task.sh started by hand waits for it"),
+    wait_gpu=("TASK_WAIT_GPU", "run", "most minutes run_task.sh waits for a busy GPU: spec.py shell sets it from the task's res.wait_gpu "
+                                      "(empty = wait forever); the pueue worker command sets the machine table worker's wait"),
+    key=("TASK_KEY", "run", "the task's name: the worker sets it for run_task.sh (spec.py shell sets it there too)"),
+    jobtag=("TASK_JOBTAG", "run", "the job name in the task's part log name and first line: the worker's name, plus -<start time> for a "
+                                  "resident worker (the worker sets it); set = started by a worker: one try, and the training stops once "
+                                  "the worker is gone; unset = <hostname>-<time>"),
+    part=("TASK_PART", "run", "the part number in the part log name (the worker sets 1); unset = 1"),
+    cpus=("TASK_CPUS", "run", "cores for this task: the worker's cores divided by its slots (the worker sets it)"),
+    inputs_root=("TASK_INPUTS_ROOT", "run", "where the task's command reads its inputs, at the same relative paths as in the data dir: "
+                                            "the data dir, or a node-local copy (res.local_inputs with TASKQ_STAGE_ROOT); run_task.sh sets it"),
+    test_gpu=("WORKER_TEST_GPU", "test", "replaces the GPU records the gpu_share plugin reads: average utilisation, records, MiB used, MiB total"),
+    tries=("RUN_TASK_TRIES", "test", "replaces how many times run_task.sh tries a failing command"),
+    poll=("RUN_TASK_POLL", "test", "replaces run_task.sh's wait before trying again (seconds)"),
+    gpu_poll=("RUN_TASK_GPU_POLL", "test", "replaces how often run_task.sh checks a busy GPU (seconds)"),
+    stop_wait=("RUN_TASK_STOP_WAIT", "test", "replaces how long run_task.sh waits for stopped training before forcing it (seconds)"),
+    boss_poll=("RUN_TASK_BOSS_POLL", "test", "replaces how often run_task.sh's watcher checks that its worker is still there (seconds)"),
+)
+RUN_VARS = {k: v[0] for k, v in RUN_ENV.items()}
+# shell variables spec.py shell prints for run_task.sh to evaluate (role -> name); the worker reads out and safe from it too
+SHELL_VARS = dict(key="TASK_KEY", env="TASK_ENV", cmd="TASK_CMD", out="TASK_OUT", safe="TASK_SAFE", wait_gpu="TASK_WAIT_GPU",
+                  inputs="TASK_INPUTS", local="TASK_LOCAL")
 
 
 # project notices (taskq notice, monitor/notice.py): in the hub database; each reports one problem notice:<name>
