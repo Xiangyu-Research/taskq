@@ -273,9 +273,15 @@ def resend(name, say=print):
 # ---------------- fetch and archive (queued in the hub's IO group; data moves between the store and the executor) ----------------
 def fetch(name, key, say=print):
     """Results finished over there → the store data dir (site_ops list on the remote side, pull on the store, verify, place).
-    Any failure (not done, cannot list, pull or verify) raises RelayError."""
-    real = lookup(key)
+    Any failure (not done, cannot list, pull or verify) raises RelayError. A key gone from the hub queue and the experiment table
+    is fetched by the recipe and params it was sent with: finished results are brought back before they are dropped over there."""
     k = ST.keys_of(ST.load_state(), name).get(key)
+    try:
+        real = lookup(key)
+    except Gone:
+        if not k:
+            raise
+        real = S.resolve(k["recipe"], k["params"])
     if not k:
         raise RN.RelayError(f"no record of {key} staged to {RM.conf(name)['label']}")
     o = S.outputs(real)

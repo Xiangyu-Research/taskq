@@ -305,6 +305,27 @@ def plan(s, name, rs, st, now=None):
     rt = {t["key"]: t for t in rs["taskq"]["tasks"]}
     view = site_view(name, rs, st)  # half-done is judged on these entries (they carry ran), never on raw rs["tasks"]
     owned, holds, gated = set(), BG.held(st, name), set()
+
+    def fetched(key, since, kept):
+        """A task finished over there whose results the store does not have: queue its fetch, wait while it runs, report a failed
+        one (kept: what stays as it is meanwhile) → the fetch task once it has succeeded, else None."""
+        ft = io_task(s, "relay_fetch", key, since)
+        if ft is None or again(s, "relay_fetch", key, since, code):
+            acts.append(dict(op="fetch", key=key))
+        elif ft["status"] == "Success":
+            return ft
+        elif ft["status"] not in LIVE:
+            stuck[alert_id("relayfetch", key)] = alert(f"fetching {key} from {L} failed on {M.hub()} task {ft['id']} ({ft['status']}); {kept}."
+                                                       f" See pueue log {ft['id']}, then pueue remove {ft['id']} to retry next check",
+                                                       machine=name, step="fetch", task=ft["id"], status=ft["status"])
+        return None
+
+    def late(key, ft):
+        """Fetched, but the hub queue still does not show it as done after a while: report it."""
+        end = C.local_time(ft.get("end"))
+        if end is not None and now - end.timestamp() > proto.FETCH_LATE:
+            stuck[alert_id("relayfetch", key)] = alert(f"{key} on {L} was fetched and archived successfully ({M.hub()} task {ft['id']}), but {M.hub()} still does not see it as done;"
+                                                       f" check the result dir on {M.hub()}", machine=name, step="late", task=ft["id"], status=ft["status"])
     for t in mine:
         key = t["key"]
         k = keys.get(key)
@@ -399,18 +420,9 @@ def plan(s, name, rs, st, now=None):
         if ast == "done" and proto.worker_holds(a, now):
             pass  # done marker exists but the worker still claims it: the command is still writing results, so only beat and fetch after release; an expired claim (worker died without releasing) fetches as usual
         elif ast == "done":
-            ft = io_task(s, "relay_fetch", key, since)
-            if ft is None or again(s, "relay_fetch", key, since, code):
-                acts.append(dict(op="fetch", key=key))
-            elif ft["status"] == "Success":
-                end = C.local_time(ft.get("end"))
-                if end is not None and now - end.timestamp() > proto.FETCH_LATE:
-                    stuck[alert_id("relayfetch", key)] = alert(f"{key} on {L} was fetched and archived successfully ({M.hub()} task {ft['id']}), but {M.hub()} still does not see it as done;"
-                                                               f" check the result dir on {M.hub()}", machine=name, step="late", task=ft["id"], status=ft["status"])
-            elif ft["status"] not in LIVE:
-                stuck[alert_id("relayfetch", key)] = alert(f"fetching {key} from {L} failed on {M.hub()} task {ft['id']} ({ft['status']}); claim kept."
-                                                           f" See pueue log {ft['id']}, then pueue remove {ft['id']} to retry next check",
-                                                           machine=name, step="fetch", task=ft["id"], status=ft["status"])
+            ft = fetched(key, since, "claim kept")
+            if ft:
+                late(key, ft)
         elif ast == "stopped":
             acts.append(dict(op="rresume", key=key, rkey=a["key"]))
         elif ast == "input":  # remote side found missing inputs before starting (taskq.py missing): restage only the missing ones, rebuild views, then clear the marker
@@ -448,6 +460,15 @@ def plan(s, name, rs, st, now=None):
         elif a["state"] in ("claimed", "busy"):
             stuck[alert_id("site", name, "orphan", real)] = alert(f"{L} is running {real}, but the hub queue does not have it claimed there; compare the hub queue and the {L} queue",
                                                                   unknown=False, state=a["state"], assigned=(m or {}).get("worker"))
+        elif a["state"] == "done" and not (m and m["state"] == "done") and not proto.is_smoke(real):
+            # finished here, but the hub queue no longer has it on this machine (released, assigned elsewhere or removed) and does
+            # not show it as done: its results exist only here, so fetch them first; they are dropped once the store has them
+            if not proto.worker_holds(a, now):  # a worker still holding it is still writing results
+                ft = fetched(real, keys[real].get("staged") or 0, f"its results stay on {L}")
+                if ft and m is None:  # not in the hub queue (nothing will show it as done): the fetch verified what it placed
+                    acts.append(dict(op="drop", key=real, rkey=a["key"]))
+                elif ft:
+                    late(real, ft)
         elif m is None or m["state"] == "done" or m.get("worker") and m["worker"] != name:  # done, or assigned to another executor: drop
             acts.append(dict(op="drop", key=real, rkey=a["key"]))
         elif a["state"] != "stopped":

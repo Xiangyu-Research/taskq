@@ -350,6 +350,8 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
    - stopped in the hub queue before it reached that queue: the staging does not send it (it asks the hub queue before the transfer
      and again before placing and adding), and the claim is released only once its staging has ended;
    - blocked by the bundle gate or smoke gate -> `hold`; unblocked -> `unhold`.
+   - in that queue but no longer assigned to this machine in the hub queue (released, assigned elsewhere, removed): running -> reported;
+     finished -> `fetch` first, and `drop` only once the store has the results; otherwise stopped or dropped there;
    - a failed `stage` / `fetch` / `restage` (mostly not the task's fault: tunnel down, busy disk timing out) is queued again at the next
      check, reported only after `XFER_TRIES` (`relay.py`) failures within one claim since the bundle last changed (a new bundle gets
      fresh tries); stopped by hand is not retried; an old failed one queued again later is not reported by the health check. Blob work

@@ -460,6 +460,32 @@ def test_plan():
         assert ops(acts) == [("drop", K)] and acts[0].get("gone") and acts[0]["rkey"] == K, (mt, acts)
     ok("reassigned to another executor in the hub queue (stopped over there too) → drop the remote task and results; remote task dropped but paths left (dropped) → remove only the paths")
 
+    sst = dict(keys={NAME: {K: dict(st["keys"][NAME][K], staged=1500.0)}})
+    frec = dict(machine=M.hub(), id=9, label="relay_fetch:" + K, step="relay_fetch", key=K, added=2000.0)
+    fjob = lambda **kw: [dict(id=9, label=frec["label"], **kw)]  # noqa: E731
+    for mt in ([mtask(K, "claimed", "other")], [mtask(K, "free", worker=None)], [mtask(K, "stopped", worker=None)], []):
+        acts, stuck = relay.plan(S0(mt), NAME, RS(rtask(A, "done")), sst)
+        assert ops(acts) == [("fetch", K)] and not stuck, (mt, acts, stuck)
+        acts, stuck = relay.plan(S0(mt, fjob(status="Running"), [frec]), NAME, RS(rtask(A, "done")), sst)
+        assert ops(acts) == [] and not stuck, (mt, acts, stuck)
+        acts, stuck = relay.plan(S0(mt, fjob(status="Success"), [dict(frec, added=10.0)]), NAME, RS(rtask(A, "done")), sst)
+        assert ops(acts) == [("fetch", K)] and not stuck, (mt, acts, stuck)  # a fetch from before this staging is not this run's
+        acts, stuck = relay.plan(S0(mt, fjob(status="Success"), [frec]), NAME, RS(rtask(A, "done")), sst)
+        assert ops(acts) == ([] if mt else [("drop", K)]) and not stuck, (mt, acts, stuck)
+        f3 = [dict(id=i, label=frec["label"], status="Failed") for i in (7, 8, 9)]
+        acts, stuck = relay.plan(S0(mt, f3, [dict(frec, id=i) for i in (7, 8, 9)]), NAME, RS(rtask(A, "done")), sst)
+        assert ops(acts) == [] and list(stuck) == [f"relayfetch:{K}"] and "its results stay on" in stuck[f"relayfetch:{K}"]["msg"], (mt, acts, stuck)
+        acts, stuck = relay.plan(S0(mt), NAME, RS(dict(rtask(A, "done", "123"), beat=time.time())), sst)
+        assert ops(acts) == [] and not stuck, (mt, acts, stuck)
+    acts, stuck = relay.plan(S0([mtask(K, "done", "other")]), NAME, RS(rtask(A, "done")), sst)
+    assert ops(acts) == [("drop", K)] and not stuck, (acts, stuck)
+    late = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - proto.FETCH_LATE - 60))
+    acts, stuck = relay.plan(S0([mtask(K, "claimed", "other")], fjob(status="Success", end=late), [frec]), NAME, RS(rtask(A, "done")), sst)
+    assert ops(acts) == [] and "still does not see it as done" in stuck[f"relayfetch:{K}"]["msg"], (acts, stuck)
+    ok("finished over there but no longer assigned to it in the hub queue (released, reassigned or removed): fetch first, drop only once the "
+       "store has the results (hub queue shows done; removed from the queue: its fetch succeeded); a failed fetch keeps them and alerts; "
+       "a worker still holding it is left to finish writing")
+
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 3 * 3600}))
     assert ops(acts) == [("beat", K)] and f"site:{NAME}:down" in stuck, stuck
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, None, dict(st, last_ok={NAME: time.time() - 600}))
@@ -1037,6 +1063,20 @@ def test_e2e():
         assert os.readlink(p) == os.path.relpath(gin, os.path.dirname(p)) and os.path.samefile(p, gin), (f, os.readlink(p))
     assert os.readlink(os.path.join(out, "refs", "best.ckpt")) == "../final.ckpt"
     ok("fetch with symlinks: links to inputs (straight to a blob or into a view) become relative links to that input on the store; output links stay as is")
+
+    RT.lookup = gone
+    try:
+        shutil.rmtree(out)
+        RT.fetch(NAME, sp["key"], say=lambda m: None)
+        assert open(os.path.join(out, "final.ckpt"), "rb").read() == b"ck" and not os.listdir(os.path.join(TN.ROOT, proto.RELAY_INBOX))
+        try:
+            RT.fetch(NAME, "D999_zz/tr/0", say=lambda m: None)
+            raise AssertionError("a key with no record should not be fetched")
+        except RT.Gone:
+            pass
+    finally:
+        RT.lookup = lambda k: sp
+    ok("fetch of a key gone from the hub queue and the experiment table: fetched by the recipe and params it was sent with; no staging record either → Gone")
 
     relay.write_status(NAME, relay.remote_status(NAME), ST.load_state())
     st = HS.sites()[NAME]
