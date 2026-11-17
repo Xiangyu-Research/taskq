@@ -296,7 +296,9 @@ from the spec, sets env vars and runs the command at the project root inside the
 command must resume from its checkpoint (after a release another worker continues from it). Training never outlives its task: the
 command runs in its own session, whatever it leaves there when it exits is stopped, and a watcher stops the training once the worker
 that started `run_task.sh` is gone (killed) or `run_task.sh` itself was killed, so a killed worker never leaves training on the GPU
-for a new worker to stack another task onto.
+for a new worker to stack another task onto. Stops the worker sends itself (`taskq stop`, its own stop signal or hours window, stall
+handling, a claim taken over) release the task without a failure; a task whose training or `run_task.sh` dies of a signal the worker
+did not send (an out-of-memory killer, an admin) is released as a failure, so one killed every time reaches the failure limit.
 
 #### Consumers
 

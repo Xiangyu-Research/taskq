@@ -101,6 +101,14 @@ def tree(pid):
     return out
 
 
+def signame(rc):
+    """Exit code of a death by signal (128 + n, as the shell and run_task.sh report it) → the signal's name; None for any other code."""
+    try:
+        return signal.Signals(rc - 128).name if isinstance(rc, int) and rc > 128 else None
+    except ValueError:
+        return None
+
+
 def kill(pid, sig):
     if not isinstance(pid, int) or pid <= 1:  # 0 / 1 / negative would hit our own group or every process of the account
         return
@@ -738,10 +746,17 @@ class Worker:
             elif r.stalled:
                 say(f"{key} stopped; releasing")
                 self.tq("release", key)
-            elif rc is not None and rc > 128 and session_alive(r.sid) or rc is None and session_alive(r.sid):
-                say(f"{key}'s run_task.sh was stopped (exit code {'not received' if rc is None else rc}) but training is still running: stopping it and releasing once it stops (not a failure); this job will not claim it again")
+            # every stop this worker sends is marked on the run above (why stall / lost, stalled) or released where it is sent (shutdown,
+            # taskq stop); a signal death from here on came from elsewhere (an out-of-memory killer, an admin, ...) and counts as a
+            # failure, so a task killed every time reaches the failure limit instead of being retried forever
+            elif session_alive(r.sid) and (rc is None or rc > 128):
                 subprocess.run(["pkill", "-TERM", "-s", str(r.sid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                r.why = "killed"
+                if rc is None:
+                    say(f"{key} ended during the code switch (exit code not received) but training is still running: stopping it and releasing once it stops (not a failure); this job will not claim it again")
+                    r.why = "killed"
+                else:
+                    say(f"{key}'s run_task.sh was killed ({signame(rc) or f'exit code {rc}'}), not by this worker, but training is still running: stopping it, then releasing and recording a failure; this job will not claim it again")
+                    r.why = "signal"
                 self.zomb[pid] = r
                 self.exclude(key)
             elif rc is None:
@@ -762,10 +777,9 @@ class Worker:
             elif rc == X["run_not_done"]:
                 say(f"{key} command ended normally but training is not done; releasing and recording a failure")
                 self.fail(key, "exit code 0 but not done", ran)
-            elif rc == X["run_term"]:
-                say(f"{key} stopped from outside (run_task.sh got a stop signal) and training has stopped: releasing (not a failure); this job will not claim it again")
-                self.tq("release", key)
-                self.exclude(key)
+            elif signame(rc):  # run_term (143) included: run_task.sh or the training got SIGTERM, but not from this worker
+                say(f"{key} was killed by {signame(rc)} (run_task.sh exit code {rc}), not stopped by this worker (an out-of-memory killer, an admin, ...); releasing and recording a failure")
+                self.fail(key, f"killed by {signame(rc)} (exit code {rc}), not stopped by the worker", ran)
             else:
                 say(f"{key} training failed (run_task.sh exit code {rc}); releasing and recording a failure")
                 extra = ""
@@ -786,6 +800,10 @@ class Worker:
             elif r.why == "stall":
                 say(f"unstoppable {r.key} finally stopped; releasing")
                 self.release_stalled(r.key, self.stalls(r.safe), 0)
+            elif r.why == "signal":
+                sig = signame(r.rc) or "a signal"
+                say(f"{r.key} finally stopped; releasing and recording a failure (its run_task.sh was killed by {sig}, not by this worker)")
+                self.fail(r.key, f"run_task.sh killed by {sig} while training ran, not stopped by the worker", now - r.started)
             else:
                 say(f"unstoppable {r.key} finally stopped; releasing")
                 self.tq("release", r.key)

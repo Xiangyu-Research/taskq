@@ -1,5 +1,5 @@
 #!/bin/bash
-# Simulated tests for the worker in a Slurm job (worker_start.sh → consume.py, like test_worker.sh): stop signal, stopping one task, CPU worker, failures shortly after start
+# Simulated tests for the worker in a Slurm job (worker_start.sh → consume.py, like test_worker.sh): stop signal, stopping one task, CPU worker, failures shortly after start, training killed from outside
 #   bash queue/test_worker_stop.sh        WORKER_TEST_ONLY="3 4b" runs only these cases
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -171,7 +171,7 @@ check "exit code 2: the failure reason carries the part-log reason" 'grep -q "ex
 rm -f "$T/badspec"
 fi
 
-# 6. only run_task.sh is stopped from outside: SIGTERM → training stops, release, no failure; SIGKILL → keep holding the claim while training runs, stop it, release only once it stops, no failure
+# 6. only run_task.sh is stopped from outside (not by this worker): SIGTERM → training stops, released as a failure; SIGKILL → keep holding the claim while training runs, stop it, release only once it stops, as a failure
 if want 6; then
 reset
 table << EOF
@@ -182,7 +182,7 @@ wpid=$!
 waitfor 30 'grep -q ^start $T/train.log 2> /dev/null'
 kill -TERM "$(pgrep -P "$(pgrep -P $wpid)" -f run_task.sh)"
 wait $wpid
-check "run_task.sh alone gets SIGTERM: training stops, release, no failure, this job does not claim it again" 'grep -q "^term t/a" $T/train.log && [[ -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "stopped from outside" $T/w6a.out && [[ $(grep -c ^start $T/train.log) == 1 ]]'
+check "run_task.sh alone gets SIGTERM from outside: training stops, released as a failure, this job does not claim it again" 'grep -q "^term t/a" $T/train.log && [[ -z $(ls $TASKQ_DIR/claims) ]] && grep -q "killed by SIGTERM (exit code 143), not stopped by the worker" $TASKQ_DIR/failures/t__a && grep -q "t/a was killed by SIGTERM (run_task.sh exit code 143), not stopped by this worker" $T/w6a.out && [[ $(grep -c ^start $T/train.log) == 1 ]]'
 reset
 FAKE_IGNORE=t/a SLURM_JOB_ID=900212 TASKQ_SLOTS=1 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/worker_start.sh" > "$T/w6b.out" 2>&1 &
 wpid=$!
@@ -196,7 +196,26 @@ pkill -KILL -f "$T/fake_train.sh t/a"
 waitfor 20 '[[ -z $(ls $TASKQ_DIR/claims) ]]'
 kill -TERM "$(pgrep -P $wpid)"
 wait $wpid
-check "run_task.sh killed with SIGKILL while training runs: stop it, keep the claim; release once training stops, no failure" '[[ $held == 1 && -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "finally stopped; releasing" $T/w6b.out'
+check "run_task.sh killed with SIGKILL while training runs: stop it, keep the claim; release once training stops, as a failure" '[[ $held == 1 && -z $(ls $TASKQ_DIR/claims) ]] && grep -q "run_task.sh killed by SIGKILL while training ran, not stopped by the worker" $TASKQ_DIR/failures/t__a && grep -q "finally stopped; releasing and recording a failure" $T/w6b.out'
+fi
+
+# 7. the training itself is killed from outside (an out-of-memory killer's SIGTERM or SIGKILL, an admin): run_task.sh passes the exit
+#    code through (143 / 137) and, since this worker sent no stop, it is released as a failure, so a task killed every time reaches the
+#    failure limit instead of being retried forever (stops the worker sends itself are not failures: cases 3, 3b, 3c, 3d and the stall tests)
+if want 7; then
+for s in TERM KILL; do
+    reset
+    table << EOF
+t/k base
+EOF
+    FAKE_SECS=60 SLURM_JOB_ID=900215 TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w7$s.out" 2>&1 &
+    wpid=$!
+    waitfor 30 'grep -q "^start .* t/k" $T/train.log 2> /dev/null && pgrep -xf "bash $T/fake_train.sh t/k" > /dev/null'
+    kill -$s "$(pgrep -xf "bash $T/fake_train.sh t/k")"
+    wait $wpid; rc=$?
+    code=$(( 128 + $(kill -l $s) ))
+    check "training killed by SIG$s from outside: exit code $code, released as a failure, the worker goes on" '[[ $rc == 0 && -z $(ls $TASKQ_DIR/claims) ]] && grep -q "killed by SIG$s (exit code $code), not stopped by the worker" $TASKQ_DIR/failures/t__k && grep -q "t/k was killed by SIG$s (run_task.sh exit code $code), not stopped by this worker" $T/w7$s.out && [[ $(grep -c ^start $T/train.log) == 1 ]]'
+done
 fi
 
 (( fails == 0 )) && echo "all passed" || { echo "$fails checks failed"; exit 1; }
