@@ -1,5 +1,5 @@
 """Worker in a Slurm job: the job id is the worker name, slots from this machine's jobs entry for its device, read from the
-machine table when the job starts (default 1; TASKQ_SLOTS overrides it by hand or in tests, submit_cmd does not pass it); memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
+machine table when the job starts (default 1); memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
 import os
 import re
 import shutil
@@ -17,24 +17,13 @@ def setup(w):
     e = os.environ
     w.W = e["SLURM_JOB_ID"]
     w.mem_mb = int(e.get("SLURM_MEM_PER_NODE") or 0) or int(e.get("SLURM_MEM_PER_CPU") or 0) * w.ncpu
-    w.slots = int(e.get("TASKQ_SLOTS") or table_slots(w) or 1)
+    w.slots = w.table_slots(lambda x: x["kind"] == w.device)
     w.term_rc, w.term_why = 143, "likely the time limit"
     w.end_text = "not known yet, checking later"
     w.get_end = end_time
     w.stage_root = os.path.join(e.get("TMPDIR") or "/tmp", proto.STAGE_DIR_PREFIX + w.W)
     w.said = set()
     w.idle_mark = None
-
-
-def table_slots(w):
-    """This machine's jobs entry for the worker's device (gpu / cpu): its slots (mtab.workers); None (and said) when unreadable."""
-    try:
-        import cfg
-        m = cfg.mtab()
-        return next((x["slots"] for x in m.workers(m.whoami()) if x["kind"] == w.device), None)
-    except Exception as e:  # noqa: BLE001  an unreadable machine table leaves the default
-        w.say(f"!! cannot read this job's slots from the machine table ({type(e).__name__}: {e}); 1 at once")
-        return None
 
 
 def end_time(w):

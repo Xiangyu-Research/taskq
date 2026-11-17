@@ -26,10 +26,11 @@ t/h base
 t/f base
 EOF
 bundle
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=3 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=8 FAKE_FAIL=t/f \
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 3) TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=8 FAKE_FAIL=t/f \
   exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/wh.out" 2>&1 &
 wpid=$!
 waitfor 30 '[[ $(grep -c "started" $T/wh.out) == 2 ]]'
+check "resident: slots from its machine table worker (3), not a TASKQ_SLOTS=1 in the environment" 'grep -q "job site-pueue-gpu1 @ .*at most 3 at once" $T/wh.out'
 ln -sfn b "$T/code/current"
 waitfor 30 'grep -q "taking over t/f" $T/wh.out'
 check "switch: both running tasks handed to the new process" 'grep -q "switching to new code b and continuing (2 running handed to the new code)" $T/wh.out && grep -q "taking over t/h" $T/wh.out && [[ $(nclaims) == 2 ]] && kill -0 $wpid'
@@ -47,7 +48,7 @@ t/s2 base
 EOF
 bundle
 printf 'raise RuntimeError("broken")\n' > "$T/code/b/scripts/taskq/queue/consumers/slurm.py"
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=3 \
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 FAKE_SECS=3 \
   exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/whs.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "started t/s (" $T/whs.out'
@@ -64,7 +65,7 @@ reset
 table << EOF
 t/r base
 EOF
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=6 TASKQ_EARLY_FAIL=0 TASKQ_FAIL_RETRY=2 FAKE_FAIL=t/r \
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=6 TASKQ_EARLY_FAIL=0 TASKQ_FAIL_RETRY=2 FAKE_FAIL=t/r \
   exec bash "$HERE/worker_start.sh") > "$T/wr.out" 2>&1 &
 wpid=$!
 waitfor 60 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
@@ -78,7 +79,7 @@ reset
 table < /dev/null
 bundle
 t0=$(date +%s)
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=14 \
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=14 \
   exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/whi.out" 2>&1 &
 wpid=$!
 waitfor 10 '(( $(date +%s) - t0 >= 7 ))'
@@ -135,7 +136,7 @@ printf '#!/bin/bash\n[[ -e %q ]] && exit 9\ncase "$*" in\n    *compute-apps*) [[
   "$T/smifail" "$T/busy" > "$T/bini/nvidia-smi"; chmod +x "$T/bini/nvidia-smi"
 f=$T/gpulog/$(date +gpu_%Y-%m.csv)
 echo "$(date -d '-5 min' '+%F %T'),1,50,9000,24576,someone,4242,9000,python" > "$f"
-(WORKER_ID=site-pueue-gpu1 CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
+(WORKER_ID=site-pueue-gpu1 CUDA_VISIBLE_DEVICES=1 TASK_GPU_IDLE=60 GPU_LOG_DIR=$T/gpulog TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 \
   PATH=$T/bini:$PATH exec bash "$HERE/worker_start.sh") > "$T/widle.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "GPU 1 free, but someone .* still used it; waiting 60 minutes of quiet (waited 0 minutes)" $T/widle.out'
@@ -160,7 +161,7 @@ TASKQ_ADMITTED=1 run; rc=$?
 check "run_task.sh started by the consumer (TASKQ_ADMITTED=1): does not wait again" '[[ $rc == 0 ]] && ! grep -q "GPU 1 busy" $T/rt.out && grep -q "^end .* t/r" $T/train.log'
 fi
 
-# slurm. Slurm job: the job id is the name, 1 slot without TASKQ_SLOTS, an unknown time limit checked again later, the local staging dir handed to run_task.sh and removed at the end
+# slurm. Slurm job: the job id is the name, 1 slot when its jobs entry sets none, an unknown time limit checked again later, the local staging dir handed to run_task.sh and removed at the end
 if want slurm; then
 reset
 python3 - "$TASKQ_DIR/tasks.jsonl" "$T" << 'EOT'
@@ -172,24 +173,17 @@ open(p, "w").write(json.dumps(dict(order=1, nice=0, key="t/s", exp=None, recipe=
 EOT
 eval "$(python3 "$HERE/proto.py" sh)"
 mkdir -p "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300" "$T/bins"; printf '#!/bin/bash\nexit 1\n' > "$T/bins/squeue"; chmod +x "$T/bins/squeue"
-(unset TASKQ_SLOTS; TASKQ_MACHINE=site-slurm SLURM_JOB_ID=900300 SLURM_MEM_PER_NODE=65536 TASKQ_IDLE_MAX=2 TASKQ_GPU_PAD_BASE=$T/nopad PATH=$T/bins:$PATH \
+(TASKQ_CONFIG=$FIXTURE_CFG TASKQ_MACHINE=site-slurm SLURM_JOB_ID=900300 SLURM_MEM_PER_NODE=65536 TASKQ_IDLE_MAX=2 TASKQ_GPU_PAD_BASE=$T/nopad PATH=$T/bins:$PATH \
   exec bash "$HERE/worker_start.sh") > "$T/wslurm.out" 2>&1
 rc=$?
 n=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))")
-check "Slurm: job id as the name, 1 slot without TASKQ_SLOTS (whatever the CPUs and memory), unknown time limit" '[[ $rc == 0 ]] && grep -q "job 900300 @ .*at most 1 at once, CPU $n, memory 65536M.*time limit not known yet, checking later" $T/wslurm.out && grep -q "done t/s" $T/wslurm.out'
+check "Slurm: job id as the name, 1 slot when the jobs entry sets no slots (whatever the CPUs and memory), unknown time limit" '[[ $rc == 0 ]] && grep -q "job 900300 @ .*at most 1 at once, CPU $n, memory 65536M.*time limit not known yet, checking later" $T/wslurm.out && grep -q "done t/s" $T/wslurm.out'
 check "Slurm: local staging dir (TASKQ_STAGE_ROOT) and TASKQ_ADMITTED handed to run_task.sh, removed at the end" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 ]]'
-# a job on a machine whose jobs entry says slots=2: the worker reads it from the machine table (submit_cmd passes no TASKQ_SLOTS)
-mkdir -p "$T/scfg"; cp -r "$TASKQ_CONFIG/." "$T/scfg/"
-printf 'import importlib.util as _u
-_s = _u.spec_from_file_location("_fx_machines", %s)
-_m = _u.module_from_spec(_s)
-_s.loader.exec_module(_m)
-globals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
-MACHINES["site-slurm"]["jobs"]["gpu"]["slots"] = 2
-' "'$TASKQ_CONFIG/machines.py'" > "$T/scfg/machines.py"
-(unset TASKQ_SLOTS; TASKQ_CONFIG=$T/scfg TASKQ_MACHINE=site-slurm SLURM_JOB_ID=900302 SLURM_MEM_PER_NODE=65536 TASKQ_IDLE_MAX=2 TASKQ_GPU_PAD_BASE=$T/nopad \
+# a job on a machine whose jobs entry says slots=2: the worker reads it from the machine table; a TASKQ_SLOTS in the
+# environment (a login shell's, carried by --export=ALL) changes nothing
+(TASKQ_SLOTS=1 TASKQ_CONFIG=$(slots_cfg 2) TASKQ_MACHINE=site-slurm SLURM_JOB_ID=900302 SLURM_MEM_PER_NODE=65536 TASKQ_IDLE_MAX=2 TASKQ_GPU_PAD_BASE=$T/nopad \
   PATH=$T/bins:$PATH exec bash "$HERE/worker_start.sh") > "$T/wslurm2.out" 2>&1
-check "Slurm: the job takes the slots of its machine table jobs entry (slots=2)" 'grep -q "job 900302 @ .*at most 2 at once" $T/wslurm2.out || { tail -5 $T/wslurm2.out; false; }'
+check "Slurm: the job takes the slots of its machine table jobs entry (slots=2), not a TASKQ_SLOTS=1 in the environment" 'grep -q "job 900302 @ .*at most 2 at once" $T/wslurm2.out || { tail -5 $T/wslurm2.out; false; }'
 fi
 
 # plug. consumers.py (CONSUMERS) in the user's plugin dir: hooks are still called; no claims while admit blocks
@@ -204,7 +198,7 @@ import os
 CONSUMERS = {"demo": {"setup": lambda w: w.say("user plugin loaded"),
                       "admit": lambda w: None if os.path.exists(os.environ["DEMO_OPEN"]) else "the door is closed"}}
 EOT
-(TASKQ_PLUGINS=$T/plug DEMO_OPEN=$T/open WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wplug.out" 2>&1 &
+(TASKQ_PLUGINS=$T/plug DEMO_OPEN=$T/open WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wplug.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "user plugin loaded" $T/wplug.out'
 sleep 4
@@ -248,7 +242,7 @@ CONSUMERS = {"shaky": {"active": broken, "setup": broken, "admit": admit, "befor
 EOT
 rm -f "$T/open" "$T/sabotage" "$T/exited" "$T/envseen"
 (export TASKQ_PLUGINS=$T/plugk DEMO_OPEN=$T/open DEMO_SABOTAGE=$T/sabotage DEMO_EXITED=$T/exited
- WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wk.out" 2>&1 &
+ WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wk.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "consumer plugin shaky: admit failed (RuntimeError: admit broken); not claiming now" $T/wk.out'
 sleep 4
@@ -264,7 +258,7 @@ t/x base
 EOF
 rm -f "$T/sabotage" "$T/exited"
 (export TASKQ_PLUGINS=$T/plugk DEMO_OPEN=$T/open DEMO_SABOTAGE=$T/sabotage DEMO_EXITED=$T/exited
- WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=60 exec bash "$HERE/worker_start.sh") > "$T/wk2.out" 2>&1 &
+ WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 FAKE_SECS=60 exec bash "$HERE/worker_start.sh") > "$T/wk2.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/x" $T/train.log'
 touch "$T/sabotage"
@@ -275,7 +269,7 @@ fi
 
 # unit. plugin decisions (no worker started): when gpu_share claims a second, gpu_pad making room, resident's slots, unreadable hours: no new claims and running tasks keep going
 if want unit; then
-python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
+TASKQ_CONFIG=$(slots_cfg 3) python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
 import importlib.util, os, sys, time, types
 here, t = sys.argv[1:]
 sys.path.insert(0, here)
@@ -297,12 +291,16 @@ open(b + ".mib", "w").write("0"); said.clear(); pad.make_room(b, said.append)
 assert os.path.exists(b + ".start") and not said
 open(b + ".mib", "w").write("5000"); orig = time.sleep; time.sleep = lambda s: None; pad.make_room(b, said.append); time.sleep = orig
 assert said and "did not respond within 30 seconds" in said[0], said
-w = types.SimpleNamespace(ncpu=64)
-os.environ["TASKQ_SLOTS"] = "3"; os.environ["TASKQ_CPUS"] = "16"; os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+import consume  # resident slots: read for real from the machine table (TASKQ_CONFIG=slots_cfg 3, machine site-pueue)
+said.clear()
+w = types.SimpleNamespace(ncpu=64, W="site-pueue-gpu1", say=said.append)
+w.table_slots = lambda pick: consume.Worker.table_slots(w, pick)
+os.environ["TASKQ_SLOTS"] = "1"; os.environ["TASKQ_CPUS"] = "16"; os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 res.setup(w)
-assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True), vars(w)
-os.environ.pop("TASKQ_SLOTS"); res.setup(w)
-assert w.slots == 1, vars(w)
+assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True) and not said, (vars(w), said)
+w.W = "site-pueue-gpu9"; res.setup(w)
+assert w.slots == 1 and said and said[0].startswith("!! no such worker of machine site-pueue"), (vars(w), said)
+os.environ.pop("TASKQ_SLOTS"); said.clear()
 win = load("window")
 def broken(w):
     raise ImportError("broken")
@@ -415,7 +413,7 @@ params = dict(key="t/sec", cmd=cmd, env="base", out="runs/t/sec", done=["DONE"],
 open(p, "w").write(json.dumps(dict(order=1, nice=0, key="t/sec", exp=None, recipe="command", params=params,
                                    spec=S.sendable(S.resolve("command", params)))) + "\n")
 EOT
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wsec.out" 2>&1
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wsec.out" 2>&1
 rc=$?
 check "spec with a token: done, the command gets it, run_task.sh's command line is only --stdin, nothing running holds the token on its command line" \
   '[[ $rc == 0 && $(cat $T/token_seen) == "$SECRET" ]] && grep -q "done t/sec" $T/wsec.out && [[ $(cat $T/rt_cmdline) == "bash $HERE/run_task.sh --stdin " ]] && ! grep -q "$SECRET" $T/ps_seen'

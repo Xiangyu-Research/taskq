@@ -12,7 +12,7 @@ export TASKQ_DIR=$T/tq TASKQ_DATA=$T/data TASKQ_MACHINE=site-pueue   # this mach
 source "$HERE/testdata/worker_harness.sh"
 HEADCMD="cat $T/head"
 
-# 6. outside Slurm (resident in site-pueue's pueue group, worker on GPU 1): WORKER_ID is the name, slots from the worker's slots (TASKQ_SLOTS, unset → 1), only the GPU in CUDA_VISIBLE_DEVICES;
+# 6. outside Slurm (resident in site-pueue's pueue group, worker on GPU 1): WORKER_ID is the name, slots from the machine table worker's slots (unset → 1), only the GPU in CUDA_VISIBLE_DEVICES;
 #    idle less than IDLE_EXIT (default 30 minutes), queue errors and too many failures do not exit (RUN_TASK_TRIES=1: outside Slurm run_task.sh retries 3 times itself); exit 0 when the commit changes with nothing running, and wait for training to finish when it changes while running
 if want 6; then
 mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n[[ $* == *query-gpu=index,memory.used* ]] && echo "1, 0"\nexit 0\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
@@ -22,7 +22,7 @@ table << EOF
 t/a base
 t/b base
 EOF
-(unset TASKQ_SLOTS; WORKER_ID=site-pueue-gpu1 CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 TASKQ_HEAD_CMD=$HEADCMD PATH=$T/bin6:$PATH exec bash "$HERE/worker_start.sh") > "$T/w6.out" 2>&1 &
+(TASKQ_CONFIG=$FIXTURE_CFG WORKER_ID=site-pueue-gpu1 CUDA_VISIBLE_DEVICES=1 TASKQ_IDLE_POLL=1 TASKQ_HEAD_CMD=$HEADCMD PATH=$T/bin6:$PATH exec bash "$HERE/worker_start.sh") > "$T/w6.out" 2>&1 &
 wpid=$!
 waitfor 60 '[[ $(grep -c ^end $T/train.log) == 2 ]]'
 check "outside Slurm: one at a time per slots (no second even when the GPU is idle), both finish one after the other" '[[ $(sed -n 2p $T/train.log) == end* && $(grep -c ^end $T/train.log) == 2 ]] && grep -q "job site-pueue-gpu1 @ .*at most 1 at once.*time limit none" $T/w6.out'
@@ -57,7 +57,7 @@ t/c base
 t/d base
 EOF
 echo a > "$T/head"
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=3 TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/worker_start.sh") > "$T/w6b.out" 2>&1 &
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 FAKE_SECS=3 TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/worker_start.sh") > "$T/w6b.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/c" $T/train.log'
 echo b > "$T/head"
@@ -73,7 +73,7 @@ t/b base
 t/c base
 EOF
 echo a > "$T/head"
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 RUN_TASK_TRIES=1 FAKE_FAIL="t/a t/b" TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/worker_start.sh") > "$T/w6c.out" 2>&1 &
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 RUN_TASK_TRIES=1 FAKE_FAIL="t/a t/b" TASKQ_HEAD_CMD=$HEADCMD exec bash "$HERE/worker_start.sh") > "$T/w6c.out" 2>&1 &
 wpid=$!
 waitfor 30 '[[ $(grep -c "^fail" $T/train.log) == 2 ]]'
 waitfor 20 'grep -q "not claiming until the window passes" $T/w6c.out'
@@ -107,7 +107,7 @@ echo "new bundle start $WORKER_ID"
 ' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
 ln -sfn a "$T/code/current"
 touch -d "5 days ago" "$T/code/a"
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=30 exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/w6e.out" 2>&1 &
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=30 exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/w6e.out" 2>&1 &
 wpid=$!
 waitfor 20 'grep -q "no claimable tasks" $T/w6e.out'
 ln -sfn b "$T/code/current"
@@ -128,7 +128,7 @@ cp -r "$CORE/." "$T/code/a/scripts/taskq/"; cp -r "$CORE/." "$T/code/b/scripts/t
 printf '#!/bin/bash\necho "new bundle start"\nexec python3 "$(dirname "$0")/consume.py"\n' > "$T/code/b/scripts/taskq/queue/worker_start.sh"
 printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"
 ln -sfn a "$T/code/current"
-(WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
+(WORKER_ID=site-pueue-gpu1 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
   FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$T/code/a/scripts/taskq/queue/worker_start.sh") > "$T/w6z.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "unstoppable training" $T/w6z.out'

@@ -18,13 +18,13 @@ t/b base
 t/c base
 EOF
 export FAKE_FAIL="t/a t/b"
-SLURM_JOB_ID=900201 TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e1.out" 2>&1
+SLURM_JOB_ID=900201 TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e1.out" 2>&1
 check "two tasks fail shortly after start: the job claims no third" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && ! grep -q "start .* t/c" $T/train.log && grep -q "failed shortly after starting" $T/w2e1.out'
 reset
-SLURM_JOB_ID=900202 TASKQ_SLOTS=1 TASKQ_EARLY_FAIL=0 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e2.out" 2>&1
+SLURM_JOB_ID=900202 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_EARLY_FAIL=0 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e2.out" 2>&1
 check "failures after running a while: recorded on the task, job keeps claiming" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && [[ -f $TASKQ_DIR/failures/t__a && -f $TASKQ_DIR/failures/t__b ]]'
 reset
-SLURM_JOB_ID=900203 TASKQ_SLOTS=1 TASKQ_FAIL_WINDOW=0 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e3.out" 2>&1
+SLURM_JOB_ID=900203 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_FAIL_WINDOW=0 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2e3.out" 2>&1
 check "two failures shortly after start but outside the window: job keeps claiming" '[[ $(grep -c "^fail" $T/train.log) == 2 ]] && grep -q "end .* t/c" $T/train.log && ! grep -q "failed shortly after starting" $T/w2e3.out'
 unset FAKE_FAIL
 fi
@@ -103,7 +103,7 @@ reset
 table << EOF
 t/e base
 EOF
-FAKE_EAGER=t/e SLURM_JOB_ID=900213 TASKQ_SLOTS=1 TASKQ_IDLE_MAX=60 TASKQ_POLL=30 TASKQ_STOP_POLL=1 bash "$HERE/worker_start.sh" > "$T/w3d.out" 2>&1 &
+FAKE_EAGER=t/e SLURM_JOB_ID=900213 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_MAX=60 TASKQ_POLL=30 TASKQ_STOP_POLL=1 bash "$HERE/worker_start.sh" > "$T/w3d.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/e" $T/train.log 2> /dev/null && [[ -e $T/chain.ready ]]'
 python3 "$HERE/taskq.py" stop t/e > /dev/null
@@ -143,10 +143,11 @@ t/g base
 t/c1 base cpu
 t/c2 base cpu
 EOF
-SLURM_JOB_ID=900207 WORKER_DEVICE=cpu TASKQ_SLOTS= timeout 60 bash "$HERE/worker_start.sh" > "$T/w4b.out" 2>&1
+SLURM_JOB_ID=900207 WORKER_DEVICE=cpu TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w4b.out" 2>&1
 check "CPU worker: two CPU-only tasks finish one after the other, GPU tasks untouched" '[[ $(grep -c "^end .* t/c" $T/train.log) == 2 ]] && ! grep -q "t/g" $T/train.log'
 check "CPU worker: one at a time, no GPU records" '[[ $(head -2 $T/train.log | grep -c ^start) == 1 && ! -e $TASKQ_DATA/logs/workers/worker_900207_gpu.csv ]] && grep -q "worker (cpu).*at most 1 at once" $T/w4b.out'
 check "CPU worker: ends when nothing is claimable, does not idle" 'grep -q "nothing running and no claimable tasks; ending the job" $T/w4b.out && ! grep -q "waiting, checking every" $T/w4b.out'
+check "CPU worker: its slots read from the machine table (no !!; in a bundle, the packaged config found through .taskq.toml)" '! grep -q "^.*!!.*machine table" $T/w4b.out'
 SLURM_JOB_ID=900208 timeout 60 bash "$HERE/worker_start.sh" > "$T/w4c.out" 2>&1
 check "GPU worker: trains only tasks that need a GPU" 'grep -q "^end .* t/g" $T/train.log && [[ $(grep -c "^start .* t/c" $T/train.log) == 2 ]]'
 fi
@@ -161,12 +162,12 @@ table << EOF
 t/u base
 EOF
 touch "$T/unreadable"
-FAKE_DONE5=$T/unreadable SLURM_JOB_ID=900209 TASKQ_SLOTS=1 timeout 60 bash "$T/core/queue/worker_start.sh" > "$T/w5.out" 2>&1
+FAKE_DONE5=$T/unreadable SLURM_JOB_ID=900209 TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$T/core/queue/worker_start.sh" > "$T/w5.out" 2>&1
 check "exit code 5: release, no failure, this job does not reclaim at once" '[[ $(grep -c "t/u: disk unreadable, cannot tell whether training finished; releasing" $T/w5.out) == 1 && -z $(ls $TASKQ_DIR/claims) && ! -e $TASKQ_DIR/failures/t__u ]] && ! grep -q t/u $T/train.log'
 rm -f "$T/unreadable"
 reset
 touch "$T/badspec"
-FAKE_SHELL2=$T/badspec SLURM_JOB_ID=900210 TASKQ_SLOTS=1 timeout 60 bash "$T/core/queue/worker_start.sh" > "$T/w2r.out" 2>&1
+FAKE_SHELL2=$T/badspec SLURM_JOB_ID=900210 TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$T/core/queue/worker_start.sh" > "$T/w2r.out" 2>&1
 check "exit code 2: the failure reason carries the part-log reason" 'grep -q "exit code 2: not started: bad task spec: spec.py: unknown {nosuch}" $TASKQ_DIR/failures/t__u'
 rm -f "$T/badspec"
 fi
@@ -177,14 +178,14 @@ reset
 table << EOF
 t/a base
 EOF
-FAKE_SECS=60 SLURM_JOB_ID=900211 TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w6a.out" 2>&1 &
+FAKE_SECS=60 SLURM_JOB_ID=900211 TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w6a.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q ^start $T/train.log 2> /dev/null'
 kill -TERM "$(pgrep -P "$(pgrep -P $wpid)" -f run_task.sh)"
 wait $wpid
 check "run_task.sh alone gets SIGTERM from outside: training stops, released as a failure, this job does not claim it again" 'grep -q "^term t/a" $T/train.log && [[ -z $(ls $TASKQ_DIR/claims) ]] && grep -q "killed by SIGTERM (exit code 143), not stopped by the worker" $TASKQ_DIR/failures/t__a && grep -q "t/a was killed by SIGTERM (run_task.sh exit code 143), not stopped by this worker" $T/w6a.out && [[ $(grep -c ^start $T/train.log) == 1 ]]'
 reset
-FAKE_IGNORE=t/a SLURM_JOB_ID=900212 TASKQ_SLOTS=1 TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/worker_start.sh" > "$T/w6b.out" 2>&1 &
+FAKE_IGNORE=t/a SLURM_JOB_ID=900212 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_MAX=60 timeout 60 bash "$HERE/worker_start.sh" > "$T/w6b.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q ^start $T/train.log 2> /dev/null'
 sleep 3
@@ -208,7 +209,7 @@ for s in TERM KILL; do
     table << EOF
 t/k base
 EOF
-    FAKE_SECS=60 SLURM_JOB_ID=900215 TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w7$s.out" 2>&1 &
+    FAKE_SECS=60 SLURM_JOB_ID=900215 TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w7$s.out" 2>&1 &
     wpid=$!
     waitfor 30 'grep -q "^start .* t/k" $T/train.log 2> /dev/null && pgrep -xf "bash $T/fake_train.sh t/k" > /dev/null'
     kill -$s "$(pgrep -xf "bash $T/fake_train.sh t/k")"

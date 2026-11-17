@@ -180,10 +180,11 @@ def main():
     argv = shlex.split(fake.calls[0])
     run = shlex.split(argv[argv.index("--") + 1])[3]
     assert argv[argv.index("-g") + 1] == cw["group"] and argv[argv.index("-l") + 1] == f"worker:{cw['id']}"
-    assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES='' TASKQ_CPUS={cw['cpus']} TASKQ_SLOTS=1;" in run, run
+    assert f"WORKER_ID={cw['id']} WORKER_DEVICE=cpu CUDA_VISIBLE_DEVICES='' TASKQ_CPUS={cw['cpus']};" in run, run
+    assert "TASKQ_SLOTS" not in run and "TASKQ_SLOTS" not in PQ.worker_cmd("site-pueue", w)  # the worker reads its slots from the table
     assert run.endswith(f'exec bash "$REPO/{QR}/worker_start.sh"') and "WORKER_DEVICE=gpu" in PQ.worker_cmd("site-pueue", w)
     assert "TASKQ_CPUS" not in PQ.worker_cmd("site-pueue", w)
-    ok("pueue: a CPU worker in its own group, WORKER_DEVICE=cpu, no GPUs, at most cpus cores, entry point worker_start.sh")
+    ok("pueue: a CPU worker in its own group, WORKER_DEVICE=cpu, no GPUs, at most cpus cores (no slots: the worker reads them from the table), entry point worker_start.sh")
     raw2 = pueue_json((3, w["group"], wl, "Running"), (4, cw["group"], f"worker:{cw['id']}", "Queued"), (5, "gpu0", "x", "Running"))
     jobs2 = PQ.parse(raw2, [w["group"], cw["group"]])
     assert [j[0] for j in jobs2] == [3, 4] and [j[0] for j in PQ.workers(cw, jobs2)] == [4]

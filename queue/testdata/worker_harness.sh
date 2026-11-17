@@ -1,6 +1,36 @@
 # Fake training and helpers shared by worker tests (worker_start.sh -> consume.py): create $T, set TASKQ_DIR, TASKQ_DATA and TASKQ_MACHINE, then source this
 # WORKER_TEST_ONLY="<cases...>": run only these cases (want); all when unset
-export TASKQ_POLL=1 TASKQ_IDLE_MAX=2 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_SLOTS=2 TASKQ_ADD_AFTER=0 TASKQ_ERR_MAX=2
+export TASKQ_POLL=1 TASKQ_IDLE_MAX=2 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_ADD_AFTER=0 TASKQ_ERR_MAX=2
+# Workers read how many trainings they run at once (slots) from the machine table: slots_cfg N prints a config dir, the
+# fixture config with every site-pueue worker and every site-slurm / site-slurm2 jobs entry at slots=N (made once per N);
+# FIXTURE_CFG is the config in use without it (the fixture, or a bundle's packaged copy; no slots set: default 1). Cases set TASKQ_CONFIG=$(slots_cfg N) for N.
+FIXTURE_CFG=${TASKQ_CONFIG:-$(cd "$HERE" && python3 -c "import cfg; print(cfg.config_dir())")} || exit 1   # in a bundle: its packaged config
+if [[ -z ${TASKQ_CONFIG:-} ]]; then IN_BUNDLE=1; else IN_BUNDLE=; fi   # test_relay_bundle runs a few cases inside a bundle without TASKQ_CONFIG
+slots_cfg() {  # made in a temp dir and moved in whole (cases started in the background may ask at the same time)
+    local d=$T/slots_cfg$1 t
+    if [[ $1 == 1 && $IN_BUNDLE == 1 ]]; then  # the packaged table sets no slots: leave the config for the worker to find (.taskq.toml)
+        echo ""; return
+    fi
+    if [[ ! -d $d ]]; then
+        t=$(mktemp -d "$T/slots_cfg.XXXXXX") && cp -r "$FIXTURE_CFG/." "$t/"
+        printf 'import importlib.util as _u
+_s = _u.spec_from_file_location("_fx_machines", %s)
+_m = _u.module_from_spec(_s)
+_s.loader.exec_module(_m)
+globals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
+for _w in MACHINES["site-pueue"]["workers"]:
+    _w["slots"] = %d
+for _n in ("site-slurm", "site-slurm2"):
+    for _j in MACHINES[_n]["jobs"].values():
+        _j["slots"] = %d
+' "'$FIXTURE_CFG/machines.py'" "$1" "$1" > "$t/machines.py"
+        mv -T "$t" "$d" 2> /dev/null || rm -rf "$t"
+    fi
+    echo "$d"
+}
+# with the fixture config: cases run at 2 by default; in a bundle (no TASKQ_CONFIG) the worker finds the packaged config
+# itself (.taskq.toml), as on an executor, and runs at its default 1
+if [[ -z $IN_BUNDLE ]]; then export TASKQ_CONFIG=$(slots_cfg 2); fi
 export WORKER_TEST_GPU="50 10 20000 81920"   # 50% utilisation over the last 10 minutes, training uses 20GB
 export TASKQ_GPU_PAD_BASE=$T/nopad TMPDIR=$T/tmp   # keep the GPU pad and local copies out of /tmp job paths
 export TASKQ_GPU_PAD=0   # worker_start.sh starts no real GPU pad (the handshake is simulated by fake files under TASKQ_GPU_PAD_BASE)

@@ -14,7 +14,7 @@ table << EOT
 t/a base
 t/b base
 EOT
-(TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/a timeout 40 bash "$HERE/worker_start.sh") > "$T/w.out" 2>&1
+(TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/a timeout 40 bash "$HERE/worker_start.sh") > "$T/w.out" 2>&1
 check "pueue worker: stalled t/a is stopped and released" 'grep -q "t/a: log and output dir unchanged for .*treating it as stalled" $T/w.out && grep -q "^term t/a" $T/train.log'
 check "pueue worker: trains t/b after the stall" 'grep -q "end .* t/b" $T/train.log'
 check "first stall: release only, no failure" '[[ ! -e $TASKQ_DIR/failures/t__a ]] && grep -q "^STALLED" $TASKQ_DATA/logs/tasks/t__a__*_part1.log'
@@ -27,7 +27,7 @@ t/z base
 t/b base
 EOT
 mkdir -p "$T/binz"; printf '#!/bin/bash\nexit 0\n' > "$T/binz/pkill"; chmod +x "$T/binz/pkill"   # makes the session-wide force kill a no-op
-(TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
+(TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 TASKQ_GIVEUP=3 TASKQ_BEAT=1 \
   FAKE_ESCAPE=t/z FAKE_ESCAPE_SECS=25 PATH=$T/binz:$PATH exec bash "$HERE/worker_start.sh") > "$T/wz.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^end .* t/b" $T/train.log'
@@ -44,7 +44,7 @@ reset
 table << EOT
 t/z base
 EOT
-(TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/z timeout 40 bash "$HERE/worker_start.sh") > "$T/wz2.out" 2>&1
+(TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_STALL_MAX=4 FAKE_HANG=t/z timeout 40 bash "$HERE/worker_start.sh") > "$T/wz2.out" 2>&1
 check "second stall: record one failure" 'grep -q "stalled again this week (2 times); recording a failure" $T/wz2.out && grep -q "stalled (2 times this week)" $TASKQ_DIR/failures/t__z'
 
 # heartbeat finds the claim is no longer ours: stop the training, no release, no failure
@@ -52,7 +52,7 @@ reset
 table << EOT
 t/l base
 EOT
-(TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_BEAT=1 FAKE_SECS=30 exec bash "$HERE/worker_start.sh") > "$T/wl.out" 2>&1 &
+(TASKQ_CONFIG=$(slots_cfg 1) TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 TASKQ_BEAT=1 FAKE_SECS=30 exec bash "$HERE/worker_start.sh") > "$T/wl.out" 2>&1 &
 wpid=$!
 waitfor 30 'grep -q "^start .* t/l" $T/train.log'
 python3 -c 'import json, sys; p = sys.argv[1]; c = json.load(open(p)); c["worker"] = "other"; json.dump(c, open(p, "w"))' "$TASKQ_DIR/claims/t__l/info"

@@ -1,4 +1,4 @@
-"""Resident worker (in a pueue group, not in Slurm): WORKER_ID is the name, uses at most TASKQ_CPUS cores, runs TASKQ_SLOTS trainings at once (the machine table worker's slots), with a job name per start for the part log.
+"""Resident worker (in a pueue group, not in Slurm): WORKER_ID is the name, uses at most TASKQ_CPUS cores, runs as many trainings at once as the machine table worker's slots (read at start), with a job name per start for the part log.
 No claims, errors or too many failures do not exit at once; it exits 0 only after IDLE_EXIT seconds with nothing running."""
 import os
 
@@ -14,8 +14,7 @@ def setup(w):
     c = e.get("TASKQ_CPUS", "")
     if c.isdigit() and 0 < int(c) < w.ncpu:
         w.ncpu = int(c)
-    s = e.get("TASKQ_SLOTS")
-    w.slots = int(s) if str(s).isdigit() else 1
+    w.slots = w.table_slots(lambda x: x["id"] == w.W)
     cvd = e.get("CUDA_VISIBLE_DEVICES", "")
     if cvd.isdigit():
         w.nvsel = ["-i", cvd]

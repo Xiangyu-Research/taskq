@@ -21,7 +21,7 @@ t/b alt
 t/c base
 t/d base
 EOF
-FAKE_SECS=3 SLURM_JOB_ID=900101 timeout 90 bash "$HERE/worker.sbatch" "$HERE/worker_start.sh" > "$T/w1.out" 2>&1
+FAKE_SECS=3 SLURM_JOB_ID=900101 TASKQ_CONFIG=$(slots_cfg 2) timeout 90 bash "$HERE/worker.sbatch" "$HERE/worker_start.sh" > "$T/w1.out" 2>&1
 check "Slurm job: all four finish" '[[ $(grep -c ^end $T/train.log) == 4 ]]'
 check "Slurm job: the first two start together while the GPU is not busy" '[[ $(head -2 $T/train.log | grep -c ^start) == 2 ]]'
 check "env per task: alt uses the venv (on conda base0), base uses the conda env (not inside the venv)" \
@@ -128,7 +128,7 @@ table << EOF
 t/a base
 t/b base
 EOF
-SLURM_JOB_ID=900109 FAKE_FAIL=t/a TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2d.out" 2>&1
+SLURM_JOB_ID=900109 FAKE_FAIL=t/a TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w2d.out" 2>&1
 check "training fails: one failure recorded, next task claimed" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
 fi
 
@@ -147,7 +147,7 @@ ts = [json.loads(l) for l in open(p)]
 ts[0]["params"]["inputs"] = ["in/nothere"]
 open(p, "w").write("".join(json.dumps(t) + "\n" for t in ts))
 PY
-SLURM_JOB_ID=900110 TASKQ_SLOTS=1 timeout 60 bash "$HERE/worker_start.sh" > "$T/w2m.out" 2>&1
+SLURM_JOB_ID=900110 TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w2m.out" 2>&1
 check "missing inputs: did not start, no failure, recorded as missing inputs, next task trained" '! grep -q "start .* t/a" $T/train.log && [[ ! -e $TASKQ_DIR/failures/t__a ]] && [[ -e $TASKQ_DIR/inputs/t__a ]] && grep -q "end .* t/b" $T/train.log'
 check "missing inputs: claim released" '[[ ! -e $TASKQ_DIR/claims/t__a ]]'
 rm -rf "$TASKQ_DIR/inputs"
@@ -161,7 +161,7 @@ t/a base
 t/b base
 t/c base
 EOF
-SLURM_JOB_ID=900111 TASKQ_SLOTS=1 TASKQ_STALL_MAX=3 FAKE_HANG=t/a FAKE_BUSY=t/b FAKE_BUSY_SECS=7 timeout 90 bash "$HERE/worker_start.sh" > "$T/w2f.out" 2>&1
+SLURM_JOB_ID=900111 TASKQ_CONFIG=$(slots_cfg 1) TASKQ_STALL_MAX=3 FAKE_HANG=t/a FAKE_BUSY=t/b FAKE_BUSY_SECS=7 timeout 90 bash "$HERE/worker_start.sh" > "$T/w2f.out" 2>&1
 check "stalled: stopped, released, no failure" 'grep -q "^term t/a" $T/train.log && grep -q "t/a: log and output dir unchanged for .*treating it as stalled" $T/w2f.out && grep -q "stalled t/a stopped" $T/w2f.out && [[ ! -e $TASKQ_DIR/failures/t__a ]]'
 check "after the stalled task stops, this job claims the next ones" 'grep -q "end .* t/b" $T/train.log && grep -q "end .* t/c" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
 check "one that keeps writing its output dir (not the log) is not stalled" '! grep -q "t/b: log and output dir unchanged" $T/w2f.out'
