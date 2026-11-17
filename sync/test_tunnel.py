@@ -181,36 +181,40 @@ sv.close()
 ok("after the session closes its token is 404", code("GET", f"/{tok}/") == 404 and code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx") == 404)
 ok("session files deleted", not [f for f in os.listdir(SRV) if f.endswith((".json", ".out"))])
 
-# rsync stand-in
-big = {"frag/check/c1.prob": 1_500_000, "frag/check/c2.prob": 700_000, "frag/final.ckpt": 400_000, "frag/plans.json": 50}
-rs = os.path.join(HOME, "st/res")
-make(rs, big)
-loc = os.path.join(T, "hub/res/frag")
-r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "plainhost:st/res/frag/", loc + "/")
-inner = [f for f in big if f.count("/") > 1]
-ok("stand-in pull, first pass (top-level files excluded): subdirs complete, marker file final.ckpt not there", r.returncode == 0
-   and same(os.path.join(rs, "frag"), loc, [f[5:] for f in inner]) and not os.path.exists(os.path.join(loc, "final.ckpt")))
-ok("stand-in pull: data over the tunnel (rsync sent 0 bytes over ssh)", "tunnel transfer" in r.stdout and "Literal data: 0 bytes" in r.stdout)
-ok("stand-in pull: staging dir deleted", not [d for d in os.listdir(os.path.dirname(loc)) if d.startswith(".tunnel_stage_")])
-r = run("rsync", "-rlt", "--partial", "plainhost:st/res/frag/", loc + "/")
-ok("stand-in pull, second pass: everything there", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
+# rsync stand-in (needs the real rsync)
+if not shutil.which("rsync", path=ENV["PATH"]):
+    print("SKIP:no rsync on PATH: the rsync stand-in checks are not run")
+else:
+    big = {"frag/check/c1.prob": 1_500_000, "frag/check/c2.prob": 700_000, "frag/final.ckpt": 400_000, "frag/plans.json": 50}
+    rs = os.path.join(HOME, "st/res")
+    make(rs, big)
+    loc = os.path.join(T, "hub/res/frag")
+    r = run("rsync", "-rlt", "--partial", "--stats", "--include=/*/", "--exclude=/*", "plainhost:st/res/frag/", loc + "/")
+    inner = [f for f in big if f.count("/") > 1]
+    ok("stand-in pull, first pass (top-level files excluded): subdirs complete, marker file final.ckpt not there", r.returncode == 0
+       and same(os.path.join(rs, "frag"), loc, [f[5:] for f in inner]) and not os.path.exists(os.path.join(loc, "final.ckpt")))
+    ok("stand-in pull: data over the tunnel (rsync sent 0 bytes over ssh)", "tunnel transfer" in r.stdout and "Literal data: 0 bytes" in r.stdout)
+    ok("stand-in pull: staging dir deleted", not [d for d in os.listdir(os.path.dirname(loc)) if d.startswith(".tunnel_stage_")])
+    r = run("rsync", "-rlt", "--partial", "plainhost:st/res/frag/", loc + "/")
+    ok("stand-in pull, second pass: everything there", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
 
-shutil.rmtree(loc)
-r = run("rsync", "-rlt", "--partial", "plainhost:st/res/frag/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="check/c1.prob"))
-ok("stand-in pull: bad files from the tunnel are filled in by rsync over ssh", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
+    shutil.rmtree(loc)
+    r = run("rsync", "-rlt", "--partial", "plainhost:st/res/frag/", loc + "/", env=dict(ENV, TUNNEL_TEST_BADMD5="check/c1.prob"))
+    ok("stand-in pull: bad files from the tunnel are filled in by rsync over ssh", r.returncode == 0 and same(os.path.join(rs, "frag"), loc, [f[5:] for f in big]))
 
-bsrc = os.path.join(T, "hub/arch/frag")
-make(bsrc, {k[5:]: v for k, v in big.items()})
-r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "plainhost:~/st/arch/frag/")
-rdst = os.path.join(HOME, "st/arch/frag")
-ok("stand-in push (target starting with ~/): all match, data over the tunnel", r.returncode == 0 and same(bsrc, rdst, [f[5:] for f in big])
-   and "Literal data: 0 bytes" in r.stdout and not os.path.exists(os.path.join(HOME, "~")))
-ok("stand-in push: staging dir there deleted", not [d for d in os.listdir(os.path.dirname(rdst)) if d.startswith(".tunnel_stage_")])
+    bsrc = os.path.join(T, "hub/arch/frag")
+    make(bsrc, {k[5:]: v for k, v in big.items()})
+    r = run("rsync", "-rlt", "--partial", "--ignore-existing", "--stats", bsrc + "/", "plainhost:~/st/arch/frag/")
+    rdst = os.path.join(HOME, "st/arch/frag")
+    ok("stand-in push (target starting with ~/): all match, data over the tunnel", r.returncode == 0 and same(bsrc, rdst, [f[5:] for f in big])
+       and "Literal data: 0 bytes" in r.stdout and not os.path.exists(os.path.join(HOME, "~")))
+    ok("stand-in push: staging dir there deleted", not [d for d in os.listdir(os.path.dirname(rdst)) if d.startswith(".tunnel_stage_")])
 
-r = run("rsync", "-rltR", bsrc + "/./final.ckpt", "plainhost:st/arch3/")
-ok("with -R: plain rsync", r.returncode == 0 and "tunnel transfer" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/final.ckpt")))
-r = run("rsync", "-rlt", "fake-pueue-host:x/", os.path.join(T, "pueue-host/"))
-ok("machine without a tunnel (pueue-host): plain rsync", "tunnel transfer" not in r.stdout)
+    r = run("rsync", "-rltR", bsrc + "/./final.ckpt", "plainhost:st/arch3/")
+    ok("with -R: plain rsync", r.returncode == 0 and "tunnel transfer" not in r.stdout and os.path.isfile(os.path.join(HOME, "st/arch3/final.ckpt")))
+    r = run("rsync", "-rlt", "fake-pueue-host:x/", os.path.join(T, "pueue-host/"))
+    ok("machine without a tunnel (pueue-host): plain rsync", "tunnel transfer" not in r.stdout)
+
 
 wd, fbin = os.path.join(T, "wd"), os.path.join(T, "fbin")
 os.makedirs(wd)
