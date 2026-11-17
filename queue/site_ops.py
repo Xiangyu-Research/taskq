@@ -83,7 +83,7 @@ def blob_path(R, h):
 
 def stamp(p):
     x = os.stat(p)
-    return f"{x.st_size} {x.st_mtime_ns}"
+    return proto.BLOB_STAMP.format(size=x.st_size, mtime_ns=x.st_mtime_ns)
 
 
 def record(R, h):
@@ -92,9 +92,9 @@ def record(R, h):
 
 
 def blob_ok(R, h):
-    """The blob exists and still matches h: size and mtime equal the recorded values; without a record (came over the tunnel)
-    compute sha256 once and record it. On a mismatch (a hard-link source was modified in place, or a bad transfer) remove the
-    blob and its record (the source is left alone) and return False."""
+    """The blob exists and still matches h: size and mtime equal the recorded values (ingest and push record them once the
+    sha256 is checked, push while receiving); without a record compute sha256 once and record it. On a mismatch (a hard-link
+    source was modified in place, or a bad transfer) remove the blob and its record (the source is left alone) and return False."""
     p = blob_path(R, h)
     if not os.path.isfile(p):
         return False
@@ -701,7 +701,9 @@ def op_export(A):
 
 def op_push(A):
     """to: executor; files {sha256: local path} → put them in the remote blobs (copy locally on the same machine, hard link when
-    possible, otherwise over the tunnel) → sha256s not transferred or mismatched (already removed)."""
+    possible, otherwise over the tunnel) → sha256s not transferred or mismatched (already removed). The receiving side checks
+    each file's sha256 in the read that checks its MD5 and records it (proto.BLOB_STAT), so later operations there (missing,
+    view) compare size and mtime instead of reading hundreds of GB again within their timeout."""
     T = mods()[3]
     R = root()
     host, troot = reach(A["to"])
@@ -713,7 +715,8 @@ def op_push(A):
             q = os.path.join(tmp, rels[h])
             os.makedirs(os.path.dirname(q), exist_ok=True)
             os.symlink(os.path.realpath(p), q)
-        bad = T.push(host, tmp, f"{troot}/{proto.ROOT['blobs']}", sorted(rels.values()), site=A["to"])
+        bad = T.push(host, tmp, f"{troot}/{proto.ROOT['blobs']}", sorted(rels.values()), site=A["to"],
+                     sums={rels[h]: h for h in A["files"]}, stat=(proto.BLOB_STAT, proto.BLOB_STAMP))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     back = {v: k for k, v in rels.items()}

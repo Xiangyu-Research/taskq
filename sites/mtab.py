@@ -313,29 +313,99 @@ def lock_bytes(path):
     return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def spec_hash(env, variant="default"):
-    """sha256(the bytes of <env>.yml + the canonical bytes of this variant's lock); without a lock it is the spec
-    alone; no such spec → None."""
-    import hashlib
+def _spec_bytes(env):
     try:
         with open(os.path.join(SPECS, f"{env}.yml"), "rb") as f:
-            h = hashlib.sha256(f.read())
+            return f.read()
     except OSError:
         return None
+
+
+def _lock(env, variant):
+    """This variant's lock as a dict; none or unreadable → None."""
+    import json
+    try:
+        with open(lock_path(env, variant), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def lock_variants(env):
+    """The variants of env that have a lock (sorted)."""
+    import glob
+    out = []
+    for p in glob.glob(os.path.join(SPECS, glob.escape(env) + ".*" + proto.LOCK_SUFFIX)):
+        v = os.path.basename(p)[len(env) + 1:-len(proto.LOCK_SUFFIX)]
+        if (_lock(env, v) or {}).get("name") == env:
+            out.append(v)
+    return sorted(out)
+
+
+def lock_stale(env, variant="default", _depth=0):
+    """Why this variant's lock no longer describes what it was made from → str; None when it does (or there is no lock): the
+    spec changed after locking (spec_sha256), or for a venv the base's lock is not the one it was locked on (its base entry's
+    lock_sha256) or is itself stale. Building from a stale lock would build the old env under the new hash."""
+    import hashlib
+    d = _lock(env, variant)
+    if d is None:
+        return None
+    fn, again = os.path.basename(lock_path(env, variant)), f"lock it again: taskq env lock {env} --variant {variant}"
+    yml = _spec_bytes(env)
+    if yml is None or d.get("spec_sha256") != hashlib.sha256(yml).hexdigest():
+        return f"{fn} is from an older {env}.yml ({env}.yml changed after locking); {again}"
+    b = d.get("base")
+    if isinstance(b, dict) and b.get("name") and _depth < 5:
+        bv = b.get("variant") or variant
+        try:
+            bl = lock_bytes(lock_path(b["name"], bv))
+        except ValueError:
+            bl = None
+        if bl is None or hashlib.sha256(bl).hexdigest() != b.get("lock_sha256"):
+            return f"{fn} was locked on another lock of its base {b['name']} ({b['name']} was locked again since); {again}"
+        why = lock_stale(b["name"], bv, _depth + 1)
+        if why:
+            return f"{fn}: its base's lock is stale ({why})"
+    return None
+
+
+def spec_hash(env, variant="default", _depth=0):
+    """What env is built from, as a sha256 (.ok records it, readiness compares it): the bytes of <env>.yml + the canonical
+    bytes of this variant's lock. Without a lock nothing pins the rest, so the variant counts too (unless default) and, for a
+    venv (base in the spec), the hashes of its base (default and every locked variant). A venv with a stale lock (lock_stale)
+    takes its base's current hash too: built on an older base it is not ok, and building it says to lock it again. With
+    a current lock nothing more is added (the lock pins its base's lock, which pins the base's spec). No such spec → None."""
+    import hashlib
+    yml = _spec_bytes(env)
+    if yml is None:
+        return None
+    h = hashlib.sha256(yml)
     lk = lock_bytes(lock_path(env, variant))
     if lk is not None:
         h.update(lk)
+    elif variant != "default":
+        h.update(f"\0variant {variant}".encode())
+    b = _base_in(yml.decode("utf-8", "replace"))
+    if b and _depth < 5:
+        if lk is None:
+            for bv in ["default"] + [x for x in lock_variants(b) if x != "default"]:
+                h.update(f"\0base {b} {bv} {spec_hash(b, bv, _depth + 1)}".encode())
+        elif lock_stale(env, variant):
+            bv = ((_lock(env, variant) or {}).get("base") or {}).get("variant") or variant
+            h.update(f"\0base {b} {bv} {spec_hash(b, bv, _depth + 1)}".encode())
     return h.hexdigest()
+
+
+def _base_in(text):
+    m = re.search(r"""^base:[ \t]*["']?([^\s"'#]+)""", text, re.M)
+    return m.group(1) if m else None
 
 
 def spec_base(env):
     """The spec's base (which env a venv builds on); none → None."""
-    try:
-        with open(os.path.join(SPECS, f"{env}.yml"), encoding="utf-8") as f:
-            m = re.search(r"""^base:[ \t]*["']?([^\s"'#]+)""", f.read(), re.M)
-    except OSError:
-        return None
-    return m.group(1) if m else None
+    yml = _spec_bytes(env)
+    return _base_in(yml.decode("utf-8", "replace")) if yml is not None else None
 
 
 def spec_variant(name, env):

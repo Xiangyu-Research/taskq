@@ -29,7 +29,9 @@ each part runs, where files live, and how to add things.
   and puts the task in that executor's own queue (`R/queue`, same key as the hub queue); the worker there claims, trains and releases;
   when the hub sees it finished, it fetches the results to the store. Executors do not talk to each other.
 - One machine can hold several roles; the one with `ssh=None` is the hub's machine and can also be an executor (commands run locally,
-  transfers copy locally).
+  transfers copy locally). An executor that sees the store's files keeps its data dir (`R/data`) apart from the store's data dir: neither
+  may be the other or inside it (`taskq check`), or finished results there would count as already on the store and the executor's copy,
+  the only one, would be deleted.
 - Executors run bundles built by the hub (`queue/relay_bundle.py`: the core files executors need go into `scripts/taskq/` inside the
   bundle, plus the project's config dir and the dirs listed in `OUTPUTS["bundle"]`, minus `bundle_skip`, both read from `policy.py` at
   the commit being bundled); the bundle name is a content hash; it is pushed to
@@ -396,18 +398,27 @@ before it is pushed.
 
 `queue/flow/compile.py` derives instances and order from the experiment table: within one task in order (training -> `after`'s first step
 -> second ...); an input (wildcards included) that falls in another instance's outputs is ordered after that instance, across experiments;
-inputs that fall in no output are raw data. Checks: unknown names in templates, wildcard outputs, overlapping outputs, an input inside its
-own outputs, `temp` patterns that leave the output or match a done marker, and cycles.
+inputs that fall in no output are raw data. Checks: unknown names in templates (`cmd` and `inputs_cmd` are filled here too, so a bad name
+shows at once), wildcard outputs, overlapping outputs, an input inside its own outputs, `temp` patterns that leave the output or match a
+done marker, and cycles.
+
+Errors stay local. Each experiment table loads on its own (`experiments.py`): a table that cannot be imported, an experiment or `FINAL`
+step with bad fields, an experiment whose tasks do not resolve, a duplicate experiment id or task name leaves out just those entries, and
+the rest load; a queued task whose experiment is not found while entries are left out does not resolve (status shows it as bad). An
+error in a step blocks that instance and every instance after it (a step whose outputs cannot be filled keeps its readers waiting through
+its outputs with the unknown names as wildcards); the others go on. `taskq check` lists every error, and advance reports them each round
+(`advance:flow`).
 
 `queue/advance.py` each round:
 
 1. checks on the store whether each instance is done (all `done` files present; still being fetched does not count);
-2. adds to the hub queue any instance whose prerequisites are done, which is not done itself, and is not in the queue (recipe `command`,
-   key = instance id, `step` = step name); which machine it goes to is decided by `PLACE` when sending;
+2. adds to the hub queue any instance whose prerequisites are done, which is not done itself, not blocked by an error, and is not in the
+   queue (recipe `command`, key = instance id, `step` = step name); which machine it goes to is decided by `PLACE` when sending;
 3. steps with `rerun=True`: when an input is newer than the done file, delete the done file on the store and queue it again;
 4. `temp`: after every instance using it is done and its results are on the store, delete those temp files on the store and record it in
    events. The store deletes files and links only: a matching directory goes once it is empty (`dir/**` empties one), and one that still
-   holds files is reported.
+   holds files is reported. While entries are left out of the experiment tables (or a step's inputs cannot be filled) no temp files are
+   deleted: a step reading them may be among those entries.
 
 `HOLD` matches are not queued; with `AUTO["advance"]` off it only writes "what it would queue".
 
@@ -421,7 +432,9 @@ operations is at the top of `site_ops.py`: for an executor root, `status`, `stat
 ### Data: blobs, views, fetching
 
 - **blob**: data files on an executor are stored by sha256 at `R/blobs/<first two>/<sha256>` (`proto.blob`); the adjacent `.st` records size
-  and mtime when ingested, and a mismatch means drop and ingest again. The store's `export` lists the files and sha256 for a task (cached in
+  and mtime once the sha256 is checked (when ingested, or by the receiving side of `push` in the same read that checks the MD5, after the
+  file is in place), so later operations compare those instead of reading the file again; a mismatch means drop and ingest again. A pushed
+  file whose content is not its sha256 is not placed and not sent again in that run. The store's `export` lists the files and sha256 for a task (cached in
   `R/state/hashes.db`), and `push` sends only what is missing there; existing files on the same disk are hardlinked in (`ingest`).
 - **views**: each task's inputs under `R/data` are built as symlinks to blobs following the store data dir's relative paths (`view`, never
   overwriting real files; a half-built dir contains `.incomplete`), and commands read paths under `{data}` as usual. A task being
@@ -466,6 +479,12 @@ changed, or build interrupted means queue a `taskq site env <machine> <env>` in 
 generates a bash snippet and runs it on that machine's CPU (Slurm uses `env_job`'s srun). A new version is built in `<name>-<hash>/` and
 only after a passing check does the `<name>` symlink switch and `.ok` get written; running tasks are unaffected. Broken builds and lack of
 space report `site:<machine>:env:<env>`. Executors whose env is not ready are not chosen when assigning tasks.
+
+The hash (`mtab.spec_hash`, what `.ok` records) is the description plus the lock of the variant used there. Without a lock nothing pins the
+rest, so the variant counts too (unless `default`), and a venv takes in its base's hashes: when the base is rebuilt the venv is rebuilt on
+it. A lock pins its base's lock, so a venv with a current lock keeps its hash; a stale lock (`mtab.lock_stale`: the description changed
+after locking, or the base was locked again) changes the hash and is not built from (lock it again), so an env never shows ready while
+built from an old description or on an old base.
 
 #### Env locks
 

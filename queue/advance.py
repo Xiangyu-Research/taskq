@@ -3,7 +3,8 @@
 
 The order comes from flow/compile.py. Each round: queue instances whose dependencies are done; rerun a step when an input
 is newer than its done file; delete temp files once every user is done and fetched. HOLD is skipped; with policy.py
-AUTO["advance"] false only what would be queued is written.taskq plan shows what this round would do (health.py -n).
+AUTO["advance"] false only what would be queued is written. An error in the experiment table holds back only the instances it
+concerns and those after them (flow.blocked); it is reported as advance:flow. taskq plan shows what this round would do (health.py -n).
 """
 import fnmatch
 import os
@@ -58,9 +59,10 @@ def done_files(i):
 
 
 def queue_params(i):
-    """Step instance -> parameters for the queue (recipe command). {data} is left for the executor to expand."""
+    """Step instance -> parameters for the queue (recipe command). cmd and inputs_cmd were filled by flow/compile.py; {data} is
+    left for the executor to expand."""
     st = i.step
-    p = dict(key=i.id, step=st["name"], cmd=S.fill(st["cmd"], i.names), env=st["env"] if len(st["env"]) > 1 else st["env"][0],
+    p = dict(key=i.id, step=st["name"], cmd=st["cmd"], env=st["env"] if len(st["env"]) > 1 else st["env"][0],
              out=i.outputs[0], done=list(st["done"]), inputs=list(i.inputs), relay=st["relay"], device=st["device"],
              fetch=dict(exclude=[], extra=[], also=i.outputs[1:]))
     if st.get("res"):
@@ -68,12 +70,23 @@ def queue_params(i):
     if st.get("out_gb") is not None:
         p["out_gb"] = st["out_gb"]
     if st.get("inputs_cmd"):
-        p["inputs_cmd"] = S.fill(st["inputs_cmd"], i.names)
+        p["inputs_cmd"] = st["inputs_cmd"]
     return p
 
 
+def flow_alert(flow):
+    """The experiment table's errors (flow.errors) -> the advance:flow report: what is wrong and which steps wait for it."""
+    errs, steps = flow.errors, [k for k in flow.blocked if k not in flow.instances or flow.instances[k].scope != SOURCE]
+    more = f" (and {len(errs) - 5} more)" if len(errs) > 5 else ""
+    who = (f"; {len(steps)} steps with an error or after one are not queued ({', '.join(steps[:5])}{' ...' if len(steps) > 5 else ''})"
+           if steps else "")
+    return (f"The experiment table has errors: {'; '.join(errs[:5])}{more}. Entries with errors are left out{who}; "
+            "the other steps are queued as usual")
+
+
 def plan(s):
-    """-> (todo [dict(op=add|rerun|temp, id, ...)], stuck {problem id: explanation})."""
+    """-> (todo [dict(op=add|rerun|temp, id, ...)], stuck {problem id: explanation}). Steps an experiment table error blocks
+    (flow.blocked) are not queued, rerun or cleaned up; the rest are, and the errors are reported (advance:flow)."""
     global STORED
     NOTES.clear()
     STORED = None
@@ -82,9 +95,7 @@ def plan(s):
     if not mq:
         return [], {}
     flow = FC.build(queue_tasks=mq["tasks"])
-    if flow.errors:
-        more = f" (and {len(flow.errors) - 5} more)" if len(flow.errors) > 5 else ""
-        return [], {alert_id("advance", "flow"): "The experiment table has bad steps, so nothing was queued this time: " + "; ".join(flow.errors[:5]) + more}
+    stuck = {alert_id("advance", "flow"): flow_alert(flow)} if flow.errors else {}
     g = Graph(flow)
     inst = flow.instances
     queued = {t["key"]: t for t in mq["tasks"]}
@@ -92,10 +103,10 @@ def plan(s):
     try:
         miss = RM.store_op("done", dict(items={k: done_items(i) for k, i in inst.items()}))
     except RuntimeError as e:
-        return [], {alert_id("advance", "store"): f"cannot check results on the store ({e}), not queueing this round"}
+        return [], dict(stuck, **{alert_id("advance", "store"): f"cannot check results on the store ({e}), not queueing this round"})
     done = {k for k, m in miss.items() if not m and k not in moving}
     reruns = {}  # instance id -> done files to delete
-    cand = [i for i in inst.values() if i.step and i.step["rerun"] and i.id in done
+    cand = [i for i in inst.values() if i.step and i.step["rerun"] and i.id in done and i.id not in flow.blocked
             and (queued.get(i.id) or {}).get("state") in (None, proto.S_DONE)]
     if cand:
         files = {i.id: done_files(i) for i in cand}
@@ -110,7 +121,7 @@ def plan(s):
                 done.discard(i.id)
                 reruns[i.id] = files[i.id]
     STORED = set(done)
-    todo, stuck = [], {}
+    todo, held = [], []
     for k in g.order():
         i = inst[k]
         if i.scope == SOURCE or k in done:
@@ -120,14 +131,23 @@ def plan(s):
             continue
         if k in queued and k not in reruns:
             continue
+        if k in flow.blocked:
+            held.append(k)
+            continue
         if any(fnmatch.fnmatch(k, pat) for pat in P.HOLD):
             NOTES.append(f"{k}: HOLD, not queueing")
             continue
         if k in reruns:
             todo.append(dict(op="rerun", id=k, files=reruns[k]))
         todo.append(dict(op="add", id=k, nice=i.step["nice"], params=queue_params(i), queued=k in queued))
+    if held:
+        NOTES.append(f"{len(held)} steps are due but blocked by an error in the experiment table: "
+                     + "; ".join(f"{k} ({flow.blocked[k]})" for k in held[:5]) + (" ..." if len(held) > 5 else ""))
+    if flow.partial:
+        NOTES.append("entries are left out of the experiment table or have inputs that cannot be filled: no temp files are deleted "
+                     "until that is fixed (a step reading them may be among those entries)")
     for i in inst.values():
-        if not (i.step and i.step.get("temp")) or i.id not in done:
+        if flow.partial or not (i.step and i.step.get("temp")) or i.id not in done or i.id in flow.blocked:
             continue
         users = g.users.get(i.id, [])
         if users and all(u in done for u in users) and not g.descendants(i.id) & set(reruns):

@@ -14,7 +14,6 @@ import ast
 import datetime as dt
 import fnmatch
 import glob
-import hashlib
 import json
 import os
 import re
@@ -30,6 +29,7 @@ for d in ("sites", "monitor", "sync"):
     sys.path.insert(0, os.path.join(CORE, d))
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+import common as C  # noqa: E402
 import proto as PR  # noqa: E402
 cfg.use_config()
 # Import core modules first: a project's experiment table may add plugin dirs to sys.path with same-named recipes.py or relay_plugins.py
@@ -249,12 +249,34 @@ def check_machines(r):
     if len(local) > 1:
         r.bad(g, f"at most one executor may have ssh=None (same machine as the hub), now {local}")
     if st and M.MACHINES[st].get("data"):
-        real = lambda p: os.path.realpath(os.path.expanduser(p))  # noqa: E731
-        for n in M.executors():
-            if n != st and M.MACHINES[n].get("ssh") is None and M.MACHINES[st].get("ssh") is None \
-                    and (real(M.MACHINES[n]["root"]) + "/").startswith(real(M.MACHINES[st]["data"]).rstrip("/") + "/"):
-                r.bad(g, f"root of MACHINES[{n!r}] is inside the store's data dir: an executor's data must be separate from the home of results")
+        check_data_dirs(r, M, st)
     check_specs(r, M)
+
+
+def check_data_dirs(r, M, st):
+    """An executor that sees the store's files (the store itself, or both on the hub's machine, or the same ssh host): its
+    root is not inside the store's data dir, and its data dir (<root>/data) and the store's data dir do not overlap either way
+    (one is the other or inside it), paths compared after resolving (~ and symlinks, for machines on this one). With an
+    overlap a worker's done markers make the results count as already on the store, and the hub deletes the executor's copy:
+    the only one."""
+    g = "machines"
+    ssh = lambda n: M.MACHINES[n].get("ssh")  # noqa: E731
+
+    def where(n, p):
+        return os.path.realpath(os.path.expanduser(p)) if ssh(n) is None else os.path.normpath(p)
+
+    sd = where(st, M.MACHINES[st]["data"])
+    for n in M.executors():
+        if n != st and ssh(n) != ssh(st):
+            continue
+        root = M.MACHINES[n]["root"].rstrip("/")
+        rd, ed = where(n, root), where(n, f"{root}/{PR.ROOT['data']}")
+        if C.under(rd, sd):
+            r.bad(g, f"root of MACHINES[{n!r}] is inside the store's data dir: an executor's data must be separate from the home of results")
+        elif C.under(ed, sd) or C.under(sd, ed):
+            r.bad(g, f"MACHINES[{n!r}]: its data dir {ed} and the store's data dir {sd} overlap (one is the other or inside it): "
+                     "results written there would count as already on the store and the executor's copy, the only one, would be "
+                     "deleted; give the store a data dir of its own")
 
 
 PLACEHOLDERS = {"torch_mm", "abi", "cp"}  # placeholders allowed in pip packages of an env description (sites/envs.py pip_lines)
@@ -289,6 +311,8 @@ def check_specs(r, M):
         if odd:
             r.bad(g, f"env description {n}.yml has unknown pip placeholders {odd} (allowed: {sorted(PLACEHOLDERS)})")
         for v in list(sp.get("torch") or {}) or ["default"]:
+            if M.lock_stale(n, v):  # check_locks reports it; a build script needs a current lock
+                continue
             envs = {x: "spec" for x in names}
             envs[n] = ("spec", v)
             M.MACHINES[fake] = dict(label=fake, hostname=r"\A\Z", ssh="-", scheduler="pueue", root="/check/root",
@@ -302,7 +326,8 @@ def check_specs(r, M):
 
 
 def check_locks(r, M, names):
-    """<name>.<variant>.lock.json: the description exists and the recorded spec_sha256 is the current one (relock after a change)."""
+    """<name>.<variant>.lock.json: the description exists and the lock is current (mtab.lock_stale: the recorded spec_sha256 is
+    the description's, a venv's base lock is the one it was locked on; relock after a change)."""
     g = "machines"
     for p in sorted(glob.glob(os.path.join(M.SPECS, "*" + PR.LOCK_SUFFIX))):
         r.checked(g)
@@ -316,8 +341,9 @@ def check_locks(r, M, names):
         if f != f"{n}.{v}{PR.LOCK_SUFFIX}" or n not in names:
             r.bad(g, f"lock {f} has name / variant ({n} / {v}) that do not match the filename, or has no description {n}.yml")
             continue
-        if d.get("spec_sha256") != hashlib.sha256(open(os.path.join(M.SPECS, f"{n}.yml"), "rb").read()).hexdigest():
-            r.bad(g, f"lock {f} is from an older description ({n}.yml changed after locking); relock: taskq env lock {n} --variant {v}")
+        why = M.lock_stale(n, v)
+        if why:
+            r.bad(g, f"lock {why}")
 
 
 # ---------------- policy ----------------
@@ -434,11 +460,13 @@ def check_experiments(r):
     import experiments as E
     g = "experiments"
     try:
-        exps, final = E.load()  # fields (EXP_FIELDS, STEP_FIELDS) are checked on load
+        exps, final = E.load()  # fields (EXP_FIELDS, STEP_FIELDS) are checked on load; an entry with an error is left out (E.errors)
         ts = E.tasks()
     except Exception as e:  # noqa: BLE001
         r.bad(g, f"cannot read the experiment tables: {e}")
         return False
+    for x in E.errors():  # the later groups check what loaded
+        r.bad(g, x)
     if not exps:
         r.note(g, f"no experiments (OUTPUTS[\"experiments\"] = {cfg.outputs('experiments')!r})")
     for e in exps:
@@ -483,7 +511,8 @@ def check_flow(r):
     f = flow()
     r.checked(g, len(f.instances))
     for e in f.errors:
-        r.bad(g, e)
+        if e not in E.errors():  # entries left out of the tables: reported under experiments
+            r.bad(g, e)
     exps, final = E.load()
     steps = {st["name"]: st for e in exps for st in e["after"] + e["group_after"]} | {st["name"]: st for st in final}
     trains = {e["recipe"] for e in exps}
@@ -572,10 +601,10 @@ def check_smoke(r, k, sp, seen):
 
 # ---------------- each step ----------------
 def one_per_step():
-    """One instance of each step of each experiment (one of each FINAL step)."""
+    """One instance of each step of each experiment (one of each FINAL step); instances with errors are left out (check_flow reports them)."""
     seen = {}
     for i in flow().instances.values():
-        if i.step:
+        if i.step and not i.errors:
             seen.setdefault((i.exp, i.rule), i)
     return list(seen.values())
 
@@ -611,7 +640,7 @@ def check_inputs(r):
 
     def run(i):
         try:
-            return S.listed_inputs(S.fill(i.step["inputs_cmd"], i.names), root, i.step.get("vars"), timeout=120), None
+            return S.listed_inputs(i.step["inputs_cmd"], root, i.step.get("vars"), timeout=120), None
         except Exception as e:  # noqa: BLE001
             return None, str(e)
     try:

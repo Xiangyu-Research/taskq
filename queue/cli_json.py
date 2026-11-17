@@ -117,9 +117,10 @@ def exp_steps(argv):
     return 0
 
 
-def _fill_data(text, names, data):
+def _fill_data(text, data):
+    """A step's cmd (names filled by flow/compile.py) -> {data} and {repo} expanded too."""
     import spec as S
-    return S.fill(S.fill(text, names), dict(data=data, repo=cfg.REPO), keep=())
+    return S.fill(text, dict(data=data, repo=cfg.REPO), keep=())
 
 
 def step_row(i, lv, done, data):
@@ -127,11 +128,11 @@ def step_row(i, lv, done, data):
     import site_ops as SO
     st = i.step
     row = dict(level=lv, exp=i.exp or None, key=i.task or None, id=i.id, name=st["name"], cmd=None, names=E.jsonable(i.names),
-               out=list(i.outputs), inputs=list(i.inputs), done=None, needs=None, error=None)
+               out=list(i.outputs), inputs=list(i.inputs), done=None, needs=None, error="; ".join(i.errors) or None)
     try:
-        row["cmd"] = _fill_data(st["cmd"], i.names, data)
+        row["cmd"] = _fill_data(st["cmd"], data)
     except Exception as e:  # noqa: BLE001
-        row["error"] = f"cannot fill cmd: {e}"
+        row["error"] = row["error"] or f"cannot fill cmd: {e}"
     if done:
         row["done"] = not SO.done_missing(data, i.outputs[0], proto.done_items(st["done"]))
     return row
@@ -144,7 +145,7 @@ def need_rows(rows, insts, data):
     def one(x):
         r, i = x
         try:
-            r["needs"] = S.listed_inputs(S.fill(i.step["inputs_cmd"], i.names), data, i.step.get("vars"))
+            r["needs"] = S.listed_inputs(i.step["inputs_cmd"], data, i.step.get("vars"))
         except Exception as e:  # noqa: BLE001
             r["error"] = str(e)
     with ThreadPoolExecutor(8) as ex:

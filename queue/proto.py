@@ -43,7 +43,8 @@ def blob(h):
     return f"blobs/{h[:2]}/{h}"
 
 
-BLOB_STAT = ".st"       # blobs/<h2>/<h>.st: "size mtime(ns)" of a blob when ingested and sha256-checked; mismatch (hardlink source changed in place) -> drop and ingest again
+BLOB_STAT = ".st"       # blobs/<h2>/<h>.st: "size mtime(ns)" of a blob when ingested or received and sha256-checked; mismatch (hardlink source changed in place) -> drop and ingest again
+BLOB_STAMP = "{size} {mtime_ns}"  # what a .st record holds (site_ops.stamp; the tunnel's receiving side fills it after checking a pushed blob's sha256)
 PIN_TTL = 12 * 3600     # a pinned blob (state/pins/<key>.json) no longer counts as pinned after this long without an update
 TMP_KEEP = 24 * 3600    # temp files with a dot in blobs (half-transferred) are kept this long
 TMP = ".tmp"            # suffix of half-written files (common.tmp_of: <name>.<pid>.tmp), renamed when done

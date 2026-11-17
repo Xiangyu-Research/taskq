@@ -141,6 +141,38 @@ ok("an executor with ssh=None and the store on another machine: the store must a
 ok("an executor with a locked env: hub needs root, and transfer when sent over a tunnel",
    "hub (hub) needs root: site-pueue use locked envs" in err and "hub (hub) needs transfer: site-pueue" in err)
 
+# the store's data dir and an executor's data dir (<root>/data) on the same machine must not overlap either way: a worker's done
+# markers would make results count as already on the store, and the hub would delete the executor's copy (the only one)
+OVER = "data dir {} and the store's data dir {} overlap"
+EXEC = ('roles=("hub", "store"), repo="~/auto/demo",', 'roles=("hub", "store"), repo="~/auto/demo", scheduler="pueue", workers=[dict(cpus=2)],')
+dd = os.path.realpath(fixture.tmpdir())
+
+
+def ok_err(what, cond, err):
+    ok(what, cond)
+    if not cond:
+        print(err)
+
+
+rc, err = machines_err(EXEC, ('data="/data/others/DEMO_DATA"', f'data="{dd}/st"'), ('root="~/demo_root"', f'root="{dd}/root"'))
+ok_err("the store is also an executor with a data dir of its own: nothing reported", "overlap" not in err and "inside the store's data dir" not in err, err)
+rc, err = machines_err(EXEC, ('data="/data/others/DEMO_DATA"', f'data="{dd}/root/data"'), ('root="~/demo_root"', f'root="{dd}/root"'))
+ok_err("the store is also an executor and its data dir is the store's data dir: reported", rc == 1 and "MACHINES['hub']: its " + OVER.format(f"{dd}/root/data", f"{dd}/root/data") in err, err)
+rc, err = machines_err(EXEC, ('data="/data/others/DEMO_DATA"', f'data="{dd}/root/data/results"'), ('root="~/demo_root"', f'root="{dd}/root"'))
+ok_err("the store's data dir inside the executor's data dir: reported", rc == 1 and OVER.format(f"{dd}/root/data", f"{dd}/root/data/results") in err, err)
+rc, err = machines_err(EXEC, ('data="/data/others/DEMO_DATA"', f'data="{dd}/root"'), ('root="~/demo_root"', f'root="{dd}/root"'))
+ok_err("the executor's root (so its data dir) inside the store's data dir: reported", rc == 1 and "root of MACHINES['hub'] is inside the store's data dir" in err, err)
+os.makedirs(f"{dd}/root2")
+os.makedirs(f"{dd}/st2")
+os.symlink(f"{dd}/st2", f"{dd}/root2/data")
+rc, err = machines_err(EXEC, ('data="/data/others/DEMO_DATA"', f'data="{dd}/st2"'), ('root="~/demo_root"', f'root="{dd}/root2"'))
+ok_err("the executor's data dir is a link to the store's data dir: found after resolving links, reported",
+       rc == 1 and OVER.format(f"{dd}/st2", f"{dd}/st2") in err, err)
+rc, err = machines_err(('data="/data/others/DEMO_DATA"', f'data="{dd}/loc/data"'),
+                       ('\n}\n', f'\n    "loc": dict(label="L", hostname=r"xl", scheduler="pueue", root="{dd}/loc", workers=[dict(gpu="0")]),\n}}\n'))
+ok_err("another executor on the store's machine (both ssh=None) whose data dir is the store's: reported",
+       rc == 1 and "MACHINES['loc']: its " + OVER.format(f"{dd}/loc/data", f"{dd}/loc/data") in err, err)
+
 # broken labels plugin: wrong value types, PLAN_TITLES() fails; --only plugins reports them
 lab = os.path.join(fixture.tmpdir(), "plugins")
 os.makedirs(lab)
@@ -243,7 +275,8 @@ ok("step has the wrong type (device), out is empty, each is not a list", f"step 
 restore()
 e0 = exps[0]
 e0["after"][-1] = dict(e0["after"][-1], cmd="echo {nosuch}")
-ok("unknown name in a step command: cannot become a hub queue task", "{nosuch}" in problems("steps"))
+ok("unknown name in a step command: reported when compiling the order (flow), not again under steps",
+   "cmd: unknown {nosuch}" in problems("flow") and "{nosuch}" not in problems("steps"))
 restore()
 
 ev = next(st for st in exps[0]["after"] if st["name"] == "eval")
@@ -296,6 +329,19 @@ try:
     ok("output not under a {smoke} dir: reported", "{smoke}" in smk())
 finally:
     K.SG.SMOKE.pop("toy", None)
+
+# tables with errors next to the test table (fixture.BAD_TABLES; last: experiments' cache is replaced): each entry left out is
+# reported once under experiments, the later groups check what loaded
+fixture.read_tables(fixture.exp_tables(fixture.BAD_TABLES))
+K._FLOW.clear()
+rep = K.run(only=["experiments", "flow", "tasks"])
+by = {}
+for g, m in rep.problems:
+    by.setdefault(g, []).append(m)
+ok(f"bad tables: experiments lists each entry left out, flow only the instances' errors, tasks still checked ({by})",
+   len(by.get("experiments", [])) == 5 and any("SyntaxError" in m for m in by["experiments"])
+   and sorted(m.split(":")[0] for m in by.get("flow", [])) == ["xa1/xa_f0", "xc1/xc_f0"] and "tasks" not in by)
+fixture.read_tables(None)
 
 print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)

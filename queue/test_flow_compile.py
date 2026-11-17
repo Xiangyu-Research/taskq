@@ -6,12 +6,15 @@
       experiment-level each expansion all count); inputs in no output are raw data, training's shared fetch.extra is not;
    3. topological order, upstream/downstream, who (longest prefix), dag; tasks in the hub queue outside the experiment table are sources too;
    4. checks: unknown template names, wildcard outputs, overlapping outputs, an input inside its own outputs, temp patterns that
-      leave the output or hit a done marker, cycles.
+      leave the output or hit a done marker, cycles;
+   5. an error blocks only the instances it concerns and those after them (cmd and inputs_cmd are filled when compiling); tables
+      with errors next to the test table (fixture.BAD_TABLES) leave the test table's instances as they are.
     python3 queue/test_flow_compile.py
 """
 import copy
 import os
 import random
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -211,6 +214,60 @@ def loop(exps, final):
 ok(any("cycle in the order" in p for p in compiled(loop)), "a cycle")
 ok(FC.cycles({"a": Instance("a", EACH, "r", deps=["b"]), "b": Instance("b", EACH, "r", deps=["a"])}) == ["cycle in the order: a -> b -> a"],
    "cycles: each cycle once")
+
+
+# ---- 5. an error holds back only the instances it concerns and those after them ----
+def built(edit):
+    exps, final = copy.deepcopy(EXPS), copy.deepcopy(FINAL)
+    edit(exps, final)
+    return FC.build(exps, final)
+
+
+ok(not F.blocked and not F.partial, f"whole tables: nothing blocked {list(F.blocked)[:3]}")
+ok(not [k for i in inst.values() if i.step for k in re.findall(r"(?<!\$)\{(\w+)\}", i.step["cmd"] + (i.step.get("inputs_cmd") or ""))
+        if k not in S.BUILTIN], "cmd and inputs_cmd are filled when compiling ({data} left for the executor)")
+
+
+def names_bad(exps, final):
+    step_of(exps, "t0", "eval")["cmd"] = "run {nosuch_cmd}"
+    step_of(exps, "t0", "infer")["inputs_cmd"] = "list {nosuch_in}"
+
+
+FB = built(names_bad)
+ok(any(p.startswith("eval/t0_f0: cmd: unknown {nosuch_cmd}") for p in FB.errors)
+   and any(p.startswith("infer/t0_f3: inputs_cmd: unknown {nosuch_in}") for p in FB.errors),
+   "a bad name in cmd or inputs_cmd is reported when compiling, though nothing has run yet")
+own_b = {f"{s}/t0_f{f}" for s in ("infer", "eval") for f in "01234"}
+want_b = own_b.union(*(G.descendants(k) for k in own_b))
+ok(set(FB.blocked) == want_b and {"lprob/t0_f0", "ens/t0", "paired/t3b", "compare_all"} <= want_b and "infer/t3b_f0" not in want_b,
+   f"blocked: those instances and everything after them (lprob, ens/t0, each paired that reads it, compare_all), nothing else: "
+   f"extra {sorted(set(FB.blocked) - want_b)[:4]}, missing {sorted(want_b - set(FB.blocked))[:4]}")
+ok(FB.blocked["lprob/t0_f2"] in ("after infer/t0_f2, which has an error", "after eval/t0_f2, which has an error")
+   and "nosuch_cmd" in FB.blocked["eval/t0_f2"] and FB.instances["eval/t0_f2"].errors, "blocked: says why")
+ok(set(FB.instances) == set(inst), "instances with errors stay in the graph (their outputs keep readers waiting)")
+FO = built(same)
+ok({"eval/t0_f0", "lprob/t0_f0"} <= set(FO.blocked) and "eval/t3b_f0" not in FO.blocked, "overlapping outputs block both instances")
+FL = built(loop)
+ok({"oof/t3b", "paired/t3b"} <= set(FL.blocked) and "oof/t3g" not in FL.blocked, "a cycle blocks its instances")
+
+fixture.read_tables(fixture.exp_tables(fixture.BAD_TABLES))
+FE = FC.build()
+fixture.read_tables(None)
+ok(all(k in FE.instances and FE.instances[k].deps == i.deps and k not in FE.blocked for k, i in inst.items()),
+   "tables with errors next to the test table: its instances are all there with the same order, none blocked")
+ok(sum(1 for p in FE.errors if "broken/experiments.py cannot be loaded" in p and "SyntaxError" in p) == 1
+   and any("unknown fields nicee" in p for p in FE.errors) and any("xfin" in p and "cmd" in p for p in FE.errors)
+   and any("duplicate experiment ids" in p and "xg" in p for p in FE.errors) and any("X8/V_save/0" in p for p in FE.errors),
+   f"table errors are flow errors: a table that cannot be imported, an unknown field, a duplicate id or task name: {FE.errors}")
+ok(set(FE.blocked) == {"xa1/xa_f0", "xa2/xa_f0", "xc1/xc_f0", "xd1/xd_f0"} and "{frg}" in FE.blocked["xa1/xa_f0"]
+   and FE.blocked["xa2/xa_f0"] == "after xa1/xa_f0, which has an error" and FE.blocked["xd1/xd_f0"] == "after xc1/xc_f0, which has an error",
+   f"bad name in cmd: blocked with the next step of its task; out cannot be filled: blocked with what reads it: {FE.blocked}")
+ok("xb1/xb_f0" in FE.instances and "xc1/xc_f0" not in FE.instances and FE.partial,
+   "the fine experiment of that table compiles; a step whose out cannot be filled has no instance; the flow is partial")
+_o = FC.Outs()
+_o.add("x/**/c", "g")
+ok(_o.match("x/a/b/c") == {"g"} and _o.match("x/a/c/d") == {"g"} and _o.match("x") == {"g"} and not _o.match("x/a/b")
+   and not _o.match("x/c"), "an unknown name in an output stands for one or more components")
 
 print("\n".join(fails) if fails else f"flow compile: {len(inst)} instances, all fine")
 sys.exit(1 if fails else 0)

@@ -7,7 +7,9 @@ dir; store operations (done, probe, rm) really run site_ops.py.
   3. rerun: an input newer than the done file -> delete the done file (on the store) and redo; upstream not done -> no redo;
   4. temp: every user finished -> delete temp files on the store, leave the rest; a downstream rerun -> do not delete; the store
      deletes files only (never a directory that still holds something, nothing reached through ..);
-  5. HOLD, AUTO["advance"]=False (only write what would be done), bad experiment table, unreachable store: reported right;
+  5. HOLD, AUTO["advance"]=False (only write what would be done), unreachable store: reported right; errors in the experiment
+     tables (fixture.BAD_TABLES) hold back only the steps they concern and those after them, the rest are queued, no temp files
+     are deleted while entries are left out;
   6. adding to the queue really runs taskq.py add (temp state dir); queued tasks carry step, key is the instance id.
     python3 queue/test_advance.py
 """
@@ -69,9 +71,9 @@ def touch(rel, text="", age=0):
     return p
 
 
-def finish(iid, age=0):
+def finish(iid, age=0, inst=None):
     """Put the instance's result on the store (first alternative of each done item)."""
-    i = INST[iid]
+    i = (inst or INST)[iid]
     it = A.done_items(i)
     for d in it["done"]:
         touch(f"{it['out']}/{d[0] if isinstance(d, list) else d}", age=age)
@@ -224,11 +226,27 @@ ok("run: saves the keys whose done files are on the store (taskq status shows un
    EV.stored(_db) == A.STORED and "eval/t0_f1" not in A.STORED and len(A.STORED) > 0)
 _db.close()
 del os.environ["TASKQ_DB"]
-saved = A.FC.build
-A.FC.build = lambda **kw: type("F", (), dict(errors=["output a of x is also b's"], instances={}))()
+# errors in the experiment tables (fixture.BAD_TABLES next to the test table): only what they concern waits
+fixture.read_tables(fixture.exp_tables(fixture.BAD_TABLES))
+FX = FC.build().instances
+for k in ("X1/V_save/0", "X2/V_save/0", "X4/V_save/0"):
+    finish(k, inst=FX)
+touch(inf.outputs[0] + "/G-A/c.prob")  # every user of infer/t0_f0 is done: with whole tables its temp files would go
 todo, stuck = A.plan(snap())
-A.FC.build = saved
-ok("bad experiment table: queue nothing, report advance:flow", not todo and list(stuck) == [proto.alert_id("advance", "flow")])
+got = adds(todo)
+ok("table errors: the fine step of the same table (xb1) and the test table's due step (eval/t0_f1) are queued; xa1 (bad name in "
+   "cmd), xa2 after it, xc1 (out cannot be filled) and xd1 (reads xc1's output) are not",
+   "xb1/xb_f0" in got and "eval/t0_f1" in got and not {"xa1/xa_f0", "xa2/xa_f0", "xc1/xc_f0", "xd1/xd_f0"} & set(got))
+msg = stuck.get(proto.alert_id("advance", "flow"), "")
+ok(f"table errors: reported as advance:flow with the errors and the steps they block ({msg[:300]})",
+   list(stuck) == [proto.alert_id("advance", "flow")] and "SyntaxError" in msg and "nicee" in msg and "xa1/xa_f0" in msg
+   and "xd1/xd_f0" in msg and "and 2 more" in msg)
+ok("table errors: a step due but blocked is in the notes with why", any("xa1/xa_f0" in n and "{frg}" in n for n in A.NOTES))
+ok("table errors: entries are left out, so no temp files are deleted (a left-out step may read them)",
+   not [t for t in todo if t["op"] == "temp"] and any("no temp files are deleted" in n for n in A.NOTES))
+fixture.read_tables(None)
+ok("tables whole again: those temp files are deleted as usual", [t for t in A.plan(snap())[0] if t["op"] == "temp" and t["id"] == "infer/t0_f0"])
+os.remove(os.path.join(DATA, inf.outputs[0], "G-A", "c.prob"))
 M.MACHINES[HUB]["data"] = os.path.join(DATA, "nosuch")
 todo, stuck = A.plan(snap())
 M.MACHINES[HUB]["data"] = DATA

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Test the experiments.py commands: list, tasks (--json), name-of, env-of, fixed config.
+"""Test the experiments.py commands: list, tasks (--json), name-of, env-of, fixed config; tables with errors next to the test table
+(fixture.BAD_TABLES) leave out only their bad entries (load, resolve_task, the commands, taskq status).
 
     python3 queue/test_experiments_cli.py
 """
@@ -15,6 +16,7 @@ fixture.use()
 sys.path.insert(0, HERE)
 import experiments as E  # noqa: E402
 import proto  # noqa: E402
+import spec as S  # noqa: E402
 
 fails = 0
 
@@ -81,6 +83,48 @@ print('ok')
 """
 r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=os.environ.copy())
 ok("after an experiment table inserts its plugin dir, check_fields still uses the core recipes", r.returncode == 0 and "ok" in r.stdout)
+
+# Each table loads on its own: tables with errors (fixture.BAD_TABLES) next to the test table leave out only their bad entries
+ids, keys, t0 = [e["id"] for e in E.load()[0]], list(E.tasks()), next(t for t in E.tasks().values() if t["exp"] == "t0")
+PAT = fixture.exp_tables(fixture.BAD_TABLES)
+fixture.read_tables(PAT)
+errs = E.errors()
+ok(f"bad tables: every problem listed once, the rest loads ({errs})", len(errs) == 5 and "SyntaxError" in errs[0]
+   and "unknown fields nicee" in errs[1] and "xfin" in errs[2] and "xg" in errs[3] and "X8/V_save/0" in errs[4]
+   and [e["id"] for e in E.load()[0]] == ids + ["xa", "xb", "xc", "xd"] and list(E.tasks())[:len(keys)] == keys
+   and [st["name"] for st in E.load()[1]] == ["compare_all"])
+ok("bad tables: a queued task of the test table resolves as before (with its experiment's fields)",
+   E.resolve_task(t0["recipe"], t0["params"], "t0") == t0["spec"] and t0["spec"]["metrics"])
+try:
+    E.resolve_task("toy", dict(ds="X5", frag="0"), "xe")
+    got = None
+except S.SpecError as err:
+    got = err
+ok(f"bad tables: a queued task whose experiment is not found is an error (it may be left out; its fields would change the spec): {got}",
+   got is not None and not isinstance(got, E.NotFound) and "xe" in str(got) and "SyntaxError" in str(got))
+fixture.read_tables(None)
+ok("whole tables again: no errors", E.errors() == [] and [e["id"] for e in E.load()[0]] == ids)
+BAD_ENV = dict(os.environ, TASKQ_CONFIG=fixture.config_reading(PAT))
+r = subprocess.run([sys.executable, os.path.join(HERE, "experiments.py"), "list"], capture_output=True, text=True, env=BAD_ENV)
+ok("bad tables: list prints what loaded, the entries left out and why on stderr, exit 1",
+   r.returncode == 1 and r.stdout.startswith("t0\t") and "\nxd\t" in r.stdout and "SyntaxError" in r.stderr and "nicee" in r.stderr)
+r = subprocess.run([sys.executable, os.path.join(HERE, "experiments.py"), "env-of", "/x/X5/V_save__PlanM__full"],
+                   capture_output=True, text=True, env=BAD_ENV)
+ok("bad tables: env-of a model not found -> 1 (it may be left out), not 4 (not in the tables)", r.returncode == 1 and "left out" in r.stderr)
+r = subprocess.run([sys.executable, os.path.join(HERE, "experiments.py"), "env-of", "/x/X2/V_save__PlanM__full"],
+                   capture_output=True, text=True, env=BAD_ENV)
+ok("bad tables: env-of a model of a fine experiment in that table answers as usual", r.returncode == 0 and r.stdout == "base\n" and not r.stderr)
+# taskq status on a queue holding a task of the test table and one of an experiment left out: it reads, only that task is bad
+Q, D = fixture.tmpdir(), fixture.tmpdir()
+with open(os.path.join(Q, "tasks.jsonl"), "w", encoding="utf-8") as f:
+    f.write(json.dumps(dict(order=1, nice=0, key=t0["key"], exp="t0", recipe="toy", params=t0["params"])) + "\n")
+    f.write(json.dumps(dict(order=2, nice=0, key="X5/V_save/0", exp="xe", recipe="toy", params=dict(ds="X5", frag="0"))) + "\n")
+r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json"], capture_output=True, text=True,
+                   env=dict(BAD_ENV, TASKQ_DIR=Q, TASKQ_DATA=D, TASKQ_MACHINE="slurm-login"))
+rows = {t["key"]: t for t in (S.json_in(r.stdout) or {}).get("tasks") or []}
+ok(f"bad tables: taskq status reads; the test table's task as usual, the left-out experiment's task is bad ({r.returncode} {r.stderr[-300:]})",
+   r.returncode == 0 and rows.get(t0["key"], {}).get("state") == proto.S_FREE and rows[t0["key"]]["spec"]["metrics"]
+   and rows.get("X5/V_save/0", {}).get("state") == proto.S_BAD)
 
 print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)

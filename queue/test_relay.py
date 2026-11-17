@@ -974,6 +974,9 @@ def test_e2e():
     links = [os.path.join(dp, f) for dp, _, fs in os.walk(pre) for f in fs]
     assert links and all(os.path.islink(p) and os.path.isfile(p) for p in links), links
     assert all(os.path.realpath(p).startswith(os.path.join(RROOT, "blobs") + "/") for p in links)
+    got = sorted({os.path.realpath(p) for p in links})
+    assert all(open(b + proto.BLOB_STAT).read() == SO.stamp(b) for b in got), got  # recorded while receiving: missing / view compare stats, read nothing
+    assert any("tunnel transfer" in x or "missing over there" in x for x in said), said
     assert not os.path.exists(os.path.join(pre, proto.INCOMPLETE))
     gt = sorted(os.listdir(os.path.join(pre, "gt")))
     assert gt == sorted(c + ".dat" for c in TN.CASES), gt

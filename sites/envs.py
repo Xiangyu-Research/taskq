@@ -75,7 +75,8 @@ def variant_of(name, env):
 
 
 def vhash(env, v):
-    """Hash of the spec plus this variant's lock: what .ok records and states compare against."""
+    """What the env is built from (mtab.spec_hash: the spec plus this variant's lock, or without one the variant and a venv's
+    base): what .ok records and states compare against."""
     return M.spec_hash(env, v)
 
 
@@ -134,7 +135,8 @@ def pip_lines(pkgs):
 
 # ---------------- lock files and wheelhouse ----------------
 def load_lock(env, v):
-    """<name>.<variant>.lock.json → dict; none → None; wrong format → EnvError."""
+    """<name>.<variant>.lock.json → dict; none → None; wrong format, or stale (mtab.lock_stale: the spec changed after
+    locking, or a venv's base was locked again) → EnvError: building from it would build the old env under the new hash."""
     p = M.lock_path(env, v)
     if not os.path.isfile(p):
         return None
@@ -156,6 +158,9 @@ def load_lock(env, v):
             raise EnvError(f"{fn}: bad name or version for pip package {x.get('name')}")
     if lk.get("conda") and lk.get("base"):
         raise EnvError(f"{fn}: an env with a base (venv) cannot have conda packages")
+    why = M.lock_stale(env, v)
+    if why:
+        raise EnvError(why)
     return lk
 
 
