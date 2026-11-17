@@ -723,7 +723,8 @@ def op_push(A):
 def place(src, D, written, sp, links=()):
     """Move verified results (under src, same relative paths as the data dir) into data dir D, markers last: regular files →
     files matching fetch.extra in out's parent (keep existing ones) → output symlinks (links [(relative path, target relative
-    to the data dir)], written as relative links) → MANIFEST.json → done markers (in reverse done order, first item last)."""
+    to the data dir)], written as relative links) → flush them and their dirs to disk → MANIFEST.json → done markers (in
+    reverse done order, first item last) → flush the markers' dirs. After a power cut a marker never points at missing data."""
     S = mods()[2]
     o = S.outputs(sp)
     rout = o["outs"][0]
@@ -739,16 +740,29 @@ def place(src, D, written, sp, links=()):
         p = os.path.join(D, w)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         os.replace(os.path.join(src, w), p)
+
+    def dirs(rels):  # every dir from D down to each path's dir: new dirs' entries live in their parents
+        out = {D}
+        for r in rels:
+            d = os.path.dirname(r)
+            while d:
+                out.add(os.path.join(D, d))
+                d = os.path.dirname(d)
+        return sorted(out)
+    moved = list(first)
     for w in first:
         mv(w)
     for w in parent:
         if not os.path.exists(os.path.join(D, w)):
             mv(w)
+            moved.append(w)
     for rel, to in links:
         p = os.path.join(D, rel)
         C.atomic_link(os.path.relpath(os.path.join(D, to), os.path.dirname(p)), p)
+    C.fsync_paths([os.path.join(D, w) for w in moved] + dirs(moved + [r for r, _ in links] + man + done))
     for w in man + done:
         mv(w)
+    C.fsync_paths(dirs(man + done))
 
 
 def op_pull(A):

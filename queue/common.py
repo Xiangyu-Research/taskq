@@ -48,6 +48,22 @@ def atomic_write(path, data):
     atomic_put(path, make)
 
 
+def fsync_paths(paths):
+    """Flush files and directories (their entries) to disk, so a marker written after them never lands before the data it
+    marks; paths that are gone, and directories a filesystem refuses to sync, are skipped."""
+    for p in paths:
+        try:
+            fd = os.open(p, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
 def atomic_link(target, path):
     """Replace path with a symlink to target."""
     atomic_put(path, lambda tmp: os.symlink(target, tmp))

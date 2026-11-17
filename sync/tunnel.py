@@ -85,6 +85,17 @@ def md5_of(path):
     return h.hexdigest()
 
 
+def settle(part, path):
+    """Move a fully received file into place, flushed to disk first: after a power cut the name never points at data
+    that was not written yet (results are marked done on the strength of these files)."""
+    fd = os.open(part, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(part, path)
+
+
 # ---------------- file server on this machine ----------------
 # All transfers share one file server process on bind (_serve): the first transfer starts it, another starts it again if
 # it died, and it exits after IDLE seconds without sessions. Each transfer is a session:
@@ -259,7 +270,7 @@ def handler(reg):
                 m = int(g["mtime"])
                 os.chmod(part, int(g["mode"]) & 0o7777)
                 os.utime(part, ns=(m, m))
-                os.replace(part, os.path.join(S.dst, rel))
+                settle(part, os.path.join(S.dst, rel))
             elif os.path.exists(part):
                 os.unlink(part)
             S.emit("D", rel, ok)
@@ -513,7 +524,7 @@ def home_path(p):
 
 def local_copy(src, dst, rels, link=False):
     """Executor on the same machine as this one: copy src/<rel> → dst/<rel> here directly, no tunnel.
-    Write to .tunnelpart in the same dir, check the size (push also checks MD5), keep mtime and mode, then rename; skip
+    Write to .tunnelpart in the same dir, check the size (push also checks MD5), keep mtime and mode, flush, then rename; skip
     files that exist with the same size and mtime. link (push): try a hard link first (blobs are named by content and
     never change, same as ingest), copy and check MD5 if on another disk. Return the files not copied (partials removed)."""
     bad = []
@@ -539,7 +550,7 @@ def local_copy(src, dst, rels, link=False):
                 raise IOError(f"copied only {os.path.getsize(part)} / {st.st_size} bytes")
             if link and not linked and md5_of(part) != md5_of(a):
                 raise IOError("MD5 mismatch")
-            os.replace(part, b)
+            settle(part, b)
         except OSError as e:
             log(f"failed {r}: {e}")
             bad.append(r)
@@ -681,7 +692,7 @@ def remote_fetch(plan):
                 digest = md5_of(p + ".tunnelpart")
                 os.chmod(p + ".tunnelpart", mode)
                 os.utime(p + ".tunnelpart", ns=(mtime, mtime))
-                os.replace(p + ".tunnelpart", p)
+                settle(p + ".tunnelpart", p)
                 return digest
             digest = retry(get, rel)
             if digest is None:

@@ -351,5 +351,18 @@ ok("local copy interrupted halfway: reported not copied (caller does not count i
 bad = tunnel.pull(None, lsrc, lpull, [("a/x.bin", FILES["a/x.bin"]), ("top.pth", FILES["top.pth"])])
 ok("local copy after a half-copy: completed", not bad and same(lsrc, lpull, ["a/x.bin", "top.pth"]))
 
+events, real_fsync, real_replace = [], tunnel.os.fsync, tunnel.os.replace
+tunnel.os.fsync = lambda fd: (events.append(("sync", os.readlink(f"/proc/self/fd/{fd}"))), real_fsync(fd))[1]
+tunnel.os.replace = lambda a, b: (events.append(("move", os.path.realpath(a))), real_replace(a, b))[1]
+try:
+    shutil.rmtree(lpull)
+    bad = tunnel.pull(None, lsrc, lpull, [(r, n) for r, n in FILES.items()])
+finally:
+    tunnel.os.fsync, tunnel.os.replace = real_fsync, real_replace
+moves = [a for k, a in events if k == "move" and a.endswith(".tunnelpart")]
+ok("received files are flushed to disk before they get their final name (after a power cut a name never points at unwritten data)",
+   not bad and same(lsrc, lpull, FILES) and len(moves) == len(FILES)
+   and all(("sync", a) in events and events.index(("sync", a)) < events.index(("move", a)) for a in moves))
+
 print(f"\n{len(FAILS)} failures" if FAILS else "\nall passed")
 sys.exit(1 if FAILS else 0)

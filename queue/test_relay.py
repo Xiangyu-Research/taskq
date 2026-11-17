@@ -869,10 +869,24 @@ def test_place():
     written = ["preds/m/frag_0/DONE", "preds/m/frag_0/MANIFEST.json", "preds/m/frag_0/c1.dat", "preds/m/note.txt"]
     for w in written:
         TN.wb(os.path.join(src, w), b"n")
-    with spy_replace(D) as seen:
-        SO.place(src, D, written, sp)
+    syncs, real_sync = [], SO.C.fsync_paths
+
+    def spy_sync(ps):
+        syncs.append((len(seen), [os.path.relpath(p, D) for p in ps]))
+        real_sync(ps)
+    SO.C.fsync_paths = spy_sync
+    try:
+        with spy_replace(D) as seen:
+            SO.place(src, D, written, sp)
+    finally:
+        SO.C.fsync_paths = real_sync
     assert seen == ["preds/m/frag_0/c1.dat", "preds/m/note.txt", "preds/m/frag_0/MANIFEST.json", "preds/m/frag_0/DONE"], seen
     ok("fetch: MANIFEST.json moves before done markers and after regular files")
+    assert [n for n, _ in syncs] == [2, 4], syncs
+    assert {"preds/m/frag_0/c1.dat", "preds/m/note.txt", "preds/m/frag_0", "preds/m", "preds", "."} <= set(syncs[0][1]), syncs
+    assert "preds/m/frag_0" in syncs[1][1], syncs
+    ok("fetch: data files and their dirs are flushed to disk before the first marker moves in, the markers' dirs after "
+       "(after a power cut a marker never points at missing data)")
 
     src, D = os.path.join(T, "place3_src"), os.path.join(T, "place3_dst")
     sp = dict(key="o/0", out="o/f0", done=["first.flag", "second.flag|alt.flag", "third.flag"], fetch=dict(extra=[]))
