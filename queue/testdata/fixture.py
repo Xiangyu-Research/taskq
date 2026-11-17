@@ -6,7 +6,8 @@
 Call use() before importing modules that read config (machines, policy, recipes, relay_plugins, spec, experiments...): it sets
 TASKQ_CONFIG and TASKQ_PLUGINS here (overriding existing values) and puts noremote/ before the real ssh on PATH (ssh and scp fail
 at once, so a test that forgets its fake ssh still cannot reach a real machine; a test's own fake ssh earlier on PATH works as
-usual); child processes inherit it. Bash tests source fixture.sh.
+usual); child processes inherit it. It also turns off the on-disk format stamp check (TASKQ_FORMAT_ANY=1, unless already set:
+a test of the check sets 0). Bash tests source fixture.sh.
 """
 import atexit
 import os
@@ -48,6 +49,7 @@ def use():
     os.environ["TASKQ_CONFIG"] = CONFIG
     os.environ["TASKQ_PLUGINS"] = PLUGINS
     os.environ["PATH"] = guard_path(os.environ.get("PATH", ""))
+    os.environ.setdefault("TASKQ_FORMAT_ANY", "1")  # state built by hand has no format stamp (a test that checks the stamp sets 0)
     if not os.environ.get("TASKQ_DB"):  # the hub database and plain text logs: tests never use the real ones
         sys.path.insert(0, os.path.dirname(FIX)) if os.path.dirname(FIX) not in sys.path else None
         import proto

@@ -214,6 +214,50 @@ def changed(name, value):
     return True
 
 
+# ---------------- on-disk format stamp (proto.FORMAT_FILE; taskq self migrate writes it) ----------------
+def format_path():
+    """The format stamp of the state this process uses: <state dir>/format on the hub, <root>/state/format (proto.ROOT format)
+    in an executor or store root (TASKQ_ROOT)."""
+    return _cfg().state(_proto().FORMAT_FILE)
+
+
+def format_on_disk(path=None):
+    """The format version a stamp records -> int; 0 when there is none (state from before stamps); None when unreadable."""
+    try:
+        with open(path or format_path(), encoding="utf-8") as f:
+            return int(f.read().strip())
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError):
+        return None
+
+
+def write_format(v, path=None):
+    atomic_write(path or format_path(), f"{v}\n")
+
+
+def format_problem(path=None, fresh=False):
+    """Is the state here in this code's on-disk format (proto.FORMAT)? -> None when it is, else what to tell the user.
+    fresh: nothing here was written by an older taskq (a new hub): stamp it with this code's format instead. The test-only
+    TASKQ_FORMAT_ANY=1 turns the check off (tests that build state by hand)."""
+    P = _proto()
+    if os.environ.get("TASKQ_FORMAT_ANY") == "1":
+        return None
+    p = path or format_path()
+    if fresh and not os.path.lexists(p):
+        write_format(P.FORMAT, p)
+    v = format_on_disk(p)
+    if v == P.FORMAT:
+        return None
+    if v is None:
+        return f"cannot read the on-disk format stamp {p}; it should hold {P.FORMAT} (taskq self migrate writes it)"
+    if v < P.FORMAT:
+        return (f"the state here is in on-disk format {v} ({p}{', no stamp' if v == 0 else ''}), this taskq needs format {P.FORMAT}: "
+                "run `taskq self migrate` on the hub (it lists the steps; --apply runs them)")
+    return (f"the state here is in on-disk format {v} ({p}), newer than this taskq (format {P.FORMAT}): update taskq "
+            "(an older bundle or checkout cannot run on it)")
+
+
 # ---------------- task records: the only way to know who a pueue task the core added (transfer, fetch, archive, env build in the hub core group) is ----------------
 # (kept in the hub database, hubstate.records; none elsewhere)
 def load_records():
