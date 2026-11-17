@@ -579,6 +579,19 @@ def _no_claim(key):
         return False
 
 
+def unwanted(key, worker):
+    """Why this task should not be sent to executor `worker` now, or None: it was stopped here, or it is no longer that executor's
+    (released, or claimed by someone else). The hub asks while it moves a task's inputs. Read without the lock: each answer is one
+    small file, and a stop that lands just after it is seen by the next check (the claim is still the executor's)."""
+    stop = stopped_info(key)
+    if stop is not None:
+        return f"stopped ({stop})"
+    ci = claim_info(key)
+    if ci is None:
+        return "no longer claimed" if _no_claim(key) else None  # a record that cannot be read does not count as lost
+    return None if str(ci.get("worker")) == str(worker) else f"claimed by {ci.get('worker')}"
+
+
 def cmd_release(a):
     with Lock(**({"tries": max(1, int(a.lock_wait / LOCK_WAIT))} if a.lock_wait else {})):
         for key in a.keys:

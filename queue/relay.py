@@ -358,8 +358,11 @@ def plan(s, name, rs, st, now=None):
             continue
         acts.append(dict(op="beat", key=key))
         if t["state"] == "stopped" and not (a and a["state"] == "done"):
+            sg = None if a else io_task(s, "relay_stage", key, t.get("since") or 0)
             if a and a["state"] != "stopped":
                 acts.append(dict(op="rstop", key=key, rkey=a["key"]))
+            elif sg is not None and sg["status"] in LIVE:
+                pass  # its staging has not ended: keep the claim, so a task it still adds over there is stopped from here next check
             elif not (a and a.get("worker")):  # no longer claimed over there (or not staged yet)
                 acts[-1] = dict(op="release", key=key, why="stopped (taskq.py stop)" + ("; remote results kept" if a else ""))
             continue

@@ -20,6 +20,7 @@ import proto  # noqa: E402
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
 import spec as S  # noqa: E402
+import taskq  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
@@ -41,8 +42,20 @@ def lookup(key):
     return s if s.get("exp") else S.resolve(s["recipe"], s["params"])
 
 
+def unwanted(name, key, say=print):
+    """Does the hub queue no longer want this task sent to the executor (stopped, released or claimed elsewhere)? Says why."""
+    why = taskq.unwanted(key, name)
+    if why:
+        say(f"{key} is {why} in the hub queue; not sending it to {RM.conf(name)['label']}")
+    return bool(why)
+
+
 def stage(name, key, nice=None, add=True, say=print):
-    """Store data → remote (same relative paths as the store data dir); when add, also add it to the remote queue. → key."""
+    """Store data → remote (same relative paths as the store data dir); when add, also add it to the remote queue. → key.
+    A task the hub queue no longer wants there (unwanted) is not sent: asked before the transfer and again once the data is over
+    there, before anything is placed or added (None, as when there is no job slot: the next check decides what happens to it)."""
+    if add and unwanted(name, key, say):
+        return None
     real = lookup(key)
     ex = RM.store_op("export", dict(spec=real), timeout=MOVE_TIMEOUT)  # first export of new inputs hashes them all (can be tens of GB)
     ids = in_use(name) if add else []
@@ -181,6 +194,8 @@ def _stage(name, key, nice, add, say, real, ex, links):
             ensure_blobs(name, {h: [inner, size, path] for _, h, size, inner, path in ex["files"]}, say, what=key, n=len(links))
         except RM.NoSlot as e:
             say(f"{e}; not staging this time, will retry on the next check")
+            return None
+        if add and unwanted(name, key, say):  # stopped or released while its data was moving (which can take hours)
             return None
         now = time.time()
         ST.update_state(lambda st: st.setdefault("views", {}).setdefault(name, {}).update({v: now for v in views}))

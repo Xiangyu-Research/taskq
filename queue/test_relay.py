@@ -421,6 +421,19 @@ def test_plan():
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "stopped")), st)
     assert ops(acts) == [("beat", K), ("rresume", K)], acts
     ok("stopped in the hub queue → stop over there and release once it no longer claims it; claimed again → resume over there")
+    acts, _ = relay.plan(S0([mtask(K, "stopped")]), NAME, RS(), {})
+    assert ops(acts) == [("release", K)], acts
+    rec = dict(machine=M.hub(), id=7, label="relay_stage:" + K, step="relay_stage", key=K, added=2000.0)
+    for status in ("Running", "Queued"):
+        acts, stuck = relay.plan(S0([mtask(K, "stopped")], [dict(id=7, label=rec["label"], status=status)], [rec]), NAME, RS(), {})
+        assert ops(acts) == [("beat", K)] and not stuck, (status, acts, stuck)
+    for done in (dict(status="Success"), dict(status=f"Failed ({relay.NOSLOT_RC})", code=relay.NOSLOT_RC), dict(status="Failed")):
+        acts, stuck = relay.plan(S0([mtask(K, "stopped")], [dict(id=7, label=rec["label"], **done)], [rec]), NAME, RS(), {})
+        assert ops(acts) == [("release", K)] and not stuck, (done, acts, stuck)
+    acts, _ = relay.plan(S0([mtask(K, "stopped")], [dict(id=7, label=rec["label"], status="Running")], [rec]), NAME, RS(rtask(A, "free")), st)
+    assert ops(acts) == [("beat", K), ("rstop", K)], acts
+    ok("stopped in the hub queue while its staging runs or waits → keep the claim (a task the staging still adds is then stopped from here); "
+       "staging ended and nothing over there → release; added over there after all → stop it there")
 
     acts, _ = relay.plan(S0([mtask(K, "free", worker=None)]), NAME, RS(rtask(A, "free")), st)
     assert ops(acts) == [("rstop", K)], acts

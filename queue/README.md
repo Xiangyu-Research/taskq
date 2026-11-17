@@ -347,6 +347,8 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
      backup machine; release only after success);
    - failed there: no progress -> `release --skip` (this machine will not claim it again); with progress -> keep the claim and report it;
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
+   - stopped in the hub queue before it reached that queue: the staging does not send it (it asks the hub queue before the transfer
+     and again before placing and adding), and the claim is released only once its staging has ended;
    - blocked by the bundle gate or smoke gate -> `hold`; unblocked -> `unhold`.
    - a failed `stage` / `fetch` / `restage` (mostly not the task's fault: tunnel down, busy disk timing out) is queued again at the next
      check, reported only after `XFER_TRIES` (`relay.py`) failures within one claim since the bundle last changed (a new bundle gets

@@ -262,6 +262,17 @@ rc, _ = tq2("take", "--worker", "other", "--assign", "--from", "pueue-host", UM)
 check("take has no --from (an assigned task cannot be reassigned in the queue): argument error", rc == 2)
 rc, out = tq2("set", UM, "env=alt")
 check("set on a task assigned to an executor: says how to send the new spec there", rc == 0 and "taskq site resend pueue-host" in out)
+old_tq, taskq.TQ = taskq.TQ, TQ2
+try:
+    check("unwanted: assigned to this executor and not stopped -> None; asked for another executor -> says who holds it",
+          taskq.unwanted(UM, "pueue-host") is None and taskq.unwanted(UM, "other") == "claimed by pueue-host")
+    tq2("stop", "--why", "test", UM)
+    check("unwanted: stopped in the queue -> says so, even while the claim is kept", (taskq.unwanted(UM, "pueue-host") or "").startswith("stopped ("))
+    tq2("resume", UM)
+    check("unwanted: stop undone -> None again; a task nobody claims -> no longer claimed",
+          taskq.unwanted(UM, "pueue-host") is None and taskq.unwanted(SWK, "pueue-host") == "no longer claimed")
+finally:
+    taskq.TQ = old_tq
 tq2("set", UM, "env=")
 tq2("release", "--worker", "pueue-host", UM)
 rc, out = tq2("next", "--worker", "501", "--envs", ALL, "--exclude", "D101_alpha/V_s/0", "D116_gamma/V_save/4")

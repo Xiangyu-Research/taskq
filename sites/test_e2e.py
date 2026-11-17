@@ -675,6 +675,47 @@ def step_gc():
     M.MACHINES[NAME]["budget"] = (0, 0)
 
 
+K8 = "guest/e2e/t8"
+
+
+def step_stop_in_transfer():
+    """Stopped in the hub queue while its data is moving to the executor: the data arrives, nothing is placed or added over
+    there, the next check releases it; resumed, it is sent and runs as usual."""
+    wb(os.path.join(T, "sheets/job8.json"), json.dumps([sheet(
+        K8, ["guest/e2e/code", "guest/e2e/d3"],
+        "python3 {data}/guest/e2e/code/toy.py --data {data}/guest/e2e/d3 --out {data}/guest/e2e/r/t8", "guest/e2e/r/t8", [NAME])],
+        ensure_ascii=False))
+    central(f"add --file {T}/sheets/job8.json")
+    moved = RT.ensure_blobs
+
+    def stop_after(*a, **kw):
+        r = moved(*a, **kw)
+        central(f"stop --why test {K8}")
+        return r
+    n0 = len(LOG)
+    RT.ensure_blobs = stop_after
+    try:
+        check()
+    finally:
+        RT.ensure_blobs = moved
+
+    def absent():
+        return K8 not in keys() and all(x["key"] != K8 for x in relay.remote_status(NAME)["taskq"]["tasks"])
+    t = hub_tasks()[K8]
+    step("stopped in the hub queue while its data was moving: the data arrived, nothing was placed or added over there",
+         absent() and blob_files(RROOT) and not os.path.exists(os.path.join(RROOT, "data/guest/e2e/d3"))
+         and t["state"] == "stopped" and t["worker"] == NAME and any(f"{K8} is stopped" in x and "not sending it" in x for x in LOG[n0:]),
+         lambda: (t, keys(), LOG[n0:][-10:]))
+    check()
+    t = hub_tasks()[K8]
+    step("next check: the hub releases it, still nothing over there", t["state"] == "stopped" and not t["worker"] and absent(), t)
+    central(f"resume {K8}")
+    wait(lambda: hub_tasks()[K8]["state"] == "done", 300, "after resume t8 is sent, runs and is fetched back", every=2, act=check)
+    res = json.load(open(os.path.join(HD, "guest/e2e/r/t8/result.json")))
+    step("resumed: sent, run and fetched with the right result", res["text"] == text_of(3) and res["total"] == 3 * sum(text_of(3).encode()), res)
+    wait(lambda: K8 not in keys(), 60, "t8 is removed over there after the fetch", every=2, act=check)
+
+
 K7 = "guest/e2e/t7"
 
 
@@ -773,6 +814,7 @@ def main_together():
     step_stop()
     step_finish()
     step_gc()
+    step_stop_in_transfer()
     step_local()
     step_two_workers()
 
