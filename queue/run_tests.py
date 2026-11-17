@@ -5,7 +5,8 @@
     python3 queue/run_tests.py ... (same)
 
 Each file runs at the core root with its own temp HOME and a short TMPDIR (unix socket paths have a length limit); the
-environment holds only PATH, LANG, HOME and TMPDIR (no TASKQ_*; tests use their own fixed config in queue/testdata/).
+environment holds only PATH, LANG, HOME and TMPDIR (no TASKQ_*; tests use their own fixed config in queue/testdata/), plus
+TQTEST_* settings for optional tests (TQTEST_SSH_HOST: an sshd reaching this machine, for test_real_ssh.py).
 The temp HOME links this machine's conda (miniforge3 etc.), ~/envs/* and .gitconfig.
 Patterns: a file path or name, with * and ?, or part of a path (relay -> test_relay*.py).
 
@@ -32,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = ("queue", "sites", "sync", "monitor")
 SKIP = 77  # the test says it skips (automake style)
+TEST_VARS = "TQTEST_"  # environment variables passed through to every test: settings for optional tests
 GPU_MARK = re.compile(r"^#\s*needs-gpu")
 OUT = "~/.cache/taskq-test"
 PASS, SKIPPED = "PASS", "SKIP"
@@ -197,7 +199,7 @@ def main(argv=None):
     rep = os.path.join(out, "report.tsv")
     last = last_seconds(rep)
     base = short_base()
-    env = {"PATH": env_path(), "LANG": "C.UTF-8"}
+    env = {"PATH": env_path(), "LANG": "C.UTF-8", **{k: v for k, v in os.environ.items() if k.startswith(TEST_VARS)}}
     order = sorted(tests, key=lambda t: (-last.get(t, 0), t))
     rows, t0 = {}, time.time()
     print(f"run_tests: {len(tests)} files, {max(1, a.jobs)} at a time; logs in {out}", file=sys.stderr)
