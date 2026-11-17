@@ -23,7 +23,7 @@ import cfg  # noqa: E402
 cfg.use_config()
 import spec as S  # noqa: E402
 import proto  # noqa: E402
-from common import atomic_write, write_json  # noqa: E402
+from common import atomic_write, format_problem, write_json  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", cfg.state("taskq", expand=False)))  # TASKQ_DIR: tests and relay sites (relay.py)
 Q = proto.QUEUE  # names inside the queue dir
@@ -428,6 +428,10 @@ def _claim(a, pick):
         # not the same as "no tasks" (exit code 10): then every started job would exit at once and queued jobs would all be used up in minutes
         print(f"no {tasks_path()}", file=sys.stderr)
         return X["no_queue"], None
+    why = format_problem()
+    if why:  # the state here is not in this code's on-disk format (self migrate has not reached it): claim nothing, as when paused
+        print(why, file=sys.stderr)
+        return PAUSED, None
     busy_ahead = 0  # ahead of us and just stopped (log updated in the last 15 minutes, unclaimed)
     try:  # outside the lock: reading every task's files takes long, and claims are checked again under the lock below
         F = facts(read_tasks())

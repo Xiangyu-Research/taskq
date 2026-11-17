@@ -127,7 +127,8 @@ def claim_times(rs):
 
 def deploy(name, bid, path, claims=None, switch=True):
     """Push the bundle and switch current (atomic mv -T; switch=False: only unpack it under code/, self migrate switches it);
-    the first time, create dirs and enable the queue; record the machine name in the root (proto.ROOT machine).
+    the first time, create dirs, enable the queue and stamp the root with this code's on-disk format (proto.ROOT format: a new
+    root is in it; an existing one is stamped by taskq self migrate); record the machine name in the root (proto.ROOT machine).
     Only unpack after receiving everything and matching sha256 (tar does not complain when ssh drops between two files); push
     one at a time per machine (flock), each with its own temp dir. Prune old bundles (claims: claim times of tasks still claimed
     over there, claim_times): keep current, the newest proto.CODE_KEEP, anything touched within CODE_KEEP_S (a running worker
@@ -142,9 +143,9 @@ def deploy(name, bid, path, claims=None, switch=True):
     sha = hashlib.sha256(tar).hexdigest()
     cur = os.path.relpath(ROOT["current"], ROOT["code"])  # name under code/
     tq, en = f"$R/{ROOT['queue']}/{proto.QUEUE['tasks']}", f"$R/{ROOT['queue']}/{proto.QUEUE['enabled']}"
-    mf = f"$R/{ROOT['machine']}"
+    mf, fm = f"$R/{ROOT['machine']}", f"$R/{ROOT['format']}"
     cmd = (f"set -e; R={r}; mkdir -p {' '.join('$R/' + d for d in proto.MKDIRS)}; "
-           f"[ -e {tq} ] || {{ : > {tq}; touch {en}; }}; echo {shlex.quote(name)} > {mf}.tmp.$$; mv -f {mf}.tmp.$$ {mf}; cd $R/{ROOT['code']}; "
+           f"[ -e {tq} ] || {{ : > {tq}; touch {en}; echo {proto.FORMAT} > {fm}.tmp.$$; mv -f {fm}.tmp.$$ {fm}; }}; echo {shlex.quote(name)} > {mf}.tmp.$$; mv -f {mf}.tmp.$$ {mf}; cd $R/{ROOT['code']}; "
            f"exec 9> $R/{ROOT['deploy_lock']}; flock -w 300 9; "
            "find . -maxdepth 1 -name '*.tmp.*' -mtime +0 -exec rm -rf {} + || true; "  # left by earlier interrupted deploys (nobody else pushes under the lock)
            f"t={b}.tmp.$$; rm -rf $t $t.tar; cat > $t.tar; "
@@ -1060,6 +1061,10 @@ def main(argv):
     p = sub.add_parser("resend", help="replace staged tasks' specs in the remote queue with the hub's current ones")
     p.add_argument("name")
     a = ap.parse_args(argv)
+    why = C.format_problem() if a.cmd in ("stage", "fetch", "archive") else None
+    if why:  # steps of a hub round: not on state in another format (taskq self migrate first)
+        print(f"{ap.prog} {a.cmd}: not run: {why}", file=sys.stderr)
+        return 1
     if a.cmd == "archive":
         try:
             RT.archive(a.key)

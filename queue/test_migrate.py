@@ -536,5 +536,71 @@ left = sorted(os.listdir(SNAPS))
 ok(f"snapshots: only the newest {proto.SNAPSHOT_KEEP} stay, no half-written one ({left})",
    len(left) == proto.SNAPSHOT_KEEP and not any(x.endswith(proto.TMP) for x in left))
 
+# ---------------- 8. the stamp binds this code: workers claim nothing, hub rounds and relay steps refuse; new roots stamped ----------------
+ENVX = {k: v for k, v in os.environ.items() if k not in ("TASKQ_DIR", "TASKQ_STATE", "TASKQ_DATA", "TASKQ_ROOT", "TASKQ_MACHINE")}
+ENVX["TASKQ_FORMAT_ANY"] = "0"
+WR = os.path.join(T, "wroot")  # an executor root as a worker of this code sees it
+os.makedirs(os.path.join(WR, proto.ROOT["data"], proto.TASK_LOGS))
+os.makedirs(os.path.join(WR, proto.ROOT["state"]))
+write(os.path.join(WR, proto.ROOT["queue"], Q["tasks"]),
+      jl([dict(order=1, nice=0, key="D9/V/0", exp=None, recipe="toy", params=dict(ds="D9", variant="V", frag="0"))]))
+
+
+def worker_next():
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "next", "--worker", "w1", "--envs", "base,alt,alt2"],
+                       env=dict(ENVX, TASKQ_ROOT=WR, TASKQ_MACHINE="site-pueue"), capture_output=True, text=True, timeout=120)
+    return r.returncode, r.stdout + r.stderr
+
+
+rc, o = worker_next()
+ok(f"worker next of this code on a root without a stamp: exit 12 (paused, an exit code it already has), says run taskq self "
+   f"migrate, claims nothing ({rc} {o.strip()[-200:]})",
+   rc == proto.EXIT["paused"] and "taskq self migrate" in o and not os.path.exists(os.path.join(WR, proto.ROOT["queue"], Q["claims"], sf("D9/V/0"))))
+write(os.path.join(WR, proto.ROOT["format"]), f"{proto.FORMAT + 1}\n")
+rc, o = worker_next()
+ok(f"... on a root in a newer format: also paused, says update taskq ({o.strip()[-120:]})", rc == proto.EXIT["paused"] and "newer" in o)
+write(os.path.join(WR, proto.ROOT["format"]), f"{proto.FORMAT}\n")
+rc, o = worker_next()
+ok(f"... stamped with this code's format: claims ({rc} {o.strip()[-200:]})", rc == 0 and o.startswith("D9/V/0\n"))
+
+OH = os.path.join(T, "oldhub")  # a hub state dir from before stamps, with its database
+OHDB = os.path.join(OH, proto.DB)
+os.makedirs(OH)
+con = sqlite3.connect(OHDB)
+con.executescript(DB.SCHEMA[0])
+con.execute("PRAGMA user_version=1")
+con.commit()
+con.close()
+with open(OHDB, "rb") as f:
+    OHDB_BYTES = f.read()
+r = subprocess.run([os.path.join(CORE, "bin", "taskq"), "tick"], env=dict(ENVX, TASKQ_STATE=OH, TASKQ_DB=OHDB),
+                   capture_output=True, text=True, timeout=300)
+with open(OHDB, "rb") as f:
+    same = f.read() == OHDB_BYTES
+ok(f"taskq tick on a hub without a stamp: exit 1, says run taskq self migrate, the database untouched (its schema not migrated), "
+   f"no queue made, no stamp written ({r.returncode} {r.stderr.strip()[-300:]})",
+   r.returncode == 1 and "Health check not run" in r.stderr and "taskq self migrate" in r.stderr and same
+   and not os.path.exists(os.path.join(OH, "taskq")) and not os.path.exists(os.path.join(OH, proto.FORMAT_FILE)))
+r = subprocess.run([sys.executable, os.path.join(HERE, "relay.py"), "stage", "site-pueue", "D9/V/0", "--nice", "0"],
+                   env=dict(ENVX, TASKQ_STATE=OH, TASKQ_DB=OHDB), capture_output=True, text=True, timeout=300)
+ok(f"relay stage (a step a hub round queues) on that hub: exit 1, not run ({r.returncode} {r.stderr.strip()[-200:]})",
+   r.returncode == 1 and "not run" in r.stderr and "taskq self migrate" in r.stderr)
+
+import relay as RLY  # noqa: E402
+BSRC = os.path.dirname(write(os.path.join(T, "bsrc", "x.txt"), "x"))
+FRESH = os.path.join(T, "roots", "fresh")
+saved = M.MACHINES["site-pueue"]["root"]
+M.MACHINES["site-pueue"]["root"] = FRESH
+try:
+    RLY.deploy("site-pueue", "bfresh", BSRC)
+    first = C.format_on_disk(os.path.join(FRESH, proto.ROOT["format"]))
+    os.remove(os.path.join(FRESH, proto.ROOT["format"]))
+    RLY.deploy("site-pueue", "bfresh2", BSRC)
+    again = os.path.exists(os.path.join(FRESH, proto.ROOT["format"]))
+finally:
+    M.MACHINES["site-pueue"]["root"] = saved
+ok(f"relay deploy making a new root stamps it with this code's format; an existing root is left to self migrate ({first} {again})",
+   first == proto.FORMAT and not again)
+
 print("all passed" if not fails else f"{fails} failures")
 sys.exit(1 if fails else 0)
