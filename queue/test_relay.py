@@ -1373,6 +1373,11 @@ def test_view_no_overwrite():
     assert not os.path.islink(os.path.join(D, "prepared/D1/out.dat")) and not os.path.exists(os.path.join(D, "prepared/D1", proto.INCOMPLETE))
     ok("a view does not overwrite real files: another real file there → fail, leave it, that view is not built (keeps .incomplete), while other views in the same run build and "
        "lose .incomplete; if it is the blob itself (hard link) → leave it")
+    os.remove(os.path.join(D, "prepared/D1/out.dat"))
+    TN.wb(os.path.join(D, "prepared/D1/out.dat"), b"input-b")
+    assert run_op("view", R, dict(views=["prepared/D1"], links=dict(links, **{"prepared/D1/out.dat": h2}), texts={}))[0] == 0
+    assert not os.path.islink(os.path.join(D, "prepared/D1/out.dat")) and not os.path.exists(os.path.join(D, "prepared/D1", proto.INCOMPLETE))
+    ok("a real file with the blob's content (another task's copy of a shared input) → leave it and build")
 
     before = walk(os.path.join(D, "prepared/D1"))
     rc, _, err = run_op("view", R, dict(views=["prepared/D1"], links=dict(links, **{"prepared/D1/b.dat": "cd" + "0" * 62}),

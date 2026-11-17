@@ -164,7 +164,8 @@ def op_ingest(A):
 def op_view(A):
     """views: this task's view dirs; links {relative path: h}; texts {relative path: base64}; clean: dirs whose stale links
     should be removed (default views). When the input path already holds a real file: if it is the blob itself (same inode,
-    output of a previous step ingested on the same disk) leave it; otherwise fail without overwriting: that view keeps
+    output of a previous step ingested on the same disk) or has the same content (a file another task wrote over there, such
+    as a training's copy of a shared input) leave it; otherwise fail without overwriting: that view keeps
     .incomplete (not built; cleanup will not remove real files under it), while other views build as usual and lose .incomplete."""
     R = root()
     D = sub(R, "data")
@@ -188,7 +189,7 @@ def op_view(A):
             if os.readlink(p) != t:
                 C.atomic_link(t, p)
         elif os.path.lexists(p):
-            if not os.path.samefile(p, t):
+            if not os.path.samefile(p, t) and not (os.path.isfile(p) and os.path.getsize(p) == os.path.getsize(t) and C.sha256(p) == h):
                 clash.append(rel)
         else:
             C.atomic_link(t, p)
