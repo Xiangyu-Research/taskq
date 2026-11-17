@@ -249,7 +249,7 @@ TREE = {
                   "on the hub: what needs you, what runs where, when results are due, progress per step (as of the last health check;\n"
                   "monitor/summary.py). --all: every task grouped by state; <machine>: one machine's tasks; <words>: tasks whose key has every word.\n"
                   "--queue, or not on the hub: this machine's queue (taskq.py status); --json: one @@JSON line; --all --json: overview.py --json"),
-    "stop": Cmd("stop a task (a running one stops and releases within 30 seconds; not claimed again afterwards)", py("taskq", "stop"), own_help=True),
+    "stop": Cmd("stop a task (not claimed again; running in this queue: stops within 30 seconds; sent to an executor: at the hub's next check)", py("taskq", "stop"), own_help=True),
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
     "unskip": Cmd("let executors that released a task claim it again (--worker: only that one)", py("taskq", "unskip"), own_help=True),
     "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
