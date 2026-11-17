@@ -1,5 +1,5 @@
 #!/bin/bash
-# Simulated tests for consume.py (the consumer) and its plugins: taking over running tasks on a bundle switch, hours window, waiting for a free GPU, Slurm, user plugins
+# Simulated tests for consume.py (the consumer) and its plugins: taking over running tasks on a bundle switch, hours window, waiting for a free GPU, Slurm, user plugins, failing hooks
 #   bash queue/test_consume.sh        WORKER_TEST_ONLY="h win" runs only these cases
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -198,6 +198,65 @@ waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
 check "user plugin: claims and finishes once allowed" '[[ $rc == 0 ]] && grep -q "done t/p" $T/wplug.out'
 fi
 
+# hookerr. consumer plugin hooks that raise: logged with the plugin and hook name (the same error once), the worker goes on: a
+#   failing active keeps the plugin, a failing admit holds claims, a failing before_start starts anyway, a failing env hook leaves the
+#   env unchanged; an unexpected error in the main loop itself stops training, releases the claim, runs on_exit and exits 1
+if want hookerr; then
+reset
+python3 - "$TASKQ_DIR/tasks.jsonl" "$T" << 'EOT'
+import json, sys
+p, t = sys.argv[1:]
+cmd = f'echo "${{DEMO_HALF:-unset}}" > {t}/envseen; mkdir -p "$TASKQ_DATA/runs/t/k"; touch "$TASKQ_DATA/runs/t/k/DONE"'
+open(p, "w").write(json.dumps(dict(order=1, nice=0, key="t/k", exp=None, recipe="command",
+                                   params=dict(key="t/k", cmd=cmd, env="base", out="runs/t/k", done=["DONE"], device="gpu"))) + "\n")
+EOT
+mkdir -p "$T/plugk"; cp -r "$TASKQ_PLUGINS/." "$T/plugk/"
+cat > "$T/plugk/consumers.py" << 'EOT'
+import os
+def broken(*a):
+    raise RuntimeError("broken on purpose")
+def admit(w):
+    if not os.path.exists(os.environ["DEMO_OPEN"]):
+        raise RuntimeError("admit broken")
+def env(w, e):
+    e["DEMO_HALF"] = "set"
+    raise RuntimeError("env broken")
+def tick(w):
+    if os.path.exists(os.environ["DEMO_SABOTAGE"]):
+        w.head_now = None  # the main loop's next call fails, outside any hook
+    raise RuntimeError("tick broken")
+def on_exit(w):
+    open(os.environ["DEMO_EXITED"], "a").write("on_exit\n")
+    raise RuntimeError("on_exit broken")
+CONSUMERS = {"shaky": {"active": broken, "setup": broken, "admit": admit, "before_start": broken, "env": env, "tick": tick, "on_exit": on_exit}}
+EOT
+rm -f "$T/open" "$T/sabotage" "$T/exited" "$T/envseen"
+(export TASKQ_PLUGINS=$T/plugk DEMO_OPEN=$T/open DEMO_SABOTAGE=$T/sabotage DEMO_EXITED=$T/exited
+ WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/wk.out" 2>&1 &
+wpid=$!
+waitfor 20 'grep -q "consumer plugin shaky: admit failed (RuntimeError: admit broken); not claiming now" $T/wk.out'
+sleep 4
+check "hooks raise: active and setup logged with plugin and hook, plugin kept; failing admit holds claims, no exit; each error logged once" \
+  'kill -0 $wpid && [[ $(nclaims) == 0 && ! -e $T/envseen ]] && grep -q "consumer plugin shaky: active failed (RuntimeError: broken on purpose); using the plugin anyway" $T/wk.out && grep -q "consumer plugin shaky: setup failed (RuntimeError: broken on purpose); keeping the plugin" $T/wk.out && [[ $(grep -c "shaky: tick failed" $T/wk.out) == 1 && $(grep -c "shaky: admit failed" $T/wk.out) == 1 ]]'
+touch "$T/open"
+waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "hooks raise: once admit works the task runs (before_start failing: started anyway; env failing half way: env unchanged), exit 0, on_exit ran" \
+  '[[ $rc == 0 && $(cat $T/envseen 2> /dev/null) == unset && -s $T/exited ]] && grep -q "done t/k" $T/wk.out && grep -q "consumer plugin shaky: admit works again" $T/wk.out && grep -q "shaky: before_start failed (RuntimeError: broken on purpose); starting anyway" $T/wk.out && grep -q "shaky: env failed (RuntimeError: env broken); env vars for run_task.sh unchanged" $T/wk.out && grep -q "shaky: on_exit failed" $T/wk.out'
+reset
+table << EOF
+t/x base
+EOF
+rm -f "$T/sabotage" "$T/exited"
+(export TASKQ_PLUGINS=$T/plugk DEMO_OPEN=$T/open DEMO_SABOTAGE=$T/sabotage DEMO_EXITED=$T/exited
+ WORKER_ID=site-pueue-gpu1 TASKQ_SLOTS=1 TASKQ_IDLE_POLL=1 FAKE_SECS=60 exec bash "$HERE/worker_start.sh") > "$T/wk2.out" 2>&1 &
+wpid=$!
+waitfor 30 'grep -q "^start .* t/x" $T/train.log'
+touch "$T/sabotage"
+waitfor 40 '! kill -0 $wpid 2> /dev/null'; wait $wpid; rc=$?
+check "unexpected error in the main loop: training stopped, claim released (no failure), on_exit ran, exit 1" \
+  '[[ $rc == 1 && $(nclaims) == 0 && ! -e $TASKQ_DIR/failures/t__x && -s $T/exited ]] && grep -q "^term t/x" $T/train.log && grep -q "worker error (TypeError: .*); stopping training and releasing tasks" $T/wk2.out'
+fi
+
 # unit. plugin decisions (no worker started): when gpu_share claims a second, gpu_pad making room, resident's slots, unreadable hours: no new claims and running tasks keep going
 if want unit; then
 python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
@@ -239,6 +298,16 @@ win.tick(w); assert not stops, stops
 w.site, w.wconf = "site-pueue", {"hours": [("9am", "21:00", None, None)]}
 assert win.admit(w) and win.admit(w).startswith("cannot read the hours"), win.admit(w)
 win.tick(w); assert not stops, stops
+import consume
+w = consume.Worker.__new__(consume.Worker)
+def boom(*a):
+    raise RuntimeError("no")
+w.plugins, w.hook_err, w.zomb, w.runs, w.slots = [("bad", {"admit": boom, "idle": boom})], {}, {}, {}, 1
+w.POLL, w.IDLE_MAX, w.idle_since = 7, 100, 1000
+assert w.can_add() == (False, "consumer plugin bad: admit failed"), w.can_add()
+assert w.idle_wait("nothing", 1050, 0) == 7 and w.idle_wait("nothing", 1200, 0) is None
+w.zomb = {1: None}
+assert w.idle_wait("nothing", 1200, 0) == 7
 print("ok")
 EOT
 check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -29,6 +30,11 @@ TASKQ = os.path.join(HERE, "taskq.py")
 RUN_TASK = os.path.join(HERE, "run_task.sh")
 BUILTIN = ("slurm", "resident", "gpu_pad", "window", "gpu_idle", "gpu_share")
 HOOKS = ("active", "setup", "admit", "env", "before_start", "tick", "idle", "on_exit")
+# what the worker does instead when a hook raises (Worker.guard; idle and get_end say it where they are called)
+HOOK_FALLBACK = dict(active="using the plugin anyway, so its admit still decides", setup="keeping the plugin, its settings may be incomplete",
+                     admit="not claiming now", before_start="starting anyway", env="env vars for run_task.sh unchanged",
+                     tick="skipped this round", on_exit="going on with the exit")
+HOOK_ERR_EVERY = 1800  # the same hook error is logged again at most this often (seconds)
 CURRENT = os.path.basename(proto.ROOT["current"])
 
 
@@ -188,7 +194,10 @@ class Worker:
         self.blocked = ""
         self.stopping = False
         self.bad = set()
+        self.mon_stop = threading.Event()
         self.plugins = []
+        self.hook_err = {}  # (plugin, hook) → (last error, when it was logged)
+        self.end_by = "?"   # the plugin that set get_end
         try:
             cands = plugin_list()
         except Exception as e:  # noqa: BLE001
@@ -196,11 +205,17 @@ class Worker:
             cands = [(n, load(os.path.join(HERE, "consumers", n + ".py"), "taskq_consumer_" + n)) for n in BUILTIN]
         for name, p in cands:
             a = hook(p, "active")
-            if a is None or a(self):
-                self.plugins.append((name, p))
-                s = hook(p, "setup")
-                if s:
-                    s(self)
+            if a is not None:
+                ok, on = self.guard(name, "active", a, self)
+                if ok and not on:
+                    continue
+            self.plugins.append((name, p))
+            s = hook(p, "setup")
+            if s:
+                had = self.get_end
+                self.guard(name, "setup", s, self)
+                if self.get_end is not had:
+                    self.end_by = name
         if not self.W:
             print("set WORKER_ID (a worker in machines.py in the config dir)", file=sys.stderr)
             sys.exit(1)
@@ -284,11 +299,48 @@ class Worker:
             pass
 
     # ---------- plugins ----------
-    def each(self, name):
-        for _, p in self.plugins:
+    def hooks(self, name):
+        """→ (plugin name, hook) for each active plugin that has hook name, in order."""
+        for pname, p in self.plugins:
             f = hook(p, name)
             if f:
-                yield f
+                yield pname, f
+
+    def guard(self, pname, hname, f, *args, fallback=None):
+        """Call one plugin hook → (True, its result), or (False, None) when it raised: a broken plugin never stops the worker, the caller
+        falls back. The error is logged with the plugin and hook names and what the worker does instead (fallback, else
+        HOOK_FALLBACK); the same error again at most every HOOK_ERR_EVERY seconds."""
+        k = (pname, hname)
+        try:
+            r = f(*args)
+        except Exception as e:  # noqa: BLE001
+            err, now = f"{type(e).__name__}: {e}", time.time()
+            last = self.hook_err.get(k)
+            if not last or last[0] != err or now - last[1] >= HOOK_ERR_EVERY:
+                say(f"!! consumer plugin {pname}: {hname} failed ({err}); {fallback or HOOK_FALLBACK.get(hname, 'going on')}")
+                self.hook_err[k] = (err, now)
+            return False, None
+        if self.hook_err.pop(k, None):
+            say(f"consumer plugin {pname}: {hname} works again")
+        return True, r
+
+    def end_of(self):
+        """Time limit from the plugin that set get_end (epoch seconds); 0 when unknown or it failed (asked again next round)."""
+        if not self.get_end:
+            return 0
+        ok, end = self.guard(self.end_by, "get_end", self.get_end, self, fallback="time limit unknown for now, asking again next round")
+        return (end or 0) if ok else 0
+
+    def idle_wait(self, why, now, err_since):
+        """Nothing running: the first plugin with an idle hook decides → seconds to sleep, None = exit. When that hook fails: check
+        again in POLL seconds and exit once idle for IDLE_MAX (not while unstoppable training is still followed)."""
+        for pname, f in self.hooks("idle"):
+            ok, d = self.guard(pname, "idle", f, self, why, now, self.idle_since, err_since,
+                               fallback=f"checking again in {self.POLL} seconds, exiting once idle for {self.IDLE_MAX // 60} minutes")
+            if ok:
+                return d
+            return self.POLL if self.zomb or now - self.idle_since < self.IDLE_MAX else None
+        return None
 
     def say(self, msg):
         say(msg)
@@ -434,39 +486,40 @@ class Worker:
 
     def finish(self):
         self.mon_stop.set()
-        for f in self.each("on_exit"):
-            try:
-                f(self)
-            except Exception as e:  # noqa: BLE001
-                say(f"!! plugin cleanup failed: {e}")
+        for pname, f in self.hooks("on_exit"):
+            self.guard(pname, "on_exit", f, self)
 
     def shutdown(self, msg, rc):
-        """Stop everything running, release what is confirmed stopped, then exit rc."""
+        """Stop everything running, release what is confirmed stopped, run on_exit, then exit rc (whatever fails on the way)."""
         if self.stopping:
             return
         self.stopping = True
-        for s in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(s, signal.SIG_IGN)
-        say(msg)
-        for r in self.all_runs():
-            self.stop_tree(r)
-        for _ in range(int(self.TERM_WAIT)):
-            if not self.any_alive():
-                break
-            time.sleep(1)
-        if self.any_alive():
-            say(f"did not stop within {self.TERM_WAIT} seconds; forcing")
+        try:
+            for s in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(s, signal.SIG_IGN)
+            say(msg)
             for r in self.all_runs():
-                if self.alive(r):
-                    self.stop_tree(r, signal.SIGKILL)
-            for _ in range(3):
+                self.stop_tree(r)
+            for _ in range(int(self.TERM_WAIT)):
                 if not self.any_alive():
                     break
                 time.sleep(1)
-        self.let_go()
-        self.finish()
-        sys.stdout.flush()
-        os._exit(rc)
+            if self.any_alive():
+                say(f"did not stop within {self.TERM_WAIT} seconds; forcing")
+                for r in self.all_runs():
+                    if self.alive(r):
+                        self.stop_tree(r, signal.SIGKILL)
+                for _ in range(3):
+                    if not self.any_alive():
+                        break
+                    time.sleep(1)
+            self.let_go()
+        except Exception as e:  # noqa: BLE001
+            say(f"!! stopping failed ({type(e).__name__}: {e}); tasks not released yet can be taken once their claim expires")
+        finally:
+            self.finish()
+            sys.stdout.flush()
+            os._exit(rc)
 
     def on_signal(self, *_):
         self.shutdown(f"got stop signal ({self.term_why}); stopping training and releasing tasks", self.term_rc)
@@ -529,8 +582,10 @@ class Worker:
         if n >= self.slots:
             self.why_not = f"already {n} running"
             return False, self.why_not
-        for f in self.each("admit"):
-            why = f(self)
+        for pname, f in self.hooks("admit"):
+            ok, why = self.guard(pname, "admit", f, self)
+            if not ok:
+                why = f"consumer plugin {pname}: admit failed"
             if why:
                 if n:
                     self.why_not = why
@@ -541,25 +596,37 @@ class Worker:
         lines = (out.split("\n") + ["", "", ""])[:3]
         key, args, tok = lines
         self.tok[key] = tok
-        targs = shlex.split(args)
-        for f in self.each("before_start"):
-            f(self)
+        for pname, f in self.hooks("before_start"):
+            self.guard(pname, "before_start", f, self)
         env = dict(os.environ, TASK_KEY=key, TASK_JOBTAG=jt, TASK_PART="1", TASK_CPUS=str(self.task_cpus), TASKQ_ADMITTED="1")
-        for f in self.each("env"):
-            f(self, env)
+        for pname, f in self.hooks("env"):
+            e = dict(env)  # a hook that fails half way leaves nothing behind
+            if self.guard(pname, "env", f, self, e)[0]:
+                env = e
         sys.stdout.flush()
-        proc = subprocess.Popen(["bash", RUN_TASK, *targs], stdin=subprocess.DEVNULL, env=env)
-        sh = out_of([PY, os.path.join(HERE, "spec.py"), "shell", *targs], any_rc=True) or ""
-        vals = {}
-        for ln in sh.split("\n"):
-            m = re.match(r"(TASK_OUT|TASK_SAFE)=(.*)$", ln)
-            if m:
-                v = shlex.split(m.group(2))
-                vals[m.group(1)] = v[0] if v else ""
-        r = Run(proc.pid, key, proc=proc, outdir=vals.get("TASK_OUT", ""), safe=vals.get("TASK_SAFE"), jtag=jt)
+        try:
+            targs = shlex.split(args)
+            proc = subprocess.Popen(["bash", RUN_TASK, *targs], stdin=subprocess.DEVNULL, env=env)
+        except (OSError, ValueError, TypeError) as e:  # TypeError: an env hook put in a value that is not a string
+            say(f"!! {key}: cannot start run_task.sh ({type(e).__name__}: {e}); releasing and recording a failure")
+            self.fail(key, f"cannot start run_task.sh: {type(e).__name__}: {e}", 0)
+            return
+        r = Run(proc.pid, key, proc=proc, jtag=jt)  # registered before anything else can fail: the run is always followed
         self.runs[proc.pid] = r
         self.changed = int(time.time())
         say(f"started {key} (pid {proc.pid}: run_task.sh {args})")
+        sh = out_of([PY, os.path.join(HERE, "spec.py"), "shell", *targs], any_rc=True) or ""
+        for ln in sh.split("\n"):
+            m = re.match(r"(TASK_OUT|TASK_SAFE)=(.*)$", ln)
+            if m:
+                try:
+                    v = (shlex.split(m.group(2)) or [""])[0]
+                except ValueError:
+                    v = ""
+                if m.group(1) == "TASK_OUT":
+                    r.outdir = v
+                elif v:
+                    r.safe = v
 
     def claim(self, jt):
         now = time.time()
@@ -764,12 +831,21 @@ class Worker:
             self.touch_repo()
 
     def run(self):
+        """The main loop. Anything unexpected in it goes through the normal shutdown path (stop the runs, release what is confirmed
+        stopped, on_exit) and exits 1, instead of dying with claims held and training left unattended."""
+        try:
+            return self.loop()
+        except BaseException as e:  # noqa: BLE001
+            traceback.print_exc(file=sys.stdout)
+            self.shutdown(f"!! worker error ({type(e).__name__}: {e}); stopping training and releasing tasks", 1)
+            raise  # only when already shutting down (shutdown exits)
+
+    def loop(self):
         if self.get_end:
-            self.end = self.get_end(self) or 0
+            self.end = self.end_of()
         lim = time.strftime("%F %T", time.localtime(self.end)) if self.end else self.end_text
         say(f"task queue worker ({self.device}): job {self.W} @ {self.host}, at most {self.slots} at once, CPU {self.ncpu}, "
             f"memory {self.mem_mb}M ({self.task_cpus} CPUs per training), envs {self.envs}, time limit {lim}, code {self.commit}")
-        self.mon_stop = threading.Event()
         self.gpu_gb = None
         if self.device == "gpu":
             sys.stdout.flush()
@@ -794,13 +870,13 @@ class Worker:
             self.reap(now)
             now = time.time()
             self.watch_stalls(now)
-            if not self.end and self.get_end:
-                self.end = self.get_end(self) or 0
+            if not self.end:
+                self.end = self.end_of()
             if now - last_beat >= self.BEAT:
                 self.beat(now)
                 last_beat = now
-            for f in self.each("tick"):
-                f(self)
+            for pname, f in self.hooks("tick"):
+                self.guard(pname, "tick", f, self)
             head = self.head_now()
             changed = self.code_changed(head)
             why, tried = None, False
@@ -849,8 +925,7 @@ class Worker:
                         say("code updated")
                         restart = True
                         break
-                f = next(self.each("idle"), None)
-                d = f(self, why, now, self.idle_since, err_since) if f else None
+                d = self.idle_wait(why, now, err_since)
                 if d is None:
                     break
                 self.nap(d)

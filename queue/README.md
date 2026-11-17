@@ -314,6 +314,12 @@ Differences between executor kinds live in consumer plugins: the core's `queue/c
 | `idle(w, why, now, since, err_since)` | nothing running: return seconds to sleep, `None` = exit |
 | `on_exit(w)` | before exiting |
 
+A hook that raises never stops the worker: it is logged with the plugin and hook names and the worker falls back (a failing `active`
+keeps the plugin, so its `admit` still decides; a failing `admit` means do not claim now; a failing `before_start` starts anyway; a
+failing `env` leaves the env vars unchanged; a failing `idle` checks again after `TASKQ_POLL` seconds and exits once idle for
+`TASKQ_IDLE_MAX`). Any other unexpected error in the worker goes through the normal shutdown: it stops training, releases the claims
+of what has stopped, runs `on_exit` and exits 1.
+
 | plugin | what it does |
 |---|---|
 | `slurm` | in a Slurm job: job id as the worker name, concurrency from allocated CPUs and memory, job time limit, node-local staging dir, exit after an idle period |
