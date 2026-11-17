@@ -1,5 +1,5 @@
 """Worker in a Slurm job: the job id is the worker name, slots from TASKQ_SLOTS (the machine table jobs entry's slots, passed by
-sites/slurm.py submit_cmd; default 1), memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
+sites/slurm.py submit_cmd), else that jobs entry's slots read here (a job submitted without TASKQ_SLOTS), default 1; memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
 import os
 import re
 import shutil
@@ -17,13 +17,20 @@ def setup(w):
     e = os.environ
     w.W = e["SLURM_JOB_ID"]
     w.mem_mb = int(e.get("SLURM_MEM_PER_NODE") or 0) or int(e.get("SLURM_MEM_PER_CPU") or 0) * w.ncpu
-    w.slots = int(e.get("TASKQ_SLOTS") or 1)
+    w.slots = int(e.get("TASKQ_SLOTS") or table_slots(w) or 1)
     w.term_rc, w.term_why = 143, "likely the time limit"
     w.end_text = "not known yet, checking later"
     w.get_end = end_time
     w.stage_root = os.path.join(e.get("TMPDIR") or "/tmp", proto.STAGE_DIR_PREFIX + w.W)
     w.said = set()
     w.idle_mark = None
+
+
+def table_slots(w):
+    """This machine's jobs entry for the worker's device (gpu / cpu): its slots, None when unset or unreadable."""
+    jobs = w.mget("jobs")
+    entry = jobs.get(w.device) if isinstance(jobs, dict) else None
+    return entry.get("slots") if isinstance(entry, dict) else None
 
 
 def end_time(w):

@@ -291,6 +291,15 @@ res.setup(w)
 assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True), vars(w)
 os.environ.pop("TASKQ_SLOTS"); res.setup(w)
 assert w.slots == 1, vars(w)
+sl = load("slurm")
+os.environ.update(SLURM_JOB_ID="900301", SLURM_MEM_PER_NODE="1024")
+jobs = {"gpu": {"partition": "p", "slots": 2}, "cpu": {"partition": "c"}}
+w = types.SimpleNamespace(ncpu=4, device="gpu", mget=lambda f: jobs if f == "jobs" else "")
+sl.setup(w); assert w.slots == 2, "a job without TASKQ_SLOTS takes its jobs entry's slots"
+w.device = "cpu"; sl.setup(w); assert w.slots == 1, "an entry without slots: 1"
+w.mget = lambda f: ""; w.device = "gpu"; sl.setup(w); assert w.slots == 1, "unreadable machine table: 1"
+os.environ["TASKQ_SLOTS"] = "3"; w.mget = lambda f: jobs; sl.setup(w); assert w.slots == 3, "TASKQ_SLOTS wins"
+for k in ("TASKQ_SLOTS", "SLURM_JOB_ID", "SLURM_MEM_PER_NODE"): os.environ.pop(k)
 win = load("window")
 def broken(w):
     raise ImportError("broken")
@@ -354,7 +363,7 @@ assert real._smi("0", Q) is None
 os.environ["PATH"] = path
 print("ok")
 EOT
-check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
+check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, Slurm slots from the jobs entry without TASKQ_SLOTS, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
 fi
 
 # secret. a spec with a token in vars: the worker hands it to run_task.sh and spec.py on stdin (a 0600 file already unlinked), so

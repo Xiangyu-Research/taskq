@@ -52,7 +52,8 @@ results), `backup` (archive). An entry with `root` and `scheduler` is an executo
   in order: with a GPU it is `gpu<number>`, without it `cpu` (`cpu<number>` when several); the id is `<machine>-<name>` and the pueue group
   has the same name.
 - `scheduler="slurm"`: write `jobs=dict(gpu=..., cpu=...)` (sbatch options); how many, QOS and time limits are in `policy.py`'s `SLURM`.
-  An entry's `slots` (default 1) is how many trainings one job runs at once (passed to the job as `TASKQ_SLOTS`, not to sbatch); each
+  An entry's `slots` (default 1) is how many trainings one job runs at once (passed to the job as `TASKQ_SLOTS`, not to sbatch; a job
+  submitted without it reads the entry when it starts); each
   task then gets its share of the job's cores and memory.
 
 Pueue executors, the hub and the store all have the core's own pueue group `taskq` (`proto.IO_GROUP`: transfer, fetch, archive, env build,
