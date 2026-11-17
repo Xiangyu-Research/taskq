@@ -333,7 +333,7 @@ of what has stopped, runs `on_exit` and exits 1.
 
 | plugin | what it does |
 |---|---|
-| `slurm` | in a Slurm job: job id as the worker name, concurrency from allocated CPUs and memory, job time limit, node-local staging dir, exit after an idle period |
+| `slurm` | in a Slurm job: job id as the worker name, concurrency from the jobs entry's `slots` (`TASKQ_SLOTS`, default 1), job time limit, node-local staging dir, exit after an idle period |
 | `resident` | resident worker in a pueue group: worker id as the name, cores and concurrency from the machine table's worker, exit after an idle period (exit 0, the hub starts it again next round) |
 | `gpu_pad` | with a GPU pad: grow it to floor before training, subtract its memory when computing free GPU memory |
 | `window` | the machine table worker's `hours`: do not claim outside the window; at the end of the window stop and release current tasks and exit |

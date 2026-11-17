@@ -160,7 +160,7 @@ TASKQ_ADMITTED=1 run; rc=$?
 check "run_task.sh started by the consumer (TASKQ_ADMITTED=1): does not wait again" '[[ $rc == 0 ]] && ! grep -q "GPU 1 busy" $T/rt.out && grep -q "^end .* t/r" $T/train.log'
 fi
 
-# slurm. Slurm job: the job id is the name, slots from CPUs and memory, an unknown time limit checked again later, the local staging dir handed to run_task.sh and removed at the end
+# slurm. Slurm job: the job id is the name, 1 slot without TASKQ_SLOTS, an unknown time limit checked again later, the local staging dir handed to run_task.sh and removed at the end
 if want slurm; then
 reset
 python3 - "$TASKQ_DIR/tasks.jsonl" "$T" << 'EOT'
