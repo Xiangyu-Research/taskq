@@ -298,7 +298,9 @@ from the spec, sets env vars and runs the command at the project root inside the
 command must resume from its checkpoint (after a release another worker continues from it). Training never outlives its task: the
 command runs in its own session, whatever it leaves there when it exits is stopped, and a watcher stops the training once the worker
 that started `run_task.sh` is gone (killed) or `run_task.sh` itself was killed, so a killed worker never leaves training on the GPU
-for a new worker to stack another task onto.
+for a new worker to stack another task onto. Stops the worker sends itself (`taskq stop`, its own stop signal or hours window, stall
+handling, a claim taken over) release the task without a failure; a task whose training or `run_task.sh` dies of a signal the worker
+did not send (an out-of-memory killer, an admin) is released as a failure, so one killed every time reaches the failure limit.
 
 #### Consumers
 
@@ -316,13 +318,19 @@ Differences between executor kinds live in consumer plugins: the core's `queue/c
 | `idle(w, why, now, since, err_since)` | nothing running: return seconds to sleep, `None` = exit |
 | `on_exit(w)` | before exiting |
 
+A hook that raises never stops the worker: it is logged with the plugin and hook names and the worker falls back (a failing `active`
+keeps the plugin, so its `admit` still decides; a failing `admit` means do not claim now; a failing `before_start` starts anyway; a
+failing `env` leaves the env vars unchanged; a failing `idle` checks again after `TASKQ_POLL` seconds and exits once idle for
+`TASKQ_IDLE_MAX`). Any other unexpected error in the worker goes through the normal shutdown: it stops training, releases the claims
+of what has stopped, runs `on_exit` and exits 1.
+
 | plugin | what it does |
 |---|---|
 | `slurm` | in a Slurm job: job id as the worker name, concurrency from allocated CPUs and memory, job time limit, node-local staging dir, exit after an idle period |
 | `resident` | resident worker in a pueue group: worker id as the name, cores and concurrency from the machine table's worker, exit after an idle period (exit 0, the hub starts it again next round) |
 | `gpu_pad` | with a GPU pad: grow it to floor before training, subtract its memory when computing free GPU memory |
 | `window` | the machine table worker's `hours`: do not claim outside the window; at the end of the window stop and release current tasks and exit |
-| `gpu_idle` | claim only when no one else's processes are on the GPU and the usage records show no one else in the last `idle` minutes |
+| `gpu_idle` | claim only when, on every GPU in `CUDA_VISIBLE_DEVICES` (by index or UUID), no one else's processes are there and the usage records show no one else in the last `idle` minutes; a GPU nvidia-smi cannot tell about (missing, failing, timing out, unreadable output) is not free (`run_task.sh` waits the same way when started by hand) |
 | `gpu_share` | a second task on one GPU: after the first has trained for a while, claim another when average utilisation is low and half the memory is still free |
 
 How many tasks share a GPU and when to top up follow only this live state, never a model classification.

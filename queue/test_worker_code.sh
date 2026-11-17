@@ -15,7 +15,7 @@ HEADCMD="cat $T/head"
 # 6. outside Slurm (resident in site-pueue's pueue group, worker on GPU 1): WORKER_ID is the name, slots from the worker's slots (TASKQ_SLOTS, unset → 1), only the GPU in CUDA_VISIBLE_DEVICES;
 #    idle less than IDLE_EXIT (default 30 minutes), queue errors and too many failures do not exit (RUN_TASK_TRIES=1: outside Slurm run_task.sh retries 3 times itself); exit 0 when the commit changes with nothing running, and wait for training to finish when it changes while running
 if want 6; then
-mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
+mkdir -p "$T/bin6"; printf '#!/bin/bash\necho "$*" >> %q\n[[ $* == *query-gpu=index,memory.used* ]] && echo "1, 0"\nexit 0\n' "$T/nvsmi.args" > "$T/bin6/nvidia-smi"; chmod +x "$T/bin6/nvidia-smi"
 echo a > "$T/head"
 reset
 table << EOF
