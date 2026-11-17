@@ -74,8 +74,9 @@ ok("worker env named in envs → activated as for tasks (spec: its .activate, no
    M.worker_activate("tsite") == M.activate("tsite", "alt"))
 M.MACHINES["tsite"]["conda"] = ("/opt/c", "base")
 ok("without .ok a spec env is not ready, a conda one is", M.ready_envs("tsite") == {"old"})
-h = M.spec_hash("base")
-ok("ready only when .ok matches", M.ready_envs("tsite", {"base": h}) == {"old", "base"})
+h = M.spec_hash("base", "cu128")  # tsite builds base's cu128 variant: without a lock that is not the default variant's hash
+ok("ready only when .ok matches", M.ready_envs("tsite", {"base": h}) == {"old", "base"}
+   and M.ready_envs("tsite", {"base": M.spec_hash("base")}) == {"old"})
 ok(".ok from an old spec → not ready", M.ready_envs("tsite", {"base": "0" * 64}) == {"old"})
 ok("all envs of the existing machine entries are still ready (not turned into specs)",
    all(M.ready_envs(n) == set(M.machine(n).get("envs") or {}) for n in SAVE_M))

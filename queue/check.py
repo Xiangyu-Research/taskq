@@ -14,7 +14,6 @@ import ast
 import datetime as dt
 import fnmatch
 import glob
-import hashlib
 import json
 import os
 import re
@@ -289,6 +288,8 @@ def check_specs(r, M):
         if odd:
             r.bad(g, f"env description {n}.yml has unknown pip placeholders {odd} (allowed: {sorted(PLACEHOLDERS)})")
         for v in list(sp.get("torch") or {}) or ["default"]:
+            if M.lock_stale(n, v):  # check_locks reports it; a build script needs a current lock
+                continue
             envs = {x: "spec" for x in names}
             envs[n] = ("spec", v)
             M.MACHINES[fake] = dict(label=fake, hostname=r"\A\Z", ssh="-", scheduler="pueue", root="/check/root",
@@ -302,7 +303,8 @@ def check_specs(r, M):
 
 
 def check_locks(r, M, names):
-    """<name>.<variant>.lock.json: the description exists and the recorded spec_sha256 is the current one (relock after a change)."""
+    """<name>.<variant>.lock.json: the description exists and the lock is current (mtab.lock_stale: the recorded spec_sha256 is
+    the description's, a venv's base lock is the one it was locked on; relock after a change)."""
     g = "machines"
     for p in sorted(glob.glob(os.path.join(M.SPECS, "*" + PR.LOCK_SUFFIX))):
         r.checked(g)
@@ -316,8 +318,9 @@ def check_locks(r, M, names):
         if f != f"{n}.{v}{PR.LOCK_SUFFIX}" or n not in names:
             r.bad(g, f"lock {f} has name / variant ({n} / {v}) that do not match the filename, or has no description {n}.yml")
             continue
-        if d.get("spec_sha256") != hashlib.sha256(open(os.path.join(M.SPECS, f"{n}.yml"), "rb").read()).hexdigest():
-            r.bad(g, f"lock {f} is from an older description ({n}.yml changed after locking); relock: taskq env lock {n} --variant {v}")
+        why = M.lock_stale(n, v)
+        if why:
+            r.bad(g, f"lock {why}")
 
 
 # ---------------- policy ----------------

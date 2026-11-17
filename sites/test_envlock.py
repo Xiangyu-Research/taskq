@@ -256,7 +256,8 @@ yml = open(os.path.join(SPECS, "base.yml"), "rb").read()
 canon = json.dumps({k: v for k, v in base.items() if k != "created"}, sort_keys=True, separators=(",", ":"),
                    ensure_ascii=False).encode()
 ok("with a lock the hash = sha256(spec + lock without created)", M.spec_hash("base") == sha(yml + canon) != h0)
-ok("a variant without a lock: the hash covers the spec only", M.spec_hash("base", "cu128") == h0 == sha(yml))
+ok("without a lock: default is the spec alone (as before), another variant counts too (a cu128 build is not the default one)",
+   h0 == sha(yml) and M.spec_hash("base", "cu128") == sha(yml + b"\0variant cu128") != h0)
 ok("no such spec → None", M.spec_hash("no-such-spec") is None)
 first = open(p).read()
 os.utime(p)
@@ -340,6 +341,47 @@ CK.check_locks(r, M, L.spec_names())
 ok("check: the spec changed and the lock is old → reported", len(r.problems) == 1 and "layer.default.lock.json" in r.problems[0], r.problems)
 M.MACHINES.clear()
 M.MACHINES.update(SAVE)
+
+# ---------- an env's hash follows what it is built on; a stale lock is not built ----------
+EV = L.EV
+lyml, eyml = (open(os.path.join(SPECS, f"{n}.yml"), "rb").read() for n in ("layer", "ext"))
+
+
+def load_err(env, v="default"):
+    try:
+        EV.load_lock(env, v)
+        return None
+    except EV.EnvError as e:
+        return str(e)
+
+
+ok("the spec changed after locking: the lock is stale and building from it is refused (it would build the old env under the new hash)",
+   "older layer.yml" in (M.lock_stale("layer") or "") and "taskq env lock layer" in (load_err("layer") or ""))
+ok("a venv with a current lock: its hash is the spec plus its lock, as before (envs built from current locks keep their hash)",
+   M.lock_stale("ext") is None and load_err("ext") is None and M.spec_hash("ext") == sha(eyml + M.lock_bytes(M.lock_path("ext"))))
+spec("plain", "base: base\npip:\n  - six==1.16.0\n")  # a venv without a lock
+hp = M.spec_hash("plain")
+ok("a venv without a lock: its hash takes in its base's (every locked variant), and is stable",
+   hp == M.spec_hash("plain") and hp != sha(open(os.path.join(SPECS, "plain.yml"), "rb").read()))
+he, he8 = M.spec_hash("ext"), M.spec_hash("ext", "cu128")
+open(os.path.join(SPECS, "base.yml"), "a").write("# base changed\n")
+lk.lock("base")  # the base is locked again (and rebuilt): what was built on it is old
+ok("the base locked again: a venv locked on its old lock is stale, its hash changes (not ok) and building it says to lock it again",
+   "another lock of its base base" in (M.lock_stale("ext") or "") and M.spec_hash("ext") != he and "taskq env lock ext" in (load_err("ext") or ""))
+ok("the base's spec changed but that variant was not locked again: the base lock is stale, and so is the venv locked on it",
+   "older base.yml" in (M.lock_stale("base", "cu128") or "") and "its base's lock is stale" in (M.lock_stale("ext", "cu128") or "")
+   and M.spec_hash("ext", "cu128") != he8 and load_err("base", "cu128"))
+hp2 = M.spec_hash("plain")
+lk.lock("base", "cu128")
+ok("a venv without a lock: its hash changes whenever its base changes (spec or any variant's lock)", hp2 != hp and M.spec_hash("plain") != hp2)
+lk.lock("ext")
+ok("the venv locked again on the new base lock: current again, and its hash is the spec plus the new lock",
+   M.lock_stale("ext") is None and load_err("ext") is None and M.spec_hash("ext") == sha(eyml + M.lock_bytes(M.lock_path("ext"))) != he)
+r = R()
+CK.check_locks(r, M, L.spec_names())
+ok("check: stale locks of venvs whose base was locked again are reported too",
+   len(r.problems) == 2 and "ext.cu128.lock.json was locked on another lock" in r.problems[0] and "layer.default.lock.json" in r.problems[1],
+   r.problems)
 
 # ---------- real lock (--real): python 3.11 + six ----------
 if "--real" in sys.argv:

@@ -468,6 +468,12 @@ generates a bash snippet and runs it on that machine's CPU (Slurm uses `env_job`
 only after a passing check does the `<name>` symlink switch and `.ok` get written; running tasks are unaffected. Broken builds and lack of
 space report `site:<machine>:env:<env>`. Executors whose env is not ready are not chosen when assigning tasks.
 
+The hash (`mtab.spec_hash`, what `.ok` records) is the description plus the lock of the variant used there. Without a lock nothing pins the
+rest, so the variant counts too (unless `default`), and a venv takes in its base's hashes: when the base is rebuilt the venv is rebuilt on
+it. A lock pins its base's lock, so a venv with a current lock keeps its hash; a stale lock (`mtab.lock_stale`: the description changed
+after locking, or the base was locked again) changes the hash and is not built from (lock it again), so an env never shows ready while
+built from an old description or on an old base.
+
 #### Env locks
 
 `taskq env lock <name> [--variant V]` (or `--all`) resolves a description into `<name>.<variant>.lock.json`: exact versions, URLs and sha256
