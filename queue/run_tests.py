@@ -96,6 +96,11 @@ def env_path():
     return ":".join(seen)
 
 
+def child_env():
+    """The environment every test starts from (HOME and TMPDIR are added per file): PATH, LANG and the TQTEST_* settings."""
+    return {"PATH": env_path(), "LANG": "C.UTF-8", **{k: v for k, v in os.environ.items() if k.startswith(TEST_VARS)}}
+
+
 def skip_reason(log):
     lines = [ln.strip() for ln in open(log, encoding="utf-8", errors="replace").read().splitlines() if ln.strip()]
     hit = [ln for ln in lines if ln.startswith("SKIP:")]
@@ -199,7 +204,7 @@ def main(argv=None):
     rep = os.path.join(out, "report.tsv")
     last = last_seconds(rep)
     base = short_base()
-    env = {"PATH": env_path(), "LANG": "C.UTF-8", **{k: v for k, v in os.environ.items() if k.startswith(TEST_VARS)}}
+    env = child_env()
     order = sorted(tests, key=lambda t: (-last.get(t, 0), t))
     rows, t0 = {}, time.time()
     print(f"run_tests: {len(tests)} files, {max(1, a.jobs)} at a time; logs in {out}", file=sys.stderr)

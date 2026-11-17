@@ -191,6 +191,7 @@ and `bin/taskq` mean the full suite):
 | changed | run |
 |---|---|
 | `bin/taskq` | `test_cli.py`, `test_cli_json.py`, `test_readme.py` |
+| `queue/run_tests.py` | `test_run_tests.py` |
 | `README.md`, `queue/README.md`, `queue/schema.py` | `test_readme.py`, `test_check.py` |
 | `queue/proto.py` | `test_protocol.py`, `test_core_clean.py`, then the full suite |
 | any core file (no specific project, machine or path) | `test_core_clean.py` |
