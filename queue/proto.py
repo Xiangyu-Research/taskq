@@ -79,8 +79,18 @@ INCOMPLETE = ".incomplete"     # a dir half created (tunnel_push.sh, relay makin
 MANIFEST = "MANIFEST.json"     # fetched result: written last, only present when the fetch is complete (relay_transfer.py)
 RELAY_INBOX = ".relay_in"      # half-fetched results in the store data dir .relay_in/<safe key> (site_ops.py pull)
 STAGE_DIR_PREFIX = "taskq_stage_"  # input copy on node-local disk $TMPDIR/taskq_stage_<job> (inputs.py, run_task.sh, consumers/slurm.py)
-GPU_PAD_BASE = "/tmp/gpu_pad_"  # GPU pad and worker handshake /tmp/gpu_pad_<job>{.mib,.ready,.start}
+GPU_PAD_BASE = "/tmp/gpu_pad_"  # handshake of GPU pads started by bundles from before GPU_PAD_DIR: /tmp/gpu_pad_<job>{.mib,.ready,.start}
 GPU_PAD_FILES = (".mib", ".ready", ".start")
+# GPU pad and worker handshake in this account's private dir (0700): <GPU_PAD_DIR><uid>/<job>{.mib,.ready,.start} (gpu_pad_base).
+# Workers and taskq pad room still find a pad started by an older bundle at GPU_PAD_BASE<job> (regular files of this account
+# only, no link followed) while a Slurm job started before GPU_PAD_DIR runs
+GPU_PAD_DIR = "/tmp/taskq_gpu_pad_"
+
+
+def gpu_pad_base(job, uid):
+    """Handshake prefix of a job's GPU pad (in this account's private dir GPU_PAD_DIR<uid>)."""
+    return f"{GPU_PAD_DIR}{uid}/{job}"
+
 
 # ---------------- logs ----------------
 TASK_LOGS = "logs/tasks"       # under the data dir: part logs <safe key>__<job>_part<part>.log
@@ -351,7 +361,7 @@ ENV = dict(
     TASKQ_MACHINE=("run", "which machine in the machine table this is (set by pueue worker commands, worker.sbatch, relay_remote.prefix); when unset the unique hostname match"),
     TASKQ_HEAD_CMD=("test", "replaces the command that reads the code version"),
     TASKQ_GPU_PAD_SCRIPT=("test", "replaces gpu_pad.py"),
-    TASKQ_GPU_PAD_BASE=("test", "replaces /tmp/gpu_pad_<job>"),
+    TASKQ_GPU_PAD_BASE=("test", "replaces the GPU pad handshake prefix (gpu_pad_base: <GPU_PAD_DIR><uid>/<job>)"),
     TASKQ_TEST_FAKEBIN=("test", "dir holding fake commands"),
     TASKQ_LAST=("test", "replaces the state dir's last"),
     TASKQ_LOCK_WAIT=("test", "retry interval while waiting for a lock (seconds, default 0.5)"),
@@ -527,6 +537,7 @@ def sh_vars():
            "TQ_LOG_GPU_BUSY_FMT": LOG_GPU_BUSY_FMT, "TQ_LOG_UNREADABLE": LOG_UNREADABLE}
     out.update({f"TQ_GPU_PAD_{x[1:].upper()}": x for x in GPU_PAD_FILES})  # TQ_GPU_PAD_MIB, _READY, _START
     out["TQ_LOG_PART"] = LOG_PART
+    out["TQ_GPU_PAD_DIR"] = GPU_PAD_DIR
     out.update({f"TQ_ROOT_{k.upper()}": v for k, v in ROOT.items()})
     out.update({f"TQ_Q_{k.upper()}": v for k, v in QUEUE.items()})
     out.update({f"TQ_EXIT_{k.upper()}": v for k, v in EXIT.items()})

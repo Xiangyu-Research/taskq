@@ -19,12 +19,16 @@ if [[ -n ${SLURM_JOB_ID:-} && -z ${SLURM_STEP_ID:-} && -z ${TASKQ_TEST_FAKEBIN:-
     if [[ -f $_pad && ! -e $_switch && -z ${TASKQ_GPU_PAD_STARTED:-} ]]; then
         export TASKQ_GPU_PAD_STARTED=1
         while IFS= read -r _l; do
-            case $_l in TQ_WORKER_LOGS=* | TQ_GPU_PAD_BASE=*) eval "$_l" ;; esac
+            case $_l in TQ_WORKER_LOGS=* | TQ_GPU_PAD_DIR=*) eval "$_l" ;; esac
         done < <(python3 "$_padhere/proto.py" sh)
         unset _l
         _padlog=${TASKQ_DATA:-$HOME}/$TQ_WORKER_LOGS/gpu_pad_${SLURM_JOB_ID}.log
-        mkdir -p "$(dirname "$_padlog")" 2> /dev/null || _padlog=$TQ_GPU_PAD_BASE${SLURM_JOB_ID}.log
-        unset TQ_WORKER_LOGS TQ_GPU_PAD_BASE
+        if ! mkdir -p "$(dirname "$_padlog")" 2> /dev/null; then  # no logs dir: in this account's private handshake dir, never a shared one
+            _padlog=$TQ_GPU_PAD_DIR$UID
+            mkdir -m 700 "$_padlog" 2> /dev/null
+            if [[ -d $_padlog && ! -L $_padlog && -O $_padlog ]]; then _padlog=$_padlog/${SLURM_JOB_ID}.log; else _padlog=/dev/null; fi
+        fi
+        unset TQ_WORKER_LOGS TQ_GPU_PAD_DIR
         echo "$(date '+%F %T') GPU pad started: floor=${TASKQ_GPU_PAD_FLOOR_MIB}MiB target=${TASKQ_GPU_PAD_TARGET_MIB}MiB high=${TASKQ_GPU_PAD_HIGH_MIB}MiB log=$_padlog"
         _py=$(command -v python3)
         # Restart if it exits during the job (delay 1, 2, 4... times RETRY_DELAY, at most 16); give up after MAX_FAILS consecutive runs shorter than RESET_AFTER seconds

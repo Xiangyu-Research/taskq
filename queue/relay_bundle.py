@@ -104,16 +104,30 @@ SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
 SMALL_MAX = 8 << 20  # tables listing the items of each data split run past 1 MB; data proper is not git-tracked
 PROJECT_FILE = ".taskq.toml"  # project description at the project repo root, included when present
 VERSION = BC + "/VERSION"  # short core commit; not part of the bundle name: hub-only core changes keep the name and executors keep the bundle
-SECRETS = [
+SECRETS = [  # look-alike secrets: a bundle holding one is refused (tokens with a fixed prefix; bare hex keys only next to their name)
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b"),  # GitHub
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{60,}"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,}"),
-    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-    re.compile(r"\btk_[a-z0-9]{29}\b"),
-    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"),  # GitLab
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id, and the secret key next to its name
+    re.compile(r"(?i)\baws_secret_access_key\b[\"'\]]*\s*[:=]\s*[\"']?[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),  # Slack
+    re.compile(r"\bhooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{20,}"),
+    re.compile(r"\bdiscord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{60,}"),
+    re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b"),  # Telegram bot
+    re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,}"),  # OpenAI, Anthropic
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),  # Google API key, OAuth client secret
+    re.compile(r"\bGOCSPX-[A-Za-z0-9_-]{28}\b"),
+    re.compile(r"\btk_[a-z0-9]{29}\b"),  # ntfy
+    re.compile(r"\bhf_[A-Za-z0-9]{34}\b"),  # Hugging Face (user and older org tokens)
+    re.compile(r"\bapi_org_[A-Za-z0-9]{34}\b"),
+    re.compile(r"(?i)\bwandb_api_key\b[\"'\]]*\s*[:=]\s*[\"']?(?:local-)?[0-9a-f]{40}\b"),  # Weights & Biases (40 hex) by name
+    re.compile(r"(?i)\bwandb\.login\([^)]*\bkey\s*=\s*[\"'](?:local-)?[0-9a-f]{40}\b"),
+    re.compile(r"(?i)\bapi\.wandb\.ai\b.*\bpassword\s+(?:local-)?[0-9a-f]{40}\b"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"),  # npm, PyPI
+    re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"),
+    re.compile(r"\b[rs]k_live_[0-9A-Za-z]{24,}\b"),  # Stripe
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"),  # JWT
 ]
 
 

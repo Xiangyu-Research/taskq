@@ -212,6 +212,119 @@ with open(os.path.join(BIN, "squeue"), "w") as f:
 rc, out, err = run("prepare", DATA, "k5", L7, V, env=env)
 ok("squeue fails: keep other jobs' dirs", rc == 0 and os.path.isdir(L8) and os.path.isdir(os.path.join(TMP, "taskq_stage_9")))
 
+# the local root and other jobs' dirs sit in a shared temp dir with predictable names: only private dirs of this account are
+# used, and a local blob is used only while its sha256 is known to match (record, else checked again)
+import stat  # noqa: E402
+mode = lambda p: stat.S_IMODE(os.lstat(p).st_mode)  # noqa: E731
+real_of = lambda root, k, r: os.path.realpath(os.path.join(root, "views", k, "in", "ds1", r))  # noqa: E731
+ok("local root: created private (0700)", mode(L7) == 0o700)
+L12 = os.path.join(TMP, "taskq_stage_12")
+os.makedirs(L12)
+os.chmod(L12, 0o755)  # as an older version made them
+rc, out, err = run("prepare", DATA, "k12", L12, V, env=env)
+ok("local root of ours made open by an older version: closed to others (0700), used", rc == 0 and out == os.path.join(L12, "views", "k12")
+   and mode(L12) == 0o700)
+ELSE = os.path.join(T, "elsewhere")
+os.makedirs(ELSE)
+L13 = os.path.join(TMP, "taskq_stage_13")
+os.symlink(ELSE, L13)  # planted by another account
+rc, out, err = run("prepare", DATA, "k13", L13, V, env=env)
+rc2, out2, err2 = run("copy", L13, "k13", env=env)
+ok("a link planted at the local root: inputs read in place (prints the data dir, says why), nothing written where it points",
+   rc == 0 and out == DATA and "not a private dir" in err and rc2 == 0 and os.listdir(ELSE) == [])
+L14 = os.path.join(TMP, "taskq_stage_14")
+os.makedirs(L14)
+_getuid = os.getuid
+os.getuid = lambda: _getuid() + 1  # every existing dir now belongs to another account
+try:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+        rc = I.prepare(DATA, "k14", L14, [V])
+finally:
+    os.getuid = _getuid
+ok("local root made by another account: inputs read in place, nothing written there", rc == 0 and buf.getvalue().strip() == DATA
+   and os.listdir(L14) == [])
+
+# another job's same-size blobs with other content (no record, or a record from before the content changed) are not hard-linked;
+# fresh copies are checked, closed to others (the original is group-writable here) and recorded
+TMP3 = os.path.join(T, "tmp3")
+L30, L31 = os.path.join(TMP3, "taskq_stage_30"), os.path.join(TMP3, "taskq_stage_31")
+for i, (rel, c) in enumerate(files.items()):
+    h = os.path.basename(os.path.realpath(os.path.join(V, rel)))
+    p = os.path.join(L30, "blobs", h[:2], h)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "wb").write(c)
+    if i % 2:
+        open(p + ".st", "w").write(I.SO.stamp(p))  # recorded while it matched
+    t = os.stat(p).st_mtime_ns
+    open(p, "wb").write(bytes(len(c)))  # then changed in place later: same size, other content
+    os.utime(p, ns=(t + 10 ** 9, t + 10 ** 9))
+    os.chmod(os.path.realpath(os.path.join(V, rel)), 0o664)
+os.chmod(L30, 0o700)
+run("prepare", DATA, "k31", L31, V, env=env)
+rc, out, err = run("copy", L31, "k31", env=env)
+ok("another job's same-size blobs with other content are not hard-linked: copied from the original instead, content right",
+   rc == 0 and "hard-linked 0" in out and "new 6" in out and all(open(os.path.join(L31, "views", "k31", "in", "ds1", r), "rb").read() == c for r, c in files.items()))
+ok("fresh copies: not writable by group or others (the original is), each recorded",
+   all(mode(real_of(L31, "k31", r)) & 0o022 == 0 and open(real_of(L31, "k31", r) + ".st").read() == I.SO.stamp(real_of(L31, "k31", r)) for r in files))
+for rel in files:
+    os.chmod(os.path.realpath(os.path.join(V, rel)), 0o644)
+
+# copied halfway: a blob already in place but not recorded yet (stopped between placing and recording), and one of the right size
+# but other content: the view does not use them before the copy; the copy checks the first (kept, recorded) and replaces the second
+TMP4 = os.path.join(T, "tmp4")
+L32 = os.path.join(TMP4, "taskq_stage_32")
+rels = sorted(files)
+for rel, c in ((rels[0], files[rels[0]]), (rels[1], bytes(len(files[rels[1]])))):
+    h = os.path.basename(os.path.realpath(os.path.join(V, rel)))
+    os.makedirs(os.path.join(L32, "blobs", h[:2]), exist_ok=True)
+    open(os.path.join(L32, "blobs", h[:2], h), "wb").write(c)
+rc, out, err = run("prepare", DATA, "k32", L32, V, env=env)
+todo32 = json.load(open(os.path.join(L32, "views", "k32.todo.json")))
+ok("copied halfway: blobs without a record are not used before the copy (the view reads the originals)", rc == 0 and len(todo32) == 6
+   and all(real_of(L32, "k32", r).startswith(STORE) for r in files))
+rc, out, err = run("copy", L32, "k32", env=env)
+ok("copied halfway: the copy checks the unrecorded blob (kept and recorded) and replaces the one with other content",
+   rc == 0 and "already present 1" in out and "new 5" in out
+   and all(real_of(L32, "k32", r).startswith(L32 + "/") and open(real_of(L32, "k32", r), "rb").read() == c
+           and open(real_of(L32, "k32", r) + ".st").read() == I.SO.stamp(real_of(L32, "k32", r)) for r, c in files.items()))
+rc, out, err = run("prepare", DATA, "k32b", L32, V, env=env)
+ok("copied halfway: once recorded, the next task's view uses the local blobs at once", rc == 0
+   and json.load(open(os.path.join(L32, "views", "k32b.todo.json"))) == [] and all(real_of(L32, "k32b", r).startswith(L32 + "/") for r in files))
+
+# the copy lock (shared by this account's jobs on the node, in the shared temp dir) replaced by a link: no copy, nothing written there
+LOCK4 = os.path.join(TMP4, f".taskq_stage_{os.getuid()}.lock")
+VICTIM = os.path.join(T, "victim")
+open(VICTIM, "w").write("keep")
+os.remove(LOCK4)
+os.symlink(VICTIM, LOCK4)
+L33 = os.path.join(TMP4, "taskq_stage_33")
+shutil.copytree(L32, L33, symlinks=True, ignore=shutil.ignore_patterns("views", "*.st"))  # unrecorded blobs: the copy must run
+run("prepare", DATA, "k33", L33, V, env=env)
+rc, out, err = run("copy", L33, "k33", env=env)
+ok("a link planted as the copy lock: not copying (reading in place), the file it points at untouched", rc == 0 and "not copying" in out
+   and open(VICTIM).read() == "keep" and all(real_of(L33, "k33", r).startswith(STORE) for r in files))
+
+# another account's dirs on the node (needs root to make them): never hard-linked from, never removed
+if os.getuid() == 0:
+    TMP5 = os.path.join(T, "tmp5")
+    L40, L41 = os.path.join(TMP5, "taskq_stage_40"), os.path.join(TMP5, "taskq_stage_41")
+    run("prepare", DATA, "k40", L40, V, env=env)
+    run("copy", L40, "k40", env=env)  # good, recorded copies
+    for d, _, fs in os.walk(L40):
+        for x in [d] + [os.path.join(d, f) for f in fs]:
+            os.lchown(x, 4242, 4242)
+    with open(os.path.join(BIN, "squeue"), "w") as f:
+        f.write("#!/bin/sh\necho 41\n")
+    run("prepare", DATA, "k41", L41, V, env=env)
+    rc, out, err = run("copy", L41, "k41", env=env)
+    ok("another account's job dir: not hard-linked from (copied from the original), not removed although its job is not running",
+       rc == 0 and "hard-linked 0" in out and "new 6" in out and os.path.isdir(L40))
+    with open(os.path.join(BIN, "squeue"), "w") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+else:
+    print("SKIP: another account's job dir (needs root to make files of another account)")
+
 # run_task.sh: missing inputs → exit 4 without running the command; all present → the command reads from TASK_INPUTS_ROOT; with a staging dir (TASKQ_STAGE_ROOT) and local_inputs → read the local view
 RT = os.path.join(HERE, "run_task.sh")
 OUT = os.path.join(DATA, "jobs", "t")

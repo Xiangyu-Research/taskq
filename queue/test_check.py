@@ -140,6 +140,12 @@ rc, err = machines_err((HUB, 'roles=("hub",), repo="~/auto/demo",'), (TRANSFER, 
 ok("an executor with ssh=None and the store on another machine: the store must also be here", "loc share the hub's machine (ssh is None); store (st) on another machine" in err)
 ok("an executor with a locked env: hub needs root, and transfer when sent over a tunnel",
    "hub (hub) needs root: site-pueue use locked envs" in err and "hub (hub) needs transfer: site-pueue" in err)
+# the file service's public address carries session tokens and files: https, plain http only to this machine
+rc, err = machines_err((TRANSFER, 'transfer=("http://transfer.example.org", "172.18.0.1:18090"),'))
+ok("transfer address over plain http to another host: reported", rc == 1
+   and "MACHINES['hub']: transfer's address 'http://transfer.example.org' is not https" in err)
+rc, err = machines_err((TRANSFER, 'transfer=("http://127.0.0.1:18090", "127.0.0.1:18090"),'))
+ok("transfer address over plain http to this machine: fine", rc == 0 and "is not https" not in err)
 
 # the store's data dir and an executor's data dir (<root>/data) on the same machine must not overlap either way: a worker's done
 # markers would make results count as already on the store, and the hub would delete the executor's copy (the only one)

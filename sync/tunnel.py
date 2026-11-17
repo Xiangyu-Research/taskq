@@ -13,6 +13,7 @@ caps one request at 100 MB). Transfers for one machine run one at a time; differ
 """
 import fcntl
 import hashlib
+import hmac
 import http.client
 import http.server
 import json
@@ -21,7 +22,7 @@ import re
 import secrets
 import shlex
 import shutil
-import socket
+import signal
 import subprocess
 import sys
 import threading
@@ -45,6 +46,18 @@ IDLE = float(os.environ.get("TUNNEL_IDLE", 300))
 TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,}")
 UA = {"User-Agent": "xfer/1"}
 STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
+# file server protocol (this file runs on both sides; the other side gets it from the transfer process each run):
+# a session's token travels in TOKEN_HEADER, never in the URL (paths are /<relpath>, only those in the session's list);
+# GET / with CHALLENGE_HEADER: a nonce -> "ok <SERVER_VERSION> <proof>", proof = HMAC of the nonce with the key only this
+# account can read (<server dir>/serve.key): a transfer process uses a server only when it proves it is ours, and restarts
+# our server of an older version
+SERVER_VERSION = 2
+TOKEN_HEADER = "X-Xfer-Token"
+CHALLENGE_HEADER = "X-Xfer-Challenge"
+NONCE_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
+KEY_FILE, PID_FILE = "serve.key", "serve.pid"  # in the server dir (0700)
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+MODE_BITS = 0o777  # modes a received file may get: never setuid, setgid or sticky, whatever the other side sends
 
 
 def log(msg):
@@ -126,7 +139,78 @@ def put_record(path, stat):
 # it died, and it exits after IDLE seconds without sessions. Each transfer is a session:
 # <server dir>/<token>.json holds the list, src / dst and the transfer process pid (the server drops sessions whose pid
 # is gone); progress (bytes moved, MD5 of sent files, whether received files match) is appended to <token>.out, which
-# the transfer process reads.
+# the transfer process reads. Once the server has exited, any local account can listen on bind: a transfer process
+# first makes sure the server there is ours (probe), and never hands a session to another.
+
+def url_ok(url):
+    """The file server's public address (the store's transfer, a quick tunnel, TUNNEL_URL): https, since session tokens and files
+    cross the network; plain http only to this machine."""
+    u = urllib.parse.urlsplit(str(url))
+    return bool(u.hostname) and (u.scheme == "https" or u.scheme == "http" and u.hostname in LOCAL_HOSTS)
+
+
+def server_key(d):
+    """The secret this account's transfer processes and file server share (<server dir>/serve.key, 0600): a server proves it is
+    ours with it. Made on first use (written to a temp name, then linked into place: readers never see it half-written)."""
+    p = os.path.join(d, KEY_FILE)
+    if not os.path.lexists(p):
+        tmp = f"{p}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(32))
+        try:
+            os.link(tmp, p)
+        except FileExistsError:
+            pass
+        finally:
+            os.unlink(tmp)
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as f:
+        st = os.fstat(f.fileno())
+        if st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise RuntimeError(f"{p} is not this account's private key file (owner or mode); not using the file server")
+        return f.read().strip()
+
+
+def proof(key, nonce):
+    return hmac.new(key.encode(), b"xfer server " + nonce.encode(), hashlib.sha256).hexdigest()
+
+
+def server_pid(bind, d):
+    """Pid in the server dir's pid file when it is a live process of this account running this script's _serve for bind and
+    d (our server, possibly of an older version; it wrote the pid after binding and holds bind until it exits) → pid, else None."""
+    try:
+        pid = int(open(os.path.join(d, PID_FILE)).read().strip())
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return None
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
+    except (OSError, ValueError):
+        return None
+    return pid if args[-3:] == ["_serve", bind, d] else None
+
+
+def probe(bind, d, key):
+    """Who listens on bind → "none" (nothing), "ours" (answers the challenge with our key, this version or newer), "older" (a
+    server of ours to restart: an older version, or named by our pid file without answering), "other" (anything else)."""
+    h, port = bind.rsplit(":", 1)
+    nonce = secrets.token_urlsafe(24)
+    body = []
+    try:
+        c = http.client.HTTPConnection("127.0.0.1" if h in ("", "0.0.0.0") else h, int(port), timeout=10)
+        try:
+            c.request("GET", "/", headers={**UA, CHALLENGE_HEADER: nonce})
+            body = c.getresponse().read(300).decode(errors="replace").split()
+        finally:
+            c.close()
+    except ConnectionRefusedError:
+        return "none"
+    except (OSError, http.client.HTTPException):
+        pass
+    if len(body) == 3 and body[0] == "ok" and hmac.compare_digest(body[2].encode(), proof(key, nonce).encode()):
+        return "ours" if body[1].isdigit() and int(body[1]) >= SERVER_VERSION else "older"
+    return "older" if server_pid(bind, d) else "other"
+
 
 def alive(pid):
     try:
@@ -205,7 +289,7 @@ class Registry:
         return n
 
 
-def handler(reg):
+def handler(reg, key):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -227,16 +311,16 @@ def handler(reg):
             self.wfile.write(body)
 
         def session(self):
-            """/<token>/<relpath>?query → (session, relpath, params); bad token → session is None."""
+            """Token in TOKEN_HEADER, /<relpath>?query → (session, relpath, params); missing or bad token → session is None."""
             p = urllib.parse.urlsplit(self.path)
-            parts = p.path.split("/", 2)
-            if len(parts) < 3:
+            if not p.path.startswith("/"):
                 return None, None, None
-            return reg.get(parts[1]), urllib.parse.unquote(parts[2]), urllib.parse.parse_qs(p.query)
+            return reg.get(self.headers.get(TOKEN_HEADER) or ""), urllib.parse.unquote(p.path[1:]), urllib.parse.parse_qs(p.query)
 
         def do_GET(self):
-            if self.path == "/":
-                return self.reply(200, b"ok")
+            if self.path == "/" and TOKEN_HEADER not in self.headers:
+                n = self.headers.get(CHALLENGE_HEADER) or ""
+                return self.reply(200, f"ok {SERVER_VERSION} {proof(key, n)}".encode() if NONCE_RE.fullmatch(n) else b"ok")
             S, rel, _ = self.session()
             if S is not None and rel == "":
                 return self.reply(200, b"ok")  # the transfer process checks that the server knows this session
@@ -293,7 +377,7 @@ def handler(reg):
             ok = os.path.isfile(part) and os.path.getsize(part) == S.files[rel][0] and md5_of(part) == g.get("md5")
             if ok:
                 m = int(g["mtime"])
-                os.chmod(part, int(g["mode"]) & 0o7777)
+                os.chmod(part, int(g["mode"]) & MODE_BITS)
                 os.utime(part, ns=(m, m))
                 settle(part, os.path.join(S.dst, rel))
             elif os.path.exists(part):
@@ -307,14 +391,15 @@ def handler(reg):
 def serve_main(bind, d):
     """Shared file server (tunnel.py _serve); exits if bind already has one."""
     reg = Registry(d)
+    key = server_key(d)
     host, port = bind.rsplit(":", 1)
     try:
-        srv = http.server.ThreadingHTTPServer((host, int(port)), handler(reg))
+        srv = http.server.ThreadingHTTPServer((host, int(port)), handler(reg, key))
     except OSError as e:
         log(f"{bind} already has a server ({e}), not starting another")
         return 0
     srv.daemon_threads = True
-    pidf = os.path.join(d, "serve.pid")
+    pidf = os.path.join(d, PID_FILE)
     with open(pidf, "w") as f:
         f.write(f"{os.getpid()}\n")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -342,7 +427,10 @@ def serve_main(bind, d):
 
 def srv_dir():
     d = os.path.join(os.path.dirname(lock_path()), "tunnel_srv")
-    os.makedirs(d, mode=0o700, exist_ok=True)
+    sys.path.insert(0, os.path.join(CORE, "queue"))
+    import common
+    if not common.private_dir(d):
+        raise RuntimeError(f"{d} is not a private dir of this account; not using the file server")
     return d
 
 
@@ -355,8 +443,11 @@ class Session:
         self.sent, self.done, self.moved, self.last, self.off = {}, {}, 0, time.time(), 0
         url, bind = here()["transfer"]
         self.url, self.bind = os.environ.get("TUNNEL_URL", url), os.environ.get("TUNNEL_BIND", bind)
+        if not url_ok(self.url):
+            raise RuntimeError(f"the file server address {self.url} is not https (session tokens and files cross the network; plain http only to this machine)")
         self.cid = None
         self.dir = srv_dir()
+        self.key = server_key(self.dir)
         self.base = os.path.join(self.dir, self.token)
         tmp = os.path.join(self.dir, f".{self.token}.tmp")
         with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
@@ -364,19 +455,36 @@ class Session:
         os.replace(tmp, self.base + ".json")
 
     def ensure(self):
-        """Start a server if nothing listens on bind (of two started at once, the second cannot bind and exits)."""
-        h, p = self.bind.rsplit(":", 1)
-        try:
-            with socket.create_connection(("127.0.0.1" if h in ("", "0.0.0.0") else h, int(p)), timeout=3):
-                return
-        except OSError:
-            pass
+        """Make sure our file server runs on bind → True when it answers as ours now. Nothing there: start one (of two started at
+        once, the second cannot bind and exits). Our server of an older version (or ours not answering): stop it and start
+        this one; sessions live in files, so transfers of this version continue (their requests retry), an older version's
+        transfers fail and are queued again. Anything else on bind: RuntimeError, nothing is sent to it."""
+        who = probe(self.bind, self.dir, self.key)
+        if who == "ours":
+            return True
+        if who == "other":
+            raise RuntimeError(f"{self.bind} is taken by a process that is not this account's file server (it cannot answer with "
+                               f"the key in {self.dir}); not transferring through it")
+        if who == "older":
+            pid = server_pid(self.bind, self.dir)
+            if pid:
+                log(f"stopping the file server pid {pid} (older version, or not answering) to start this one")
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                for _ in range(100):
+                    if not alive(pid):
+                        break
+                    time.sleep(0.1)
         with open(os.path.join(self.dir, "serve.log"), "a") as lf:
             subprocess.Popen([sys.executable, os.path.abspath(__file__), "_serve", self.bind, self.dir],
                              cwd=self.dir, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+        return False
 
     def open(self, quick=False):
-        """→ address for the other side. quick: use a temporary address (this machine's quick, an executor's quick_tunnel) instead of this machine's fixed address."""
+        """→ address for the other side. quick: use a temporary address (this machine's quick, an executor's quick_tunnel) instead of this machine's fixed address.
+        The session is asked for through the address only once the server on bind answers as ours."""
         quick = quick and "TUNNEL_URL" not in os.environ
         for attempt in range(3 if quick else 1):
             self.ensure()
@@ -384,16 +492,20 @@ class Session:
                 if self.cid:
                     subprocess.run(["docker", "stop", self.cid], capture_output=True)
                 self.cid, self.url = quick_tunnel(self.bind)
+                if not url_ok(self.url):
+                    raise RuntimeError(f"the temporary tunnel address {self.url} is not https; not using it")
             wait = 0.2
             for _ in range(60 if quick else 30):
                 try:
-                    if urllib.request.urlopen(urllib.request.Request(f"{self.url}/{self.token}/", headers=UA), timeout=10).read() == b"ok":
+                    if self.ensure() and urllib.request.urlopen(urllib.request.Request(
+                            f"{self.url}/", headers={**UA, TOKEN_HEADER: self.token}), timeout=10).read() == b"ok":
                         return self.url
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
                 time.sleep(wait)
                 wait = min(2 * wait, 2)
-                self.ensure()
         raise RuntimeError(f"cannot reach the file server at {self.url} (traefik route or tunnel)")
 
     def poll(self):
@@ -606,7 +718,7 @@ def push(host, src, dst, rels, site=None, sums=None, stat=None):
     files = {}
     for r in rels:
         st = os.stat(os.path.join(src, r))
-        files[r] = (st.st_size, st.st_mtime_ns, st.st_mode & 0o7777)
+        files[r] = (st.st_size, st.st_mtime_ns, st.st_mode & MODE_BITS)
     total = sum(v[0] for v in files.values())
     if host is None:
         log(f"local copy of {len(files)} files, {total / 1e9:.2f} GB to {dst}")
@@ -624,7 +736,7 @@ def push(host, src, dst, rels, site=None, sums=None, stat=None):
             serve.poll()
             for r in bad:
                 serve.sent.pop(r, None)
-            plan = dict(base=f"{url}/{serve.token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad],
+            plan = dict(base=url, token=serve.token, root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad],
                         sums={r: sums[r] for r in bad if r in sums}, stat=stat)
             try:
                 res, stop = run_remote(host, "_fetch", plan, serve, sum(files[r][0] for r in bad), site), False
@@ -674,7 +786,7 @@ def pull(host, src, dst, items, site=None):
             serve.poll()
             for r in bad:
                 serve.done.pop(r, None)
-            plan = dict(base=f"{url}/{serve.token}", root=src, chunk=CHUNK, npar=NPAR, round=k, files=[[r, files[r][0]] for r in bad])
+            plan = dict(base=url, token=serve.token, root=src, chunk=CHUNK, npar=NPAR, round=k, files=[[r, files[r][0]] for r in bad])
             try:
                 run_remote(host, "_send", plan, serve, sum(files[r][0] for r in bad), site)
                 stop = False
@@ -735,6 +847,8 @@ def remote_fetch(plan):
             def get():
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 cfg = {"url": plan["base"] + "/" + urllib.parse.quote(rel), "user-agent": UA["User-Agent"], "output": p + ".tunnelpart"}
+                if plan.get("token"):
+                    cfg["header"] = f"{TOKEN_HEADER}: {plan['token']}"
                 cfg = "".join(f'{k} = "{v.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"\n' for k, v in cfg.items())
                 subprocess.run(["curl", "-sSf", "--retry", "5", "--retry-all-errors", "--speed-limit", "1024", "--speed-time", "180", "-K", "-"],
                                input=cfg, text=True, check=True, capture_output=True)  # address and token stay out of the process list
@@ -745,7 +859,7 @@ def remote_fetch(plan):
                 if sha is not None and sha != sums[rel]:
                     os.unlink(p + ".tunnelpart")  # not this content: never put in place
                     return digest, sha
-                os.chmod(p + ".tunnelpart", mode)
+                os.chmod(p + ".tunnelpart", mode & MODE_BITS)
                 os.utime(p + ".tunnelpart", ns=(mtime, mtime))
                 settle(p + ".tunnelpart", p)
                 return digest, sha
@@ -787,6 +901,8 @@ def remote_send(plan):
                 c.putrequest(method, base.path + "/" + path)
                 c.putheader("Content-Length", str(n))
                 c.putheader("User-Agent", UA["User-Agent"])
+                if plan.get("token"):
+                    c.putheader(TOKEN_HEADER, plan["token"])
                 c.endheaders()
                 if f:
                     f.seek(off)
@@ -827,7 +943,7 @@ def remote_send(plan):
                     off += n
                     if off >= size:
                         break
-            q = urllib.parse.urlencode(dict(md5="0" * 32 if rel == bad else h.hexdigest(), mtime=st.st_mtime_ns, mode=st.st_mode & 0o7777))
+            q = urllib.parse.urlencode(dict(md5="0" * 32 if rel == bad else h.hexdigest(), mtime=st.st_mtime_ns, mode=st.st_mode & MODE_BITS))
             if req("POST", urllib.parse.quote(rel) + "?" + q)[0] != 200:
                 raise IOError("checksum mismatch")
         except Exception as e:

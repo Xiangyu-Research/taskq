@@ -350,7 +350,9 @@ The hub tops up Slurm executors each round through `refill.slurm_plan` (`sites/s
 The job's argument is `R/code/current/.../worker_start.sh`; `current` is resolved when the job starts, so it uses the bundle of that
 moment; a worker switches to a new `current` only when claiming a new task.
 When inputs must be copied to node-local disk (`res.local_inputs`), the copy runs in the background after training starts
-(`queue/inputs.py`).
+(`queue/inputs.py`). The node-local dir must be a private dir of this account (created 0700; one made by another account, or a link,
+means inputs are read in place), only this account's other job dirs on the node are hard-linked from or cleaned up, and a local blob
+is used only while its sha256 is known to match (its `.st` record, else checked again by the copy).
 
 ### Sending tasks: feed -> relay -> refill.choose
 
@@ -461,12 +463,21 @@ says which direction this machine uses: `push` (store -> here, the other side do
 `pull` (here -> store, chunked upload). Transfers on the same machine (such as a store that is also an executor, or an executor with
 `ssh=None`) copy directly, hardlinking blobs, write to `.tunnelpart` and rename. `taskq tunnel rsync` is an rsync stand-in: transfer
 through the tunnel first, then run rsync unchanged.
+The public address must be https (plain http only to localhost; `taskq check` reports it). Each transfer is a session whose random
+token travels in a request header, never in the URL, and allows only the files in its list; received files never get setuid, setgid
+or sticky bits. One file server process on the listen address serves all sessions and exits when idle; before using it, a transfer
+checks that the server answers a challenge with a key only this account can read (`tunnel_srv/serve.key` in the state dir, 0700):
+another account's process on that address makes the transfer fail without sending it anything, and our server of an older version
+is stopped and replaced.
 
 ### GPU pad
 
 Inside a Slurm job, when the machine table has `gpu_pad=(floor, target, high)` (MiB), `queue/gpu_pad_start.sh` starts `queue/gpu_pad.py` in
 the job: hold floor while nothing trains; grow to target once training memory is stable; yield when total usage exceeds high. The worker
 grows it to floor before training (the `gpu_pad` consumer, or `taskq pad room`), and its memory is subtracted when computing free GPU memory.
+The pad and the worker talk through files in this account's private dir on the node (`proto.gpu_pad_base`: `/tmp/taskq_gpu_pad_<uid>/<job>.mib`,
+`.ready`, `.start`; the pad does not run when that dir is a link or another account's), read and written only as regular files of this
+account, never through a link; a pad started by an older bundle is still found at `proto.GPU_PAD_BASE`.
 Master switch: off while `R/queue/gpu_pad_DISABLED` exists in the executor root. Thresholds can also be given through `TASKQ_GPU_PAD_*`
 env vars.
 

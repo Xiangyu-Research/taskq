@@ -12,12 +12,17 @@ node's local disk and copy blobs there in the background.
         serialized by a lock; a mismatch or failure keeps reading the original.
 Only blobs are copied; other files are read in place. Exit codes: 0 ok; 4 missing inputs; anything else = error (run_task.sh
 reads in place in that case).
+The local root and other jobs' dirs sit in a shared temp dir with predictable names: the root must be a private dir of this
+account (created 0700; one made by another account or a planted link means reading in place), only this account's dirs are
+reused or removed, and a local blob is used only while its sha256 is known to match: its record (<blob>.st, size and mtime,
+written right after the check) still holds, or its sha256 is computed again (in the background copy, never before the start).
 """
 import fcntl
 import glob
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -93,11 +98,16 @@ def live_jobs():
 
 
 def jobs_dirs(root):
-    """Local copies of each job on this node (in the same parent dir) → {job id: dir}."""
+    """Local copies of this account's jobs on this node (in the same parent dir; real dirs owned by this account, another
+    account's dirs and links are never used or removed) → {job id: dir}."""
     out = {}
     for d in glob.glob(os.path.join(os.path.dirname(root), proto.STAGE_DIR_PREFIX + "*")):
         j = os.path.basename(d)[len(proto.STAGE_DIR_PREFIX):]
-        if j.isdigit() and os.path.isdir(d):
+        try:
+            st = os.lstat(d)
+        except OSError:
+            continue
+        if j.isdigit() and stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
             out[j] = d
     return out
 
@@ -107,13 +117,51 @@ def clean_old(root):
     if live is None:
         return
     for j, d in jobs_dirs(root).items():
-        try:
-            mine = os.stat(d).st_uid == os.getuid()
-        except OSError:
-            continue
-        if d != root and j not in live and mine:
+        if d != root and j not in live:
             print(f"removing local copy {d} of ended job {j}", file=sys.stderr)
             shutil.rmtree(d, ignore_errors=True)
+
+
+def _record(p):
+    """The record next to blob p (proto.BLOB_STAT: size and mtime when its sha256 was checked), when it is a file of this account."""
+    try:
+        fd = os.open(p + proto.BLOB_STAT, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        return os.read(fd, 256).decode(errors="replace").strip() if os.fstat(fd).st_uid == os.getuid() else None
+    finally:
+        os.close(fd)
+
+
+def usable(p, h, size, check):
+    """Blob p can stand for content h: a regular file of this account (not a link) of size bytes, writable by nobody else, whose
+    sha256 is known to match: its record holds its current size and mtime, or (check) its sha256 is h now → its stamp (size and
+    mtime, proto.BLOB_STAMP), else None. A file of ours that others could write is closed first when checking (a record from
+    before does not count)."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size != size:
+        return None
+    stamp = proto.BLOB_STAMP.format(size=st.st_size, mtime_ns=st.st_mtime_ns)
+    if st.st_mode & 0o022:
+        if not check:
+            return None
+        os.chmod(p, stat.S_IMODE(st.st_mode) & ~0o022)
+    elif _record(p) == stamp:
+        return stamp
+    return stamp if check and C.sha256(p) == h else None
+
+
+def private_root(root):
+    """The local root is a private dir of this account → True; else say so (inputs are read in place) → False."""
+    if C.private_dir(root):
+        return True
+    print(f"local copy dir {root} is not a private dir of this account (another account made it, or it is a link); reading inputs in place",
+          file=sys.stderr)
+    return False
 
 
 def prepare(data, key, root, inputs):
@@ -129,10 +177,10 @@ def prepare(data, key, root, inputs):
     if miss:
         print(f"missing inputs: {len(miss)} ({'; '.join(miss[:5])}{' …' if len(miss) > 5 else ''})", file=sys.stderr)
         return MISSING
-    if not root:
+    root = os.path.abspath(root) if root else ""
+    if not root or not private_root(root):
         print(data)
         return 0
-    root = os.path.abspath(root)
     clean_old(root)
     view = os.path.join(root, "views", key)
     shutil.rmtree(view, ignore_errors=True)
@@ -141,7 +189,7 @@ def prepare(data, key, root, inputs):
         p = os.path.join(view, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         local = os.path.join(root, proto.blob(h)) if h else None
-        if local and _size(local) == size:
+        if local and usable(local, h, size, check=False):  # checked earlier (record holds); otherwise the copy checks it
             os.symlink(local, p)
         else:
             os.symlink(real, p)
@@ -165,6 +213,8 @@ def alive(pid):
 def copy(root, key):
     t0 = time.time()
     root = os.path.abspath(root)
+    if not private_root(root):
+        return 0
     view = os.path.join(root, "views", key)
     todo = json.load(open(view + ".todo.json"))
     for p in glob.glob(os.path.join(root, "blobs", "*", "*" + proto.TMP)):  # left by a stopped copy (<h>.<pid>.tmp)
@@ -177,45 +227,59 @@ def copy(root, key):
     for rel, real, size, h in todo:
         by.setdefault(h, [real, size, []])[2].append(rel)
     others = [d for d in jobs_dirs(root).values() if d != root]
-    with open(os.path.join(os.path.dirname(root), f".{proto.STAGE_DIR_PREFIX}{os.getuid()}.lock"), "a") as lk:
+    lock = os.path.join(os.path.dirname(root), f".{proto.STAGE_DIR_PREFIX}{os.getuid()}.lock")
+    try:
+        lk = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        print(f"cannot open the copy lock {lock} ({e}); not copying, reading in place")
+        return 0
+    try:
+        if os.fstat(lk).st_uid != os.getuid():
+            print(f"the copy lock {lock} belongs to another account; not copying, reading in place")
+            return 0
         fcntl.flock(lk, fcntl.LOCK_EX)  # one copy at a time on this node: no other copy between the space check and the copy
         need = sum(size for h, (_, size, _) in by.items()
-                   if _size(os.path.join(root, proto.blob(h))) != size and not any(_size(os.path.join(o, proto.blob(h))) == size for o in others))
+                   if not usable(os.path.join(root, proto.blob(h)), h, size, check=False)
+                   and not any(usable(os.path.join(o, proto.blob(h)), h, size, check=False) for o in others))
         free = shutil.disk_usage(root).free
         if free - need < KEEP_GB * 1024 ** 3:
             print(f"local disk has {free / 1024 ** 3:.0f} GB; copying {need / 1024 ** 3:.0f} GB would leave less than {KEEP_GB:.0f} GB, not copying, reading in place")
             return 0
         return _copy(root, view, by, others, t0)
-
-
-def _size(p):
-    try:
-        return os.path.getsize(p)
-    except OSError:
-        return None
+    finally:
+        os.close(lk)
 
 
 def _copy(root, view, by, others, t0):
+    """Each blob: already here and known to match (record, else sha256 now), else hard-linked from another job of ours whose copy
+    is known to match (the linked file must still have the size and mtime checked), else copied from the original with its sha256
+    checked while copying; then closed to others, recorded, and the view repointed. A blob whose content does not match is not used."""
     n = dict(copied=0, linked=0, had=0, bytes=0)
     bad = []
 
     def one(item):
         h, (real, size, rels) = item
         dst = os.path.join(root, proto.blob(h))
-        if _size(dst) == size:
-            n["had"] += 1
-        else:
-            src = next((q for q in (os.path.join(o, proto.blob(h)) for o in others) if _size(q) == size), None)
-            try:
-                if src and C.atomic_copy(src, dst, link=True, size=size):
+        try:
+            if usable(dst, h, size, check=True):
+                n["had"] += 1
+            else:
+                src, stamp = next(((q, s) for q in (os.path.join(o, proto.blob(h)) for o in others)
+                                   if (s := usable(q, h, size, check=True))), (None, None))
+                if src and C.atomic_copy(src, dst, link=True, size=size) and SO.stamp(dst) == stamp:
                     n["linked"] += 1
                 else:
                     C.atomic_copy(real, dst, size=size, sha=h)
                     n["copied"] += 1
                     n["bytes"] += size
-            except OSError as e:
-                bad.append(f"{os.path.basename(rels[0])}: {e}")
-                return
+                    mode = stat.S_IMODE(os.lstat(dst).st_mode)
+                    if mode & 0o022:  # copied with the original's mode: nobody else may write a blob we rely on
+                        os.chmod(dst, mode & ~0o022)
+            if _record(dst) != SO.stamp(dst):
+                SO.record(root, h)
+        except OSError as e:
+            bad.append(f"{os.path.basename(rels[0])}: {e}")
+            return
         for rel in rels:
             C.atomic_link(dst, os.path.join(view, rel))
     with ThreadPoolExecutor(min(PAR, 8)) as ex:

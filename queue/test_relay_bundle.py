@@ -166,6 +166,38 @@ def test_secrets():
     finally:
         B.source_files = saved
     ok("secrets: private keys and GitHub tokens fail (the error omits the whole secret); short look-alikes do not")
+    # each kind of key the scan knows, written out the way it shows up in code (built from parts: no file holds a whole look-alike)
+    hx, mixed = "0123456789abcdef" * 2 + "01234567", "AbCdEfGhIjKlMnOpQrStUvWxYz" * 3
+    found = {
+        "Hugging Face token": "HF_TOKEN = '" + "hf_" + mixed[:34] + "'",
+        "Hugging Face org token": "tok = " + "api_" + "org_" + mixed[:34],
+        "W&B key in the env": "export " + "WANDB" + "_API_KEY=" + hx,
+        "W&B key in os.environ": "os.environ[\"" + "WANDB" + "_API_KEY\"] = \"" + hx + "\"",
+        "W&B key in YAML": "wandb" + "_api_key: " + hx,
+        "W&B local key": "WANDB" + "_API_KEY=local-" + hx,
+        "W&B login": "wandb." + "login(key='" + hx + "')",
+        "W&B netrc": "machine api." + "wandb.ai login user password " + hx,
+        "GitHub fine-grained token": "t = " + "github_" + "pat_" + "A1" * 41,
+        "GitLab token": "t = " + "glpat-" + "x1Y2" * 5,
+        "AWS secret key": "aws_secret" + "_access_key = " + ("aB3/" * 10),
+        "Slack webhook": "https://hooks." + "slack.com/services/T0123ABCD/B0123ABCD/" + mixed[:24],
+        "Discord webhook": "https://discord" + ".com/api/webhooks/123456789012345678/" + mixed[:68],
+        "Telegram bot token": "BOT = '" + "123456789:AA" + mixed[:33] + "'",
+        "Google OAuth client secret": "GOCSPX-" + mixed[:28],
+        "npm token": "//registry.npmjs.org/:_authToken=" + "npm_" + mixed[:36],
+        "PyPI token": "password = " + "pypi-AgEI" + "cHlwaS5vcmc" + mixed[:60],
+        "Stripe live key": "STRIPE = '" + "sk_" + "live_" + mixed[:30] + "'",
+    }
+    missed = [k for k, v in found.items() if not B.secret_hits({"x.py": (v, False)})]
+    assert not missed, missed
+    fine = ["from huggingface_hub import hf_hub_download", "hf_" + "token = os.environ['HF_TOKEN']", "commit = '" + hx + "'",
+            "wandb.init(project='demo', id='" + hx + "')", "WANDB" + "_API_KEY=${WANDB_API_KEY}", "key = os.environ.get('WANDB" + "_API_KEY')",
+            "wandb." + "login(key=os.environ['WANDB_API_KEY'])", "def npm_install_dependencies_for_frontend_build(): pass",
+            "sk_live = False", "glpat = None", "t = '12:30'"]
+    loud = [x for x in fine if B.secret_hits({"x.py": (x, False)})]
+    assert not loud, loud
+    ok("secrets: Hugging Face, W&B (keys next to their name, login, netrc), GitLab, AWS secret, Slack/Discord webhooks, Telegram, "
+       "Google OAuth, npm, PyPI, Stripe keys fail; ordinary code with the same names or a bare 40-hex commit does not")
 
 
 def test_bundle(T):

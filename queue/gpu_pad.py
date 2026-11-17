@@ -7,6 +7,7 @@ import argparse
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -17,9 +18,10 @@ try:
     import cfg as tcfg
 except ImportError:
     tcfg = None
+import common as C  # noqa: E402
 import proto  # noqa: E402
 
-MIB_F, READY_F, START_F = proto.GPU_PAD_FILES  # handshake files with the worker: <base>.mib, .ready, .start
+MIB_F, READY_F, START_F = proto.GPU_PAD_FILES  # handshake files with the worker: <base>.mib, .ready, .start (written and read without following a link)
 
 MIB = 1024 * 1024
 STABLE_TOL_MIB = 1024
@@ -47,8 +49,13 @@ def env_int(name, default):
         return default
 
 
+def private_base():
+    """The handshake prefix in this account's private dir (proto.gpu_pad_base)."""
+    return proto.gpu_pad_base(os.environ.get("SLURM_JOB_ID", "nojob"), os.getuid())
+
+
 def default_base():
-    return pad_env("BASE") or f"{proto.GPU_PAD_BASE}{os.environ.get('SLURM_JOB_ID', 'nojob')}"
+    return pad_env("BASE") or private_base()
 
 
 def env_float(name, default):
@@ -163,30 +170,32 @@ class Pad:
                  f"switch={cfg.switch} parent={cfg.parent_pid} supervisor={cfg.supervisor_pid} dry_run={cfg.dry_run}")
 
     def _start_mtime(self):
+        """mtime of <base>.start when it is a regular file of this account (a link or another account's file counts as absent)."""
         try:
-            return os.path.getmtime(self.c.base + START_F) if self.c.base else 0.0
+            st = os.lstat(self.c.base + START_F) if self.c.base else None
         except OSError:
             return 0.0
+        return st.st_mtime if st and stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() else 0.0
+
+    def _put(self, name, text):
+        """Write <base><name> through a temp name of this process, never following a link (O_NOFOLLOW)."""
+        if not self.c.base:
+            return
+        p = self.c.base + name
+        tmp = f"{p}.{os.getpid()}.tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            os.replace(tmp, p)
+        except OSError:
+            pass
 
     def _write_mib(self):
-        if not self.c.base:
-            return
-        try:
-            with open(self.c.base + MIB_F + ".tmp", "w") as f:
-                f.write(f"{sum(self.b.pad_mib(d) for d in self.devices)}\n")
-            os.replace(self.c.base + MIB_F + ".tmp", self.c.base + MIB_F)
-        except OSError:
-            pass
+        self._put(MIB_F, f"{sum(self.b.pad_mib(d) for d in self.devices)}\n")
 
     def _write_ready(self):
-        if not self.c.base:
-            return
-        try:
-            with open(self.c.base + READY_F + ".tmp", "w") as f:
-                f.write(f"{self.seen_start}\n")
-            os.replace(self.c.base + READY_F + ".tmp", self.c.base + READY_F)
-        except OSError:
-            pass
+        self._put(READY_F, f"{self.seen_start}\n")
 
     def stop_now(self, *_):
         self.stopped = True
@@ -216,7 +225,8 @@ class Pad:
             return
         if total < self.c.min_total_mib:
             if dev not in self.skip_total:
-                self.log(f"dev {dev}: total={total}MiB < {self.c.min_total_mib}MiB, not an 80GB A100; not padding")
+                self.log(f"dev {dev}: total={total}MiB is below min_total={self.c.min_total_mib}MiB (--min-total-mib, "
+                         f"TASKQ_GPU_PAD_MIN_TOTAL_MIB); not padding this GPU")
                 self.skip_total.add(dev)
             return
         state, used = self._decide(dev, used, total, fallback, now)
@@ -379,6 +389,10 @@ def main(argv=None):
     a = parse_args(argv)
     if a.dry_run:
         log("dry-run: read GPU memory only, do not allocate")
+    d = os.path.dirname(a.base)
+    if a.base == private_base() and not C.private_dir(d):
+        log(f"{d} (the handshake with the worker) is not a private dir of this account (another account made it, or it is a link); not padding")
+        return 1
     try:
         backend = TorchBackend(device=a.device)
     except Exception as e:

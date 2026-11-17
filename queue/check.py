@@ -164,6 +164,7 @@ def fields(r, g, where, d, table):
 def check_machines(r):
     M = cfg.mtab()
     import slurm as SL
+    import tunnel as TU
     g = "machines"
     for n, m in M.MACHINES.items():
         where = f"MACHINES[{n!r}]"
@@ -245,6 +246,9 @@ def check_machines(r):
                 r.bad(g, f"env {en} in {where} is conda but this machine has no conda=(dir, env)")
         if m.get("quick") and _tup(m["quick"], 2) and not _regex(m["quick"][1]):
             r.bad(g, f"{where}: quick's second item is not a regex")
+        if m.get("transfer") and _tup(m["transfer"], 2) and not TU.url_ok(m["transfer"][0]):
+            r.bad(g, f"{where}: transfer's address {m['transfer'][0]!r} is not https (session tokens and files cross the network; "
+                     f"plain http only to localhost)")
     local = [n for n in M.executors() if M.MACHINES[n].get("ssh") is None]
     if len(local) > 1:
         r.bad(g, f"at most one executor may have ssh=None (same machine as the hub), now {local}")
