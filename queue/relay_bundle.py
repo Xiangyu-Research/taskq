@@ -101,7 +101,7 @@ RUNTIME = (
     "queue/migrate.py")
 CODE = (".py", ".sh", ".R", ".sbatch")
 SMALL = (".json", ".csv", ".txt", ".yaml", ".yml")
-SMALL_MAX = 8 << 20  # split tables (case lists per fold) run past 1 MB; data proper is not git-tracked
+SMALL_MAX = 8 << 20  # tables listing the items of each data split run past 1 MB; data proper is not git-tracked
 PROJECT_FILE = ".taskq.toml"  # project description at the project repo root, included when present
 VERSION = BC + "/VERSION"  # short core commit; not part of the bundle name: hub-only core changes keep the name and executors keep the bundle
 SECRETS = [

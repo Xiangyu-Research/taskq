@@ -67,6 +67,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq status` | on the hub: a one-screen summary (--all: every task by state; <machine>: one machine; <words>: matching tasks) |
 | `taskq stop` | stop a task (running one stops and releases within 30 seconds; not claimed again afterwards) |
 | `taskq resume` | undo a stop |
+| `taskq unskip` | let executors that released a task claim it again (--worker: only that one) |
 | `taskq rm` | remove an unclaimed task |
 
 **Scheduling**
