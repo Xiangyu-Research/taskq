@@ -225,7 +225,8 @@ class Pad:
             return
         if total < self.c.min_total_mib:
             if dev not in self.skip_total:
-                self.log(f"dev {dev}: total={total}MiB < {self.c.min_total_mib}MiB, not an 80GB A100; not padding")
+                self.log(f"dev {dev}: total={total}MiB is below min_total={self.c.min_total_mib}MiB (--min-total-mib, "
+                         f"TASKQ_GPU_PAD_MIN_TOTAL_MIB); not padding this GPU")
                 self.skip_total.add(dev)
             return
         state, used = self._decide(dev, used, total, fallback, now)

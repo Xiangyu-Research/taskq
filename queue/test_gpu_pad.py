@@ -263,6 +263,8 @@ b = FakeBackend(total=32000)
 p, logs = pad_of(b)
 p.step()
 ok("total memory <60GB: no padding", b.live[0] == 0 and any("not padding" in x for x in logs))
+ok("the log states the measured total and the threshold, names no GPU model",
+   any("total=32000MiB is below min_total=60000MiB" in x for x in logs) and not any("A100" in x or "80GB" in x for x in logs))
 
 b = FakeBackend()
 p, logs = pad_of(b)
