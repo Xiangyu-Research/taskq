@@ -43,8 +43,8 @@ import proto  # noqa: E402
 import common as C  # noqa: E402
 
 safe = proto.safe
-# Oldest format migrated from: the steps up to it are deleted. 0 is the state the 2026-11-14 cutover (the last run of the
-# unnumbered migrate) left, with what came after it but before stamps.
+# Oldest format migrated from: the steps up to it are deleted. 0 is the state the last run of the unnumbered self migrate
+# (before format versions) left, with the format changes after it and before stamps.
 MIN_FORMAT = 0
 
 
@@ -73,8 +73,8 @@ def pending(v, where="the state here"):
 
 
 # ---------------- step 1: what the unnumbered migrate left, and the hub bookkeeping into the database ----------------
-# Old part log text from before the 2026-11-08 translation. Workers of bundles from before the 2026-11-14 cutover went on
-# writing it until they switched, and logs of tasks claimed during the old migrate's runs were skipped; only this step reads it.
+# Old part log text from before the core was translated to English. Workers of bundles that old went on writing it until
+# they switched, and logs of tasks claimed during the unnumbered migrate's runs were skipped; only this step reads it.
 OLD_PART = "_seg"  # old part log name <safe key>__<job>_seg<part>.log
 OLD_TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 OLD_HEAD = re.compile(r"^作业 (\S+) @ ([^，]+)，任务=([^，]*)，第 (\d+) 段，环境 ([^，]*)，代码 ([^，]*)，" + OLD_TS + r"$")
@@ -86,7 +86,7 @@ OLD_GPU_WAIT_SEEN = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 空着，别人 (.+?
 OLD_GPU_WAIT = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 被别人占着，等它空出来（已等 (\d+) 分钟(?:，最多 (\d+) 分钟)?）$")
 OLD_STALL_MSG = re.compile(r"^( \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})：日志和结果文件夹 (\d+) 分钟没有变化，作业 (\S+) 停掉它$")
 OLD_FAIL_JOB = "作业 "
-# hub bookkeeping files from before it moved into the hub database (hubstate.py, 2026-11-15), under the state dir
+# hub bookkeeping files from before it moved into the hub database (hubstate.py, db schema 4), under the state dir
 OLD_RELAY_STATE = os.path.join("relay", "state.json")
 OLD_LINKSETS = os.path.join("relay", "linksets")  # <id>.json per link set
 OLD_SITES = os.path.join("relay", "status.json")
@@ -436,7 +436,7 @@ def v1_hub(ctx, say, dry):
 
 # ---------------- the steps (each format change adds one; MIN_FORMAT moves up once every place is past a step) ----------------
 STEPS = [
-    Step(1, "part logs and failure records workers of bundles from before the 2026-11-14 cutover left in the old format (logs of "
+    Step(1, "part logs and failure records workers of untranslated bundles left in the old format (logs of "
             "claimed tasks stay as they are); on the hub, relay's bookkeeping, link sets, executor reads and task records from "
             "files into the hub database, smoke kind names, unused state-dir entries and old code snapshots",
          hub=v1_hub, root=v1_root),
