@@ -147,6 +147,9 @@ Each worker of a pueue executor (each entry in `workers`):
 | `env_script` | `str?` | `None` | script sourced first by tasks added with taskq pueue-add |
 | `name` | `str` | `'taskq'` | prefix of push titles |
 | `topic` | `str` | `'~/.config/taskq/ntfy_topic'` | file holding the push channel name (the channel name does not go in the repo) |
+| `push_url` | `str` | `'https://ntfy.sh'` | push server (ntfy; your own server keeps messages off a public one); https only, except on this machine |
+| `push_token` | `str` | `'~/.config/taskq/ntfy_token'` | file holding an access token for the push server (sent as Authorization: Bearer when the file exists) |
+| `push_detail` | `bool` | `True` | False: a push says only how many items need attention, never task names, paths or error text |
 | `logs` | `str` | `'~'` | dir for plain text logs (relay.log, advance.log, ...) |
 | `heartbeat` | `str?` | `None` | URL fetched after every finished health check round, so an outside service (a dead-man's switch) alerts when rounds stop |
 <!-- /fields -->

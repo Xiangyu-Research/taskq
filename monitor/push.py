@@ -4,6 +4,9 @@
     taskq notify [--title T] [--priority P] [--tags X] [--kind K] [--data JSON] <text...>   (reads stdin when no text)
 
 Channel name: in the file policy.py OUTPUTS["topic"] points to, default ~/.config/taskq/ntfy_topic (not in the repo).
+Server: OUTPUTS["push_url"] (an ntfy server, default https://ntfy.sh; https only, except on this machine). Access token: in the
+file OUTPUTS["push_token"] points to, sent as Authorization: Bearer when the file exists (a protected topic: only token holders
+read or post). OUTPUTS["push_detail"] False: the message says only how many lines there are, never task names, paths or errors.
 Title prefix: OUTPUTS["name"] (default taskq).
 """
 import argparse
@@ -36,8 +39,19 @@ def name():
 
 def push(msg, title=None, priority="default", tags=""):
     topic = open(topic_file()).read().strip()
+    base = str(_out("push_url")).rstrip("/")
+    u = urllib.parse.urlparse(base)
+    if u.scheme != "https" and not (u.scheme == "http" and u.hostname in ("localhost", "127.0.0.1", "::1")):
+        raise OSError(f"push_url {base} is not https (the message and the topic would travel in the clear)")
+    if not _out("push_detail"):
+        n = msg.count("\n") + 1
+        msg = f"{n} item{'s' if n > 1 else ''} need{'' if n > 1 else 's'} attention; details on the hub (taskq problems, taskq events)"
     q = urllib.parse.urlencode({"title": title or f"{name()} job", "priority": priority, "tags": tags})
-    req = urllib.request.Request(f"https://ntfy.sh/{topic}?{q}", data=msg.encode(), method="POST")
+    head = {}
+    tf = os.path.expanduser(str(_out("push_token")))
+    if os.path.isfile(tf):
+        head["Authorization"] = "Bearer " + open(tf).read().strip()
+    req = urllib.request.Request(f"{base}/{urllib.parse.quote(topic)}?{q}", data=msg.encode(), method="POST", headers=head)
     urllib.request.urlopen(req, timeout=30).read()
 
 
