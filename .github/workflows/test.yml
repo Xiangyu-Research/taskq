@@ -1,9 +1,16 @@
 # all core tests (taskq self test; needs-gpu ones are skipped) and the example project check (taskq --project example check)
+# on every push to any branch and on every pull request; main is a protected branch that requires this check (job "test")
 name: test
 
 on:
   push:
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+
+concurrency:  # a newer push to the same branch or pull request replaces a run still going (every commit on main is tested)
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -11,6 +18,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history: test_compat.py and test_bundle_gate.py build old bundles from older commits
+      - name: full history
+        run: test "$(git rev-parse --is-shallow-repository)" = false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
