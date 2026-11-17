@@ -255,14 +255,17 @@ def facts(tasks):
         if s is not None:
             ci = claim_info(t["key"]) or {}
             items.append(dict(spec=s, since=t.get("added"), tags=[ci.get("log") or ci.get("worker")]))
-    root = cfg.data_dir()
+    root, at = cfg.data_dir(), time.time()
     try:
         if root:
             return S.facts(items, root)
         if not items:
             return {}
         import relay_remote as RM
-        return RM.store_op("facts", dict(items=[dict(it, spec=S.sendable(it["spec"])) for it in items]), timeout=300)
+        out = RM.store_op("facts", dict(items=[dict(it, spec=S.sendable(it["spec"])) for it in items]), timeout=300)
+        for f in out.values():
+            f["at"] = at  # this machine's clock, taken before asking (state compares it with release times written here)
+        return out
     except (OSError, RuntimeError) as e:
         raise DiskError(f"cannot read data dir {' ' + root if root else '(on the store)'}: {e}") from None
 
@@ -391,7 +394,8 @@ def state(t, f):
         return cs
     if age is not None and age < FRESH_LOG:
         rel = released_at(t["key"])
-        if rel is None or time.time() - age > rel + 5:  # the log moved on after the release (or was never released): someone outside the queue is training
+        if rel is None or f["at"] - age > rel + 5:  # the log moved on after the release (or was never released): someone outside the queue is training
+            # (at and age come from the same measurement: time.time() here would drift by however long reading the facts took)
             return "busy", f"part log updated {age / 60:.0f} minutes ago"
     if failures(t["key"]) >= proto.MAX_FAIL:
         return "failed", f"failed {failures(t['key'])} times"
@@ -425,13 +429,13 @@ def _claim(a, pick):
         print(f"no {tasks_path()}", file=sys.stderr)
         return X["no_queue"], None
     busy_ahead = 0  # ahead of us and just stopped (log updated in the last 15 minutes, unclaimed)
+    try:  # outside the lock: reading every task's files takes long, and claims are checked again under the lock below
+        F = facts(read_tasks())
+    except DiskError as e:  # check the disk first: an unreadable disk is the likely cause of the failure
+        print(e, file=sys.stderr)
+        return PAUSED, None
     with Lock():
-        tasks = read_tasks()
-        try:
-            F = facts(tasks)
-        except DiskError as e:  # check the disk first: an unreadable disk is the likely cause of the failure
-            print(e, file=sys.stderr)
-            return PAUSED, None
+        tasks = read_tasks()  # a task added meanwhile has no facts yet: claimed next time
         if recent_failures() >= proto.PAUSE_N:
             return PAUSED, None
         for t in sorted((t for t in tasks if t["key"] in F), key=lambda t: (t["nice"], not has_progress(t, F[t["key"]]), t["order"])):

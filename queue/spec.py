@@ -16,6 +16,7 @@ Commands:
                                      {"version": ..., "tasks", "seglogs"[, "stuck", "errors"]}
 A k=v value starting with [ or { is read as JSON (e.g. done='["a","b|c"]'); everything else is a string.
 """
+import bisect
 import fnmatch
 import glob
 import json
@@ -371,26 +372,49 @@ def dir_age(d):
     return time.time() - max(ms)
 
 
-def seg_age(root, key, tag):
-    """Seconds since the part log that job tag (a log name or worker name in the claim) wrote for this task last changed
-    (run_task.sh); none -> None."""
-    pre = os.path.join(root, P.TASK_LOGS, f"{glob.escape(safe(key))}{SAFE}{glob.escape(str(tag))}_")
+def part_logs(root):
+    """Names in the part log dir, sorted: facts lists it once and looks each task up by prefix (listing it for every task costs
+    tasks x logs). Absent or unreadable -> []."""
     try:
-        logs = glob.glob(f"{pre}{P.LOG_PART}*.log")
-        return time.time() - max(os.path.getmtime(p) for p in logs) if logs else None
+        return sorted(os.listdir(os.path.join(root, P.TASK_LOGS)))
     except OSError:
-        return None
+        return []
 
 
-def ran(root, key, since=None):
+def _prefixed(names, pre):
+    """The names in sorted list names that start with pre."""
+    i = bisect.bisect_left(names, pre)
+    out = []
+    while i < len(names) and names[i].startswith(pre):
+        out.append(names[i])
+        i += 1
+    return out
+
+
+def seg_age(root, key, tag, names=None):
+    """Seconds since the part log that job tag (a log name or worker name in the claim) wrote for this task last changed
+    (run_task.sh); none -> None. names: part_logs(root) when the caller already listed it."""
+    pre = f"{safe(key)}{SAFE}{tag}_"
+    ms = []
+    for n in _prefixed(part_logs(root) if names is None else names, pre):
+        if fnmatch.fnmatchcase(n[len(pre):], f"{P.LOG_PART}*.log"):
+            try:
+                ms.append(os.path.getmtime(os.path.join(root, P.TASK_LOGS, n)))
+            except OSError:
+                pass
+    return time.time() - max(ms) if ms else None
+
+
+def ran(root, key, since=None, names=None):
     """Whether the data dir has a part log for this task (any job, any part; key a/b does not count for a/b/c);
-    since: only logs written at or after it (mtime; the task's added); None = any."""
-    pre = os.path.join(root, P.TASK_LOGS, f"{safe(key)}{SAFE}")
-    for p in glob.glob(f"{glob.escape(pre)}*_{P.LOG_PART}*.log"):
-        if SAFE in os.path.basename(p)[len(os.path.basename(pre)):]:
+    since: only logs written at or after it (mtime; the task's added); None = any. names: part_logs(root) when already listed."""
+    pre = f"{safe(key)}{SAFE}"
+    for n in _prefixed(part_logs(root) if names is None else names, pre):
+        rest = n[len(pre):]
+        if SAFE in rest or not fnmatch.fnmatchcase(rest, f"*_{P.LOG_PART}*.log"):
             continue
         try:
-            if since is None or os.path.getmtime(p) >= float(since):
+            if since is None or os.path.getmtime(os.path.join(root, P.TASK_LOGS, n)) >= float(since):
                 return True
         except (OSError, TypeError, ValueError):
             continue
@@ -398,11 +422,13 @@ def ran(root, key, since=None):
 
 
 def facts(items, root):
-    """[dict(spec, since, tags)] -> {task key: dict(done, log_age, out_age, resumable, ran, tag_age={tag: seconds})}: each task's
-    results and logs in data dir root (since: the task's added, older part logs do not count; tags: job names in the claim). An
-    executor computes its own queue; the hub computes the hub queue on the store (site_ops facts). root unreadable or done cannot
-    be judged -> OSError (not treated as not done)."""
+    """[dict(spec, since, tags)] -> {task key: dict(done, log_age, out_age, resumable, ran, tag_age={tag: seconds}, at)}: each task's
+    results and logs in data dir root (since: the task's added, older part logs do not count; tags: job names in the claim; at: the
+    time just before measuring, so at - log_age is never later than the log's mtime). An executor computes its own queue; the hub
+    computes the hub queue on the store (site_ops facts). root unreadable or done cannot be judged -> OSError (not treated as not
+    done). The part log dir is listed once for all tasks."""
     os.listdir(root)
+    at, names = time.time(), part_logs(root)
     out = {}
     for it in items:
         s = it["spec"]
@@ -412,7 +438,8 @@ def facts(items, root):
         except (OSError, KeyError, TypeError, ValueError):
             res = False
         out[s["key"]] = dict(done=is_done(s, root), log_age=log_age(s, root), out_age=dir_age(fd), resumable=res,
-                             ran=ran(root, s["key"], it.get("since")), tag_age={t: seg_age(root, s["key"], t) for t in it.get("tags") or [] if t})
+                             ran=ran(root, s["key"], it.get("since"), names),
+                             tag_age={t: seg_age(root, s["key"], t, names) for t in it.get("tags") or [] if t}, at=at)
     return out
 
 

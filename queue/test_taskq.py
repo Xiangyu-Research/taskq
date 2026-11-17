@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for taskq.py: fake queues and fake training results in temp dirs; connects to no machine.  python3 queue/test_taskq.py"""
+import argparse
 import glob
 import json
 import os
@@ -883,6 +884,45 @@ try:
     taskq.write_json(os.path.join(TQR, "claims", taskq.safe("r/inp"), "info"), dict(worker="W2", host="h", since=time.time(), beat=time.time()), indent=None)
     st_i = taskq.state(t_i, taskq.S.facts([dict(spec=taskq.spec_of(t_i), since=t_i.get("added"), tags=["W2"])], DATA)["r/inp"])
     check("missing-input marker + someone holds it -> claimed", st_i[0] == "claimed")
+    # just released: facts were read a while before state() looks at them (a long queue); the log is from before the release
+    taskq.write_tasks([dict(cmdtask(1, "r/rel"))])
+    t_r = taskq.read_tasks()[0]
+    taskq._mark_released("r/rel", "W", "back")
+    rel = taskq.released_at("r/rel")
+    at = time.time() - 30
+    f_r = dict(done=False, log_age=at - (rel - 1), out_age=None, resumable=False, ran=True, tag_age={}, at=at)
+    st_old = taskq.state(t_r, f_r)
+    f_r2 = dict(f_r, log_age=at - (rel + 20))  # the log moved on 20 s after the release: someone outside the queue is training
+    check("just released, facts read 30 s earlier: free (compared with the time the facts were measured, not now); "
+          "a log written after the release: busy", st_old[0] == "free" and taskq.state(t_r, f_r2)[0] == "busy")
+    # facts list the part log dir once for all tasks (listing it per task cost tasks x logs: seconds per claim with a long queue)
+    many = [dict(cmdtask(i, f"r/m{i}")) for i in range(40)]
+    logs_d = os.path.join(DATA, taskq.proto.TASK_LOGS)
+    os.makedirs(logs_d, exist_ok=True)
+    for i in range(0, 40, 2):
+        open(os.path.join(logs_d, f"r__m{i}__W_part1.log"), "w").close()
+    open(os.path.join(logs_d, "r__m1__x__W_part1.log"), "w").close()  # r/m1/x's log, not r/m1's
+    real_ld, seen_ld = taskq.S.os.listdir, []
+    taskq.S.os.listdir = lambda d=".": (seen_ld.append(os.path.normpath(d)), real_ld(d))[1]
+    try:
+        F_m = taskq.S.facts([dict(spec=taskq.spec_of(t), since=None, tags=["W"]) for t in many], DATA)
+    finally:
+        taskq.S.os.listdir = real_ld
+    check("facts: the part log dir is listed once for 40 tasks; ran and tag ages match a per-task look (r/m1/x's log is not r/m1's)",
+          seen_ld.count(os.path.normpath(logs_d)) == 1
+          and [k for k, f in F_m.items() if f["ran"]] == [f"r/m{i}" for i in range(0, 40, 2)]
+          and all((f["tag_age"]["W"] is not None) == f["ran"] for f in F_m.values())
+          and all(taskq.S.ran(DATA, k) == f["ran"] for k, f in F_m.items()))
+    held_at_facts = []
+    real_facts = taskq.facts
+    taskq.facts = lambda ts: (held_at_facts.append(taskq.Lock.held), real_facts(ts))[1]
+    try:
+        taskq.write_tasks(many)
+        rc_c, _ = taskq._claim(argparse.Namespace(exclude=[], free_slots=1, patience_until=0, worker="W9", log_tag=None), lambda t: None)
+    finally:
+        taskq.facts = real_facts
+    check("worker next reads the facts before taking the queue lock (claims are still checked under it; this queue is paused by earlier failures)",
+          held_at_facts == [None] and rc_c in (taskq.NOTHING, taskq.PAUSED))
 finally:
     taskq.TQ = tq_orig
 
