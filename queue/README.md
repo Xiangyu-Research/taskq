@@ -518,11 +518,23 @@ write checkpoints under `out`.
 
 ### Format cutovers
 
-When an on-disk format changes, run `taskq self migrate` once in a cutover (stop cron, hand back running tasks, push the code, switch every
-executor to the new bundle) (lists by default, `--apply` changes; `--rename old=new`, `--merge old=old root`): the hub queue, relay
-bookkeeping and smoke records on the hub, and queues and part logs in each executor and store root; it also creates missing pueue groups
-and resumes paused ones (manual groups left alone). It never removes a task: one that is not a step of the experiment table (added by hand
-with `taskq add`) keeps its name, parameters and records.
+The on-disk format has a version, `proto.FORMAT`. Each place records the version its state is in, one line in a stamp file: the hub state
+dir (`format`) and each executor and store root (`state/format`); no stamp is format 0. Code runs only on state in its own format: on
+another, `taskq tick` does nothing but say (and push once) that `taskq self migrate` is needed, `taskq internal stage/fetch/archive`
+refuse, and `taskq worker next` claims nothing (exit code 12, paused; tasks already running keep going); `taskq plan` notes it. Workers
+of older bundles do not read the stamp. A new root made by relay and a new hub (no database yet) are stamped with the current format.
+
+`taskq self migrate` holds one numbered step per format version (`migrate.STEPS`): step N takes a place from format N-1 to N and then
+records N there, so each step runs once per place. By default (or `--list`) it only lists each place's format, the steps it needs and
+what the hub's steps would change; it builds, pushes and writes nothing. `--apply` first reads every root and checks the hub steps
+(anything wrong: nothing changes), holds the health check's round lock, copies the hub queue, database and stamp to
+`<state dir>/snapshots/<time>-format<N>/` (the newest `proto.SNAPSHOT_KEEP` stay), migrates each root that is behind from the new
+bundle (an executor switches to it with its unclaimed tasks set aside for a moment; claimed tasks keep running), then the hub. Run again,
+it does nothing; a root that was unreachable is migrated on a later run.
+
+A format change bumps `proto.FORMAT` and adds its step in the same commit; steps up to `migrate.MIN_FORMAT` are deleted once every place
+is past them. The cutover: stop cron, push the code, (switch executors with `taskq site bundle`, or let migrate do it), `taskq self
+migrate --apply`, start cron.
 
 ## File layout
 
@@ -534,15 +546,15 @@ Executor and store root R (the machine table's `root`, `proto.ROOT`):
 | `queue/` | this machine's task queue (`ENABLED` is the master switch: without it queued workers exit at start) |
 | `blobs/<first two>/<sha256>` | data files (may be symlinks to another disk) |
 | `data/` | data dir: task views and outputs, `logs/tasks/` (part logs), `logs/workers/` |
-| `state/` | `pins/`, `envs/` (env `.ok`), `hashes.db`, `view.lock`, `deploy.lock` |
+| `state/` | `pins/`, `envs/` (env `.ok`), `hashes.db`, `view.lock`, `deploy.lock`, `format` (on-disk format stamp) |
 | `tmp/` | half-transferred files |
 | `envs/` | envs built on this machine |
 
 Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (bundles and stage locks; `proto.RELAY_NAMES`), `health/`
 (`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; and the hub's bookkeeping, `queue/hubstate.py`:
 what relay last read on each executor, the task records of pueue tasks the core added, relay's placement record per staged task and
-each distinct set of staged input links once; the health check compacts it when mostly free pages), `wheelhouse/`, `tunnel*` etc.
-`taskq self migrate` deletes other entries there.
+each distinct set of staged input links once; the health check compacts it when mostly free pages), `format` (on-disk format stamp),
+`snapshots/` (taken by `taskq self migrate --apply`), `wheelhouse/`, `tunnel*` etc. `taskq self migrate` deletes other entries there.
 
 Core source:
 
@@ -561,8 +573,8 @@ Core source:
 - The protocol lives only in `queue/proto.py`: on-disk names, time constants, task states, exit codes (table in [`../README.md`](../README.md)'s
   "Conventions"), field tables, alert formats, `TASKQ_*` env vars (`proto.ENV`). The rest of the core writes no such literals
   (`queue/test_protocol.py` checks).
-- When a format changes (on-disk layout, queue, marker files, JSON fields, bundles), put the rewrite of old state into `taskq self migrate`
-  and do it in one cutover; code keeps no branch reading the old format.
+- When a format changes (on-disk layout, queue, marker files, JSON fields, bundles), bump `proto.FORMAT` and put the rewrite of old state
+  into `taskq self migrate` as that version's step; it runs once in the cutover. Code keeps no branch reading the old format.
 - `--json` prints one JSON line, field tables in `proto.py`, with a `version`; frozen commands read back over ssh (`taskq status --json`,
   `taskq spec collect --json`) put that line behind `@@JSON `, and the hub reads only that line.
 - `taskq worker`, `taskq spec` and `taskq internal` are for workers, programs on executors and the scheduler itself. Changes that go live

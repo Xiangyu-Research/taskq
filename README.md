@@ -239,8 +239,8 @@ The fixed test config [`queue/testdata/`](queue/testdata/) shows every field in 
 - One version only: pushing to `main` is going live; the hub's cron runs `taskq self update` next round, executor bundles are rebuilt and
   pushed next round, and running workers switch bundles when they go idle.
 - On-disk names, time constants, task states, exit codes, field tables, alert formats and `TASKQ_*` env vars are defined only in
-  `queue/proto.py`; when a format changes, the rewrite of old state goes into `taskq self migrate` and happens in one cutover (see
-  [`queue/README.md`](queue/README.md)'s "command line and conventions").
+  `queue/proto.py`; when a format changes, `proto.FORMAT` goes up and the rewrite of old state goes into `taskq self migrate` as that
+  version's step, run once in one cutover (see [`queue/README.md`](queue/README.md)'s "Format cutovers").
 - Commands with `--json` print one JSON line with a `version`; fields are add-only. Commands the hub reads back over ssh
   (`taskq status --json`, `taskq spec collect --json`) put that line behind `@@JSON `.
 - Changes that go live without a cutover do not change the arguments and exit codes of `taskq worker next/beat/release` (running workers
@@ -254,7 +254,7 @@ Exit codes (`proto.EXIT`):
 | `taskq show`, `set`, `stop`, `nice`, `add --exp` | 4 not in the queue (or experiment table) (several keys: 4 when any is missing) |
 | `taskq rm` | 0 removed; 3 not removed (claimed, assigned, another task waits for it); 4 none of them in the queue |
 | `taskq status` | 1 queue unreadable |
-| `taskq worker next` | 0 claimed; 10 nothing to claim; 11 wait first (leave room for queued, recently stopped tasks); 12 paused (3 failures in 3 hours across the queue, or data dir unreadable) |
+| `taskq worker next` | 0 claimed; 10 nothing to claim; 11 wait first (leave room for queued, recently stopped tasks); 12 paused (3 failures in 3 hours across the queue, data dir unreadable, or the on-disk format is not this code's: `taskq self migrate`) |
 | `taskq worker beat --strict` | 13 some claims are no longer ours |
 | `taskq worker missing` | 1 not claimed by us |
 | `queue/run_task.sh` | 0 done; 1 training failed; 2 bad spec or env; 3 command exited normally but training did not finish; 4 missing inputs (did not start); 5 disk unreadable, cannot tell whether training finished; 143 got SIGTERM |
