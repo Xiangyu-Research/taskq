@@ -9,6 +9,7 @@ RECIPES = {
     "toy": dict(
         params=dict(ds=REQUIRED, frag=REQUIRED, variant="V_save", plan="PlanM", cfg="full", env="base",
                     code=QR + "/testdata/code", model="{ds}/{variant}__{plan}__{cfg}"),
+        override=["vars", "metrics"],  # the experiment table's fields and the smoke definition set these too
         key="{ds}/{variant}/{frag}",
         env="{env}",
         cmd="bash " + QR + "/testdata/bin/toy_train.sh {ds} {cfg} {frag} {plan} {variant}",

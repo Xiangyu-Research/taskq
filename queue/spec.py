@@ -97,10 +97,11 @@ def resolve(recipe, params, exp=None):
     if recipe not in R.RECIPES:
         raise SpecError(f"unknown recipe {recipe} (have: {', '.join(R.RECIPES)})")
     r = R.RECIPES[recipe]
-    odd = sorted(set(r) - set(schema.RECIPE_FIELDS) - {"params", "open"})
+    odd = sorted(set(r) - set(schema.RECIPE_FIELDS) - set(schema.RECIPE_KEYS))
     if odd:
         raise SpecError(f"unknown field {', '.join(odd)} in recipe {recipe} (see RECIPE_FIELDS in queue/schema.py)")
     fields = list(schema.RECIPE_FIELDS)
+    may = settable(recipe, r)
     over = {k: v for k, v in params.items() if k in fields and k not in r["params"]}
     p = {k: v for k, v in r["params"].items()}
     extra = [k for k in params if k not in p and k not in over]
@@ -108,7 +109,11 @@ def resolve(recipe, params, exp=None):
     if taken:
         raise SpecError(f"a param cannot be named {', '.join(taken)} ({{{taken[0]}}} is expanded per executor; write inputs in inputs)")
     if extra and not r.get("open"):
-        raise SpecError(f"recipe {recipe} has no params {', '.join(extra)} (have: {', '.join(list(p) + fields)})")
+        raise SpecError(f"recipe {recipe} has no params {', '.join(extra)} (have: {', '.join(list(p) + sorted(may))})")
+    shut = sorted(set(over) - may)
+    if shut:
+        raise SpecError(f"recipe {recipe} does not let a task set {', '.join(shut)} (a task may set its params {', '.join(p) or 'none'} "
+                        f"and the fields {', '.join(sorted(may))}; the recipe lists further fields its tasks may set in override)")
     p.update({k: v for k, v in params.items() if k not in over})
     missing = [k for k, v in p.items() if v is R.REQUIRED]
     if missing:
@@ -133,6 +138,22 @@ def resolve(recipe, params, exp=None):
     s.update(recipe=recipe, params={k: v for k, v in params.items()}, exp=exp, names=p)
     _size_ok(sendable(s))
     return s
+
+
+def settable(recipe, r):
+    """The spec fields a task's params may set on recipe r -> set: every field on an open recipe; otherwise schema.TASK_SETS plus
+    the recipe's override, which may not name schema.OPEN_ONLY (code a task would bring along) -> SpecError."""
+    import schema
+    if r.get("open"):
+        return set(schema.RECIPE_FIELDS)
+    extra = r.get("override") or ()
+    if isinstance(extra, str) or not isinstance(extra, (list, tuple)) or not all(x in schema.RECIPE_FIELDS for x in extra):
+        raise SpecError(f"recipe {recipe}: override must be a list of field names (RECIPE_FIELDS in queue/schema.py): {extra!r}")
+    code = sorted(set(extra) & set(schema.OPEN_ONLY))
+    if code:
+        raise SpecError(f"recipe {recipe} lists {', '.join(code)} in override: a recipe whose tasks bring their own command is open "
+                        "(open=True)")
+    return set(schema.TASK_SETS) | set(extra)
 
 
 def _size_ok(sent):

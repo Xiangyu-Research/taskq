@@ -53,6 +53,42 @@ ok("a param overrides a same-named field: env replaced, vars merged", s2["env"] 
 ok("a plan param goes into the model dir", S.resolve("toy", {"ds": "D101_alpha", "frag": "0", "plan": "PlanP"})["out"]
    == "results/D101_alpha/V_save__PlanP__full/frag_0")
 
+# ---------------- what a task may set on a closed recipe ----------------
+import recipes as RCP  # noqa: E402
+RCP.RECIPES["closed"] = dict(params=dict(name=RCP.REQUIRED, seed=RCP.REQUIRED, n="100"),
+                             key="closed/{name}/{seed}", env="base", cmd="bash bin/count.sh {n} {data}/closed/{name}/seed_{seed}",
+                             out="closed/{name}/seed_{seed}", done=["DONE"], resume=["ckpt.json"])
+CL = dict(name="a", seed="0")
+ok("closed recipe: a task cannot set cmd, inputs_cmd, vars, resume, out, done, inputs, env (the recipe's override does not list them)",
+   all(raises(lambda f=f, v=v: S.resolve("closed", dict(CL, **{f: v}))) for f, v in
+       (("cmd", "echo pwned"), ("inputs_cmd", "echo x"), ("vars", {"BASH_ENV": "/tmp/x"}), ("resume", ["*"]), ("out", "x/y"),
+        ("done", ["x"]), ("inputs", ["raw"]), ("env", "alt"))))
+_cl = S.resolve("closed", dict(CL, key="closed/b/0", machines=["site-pueue"], res={"cpus": 2}, device="cpu", out_gb="3", owner="bob"))
+ok("closed recipe: a task may set key, machines, res, device, out_gb, owner (schema.TASK_SETS)",
+   (_cl["key"], _cl["machines"], _cl["res"], _cl["device"], _cl["out_gb"], _cl["owner"])
+   == ("closed/b/0", ["site-pueue"], {"cpus": 2}, "cpu", "3", "bob") and _cl["cmd"].startswith("bash bin/count.sh 100 "))
+try:
+    S.resolve("closed", dict(CL, cmd="echo pwned"))
+    _why = ""
+except S.SpecError as e:
+    _why = str(e)
+ok("closed recipe: the refusal names the field and what the task may set", "cmd" in _why and "override" in _why and "machines" in _why)
+RCP.RECIPES["closed"]["override"] = ["vars", "resume"]
+_cv = S.resolve("closed", dict(CL, vars={"X": "1"}, resume=["last.ckpt"]))
+ok("override: the fields a recipe lists may be set by its tasks (vars, resume)", _cv["vars"] == {"X": "1"} and _cv["resume"] == ["last.ckpt"]
+   and raises(lambda: S.resolve("closed", dict(CL, done=["x"]))))
+for _bad in (["cmd"], ["vars", "inputs_cmd"], "vars", ["nope"]):
+    RCP.RECIPES["closed"]["override"] = _bad
+    ok(f"override {_bad!r}: the recipe is refused (cmd, inputs_cmd only on an open recipe; a list of field names)",
+       raises(lambda: S.resolve("closed", CL)))
+del RCP.RECIPES["closed"]
+ok("open recipe (command): a task sets any field, its command included", S.resolve("command", dict(
+    key="o/a", cmd="echo hi; true", env="base", out="o/a", done="DONE", resume="c*", inputs_cmd="echo x"))["inputs_cmd"] == "echo x")
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "resolve", "toy", "ds=D1", "frag=0", "cmd=echo pwned"],
+                    capture_output=True, text=True)
+ok("spec.py resolve (as taskq add --recipe): cmd on the closed toy recipe -> exit 2, nothing printed",
+   _r.returncode == 2 and not _r.stdout and "does not let a task set cmd" in _r.stderr)
+
 # ---------------- command recipe ----------------
 c = S.resolve("command", {"key": "misc/a", "cmd": "python x.py --out {data}/misc/a", "env": "base", "out": "misc/a",
                           "done": ["model.pt"], "inputs": ["other/stuff"], "extra": "1"})

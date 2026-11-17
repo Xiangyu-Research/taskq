@@ -3,7 +3,11 @@ done, and how to fetch and archive them.
 Scheduling follows only recipe fields and knows no specific model. Fields, defaults and descriptions are in queue/schema.py's
 RECIPE_FIELDS (a recipe that omits a field takes the default); resolving is in queue/spec.py's resolve. Each recipe also has:
   params     params and defaults (REQUIRED = must be given). A default may use {another param} (e.g. model).
-  open       True = a task may carry params not listed here (the command recipe); otherwise a wrong param name is an error.
+  open       True = a task may carry params not listed here and set any field (the command recipe); otherwise a wrong param name
+             is an error.
+  override   fields (beyond schema.TASK_SETS: key, machines, res, device, out_gb, owner) a task's params may set on this recipe,
+             e.g. ["vars", "inputs"]; an experiment table's fields and a smoke definition's vars count as params too. cmd and
+             inputs_cmd (schema.OPEN_ONLY) cannot be listed: a recipe whose tasks bring their own command is open.
 
 Domain-specific recipes live in each TASKQ_PLUGINS dir's recipes.py (exporting RECIPES and HOOKS; see the top of cfg.py) and are
 merged on load.

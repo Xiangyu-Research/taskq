@@ -169,7 +169,7 @@ The file `OUTPUTS["experiments"]` points to holds `EXPERIMENTS = [dict(...), ...
 | `hours` | `num?` | `None` | hours each task counts as (ledger total progress) |
 | `recipe` | `str` | required | training recipe (recipes.py); PLACE places training tasks by it |
 | `params` | `dict` | `{}` | recipe params |
-| `fields` | `dict` | `{}` | extra spec fields to override (e.g. metrics, vars, inputs) |
+| `fields` | `dict` | `{}` | extra spec fields to set (e.g. metrics, vars, inputs); the recipe must let tasks set them (its override) |
 | `each` | `dict` | `{}` | {param: [values...]}: expand into one task per combination; absent = one task |
 | `after` | `steps` | `()` | steps after each task is done (STEP_FIELDS), done in order |
 | `group_after` | `steps` | `()` | experiment-wide steps (STEP_FIELDS); order follows inputs and outputs |
@@ -210,8 +210,11 @@ lists expanded steps, `taskq dag` shows the order, and `taskq who <file>` tells 
 A recipe (`command` in `queue/recipes.py`, plus `RECIPES` in the project's `recipes.py`) is a template for a kind of task: `params` are
 parameters and defaults (`REQUIRED` = must be given, defaults may use `{other param}`), `open=True` lets a task carry params not listed
 here; the other fields form the task spec (templates, `{param}` replaced by the value).
-When a task's param name is a field in the table below and the recipe's `params` lacks it, it directly overrides that spec field (such as
-`res`, `machines`, `out_gb`).
+A task param named after a field in the table below (and not in the recipe's `params`) sets that spec field only where the recipe lets
+tasks set it, otherwise the task is refused: on any recipe `key`, `machines`, `res`, `device`, `out_gb`, `owner` (`schema.TASK_SETS`);
+the fields the recipe lists in `override` (such as `override=["vars", "inputs"]`); every field on an open recipe. The experiment
+table's `fields` and a smoke definition's `vars` reach the spec the same way, so the recipe lists them in `override`. `cmd` and
+`inputs_cmd` (code run on executors and the store, `schema.OPEN_ONLY`) cannot be listed: only an open recipe takes them from a task.
 
 <!-- fields:RECIPE_FIELDS -->
 | field | type | default | description |
