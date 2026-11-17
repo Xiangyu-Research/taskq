@@ -120,6 +120,7 @@ def fake_pip(cmd, env):
     rpt = o["--report"][0]
     if "--no-binary" in o:
         n = re.split(r"[=<>!~]", reqs[0])[0]
+        CALLS.append(("sdist", n))
         if n not in INDEX:
             return 1, "", f"ERROR: No matching distribution found for {reqs[0]}\n"
         v = INDEX[n][0]
@@ -215,7 +216,8 @@ spec("base", "python: \"3.11\"\nchannels: [conda-forge]\nconda: []\ntorch:\n  de
 spec("layer", "base: base\npip:\n  - six==1.16.0\n  - newpkg==1.0\n")
 spec("ext", "base: base\npip_no_deps:\n  - https://gh/rel/mamba-1.0+cu12torch{torch_mm}cxx11abi{abi}-{cp}-{cp}-linux_x86_64.whl\n")
 spec("bad", "python: \"3.11\"\nchannels: [conda-forge]\npip:\n  - cext==2.0\n")
-lk = L.Locker(conda="/x/bin/conda", run=fake_run, get=fake_get, home=os.path.join(d, "home"), log=lambda m: None)
+lk = L.Locker(conda="/x/bin/conda", run=fake_run, get=fake_get, home=os.path.join(d, "home"), log=lambda m: None, build_sdist=True)
+lk0 = L.Locker(conda="/x/bin/conda", run=fake_run, get=fake_get, home=os.path.join(d, "home"), log=lambda m: None)  # no --build-sdist
 
 # ---------- platforms ----------
 pl = L.pip_platforms("2.34")
@@ -224,8 +226,20 @@ ok("manylinux ladder: from 2_34 down to 2_17 one by one, then manylinux2014, the
    and "manylinux2014_x86_64" in pl and pl[-1] == "linux_x86_64" and len([p for p in pl if p.startswith("manylinux_2_")]) == 18 + 2)
 ok("nothing in the ladder is newer than the cap", not any(re.fullmatch(r"manylinux_2_(\d+)_x86_64", p) and int(p.split("_")[2]) > 34 for p in pl))
 
-# ---------- lock base ----------
+# ---------- source packages are built only with --build-sdist ----------
 h0 = M.spec_hash("base")
+try:
+    lk0.lock("base")
+    ok("without --build-sdist: a req with only a source package is an error naming it and the flag", False)
+except L.LockError as e:
+    ok("without --build-sdist: a req with only a source package is an error naming it and the flag",
+       "purepkg==1.0" in str(e) and "--build-sdist" in str(e), e)
+ok("without --build-sdist: nothing of the source package is fetched or run (no metadata dry run, no wheel build)",
+   not any(c[0] in ("sdist", "wheel") for c in CALLS) and not os.path.isdir(os.path.join(d, "home", L.P.WHEELHOUSE, "built")))
+ok("without --build-sdist: the failure writes no lock", not os.path.exists(M.lock_path("base")))
+CALLS.clear()
+
+# ---------- lock base ----------
 p, base = lk.lock("base")
 cmds = [c[1] for c in CALLS if c[0] == "install"]
 ok("conda: CONDA_OVERRIDE_GLIBC = the cap, dry run, --override-channels",
@@ -267,6 +281,10 @@ again = open(p).read()
 strip = lambda t: re.sub(r'"created": "[^"]*"', "", t)  # noqa: E731
 ok("locking the same input again: the file is the same except created, the hash does not change", strip(first) == strip(again) and M.spec_hash("base") == sha(yml + canon))
 ok("the second run builds no wheel (it uses the record in wheelhouse/built)", not any(c[0] == "wheel" for c in CALLS))
+CALLS.clear()
+lk0.lock("base")
+ok("without --build-sdist a wheel built earlier is still used: same lock, nothing of the source package fetched or run",
+   strip(open(p).read()) == strip(first) and not any(c[0] in ("sdist", "wheel") for c in CALLS))
 ok(".lock.json is not taken as a spec", L.spec_names() == ["bad", "base", "ext", "layer"] and glob.glob(os.path.join(SPECS, "*.lock.json")))
 lk.lock("base", "cu128")
 ok("variant cu128: torch switched to the cu128 one", next(e for e in json.load(open(M.lock_path("base", "cu128")))["pip"]

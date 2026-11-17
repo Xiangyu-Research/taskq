@@ -494,6 +494,9 @@ built from an old description or on an old base.
 `taskq env lock <name> [--variant V]` (or `--all`) resolves a description into `<name>.<variant>.lock.json`: exact versions, URLs and sha256
 of every conda and pip package, with files downloaded into the hub state dir's `wheelhouse/`. With a lock, executors build offline: the hub
 sends the locked files as blobs into that root, and the machine runs `conda create --offline` and `pip install --no-index --require-hashes`.
+A pip package with no usable wheel is an error unless `--build-sdist` is given: building a wheel from its source package runs the
+package's setup code on the hub. Only pure-Python (`none-any`) wheels built that way are kept (`wheelhouse/built/`), and later locks
+use them without the flag.
 
 ### Smoke
 
