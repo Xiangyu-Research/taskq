@@ -298,6 +298,24 @@ class Errors(unittest.TestCase):
         for args in ((), ("gpu",), ("gpu", "--")):
             self.check(("pueue-add", *args), 2, "taskq pueue-add")
         self.check(("pueue-add", "nosuch", "--", "true"), 2, "taskq pueue-add", "nosuch")
+        self.check(("pueue-add", "gpu", "--label", "x", "true"), 2, "taskq pueue-add")  # no -- before the command
+
+    def test_pueue_add_bash(self):
+        """pueue runs a task's command with sh -c (dash on Debian / Ubuntu): pueue-add makes that a bash -c of the command,
+        so source, [[ ]], arrays and quotes in it work."""
+        home = os.path.join(T, "qhome")
+        os.makedirs(os.path.join(home, "auto", "demo"), exist_ok=True)
+        os.makedirs(os.path.join(home, ".local", "bin"), exist_ok=True)
+        out = os.path.join(T, "q_out")
+        fake = os.path.join(home, ".local", "bin", "pueue")
+        with open(fake, "w") as f:  # like pueue add: the words after -- joined with spaces, run with sh -c
+            f.write(f'#!/bin/sh\nwhile [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done\nshift\nsh -c "$*" > {out} 2>&1\n')
+        os.chmod(fake, 0o755)
+        cmd = "f=$(mktemp); echo 'V=7' > $f; source $f; rm $f; a=(x \"$V\"); [[ ${a[1]} == 7 ]] && echo \"it's ${a[1]}\""
+        r = taskq("pueue-add", "gpu", "--label", "x", "--", cmd, env=dict(ENV, HOME=home))
+        self.assertEqual(r.returncode, 0, r.stderr[-300:])
+        with open(out) as f:
+            self.assertEqual(f.read(), "it's 7\n")
 
 
 class Project(unittest.TestCase):
