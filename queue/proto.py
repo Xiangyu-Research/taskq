@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Scheduler protocol: names, directory layout, formats, constants, exit codes and fields shared across scripts and machines live only here.
-When an on-disk format changes, add the rewrite of the old format to taskq self migrate in the same cutover; every executor switches bundles together.
+When an on-disk format changes, bump FORMAT and add the rewrite of the old format as its step in taskq self migrate (migrate.STEPS)
+in the same commit; it runs once in the cutover, where every executor switches bundles together.
 
 Standard library only, no imports of other scheduler files (site_ops.py on executors and bash scripts read it via proto.py sh).
   python3 proto.py sh     assignments for bash (eval "$(python3 proto.py sh)"), names are TQ_<UPPER>
@@ -27,6 +28,7 @@ ROOT = dict(
     tmp="tmp",                   # temp files for half-transferred files
     envs="envs",                 # envs installed on the executor (conda, venv)
     machine="machine",           # this root's machine name, one line (relay.py deploy and self migrate write it): processes started without TASKQ_MACHINE read it (worker_start.sh)
+    format="state/format",       # this root's on-disk format stamp (FORMAT_FILE under state/, what cfg.state(FORMAT_FILE) gives there)
 )
 # where the scheduler core sits inside a bundle (relative to the bundle root): queued Slurm jobs and worker commands find the launcher there
 BUNDLE_CORE = "scripts/taskq"
@@ -36,6 +38,18 @@ OLD_LAUNCHER = "scripts/queue/worker_start.sh"
 IO_GROUP = "taskq"  # the core's own group on pueue machines, the hub and the store (transfers, fetches, archives, unbounded concurrency), sites/mtab.groups creates it
 WORKER_LABEL = "worker:"  # label prefix for worker tasks on pueue executors: worker:<id> (sites/pueue.py)
 MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/logs/workers")  # created when relay.py first makes the root
+
+# ---------------- on-disk format version (taskq self migrate, queue/migrate.py) ----------------
+# The on-disk format this code reads and writes. Each place records the format its state is in, one line with the number:
+# the hub state dir (<state dir>/FORMAT_FILE) and every executor and store root (ROOT format). Hub rounds and workers of
+# this code run only where the stamp says exactly FORMAT (common.format_problem); taskq self migrate runs the numbered steps
+# up to FORMAT and writes the stamps. No stamp is format 0 (state from before stamps). A format change bumps FORMAT and adds
+# its step to migrate.STEPS in the same commit; code of older bundles does not read the stamp.
+FORMAT = 1
+FORMAT_FILE = "format"
+assert ROOT["format"] == ROOT["state"] + "/" + FORMAT_FILE
+SNAPSHOTS = "snapshots"  # under the hub state dir: <time>-format<N>/ copies of the hub queue, database and stamp self migrate takes before applying
+SNAPSHOT_KEEP = 3        # self migrate keeps this many snapshots (the newest)
 
 
 def blob(h):
@@ -388,6 +402,7 @@ HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", 
                 "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_LAST")
 ENV["TASKQ_TEST_NOW"] = ("test", "a file holding a time (epoch seconds): the window plugin treats it as now")
 ENV["TASKQ_SWITCH_HOLD"] = ("test", "seconds self migrate keeps unclaimed tasks aside after switching a bundle (default SWITCH_HOLD_S)")
+ENV["TASKQ_FORMAT_ANY"] = ("test", "1 = skip the on-disk format stamp check (tests that build state by hand; testdata/fixture.py and fixture.sh set it)")
 # gpu_pad.py arguments (tune), defaults on its command line
 for _k in ("FLOOR_MIB", "TARGET_MIB", "HIGH_MIB", "CHUNK_MIB", "MIN_FREE_MIB", "MIN_TRAIN_MIB", "MIN_TOTAL_MIB", "INTERVAL",
            "SETTLE", "START_HOLD", "RETRY_DELAY", "MAX_FAILS", "RESET_AFTER"):
@@ -549,7 +564,7 @@ TICK = "tick"  # in the health check's state dir: tick.lock is held (flock) by t
 HEALTH_NAMES = (PUEUE_SEEN, "health.log", TICK)
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
-               WHEELHOUSE, "envlock", DB)
+               WHEELHOUSE, "envlock", DB, FORMAT_FILE, SNAPSHOTS)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
 EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
 # source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
