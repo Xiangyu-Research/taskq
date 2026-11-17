@@ -40,6 +40,13 @@ $R --spec '{"key": "x"}' > /dev/null 2>&1; rc=$?
 check "--spec with missing fields: exit 2" "(( rc == 2 ))"
 check "bad spec: the reason goes into the task's part log (header line as usual)" "head -1 $T/logs/tasks/x__test-1_part1.log | grep -q 'task=x,' && grep -q 'not started: bad task spec: .' $T/logs/tasks/x__test-1_part1.log"
 check "missing env: the reason goes into the part log" "grep -q 'not started: this machine has no env nosuchenv' $T/logs/tasks/toy__d__test-1_part1.log"
+SPV=$(python3 -c 'import json, sys
+s = json.loads(sys.argv[1]); s.update(key="toy/v1", out="toy/v1", vars={"A; touch " + sys.argv[2] + "; B": "1"}); print(json.dumps(s))' "$SP" "$T/pwned")
+$R --spec "$SPV" > /dev/null 2>&1; rc=$?
+check "a vars name that is not a shell variable name: exit 2, none of it runs" "(( rc == 2 )) && [[ ! -e $T/pwned ]] && grep -q 'not started: bad task spec: .*vars name' $T/logs/tasks/toy__v1__test-1_part1.log"
+$R command key=toy/v2 'cmd=printf %s "$V" > $TASKQ_DATA/toy/v2.txt; touch $TASKQ_DATA/toy/v2/DONE' env=base out=toy/v2 'done=["DONE"]' \
+  "vars={\"V\": \"\$(touch $T/pwned) \`touch $T/pwned\` ; it's\"}" > /dev/null; rc=$?
+check "vars values reach the command literally (run_task.sh evaluates quoted shell lines)" "(( rc == 0 )) && [[ ! -e $T/pwned && \$(cat $T/toy/v2.txt) == \"\\\$(touch $T/pwned) \\\`touch $T/pwned\\\` ; it's\" ]]"
 # unreadable disk (spec.py done exits 5): the copy's spec.py exits 5 from done while the FAKE_DONE5 file exists
 mkdir -p "$T/core"; cp -r "$HERE" "$T/core/queue"; cp -r "$HERE/../sites" "$T/core/sites"
 sed -i '1a import os, sys\nif __name__ == "__main__" and sys.argv[1:2] == ["done"] and os.path.exists(os.environ.get("FAKE_DONE5", "/nonexistent")): sys.exit(5)' "$T/core/queue/spec.py"

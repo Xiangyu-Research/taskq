@@ -142,7 +142,7 @@ RECIPE_FIELDS = {
     "cmd": ("str", REQUIRED, "command run with bash in the project root in the bundle; a rerun continues from the last run (after release another worker continues from the checkpoint)"),
     "out": ("str", REQUIRED, "output dir (relative to the data dir): fetch, archive and ledger all look here"),
     "done": ("strs", REQUIRED, "done markers: files under out, every item required; 'a|b' needs one"),
-    "vars": ("dict", {}, "env vars set before running"),
+    "vars": ("dict", {}, "env vars set before running (names: letters, digits and _, not starting with a digit)"),
     "log": ("str?", "*.log", "logs under out (glob): how long since the last update judges whether someone is working"),
     "progress": ("str?", None, "progress reader (spec.py PROGRESS, readers/ plugins; progress_json = out/PROGRESS.json)"),
     "resume": ("strs?", None, "checkpoints under out (glob): any one means progress, kept there on release for the same machine to continue; None = none"),

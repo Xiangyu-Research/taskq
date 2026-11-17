@@ -2,7 +2,9 @@
 done, and how to fetch and archive them.
 Scheduling follows only recipe fields and knows no specific model. Fields, defaults and descriptions are in queue/schema.py's
 RECIPE_FIELDS (a recipe that omits a field takes the default); resolving is in queue/spec.py's resolve. Each recipe also has:
-  params     params and defaults (REQUIRED = must be given). A default may use {another param} (e.g. model).
+  params     params and defaults (REQUIRED = must be given). A default may use {another param} (e.g. model). A field puts a
+             value in as is with {param}, shell-quoted (one word) with {param:q}; on a closed recipe a value a task gives that cmd
+             or inputs_cmd takes as is may not hold shell syntax.
   open       True = a task may carry params not listed here and set any field (the command recipe); otherwise a wrong param name
              is an error.
   override   fields (beyond schema.TASK_SETS: key, machines, res, device, out_gb, owner) a task's params may set on this recipe,

@@ -6,6 +6,7 @@
 import itertools
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -204,6 +205,58 @@ ok("refill.site_progress: a checkpoint alone (no epochs) counts as progress", RF
 src = {"src": {"pueue-host": {"tasks": {"guest/x": dict(final=False, runs=[dict(epochs_done=0, end=None)], resumable=True)}},
                "slurm-login": {"tasks": {}}}}
 ok("refill.progress: a checkpoint alone counts as progress, per machine", RF.progress(src, "guest/x", "pueue-host") and not RF.progress(src, "guest/x", "slurm-login"))
+
+# ---------------- template values in commands, env var names ----------------
+ok("fill: {name} as is, {name:q} shell-quoted (one word); ${X} left to the shell; a plain word is not quoted",
+   S.fill("echo {x:q} {x} ${x} {y:q}", {"x": "a b; c", "y": "plain"}) == "echo 'a b; c' a b; c ${x} plain"
+   and S.fill("{d:q}", {"d": ["a", "b"]}) == shlex.quote(str(["a", "b"])) and S.fill("{d}", {"d": ["a", "b"]}) == ["a", "b"])
+ok("fill: {data:q} is kept at resolve and expanded quoted on the executor",
+   S.fill("ls {data:q}", {}) == "ls {data:q}" and S.expand("ls {data:q} {data}", "/d d") == "ls '/d d' /d d")
+ok("fill: an unknown {name:q} is an error like {name}", raises(lambda: S.fill("x {nope:q}", {"a": "1"})))
+_pw = os.path.join(fixture.tmpdir(), "pwned")
+RCP.RECIPES["closed"] = dict(params=dict(x=RCP.REQUIRED, y="", model="{x}/m", qm="{x:q}"), key="closed/k", env="base",
+                             cmd="printf '%s|' {y:q} {model}", out="closed/k", done=["DONE"])
+ok("closed recipe: a value its command takes as is ({x}, here through the default of model) may not hold shell syntax",
+   all(raises(lambda v=v: S.resolve("closed", dict(x=v))) for v in (f"a; touch {_pw}", f"$(touch {_pw})", "`id`", "a|b", "a>b",
+                                                                   "a&b", "a\nb", "~", "*", "a'b", '"', "a#")))
+try:
+    S.resolve("closed", dict(x="a;b"))
+    _why = ""
+except S.SpecError as e:
+    _why = str(e)
+ok("closed recipe: the refusal names the param, the characters and {x:q}", "param x" in _why and "';'" in _why and "{x:q}" in _why)
+_cq = S.resolve("closed", dict(x="D1/a-b.c_d+e@f%g=h:i,j k", y=f"it's $(touch {_pw}); `id` \"q\""))
+_out = subprocess.run(["bash", "-c", _cq["cmd"]], capture_output=True, text=True).stdout
+ok("closed recipe: plain values pass as is; {y:q} takes any value as one word, the shell runs none of it",
+   _out == f"it's $(touch {_pw}); `id` \"q\"|D1/a-b.c_d+e@f%g=h:i,j|k/m|" and not os.path.exists(_pw))
+RCP.RECIPES["closed"]["cmd"] = "printf '%s|' {qm}"
+_cq = S.resolve("closed", dict(x=f"a; touch {_pw}"))
+ok("closed recipe: a default that quotes ({x:q}) is safe to use as is",
+   subprocess.run(["bash", "-c", _cq["cmd"]], capture_output=True, text=True).stdout == f"a; touch {_pw}|" and not os.path.exists(_pw))
+_cq = S.resolve("closed", dict(x="{y}", y=f"'; touch {_pw}; '"))
+ok("params are filled once: a value given as {y} takes y's value, and text filled in is not read as a template again (quoting holds)",
+   _cq["names"]["x"] == f"'; touch {_pw}; '" and subprocess.run(["bash", "-c", _cq["cmd"]], capture_output=True, text=True).stdout
+   == f"'; touch {_pw}; '|" and not os.path.exists(_pw))
+ok("params that refer to each other in a loop -> error", raises(lambda: S.resolve("closed", dict(x="{qm}"))))
+RCP.RECIPES["closed"]["cmd"], RCP.RECIPES["closed"]["out"] = "true", "closed/{x}"
+ok("closed recipe: params not in the command are not limited this way (out is checked as a path)",
+   S.resolve("closed", dict(x="a b"))["out"] == "closed/a b")
+del RCP.RECIPES["closed"]
+ok("open recipe (command): the task's own command is taken as is", S.resolve("command", dict(G, cmd="echo a; echo b | cat"))["cmd"]
+   == "echo a; echo b | cat")
+_bv = {"A; touch " + _pw + "; B": "1"}
+ok("vars names must be shell variable names: at resolve, in a sent spec, in shell lines",
+   raises(lambda: S.resolve("command", dict(G, vars=_bv))) and raises(lambda: S.resolve("command", dict(G, vars={"1A": "x"})))
+   and raises(lambda: S.from_sent(dict(S.sendable(g), vars=_bv))) and raises(lambda: S.shell_lines(dict(g, vars=_bv), "/d"))
+   and S.resolve("command", dict(G, vars={"_A1": "x", "b": "y"}))["vars"] == {"_A1": "x", "b": "y"})
+_r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "shell", "--spec", json.dumps(dict(S.sendable(g), vars=_bv))],
+                    capture_output=True, text=True)
+ok("spec.py shell --spec: a bad vars name -> exit 2, no shell lines", _r.returncode == 2 and not _r.stdout and not os.path.exists(_pw))
+_sv = dict(g, vars={"V": f"$(touch {_pw}) `id` ; x'y\"z"})
+_out = subprocess.run(["bash", "-c", S.shell_lines(_sv, "/d") + '\nprintf "%s" "$V"'], capture_output=True, text=True).stdout
+ok("shell lines: vars values stay literal when run_task.sh evaluates them", _out == f"$(touch {_pw}) `id` ; x'y\"z" and not os.path.exists(_pw))
+ok("machine table task_vars / task_unset: names that are not shell variable names are left out",
+   S.machine_vars({"task_vars": {"OK": "a b", "A;B": "1"}, "task_unset": ["Z", "X Y"]}) == ["unset Z", "[[ -n ${OK:-} ]] || export OK='a b'"])
 
 # ---------------- done check ----------------
 root = fixture.tmpdir()

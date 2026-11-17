@@ -201,7 +201,9 @@ Steps (each entry in `after`, `group_after`, `FINAL`):
 | `only` | `dict?` | `None` | per-task steps: only for tasks where each takes these values ({param: [values...]}) |
 <!-- /fields -->
 
-Names usable in templates: recipe params, `each` values, `names`, and `{data}` (the data dir on the executor). Instance ids: a per-task step
+Names usable in templates: recipe params, `each` values, `names`, and `{data}` (the data dir on the executor). `{name}` puts the value
+in as is (in a command the shell splits it at spaces and reads any shell syntax in it); `{name:q}` puts it in shell-quoted, as one word
+whatever it holds (use it for values that may hold spaces, quotes, `;`, `$` and the like). Instance ids: a per-task step
 is `<step>/<experiment id>_<short>`, an experiment-level one is `<step>/<experiment id>`, and a `FINAL` one is `<step>`. `taskq exp steps`
 lists expanded steps, `taskq dag` shows the order, and `taskq who <file>` tells whose output a file is.
 
@@ -215,6 +217,9 @@ tasks set it, otherwise the task is refused: on any recipe `key`, `machines`, `r
 the fields the recipe lists in `override` (such as `override=["vars", "inputs"]`); every field on an open recipe. The experiment
 table's `fields` and a smoke definition's `vars` reach the spec the same way, so the recipe lists them in `override`. `cmd` and
 `inputs_cmd` (code run on executors and the store, `schema.OPEN_ONLY`) cannot be listed: only an open recipe takes them from a task.
+On a closed recipe a value a task gives that `cmd` or `inputs_cmd` puts in as is (`{name}`, directly or through another param's
+default) may hold only letters, digits, spaces and `_@%+=:,./-`, so it cannot add shell syntax to the command; the recipe writes
+`{name:q}` where any value should pass as one word.
 
 <!-- fields:RECIPE_FIELDS -->
 | field | type | default | description |
@@ -224,7 +229,7 @@ table's `fields` and a smoke definition's `vars` reach the spec the same way, so
 | `cmd` | `str` | required | command run with bash in the project root in the bundle; a rerun continues from the last run (after release another worker continues from the checkpoint) |
 | `out` | `str` | required | output dir (relative to the data dir): fetch, archive and ledger all look here |
 | `done` | `strs` | required | done markers: files under out, every item required; 'a\|b' needs one |
-| `vars` | `dict` | `{}` | env vars set before running |
+| `vars` | `dict` | `{}` | env vars set before running (names: letters, digits and _, not starting with a digit) |
 | `log` | `str?` | `'*.log'` | logs under out (glob): how long since the last update judges whether someone is working |
 | `progress` | `str?` | `None` | progress reader (spec.py PROGRESS, readers/ plugins; progress_json = out/PROGRESS.json) |
 | `resume` | `strs?` | `None` | checkpoints under out (glob): any one means progress, kept there on release for the same machine to continue; None = none |
