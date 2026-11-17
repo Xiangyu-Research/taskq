@@ -218,6 +218,7 @@ and `bin/taskq` mean the full suite):
 | `monitor/overview.py` | `test_overview.py` |
 | `monitor/summary.py`, `queue/taskstate.py` | `test_summary.py`, `test_overview.py` |
 | `monitor/gpu_usage.py`, `monitor/gpu_log.sh` | `test_gpu_usage.py` |
+| frozen interfaces in `queue/taskq.py`, `queue/consume.py`, `queue/spec.py`, `queue/proto.py` (worker calls and exit codes, `status --json`, `collect --json`, bundle switch handoff, launcher path) | `test_compat.py` (pinned field names, and an old commit's worker and queue against the current ones; that part is skipped in a shallow clone) |
 | anything crossing modules (send, transfer, finish, fetch in one round) | `test_e2e.py` (pueue, separate store and fake Slurm layouts) |
 <!-- /tests -->
 
