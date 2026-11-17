@@ -1,26 +1,38 @@
-"""taskq self migrate: rewrite on-disk state from the old format to the current one, once per cutover; safe to re-run.
-By default it only lists what it would do, --apply does it.
+"""taskq self migrate: bring on-disk state to the format this code reads and writes (proto.FORMAT), once per cutover.
 
-    taskq self migrate [--apply] [--rename old=new ...] [--merge old=old-root ...]
-      --rename  old machine names (ledger, claims, smoke records) -> names in the machine table; several old names may merge
-      --merge   merge an old root into its new machine's root (same physical machine: move part logs, hardlink blobs on
-                the same disk; the old queue must be empty; the old root itself is kept, the delete command is printed)
-The hub side rewrites the queue, the relay ledger, smoke records, unused state-dir files and old config entries. Executors
-and the store run `migrate.py root` from the new bundle through relay_remote.op: rename tasks and part logs, replace specs,
-merge roots, collect view links.
-Nothing has to stop: the new bundle is first unpacked beside the one in use (also when only listing); with --apply each
-executor switches to it with its unclaimed tasks set aside for a moment (hold_and_switch). Claimed tasks keep running under
-their workers, which hand them to the new bundle at their next chance; a claimed task that would be renamed stops the run
-(wait for it to end). Their part logs are left as they are; run self migrate again once they have ended.
-Migrating never removes a task: one that is not a step of the experiment table (added by hand with taskq add) keeps its
-name, parameters and records.
+    taskq self migrate [--list | --apply]
+
+Every place records the format its state is in (proto.FORMAT_FILE): the hub state dir and each executor and store root; no
+stamp is format 0. STEPS holds one numbered one-shot step per format: step N rewrites a place from format N-1 to N (its hub
+part on the hub, its root part in each root) and then records N in that place's stamp, so no step runs twice. Steps up to
+MIN_FORMAT are deleted once every place is past them; state that old is refused (migrate with an older taskq first).
+
+Without --apply (or with --list) it only lists: each place's format (roots read over ssh), the steps each still needs and
+what the hub's steps would change. Nothing is written anywhere: no bundle built or pushed, no lock taken, no database opened
+for writing. With --apply:
+  1. hold the health check's round lock (no round runs meanwhile; cron should be stopped anyway);
+  2. snapshot the hub queue dir, the hub database and the stamp into <state dir>/snapshots/<time>-format<N>/ (the newest
+     proto.SNAPSHOT_KEEP stay);
+  3. each root behind: push the new bundle beside the one in use and run `migrate.py root` from it there (relay_remote.op):
+     an executor switches to it with its unclaimed tasks set aside for a moment (hold_and_switch; claimed tasks keep running
+     under their workers), runs the root steps under the queue lock and records each format reached;
+  4. the hub steps, each followed by the hub's stamp.
+Every root is read and the hub steps are checked before anything changes: a root that cannot be reached, or a hub step that
+cannot be done, stops the run with nothing changed. A run stopped later leaves each place at the last format it reached; run
+it again to continue. Run again after a full run, it does nothing.
+
+Until a place is stamped with this code's format, hub rounds refuse to run (taskq tick) and workers of this code claim
+nothing there (common.format_problem); workers of older bundles never read the stamp. Cutover: stop cron, push the code,
+(switch executors with taskq site bundle, or let this do it), taskq self migrate --apply, start cron.
 """
 import argparse
+import contextlib
 import glob
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -31,17 +43,39 @@ import proto  # noqa: E402
 import common as C  # noqa: E402
 
 safe = proto.safe
-OLD_CODE = "before-migrate"  # bundle field of failure records from before the cutover (not a bundle in use, so it no longer counts after the switch, taskq.fail_lines)
-OLD_SNAPSHOTS = "code"  # <state dir>/code/<commit>: code snapshots of the old queue/q (old_snapshots)
-PER_KEY = ("claims", "failures", "skips", "inputs", "released", "stopped")  # per-task records in a queue (proto.QUEUE)
-OLD_PART = "_seg"  # old part log name <safe key>__<job>_seg<part>.log
-# hub bookkeeping files from before it moved into the hub database (hubstate.py), under the state dir: read in, then deleted
-OLD_RELAY_STATE = os.path.join("relay", "state.json")
-OLD_LINKSETS = os.path.join("relay", "linksets")  # <id>.json per link set
-OLD_SITES = os.path.join("relay", "status.json")
-OLD_RECORDS = "tasks.json"
+# Oldest format migrated from: the steps up to it are deleted. 0 is the state the 2026-11-14 cutover (the last run of the
+# unnumbered migrate) left, with what came after it but before stamps.
+MIN_FORMAT = 0
 
-# old on-disk text (only this rewrite step reads it; no reader keeps accepting it)
+
+class Stop(Exception):
+    """A situation that cannot be handled automatically: change nothing (more), list why."""
+
+
+class Step:
+    """Step to format `to` (from to - 1): hub(ctx, say, dry) on the hub, root(ctx, say, dry) in each root; either may be None.
+    dry: say what would change and change nothing. A step that cannot be done raises Stop."""
+
+    def __init__(self, to, what, hub=None, root=None):
+        self.to, self.what, self.hub, self.root = to, what, hub, root
+
+
+def pending(v, where="the state here"):
+    """Steps a place in format v still needs, in order; v outside what this code migrates -> Stop."""
+    if v is None:
+        raise Stop(f"cannot read the format stamp of {where}")
+    if v > proto.FORMAT:
+        raise Stop(f"{where} is in format {v}, newer than this taskq (format {proto.FORMAT}): update taskq")
+    if v < MIN_FORMAT:
+        raise Stop(f"{where} is in format {v}: this taskq migrates from format {MIN_FORMAT} on (the older steps are deleted); "
+                   "run self migrate of an older taskq first (git log queue/migrate.py)")
+    return [s for s in STEPS if v < s.to]
+
+
+# ---------------- step 1: what the unnumbered migrate left, and the hub bookkeeping into the database ----------------
+# Old part log text from before the 2026-11-08 translation. Workers of bundles from before the 2026-11-14 cutover went on
+# writing it until they switched, and logs of tasks claimed during the old migrate's runs were skipped; only this step reads it.
+OLD_PART = "_seg"  # old part log name <safe key>__<job>_seg<part>.log
 OLD_TS = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 OLD_HEAD = re.compile(r"^作业 (\S+) @ ([^，]+)，任务=([^，]*)，第 (\d+) 段，环境 ([^，]*)，代码 ([^，]*)，" + OLD_TS + r"$")
 OLD_ENDED = re.compile(r"^" + OLD_TS + r" 命令结束（退出码 (-?\d+)），(.*)$")
@@ -52,27 +86,21 @@ OLD_GPU_WAIT_SEEN = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 空着，别人 (.+?
 OLD_GPU_WAIT = re.compile(r"^" + OLD_TS + r" 卡 (\S+) 被别人占着，等它空出来（已等 (\d+) 分钟(?:，最多 (\d+) 分钟)?）$")
 OLD_STALL_MSG = re.compile(r"^( \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})：日志和结果文件夹 (\d+) 分钟没有变化，作业 (\S+) 停掉它$")
 OLD_FAIL_JOB = "作业 "
+# hub bookkeeping files from before it moved into the hub database (hubstate.py, 2026-11-15), under the state dir
+OLD_RELAY_STATE = os.path.join("relay", "state.json")
+OLD_LINKSETS = os.path.join("relay", "linksets")  # <id>.json per link set
+OLD_SITES = os.path.join("relay", "status.json")
+OLD_RECORDS = "tasks.json"
+OLD_SNAPSHOTS = "code"  # <state dir>/code/<commit>: code snapshots of the old queue/q (old_snapshots)
 
 
-class Stop(Exception):
-    """A situation that cannot be handled automatically: change nothing, list why."""
-
-
-# ---------------- on one machine (inside the bundle, run through relay_remote.op) ----------------
-def log_rename(name, keys):
-    """Part log file name -> new name (None when unchanged). <safe key>__<job>_part<part>.log: a job name never contains "__"."""
-    new = name
-    if OLD_PART in new:
-        i = new.rfind(OLD_PART)
-        rest = new[i + len(OLD_PART):]
-        if rest[:-4].isdigit() and rest.endswith(".log"):
-            new = new[:i] + "_" + proto.LOG_PART + rest
-    for old, nk in keys.items():
-        pre = safe(old) + proto.SAFE
-        if new.startswith(pre) and proto.SAFE not in new[len(pre):]:
-            new = safe(nk) + proto.SAFE + new[len(pre):]
-            break
-    return None if new == name else new
+def log_rename(name):
+    """Old part log name <safe key>__<job>_seg<part>.log -> <safe key>__<job>_part<part>.log; None when it is not one."""
+    i = name.rfind(OLD_PART)
+    rest = name[i + len(OLD_PART):] if i >= 0 else ""
+    if rest.endswith(".log") and rest[:-4].isdigit():
+        return name[:i] + "_" + proto.LOG_PART + rest
+    return None
 
 
 def move(src, dst, say, dry):
@@ -88,20 +116,26 @@ def move(src, dst, say, dry):
 
 def open_log(f, busy):
     """Is part log file f one of a claimed task (busy: safe names)? (A safe name may itself contain proto.SAFE: a longer task
-    name sharing the prefix is skipped too, which only leaves it for a later run.)"""
+    name sharing the prefix is skipped too.)"""
     return any(f.startswith(b + proto.SAFE) for b in busy)
 
 
-def rename_logs(D, keys, say, dry, busy=()):
-    """Rename part logs (log_rename); logs of claimed tasks (busy: safe names) stay, they are still being written."""
+def claimed(Q):
+    """Safe names of the tasks claimed in queue dir Q."""
+    d = os.path.join(Q, proto.QUEUE["claims"])
+    return set(os.listdir(d)) if os.path.isdir(d) else set()
+
+
+def rename_logs(D, say, dry, busy=()):
+    """Rename old part log names (log_rename); logs of claimed tasks (busy: safe names) stay, they may still be written."""
     d = os.path.join(D, proto.TASK_LOGS)
     n = 0
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-        nf = None if open_log(f, busy) else log_rename(f, keys)
+        nf = None if open_log(f, busy) else log_rename(f)
         if nf:
             n += move(os.path.join(d, f), os.path.join(d, nf), say, dry)
     if n:
-        say(f"{d}: renamed {n} part logs")
+        say(f"{d}: renamed {n} part logs (_{OLD_PART[1:]}<part> -> _{proto.LOG_PART}<part>)")
 
 
 def english_line(ln):
@@ -165,11 +199,11 @@ def english_line(ln):
 
 
 def english_logs(D, say, dry, busy=()):
-    """Rewrite part logs under <D>/logs/tasks from the old Chinese format to English. Idempotent; only matching lines change.
-    busy: safe names of claimed tasks: their logs are still being appended to (the old run_task.sh keeps writing its own
-    format), left alone until a later run of self migrate after they end (taskq log shows those lines as they are)."""
+    """Rewrite part logs under <D>/logs/tasks from the old Chinese format to English; only matching lines change.
+    busy: safe names of claimed tasks: their logs may still be appended to by an old run_task.sh (a rewrite would lose those
+    lines), so they stay as they are and are listed (taskq log shows those lines as they are)."""
     d = os.path.join(D, proto.TASK_LOGS)
-    n = skip = 0
+    n, left = 0, []
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         p = os.path.join(d, f)
         if not f.endswith(".log") or not os.path.isfile(p):
@@ -179,19 +213,19 @@ def english_logs(D, say, dry, busy=()):
         new = "".join(english_line(ln) for ln in old.splitlines(keepends=True))
         if new == old:
             continue
-        if open_log(f, busy):  # only logs that still have old lines count: one already in English needs no later run
-            skip += 1
+        if open_log(f, busy):  # only logs that still have old lines count
+            left.append(f)
             continue
         n += 1
         if not dry:
             C.atomic_write(p, new)
-    if n or skip:
-        say(f"{d}: {n} part logs rewritten to English" + (f", {skip} logs of claimed tasks still in the old format left as they are"
-                                                          " (run self migrate again after they end)" if skip else ""))
+    if n or left:
+        say(f"{d}: {n} part logs rewritten to English" + (f"; {len(left)} logs of claimed tasks still in the old format left as they are: "
+                                                          + ", ".join(left[:5]) + (" ..." if len(left) > 5 else "") if left else ""))
 
 
 def english_failures(Q, say, dry):
-    """Rewrite failure records <time>\\tjob <worker>\\t<reason>\\t<bundle> from the old job field. Idempotent."""
+    """Rewrite failure records <time>\\tjob <worker>\\t<reason>\\t<bundle> from the old job field."""
     d = os.path.join(Q, proto.QUEUE["failures"])
     n = 0
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
@@ -218,474 +252,13 @@ def english_failures(Q, say, dry):
         say(f"{d}: {n} failure records rewritten to English")
 
 
-def merge_root(R, old_root, say, dry):
-    """Merge old root into R: move part logs and worker logs; hardlink blobs on the same disk (other disks: leave them, transfer when needed)."""
-    import taskq
-    old = taskq.read_tasks(os.path.join(old_root, proto.ROOT["queue"], proto.QUEUE["tasks"]))
-    if old:
-        raise Stop(f"{old_root} still has {len(old)} task(s) in its queue ({old[0]['key']} ...): let them finish or release them elsewhere first")
-    for sub in (proto.TASK_LOGS, proto.WORKER_LOGS):
-        src = os.path.join(old_root, proto.ROOT["data"], sub)
-        n = sum(move(os.path.join(src, f), os.path.join(R, proto.ROOT["data"], sub, f), say, dry)
-                for f in (sorted(os.listdir(src)) if os.path.isdir(src) else []))
-        say(f"{src} -> {R}: moved {n} files")
-    ob, rb = os.path.join(old_root, proto.ROOT["blobs"]), os.path.join(R, proto.ROOT["blobs"])
-    if not os.path.isdir(ob):
-        return
-    if os.stat(ob).st_dev != os.stat(rb if os.path.isdir(rb) else R).st_dev:
-        say(f"{ob} and {rb} are on different disks: blobs not moved (transfer them when needed)")
-        return
-    n = 0
-    for p in glob.glob(os.path.join(ob, "??", "*")):
-        q = os.path.join(rb, os.path.relpath(p, ob))
-        if not os.path.lexists(q) and os.path.isfile(p) and not os.path.islink(p):
-            if not dry:
-                os.makedirs(os.path.dirname(q), exist_ok=True)
-                os.link(p, q)
-            n += 1
-    say(f"{ob} -> {rb}: hardlinked {n} blobs (including {proto.BLOB_STAT})")
-
-
-def view_links(R, D, views):
-    """Symlinks in views pointing at blobs -> {path relative to the data dir: sha256} (links in the relay ledger)."""
-    blobs = os.path.realpath(os.path.join(R, proto.ROOT["blobs"]))
-    out = {}
-    for v in views:
-        for dp, _, fs in os.walk(os.path.join(D, v)):
-            for f in fs:
-                p = os.path.join(dp, f)
-                t = os.path.realpath(p) if os.path.islink(p) else None
-                if t and os.path.dirname(os.path.dirname(t)) == blobs:
-                    out[os.path.relpath(p, D)] = os.path.basename(t)
-    return out
-
-
-def claimed(Q):
-    """Safe names of the tasks claimed in queue dir Q."""
-    d = os.path.join(Q, proto.QUEUE["claims"])
-    return set(os.listdir(d)) if os.path.isdir(d) else set()
-
-
-def check_claimed(Q, keys):
-    """On an executor, a claimed task keeps running under its worker (the old bundle's worker beats and releases it by name):
-    renaming it would stop it (the claim no longer found counts as lost). Such tasks -> Stop, listing them."""
-    busy = claimed(Q)
-    hit = sorted(o for o, n in keys.items() if o != n and safe(o) in busy)
-    if hit:
-        raise Stop(f"{Q}: {len(hit)} claimed task(s) would be renamed: {', '.join(hit[:5])}"
-                   + (" ..." if len(hit) > 5 else "") + "; wait for them to end (or release them) and run again")
-
-
-def fix_queue(Q, keys, workers, say, dry, specs=None):
-    """Queue dir Q: rename tasks, fill in added, replace specs from specs {new task name: new spec}; rename per-task-name
-    records; add the reason to release records; keep only skips of workers that still exist. On an executor (workers
-    given) claimed tasks stay claimed and keep running (check_claimed)."""
-    import taskq
-    tp = os.path.join(Q, proto.QUEUE["tasks"])
-    if workers is not None:
-        check_claimed(Q, keys)
-    tasks = taskq.read_tasks(tp)
-    n = m = 0
-    specs = specs or {}
-    for t in tasks:
-        if keys.get(t["key"], t["key"]) != t["key"]:
-            t["key"] = keys[t["key"]]
-            if t.get("spec"):
-                t["spec"]["key"] = t["key"]
-            n += 1
-        if t.get("added") is None:
-            t["added"] = 0
-        if t["key"] in specs:
-            t["spec"] = specs[t["key"]]  # write the new spec directly (not via resend: that would treat a changed output as a redo and recompute added)
-            m += 1
-    if not dry:
-        taskq.write_tasks(tasks, tp)
-    say(f"{tp}: {len(tasks)} tasks, {n} renamed, {m} given a new spec")
-    for d in PER_KEY:
-        base = os.path.join(Q, proto.QUEUE[d])
-        for old, nk in keys.items():
-            if old != nk and os.path.lexists(os.path.join(base, safe(old))):
-                move(os.path.join(base, safe(old)), os.path.join(base, safe(nk)), say, dry)
-    rd = os.path.join(Q, proto.QUEUE["released"])
-    for f in sorted(os.listdir(rd)) if os.path.isdir(rd) else []:
-        p = os.path.join(rd, f)
-        x = open(p).read().split()
-        if len(x) == 2:
-            say(f"  {p}: add reason {proto.RELEASE_WHY['back']}")
-            if not dry:
-                with open(p, "w") as fh:
-                    fh.write(f"{x[0]} {x[1]} {proto.RELEASE_WHY['back']}\n")
-    sd = os.path.join(Q, proto.QUEUE["skips"])
-    for f in sorted(os.listdir(sd)) if workers is not None and os.path.isdir(sd) else []:
-        p = os.path.join(sd, f)
-        lines = open(p, encoding="utf-8").readlines()
-        keep = [ln for ln in lines if len(ln.split("\t")) > 1 and ln.split("\t")[1] in workers]
-        if len(keep) != len(lines):
-            say(f"  {p}: drop {len(lines) - len(keep)} skip records of workers that no longer exist")
-            if not dry:
-                (open(p, "w", encoding="utf-8").writelines(keep) if keep else os.remove(p))
-    english_failures(Q, say, dry)
-
-
-def this_bundle():
-    """The bundle dir this script runs from (<root>/code/<bundle>)."""
-    core = os.path.dirname(HERE)
-    if not core.endswith("/" + proto.BUNDLE_CORE):
-        raise Stop(f"{HERE} is not inside a bundle")
-    return core[:-len(proto.BUNDLE_CORE) - 1]
-
-
-def hold_and_switch(R, Q, name, keys, say):
-    """Switch the root's bundle to this one without stopping anything: under the queue lock set the unclaimed tasks aside
-    (queue held file: nobody can claim them), record the machine name and switch code/current; then wait SWITCH_HOLD_S so a
-    worker of the old bundle that looked at the bundle just before cannot claim a rewritten task (once it sees the switch it
-    hands its running tasks to the new bundle before claiming). Running tasks stay claimed and keep running. Claimed tasks
-    that would be renamed -> Stop, nothing changed. The held tasks go back in put_back."""
-    import taskq
-    b = this_bundle()
-    if os.path.realpath(os.path.dirname(b)) != os.path.realpath(os.path.join(R, proto.ROOT["code"])):
-        raise Stop(f"bundle {b} is not under {R}/{proto.ROOT['code']}")
-    tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
-    cur = os.path.join(R, proto.ROOT["current"])
-    with taskq.Lock():
-        check_claimed(Q, keys)
-        if not os.path.exists(hp):  # an interrupted earlier run already set them aside
-            busy = claimed(Q)
-            tasks = taskq.read_tasks(tp)
-            taskq.write_tasks([t for t in tasks if safe(t["key"]) not in busy], hp)
-            taskq.write_tasks([t for t in tasks if safe(t["key"]) in busy], tp)
-        C.atomic_write(os.path.join(R, proto.ROOT["machine"]), name + "\n")
-        tmp = f"{cur}.tmp.{os.getpid()}"
-        if os.path.lexists(tmp):
-            os.remove(tmp)
-        os.symlink(os.path.basename(b), tmp)
-        os.replace(tmp, cur)
-    hold = float(os.environ.get("TASKQ_SWITCH_HOLD") or proto.SWITCH_HOLD_S)
-    say(f"bundle switched to {os.path.basename(b)}; {len(taskq.read_tasks(hp))} unclaimed tasks set aside for {hold:g} s")
-    time.sleep(hold)
-
-
-def put_back(Q):
-    """Held tasks back into the queue (a task of the same name already there wins: released meanwhile). Call under the queue lock."""
-    import taskq
-    tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
-    if not os.path.exists(hp):
-        return
-    tasks = taskq.read_tasks(tp)
-    have = {t["key"] for t in tasks}
-    taskq.write_tasks(tasks + [t for t in taskq.read_tasks(hp) if t["key"] not in have], tp)
-    os.remove(hp)
-
-
-def op_root(A):
-    """On this machine (TASKQ_ROOT is its root): A = dict(dry, keys {old task name: new}, merge [old root], views {task
-    name: [views]}, data [extra data dirs], specs {new task name: spec resolved with the current recipes})
-    -> dict(log [what was done], links {task name: {relative path: sha256}})."""
-    import cfg
-    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
-    import mtab as M
-    log, dry, keys = [], A["dry"], A["keys"]
-    R = os.path.expanduser(os.environ["TASKQ_ROOT"]).rstrip("/")
-    me = M.whoami()
-    for old_root in A["merge"]:
-        merge_root(R, os.path.expanduser(old_root), log.append, dry)
-    busy = set()
-    if M.is_exec(me):
-        import taskq
-        Q = cfg.state("taskq")
-        if dry:
-            fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"])
-        else:
-            hold_and_switch(R, Q, me, keys, log.append)
-            with taskq.Lock():
-                put_back(Q)
-                fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"])
-        busy = claimed(Q)
-        if busy:
-            log.append(f"{len(busy)} claimed task(s) keep running under their workers: " + ", ".join(sorted(busy)[:8]))
-    D = os.path.join(R, proto.ROOT["data"])
-    for d in [D] + [os.path.expanduser(x) for x in A["data"]]:
-        rename_logs(d, keys, log.append, dry, busy)
-        english_logs(d, log.append, dry, busy)
-    pins = os.path.join(R, proto.ROOT["pins"])
-    for old in [k for k in keys if keys[k] != k]:
-        p = os.path.join(pins, safe(old) + ".json")
-        try:
-            age = time.time() - os.path.getmtime(p)
-        except OSError:
-            continue
-        if age < proto.PIN_TTL:  # a transfer may still be running and refreshing it; it lapses by itself after PIN_TTL
-            log.append(f"keep pin record {p} (written {age / 60:.0f} min ago: a transfer may be running)")
-            continue
-        log.append(f"drop pin record {p} (renamed task, lapsed; it is pinned again on its next transfer)")
-        if not dry:
-            os.remove(p)
-    return dict(log=log, links={k: view_links(R, D, v) for k, v in A["views"].items()})
-
-
-def root_main(argv):
-    if argv != ["root"]:
-        sys.exit("usage: migrate.py root (parameters are JSON on stdin)")
-    out, sys.stdout = sys.stdout, sys.stderr
-    try:
-        res = op_root(json.load(sys.stdin))
-    except Stop as e:
-        res = dict(stop=str(e))
-    finally:
-        sys.stdout = out
-    print(proto.JSON_MARK + json.dumps(res, ensure_ascii=False), flush=True)
-
-
-# ---------------- on the hub ----------------
-def parse_pairs(xs, what):
-    out = {}
-    for x in xs:
-        if "=" not in x:
-            raise SystemExit(f"taskq self migrate: {what} must be old=new: {x}")
-        a, b = x.split("=", 1)
-        out[a] = b
-    return out
-
-
-def key_map(tasks):
-    """Queue tasks with recipe command whose output (out) is that of exactly one current experiment-table step instance
-    take that instance's name and parameters: ({old: new}, {new: params}, [(task name, why it stays as it is)]). Every
-    other task keeps its name and parameters (a task added by hand with taskq add: no step has its output; listed with a
-    reason only when its output is also a step's, None otherwise). A task already named after its instance goes first, so
-    no two tasks end up with one name."""
-    import advance
-    from flow.compile import build
-    flow = build(queue_tasks=[t for t in tasks if t["recipe"] != "command"])
-    if flow.errors:
-        raise Stop("bad steps in the experiment table: " + "; ".join(flow.errors[:5]))
-    by_out = {}
-    for i in flow.instances.values():
-        if i.step:
-            by_out.setdefault(os.path.normpath(i.outputs[0]), []).append(i)
-    names = {t["key"] for t in tasks}
-    keys, params, kept, one = {}, {}, [], []
-    for t in tasks:
-        if t["recipe"] != "command" or proto.is_smoke(t["key"]):
-            continue
-        hit = by_out.get(os.path.normpath(str(t["params"].get("out", "")).replace("{data}/", "")), [])
-        if len(hit) == 1:
-            one.append((t, hit[0]))
-        else:
-            kept.append((t["key"], f"its output is that of {len(hit)} step instances" if hit else None))
-    for t, i in sorted(one, key=lambda x: x[0]["key"] != x[1].id):
-        if i.id in params or (t["key"] != i.id and i.id in names):
-            kept.append((t["key"], f"its output is that of step instance {i.id}, which another task already is"))
-            continue
-        keys[t["key"]], params[i.id] = i.id, advance.queue_params(i)
-    return keys, params, kept
-
-
-def renamed_params(params):
-    """Task parameters: old data (the spec's inputs, the same in every recipe) becomes inputs; parameters may no longer be called data (spec.BUILTIN)."""
-    if "data" not in params:
-        return params
-    p = dict(params)
-    p["inputs"] = p.pop("data")
-    return p
-
-
-def current_params(recipe, params):
-    """Parameters the recipe no longer has (fields of older versions, e.g. oldlogs) are dropped -> (params, [dropped names]);
-    unknown recipe or an open recipe -> unchanged (resolve reports it)."""
-    import recipes as R
-    import schema
-    r = R.RECIPES.get(recipe)
-    if not r or r.get("open"):
-        return params, []
-    gone = [k for k in params if k not in r["params"] and k not in schema.RECIPE_FIELDS]
-    return {k: v for k, v in params.items() if k not in gone}, gone
-
-
-def plan_hub(ren):
-    """Queue -> (new task list, {old: new}, [lines to say])."""
-    import experiments as E
-    import taskq
-    tasks = taskq.read_tasks()
-    keys, params, kept = key_map(tasks)
-    new, say, stale = [], [], {}
-    for t in tasks:
-        t = dict(t)
-        if t["key"] in keys:
-            t["key"], t["params"], t["exp"] = keys[t["key"]], params[keys[t["key"]]], None
-        else:
-            t["params"], gone = current_params(t["recipe"], renamed_params(t["params"]))
-            for g in gone:
-                stale[g] = stale.get(g, 0) + 1
-        if t["params"].get("machines"):
-            t["params"]["machines"] = sorted({ren.get(m, m) for m in t["params"]["machines"]})
-        if t.get("added") is None:
-            t["added"] = 0
-        try:
-            E.resolve_task(t["recipe"], t["params"], t.get("exp"))
-        except Exception as e:  # noqa: BLE001
-            raise Stop(f"{t['key']} cannot be resolved with the current recipes: {e}")
-        new.append(t)
-    say.append(f"Queue: {len(tasks)} tasks, {sum(o != n for o, n in keys.items())} renamed to step instance names, "
-               f"{len(kept)} not steps of the experiment table (left as they are)")
-    say += [f"  left as it is: {k} ({why})" for k, why in kept if why]
-    if stale:
-        say.append("Parameters the recipes no longer have, removed from queued tasks: " + ", ".join(f"{k} ({n})" for k, n in sorted(stale.items())))
-    return new, keys, say
-
-
-def pueue_groups(name, dry, say):
-    """This machine's pueue groups (mtab groups: workers, the core's IO group, manual_groups): create missing ones; set the
-    parallel count and resume paused ones except manual groups (older versions paused worker groups outside their hours;
-    workers now follow their hours themselves). dry: say the plan; otherwise do it and say only failures. Unreachable → said,
-    nothing changed."""
-    import mtab as M
-    import relay_remote as RM
-    want, manual = M.groups(name), set(M.machine(name).get("manual_groups") or {})
-    P = M.machine(name)["pueue"]
-    rc, out, err = RM.rsh(name, f"{P} group --json", timeout=60)
-    try:
-        have = json.loads(out) if rc == 0 else None
-    except ValueError:
-        have = None
-    if have is None:
-        say(f"  pueue groups on {name}: cannot read ({RM.err_tail(err or out)}); run taskq site setup {name} later")
-        return
-    cmds, lines = [], []
-    for g, (n, _, _) in want.items():
-        h = have.get(g)
-        if h is None:
-            cmds += [f"{P} group add {g}", f"{P} parallel -g {g} {n}"]
-            lines.append(f"add {g} (parallel {n})")
-            continue
-        if g in manual:
-            continue
-        if h.get("parallel_tasks") != n:
-            cmds.append(f"{P} parallel -g {g} {n}")
-            lines.append(f"{g}: parallel {h.get('parallel_tasks')} -> {n}")
-        if h.get("status") != "Running":
-            cmds.append(f"{P} start -g {g}")
-            lines.append(f"{g}: {h.get('status')} -> resume")
-    if dry:
-        say(f"  pueue groups on {name}: " + ("; ".join(lines) if lines else "as in the machine table"))
-    if cmds and not dry:
-        rc, out, err = RM.rsh(name, " && ".join(cmds), timeout=120)
-        if rc:
-            say(f"  pueue groups on {name}: failed ({RM.err_tail(err or out)}); run taskq site setup {name}")
-
-
-def fix_hub_queue(Q, tasks, keys, ren, say, dry):
-    """Hub queue: write the new task list; rename per-task-name records; rename machines
-    in claims, releases, failures and skips; add the reason to release records."""
-    import taskq
-    if not dry:
-        taskq.write_tasks(tasks, os.path.join(Q, proto.QUEUE["tasks"]))
-    fix_queue(Q, keys, None, say, dry)
-    cd = os.path.join(Q, proto.QUEUE["claims"])
-    for f in sorted(os.listdir(cd)) if os.path.isdir(cd) else []:
-        p = os.path.join(cd, f, proto.CLAIM_INFO)
-        try:
-            ci = json.load(open(p))
-        except (OSError, ValueError):
-            continue
-        nc = {k: (ren.get(v, v) if k in ("worker", "host", "assigned") else v) for k, v in ci.items()}
-        if nc != ci and not dry:
-            with open(p, "w") as fh:
-                json.dump(nc, fh)
-    for d in ("released", "failures", "skips"):
-        base = os.path.join(Q, proto.QUEUE[d])
-        for f in sorted(os.listdir(base)) if os.path.isdir(base) else []:
-            p = os.path.join(base, f)
-            sep = " " if d == "released" else "\t"
-            lines = open(p, encoding="utf-8").read().splitlines()
-            out = []
-            for ln in lines:
-                x = ln.split(sep)
-                if len(x) > 1:  # the last word of field 2 is the machine name (for failures: "job <machine>")
-                    w = x[1].split(" ")
-                    w[-1] = ren.get(w[-1], w[-1])
-                    x[1] = " ".join(w)
-                if d == "failures" and len(x) == 3:  # add the bundle that ran it: bundles from before the cutover are no longer in use, record OLD_CODE
-                    x.append(OLD_CODE)
-                out.append(sep.join(x))
-            if out != lines and not dry:
-                with open(p, "w", encoding="utf-8") as fh:
-                    fh.write("\n".join(out) + "\n")
-    say(f"{Q}: machine names in claims, releases, failures and skips updated per {ren or '(no renames)'}; failure records given a bundle column")
-
-
-def fix_smoke(Q, ren, say, dry):
-    """Smoke records smoke/<machine>.json: rename; kind names as smoke_gate.kind_of writes them (no repeated part); when
-    several machines or kinds merge, keep the newest record per kind."""
-    d = os.path.join(Q, proto.SMOKE_DIR)
-    if not os.path.isdir(d):
-        return
-    import smoke_gate as SG
-    merged = {}
-    for f in sorted(glob.glob(os.path.join(d, "*.json"))):
-        old = os.path.basename(f)[:-5]
-        try:
-            recs = json.load(open(f))
-        except ValueError:
-            recs = {}
-        to = merged.setdefault(ren.get(old, old), {})
-        for k, r in recs.items():
-            k = SG.kind_of(k.split("|"))
-            r = dict(r, kind=k)
-            if k not in to or (r.get("t") or 0) > (to[k].get("t") or 0):
-                to[k] = r
-    n = sum(len(json.load(open(f))) for f in glob.glob(os.path.join(d, "*.json")))
-    say(f"Smoke records: {sorted(os.path.basename(f)[:-5] for f in glob.glob(os.path.join(d, '*.json')))} -> {sorted(merged)},"
-        f" {n} -> {sum(map(len, merged.values()))} kinds")
-    if dry:
-        return
-    for f in glob.glob(os.path.join(d, "*.json")) + glob.glob(os.path.join(d, "*.json.lock")):
-        os.remove(f)
-    import common
-    for n, recs in merged.items():
-        common.write_json(os.path.join(d, n + ".json"), recs)
-
-
-def fix_relay(st, keys, params, ren, links, merged, say):
-    """Relay ledger (edited in place): rename machines and tasks, replace recipe parameters, drop unq, move input
-    links into link sets (relay_store.put_links; filled in from the views when a record has none); drop records of merged
-    old roots; clear bundle-gate holds (held, recorded under the old bundle) so the new
-    bundle is judged afresh. -> {link set id: links} to store with the new state (relay_store.put_links)."""
-    import relay_store as ST
-    out, sets = {}, {}
-    for old, recs in (st.get("keys") or {}).items():
-        if old in merged:
-            say(f"relay ledger: dropping {len(recs)} records of {old} (root merged into {ren.get(old, old)}, queue empty)")
-            continue
-        to = out.setdefault(ren.get(old, old), {})
-        for k, r in recs.items():
-            r = {x: v for x, v in r.items() if x != "unq"}
-            if "data" in r:  # old ledger: inputs were the files placed there, data was the spec's inputs
-                r["placed"], r["inputs"] = r.pop("inputs", []), r.pop("data")
-            nk = keys.get(k, k)
-            r["params"] = params[nk] if nk in params else renamed_params(r.get("params") or {})
-            if "linkset" not in r:
-                lk = r.pop("links", None) or (links.get(ren.get(old, old)) or {}).get(nk, {})
-                r["linkset"] = ST.links_id(lk)
-                sets[r["linkset"]] = lk
-            to[nk] = r
-    st["keys"] = out
-    if sets:
-        say(f"relay ledger: input links of {sum(map(len, out.values()))} records go into {len(sets)} link sets")
-    for f in ("views", "last_ok"):
-        v = {}
-        for old, x in (st.get(f) or {}).items():
-            if old in merged and f == "views":
-                continue
-            n = ren.get(old, old)
-            if f == "views":
-                v.setdefault(n, {}).update(x)
-            else:
-                v[n] = max(v.get(n, 0), x)
-        st[f] = v
-    st.pop("bundle_for", None)
-    st.pop("held", None)
-    say(f"relay ledger: { {n: len(r) for n, r in out.items()} } records; bundles will be rebuilt from the current commit")
-    return sets
+def v1_root(ctx, say, dry):
+    """Step 1 in a root: part logs (this root's data dir, and the store's) and failure records still in the old format."""
+    for d in ctx["data"]:
+        rename_logs(d, say, dry, ctx["busy"])
+        english_logs(d, say, dry, ctx["busy"])
+    if ctx["queue"]:
+        english_failures(ctx["queue"], say, dry)
 
 
 def old_hub_files(home):
@@ -707,18 +280,68 @@ def old_hub_files(home):
     return dict(relay=load(OLD_RELAY_STATE, dict), sets=sets, sites=load(OLD_SITES, dict), records=load(OLD_RECORDS, list))
 
 
-def hub_files_say(old, say):
-    if old["relay"] is not None:
-        say(f"relay ledger and {len(old['sets'])} link sets: from {OLD_RELAY_STATE} and {OLD_LINKSETS}/ into the hub database")
-    if old["sites"] is not None:
-        say(f"what relay last read on {len(old['sites'])} executors: from {OLD_SITES} into the hub database")
-    if old["records"] is not None:
-        say(f"{len(old['records'])} task records: from {OLD_RECORDS} into the hub database")
+def db_has_relay(dry):
+    """The hub database already holds relay bookkeeping. dry: read it as an immutable file (no -wal / -shm files made; rows
+    still only in the write-ahead log are not seen, --apply looks again with a normal connection)."""
+    import db as D
+    p = D.path()
+    if not os.path.exists(p):
+        return False
+    d = sqlite3.connect(f"file:{p}?mode=ro&immutable=1", uri=True) if dry else D.connect()
+    if d is None:
+        return False
+    try:
+        return any(D.has(d, t) and d.execute(f"SELECT 1 FROM {t} LIMIT 1").fetchone() is not None for t in ("placed", "relay"))
+    finally:
+        d.close()
+
+
+def link_sets(st):
+    """Ledger records that still carry their input links (from before link sets) name a link set instead (edited in place)
+    -> {link set id: links} made; a record with neither gets the empty set."""
+    import relay_store as ST
+    out = {}
+    for recs in (st.get("keys") or {}).values():
+        for r in recs.values():
+            if "linkset" not in r:
+                lk = r.pop("links", None) or {}
+                r["linkset"] = ST.links_id(lk)
+                out[r["linkset"]] = lk
+    return out
+
+
+def fix_smoke(Q, say, dry):
+    """Smoke records smoke/<machine>.json: kind names as smoke_gate.kind_of writes them (no repeated part); when two kinds
+    become one, the newer record stays. Only files that change are written."""
+    d = os.path.join(Q, proto.SMOKE_DIR)
+    if not os.path.isdir(d):
+        return
+    import smoke_gate as SG
+    out = {}
+    for f in sorted(glob.glob(os.path.join(d, "*.json"))):
+        try:
+            with open(f) as fh:
+                recs = json.load(fh)
+        except (OSError, ValueError) as e:
+            raise Stop(f"cannot read smoke records {f} ({e}); fix or remove it and run again")
+        new = {}
+        for k, r in recs.items():
+            k = SG.kind_of(k.split("|"))
+            r = dict(r, kind=k)
+            if k not in new or (r.get("t") or 0) > (new[k].get("t") or 0):
+                new[k] = r
+        if new != recs:
+            out[f] = (len(recs), new)
+    for f, (n, new) in out.items():
+        say(f"smoke records {os.path.basename(f)}: kind names without a repeated part, {n} -> {len(new)} kinds")
+        if not dry:
+            C.write_json(f, new)
 
 
 def leftovers(home):
     """First-level entries in the state dir not in proto.STATE_NAMES -> delete; likewise entries of relay/ and health/ not in
-    proto.RELAY_NAMES / HEALTH_NAMES (old backups, files of earlier versions, stage locks of machines no longer in the table)."""
+    proto.RELAY_NAMES / HEALTH_NAMES (files of earlier versions, the old bookkeeping files once read in, stage locks of machines
+    no longer in the table)."""
     snap = os.path.join(home, OLD_SNAPSHOTS)
     out = [os.path.join(home, f) for f in sorted(os.listdir(home))
            if (f != OLD_SNAPSHOTS or not os.path.isdir(snap) or not any(os.path.isdir(os.path.join(snap, x)) for x in os.listdir(snap)))
@@ -767,191 +390,319 @@ def drop_snapshots(paths):
         subprocess.run(["git", "--git-dir", g, "worktree", "prune"], capture_output=True)
 
 
-def move_health_log(home, say, dry):
-    """Append the health check's plain-text log from its old <state dir>/health/ location to cfg.log, where the other
-    plain-text logs live."""
-    import cfg
-    src, dst = os.path.join(home, "health", "health.log"), cfg.log("health")
-    if not os.path.isfile(src) or os.path.abspath(src) == os.path.abspath(dst):
-        return
-    say(f"appending {src} to {dst}")
-    if not dry:
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(src, "rb") as f, open(dst, "ab") as g:
-            shutil.copyfileobj(f, g)
-        os.remove(src)
-
-
-def copy_hashes(say, dry):
-    """Old sha256 cache in the hub database -> <store root>/state/hashes.db (only when the store is local; the path only makes sense there)."""
-    import sqlite3
-    import db as DB
-    import mtab as M
-    p = DB.path()
-    if not os.path.exists(p):
-        return
-    src = sqlite3.connect(p)
-    try:
-        if src.execute("PRAGMA user_version").fetchone()[0] >= 2 or not DB.has(src, "hash"):
-            return
-        rows = src.execute("SELECT k, sha FROM hash").fetchall()
-    finally:
-        src.close()
-    s = M.store()
-    if M.machine(s)["ssh"] is not None:
-        say(f"not moving {len(rows)} sha256 cache rows from the database (store {s} is not local, it will recompute on first use)")
-        return
-    to = os.path.join(os.path.expanduser(M.machine(s)["root"]), proto.ROOT["hashes"])
-    say(f"{len(rows)} sha256 cache rows from the database -> {to}")
+def v1_hub(ctx, say, dry):
+    """Step 1 on the hub: relay's bookkeeping, link sets, what relay last read on each executor and the task records move from
+    files into the hub database (records still carrying their links get link sets); smoke kind names; unused state-dir entries
+    (the files read in among them) and old code snapshots no unfinished pueue task uses are deleted. Each part finds nothing
+    to do when the state is already that way."""
+    import relay_store as ST
+    import hubstate as HS
+    home = ctx["home"]
+    files = old_hub_files(home)
+    st = files["relay"]
+    if st is not None and db_has_relay(dry):
+        raise Stop(f"both {os.path.join(home, OLD_RELAY_STATE)} and the hub database hold relay bookkeeping (a newer taskq ran "
+                   "rounds before this step): keep one (move the file away to keep the database's) and run again")
+    sets = {**files["sets"], **(link_sets(st) if st is not None else {})}
+    if st is not None:
+        named = {r.get("linkset") for recs in (st.get("keys") or {}).values() for r in recs.values()}
+        say(f"relay ledger ({sum(len(r) for r in (st.get('keys') or {}).values())} records) and {len(named)} link sets: from "
+            f"{OLD_RELAY_STATE} and {OLD_LINKSETS}/ into the hub database")
+    if files["sites"] is not None:
+        say(f"what relay last read on {len(files['sites'])} executors: from {OLD_SITES} into the hub database")
+    if files["records"] is not None:
+        say(f"{len(files['records'])} task records: from {OLD_RECORDS} into the hub database")
+    fix_smoke(ctx["queue"], say, dry)
+    junk = leftovers(home)
+    snaps, kept = old_snapshots(home)
+    if junk:
+        say(f"unused entries in the state dir: {len(junk)}" + "".join(f"\n  drop {p}" for p in junk))
+    if snaps or kept:
+        say(f"old code snapshots: delete {len(snaps)}, keep {len(kept)} (working dir of an unfinished pueue task)"
+            + "".join(f"\n  keep {p}" for p in kept))
     if dry:
         return
-    os.makedirs(os.path.dirname(to), exist_ok=True)
-    d = sqlite3.connect(to)
-    with d:
-        d.execute("CREATE TABLE IF NOT EXISTS hash(k TEXT PRIMARY KEY, sha TEXT NOT NULL)")
-        d.executemany("INSERT OR IGNORE INTO hash(k, sha) VALUES(?, ?)", rows)
-    d.close()
-    db = DB.connect(create=True)  # run the database migration (drops the hash table)
-    db.close()
+    if st is not None:  # only link sets a record names are kept (update_relay)
+        ST.update_state(lambda x: (x.clear(), x.update(st), [HS.put_links(i, lk) for i, lk in sets.items()]))
+    for n, rec in (files["sites"] or {}).items():
+        if isinstance(rec, dict):
+            HS.put_site(n, rec)
+    if files["records"] is not None:
+        HS.update_records(lambda recs: files["records"] + recs)
+    for p in junk:
+        shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+    drop_snapshots(snaps)
 
 
-def root_args(name, keys, merge, ren, views, dry, specs):
+# ---------------- the steps (each format change adds one; MIN_FORMAT moves up once every place is past a step) ----------------
+STEPS = [
+    Step(1, "part logs and failure records workers of bundles from before the 2026-11-14 cutover left in the old format (logs of "
+            "claimed tasks stay as they are); on the hub, relay's bookkeeping, link sets, executor reads and task records from "
+            "files into the hub database, smoke kind names, unused state-dir entries and old code snapshots",
+         hub=v1_hub, root=v1_root),
+]
+assert [s.to for s in STEPS] == list(range(MIN_FORMAT + 1, proto.FORMAT + 1)), "one step per format from MIN_FORMAT + 1 to proto.FORMAT"
+
+
+# ---------------- in a root (inside the new bundle, run through relay_remote.op) ----------------
+def this_bundle():
+    """The bundle dir this script runs from (<root>/code/<bundle>)."""
+    core = os.path.dirname(HERE)
+    if not core.endswith("/" + proto.BUNDLE_CORE):
+        raise Stop(f"{HERE} is not inside a bundle")
+    return core[:-len(proto.BUNDLE_CORE) - 1]
+
+
+def hold_and_switch(R, Q, name, say):
+    """Switch the root's bundle to this one without stopping anything: under the queue lock set the unclaimed tasks aside
+    (queue held file: nobody can claim them), record the machine name and switch code/current; then wait SWITCH_HOLD_S so a
+    worker of the old bundle that looked at the bundle just before cannot claim a task the steps rewrite (once it sees the
+    switch it hands its running tasks to the new bundle before claiming). Already switched more than SWITCH_HOLD_S ago (taskq
+    site bundle) -> nothing to do. Running tasks stay claimed and keep running. The held tasks go back in put_back."""
+    import taskq
+    b = this_bundle()
+    if os.path.realpath(os.path.dirname(b)) != os.path.realpath(os.path.join(R, proto.ROOT["code"])):
+        raise Stop(f"bundle {b} is not under {R}/{proto.ROOT['code']}")
+    tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
+    cur = os.path.join(R, proto.ROOT["current"])
+    hold = float(os.environ.get("TASKQ_SWITCH_HOLD") or proto.SWITCH_HOLD_S)
+    with taskq.Lock():
+        if os.path.realpath(cur) == os.path.realpath(b) and not os.path.exists(hp) and time.time() - os.lstat(cur).st_mtime >= hold:
+            return
+        if not os.path.exists(hp):  # an interrupted earlier run already set them aside
+            busy = claimed(Q)
+            tasks = taskq.read_tasks(tp)
+            taskq.write_tasks([t for t in tasks if safe(t["key"]) not in busy], hp)
+            taskq.write_tasks([t for t in tasks if safe(t["key"]) in busy], tp)
+        C.atomic_write(os.path.join(R, proto.ROOT["machine"]), name + "\n")
+        tmp = f"{cur}.tmp.{os.getpid()}"
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        os.symlink(os.path.basename(b), tmp)
+        os.replace(tmp, cur)
+    say(f"bundle switched to {os.path.basename(b)}; {len(taskq.read_tasks(hp))} unclaimed tasks set aside for {hold:g} s")
+    time.sleep(hold)
+
+
+def put_back(Q):
+    """Held tasks back into the queue (a task of the same name already there wins: released meanwhile). Call under the queue lock."""
+    import taskq
+    tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
+    if not os.path.exists(hp):
+        return
+    tasks = taskq.read_tasks(tp)
+    have = {t["key"] for t in tasks}
+    taskq.write_tasks(tasks + [t for t in taskq.read_tasks(hp) if t["key"] not in have], tp)
+    os.remove(hp)
+
+
+def op_root(A):
+    """On this machine (TASKQ_ROOT is its root), from the new bundle: the root steps its stamp still needs, each followed by the
+    stamp. A = dict(data: [more data dirs whose part logs belong here: the store's]) -> dict(log, was: format before, now)."""
+    import cfg
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
     import mtab as M
-    return dict(dry=dry, keys=keys, merge=[r for o, r in merge.items() if ren.get(o, o) == name], views=views,
-                data=[M.data()] if name == M.store() else [], specs=specs.get(name, {}))
+    R = os.path.expanduser(os.environ["TASKQ_ROOT"]).rstrip("/")
+    p = C.format_path()
+    was = C.format_on_disk(p)
+    steps = pending(was, R)
+    log = []
+    if not steps:
+        return dict(log=[f"already in format {was}"], was=was, now=was)
+    me = M.whoami()
+    Q = cfg.state("taskq") if M.is_exec(me) else None
+    if Q:
+        import taskq
+        hold_and_switch(R, Q, me, log.append)
+    with taskq.Lock() if Q else contextlib.nullcontext():
+        if Q:
+            put_back(Q)
+        ctx = dict(root=R, queue=Q, busy=claimed(Q) if Q else set(),
+                   data=[os.path.join(R, proto.ROOT["data"])] + [os.path.expanduser(x) for x in A.get("data") or []])
+        for s in steps:
+            if s.root:
+                s.root(ctx, log.append, False)
+            C.write_format(s.to, p)
+            log.append(f"format {s.to}")
+    if ctx["busy"]:
+        log.append(f"{len(ctx['busy'])} claimed task(s) keep running under their workers: " + ", ".join(sorted(ctx["busy"])[:8]))
+    return dict(log=log, was=was, now=steps[-1].to)
 
 
-def new_specs(st):
-    """Relay ledger (already renamed) -> {executor: {task name: sendable spec resolved with the current recipes}}; cannot resolve -> Stop."""
-    import relay_store as ST
-    import spec as S
-    out = {}
-    for name in st.get("keys") or {}:
-        for k, r in ST.keys_of(st, name).items():
-            r["params"] = current_params(r["recipe"], r["params"])[0]  # the ledger keeps current parameters too
-            try:
-                out.setdefault(name, {})[k] = S.sendable(S.resolve(r["recipe"], r["params"]))
-            except S.SpecError as e:
-                raise Stop(f"{k} ({name}) cannot be resolved with the current recipes: {e}")
-    return out
+def root_main(argv):
+    if argv != ["root"]:
+        sys.exit("usage: migrate.py root (parameters are JSON on stdin)")
+    out, sys.stdout = sys.stdout, sys.stderr
+    try:
+        res = op_root(json.load(sys.stdin))
+    except Stop as e:
+        res = dict(stop=str(e))
+    finally:
+        sys.stdout = out
+    print(proto.JSON_MARK + json.dumps(res, ensure_ascii=False), flush=True)
+
+
+# ---------------- on the hub ----------------
+def read_root(name):
+    """That machine's root format, read over ssh -> int (0: no stamp), None (no root there yet: relay makes it, stamped), or a
+    str saying why it cannot be read."""
+    import relay_remote as RM
+    import remote as R
+    r = R.q(RM.root(name))
+    f = f"{r}/{proto.ROOT['format']}"
+    rc, out, err = RM.rsh(name, f"if [ -e {f} ]; then cat {f}; elif [ -d {r}/{proto.ROOT['queue']} ] || [ -d {r}/{proto.ROOT['code']} ]; "
+                                "then echo 0; else echo -; fi", timeout=60)
+    s = out.strip()
+    if rc:
+        return f"cannot read its root ({RM.err_tail(err or out)})"
+    if s == "-":
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return f"unreadable format stamp {f} ({s[:40]!r})"
+
+
+def round_lock():
+    """Hold the health check's round lock (monitor/health.py round_lock) until this process ends -> the open file; a round is
+    running -> Stop."""
+    import fcntl
+    import cfg
+    import policy
+    d = os.path.expanduser(getattr(policy, "OUTPUTS", {}).get("health") or cfg.state("health", expand=False))
+    os.makedirs(d, exist_ok=True)
+    f = open(os.path.join(d, proto.TICK + ".lock"), "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise Stop("a health check round is running (stop cron, wait for it to end) - nothing changed") from None
+    return f
+
+
+def snapshot(home, v, say):
+    """Copy the hub queue dir, the hub database (sqlite backup: consistent) and the stamp to <home>/snapshots/<time>-format<v>/
+    (written under a temp name, renamed when complete); keep the newest proto.SNAPSHOT_KEEP -> its path."""
+    import db as D
+    import taskq
+    base = os.path.join(home, proto.SNAPSHOTS)
+    to = os.path.join(base, f"{time.strftime('%Y%m%d-%H%M%S')}-format{v}")
+    while os.path.lexists(to):
+        to += "+"
+    tmp = C.tmp_of(to)
+    os.makedirs(tmp)
+    if os.path.isdir(taskq.TQ):
+        shutil.copytree(taskq.TQ, os.path.join(tmp, os.path.basename(taskq.TQ)), symlinks=True)
+    p = D.path()
+    if os.path.exists(p):  # an ordinary connection: the last one to close removes the -wal / -shm files, a read-only one cannot
+        src, dst = sqlite3.connect(p), sqlite3.connect(os.path.join(tmp, os.path.basename(p)))
+        try:
+            src.backup(dst)
+        finally:
+            src.close()
+            dst.close()
+    if os.path.exists(C.format_path()):
+        shutil.copy2(C.format_path(), os.path.join(tmp, proto.FORMAT_FILE))
+    os.rename(tmp, to)
+    old = sorted(os.path.join(base, f) for f in os.listdir(base) if not f.endswith(proto.TMP))
+    for x in old[:-proto.SNAPSHOT_KEEP] + [os.path.join(base, f) for f in os.listdir(base) if f.endswith(proto.TMP)]:
+        shutil.rmtree(x, ignore_errors=True)
+    say(f"snapshot of the hub queue, database and stamp: {to} (to undo: stop, copy them back, run the older taskq)")
+    return to
 
 
 def main(argv):
     if argv[:1] == ["root"]:
         return root_main(argv)
     ap = argparse.ArgumentParser(prog="taskq self migrate", description=__doc__.split("\n")[0])
-    ap.add_argument("--apply", action="store_true", help="really change things (default: only list what would be done)")
-    ap.add_argument("--rename", nargs="*", default=[], metavar="old=new")
-    ap.add_argument("--merge", nargs="*", default=[], metavar="old=old-root")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--list", action="store_true", help="only list what is pending and what it would change (the default)")
+    g.add_argument("--apply", action="store_true", help="run the pending steps (snapshot of the hub state first)")
     a = ap.parse_args(argv)
     import cfg
     cfg.use_config()
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
     import mtab as M
     import relay_remote as RM
-    import relay_store as ST
-    import hubstate as HS
     import taskq
-    say, quiet = print, (lambda _: None)
-    ren, merge = parse_pairs(a.rename, "--rename"), parse_pairs(a.merge, "--merge")
+    say = print
     home = cfg.state().rstrip("/")
-    try:
-        files = old_hub_files(home)
-    except Stop as e:
-        print(f"taskq self migrate: {e}", file=sys.stderr)
-        return 1
-    st = files["relay"] if files["relay"] is not None else ST.load_state()
-    seen = set(st.get("keys") or {}) | set(st.get("views") or {}) | set(st.get("last_ok") or {})
-    seen |= {os.path.basename(f)[:-5] for f in glob.glob(os.path.join(taskq.TQ, proto.SMOKE_DIR, "*.json"))}
-    unknown = sorted(n for n in seen if ren.get(n, n) not in M.MACHINES)
-    if unknown:
-        sys.exit(f"taskq self migrate: {', '.join(unknown)} in the ledger is not in the machine table, use --rename old=new to say which machine it is")
-    bad = [o for o in merge if ren.get(o, o) not in M.MACHINES or not M.is_exec(ren.get(o, o))]
-    if bad:
-        sys.exit(f"taskq self migrate: {', '.join(bad)} in --merge is not an executor in the machine table after renaming")
+    ctx = dict(home=home, queue=taskq.TQ)
     roots = [n for n in M.MACHINES if M.MACHINES[n].get("root")]
-
-    import relay as RL
-
-    def on(name, args, after):
-        """Run migrate.py root in the new bundle on that machine (pushed beside the one in use); unreachable or error -> Stop
-        (saying how far it got)."""
-        try:
-            return RM.op(name, "root", args, timeout=3600, script="migrate.py", bundle=bid)
-        except RuntimeError as e:
-            raise Stop(f"{e} (check {name} is reachable; {after})")
+    say(f"this taskq: on-disk format {proto.FORMAT} (migrates from format {MIN_FORMAT} on)")
+    problems = []
+    hub_v = C.format_on_disk()
     try:
-        bid, path = RL.wanted_bundle()
-        for name in roots:  # unpack the new bundle beside the one in use (not switched: workers do not see it yet)
+        hub_steps = pending(hub_v, f"the hub state dir {home}")
+    except Stop as e:
+        hub_steps, _ = [], problems.append(str(e))
+    say(f"hub {home}: " + (problems[-1] if hub_v is None or not hub_steps and problems else
+                           f"format {hub_v}" + (" (no stamp)" if hub_v == 0 else "") + ("" if hub_steps else ", nothing to do")))
+    for s in hub_steps:
+        say(f"  step {s.to}: {s.what}")
+        if s.hub:
             try:
-                RL.deploy(name, bid, path, switch=False)
-            except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-                raise Stop(f"cannot push bundle {bid} to {name}: {e} (nothing has been changed yet)")
-        say(f"new bundle {bid} unpacked beside the one in use on {', '.join(roots)} (switched per machine with --apply)")
-        with taskq.Lock():
-            tasks, keys, notes = plan_hub(ren)
-            for n in notes:
-                say(n)
-            views = {}
-            for old, recs in (st.get("keys") or {}).items():
-                if old not in merge:
-                    for k, r in recs.items():
-                        if "linkset" not in r and not r.get("links"):
-                            views.setdefault(ren.get(old, old), {})[keys.get(k, k)] = r.get("views") or []
-            links = {}
-            for name in roots:  # look only, change nothing on any machine until all of them can be handled
-                res = on(name, root_args(name, keys, merge, ren, views.get(name, {}), True, {}), "nothing has been changed yet")
+                s.hub(ctx, lambda x: say("    " + x.replace("\n", "\n    ")), True)  # what it would change as the state is now
+            except Stop as e:
+                problems.append(f"hub step {s.to}: {e}")
+                say(f"    cannot be done: {e}")
+    todo = []
+    for n in roots:
+        v, label = read_root(n), RM.conf(n)["label"]
+        if isinstance(v, str):
+            problems.append(f"{label}: {v}")
+            say(f"{label}: {v}")
+            continue
+        if v is None:
+            say(f"{label}: no root there yet (relay makes it in format {proto.FORMAT})")
+            continue
+        try:
+            steps = pending(v, f"the root of {label}")
+        except Stop as e:
+            problems.append(str(e))
+            say(f"{label}: {e}")
+            continue
+        say(f"{label}: format {v}" + (" (no stamp)" if v == 0 else "") + ("" if steps else ", nothing to do"))
+        for s in steps:
+            say(f"  step {s.to}: " + ("its root part, after switching to the new bundle" if s.root else "the stamp only"))
+        if steps:
+            todo.append(n)
+    try:
+        if not a.apply:
+            say(("cannot apply yet: " + "; ".join(problems) + "\n" if problems else "") + "(listed only, nothing changed; add --apply when ready)")
+            return 0
+        if problems:
+            raise Stop("; ".join(problems) + " - nothing changed")
+        if not hub_steps and not todo:
+            say(f"everything is in format {proto.FORMAT} already; nothing to do")
+            return 0
+        lock = round_lock()  # noqa: F841  held until this process ends
+        snapshot(home, hub_v, say)
+        if todo:
+            import relay as RL
+            bid, path = RL.wanted_bundle()
+            for n in todo:
+                done = "places before this one are migrated and stamped; fix this and run again"
+                try:
+                    RL.deploy(n, bid, path, switch=False)  # beside the one in use: workers do not see it yet
+                except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                    raise Stop(f"cannot push bundle {bid} to {n}: {e} ({done})")
+                try:
+                    res = RM.op(n, "root", dict(data=[M.data()] if n == M.store() else []), timeout=3600, script="migrate.py", bundle=bid)
+                except RuntimeError as e:
+                    raise Stop(f"{e} (check {n} is reachable; {done})")
                 if res.get("stop"):
-                    raise Stop(f"{RM.conf(name)['label']}: {res['stop']}")
-                links[name] = res["links"]
-                say(f"== {RM.conf(name)['label']}" + "".join("\n  " + ln for ln in res["log"]))
-            params = {t["key"]: t["params"] for t in tasks if t["key"] in keys.values()}
-            sets = fix_relay(st, keys, params, ren, links, set(merge), say)
-            specs = new_specs(st)
-            say(f"Specs in executor queues replaced with the current recipes: {sum(map(len, specs.values()))}")
-            fix_hub_queue(taskq.TQ, tasks, keys, ren, say, True)
-            fix_smoke(taskq.TQ, ren, say, True)
-            hub_files_say(files, say)
-            move_health_log(home, say, True)
-            junk = leftovers(home)
-            say(f"Unused items in state dir {home}: {len(junk)}" + "".join(f"\n  drop {p}" for p in junk))
-            snaps, kept = old_snapshots(home)
-            if snaps or kept:
-                say(f"Old code snapshots: delete {len(snaps)}, keep {len(kept)} (working dir of an unfinished pueue task; run self migrate again later)"
-                    + "".join(f"\n  keep {p}" for p in kept))
-            copy_hashes(say, True)
-            say("Pueue groups:")
-            for name in M.pueue_hosts():
-                pueue_groups(name, True, say)
-            if not a.apply:
-                say("(listed only, nothing changed; add --apply when ready)")
-                return 0
-            for name in roots:
-                res = on(name, root_args(name, keys, merge, ren, {}, False, specs), "machines before this one are already changed, fix this and run again")
-                if res.get("stop"):
-                    raise Stop(f"{RM.conf(name)['label']}: {res['stop']} (machines before this one are already changed, fix this and run again)")
-            copy_hashes(quiet, False)  # before the bookkeeping below opens the hub database, which migrates it (dropping the hash table)
-            sets = {**files["sets"], **sets}  # link sets records already name, from the old files, and the ones made now
-            ST.update_state(lambda x: (x.clear(), x.update(st), [HS.put_links(i, lk) for i, lk in sets.items()]))
-            for n, rec in (files["sites"] or {}).items():
-                if isinstance(rec, dict):
-                    HS.put_site(n, rec)
-            if files["records"] is not None:
-                HS.update_records(lambda recs: files["records"] + recs)
-            fix_hub_queue(taskq.TQ, tasks, keys, ren, quiet, False)
-            fix_smoke(taskq.TQ, ren, quiet, False)
-            for name in M.pueue_hosts():
-                pueue_groups(name, False, say)  # says only what failed
-            move_health_log(home, quiet, False)
-            for p in junk:
-                shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
-            drop_snapshots(snaps)
+                    raise Stop(f"{RM.conf(n)['label']}: {res['stop']} ({done})")
+                say(f"== {RM.conf(n)['label']}: format {res['was']} -> {res['now']}" + "".join("\n  " + ln for ln in res["log"]))
+        for s in hub_steps:
+            if s.hub:
+                s.hub(ctx, say, False)
+            C.write_format(s.to)
+            say(f"hub: format {s.to}")
     except Stop as e:
         print(f"taskq self migrate: {e}", file=sys.stderr)
         return 1
-    for o, r in merge.items():
-        say(f"old root {r} ({o}) not deleted; once {ren.get(o, o)} looks fine, delete it on that machine: rm -rf {r}")
-    say(f"migration complete ({time.strftime('%F %T')})")
+    say(f"migration complete, every place in format {proto.FORMAT} ({time.strftime('%F %T')}); start cron again")
     return 0
 
 
