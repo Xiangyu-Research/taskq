@@ -84,6 +84,19 @@ ok("spec: res.wait_gpu becomes minutes, shell gets TASK_WAIT_GPU; empty when abs
    and "TASK_WAIT_GPU=" in S.shell_lines(S.resolve("command", G), "/d").splitlines()
    and raises(lambda: S.resolve("command", dict(G, res={"wait_gpu": -1}))))
 ok("spec: .. in inputs -> error", raises(lambda: S.resolve("command", dict(G, inputs=["../etc"]))))
+ok("bad task names -> error (.., --help, newline, space, empty part); ordinary names pass",
+   all(raises(lambda k=k: S.resolve("command", dict(G, key=k))) for k in ("..", "a/../b", "--help", "-x/y", "a\nb", "a b", "a//b", "/a", "a/", "./a"))
+   and S.resolve("command", dict(G, key="D101_alpha/V-save.n4+x/0"))["key"] == "D101_alpha/V-save.n4+x/0")
+ok("out outside the data dir -> error (absolute, ..); done markers and fetch paths likewise",
+   all(raises(lambda v=v: S.resolve("command", dict(G, out=v))) for v in ("/abs/x", "../x", "a/../../x", "a/./b", "a\nb"))
+   and all(raises(lambda v=v: S.resolve("command", dict(G, done=v))) for v in (["../DONE"], ["/DONE"], ["ok|../x"]))
+   and raises(lambda: S.resolve("command", dict(G, fetch={"extra": ["sub/*.json"]})))
+   and raises(lambda: S.resolve("command", dict(G, fetch={"also": ["../x"]})))
+   and raises(lambda: S.resolve("command", dict(G, fetch={"exclude": "x"})))
+   and S.resolve("command", dict(G, out="guest/x/", done=["sub/DONE|ALT"], fetch={"extra": ["*.json"], "also": ["guest/y"]}))["out"] == "guest/x/")
+ok("a spec sent to an executor is checked the same way (task name, out)",
+   raises(lambda: S.from_sent(dict(S.sendable(g), key=".."))) and raises(lambda: S.from_sent(dict(S.sendable(g), out="/etc")))
+   and S.from_sent(S.sendable(g))["key"] == "guest/x")
 ok("params named data or repo (expanded at run time) -> error", raises(lambda: S.resolve("command", dict(G, data=["x"])))
    and raises(lambda: S.resolve("command", dict(G, repo="r"))))
 ok("spec: unknown progress -> error", raises(lambda: S.resolve("command", dict(G, progress="tqdm"))))

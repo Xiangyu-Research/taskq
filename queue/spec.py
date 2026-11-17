@@ -134,21 +134,61 @@ def resolve(recipe, params, exp=None):
 
 
 RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def bad_key(k):
+    """Why k cannot be a task name -> text, or None. Names become file names, command-line arguments and lines of output:
+    parts separated by /, none empty, . or ..; no spaces or control characters; not starting with -."""
+    if re.search(r"\s", k) or _CTRL.search(k):
+        return "no spaces, tabs, newlines or control characters"
+    if k.startswith("-"):
+        return "must not start with -"
+    if any(x in ("", ".", "..") for x in k.split("/")):
+        return "parts separated by / must not be empty, . or .."
+    return None
+
+
+def _rel_ok(v, what, name=False):
+    """A path relative to the data dir (name=True: a file name pattern) -> SpecError unless plain: no control characters, not
+    absolute, no . or .. parts (name: no / at all)."""
+    if not (isinstance(v, str) and v):
+        raise SpecError(f"{what} must be a non-empty string: {v!r}")
+    why = ("no control characters" if _CTRL.search(v) else
+           "a file name pattern, no /" if name and "/" in v else
+           "relative to the data dir" if v.startswith("/") else
+           "no . or .. parts" if any(x in (".", "..") for x in v.rstrip("/").split("/")) else None)
+    if why:
+        raise SpecError(f"bad {what} {v!r}: {why}")
 
 
 def _check(s, progress=True):
     """Common spec fields: normalise and check inputs, resume, res and progress.
     progress=False: do not check the progress reader (a spec from the hub was checked already; running a task does not need it and
-    whoever reads progress reports itself). key, cmd, out, done, vars, log and fetch are type-checked only (add rejects bad types
-    instead of failing later when reading the queue)."""
+    whoever reads progress reports itself). key, cmd, out, done, vars, log and fetch are checked here too, so add (and an
+    executor receiving a spec) rejects bad ones instead of failing later when reading the queue: the task name (bad_key), out,
+    done and fetch paths stay inside the data dir.""" 
     for k in ("key", "cmd", "out"):
         if k in s and not (isinstance(s[k], str) and s[k]):
             raise SpecError(f"{k} must be a non-empty string: {s[k]!r}")
+    if "key" in s and bad_key(s["key"]):
+        raise SpecError(f"bad task name {s['key']!r}: {bad_key(s['key'])}")
+    if "out" in s:
+        _rel_ok(s["out"], "out")
     if "done" in s and not (isinstance(s["done"], list) and all(isinstance(x, str) and x for x in s["done"])):
         raise SpecError(f"done must be a list of filenames: {s['done']!r}")
+    for x in s.get("done") or []:
+        for alt in x.split("|"):
+            _rel_ok(alt, "done marker (relative to out)")
     for k, typ in (("vars", dict), ("fetch", dict), ("res", dict), ("log", str)):
         if s.get(k) is not None and not isinstance(s[k], typ):
             raise SpecError(f"{k} must be a {'dict' if typ is dict else 'string'}: {s[k]!r}")
+    for k, name in (("also", False), ("extra", True), ("exclude", True)):
+        v = (s.get("fetch") or {}).get(k)
+        if v is not None and not isinstance(v, list):
+            raise SpecError(f"fetch.{k} must be a list: {v!r}")
+        for x in v or []:
+            _rel_ok(x, f"fetch.{k} entry", name=name)
     for k in ("inputs", "resume"):
         v = s.get(k)
         if isinstance(v, str):

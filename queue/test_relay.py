@@ -271,7 +271,7 @@ def test_plan():
         msgs = relay.execute(NAME, [dict(op="rnice", key=K, rkey=A, nice=-101)], S0([mtask(K)]))
     finally:
         RM.rtq = old_rtq
-    assert calls == [f"set-nice --nice -101 {A}"] and "nice -101" in msgs[0], (calls, msgs)
+    assert calls == [f"set-nice --nice -101 -- {A}"] and "nice -101" in msgs[0], (calls, msgs)
     ok("nice changed in the hub queue → follow over there (set-nice); done ones are not changed")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), {})
@@ -699,7 +699,7 @@ def test_beat_lost():
     with patched(relay.taskq, central=central), patched(RT, drop_remote=lambda name, k, rk, gone=False: removed.append(k)):
         msgs = relay.execute(NAME, acts, S0([]))
     assert calls[0][:2] == ["beat", "--strict"] and set(calls[0][-2:]) == {K, K2}, calls
-    assert removed == [K2] and [c for c in calls if c[0] == "release"] == [["release", "--worker", NAME, K2]], (removed, calls)
+    assert removed == [K2] and [c for c in calls if c[0] == "release"] == [["release", "--worker", NAME, "--", K2]], (removed, calls)
     assert any("no longer holds the claim" in m and K in m for m in msgs), msgs
     ok("relay renews with beat --strict: keys whose claim it no longer holds are left alone this round; others proceed")
 

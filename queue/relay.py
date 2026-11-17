@@ -438,7 +438,7 @@ def plan(s, name, rs, st, now=None):
             if refill.site_progress(view.get(key)):
                 stuck[alert_id("site", name, "fail", key)] = alert(
                     f"{key} ({a['key']}) failed {a.get('failures')} times on {L} with progress; claim kept."
-                    f" Check {proto.TASK_LOGS}/ over there; to give up: taskq.py release --worker {name} {key}",
+                    f" Check {proto.TASK_LOGS}/ over there; to give up: taskq.py release --worker {name} -- {key}",
                     state="failed", progress=True, failures=a.get("failures"))
             else:
                 acts[-1] = dict(op="release", key=key, skip=f"failed on {L}", failed=True,
@@ -694,7 +694,7 @@ def execute(name, acts, s, run_add=None, stuck=None):
     beats = [a["key"] for a in acts if a["op"] == "beat"]
     lost = set()  # no longer assigned to it in the hub queue (released or reassigned elsewhere): do not touch these this round
     if beats:
-        rc, out, err = taskq.central(["beat", "--strict", "--worker", name] + beats)
+        rc, out, err = taskq.central(["beat", "--strict", "--worker", name, "--"] + beats)
         if rc == proto.EXIT["lost"]:
             lost = set(out.split()) & set(beats)
             msgs.append(f"{L} no longer holds the claim on: {', '.join(sorted(lost))}; leaving them alone this round")
@@ -725,20 +725,20 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 SG.finish(name, k, a["ok"], why)
                 msgs.append(f"smoke {k} on {L} {'passed' if a['ok'] else 'did not pass: ' + why[-200:]}")
             elif a["op"] == "smoke_end":
-                master(f"release --worker {name} {shlex.quote(k)}")
-                r = master(f"remove {shlex.quote(k)}")
+                master(f"release --worker {name} -- {shlex.quote(k)}")
+                r = master(f"remove -- {shlex.quote(k)}")
                 msgs.append(f"smoke {k} removed from the hub queue for {L}" if r[0] in (0, proto.EXIT["gone"]) else f"could not remove smoke {k} for {L}: {RM.err_tail(r[1], 150)}")
             elif a["op"] == "smoke_real":
                 if SG.real_done(name, a["mark"]):
                     msgs.append(f"the real {a['mark']['kind']} task {k} on {L} is done; recorded as passing smoke")
             elif a["op"] == "release":
-                r = master(f"release --worker {name} {shlex.quote(k)}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else ""))
+                r = master(f"release --worker {name}" + (f" --skip {shlex.quote(a['skip'])}" if a.get("skip") else "") + f" -- {shlex.quote(k)}")
                 msgs.append(f"{L} released {k}: {a['why']}" if r and r[0] == 0 else f"{L} failed to release {k}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
                 if r and r[0] == 0 and a.get("failed"):  # counted as a failure (taskq status: last 24 hours)
                     import events
                     events.add("relay", f"{k} failed on {L}", kind=proto.EV_FAILED, key=k, site=name)
             elif a["op"] == "take":
-                r = master(f"take --worker {name} --assign {shlex.quote(k)}")
+                r = master(f"take --worker {name} --assign -- {shlex.quote(k)}")
                 if r is None or r[0]:
                     msgs.append(f"{L} did not claim {k}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
                     continue
@@ -787,10 +787,10 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 BG.unhold(name, k)
                 msgs.append(f"{k} is no longer held on {L} (the bundle changed or the task no longer waits to be sent)")
             elif a["op"] == "rnice":
-                r = RM.rtq(name, f"set-nice --nice {int(a['nice'])} {shlex.quote(a['rkey'])}")
+                r = RM.rtq(name, f"set-nice --nice {int(a['nice'])} -- {shlex.quote(a['rkey'])}")
                 msgs.append(f"{k} on {L} set to nice {a['nice']}" if r and r[0] == 0 else f"could not change nice for {k} on {L}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
             elif a["op"] in ("rstop", "rresume"):
-                r = RM.rtq(name, ("stop --why stopped-from-hub-queue " if a["op"] == "rstop" else "resume ") + shlex.quote(a["rkey"]))
+                r = RM.rtq(name, ("stop --why stopped-from-hub-queue -- " if a["op"] == "rstop" else "resume -- ") + shlex.quote(a["rkey"]))
                 what = "stopped" if a["op"] == "rstop" else "resumed"
                 msgs.append(f"{what} {k} on {L}" if r and r[0] == 0 else f"failed to set {k} {what} on {L}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
         except Exception as e:  # noqa: BLE001

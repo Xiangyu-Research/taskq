@@ -216,7 +216,7 @@ def _stage(name, key, nice, add, say, real, ex, links):
             raise RuntimeError(f"could not add to the {RM.conf(name)['label']} queue: {RM.err_tail((r or [0, 'ssh unreachable'])[1])}")
         say(r[1])
     else:  # restage (the remote side reported missing inputs): clear the marker so it can claim again
-        r = RM.rtq(name, f"input-ok {shlex.quote(key)}")
+        r = RM.rtq(name, f"input-ok -- {shlex.quote(key)}")
         if r is None or r[0]:
             raise RuntimeError(f"could not clear the missing-input marker on {RM.conf(name)['label']}: {RM.err_tail((r or [0, 'ssh unreachable'])[1])}")
         say(r[1] or "no missing-input marker over there")
@@ -316,7 +316,7 @@ def drop_remote(name, key, rk, gone=False):
     """Drop the remote task (taskq.py remove checks under the lock that nobody claimed it), then remove paths and logs this
     task occupied that no other task uses, and finally its record → error text or None."""
     if not gone:
-        r = RM.rtq(name, f"remove {shlex.quote(rk)}")
+        r = RM.rtq(name, f"remove -- {shlex.quote(rk)}")
         if not r or r[0] not in (0, proto.EXIT["gone"]):  # gone: the task was removed last time but paths were left
             return f"task not removed, paths left: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}"
         ST.update_state(lambda st: ((st.get("keys") or {}).get(name, {}).get(key) or {}).update(dropped=time.time()))

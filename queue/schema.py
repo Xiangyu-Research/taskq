@@ -135,7 +135,7 @@ STEP_FIELDS = {
 # in the bundle). A task param with the same name overrides the field (dicts merge, everything else is replaced). A recipe that
 # omits a field takes the default here.
 RECIPE_FIELDS = {
-    "key": ("str", REQUIRED, "task name (queue, claims, ledger all use it; must be unique)"),
+    "key": ("str", REQUIRED, "task name (queue, claims, ledger all use it; must be unique): parts separated by /, none empty, . or ..; no spaces; not starting with -"),
     "env": ("strs", REQUIRED, "env name (each machine's envs; several comma-separated or a list)"),
     "cmd": ("str", REQUIRED, "command run with bash in the project root in the bundle; a rerun continues from the last run (after release another worker continues from the checkpoint)"),
     "out": ("str", REQUIRED, "output dir (relative to the data dir): fetch, archive and ledger all look here"),

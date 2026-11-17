@@ -213,7 +213,7 @@ When a task's param name is a field in the table below and the recipe's `params`
 <!-- fields:RECIPE_FIELDS -->
 | field | type | default | description |
 |---|---|---|---|
-| `key` | `str` | required | task name (queue, claims, ledger all use it; must be unique) |
+| `key` | `str` | required | task name (queue, claims, ledger all use it; must be unique): parts separated by /, none empty, . or ..; no spaces; not starting with - |
 | `env` | `strs` | required | env name (each machine's envs; several comma-separated or a list) |
 | `cmd` | `str` | required | command run with bash in the project root in the bundle; a rerun continues from the last run (after release another worker continues from the checkpoint) |
 | `out` | `str` | required | output dir (relative to the data dir): fetch, archive and ledger all look here |

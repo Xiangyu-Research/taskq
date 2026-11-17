@@ -1017,6 +1017,14 @@ rc3, out3 = tqx("add", "--nice", "0", "--spec-stdin", stdin="{oops")
 rc4, out4 = tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(dict(cspec("x/e"), vars=["A=1"])))
 check("add --spec-stdin: wrong done, res, vars types or not JSON -> cannot add (exit code 2)", (rc, rc2, rc3, rc4) == (2, 2, 2, 2)
       and "done" in out and "res" in out2 and "JSON" in out3 and "vars" in out4 and not {"x/d", "x/e"} & set(sx()))
+rc, out = tqx("add", "--nice", "0", "--recipe", "command", "key=..", "cmd=true", "env=stats", "out=x/x/g", "done=DONE")
+rc2, out2 = tqx("add", "--nice", "0", "--recipe", "command", "key=--help", "cmd=true", "env=stats", "out=x/x/g", "done=DONE")
+rc3, out3 = tqx("add", "--nice", "0", "--recipe", "command", "key=x/g", "cmd=true", "env=stats", "out=/etc/x", "done=DONE")
+rc4, out4 = tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(dict(cspec("x/g"), key="x/g\nx/h")))
+rc5, out5 = tqx("status")
+check("add: task names .., --help or with a newline, and an absolute out -> cannot add (exit code 2), the queue still reads",
+      (rc, rc2, rc3, rc4) == (2, 2, 2, 2) and all("cannot add: bad" in o for o in (out, out2, out3, out4)) and rc5 == 0
+      and not [k for k in sx() if k.startswith(("x/g", "-", ".."))])
 with open(os.path.join(TQX, "tasks.jsonl"), "a") as f:
     f.write(json.dumps(dict(order=99, nice=-5, key="x/f", exp=None, recipe="command", params={}, spec=dict(cspec("x/f"), done=5))) + "\n")
 rc, out = tqx("status")

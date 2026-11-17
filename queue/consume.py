@@ -302,7 +302,7 @@ class Worker:
     # ---------- queue ----------
     def tq(self, c, key, *args, quiet=False):
         tok = self.tok.get(key)
-        cmd = [PY, TASKQ, c, "--worker", self.W, *(["--token", tok] if tok else []), key, *args]
+        cmd = [PY, TASKQ, c, "--worker", self.W, *(["--token", tok] if tok else []), *args, "--", key]  # -- : a name is never an option
         sys.stdout.flush()
         return subprocess.run(cmd, stdout=subprocess.DEVNULL if quiet else None).returncode
 
