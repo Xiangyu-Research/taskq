@@ -243,7 +243,8 @@ ok("step has the wrong type (device), out is empty, each is not a list", f"step 
 restore()
 e0 = exps[0]
 e0["after"][-1] = dict(e0["after"][-1], cmd="echo {nosuch}")
-ok("unknown name in a step command: cannot become a hub queue task", "{nosuch}" in problems("steps"))
+ok("unknown name in a step command: reported when compiling the order (flow), not again under steps",
+   "cmd: unknown {nosuch}" in problems("flow") and "{nosuch}" not in problems("steps"))
 restore()
 
 ev = next(st for st in exps[0]["after"] if st["name"] == "eval")
@@ -296,6 +297,19 @@ try:
     ok("output not under a {smoke} dir: reported", "{smoke}" in smk())
 finally:
     K.SG.SMOKE.pop("toy", None)
+
+# tables with errors next to the test table (fixture.BAD_TABLES; last: experiments' cache is replaced): each entry left out is
+# reported once under experiments, the later groups check what loaded
+fixture.read_tables(fixture.exp_tables(fixture.BAD_TABLES))
+K._FLOW.clear()
+rep = K.run(only=["experiments", "flow", "tasks"])
+by = {}
+for g, m in rep.problems:
+    by.setdefault(g, []).append(m)
+ok(f"bad tables: experiments lists each entry left out, flow only the instances' errors, tasks still checked ({by})",
+   len(by.get("experiments", [])) == 5 and any("SyntaxError" in m for m in by["experiments"])
+   and sorted(m.split(":")[0] for m in by.get("flow", [])) == ["xa1/xa_f0", "xc1/xc_f0"] and "tasks" not in by)
+fixture.read_tables(None)
 
 print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)

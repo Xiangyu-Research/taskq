@@ -3,7 +3,8 @@ it into tasks. taskq.py (add --exp, resolving queued tasks), flow/compile.py (st
 from here; analysis scripts look up the owning experiment's declarations by model dir (name-of, names_of).
 
 Fields are in queue/schema.py: EXP_FIELDS for experiments and STEP_FIELDS for steps (in after, group_after, FINAL); checked on
-load, unknown fields and missing required ones are errors. Names usable in a step template: a per-task step gets the task's params
+load, unknown fields and missing required ones are errors. Each table loads on its own: an entry with an error is left out and
+listed in errors(), the rest load (flow/compile.py, advance and check report them). Names usable in a step template: a per-task step gets the task's params
 + exp, id (task_names); an experiment-wide step gets the params all tasks share + exp, id + each param <param>_list (values
 space-separated), <param>_list_q (quoted) + the experiment's names (group_names); FINAL gets data only. {data} is left for the
 executor to expand to its data dir. A table module may also hold FINAL (steps belonging to no experiment)."""
@@ -47,69 +48,140 @@ def step(st):
     return st
 
 
-def check_fields(path, mod):
-    """Every experiment and step field in an experiment table module is known and required ones are present; otherwise SpecError."""
-    steps = [(f"step {st.get('name')} in {path} FINAL", st) for st in getattr(mod, "FINAL", [])]
-    for e in mod.EXPERIMENTS:
-        where = f"experiment {e.get('id')} in {path}"
-        _check_fields(where, e, schema.EXP_FIELDS)
-        each = e.get("each") or {}
-        for st in e.get("after") or []:
-            only = st.get("only")
-            if only is None:
-                continue
-            bad = [k for k in (only if isinstance(only, dict) else ["?"]) if k not in each]
-            if bad or not all(isinstance(v, (list, tuple)) for v in only.values()):
-                raise spec.SpecError(f"step {st.get('name')} in {where}: only must be {{each param: [values...]}} (each has: {', '.join(each) or 'none'})")
-        for st in e.get("group_after") or []:
-            if not isinstance(st, dict):
-                raise spec.SpecError(f"group_after in {where}: each entry is a step (dict); order follows inputs, no separate lists")
-            if "only" in st:
-                raise spec.SpecError(f"step {st.get('name')} in {where}: only applies to per-task steps (after)")
-        steps += [(f"step {st.get('name')} in {where}", st) for st in list(e.get("after") or []) + list(e.get("group_after") or [])]
-    seen = set()
-    for where, st in steps:
-        if id(st) in seen:
+def check_experiment(path, e):
+    """One experiment of an experiment table module: every experiment and step field is known and required ones are present;
+    otherwise SpecError naming the file, the experiment and the field."""
+    where = f"experiment {e.get('id') if isinstance(e, dict) else repr(e)[:40]} in {path}"
+    _check_fields(where, e, schema.EXP_FIELDS)
+    each = e.get("each") or {}
+    for st in e.get("after") or []:
+        only = st.get("only") if isinstance(st, dict) else None
+        if only is None:
             continue
-        seen.add(id(st))
-        _check_fields(where, st, schema.STEP_FIELDS)
-        if st.get("device", "gpu") not in ("gpu", "cpu"):
-            raise spec.SpecError(f"{where}: device is gpu or cpu")
+        bad = [k for k in (only if isinstance(only, dict) else ["?"]) if k not in each]
+        if bad or not all(isinstance(v, (list, tuple)) for v in only.values()):
+            raise spec.SpecError(f"step {st.get('name')} in {where}: only must be {{each param: [values...]}} (each has: {', '.join(each) or 'none'})")
+    for st in e.get("group_after") or []:
+        if not isinstance(st, dict):
+            raise spec.SpecError(f"group_after in {where}: each entry is a step (dict); order follows inputs, no separate lists")
+        if "only" in st:
+            raise spec.SpecError(f"step {st.get('name')} in {where}: only applies to per-task steps (after)")
+    for st in list(e.get("after") or []) + list(e.get("group_after") or []):
+        check_step(f"step {st.get('name') if isinstance(st, dict) else repr(st)[:40]} in {where}", st)
+
+
+def check_step(where, st):
+    _check_fields(where, st, schema.STEP_FIELDS)
+    if st.get("device", "gpu") not in ("gpu", "cpu"):
+        raise spec.SpecError(f"{where}: device is gpu or cpu")
+
+
+def check_fields(path, mod):
+    """Every experiment and step field in an experiment table module is known and required ones are present; otherwise SpecError
+    (the first problem)."""
+    for st in getattr(mod, "FINAL", []):
+        check_step(f"step {st.get('name')} in {path} FINAL", st)
+    for e in mod.EXPERIMENTS:
+        check_experiment(path, e)
+
+
+BAD_ENTRY = (spec.SpecError, KeyError, TypeError, ValueError, AttributeError)  # a malformed entry: left out and reported, the rest load
 
 
 def load():
-    """-> (experiment list, FINAL step list), with defaults filled; each experiment gains rq (the dir name of its table). Duplicate
-    ids and task names are errors."""
+    """-> (experiment list, FINAL step list), with defaults filled; each experiment gains rq (the dir name of its table). Each table
+    loads on its own: a table that cannot be imported, an experiment or FINAL step with bad fields, an experiment whose tasks do not
+    resolve, a duplicate experiment id or a task name two experiments share leaves out just the entries involved (every experiment
+    with that id or task name), listed in errors(); the rest load as usual."""
     if "exps" in _cache:
         return _cache["exps"], _cache["final"]
-    exps, final = [], []
+    exps, final, errs = [], [], []
     pat = cfg.outputs("experiments")
     for path in sorted(glob.glob(os.path.join(REPO, pat))) if pat else []:
-        rq = os.path.basename(os.path.dirname(path))
-        sp = importlib.util.spec_from_file_location(f"experiments_{rq}", path)
-        mod = importlib.util.module_from_spec(sp)
-        sp.loader.exec_module(mod)
-        check_fields(os.path.relpath(path, REPO), mod)
-        for e in mod.EXPERIMENTS:
-            e = schema.defaults(schema.EXP_FIELDS, e)
-            exps.append(dict(e, rq=rq, after=[step(x) for x in e["after"]], group_after=[step(x) for x in e["group_after"]]))
-        final += [step(f) for f in getattr(mod, "FINAL", [])]
+        rq, rel = os.path.basename(os.path.dirname(path)), os.path.relpath(path, REPO)
+        try:
+            sp = importlib.util.spec_from_file_location(f"experiments_{rq}", path)
+            mod = importlib.util.module_from_spec(sp)
+            sp.loader.exec_module(mod)
+            got, fin = list(mod.EXPERIMENTS), list(getattr(mod, "FINAL", []))
+        except Exception as err:  # noqa: BLE001  any error in the table's own code leaves out this table only
+            errs.append(f"{rel} cannot be loaded, its experiments and FINAL steps are left out: {type(err).__name__}: {err}")
+            continue
+        for e in got:
+            try:
+                check_experiment(rel, e)
+                e = schema.defaults(schema.EXP_FIELDS, e)
+                exps.append(dict(e, rq=rq, after=[step(x) for x in e["after"]], group_after=[step(x) for x in e["group_after"]]))
+            except BAD_ENTRY as err:
+                errs.append(f"{_msg(err)} (experiment left out)")
+        for st in fin:
+            try:
+                check_step(f"step {st.get('name')} in {rel} FINAL", st)
+                final.append(step(st))
+            except BAD_ENTRY as err:
+                errs.append(f"{_msg(err)} (step left out)")
     ids = [e["id"] for e in exps]
     dup = sorted({i for i in ids if ids.count(i) > 1})
     if dup:
-        raise spec.SpecError(f"duplicate experiment ids in the tables: {', '.join(dup)}")
+        errs.append(f"duplicate experiment ids in the tables: {', '.join(dup)} (every experiment with one of these ids is left out)")
+    by_exp, owner = {}, {}
+    _cache["pending"] = {e["id"]: e for e in exps if e["id"] not in dup}
+    try:
+        for e in exps:
+            if e["id"] in dup:
+                continue
+            try:
+                by_exp[e["id"]] = expand(e)
+            except BAD_ENTRY as err:
+                errs.append(f"experiment {e['id']} in {e['rq']}: its tasks do not resolve, left out: {_msg(err)}")
+                continue
+            for t in by_exp[e["id"]]:
+                owner.setdefault(t["key"], []).append(e["id"])
+    finally:
+        del _cache["pending"]
+    clash = {k: v for k, v in owner.items() if len(v) > 1}
+    errs += [f"duplicate task name in the experiment tables: {k} ({' and '.join(v)}; these experiments are left out)" for k, v in clash.items()]
+    gone = {i for v in clash.values() for i in v}
+    exps = [e for e in exps if e["id"] in by_exp and e["id"] not in gone]
+    _cache["tasks"] = {t["key"]: t for e in exps for t in by_exp[e["id"]]}
+    _cache["errors"] = errs
     _cache["exps"], _cache["final"] = exps, final
     return exps, final
 
 
+def _msg(err):
+    return str(err) if isinstance(err, spec.SpecError) else f"{type(err).__name__}: {err}"
+
+
+def errors():
+    """Problems that left entries out of the experiment tables (see load) -> [str]; [] when every table loaded whole."""
+    load()
+    return list(_cache["errors"])
+
+
+def _missing(what):
+    """Not found: NotFound when the tables loaded whole; while they have errors it may be an entry left out, so a plain SpecError."""
+    errs = errors()
+    if not errs:
+        return NotFound(what)
+    return spec.SpecError(f"{what}; the experiment tables have errors and it may be in an entry left out: {errs[0]}"
+                          + (f" (and {len(errs) - 1} more)" if len(errs) > 1 else ""))
+
+
 def experiment(eid):
+    pending = _cache.get("pending")
+    if pending is not None:  # load is expanding the experiments: those read so far
+        return pending.get(eid)
     return next((e for e in load()[0] if e["id"] == eid), None)
 
 
 def resolve_task(recipe, params, exp=None):
     """A queued task (recipe, params, owning experiment) -> spec. When it belongs to an experiment, the experiment's fields (e.g.
-    metrics) are added."""
+    metrics) are added. Its experiment missing while the tables have errors -> SpecError (it may be an experiment left out, whose
+    fields would change the spec): this task is not resolved, the others are."""
     e = experiment(exp) if exp else None
+    if exp and e is None and errors():
+        raise _missing(f"experiment {exp} of this task is not in the experiment tables")
     return spec.resolve(recipe, {**((e or {}).get("fields") or {}), **params}, exp=exp)
 
 
@@ -164,17 +236,9 @@ def parse_label(who):
 
 
 def tasks():
-    """Every task of every experiment: {key: task}, in experiment table order. Duplicate task names are errors."""
-    if "tasks" in _cache:
-        return _cache["tasks"]
-    out = {}
-    for e in load()[0]:
-        for t in expand(e):
-            if t["key"] in out:
-                raise spec.SpecError(f"duplicate task name in the experiment tables: {t['key']} ({out[t['key']]['exp']} and {e['id']})")
-            out[t["key"]] = t
-    _cache["tasks"] = out
-    return out
+    """Every task of every experiment: {key: task}, in experiment table order (load expands them; entries it leaves out have none)."""
+    load()
+    return _cache["tasks"]
 
 
 def group_names(e):
@@ -213,7 +277,7 @@ def env_of(model_dir):
     models outside the tables)."""
     t = _task_of(model_dir)
     if t is None:
-        raise NotFound(f"no experiment in the tables trains this model: {model_dir} (set MODEL_ENV for models outside the tables)")
+        raise _missing(f"no experiment in the tables trains this model: {model_dir} (set MODEL_ENV for models outside the tables)")
     return spec.envs_of(t["spec"])[0]
 
 
@@ -228,7 +292,7 @@ def names_of(model_dir, *names):
     declarations this way (e.g. skip_ext, splits). A model not in the tables -> SpecError: never guess by name."""
     e = experiment_of(model_dir)
     if e is None:
-        raise NotFound(f"no experiment in the tables trains this model: {model_dir}")
+        raise _missing(f"no experiment in the tables trains this model: {model_dir}")
     return [str((e.get("names") or {}).get(n, "")) for n in names]
 
 
@@ -302,20 +366,28 @@ def main(argv):
                     n[t["exp"]] = n.get(t["exp"], 0) + 1
                 for e in exps:
                     print(f"{e['id']}\t{e.get('exp', '')}\t{e.get('recipe', '')}\t{n.get(e['id'], 0)} tasks\t{e.get('label', '')}")
-            return 0
+            return table_errors()
         want = a.exp or []
         bad = [x for x in want if experiment(x) is None]
         if bad:
-            raise NotFound(f"not in the experiment tables: {', '.join(bad)}")
+            raise _missing(f"not in the experiment tables: {', '.join(bad)}")
         ts = [t for t in tasks().values() if not want or t["exp"] in want]
         if a.json:
             _line(dict(version=proto.VERSION, tasks=[task_json(t) for t in ts]))
         else:
             for t in ts:
                 print(f"{t['key']}\t{t['exp']}\t{label(experiment(t['exp']), t)}")
-        return 0
+        return table_errors()
     except spec.SpecError as err:
         return fail(err)
+
+
+def table_errors():
+    """After listing what loaded: the entries left out and why on stderr -> exit code (1 when any)."""
+    errs = errors()
+    if errs:
+        print("the experiment tables have errors; these entries are left out:\n" + "\n".join(f"  {x}" for x in errs), file=sys.stderr)
+    return 1 if errs else 0
 
 
 USAGE = """usage: experiments.py env-of <model dir>

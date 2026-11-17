@@ -386,18 +386,27 @@ before it is pushed.
 
 `queue/flow/compile.py` derives instances and order from the experiment table: within one task in order (training -> `after`'s first step
 -> second ...); an input (wildcards included) that falls in another instance's outputs is ordered after that instance, across experiments;
-inputs that fall in no output are raw data. Checks: unknown names in templates, wildcard outputs, overlapping outputs, an input inside its
-own outputs, `temp` patterns that leave the output or match a done marker, and cycles.
+inputs that fall in no output are raw data. Checks: unknown names in templates (`cmd` and `inputs_cmd` are filled here too, so a bad name
+shows at once), wildcard outputs, overlapping outputs, an input inside its own outputs, `temp` patterns that leave the output or match a
+done marker, and cycles.
+
+Errors stay local. Each experiment table loads on its own (`experiments.py`): a table that cannot be imported, an experiment or `FINAL`
+step with bad fields, an experiment whose tasks do not resolve, a duplicate experiment id or task name leaves out just those entries, and
+the rest load; a queued task whose experiment is not found while entries are left out does not resolve (status shows it as bad). An
+error in a step blocks that instance and every instance after it (a step whose outputs cannot be filled keeps its readers waiting through
+its outputs with the unknown names as wildcards); the others go on. `taskq check` lists every error, and advance reports them each round
+(`advance:flow`).
 
 `queue/advance.py` each round:
 
 1. checks on the store whether each instance is done (all `done` files present; still being fetched does not count);
-2. adds to the hub queue any instance whose prerequisites are done, which is not done itself, and is not in the queue (recipe `command`,
-   key = instance id, `step` = step name); which machine it goes to is decided by `PLACE` when sending;
+2. adds to the hub queue any instance whose prerequisites are done, which is not done itself, not blocked by an error, and is not in the
+   queue (recipe `command`, key = instance id, `step` = step name); which machine it goes to is decided by `PLACE` when sending;
 3. steps with `rerun=True`: when an input is newer than the done file, delete the done file on the store and queue it again;
 4. `temp`: after every instance using it is done and its results are on the store, delete those temp files on the store and record it in
    events. The store deletes files and links only: a matching directory goes once it is empty (`dir/**` empties one), and one that still
-   holds files is reported.
+   holds files is reported. While entries are left out of the experiment tables (or a step's inputs cannot be filled) no temp files are
+   deleted: a step reading them may be among those entries.
 
 `HOLD` matches are not queued; with `AUTO["advance"]` off it only writes "what it would queue".
 

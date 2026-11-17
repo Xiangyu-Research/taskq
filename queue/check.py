@@ -434,11 +434,13 @@ def check_experiments(r):
     import experiments as E
     g = "experiments"
     try:
-        exps, final = E.load()  # fields (EXP_FIELDS, STEP_FIELDS) are checked on load
+        exps, final = E.load()  # fields (EXP_FIELDS, STEP_FIELDS) are checked on load; an entry with an error is left out (E.errors)
         ts = E.tasks()
     except Exception as e:  # noqa: BLE001
         r.bad(g, f"cannot read the experiment tables: {e}")
         return False
+    for x in E.errors():  # the later groups check what loaded
+        r.bad(g, x)
     if not exps:
         r.note(g, f"no experiments (OUTPUTS[\"experiments\"] = {cfg.outputs('experiments')!r})")
     for e in exps:
@@ -483,7 +485,8 @@ def check_flow(r):
     f = flow()
     r.checked(g, len(f.instances))
     for e in f.errors:
-        r.bad(g, e)
+        if e not in E.errors():  # entries left out of the tables: reported under experiments
+            r.bad(g, e)
     exps, final = E.load()
     steps = {st["name"]: st for e in exps for st in e["after"] + e["group_after"]} | {st["name"]: st for st in final}
     trains = {e["recipe"] for e in exps}
@@ -572,10 +575,10 @@ def check_smoke(r, k, sp, seen):
 
 # ---------------- each step ----------------
 def one_per_step():
-    """One instance of each step of each experiment (one of each FINAL step)."""
+    """One instance of each step of each experiment (one of each FINAL step); instances with errors are left out (check_flow reports them)."""
     seen = {}
     for i in flow().instances.values():
-        if i.step:
+        if i.step and not i.errors:
             seen.setdefault((i.exp, i.rule), i)
     return list(seen.values())
 
@@ -611,7 +614,7 @@ def check_inputs(r):
 
     def run(i):
         try:
-            return S.listed_inputs(S.fill(i.step["inputs_cmd"], i.names), root, i.step.get("vars"), timeout=120), None
+            return S.listed_inputs(i.step["inputs_cmd"], root, i.step.get("vars"), timeout=120), None
         except Exception as e:  # noqa: BLE001
             return None, str(e)
     try:

@@ -24,6 +24,7 @@ class Instance:
     step: dict = None           # step: the step from the experiment table (defaults filled in)
     lab: str = ""               # short name of the source task (<experiment>_<short>)
     each: dict = None           # gather: the experiment's each
+    errors: list = field(default_factory=list)   # its own problems (a template name that cannot be filled, overlapping outputs...)
 
     @property
     def key(self):
@@ -33,4 +34,6 @@ class Instance:
 @dataclass
 class Flow:
     instances: dict             # id -> Instance (in experiment table order)
-    errors: list = field(default_factory=list)
+    errors: list = field(default_factory=list)   # every problem, entries left out of the experiment tables included
+    blocked: dict = field(default_factory=dict)  # id -> why it is not queued: its own problem, an upstream one's, or an input that may be the output of an entry left out
+    partial: bool = False       # entries are left out or have inputs that cannot be filled: an instance may have users not in the graph

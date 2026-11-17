@@ -97,6 +97,72 @@ def store_bundle(root, plugins=(), config=None):
 _CONDA = {}
 
 
+# Experiment tables with errors (exp_tables(BAD_TABLES)): one that cannot be imported, and one whose entries each have a different
+# problem next to a fine one: xa's first step names {frg} in cmd (xa2 comes after it), xb is fine, xc's output names {modl} (xd reads
+# that output), xe has an unknown field, two experiments have the id xg, xh and xi make the same task name, FINAL step xfin has no cmd.
+BAD_TABLES = dict(broken="EXPERIMENTS = [\n", extra='''
+def st(name, out, inputs, cmd="true", **kw):
+    return dict(name=name, env="base", device="cpu", cmd=cmd, out=out, done="ok.txt", inputs=inputs, **kw)
+
+
+CK = "results/{model}/frag_{frag}/final.ckpt"
+EXPERIMENTS = [
+    dict(id="xa", recipe="toy", params=dict(ds="X1"), each=dict(frag=["0"]),
+         after=[st("xa1", "x/{model}/a1", [CK], cmd="run {frg}"), st("xa2", "x/{model}/a2", ["x/{model}/a1"])]),
+    dict(id="xb", recipe="toy", params=dict(ds="X2"), each=dict(frag=["0"]), after=[st("xb1", "x/{model}/b1", [CK])]),
+    dict(id="xc", recipe="toy", params=dict(ds="X3"), each=dict(frag=["0"]), after=[st("xc1", "x/{modl}/c1", [CK])]),
+    dict(id="xd", recipe="toy", params=dict(ds="X4"), each=dict(frag=["0"]), after=[st("xd1", "x/{model}/d1", ["x/X3/V_save__PlanM__full/c1"])]),
+    dict(id="xe", recipe="toy", params=dict(ds="X5", frag="0"), nicee=1),
+    dict(id="xg", recipe="toy", params=dict(ds="X6", frag="0")),
+    dict(id="xg", recipe="toy", params=dict(ds="X7", frag="0")),
+    dict(id="xh", recipe="toy", params=dict(ds="X8", frag="0")),
+    dict(id="xi", recipe="toy", params=dict(ds="X8", frag="0")),
+]
+FINAL = [dict(name="xfin", env="base", out="x/fin", done="ok.txt")]
+''')
+
+
+def exp_tables(more):
+    """The test experiment table (exps/demo, linked) plus more tables {dir name: module source} in a temp dir -> the glob that
+    reads them all (absolute, so OUTPUTS["experiments"] can be it)."""
+    d = tmpdir(prefix="exps-")
+    for name, src in dict(more, demo=None).items():
+        os.makedirs(os.path.join(d, name))
+        p = os.path.join(d, name, "experiments.py")
+        if src is None:
+            os.symlink(os.path.join(EXPS, "demo", "experiments.py"), p)
+        else:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(src)
+    return os.path.join(d, "*", "experiments.py")
+
+
+def read_tables(pat):
+    """In this process, experiments.py reads the experiment tables matching pat from now on (its cache cleared); pat None -> the
+    test table again."""
+    import cfg
+    import experiments
+    if not hasattr(cfg, "_fixture_outputs"):
+        cfg._fixture_outputs = cfg.outputs
+    real = cfg._fixture_outputs
+    cfg.outputs = real if pat is None else (lambda key: pat if key == "experiments" else real(key))
+    experiments._cache.clear()
+
+
+def config_reading(pat):
+    """A copy of config/ whose policy.py reads the experiment tables matching pat (for commands run as child processes)."""
+    d = os.path.join(tmpdir(prefix="config-"), "config")
+    shutil.copytree(CONFIG, d)
+    p = os.path.join(d, "policy.py")
+    with open(p, encoding="utf-8") as f:
+        text = f.read()
+    old = 'experiments=QR + "/testdata/exps/*/experiments.py",'
+    assert old in text, "config/policy.py no longer names the test experiment table this way"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text.replace(old, f"experiments={pat!r},"))
+    return d
+
+
 def dead_pid():
     """pid of a finished, reaped child (os.kill(pid, 0) raises ProcessLookupError). Do not use a "probably unused" number such as
     999999: some sandboxes raise PermissionError for pids they cannot see, which POSIX treats as "process exists"."""
