@@ -5,7 +5,8 @@ dir; store operations (done, probe, rm) really run site_ops.py.
      being fetched do not count as done;
   2. across experiments: paired/t3b waits for ens/t0; FINAL waits for all its upstream;
   3. rerun: an input newer than the done file -> delete the done file (on the store) and redo; upstream not done -> no redo;
-  4. temp: every user finished -> delete temp files on the store, leave the rest; a downstream rerun -> do not delete;
+  4. temp: every user finished -> delete temp files on the store, leave the rest; a downstream rerun -> do not delete; the store
+     deletes files only (never a directory that still holds something, nothing reached through ..);
   5. HOLD, AUTO["advance"]=False (only write what would be done), bad experiment table, unreachable store: reported right;
   6. adding to the queue really runs taskq.py add (temp state dir); queued tasks carry step, key is the instance id.
     python3 queue/test_advance.py
@@ -173,6 +174,28 @@ ok("run: delete *.prob on the store, leave other files (predictions, done)",
    not os.path.exists(prob) and os.path.exists(keep) and os.path.exists(os.path.join(DATA, inf.outputs[0], "MANIFEST.json")))
 ok("temp files already gone: not planned again (taskq plan does not list it, the store is not asked to delete)",
    not [t for t in A.plan(snap())[0] if t["op"] == "temp" and t["id"] == "infer/t0_f0"])
+# the store deletes files only: a directory that still holds files stays, dir/** empties one, .. is refused
+out = inf.outputs[0]
+tmp = [touch(out + "/scratch/a/x.tmp", "y" * 10), touch(out + "/scratch/b.tmp")]
+there = lambda: [os.path.exists(p) for p in tmp + [keep, os.path.join(DATA, out, "MANIFEST.json")]]  # noqa: E731
+r = A.RM.store_op("rm", dict(pats=[out + "/scratch", out, out + "/G-*", os.path.dirname(out)]))
+ok("store rm: a pattern naming a directory (a temp dir, the output itself, its parent) deletes nothing and says how many were left",
+   dict(r, bytes=0) == dict(n=0, bytes=0, dirs=4) and all(there()))
+for bad in (out + "/..", out + "/scratch/../*", out + "/../../*/*"):
+    try:
+        A.RM.store_op("rm", dict(pats=[bad]))
+        r = None
+    except RuntimeError as e:
+        r = str(e)
+    ok(f"store rm: {bad.replace(out, '<out>')} is refused, nothing deleted", r and "bad path" in r and all(there()))
+r = A.RM.store_op("rm", dict(pats=[out + "/scratch/**"]))
+ok("store rm: dir/** deletes every file under the dir, and the dirs once they are empty; the rest stays",
+   r["n"] == 2 and r["dirs"] == 0 and not os.path.exists(os.path.join(DATA, out, "scratch")) and there() == [False, False, True, True])
+touch(inf.outputs[0] + "/G-A/b.prob")
+did, stuck = A.run(snap(), tq=lambda n, p: (0, ""), store=lambda what, data: dict(n=0, bytes=0, dirs=2))
+ok("run: temp patterns that only hit directories still holding files are reported (advance:temp), not passed over in silence",
+   "2 matching directories" in stuck.get(proto.alert_id("advance", "temp", "infer/t0_f0"), ""))
+A.run(snap(), tq=lambda n, p: (0, ""))
 
 # ---- 5. HOLD, AUTO, errors ----
 os.remove(os.path.join(DATA, INST["eval/t0_f1"].outputs[0], "report/report.md"))

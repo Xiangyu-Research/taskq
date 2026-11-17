@@ -131,7 +131,7 @@ def plan(s):
             continue
         users = g.users.get(i.id, [])
         if users and all(u in done for u in users) and not g.descendants(i.id) & set(reruns):
-            pats = [S.fill(f"{i.outputs[0]}/{t}", i.names) for t in i.step["temp"]]
+            pats = [f"{i.outputs[0]}/{t}" for t in i.step["temp"]]
             todo.append(dict(op="temp", id=i.id, pats=pats))
     temp = sorted({p for t in todo if t["op"] == "temp" for p in t["pats"]})
     if temp:  # temp files already deleted: nothing to do (neither listed by taskq plan nor sent to the store again)
@@ -177,6 +177,9 @@ def run(s, dry=False, tq=None, store=None, say=None):
                     r = store("rm", dict(pats=t["pats"]))
                     if r["n"]:
                         lines.append(f"deleted {what}: {r['n']} files, {r['bytes'] / 1e9:.1f} GB")
+                    if r.get("dirs"):
+                        stuck[alert_id("advance", "temp", t["id"])] = (f"{what}: {r['dirs']} matching directories still hold files and were "
+                                                                       "left (temp deletes files only: write dir/** for everything under a dir)")
                 except RuntimeError as e:
                     stuck[alert_id("advance", "temp", t["id"])] = f"deleting {what} failed ({e})"
             else:

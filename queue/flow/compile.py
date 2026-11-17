@@ -2,7 +2,8 @@
 There are only two ordering rules: within a task in order (source -> after's first step -> second ...); an input (wildcards
 included) that falls in another instance's output (equal, inside it, or containing it) runs after that instance, whichever
 experiment it belongs to. An input in no output is raw data (raw).
-Checks (errors): unknown template names, wildcard outputs, overlapping outputs of two instances, an input inside its own outputs, cycles."""
+Checks (errors): unknown template names, wildcard outputs, overlapping outputs of two instances, an input inside its own outputs,
+temp patterns that leave the output or hit a done marker, cycles."""
 import fnmatch
 import glob as G
 import itertools
@@ -30,6 +31,25 @@ def expand_inputs(paths, names, each=()):
         else:
             out.append(S.fill(p, names))
     return [norm(p) for p in out]
+
+
+def glob_hits(pat, path):
+    """Does a glob (a ** component stands for any number of dirs, as in glob.glob(recursive=True)) match this relative path?"""
+    def go(ps, xs):
+        if not ps:
+            return not xs
+        if ps[0] == "**":
+            return any(go(ps[1:], xs[k:]) for k in range(len(xs) + 1))
+        return bool(xs) and fnmatch.fnmatchcase(xs[0], ps[0]) and go(ps[1:], xs[1:])
+    return go(pat.split("/"), path.split("/"))
+
+
+def bad_temp(t, done):
+    """Why a step's temp pattern (relative to its first output) cannot be used, or None; done: the step's done field."""
+    if t.startswith("/") or ".." in t.split("/") or norm(t) == ".":
+        return "must be a path under the output, without .. (not the output itself)"
+    hit = [a for d in S.P.done_items(done) for a in d if glob_hits(norm(t), norm(a))]
+    return f"matches the done marker {hit[0]} (the step would count as not done after the cleanup)" if hit else None
 
 
 class Outs:
@@ -91,10 +111,11 @@ def build(exps=None, final=None, queue_tasks=()):
         try:
             outs = [norm(S.fill(x, names)) for x in st["out"]]
             ins = expand_inputs(st["inputs"], names, each)
-            st = dict(st, **{k: [S.fill(x, names) for x in st[k]] for k in ("env", "done")})  # templates like cmd, out and inputs
+            st = dict(st, **{k: [S.fill(x, names) for x in st[k]] for k in ("env", "done", "temp")})  # templates like cmd, out and inputs
         except S.SpecError as e:
             errors.append(f"{iid}: {e}")
             return None
+        errors.extend(f"temp {t} of {iid} {why}" for t in st["temp"] for why in [bad_temp(t, st["done"])] if why)
         for o in outs:
             if G.has_magic(o):
                 errors.append(f"output {o} of {iid} has a wildcard (outputs must be concrete paths)")

@@ -192,7 +192,7 @@ Steps (each entry in `after`, `group_after`, `FINAL`):
 | `device` | `device` | `'gpu'` | gpu (needs a GPU) or cpu (CPU only) |
 | `res` | `dict` | `{}` | resources (recipes.py res) |
 | `out_gb` | `num?` | `None` | roughly how many GB of output (leaves room when choosing a machine; None = proto.OUT_GB) |
-| `temp` | `strs` | `()` | temp files under the first output (wildcards): after every step using them is done and they are fetched, the store deletes them and records it in the event log |
+| `temp` | `strs` | `()` | temp files under the first output (wildcards; dir/** for everything under a dir; never a done marker): after every step using them is done and they are fetched, the store deletes them and records it in the event log |
 | `rerun` | `bool` | `False` | redo when an input is newer than the output |
 | `nice` | `int` | `0` | nice in the hub queue |
 | `only` | `dict?` | `None` | per-task steps: only for tasks where each takes these values ({param: [values...]}) |
@@ -380,7 +380,7 @@ before it is pushed.
 `queue/flow/compile.py` derives instances and order from the experiment table: within one task in order (training -> `after`'s first step
 -> second ...); an input (wildcards included) that falls in another instance's outputs is ordered after that instance, across experiments;
 inputs that fall in no output are raw data. Checks: unknown names in templates, wildcard outputs, overlapping outputs, an input inside its
-own outputs, and cycles.
+own outputs, `temp` patterns that leave the output or match a done marker, and cycles.
 
 `queue/advance.py` each round:
 
@@ -388,7 +388,9 @@ own outputs, and cycles.
 2. adds to the hub queue any instance whose prerequisites are done, which is not done itself, and is not in the queue (recipe `command`,
    key = instance id, `step` = step name); which machine it goes to is decided by `PLACE` when sending;
 3. steps with `rerun=True`: when an input is newer than the done file, delete the done file on the store and queue it again;
-4. `temp`: after every instance using it is done and its results are on the store, delete those temp files on the store and record it in events.
+4. `temp`: after every instance using it is done and its results are on the store, delete those temp files on the store and record it in
+   events. The store deletes files and links only: a matching directory goes once it is empty (`dir/**` empties one), and one that still
+   holds files is reported.
 
 `HOLD` matches are not queued; with `AUTO["advance"]` off it only writes "what it would queue".
 

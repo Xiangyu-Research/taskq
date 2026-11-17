@@ -5,7 +5,8 @@
    2. order: within a task in order; an input in another instance's output is ordered after it (across experiments, wildcards and
       experiment-level each expansion all count); inputs in no output are raw data, training's shared fetch.extra is not;
    3. topological order, upstream/downstream, who (longest prefix), dag; tasks in the hub queue outside the experiment table are sources too;
-   4. checks: unknown template names, wildcard outputs, overlapping outputs, an input inside its own outputs, cycles.
+   4. checks: unknown template names, wildcard outputs, overlapping outputs, an input inside its own outputs, temp patterns that
+      leave the output or hit a done marker, cycles.
     python3 queue/test_flow_compile.py
 """
 import copy
@@ -180,6 +181,27 @@ def own(exps, final):
 
 
 ok(any("falls in its own output" in p for p in compiled(own)), "an input inside its own output")
+
+
+def temp_errs(*pats, done=None):
+    def edit(exps, final):
+        st = step_of(exps, "t0", "infer")
+        st["temp"] = list(pats)
+        st["done"] = done or st["done"]
+    return [p for p in compiled(edit) if p.startswith("temp ")]
+
+
+ok(not temp_errs("*/*.prob", "scratch/**", "cache_{frag}/*.tmp"), "temp: files under the output (wildcards, dir/**, templates) are fine")
+for bad in (".", "", "..", "../x", "a/../../x", "/abs/x", "sub/.."):
+    ok(any("must be a path under the output" in p for p in temp_errs(bad)), f"temp {bad!r}: not a path under the output")
+for bad in ("*", "**", "**/*", "MANIFEST.json", "*.json", "./MANIFEST.json"):
+    ok(any("matches the done marker MANIFEST.json" in p for p in temp_errs(bad)), f"temp {bad!r}: would delete the done marker")
+ok(any("matches the done marker d_0.json" in p and "infer/t0_f0" in p for p in temp_errs("d_{frag}.*", done=["d_{frag}.json|x/y.json"]))
+   and any("matches the done marker x/y.json" in p for p in temp_errs("x/*", done=["d_{frag}.json|x/y.json"]))
+   and not temp_errs("x/*.tmp", "y/*", done=["d_{frag}.json|x/y.json"]),
+   "temp: templates are filled first, every done alternative is checked, a marker in a subdir too")
+ok(FC.glob_hits("a/**/c", "a/c") and FC.glob_hits("a/**/c", "a/b/b/c") and FC.glob_hits("**", "a/b") and not FC.glob_hits("a/*", "a/b/c")
+   and not FC.glob_hits("a", "a/b") and FC.glob_hits("a/b*", "a/b"), "glob_hits: ** is any number of dirs, * stays within one")
 
 
 def loop(exps, final):

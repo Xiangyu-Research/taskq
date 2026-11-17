@@ -46,8 +46,10 @@ def sub(R, k):
 
 def rel_ok(r, depth=1):
     """A path relative to the data dir: not absolute, no .., at least depth levels."""
+    if ".." in str(r).split("/"):  # before normalising: a/b/.. would become a, which is not what was written
+        raise Bad(f"bad path: {r}")
     r = os.path.normpath(r)
-    if r.startswith("/") or ".." in r.split("/") or len(r.split("/")) < depth:
+    if r.startswith("/") or len(r.split("/")) < depth:
         raise Bad(f"bad path: {r}")
     return r
 
@@ -598,23 +600,29 @@ def op_probe(A):
 
 
 def op_rm(A):
-    """pats: temp-file globs (relative to the data dir) → dict(n=removed, bytes=freed); remove files only, never outside the
-    data dir."""
+    """pats: globs of files to delete (relative to the data dir; write dir/** for everything under a dir) → dict(n=files removed,
+    bytes=freed, dirs=matched directories left because they still hold something). Removes files and links only, never a directory
+    with something in it and nothing outside the data dir; a matched directory that is empty afterwards goes too."""
     D = store_dir(A)
-    n, freed = 0, 0
+    n, freed, dirs = 0, 0, set()
     for pat in A["pats"]:
         for p in matches(D, pat):
             if not C.inside(p, D) or os.path.realpath(p) == D:
                 continue
             if os.path.isdir(p) and not os.path.islink(p):
-                freed += C.du([p])[0]
-                shutil.rmtree(p)
-            else:
-                x = os.lstat(p)
-                freed += x.st_blocks * 512 if stat.S_ISREG(x.st_mode) and x.st_nlink == 1 else 0
-                os.remove(p)
+                dirs.add(os.path.normpath(p))
+                continue
+            x = os.lstat(p)
+            freed += x.st_blocks * 512 if stat.S_ISREG(x.st_mode) and x.st_nlink == 1 else 0
+            os.remove(p)
             n += 1
-    return dict(n=n, bytes=freed)
+    left = 0
+    for d in sorted(dirs, key=len, reverse=True):  # deepest first, so a dir whose subdirs all went goes too
+        try:
+            os.rmdir(d)
+        except OSError:
+            left += 1
+    return dict(n=n, bytes=freed, dirs=left)
 
 
 # ---------------- machines with files to send (store data, hub wheelhouse): push to executors, fetch, archive ----------------

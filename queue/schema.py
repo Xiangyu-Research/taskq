@@ -122,8 +122,8 @@ STEP_FIELDS = {
     "device": ("device", "gpu", "gpu (needs a GPU) or cpu (CPU only)"),
     "res": ("dict", {}, "resources (recipes.py res)"),
     "out_gb": ("num?", None, "roughly how many GB of output (leaves room when choosing a machine; None = proto.OUT_GB)"),
-    "temp": ("strs", (), "temp files under the first output (wildcards): after every step using them is done and they are fetched, "
-                         "the store deletes them and records it in the event log"),
+    "temp": ("strs", (), "temp files under the first output (wildcards; dir/** for everything under a dir; never a done marker): after "
+                         "every step using them is done and they are fetched, the store deletes them and records it in the event log"),
     "rerun": ("bool", False, "redo when an input is newer than the output"),
     "nice": ("int", 0, "nice in the hub queue"),
     "only": ("dict?", None, "per-task steps: only for tasks where each takes these values ({param: [values...]})"),
