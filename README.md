@@ -183,8 +183,9 @@ line for each, and the reasons go in its note. Exit codes: 0 all pass (or skip),
 
 CI (`.github/workflows/test.yml`, job `test`) runs the lint, the whole suite and the example project check on every push to any branch
 and on every pull request, with the full git history (a shallow clone skips the checks that build old bundles from older commits); its
-job `ssh` starts a local sshd (key made on the fly) and runs `test_real_ssh.py` through it. `main` is a protected branch that requires
-the `test` check to pass: a change goes to a branch first, and reaches `main` (goes live) only once CI has passed on it.
+job `ssh` starts a local sshd (key made on the fly) and runs `test_real_ssh.py` through it. Protect `main` in the repository's
+GitHub settings (a branch rule requiring the `test` check): then a change goes to a branch first, and reaches `main` (goes live) only
+once CI has passed on it.
 
 Which tests to run after changing which file (run the full suite once at the end of a change; shared files such as `queue/proto.py`
 and `bin/taskq` mean the full suite):
