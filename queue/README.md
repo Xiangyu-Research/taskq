@@ -345,7 +345,9 @@ The hub tops up Slurm executors each round through `refill.slurm_plan` (`sites/s
 The job's argument is `R/code/current/.../worker_start.sh`; `current` is resolved when the job starts, so it uses the bundle of that
 moment; a worker switches to a new `current` only when claiming a new task.
 When inputs must be copied to node-local disk (`res.local_inputs`), the copy runs in the background after training starts
-(`queue/inputs.py`).
+(`queue/inputs.py`). The node-local dir must be a private dir of this account (created 0700; one made by another account, or a link,
+means inputs are read in place), only this account's other job dirs on the node are hard-linked from or cleaned up, and a local blob
+is used only while its sha256 is known to match (its `.st` record, else checked again by the copy).
 
 ### Sending tasks: feed -> relay -> refill.choose
 

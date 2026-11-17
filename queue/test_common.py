@@ -109,6 +109,27 @@ ok("run: with host -> wrapped in timeout -k there, 15 seconds earlier, command p
    and cmd[-2] == "fake-slurm-login" and to == 120)
 ok("run: local commands are not wrapped", C.run("echo hi")[1] == "hi\n")
 
+# private_dir: node-local dirs with predictable names (shared temp dirs) are used only when they are this account's real dirs
+import stat  # noqa: E402
+pd = os.path.join(T, "shared", "mine")
+ok("private_dir: missing -> created 0700 (with its parents)", C.private_dir(pd) and stat.S_IMODE(os.lstat(pd).st_mode) == 0o700)
+os.chmod(pd, 0o775)
+ok("private_dir: ours but open to others -> closed (0700)", C.private_dir(pd) and stat.S_IMODE(os.lstat(pd).st_mode) == 0o700)
+os.makedirs(os.path.join(T, "target"))
+os.chmod(os.path.join(T, "target"), 0o755)
+os.symlink(os.path.join(T, "target"), os.path.join(T, "shared", "planted"))
+open(os.path.join(T, "shared", "file"), "w").close()
+ok("private_dir: a planted link or a file -> not ours (False), the link's target left as it was",
+   not C.private_dir(os.path.join(T, "shared", "planted")) and not C.private_dir(os.path.join(T, "shared", "file"))
+   and stat.S_IMODE(os.stat(os.path.join(T, "target")).st_mode) == 0o755)
+_getuid = os.getuid
+os.getuid = lambda: _getuid() + 1
+try:
+    other = not C.private_dir(pd)
+finally:
+    os.getuid = _getuid
+ok("private_dir: another account's dir -> False, left as it is", other and stat.S_IMODE(os.lstat(pd).st_mode) == 0o700)
+
 # backup_down: backup paused or unreachable this time -> reason (relay.py then does not queue archives)
 fixture.use()
 import cfg  # noqa: E402

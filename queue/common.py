@@ -116,6 +116,33 @@ def sha256(path):
     return h.hexdigest()
 
 
+def private_dir(path):
+    """Make path a dir only this account can use (node-local dirs with predictable names, such as under /tmp): created 0700 (missing
+    parents as usual) when absent; one that exists must be a real dir (not a symlink) owned by this account, and is then closed to
+    group and others. -> True; False when it is not ours (another account made it first, or a symlink is planted there): do not
+    use it."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:  # a symlink or not a dir
+        return False
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.getuid():
+            return False
+        if st.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+        return True
+    finally:
+        os.close(fd)
+
+
 def inside(path, base):
     """path (after resolving symlinks) is base itself or under it."""
     p, b = os.path.realpath(path), os.path.realpath(base)
