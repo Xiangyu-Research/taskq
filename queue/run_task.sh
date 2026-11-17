@@ -17,6 +17,8 @@
 # command's kill propagates as is).
 # A spec or env problem (exit 2) also writes the reason to the part log (key from the worker's TASK_KEY or the arguments).
 # Stop the task with SIGTERM (pueue kill -s SIGTERM): stop training first (force after 8 seconds) and then exit; next time it resumes from the checkpoint.
+# Training never outlives its task: whatever the command leaves in its session when it exits is stopped too, and when a worker
+# started this script (TASK_JOBTAG set), a watcher stops the training once the worker is gone (killed) or this script was killed.
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 eval "$(python3 "$HERE/proto.py" sh)"; [[ -n ${TQ_SAFE:-} ]] || { echo "cannot read $HERE/proto.py" >&2; exit 2; }  # shared names and exit codes TQ_*
@@ -107,21 +109,45 @@ wait_gpu() {  # GPU free -> 0; still busy after TASK_WAIT_GPU minutes -> 1. Ever
     done
 }
 kill_tree() { local c s=${2:-TERM}; for c in $(pgrep -P "$1"); do kill_tree "$c" "$s"; done; kill -"$s" "$1" 2> /dev/null; }
-gone() { ! kill -0 -- -"$1" 2> /dev/null && ! kill -0 "$1" 2> /dev/null; }  # neither the training process group nor the process itself remains
-# the training process (group leader). Its own name: bash scoping is dynamic, so a trap firing inside a function sees that
-# function's locals; gpu_free's pid (from nvidia-smi) once made on_term signal pid 1, i.e. every process of the account
-train_pid=
-on_term() {  # SIGTERM the whole process group, SIGKILL after 8 seconds (checkpoints are written atomically), exit once it is gone
+left() { ps -o stat= -s "$1" 2> /dev/null | grep -q '^[^Z]'; }  # a live process left in training session $1 (zombies do not count)
+stop_session() {  # $1 training pid (leader of its own session and group): SIGTERM the group and the session (with $2=tree also the
+    # process tree, only while the leader is not reaped yet: its pid cannot be reused), SIGKILL after STOP_WAIT seconds (checkpoints
+    # are written atomically); return once nothing is left
+    local sid=$1 tree=${2:-} _
+    [[ $sid =~ ^[0-9]+$ ]] && (( sid > 1 )) || return 0  # kill -- -1 would signal every process of the account
+    kill -TERM -- -"$sid" 2> /dev/null; pkill -TERM -s "$sid" 2> /dev/null; [[ -n $tree ]] && kill_tree "$sid"
+    for _ in $(seq "$STOP_WAIT"); do left "$sid" || return 0; sleep 1; done
+    echo "$(ts) training did not stop within $STOP_WAIT seconds, forcing" | tee -a "$LOG"
+    kill -KILL -- -"$sid" 2> /dev/null; pkill -KILL -s "$sid" 2> /dev/null; [[ -n $tree ]] && kill_tree "$sid" KILL
+    for _ in 1 2 3; do left "$sid" || return 0; sleep 1; done
+    echo "$(ts) training process still there after the force kill (likely stuck in I/O)" | tee -a "$LOG"
+}
+BOSS=$PPID  # the worker that started this script (same pid across a code switch: the switch and worker_start.sh exec in place)
+BOSS_POLL=${RUN_TASK_BOSS_POLL:-5} # tests only
+ppid_of() { local s; s=$(< "/proc/$1/stat") || return 1; s=${s##*) }; set -- $s; echo "$2"; }  # fields after "(name) ": state ppid ...
+watch_boss() {  # $1 training pid. Every BOSS_POLL seconds: this script gone (killed with SIGKILL) -> stop the training session from
+    # here; this script has another parent (the worker was killed) -> stop signal to this script (on_term stops the training)
+    local sid=$1 me=$BASHPID  # this watcher (inside $(...) BASHPID is that subshell)
+    while sleep "$BOSS_POLL"; do
+        if [[ $(ppid_of "$me" 2> /dev/null) != "$$" ]]; then
+            echo "$(ts) run_task.sh is gone, stopping its training" >> "$LOG"
+            stop_session "$sid"; return
+        fi
+        if [[ $(ppid_of $$ 2> /dev/null) != "$BOSS" ]]; then
+            echo "$(ts) the worker that started this task is gone, stopping" >> "$LOG"
+            kill -TERM $$; return
+        fi
+    done
+}
+# the training process (session and group leader) and whether it is not reaped yet; the watcher's pid. Own names: bash scoping is
+# dynamic, so a trap firing inside a function sees that function's locals; gpu_free's pid (from nvidia-smi) once made on_term
+# signal pid 1, i.e. every process of the account
+train_pid= train_up= WPID=
+on_term() {  # stop the training (whole session, forced after STOP_WAIT seconds), exit once it is gone
+    [[ -n $WPID ]] && kill "$WPID" 2> /dev/null
     if [[ $train_pid =~ ^[0-9]+$ ]] && (( train_pid > 1 )); then
         echo "$(ts) got stop signal, stopping training"
-        kill -TERM -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid"
-        for _ in $(seq "$STOP_WAIT"); do gone "$train_pid" && break; sleep 1; done
-        if ! gone "$train_pid"; then
-            echo "$(ts) training did not stop within $STOP_WAIT seconds, forcing" | tee -a "$LOG"
-            kill -KILL -- -"$train_pid" 2> /dev/null; kill_tree "$train_pid" KILL
-            for _ in 1 2 3; do gone "$train_pid" && break; sleep 1; done
-        fi
-        gone "$train_pid" || echo "$(ts) training process still there after the force kill (likely stuck in I/O)" | tee -a "$LOG"
+        stop_session "$train_pid" ${train_up:+tree}
     fi
     exit "$TQ_EXIT_RUN_TERM"
 }
@@ -153,13 +179,20 @@ if (( ${#TASK_INPUTS[@]} )); then
     fi
 fi
 export TASK_INPUTS_ROOT
-trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null' EXIT
+trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null; [[ -n $WPID ]] && kill "$WPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
     [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # the consumer checked the GPU before claiming
     # own process group so a stop takes the whole group; the task's command gets the core's library (TASKQ_LIB) and commands (bin/ first on PATH)
     ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
-    train_pid=$!
-    wait "$train_pid"; rc=$?; train_pid=
+    train_pid=$! train_up=1
+    [[ -n ${TASK_JOBTAG:-} ]] && { watch_boss "$train_pid" > /dev/null 2>&1 < /dev/null & WPID=$!; }
+    wait "$train_pid"; rc=$?; train_up=
+    [[ -n $WPID ]] && kill "$WPID" 2> /dev/null; WPID=
+    if left "$train_pid"; then  # background children would keep the GPU and keep writing into out
+        echo "$(ts) the command exited but left processes in its session, stopping them" | tee -a "$LOG"
+        stop_session "$train_pid"
+    fi
+    train_pid=
     done_ "$@"; drc=$?
     if (( drc == TQ_EXIT_DONE_YES )); then
         echo "$TQ_DONE_LINE $(ts)" >> "$LOG"; echo "$(ts) done: $TASK_KEY"; exit "$TQ_EXIT_RUN_DONE"

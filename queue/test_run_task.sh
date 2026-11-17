@@ -76,6 +76,28 @@ RUN_TASK_STOP_WAIT=2 $R command key=toy/i "cmd=trap '' TERM; sleep 307 & wait; s
 kids=$(started $rp "sleep 307" | tr '\n' ' ')
 kill -TERM $rp; wait $rp; rc=$?
 check "training ignores SIGTERM: forced stop, no training processes left when run_task.sh exits" "(( rc == 143 )) && [[ -n '$kids' ]] && ! ps -o pid= -p ${kids// /,}0 2> /dev/null | grep -q . && grep -q forcing $T/logs/tasks/toy__i__test-1_part1.log"
+# training never outlives its task. gone_in: within $1 seconds none of the pids is alive (zombies count as gone)
+gone_in() {
+    local n p a
+    for (( n = 0; n < $1 * 10; n++ )); do
+        a=0; for p in "${@:2}"; do [[ $(ps -o stat= -p "$p" 2> /dev/null) == [^Z]* ]] && a=1; done
+        (( a )) || return 0
+        sleep 0.1
+    done
+    return 1
+}
+printf '#!/bin/bash\n"$@" > /dev/null &\nwait\n' > "$T/boss.sh"  # a stand-in worker: starts run_task.sh and waits
+RUN_TASK_BOSS_POLL=1 bash "$T/boss.sh" $R command key=toy/k1 'cmd=sleep 317' env=base out=toy/k1 'done=["DONE"]' & boss=$!
+kids=$(started $boss "sleep 317" | tr '\n' ' '); rt=$(pgrep -P $boss)
+kill -KILL $boss; wait $boss 2> /dev/null
+check "the worker is killed (SIGKILL): run_task.sh notices it has another parent and stops the training" "[[ -n '$kids' && -n '$rt' ]] && gone_in 20 $rt $kids && grep -q 'the worker that started this task is gone' $T/logs/tasks/toy__k1__test-1_part1.log"
+RUN_TASK_BOSS_POLL=1 $R command key=toy/k2 'cmd=sleep 318' env=base out=toy/k2 'done=["DONE"]' > /dev/null & rp=$!
+kids=$(started $rp "sleep 318" | tr '\n' ' ')
+kill -KILL $rp; wait $rp 2> /dev/null
+check "run_task.sh itself is killed (SIGKILL): its watcher stops the training" "[[ -n '$kids' ]] && gone_in 20 $kids && grep -q 'run_task.sh is gone' $T/logs/tasks/toy__k2__test-1_part1.log"
+$R command key=toy/l 'cmd=sleep 319 & echo $! > $TASKQ_DATA/toy/l/pid; touch $TASKQ_DATA/toy/l/DONE' env=base out=toy/l 'done=["DONE"]' > /dev/null; rc=$?
+lp=$(cat "$T/toy/l/pid" 2> /dev/null)
+check "the command exits leaving a background process: it is stopped, done as usual" "(( rc == 0 )) && [[ -n '$lp' ]] && gone_in 5 $lp && grep -q 'left processes in its session' $T/logs/tasks/toy__l__test-1_part1.log"
 # GPU wait (res.wait_gpu): fake nvidia-smi reports the processes in $T/gpu/apps for the first $T/gpu/busy checks, then none; OTHER is a process of another user
 OTHER=$(ps -eo pid=,user= | awk -v me="$(id -un)" '$2 != me {print $1; exit}')
 mkdir -p "$T/bin" "$T/gpu"

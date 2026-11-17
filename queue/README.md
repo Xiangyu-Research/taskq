@@ -293,7 +293,10 @@ A worker is `queue/consume.py` (`queue/worker_start.sh` activates the worker env
 and starts it; a name in `envs` is activated the same way as for tasks): it claims tasks from this
 machine's queue, starts `queue/run_task.sh`, collects exit codes, sends heartbeats, stops and releases. `run_task.sh` activates the env
 from the spec, sets env vars and runs the command at the project root inside the bundle, writing output to the part log; the training
-command must resume from its checkpoint (after a release another worker continues from it).
+command must resume from its checkpoint (after a release another worker continues from it). Training never outlives its task: the
+command runs in its own session, whatever it leaves there when it exits is stopped, and a watcher stops the training once the worker
+that started `run_task.sh` is gone (killed) or `run_task.sh` itself was killed, so a killed worker never leaves training on the GPU
+for a new worker to stack another task onto.
 
 #### Consumers
 
