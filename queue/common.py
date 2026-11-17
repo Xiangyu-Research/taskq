@@ -265,10 +265,11 @@ def write_format(v, path=None):
 
 def format_problem(path=None, fresh=False):
     """Is the state here in this code's on-disk format (proto.FORMAT)? -> None when it is, else what to tell the user.
-    fresh: nothing here was written by an older taskq (a new hub): stamp it with this code's format instead. The test-only
-    TASKQ_FORMAT_ANY=1 turns the check off (tests that build state by hand)."""
+    fresh: nothing here was written by an older taskq (a new hub): stamp it with this code's format instead. Not checked
+    (tests only): TASKQ_FORMAT_ANY=1 (state built by hand), or a queue dir given by TASKQ_DIR (outside the state the stamp
+    describes)."""
     P = _proto()
-    if os.environ.get("TASKQ_FORMAT_ANY") == "1":
+    if os.environ.get("TASKQ_FORMAT_ANY") == "1" or os.environ.get("TASKQ_DIR"):
         return None
     p = path or format_path()
     if fresh and not os.path.lexists(p):

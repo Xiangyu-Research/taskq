@@ -469,11 +469,34 @@ def heartbeat():
         print(f"heartbeat to {url} failed: {e}", file=sys.stderr)
 
 
+def format_refused(dry):
+    """The hub state is not in this code's on-disk format (common.format_problem; a new hub, with no database yet, is stamped)
+    -> True after saying so: a round does nothing until taskq self migrate has run (pushed once per message, by day);
+    taskq plan only notes it and goes on."""
+    why = C.format_problem(fresh=not dry and not os.path.exists(NT.D.path()))
+    if not why:
+        return False
+    if dry:
+        print(f"note: {why}; this plan reads state in another format", file=sys.stderr)
+        return False
+    msg = f"Health check not run: {why}. Nothing is checked, sent or fetched until then."
+    print(msg, file=sys.stderr)
+    if proto.NIGHT[1] <= datetime.now().hour < proto.NIGHT[0] and C.changed("format_refused", msg):
+        try:
+            push(msg, priority="high", tags="warning")
+        except Exception as e:  # noqa: BLE001  not pushed: try again next round
+            print(f"push failed: {e}", file=sys.stderr)
+            C.changed("format_refused", None)
+    return True
+
+
 def one_round(a):
     t0 = time.time()
     lock = None if a.dry_run or a.test else round_lock()  # held until this returns: rounds never overlap (manual tick, slow round)
     if not (a.dry_run or a.test) and lock is None:
         return 0
+    if not a.test and format_refused(a.dry_run):  # before anything opens the database (opening migrates its schema)
+        return 1
     import events
     db = NT.open_db(write=not a.dry_run)
     if not a.dry_run and db is not None and NT.D.writable(db):
