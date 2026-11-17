@@ -473,7 +473,8 @@ def format_refused(dry):
     """The hub state is not in this code's on-disk format (common.format_problem; a new hub, with no database yet, is stamped)
     -> True after saying so: a round does nothing until taskq self migrate has run (pushed once per message, by day);
     taskq plan only notes it and goes on."""
-    why = C.format_problem(fresh=not dry and not os.path.exists(NT.D.path()))
+    fresh = not os.path.exists(NT.D.path())
+    why = None if dry and fresh else C.format_problem(fresh=fresh)  # a plan on a new hub: its first round stamps it
     if not why:
         return False
     if dry:
