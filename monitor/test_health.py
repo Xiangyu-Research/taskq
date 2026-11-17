@@ -381,6 +381,23 @@ out = run(B, datetime(2026, 10, 17, 10, 30))
 ok("several in one round: one message", len(out) == 1 and " (2 items)" in out[0][0] and out[0][1].count("\n- ") == 1)
 INFOS = {f"idle:{PH}:gpu1": dict(msg="only running jobs left", level="info", kind="state", after=0)}
 ok("info level is not pushed", run(INFOS, datetime(2026, 10, 17, 11, 0)) == [])
+F = {"down:site-slurm": dict(msg="Slurm unreachable", level="normal", kind="state", after=0)}
+d3 = datetime(2026, 10, 18, 12, 0)
+out = run(F, d3)
+ok("flapping: gone for a round and back within PROBLEM_KEEP -> not pushed again (keeps when it started)",
+   len(out) == 1 and run({}, d3 + timedelta(minutes=30)) == [] and run(F, d3 + timedelta(hours=1)) == []
+   and NT.problems(_wdb)[0]["down:site-slurm"]["first"] == "2026-10-18 12:00")
+ok("back after PROBLEM_KEEP: a new problem, pushed again", run({}, d3 + timedelta(hours=2)) == []
+   and len(run(F, d3 + timedelta(hours=2, seconds=H.proto.PROBLEM_KEEP + 60))) == 1)
+d4 = datetime(2026, 10, 19, 12, 0)
+out1 = run(A, d4)
+out2 = run({k: dict(v, level="urgent") for k, v in A.items()}, d4 + timedelta(minutes=30))
+out3 = run({k: dict(v, level="urgent") for k, v in A.items()}, d4 + timedelta(hours=1))
+ok("a pushed problem that gets worse (disk normal -> urgent) is pushed again, once", len(out1) == 1 and len(out2) == 1
+   and out2[0][0] == f"{H.NAME}: urgent" and out3 == [])
+EV = {"pueue:site-pueue:9:x": dict(msg="task failed", level="normal", kind="event", after=0)}
+ok("an event (happened once) that comes back after going away is pushed again", len(run(EV, d4 + timedelta(hours=2))) == 1
+   and run({}, d4 + timedelta(hours=2, minutes=30)) == [] and len(run(EV, d4 + timedelta(hours=3))) == 1)
 N = {"notice:board": dict(msg="board waiting for confirmation", level="normal", kind="state", after=0)}
 ok("notices are not pushed, only listed under problems", run(N, datetime(2026, 10, 17, 11, 30)) == []
    and "notice:board" in NT.problems(_wdb)[0])
@@ -456,6 +473,28 @@ with NT.D.tx(_wdb):
 got.clear()
 H.main([])
 ok("the last round took longer than TICK_SLOW: reported as a problem", "health:slow" in got and "took" in got["health:slow"]["msg"])
+pinged, _real_open, _real_outputs = [], H.urllib.request.urlopen, H.cfg.outputs
+
+
+class _Resp:
+    def read(self):
+        return b""
+
+
+H.urllib.request.urlopen = lambda req, timeout=0: pinged.append(req.full_url) or _Resp()
+H.cfg.outputs = lambda k: "https://hb.example/ping" if k == "heartbeat" else _real_outputs(k)
+H.main(["-n"])
+H.main([])
+ok("OUTPUTS heartbeat: fetched once after a finished round (not by taskq plan)", pinged == ["https://hb.example/ping"])
+_real_gather, H.gather = H.gather, lambda: 1 / 0
+pushed.clear()
+rc_a, rc_b = H.main([]), H.main([])
+ok("a crash inside a round: exit 1, pushed once (the same error is not pushed again), no heartbeat",
+   (rc_a, rc_b) == (1, 1) and len(pushed) == 1 and "crashed" in pushed[0] and "ZeroDivisionError" in pushed[0] and len(pinged) == 1)
+H.gather = _real_gather
+H.main([])
+ok("the next good round clears the crash mark (a new crash is pushed again)", NT.D.get_meta(NT.open_db(write=False), "crash_error") is None)
+H.urllib.request.urlopen, H.cfg.outputs = _real_open, _real_outputs
 H.push, H.datetime = _real_push, _real_dt
 
 # ---------------- plain wording (plain.py): labels, task key -> experiment name + task short name ----------------
@@ -569,12 +608,12 @@ runpy.run_path(H, run_name="__main__")
 """)
 
 
-def _health(plugins, hour, *args):
+def _health(plugins, hour, *args, config=None):
     home = os.path.join(_lt, "home")
     os.makedirs(os.path.join(home, ".config", "taskq"), exist_ok=True)
     open(os.path.join(home, ".config", "taskq", "ntfy_topic"), "w").write("t0\n")
     env = dict(os.environ, HOME=home, TASKQ_PLUGINS=plugins, TASKQ_STATE=os.path.join(_lt, "st"),
-               TASKQ_DIR=os.path.join(_lt, "q"))
+               TASKQ_DIR=os.path.join(_lt, "q"), **({"TASKQ_CONFIG": config} if config else {}))
     log = os.path.join(_lt, "pushed.log")
     r = subprocess.run([sys.executable, _wrap, os.path.join(HERE, "health.py"), log, str(hour), *args],
                        env=env, capture_output=True, text=True, timeout=60)
@@ -593,6 +632,13 @@ if os.path.exists(os.path.join(_lt, "pushed.log")):
     os.remove(os.path.join(_lt, "pushed.log"))
 rc4, p4 = _health(_bad, 23)
 ok("a broken plugin at night: no push (it waits for the first morning check)", rc4 != 0 and p4 == [])
+_bcfg = os.path.join(_lt, "badcfg")
+shutil.copytree(os.environ["TASKQ_CONFIG"], _bcfg)
+with open(os.path.join(_bcfg, "policy.py"), "a") as f:
+    f.write("\nTHIS IS ( BROKEN\n")
+rc5, p5 = _health(os.environ["TASKQ_PLUGINS"], 12, config=_bcfg)
+ok("policy.py with a syntax error: health still starts, exits non-zero and pushes why (to the default channel file)",
+   rc5 != 0 and len(p5) == 1 and "policy.py" in p5[0] and "SyntaxError" in p5[0] and "/t0?" in p5[0])
 
 # ---------------- pueued gone: automatic recovery ----------------
 LOC = dict(label="loc", hostname=r"\A\Z", ssh=None, scheduler="pueue", root="/tmp/loc_root", workers=[dict(cpus=2)])

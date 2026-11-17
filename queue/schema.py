@@ -87,6 +87,7 @@ OUTPUT_FIELDS = {
     "name": ("str", "taskq", "prefix of push titles"),
     "topic": ("str", "~/.config/taskq/ntfy_topic", "file holding the push channel name (the channel name does not go in the repo)"),
     "logs": ("str", "~", "dir for plain text logs (relay.log, advance.log, ...)"),
+    "heartbeat": ("str?", None, "URL fetched after every finished health check round, so an outside service (a dead-man's switch) alerts when rounds stop"),
 }
 
 

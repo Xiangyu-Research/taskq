@@ -134,6 +134,8 @@ NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are 
 SPEC_MAX = 120 * 1024        # bytes: a sent spec reaches run_task.sh as one command-line argument (Linux allows 128 KB per argument)
 TICK_SLOW = 25 * 60          # a health check round longer than this is reported (cron starts one every 30 minutes)
 TICK_STUCK = 2 * 3600        # a round still running after this long: the rounds it makes skip push an alert
+PROBLEM_KEEP = 6 * 3600      # a state problem that went away is remembered this long: back within it (flapping) it is not pushed again;
+                             # back later it is a new problem (pushed again)
 PUEUE_LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")  # pueue task statuses that are not finished
 
 

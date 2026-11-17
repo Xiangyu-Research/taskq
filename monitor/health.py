@@ -11,47 +11,30 @@ import json
 import os
 import sys
 import time
+import urllib.request
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # root of the scheduling code
 sys.path.insert(0, os.path.join(CORE, "queue"))
+sys.path.insert(0, os.path.join(CORE, "sites"))
+sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
 from proto import alert_id, alert_type  # noqa: E402
-REPO = cfg.REPO  # root of the user's repo
-cfg.use_config()
-TQS = cfg.state("taskq", expand=False)
-sys.path.insert(0, os.path.join(CORE, "sites"))
-import mtab as M  # noqa: E402
-import policy  # noqa: E402
-sys.path.insert(0, HERE)
-import notice as NT  # noqa: E402
+from push import push  # noqa: E402  (falls back to the default channel file when policy.py cannot be read)
 
-OUT = getattr(policy, "OUTPUTS", {})
-HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
-NAME = OUT.get("name", "taskq")
-
-
-from push import push  # noqa: E402
-
-
-def load_failed(e, dry=False):
-    """Loading the experiment table or plugins failed: the whole check (sending, fetching, downstream steps) is stopped; push once
-    (the same error is not pushed again; at night wait until morning)."""
-    msg = f"Health check cannot run: loading the experiment table or plugins failed; sending, fetching and downstream steps are stopped.\n{type(e).__name__}: {e}"
-    print(msg, file=sys.stderr)
-    if dry or not proto.NIGHT[1] <= datetime.now().hour < proto.NIGHT[0]:
-        return
-    db = NT.open_db()
-    if db is None or not NT.D.writable(db) or NT.D.get_meta(db, "load_error") != msg:
-        push(msg, priority="high", tags="warning")
-        if db is not None and NT.D.writable(db):
-            with NT.D.tx(db):
-                NT.D.set_meta(db, "load_error", msg)
-
-
-try:
+NT = None
+try:  # everything that reads the config dir, the experiment table or plugins: when any of it is broken the round must still push (load_failed)
+    REPO = cfg.REPO  # root of the user's repo
+    cfg.use_config()
+    TQS = cfg.state("taskq", expand=False)
+    import mtab as M  # noqa: E402
+    import policy  # noqa: E402
+    import notice as NT  # noqa: E402
+    OUT = getattr(policy, "OUTPUTS", {})
+    HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
+    NAME = OUT.get("name", "taskq")
     import spec  # noqa: E402  queue/spec.py: task specs, collection on each machine
     import relay_remote as RM  # noqa: E402  queue/relay_remote.py: runs site_ops on the store (reads plugins at import)
     import taskq  # noqa: E402  queue/taskq.py: hub queue (on the hub)
@@ -63,6 +46,35 @@ except Exception as _e:
     LOAD_ERROR = _e  # as a script, main() parses arguments first (--help pushes nothing) and reports after
 else:
     LOAD_ERROR = None
+
+
+def broken(msg, key, dry=False):
+    """The round cannot do its work (msg): print it; push it once (the same msg is not pushed again: hub database meta key;
+    at night wait until morning). Without a usable database (the config itself is broken) it is pushed every daytime round."""
+    print(msg, file=sys.stderr)
+    if dry or not proto.NIGHT[1] <= datetime.now().hour < proto.NIGHT[0]:
+        return
+    try:
+        db = NT.open_db() if NT is not None else None
+        w = db is not None and NT.D.writable(db)
+    except Exception:  # noqa: BLE001
+        db, w = None, False
+    if w and NT.D.get_meta(db, key) == msg:
+        return
+    try:
+        push(msg, priority="high", tags="warning")
+    except Exception as e:  # noqa: BLE001  not recorded: tried again next round
+        print(f"push failed: {e}", file=sys.stderr)
+        return
+    if w:
+        with NT.D.tx(db):
+            NT.D.set_meta(db, key, msg)
+
+
+def load_failed(e, dry=False):
+    """Loading the config, experiment table or plugins failed: the whole check (sending, fetching, downstream steps) is stopped."""
+    broken("Health check cannot run: loading the config, experiment table or plugins failed; sending, fetching and downstream "
+           f"steps are stopped.\n{type(e).__name__}: {e}", "load_error", dry)
 
 
 def stopped(t):
@@ -330,6 +342,9 @@ def drop_acked(P, db, dry=False):
 QUIET = ("notice", "undeclared")  # problem types (proto.alert_type) only listed in taskq problems, not pushed (the phone gets failures only; due notices are read at work time; writes outside the declared outputs)
 
 
+RANK = {"info": 0, "normal": 1, "urgent": 2}  # problem levels, least to most severe
+
+
 def night(now):
     return now.hour >= proto.NIGHT[0] or now.hour < proto.NIGHT[1]
 
@@ -338,12 +353,14 @@ def update(P, now, db, dry=False):
     """Compare with the last state: push new problems once they are old enough (plain.py wording; several in one round go as one message).
     At night only urgent ones are pushed; the rest go with the first check in the morning."""
     old = NT.problems(db)[0] if db else {}
+    keep = (now - timedelta(seconds=proto.PROBLEM_KEEP)).strftime("%Y-%m-%d %H:%M")
+    gone = {k: v for k, v in (NT.D.get_meta(db, "gone_problems", {}) if db else {}).items() if v.get("gone", "") >= keep}
     msgs, log = [], []
     cur = {}
     for pid, p in P.items():
-        o = old.get(pid, {})
+        o = old.get(pid) or gone.get(pid) or {}  # a state problem gone for a while (flapping) keeps when it started and whether it was pushed
         p["first"] = o.get("first", now.strftime("%Y-%m-%d %H:%M"))
-        p["notified"] = o.get("notified", False)
+        p["notified"] = o.get("notified", False) and RANK.get(p["level"], 1) <= RANK.get(o.get("level"), 1)  # worse than when pushed: push again
         age = (now - datetime.strptime(p["first"], "%Y-%m-%d %H:%M")).total_seconds() / 60
         p["active"] = age >= p["after"]
         if p["active"] and not p["notified"] and p["level"] != "info" and alert_type(pid) not in QUIET \
@@ -371,6 +388,10 @@ def update(P, now, db, dry=False):
             log.append(f"push failed: {e}")
         if db is not None and NT.D.writable(db):
             NT.save_problems(db, cur, now.strftime("%Y-%m-%d %H:%M"))
+            gone = {**{k: v for k, v in gone.items() if k not in cur},
+                    **{k: dict(v, gone=now.strftime("%Y-%m-%d %H:%M")) for k, v in old.items() if k not in cur and v.get("kind") == "state"}}
+            with NT.D.tx(db):
+                NT.D.set_meta(db, "gone_problems", gone)
         import events
         events.lines("health", log, db=db)
     return [p for _, p in msgs], sent_ok
@@ -424,13 +445,35 @@ def main(argv=None):
                     "tasks to send; push nothing, change no file")
     ap.add_argument("--test", action="store_true", help="push a test message")
     a = ap.parse_args(argv)
-    t0 = time.time()
-    lock = None if a.dry_run or a.test else round_lock()  # held until main returns: rounds never overlap (manual tick, slow round)
-    if not (a.dry_run or a.test) and lock is None:
-        return 0
     if LOAD_ERROR is not None:
         load_failed(LOAD_ERROR, dry=a.dry_run)
         return 1
+    try:
+        return one_round(a)
+    except Exception as e:  # noqa: BLE001  a crash must not end the checks silently: push it (once per distinct error)
+        import traceback
+        traceback.print_exc()
+        broken(f"Health check crashed this round, so nothing was checked, sent or fetched: {type(e).__name__}: {e}"[:600], "crash_error", a.dry_run)
+        return 1
+
+
+def heartbeat():
+    """OUTPUTS heartbeat: fetch that URL after a finished round, so an outside service notices when rounds stop (cron gone, the
+    hub down, the config broken, a crash every round)."""
+    url = cfg.outputs("heartbeat")
+    if not url:
+        return
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "taskq"}), timeout=10).read()
+    except Exception as e:  # noqa: BLE001
+        print(f"heartbeat to {url} failed: {e}", file=sys.stderr)
+
+
+def one_round(a):
+    t0 = time.time()
+    lock = None if a.dry_run or a.test else round_lock()  # held until this returns: rounds never overlap (manual tick, slow round)
+    if not (a.dry_run or a.test) and lock is None:
+        return 0
     import events
     db = NT.open_db(write=not a.dry_run)
     if not a.dry_run and db is not None and NT.D.writable(db):
@@ -505,8 +548,11 @@ def main(argv=None):
         try:
             with NT.D.tx(db):
                 NT.D.set_meta(db, "tick_took", round(time.time() - t0))
+                NT.D.set_meta(db, "crash_error", None)
         except Exception as e:  # noqa: BLE001  locked by a reader right now: next round
             print(f"round time not recorded: {e}", file=sys.stderr)
+    if not a.dry_run:
+        heartbeat()
     if a.dry_run:
         probs = []
         for pid, p in sorted(P.items()):

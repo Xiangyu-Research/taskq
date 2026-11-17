@@ -17,12 +17,21 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import cfg  # noqa: E402
 
+def _out(key):
+    """OUTPUTS[key]; policy.py cannot be read -> the schema default (a broken config must still reach the phone)."""
+    try:
+        return cfg.outputs(key)
+    except Exception:  # noqa: BLE001
+        from schema import OUTPUT_FIELDS
+        return OUTPUT_FIELDS[key][1]
+
+
 def topic_file():
-    return os.path.expanduser(cfg.outputs("topic"))
+    return os.path.expanduser(_out("topic"))
 
 
 def name():
-    return cfg.outputs("name")
+    return _out("name")
 
 
 def push(msg, title=None, priority="default", tags=""):
