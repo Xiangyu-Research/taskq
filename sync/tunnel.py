@@ -78,11 +78,21 @@ def rq(path):
 
 
 def md5_of(path):
-    h = hashlib.md5()
+    return digests(path)[0]
+
+
+def digests(path, sha=False):
+    """A file's MD5, and its sha256 in the same read when sha -> (md5, sha256 or None)."""
+    m, s = hashlib.md5(), hashlib.sha256() if sha else None
     with open(path, "rb") as f:
         while b := f.read(1 << 20):
-            h.update(b)
-    return h.hexdigest()
+            m.update(b)
+            if s:
+                s.update(b)
+    return m.hexdigest(), s.hexdigest() if s else None
+
+
+SHA_BAD = "sha256-differs"  # a received file's result when its content is not the sha256 it was sent as (changed at the source)
 
 
 def settle(part, path):
@@ -94,6 +104,21 @@ def settle(part, path):
     finally:
         os.close(fd)
     os.replace(part, path)
+
+
+def put_record(path, stat):
+    """stat (suffix, format): the file in place was just checked against its sha256 -> write <path><suffix> holding format
+    filled with its size and mtime (ns), via a temp name and flushed (the receiver of blobs: a later check compares these
+    cheap facts instead of reading the file again)."""
+    suffix, fmt = stat
+    st = os.stat(path)
+    rec = path + suffix
+    tmp = rec + ".tunnelpart"
+    with open(tmp, "w") as f:
+        f.write(fmt.format(size=st.st_size, mtime_ns=st.st_mtime_ns))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, rec)
 
 
 # ---------------- file server on this machine ----------------
@@ -522,18 +547,25 @@ def home_path(p):
     return os.path.join(os.path.expanduser("~"), os.path.expanduser(p))
 
 
-def local_copy(src, dst, rels, link=False):
+def local_copy(src, dst, rels, link=False, sums=None, stat=None):
     """Executor on the same machine as this one: copy src/<rel> → dst/<rel> here directly, no tunnel.
     Write to .tunnelpart in the same dir, check the size (push also checks MD5), keep mtime and mode, flush, then rename; skip
     files that exist with the same size and mtime. link (push): try a hard link first (blobs are named by content and
-    never change, same as ingest), copy and check MD5 if on another disk. Return the files not copied (partials removed)."""
-    bad = []
+    never change, same as ingest), copy and check MD5 if on another disk. sums {rel: sha256} (push): check the sha256 instead,
+    an existing file too, and with stat write its record once in place (put_record). Return the files not copied (partials
+    removed)."""
+    bad, sums = [], sums or {}
     for r in rels:
         a, b = os.path.join(src, r), os.path.join(dst, r)
         part = b + ".tunnelpart"
         try:
             st = os.stat(a)
             if os.path.isfile(b) and os.stat(b).st_size == st.st_size and os.stat(b).st_mtime_ns == st.st_mtime_ns:
+                if r in sums:
+                    if digests(b, True)[1] != sums[r]:
+                        raise IOError("the file there does not match its sha256")
+                    if stat:
+                        put_record(b, stat)
                 continue
             os.makedirs(os.path.dirname(b), exist_ok=True)
             if os.path.lexists(part):
@@ -548,9 +580,14 @@ def local_copy(src, dst, rels, link=False):
                 linked = False
             if os.path.getsize(part) != st.st_size:
                 raise IOError(f"copied only {os.path.getsize(part)} / {st.st_size} bytes")
-            if link and not linked and md5_of(part) != md5_of(a):
+            if r in sums:
+                if digests(part, True)[1] != sums[r]:
+                    raise IOError("content does not match its sha256 (changed at the source?)")
+            elif link and not linked and md5_of(part) != md5_of(a):
                 raise IOError("MD5 mismatch")
             settle(part, b)
+            if r in sums and stat:
+                put_record(b, stat)
         except OSError as e:
             log(f"failed {r}: {e}")
             bad.append(r)
@@ -560,10 +597,12 @@ def local_copy(src, dst, rels, link=False):
     return bad
 
 
-def push(host, src, dst, rels, site=None):
+def push(host, src, dst, rels, site=None, sums=None, stat=None):
     """This machine's src/<rel> → dst/<rel> on the other side (dst relative to its home, or absolute). Retry files that
     did not arrive or do not match a few times (ROUNDS); return the ones still bad (already deleted). site: the machine
-    name there (entry)."""
+    name there (entry). sums {rel: sha256}: the receiving side also computes each file's sha256 in the same read as its MD5;
+    a file whose content is not its sha256 is bad and not sent again in this run (the source changed). stat (suffix, format):
+    then it writes a record next to each file that matches (put_record), and a bad file's record is deleted with it."""
     files = {}
     for r in rels:
         st = os.stat(os.path.join(src, r))
@@ -571,20 +610,22 @@ def push(host, src, dst, rels, site=None):
     total = sum(v[0] for v in files.values())
     if host is None:
         log(f"local copy of {len(files)} files, {total / 1e9:.2f} GB to {dst}")
-        return local_copy(src, home_path(dst), rels, link=True)
+        return local_copy(src, home_path(dst), rels, link=True, sums=sums, stat=stat)
+    sums = {r: sums[r] for r in files if r in (sums or {})}
     lk = take_lock(host)
     serve = Session(files, src=src)
     try:
         url = serve.open(quick=bool(entry(host, site).get("quick_tunnel")))
         log(f"tunnel transfer of {len(files)} files, {total / 1e9:.2f} GB to {host}:{dst}")
-        t0, bad = time.time(), list(files)
+        t0, bad, wrong = time.time(), list(files), []
         for k in range(ROUNDS + 1):
             if k:
                 log(f"retry {len(bad)} missing (round {k})")
             serve.poll()
             for r in bad:
                 serve.sent.pop(r, None)
-            plan = dict(base=f"{url}/{serve.token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad])
+            plan = dict(base=f"{url}/{serve.token}", root=dst, npar=NPAR, round=k, files=[[r, *files[r]] for r in bad],
+                        sums={r: sums[r] for r in bad if r in sums}, stat=stat)
             try:
                 res, stop = run_remote(host, "_fetch", plan, serve, sum(files[r][0] for r in bad), site), False
             except RuntimeError as e:
@@ -595,9 +636,16 @@ def push(host, src, dst, rels, site=None):
             serve.poll()
             bad = [r for r in bad if res.get(r) != (serve.sent.get(r) or md5_of(os.path.join(src, r)))]
             if bad:
-                ssh(host, "cd " + rq(dst) + " && rm -f -- " + " ".join(shlex.quote(r) for r in bad), check=False)
+                gone = bad + [r + stat[0] for r in bad] if stat else bad
+                ssh(host, "cd " + rq(dst) + " && rm -f -- " + " ".join(shlex.quote(r) for r in gone), check=False)
+            for r in bad:
+                if (res.get(r) or "").startswith(SHA_BAD):
+                    log(f"failed {r}: its content is not the sha256 it was sent as (changed at the source?), not sending it again")
+                    wrong.append(r)
+            bad = [r for r in bad if r not in wrong]
             if not bad or stop:
                 break
+        bad += wrong
     finally:
         serve.close()
         lk.close()
@@ -665,11 +713,15 @@ def retry(f, what):
 
 
 def remote_fetch(plan):
+    """Download the plan's files; results.tsv gets each one's MD5. With sums {rel: sha256} the same read computes its sha256: a
+    file that does not match is not put in place (SHA_BAD instead of its MD5); one that does gets its record when the plan has
+    stat (put_record, only once the file is complete and in place)."""
     root = home_path(plan["root"])
     out = open("results.tsv", "a")
     lock = threading.Lock()
     bad = os.environ.get("TUNNEL_TEST_BADMD5")
     drop = (os.environ.get("TUNNEL_TEST_DROP") or "").split(",") if not plan.get("round") else []
+    sums, stat = plan.get("sums") or {}, plan.get("stat")
 
     def one(item):
         rel, size, mtime, mode = item
@@ -678,7 +730,7 @@ def remote_fetch(plan):
             print(f"failed {rel}: test", flush=True)
             return
         if os.path.isfile(p) and os.stat(p).st_size == size and os.stat(p).st_mtime_ns == mtime:
-            digest = md5_of(p)
+            digest, sha = digests(p, rel in sums)
         else:
             def get():
                 os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -689,14 +741,22 @@ def remote_fetch(plan):
                 n = os.path.getsize(p + ".tunnelpart")
                 if n != size:
                     raise IOError(f"received only {n} / {size} bytes")
-                digest = md5_of(p + ".tunnelpart")
+                digest, sha = digests(p + ".tunnelpart", rel in sums)
+                if sha is not None and sha != sums[rel]:
+                    os.unlink(p + ".tunnelpart")  # not this content: never put in place
+                    return digest, sha
                 os.chmod(p + ".tunnelpart", mode)
                 os.utime(p + ".tunnelpart", ns=(mtime, mtime))
                 settle(p + ".tunnelpart", p)
-                return digest
-            digest = retry(get, rel)
-            if digest is None:
+                return digest, sha
+            got = retry(get, rel)
+            if got is None:
                 return
+            digest, sha = got
+        if sha is not None and sha != sums[rel]:
+            digest = f"{SHA_BAD} {sha}"
+        elif sha is not None and stat:
+            put_record(p, stat)
         if rel == bad:
             digest = "0" * 32
         with lock:

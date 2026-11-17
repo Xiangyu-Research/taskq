@@ -364,5 +364,78 @@ ok("received files are flushed to disk before they get their final name (after a
    not bad and same(lsrc, lpull, FILES) and len(moves) == len(FILES)
    and all(("sync", a) in events and events.index(("sync", a)) < events.index(("move", a)) for a in moves))
 
+# push with sums and stat (how site_ops push sends blobs): the receiving side checks each file's sha256 in the read that checks
+# its MD5 and writes the record next to it once it is in place; a file whose content is not its sha256 is never placed
+import hashlib  # noqa: E402
+SUMS = {r: hashlib.sha256(open(os.path.join(src, r), "rb").read()).hexdigest() for r in FILES}
+STAT = (".st", "{size} {mtime_ns}")
+
+
+def recorded(root, rels):
+    """Every file has a record holding its size and mtime as they are now, and nothing else is left next to it."""
+    for r in rels:
+        p = os.path.join(root, r)
+        try:
+            rec = open(p + STAT[0]).read()
+        except OSError:
+            return False
+        if rec != f"{os.stat(p).st_size} {os.stat(p).st_mtime_ns}":
+            return False
+    return not any(p.endswith(".tunnelpart") for p in tree(root))
+
+
+def push_sums(dst_rel, sums, env=ENV):
+    code = (f"import json, tunnel; print('BAD=' + json.dumps(tunnel.push({HOST!r}, {src!r}, {dst_rel!r}, {sorted(FILES)!r}, "
+            f"sums={sums!r}, stat={STAT!r})))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=HERE, env=env, capture_output=True, text=True)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("BAD=")), "BAD=null")
+    return json.loads(line[4:]), r.stdout + r.stderr
+
+
+sdst = os.path.join(HOME, "st/blobs")
+os.makedirs(os.path.join(sdst, "a"))
+with open(os.path.join(sdst, "a/x.bin.tunnelpart"), "wb") as f:  # a previous transfer cut halfway
+    f.write(open(os.path.join(src, "a/x.bin"), "rb").read()[:1000])
+bad, out = push_sums("st/blobs", SUMS)
+ok(f"push with sums: all placed, each with its record (size and mtime as placed), the half-transferred part replaced ({bad})",
+   bad == [] and same(src, sdst, FILES) and recorded(sdst, FILES) and not os.path.exists(os.path.join(sdst, "a/x.bin.tunnelpart.st")))
+bad, out = push_sums("st/blobs", SUMS)
+ok("push with sums again: files already there are checked and recorded again, still all match", bad == [] and recorded(sdst, FILES))
+shutil.rmtree(sdst)
+bad, out = push_sums("st/blobs", dict(SUMS, **{"a/x.bin": "0" * 64}))
+ok(f"push with sums: a file that is not its sha256 (changed at the source) is not placed, has no record and is not sent again; "
+   f"the rest are placed and recorded ({bad})", bad == ["a/x.bin"] and not os.path.lexists(os.path.join(sdst, "a/x.bin"))
+   and not os.path.lexists(os.path.join(sdst, "a/x.bin.st")) and "round 1" not in out and "changed at the source" in out
+   and recorded(sdst, [r for r in FILES if r != "a/x.bin"]))
+shutil.rmtree(sdst)
+bad, out = push_sums("st/blobs", SUMS, env=dict(ENV, TUNNEL_TEST_DROP="z.bin"))
+ok("push with sums: a file that did not arrive in the first round gets its record once it does", bad == [] and recorded(sdst, FILES)
+   and "retry 1 missing (round 1)" in out)
+shutil.rmtree(sdst)
+bad, out = push_sums("st/blobs", SUMS, env=dict(ENV, TUNNEL_TEST_BADMD5="top.pth"))
+ok("push with sums: a file that does not match its MD5 after every round is deleted there with its record",
+   bad == ["top.pth"] and not os.path.lexists(os.path.join(sdst, "top.pth")) and not os.path.lexists(os.path.join(sdst, "top.pth.st"))
+   and recorded(sdst, [r for r in FILES if r != "top.pth"]))
+
+lb = os.path.join(T, "lblobs")
+bad = tunnel.push(None, src, lb, list(FILES), sums=SUMS, stat=STAT)
+ok("local push with sums: hard-linked, checked and recorded", not bad and same(src, lb, FILES) and recorded(lb, FILES)
+   and os.stat(os.path.join(lb, "a/x.bin")).st_ino == os.stat(os.path.join(src, "a/x.bin")).st_ino)
+shutil.rmtree(lb)
+real_link = tunnel.os.link
+tunnel.os.link = lambda a, b: (_ for _ in ()).throw(OSError("test: another disk"))
+tunnel.shutil.copy2 = half_copy
+try:
+    bad = tunnel.push(None, src, lb, list(FILES), sums=SUMS, stat=STAT)
+    ok("local push with sums, copy interrupted halfway: not placed, no record, no partial", sorted(bad) == sorted(FILES)
+       and not [p for p in tree(lb) if not p.endswith("/")])
+    tunnel.shutil.copy2 = real_copy
+    bad = tunnel.push(None, src, lb, list(FILES), sums=dict(SUMS, **{"top.pth": "0" * 64}), stat=STAT)
+    ok("local push with sums, copied: a file that is not its sha256 is not placed and has no record; the rest are recorded",
+       bad == ["top.pth"] and not os.path.lexists(os.path.join(lb, "top.pth")) and not os.path.lexists(os.path.join(lb, "top.pth.st"))
+       and recorded(lb, [r for r in FILES if r != "top.pth"]))
+finally:
+    tunnel.os.link, tunnel.shutil.copy2 = real_link, real_copy
+
 print(f"\n{len(FAILS)} failures" if FAILS else "\nall passed")
 sys.exit(1 if FAILS else 0)

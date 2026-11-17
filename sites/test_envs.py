@@ -405,10 +405,14 @@ os.makedirs(f"{WH}/00", exist_ok=True)
 shutil.copy(whl, f"{WH}/00/{hb}")
 open(f"{LD}/specs/tiny.yml", "a").write("# changed\n")
 write_lock(M.SPECS, "tiny", "default", pip=[dict(wpk, sha256=hb)])
-rc, out = E.build("toff", "tiny")
+try:
+    rc, out = E.build("toff", "tiny")
+except E.EnvError as e:
+    rc, out = None, str(e)
 st = E.states("toff")["tiny"]
-ok("package hash mismatch → pip installs nothing, check failed, the old env stays in use", rc != 0 and st == "check failed" and os.path.isfile(f"{LD}/root/envs/tiny/.activate"),
-   (rc, st, out))
+ok("package hash mismatch → not put into the blobs (the push checks each file's sha256), nothing built or installed, the old env "
+   "stays in use", rc is None and "do not match" in out and not os.path.exists(f"{LD}/root/{proto.blob(hb)}")
+   and st == proto.ENV_STATE["changed"] and os.path.isfile(f"{LD}/root/envs/tiny/.activate"), (rc, st, out))
 for k, v in PX.items():
     if v is None:
         os.environ.pop(k, None)
