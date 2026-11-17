@@ -48,6 +48,20 @@ for n in names:
     ok(f"{n}.yml loads and has a check", good)
     ok(f"{n}.check.py compiles", bool(compile(open(E.check_file(n), encoding="utf-8").read(), n, "exec")))
 ok("alt builds on base", E.load("alt")["base"] == "base")
+SAVE_YAML = sys.modules.get("yaml")
+sys.modules["yaml"] = None  # import yaml now raises ImportError, as without PyYAML
+try:
+    E.load("alt")
+    msg = ""
+except E.EnvError as e:
+    msg = str(e)
+finally:
+    if SAVE_YAML is None:
+        sys.modules.pop("yaml", None)
+    else:
+        sys.modules["yaml"] = SAVE_YAML
+ok("without PyYAML: reading a spec is an EnvError saying to install PyYAML on the hub", "install PyYAML on the hub" in msg
+   and "alt.yml" in msg, msg)
 ok("base has a cu128 variant", "cu128" in E.load("base")["torch"])
 ok("no lock yet: the hash = sha256 of the spec (a lock is added when present, see test_envlock.py)",
    not os.path.exists(M.lock_path("base"))

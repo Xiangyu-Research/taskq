@@ -39,10 +39,13 @@ class EnvError(Exception):
 
 
 def load(env):
-    import yaml
     p = os.path.join(M.SPECS, f"{env}.yml")
     if not os.path.isfile(p):
         raise EnvError(f"no env spec {os.path.relpath(p, REPO)}")
+    try:
+        import yaml  # the only package outside the standard library, needed only for env specs
+    except ImportError:
+        raise EnvError(f"cannot read {env}.yml: install PyYAML on the hub to build envs from {os.path.relpath(M.SPECS, REPO)}/*.yml") from None
     with open(p, encoding="utf-8") as f:
         sp = yaml.safe_load(f) or {}
     if not isinstance(sp, dict):

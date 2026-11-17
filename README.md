@@ -25,9 +25,10 @@ bash install.sh      # in a clone of taskq; to curl install.sh without cloning f
 It clones to `${TASKQ_HOME:-~/.local/share/taskq}` and links `~/.local/bin/taskq` to its `bin/taskq`; `TASKQ_ORIGIN` changes the clone
 source. Repeating is fine: an existing install is updated (`taskq self update`, pulls `origin/main`).
 
-Needs: Python 3 (the core uses only the standard library), ssh; [pueue](https://github.com/Nukesor/pueue) on pueue machines, the hub
-and the store (`queue/install_pueue.sh` installs it, checking each file's sha256: pinned for the default version, given on the
-command line for any other); conda on executors (the machine table's `conda`).
+Needs: Python 3 (the core uses only the standard library; PyYAML is needed on the hub only to build envs from env specs
+`<config>/specs/*.yml`), ssh; [pueue](https://github.com/Nukesor/pueue) on pueue machines, the hub and the store
+(`queue/install_pueue.sh` installs it, checking each file's sha256: pinned for the default version, given on the command line for any
+other); conda on executors (the machine table's `conda`).
 `taskq site setup [machine]` creates each machine's pueue daemon, groups and the hub's crontab.
 
 ## Project (`.taskq.toml`)
