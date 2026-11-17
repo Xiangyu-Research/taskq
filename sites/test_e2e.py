@@ -114,10 +114,7 @@ if _d and sys.argv and sys.argv[0].endswith("site_ops.py") and len(sys.argv) > 1
                 f.write(os.path.abspath(b) + "\\n")
         os.replace = _r
 ''')
-s_ = socket.socket()
-s_.bind(("127.0.0.1", 0))
-PORT = s_.getsockname()[1]
-s_.close()
+PORT = fixture.free_port(20000, 26000)  # not from bind(0): see fixture.free_port
 TRANSFER = (f"http://127.0.0.1:{PORT}", f"127.0.0.1:{PORT}")
 ENVS = {"sys": ("conda", "base"), "toy": "spec"}
 

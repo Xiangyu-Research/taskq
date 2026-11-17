@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -54,10 +53,7 @@ with open(os.path.join(T, "sitecustomize.py"), "w") as f:
     f.write(f"import sys\nsys.path.insert(0, {fixture.CONFIG!r})\nimport machines\n"
             f"for h in ({HOST!r}, {HOST2!r}):\n"
             "    machines.MACHINES[h] = dict(label='plain', hostname=h, ssh=h, transfer_job='-p x', tunnel=('push', 'pull'))\n")
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-PORT = s.getsockname()[1]
-s.close()
+PORT = fixture.free_port(26000, 32000)  # not from bind(0): see fixture.free_port
 ENV = dict(os.environ, HOME=HOME, TUNNEL_SSH=FAKE, RSYNC_RSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}",
            TUNNEL_BIND=f"127.0.0.1:{PORT}", TUNNEL_POLL="0.1", TUNNEL_CHUNK=str(1 << 20),
            TUNNEL_LOCK=os.path.join(T, "lock"), TUNNEL_TEST_REQUIRE_UA="1", TUNNEL_IDLE="3", PATH=os.environ["PATH"], PYTHONPATH=T)

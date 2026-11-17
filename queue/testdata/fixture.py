@@ -58,6 +58,24 @@ def use():
     return CONFIG, PLUGINS
 
 
+def free_port(lo, hi):
+    """A port in [lo, hi) free right now, for a server a test starts later. Pick the range below the kernel's ephemeral range
+    (net.ipv4.ip_local_port_range, usually from 32768): bind(0) and outgoing connections never take such a port meanwhile, and
+    giving each test file its own range keeps two files running at once from picking the same one."""
+    import random
+    import socket
+    for p in random.sample(range(lo, hi), min(200, hi - lo)):
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", p))
+            return p
+        except OSError:
+            continue
+        finally:
+            s.close()
+    raise RuntimeError(f"no free port in {lo}-{hi}")
+
+
 def tmpdir(**kw):
     """tempfile.mkdtemp(**kw), removed when the process that made it exits (pass, fail or error); tests that made it unreadable chmod first."""
     d, pid = tempfile.mkdtemp(**kw), os.getpid()

@@ -10,7 +10,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -45,10 +44,7 @@ os.environ["TASKQ_CONFIG"] = CONF
 FAKE = os.path.join(T, "fake_ssh")
 BIN = os.path.join(T, "bin")
 os.makedirs(BIN)
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-PORT = s.getsockname()[1]
-s.close()
+PORT = fixture.free_port(14000, 20000)  # not from bind(0): see fixture.free_port
 os.environ.update(RELAY_SSH=FAKE, TUNNEL_SSH=FAKE, TUNNEL_URL=f"http://127.0.0.1:{PORT}", TUNNEL_BIND=f"127.0.0.1:{PORT}",
                   TUNNEL_POLL="0.1", TUNNEL_LOCK=os.path.join(T, "lock"),
                   TASKQ_LAST=os.path.join(T, "last"), RELAY_LOG=os.path.join(T, "relay.log"),
