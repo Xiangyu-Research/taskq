@@ -13,6 +13,7 @@ import shutil
 import signal
 import socket
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +32,7 @@ STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", proto.STALE_BEAT))  # a hear
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", proto.FRESH_LOG))    # a part log updated this recently means someone is training
 LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", 0.5))  # retry interval while waiting for the lock (seconds; env var for tests only)
 LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = 120, 600, 900  # take a lock dir untouched this long: holder dead / on another host (liveness unknown) / alive here (pid may be reused)
+LOCK_KEEP = float(os.environ.get("TASKQ_LOCK_KEEP", 30))  # a holder touches its lock dir this often: only a dead or frozen one goes untouched (env var for tests only)
 HALF_CLAIM = proto.HALF_CLAIM  # a claim that only made the dir, no info, is stale after this long
 X = proto.EXIT
 NOTHING, WAIT, PAUSED = X["nothing"], X["wait"], X["paused"]   # claim exit codes
@@ -48,44 +50,68 @@ def have_queue():
 
 
 # ---------------- files ----------------
+_bad = {}  # tasks file -> its lines that could not be read [(line number, text)], as of the last read_tasks
+
+
+def bad_lines(path=None):
+    """Why the tasks file cannot be rewritten (it has lines read_tasks could not read; rewriting would drop them), or None."""
+    path = path or tasks_path()
+    bad = _bad.get(os.path.abspath(path))
+    if not bad:
+        return None
+    more = f" and {len(bad) - 1} more" if len(bad) > 1 else ""
+    return f"{path}: line {bad[0][0]}{more} cannot be read ({bad[0][1][:80]}); fix or delete it by hand, the queue is not changed until then"
+
+
 def read_tasks(path=None):
     path = path or tasks_path()
-    out = []
-    if not os.path.exists(path):
-        return out
-    for ln in open(path, encoding="utf-8"):
-        if ln.startswith("#") or not ln.strip():
-            continue
-        try:
-            t = json.loads(ln)
-            t["order"], t["nice"] = int(t["order"]), int(t["nice"])
-            t.setdefault("exp", None)
-            t.setdefault("params", {})
-            out.append(t)
-        except (ValueError, KeyError):
-            continue
+    out, bad = [], []
+    if os.path.exists(path):
+        for n, ln in enumerate(open(path, encoding="utf-8"), 1):
+            if ln.startswith("#") or not ln.strip():
+                continue
+            try:
+                t = json.loads(ln)
+                t["order"], t["nice"] = int(t["order"]), int(t["nice"])
+                t.setdefault("exp", None)
+                t.setdefault("params", {})
+                out.append(t)
+            except (ValueError, KeyError, TypeError):
+                bad.append((n, ln.strip()))
+    _bad[os.path.abspath(path)] = bad
     return sorted(out, key=lambda t: (t["nice"], t["order"]))
 
 
 def write_tasks(tasks, path=None):
+    """Replace the tasks file (written whole to a temp name and synced, then moved over). Stops instead when this process no
+    longer holds the queue lock, or when the file had lines read_tasks could not read: they are not in tasks and would be gone."""
+    if Lock.held:
+        Lock.held.check()
     path = path or tasks_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
-            rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec"}
-            if t.get("spec"):
-                rec["spec"] = t["spec"]  # executor queue: the spec the hub resolved
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
+    if bad_lines(path):
+        raise SystemExit(bad_lines(path))
+    lines = []
+    for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
+        rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec"}
+        if t.get("spec"):
+            rec["spec"] = t["spec"]  # executor queue: the spec the hub resolved
+        lines.append(json.dumps(rec, ensure_ascii=False) + "\n")
+    atomic_write(path, "".join(lines))
 
 
 class Lock:
+    """The queue lock (a dir with an owner file: host, pid, a random token). While held, a thread touches the dir every
+    LOCK_KEEP seconds, so a holder that is working never looks stale however long it takes; one that is dead or frozen does
+    and is taken over (LOCK_DEAD / LOCK_REMOTE / LOCK_MAX). A frozen holder may wake up later: check() before changing the
+    queue stops it from writing what it read back then."""
+    held = None  # the lock this process holds
+
     def __init__(self, tries=600):
         self.d = os.path.join(TQ, Q["lock"])
         self.tries = tries
         self.me = None
         self.dir_id = None
+        self.done = threading.Event()
 
     def __enter__(self):
         os.makedirs(TQ, exist_ok=True)
@@ -114,14 +140,40 @@ class Lock:
                 with open(os.path.join(self.d, "owner"), "w") as f:
                     f.write(me)
                 self.me = me
+                threading.Thread(target=self._keep, daemon=True).start()
             except OSError:
                 try:  # could not write owner: remember the dir itself, on exit remove only if still ours
                     st = os.stat(self.d)
                     self.dir_id = (st.st_ino, st.st_mtime_ns)
                 except OSError:
                     pass
+            Lock.held = self
             return self
         raise SystemExit("cannot acquire the queue lock")
+
+    def _keep(self):
+        while not self.done.wait(LOCK_KEEP):
+            try:
+                if not self.mine():
+                    return
+                os.utime(self.d)
+            except OSError:
+                return
+
+    def mine(self):
+        """Is the lock still ours (the owner file holds our token; without one, the dir is the one we made)?"""
+        try:
+            if self.me is not None:
+                return open(os.path.join(self.d, "owner")).read() == self.me
+            st = os.stat(self.d)
+            return (st.st_ino, st.st_mtime_ns) == self.dir_id
+        except OSError:
+            return False
+
+    def check(self):
+        """Call before changing the queue under the lock."""
+        if not self.mine():
+            raise SystemExit("lost the queue lock (this process stalled and the lock was taken over): nothing more is written")
 
     @staticmethod
     def _ident(d):
@@ -147,6 +199,8 @@ class Lock:
         return "alive"
 
     def __exit__(self, *a):
+        Lock.held = None
+        self.done.set()
         p = os.path.join(self.d, "owner")
         try:
             if self.me is not None:
@@ -393,6 +447,7 @@ def _claim(a, pick):
                 continue
             if busy_ahead >= a.free_slots and time.time() < a.patience_until:
                 return WAIT, None  # keep the slot for an earlier task; wait until its log is older than 15 minutes
+            Lock.held.check()  # looking at every task can take long
             d = os.path.join(TQ, Q["claims"], safe(t["key"]))
             if st == "stale":
                 gone = f"{d}.old{os.getpid()}"
@@ -1006,6 +1061,8 @@ def cmd_status(a):
         S.json_out({"version": proto.VERSION, **s})
         return 0
     print(queue_text(s, internal=a.internal))
+    if bad_lines():
+        print(bad_lines(), file=sys.stderr)
     return 0
 
 

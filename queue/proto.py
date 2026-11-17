@@ -340,6 +340,7 @@ ENV = dict(
     TASKQ_TEST_FAKEBIN=("test", "dir holding fake commands"),
     TASKQ_LAST=("test", "replaces the state dir's last"),
     TASKQ_LOCK_WAIT=("test", "retry interval while waiting for a lock (seconds, default 0.5)"),
+    TASKQ_LOCK_KEEP=("test", "how often a held queue lock is touched (seconds, default 30)"),
     TASKQ_STALE_BEAT=("test", "replaces STALE_BEAT"),
     TASKQ_FRESH_LOG=("test", "replaces FRESH_LOG"),
 )

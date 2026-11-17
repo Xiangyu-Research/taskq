@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -701,6 +702,27 @@ open(fn, "w").write("{oops")
 rc, _, err = tqf("add", "--nice", "1", "--file", fn)
 check("add --file: not JSON -> error", rc == 2 and "task sheet" in err)
 
+# ---------------- a line of tasks.jsonl that cannot be read is never dropped by a rewrite ----------------
+tjf = os.path.join(TQF, "tasks.jsonl")
+good = open(tjf).read()
+json.dump(dict(sheet, key="guest/alice/f", out="guest/alice/f"), open(fn, "w"))
+for what, line in (("broken JSON", '{"order": 9, "nice": 0, "key": "guest/alice/cut", "recipe": "comm\n'),
+                   ("a field missing", '{"nice": 0, "key": "guest/alice/noorder", "recipe": "command", "params": {}}\n'),
+                   ("not a task", "[1, 2]\n")):
+    open(tjf, "w").write(good + line)
+    rc, _, err = tqf("add", "--nice", "1", "--file", fn)
+    check(f"unreadable line ({what}): add stops and names the line, the file is left as it was (the line is not lost)",
+          rc != 0 and "line 4 cannot be read" in err and open(tjf).read() == good + line)
+    rc, _, err = tqf("remove", "guest/alice/b")
+    check(f"unreadable line ({what}): remove stops too", rc != 0 and "line 4 cannot be read" in err and open(tjf).read() == good + line)
+    rc, out, err = tqf("status")
+    check(f"unreadable line ({what}): status still lists the readable tasks and says so on stderr",
+          rc == 0 and "guest/alice/toy" in out and "line 4 cannot be read" in err)
+open(tjf, "w").write(good)
+rc, _, err = tqf("add", "--nice", "1", "--file", fn)
+check("the line fixed by hand: the queue can be changed again, and the write leaves no temp file behind",
+      rc == 0 and len(taskq.read_tasks(tjf)) == 4 and sorted(os.listdir(TQF)) == sorted(set(os.listdir(TQF)) - {f for f in os.listdir(TQF) if "tmp" in f}))
+
 # ---------------- locks, take --assign, old-token release ----------------
 TQR = os.path.join(T, "taskqr")
 os.makedirs(TQR)
@@ -739,6 +761,34 @@ if lk:
 holder.stdin.close()
 holder.wait(timeout=30)
 check("lock: the holder removes its own lock on exit", not os.path.exists(LK))
+# a holder that is working touches its lock dir (every 0.2 s here), so it is never taken however long it holds it; one that is
+# frozen (SIGSTOP: its pid is still there) stops touching, is taken after LOCK_MAX, and writes nothing when it wakes up
+HOLD = ("import sys, taskq\nwith taskq.Lock():\n    print('held', flush=True)\n    sys.stdin.readline()\n"
+        "    taskq.write_tasks([dict(order=1, nice=0, key='late/write', recipe='command')])\n    print('wrote', flush=True)")
+holder = subprocess.Popen([sys.executable, "-c", HOLD], env=dict(ENV, TASKQ_DIR=TQR, PYTHONPATH=HERE, TASKQ_LOCK_KEEP="0.2"),
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+holder.stdout.readline()
+os.utime(LK, (time.time() - taskq.LOCK_MAX - 1,) * 2)
+time.sleep(1.5)
+lk = try_lock()
+check("lock: a holder that is still working keeps its lock dir fresh, so it is not taken even long past LOCK_MAX",
+      lk is None and time.time() - os.stat(LK).st_mtime < 60)
+if lk:
+    lk.__exit__()
+os.kill(holder.pid, signal.SIGSTOP)
+time.sleep(0.5)
+os.utime(LK, (time.time() - taskq.LOCK_MAX - 1,) * 2)
+lk = try_lock()
+check("lock: a frozen holder (process there, lock dir untouched for LOCK_MAX) is taken over", lk is not None)
+taskq.write_tasks([dict(order=1, nice=0, key="new/holder", recipe="command")])
+os.kill(holder.pid, signal.SIGCONT)
+out, err = holder.communicate("\n", timeout=30)
+check("lock: the old holder wakes up and writes nothing (stops with 'lost the queue lock'), and leaves the new holder's lock alone",
+      holder.returncode == 1 and "wrote" not in out and "lost the queue lock" in err
+      and [t["key"] for t in taskq.read_tasks()] == ["new/holder"] and lk.mine())
+if lk:
+    lk.__exit__()
+os.remove(taskq.tasks_path())
 dead = subprocess.Popen([sys.executable, "-c", "pass"])
 dead.wait()
 os.mkdir(LK)
