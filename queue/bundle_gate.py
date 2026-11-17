@@ -59,6 +59,8 @@ def run(d, spec):
                                capture_output=True, text=True, timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             return False, None
+        except OSError as e:  # e.g. a spec too long for one command-line argument: this spec cannot run there
+            return True, f"cannot run spec.py {c}: {e}"
         if r.returncode not in good or "Traceback" in r.stderr:
             last = (r.stderr.strip() or r.stdout.strip()).splitlines()[-1:]
             return True, f"spec.py {c} exited {r.returncode}: {(last[0] if last else '')[-300:]}"

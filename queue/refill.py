@@ -165,18 +165,20 @@ def choose(tasks, sites, specs, held=None, sizes=None):
     by_site={key: [(executor, that executor's reason)]} (the same reasons as data),
     nowhere=[keys whose every candidate skipped it],
     noroom=[keys that fit on none of this round's available executors] (not full: waiting will not help, free space or
-    lower out_gb))."""
-    held, sizes, planned, why, by_site, nowhere, noroom = held or {}, sizes or {}, {}, {}, {}, [], []
-    for t in sorted(tasks, key=lambda t: (t["nice"], t["key"] not in held, t["order"])):
+    lower out_gb),
+    errors={key: error} (its spec or a plugin raised: that task is not sent, the others go on))."""
+    held, sizes, planned, why, by_site, nowhere, noroom, errors = held or {}, sizes or {}, {}, {}, {}, [], [], {}
+
+    def one(t):
         rec, sp = specs[t["key"]]
         opts = places(rec, sp)
         if not opts:
             why[t["key"]] = f"no executor can take it (PLACE, machines and {kind_of(sp)} workers do not intersect)"
-            continue
+            return
         skipped = set(t.get("skipped_by") or [])
         if set(opts) <= skipped:
             nowhere.append(t["key"])
-            continue
+            return
         opts = [n for n in opts if n not in skipped]
         hs = held.get(t["key"])
         if hs:  # half-done goes only to the executor with progress (when it is paused and no longer an executor, holders drops it and it may start over elsewhere)
@@ -184,7 +186,7 @@ def choose(tasks, sites, specs, held=None, sizes=None):
         live = [n for n in opts if n in sites]
         if not live:
             why[t["key"]] = f"candidates {', '.join(opts) or ', '.join(hs or [])} are all unavailable this round (unreachable or off)"
-            continue
+            return
         data = sp.get("inputs") or []
         live.sort(key=lambda n: not all(p in sites[n].ready for p in data))  # inputs already there first; the rest by preference
         fails = []
@@ -198,7 +200,14 @@ def choose(tasks, sites, specs, held=None, sizes=None):
             by_site[t["key"]] = [(n, str(r)) for n, r in fails]
             if all(r.kind == "noroom" for _, r in fails):
                 noroom.append(t["key"])
-    return dict(why=why, by_site=by_site, nowhere=nowhere, noroom=noroom)
+
+    for t in sorted(tasks, key=lambda t: (t["nice"], t["key"] not in held, t["order"])):
+        try:
+            one(t)
+        except Exception as e:  # noqa: BLE001  e.g. out_gb="big", a plugin raising: only this task is not sent
+            errors[t["key"]] = f"{type(e).__name__}: {e}"[:300]
+            why[t["key"]] = f"error: {errors[t['key']]}"
+    return dict(why=why, by_site=by_site, nowhere=nowhere, noroom=noroom, errors=errors)
 
 
 def data_sizes(paths, probe):

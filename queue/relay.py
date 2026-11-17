@@ -327,154 +327,167 @@ def plan(s, name, rs, st, now=None):
             stuck[alert_id("relayfetch", key)] = alert(f"{key} on {L} was fetched and archived successfully ({M.hub()} task {ft['id']}), but {M.hub()} still does not see it as done;"
                                                        f" check the result dir on {M.hub()}", machine=name, step="late", task=ft["id"], status=ft["status"])
     for t in mine:
-        key = t["key"]
-        k = keys.get(key)
-        a = rt.get(key) if k else None
-        if a:
-            owned.add(a["key"])
-        if proto.is_smoke(key):
-            sm = smoke_step(name, mtq, t, a, k, now)
-            if sm is not None:
-                acts += sm
-                continue
-        if t["state"] == "done":
-            ft = io_task(s, "relay_fetch", key, t.get("since") or 0)
-            at = io_task(s, "relay_archive", key, t.get("since") or 0)
-            if any(x is not None and x["status"] in LIVE for x in (ft, at)):  # it is on the store, but fetch/archive is still running: wait
-                acts.append(dict(op="beat", key=key))
-                continue
-            # the hub queue says done: the store has it (the result itself, not the fetch record). Report fetch failures
-            if ft is not None and ft["status"] != "Success":
-                acts.append(dict(op="beat", key=key))
-                stuck[alert_id("relayfetch", key)] = alert(f"fetching {key} from {L} failed on {M.hub()} task {ft['id']} ({ft['status']}); claim kept."
-                                                           f" See pueue log {ft['id']}, then pueue remove {ft['id']} to retry next check",
-                                                           machine=name, step="fetch", task=ft["id"], status=ft["status"])
-                continue
-            if k:  # once the store has it, drop the remote task and results without waiting for archive (executor disks are only staging)
-                acts.append(dict(op="drop", key=key, rkey=key))
-            try:
-                want = ft is not None and bool(RT.lookup(key).get("archive"))
-            except (RN.RelayError, S.SpecError):
-                want = False
-            archived = at is not None and at["status"] == "Success"
-            if want and not archived:
-                if at is not None:
+        n0 = len(acts)
+        try:
+            key = t["key"]
+            k = keys.get(key)
+            a = rt.get(key) if k else None
+            if a:
+                owned.add(a["key"])
+            if proto.is_smoke(key):
+                sm = smoke_step(name, mtq, t, a, k, now)
+                if sm is not None:
+                    acts += sm
+                    continue
+            if t["state"] == "done":
+                ft = io_task(s, "relay_fetch", key, t.get("since") or 0)
+                at = io_task(s, "relay_archive", key, t.get("since") or 0)
+                if any(x is not None and x["status"] in LIVE for x in (ft, at)):  # it is on the store, but fetch/archive is still running: wait
                     acts.append(dict(op="beat", key=key))
-                    stuck[alert_id("relayfetch", key)] = alert(f"archiving {key} to the backup machine failed on {M.hub()} task {at['id']} ({at['status']}); it is on {M.hub()} and the claim is kept."
-                                                               f" See pueue log {at['id']}, then pueue remove {at['id']} to retry next check",
-                                                               machine=name, step="archive", task=at["id"], status=at["status"])
                     continue
-                if not C.backup_down():  # backup machine usable: the hub queues archive separately and releases only after success; if it is just unreachable this time, retry next check
+                # the hub queue says done: the store has it (the result itself, not the fetch record). Report fetch failures
+                if ft is not None and ft["status"] != "Success":
                     acts.append(dict(op="beat", key=key))
-                    if not C.backup_down(s.get("ok")):
-                        acts.append(dict(op="archive", key=key))
+                    stuck[alert_id("relayfetch", key)] = alert(f"fetching {key} from {L} failed on {M.hub()} task {ft['id']} ({ft['status']}); claim kept."
+                                                               f" See pueue log {ft['id']}, then pueue remove {ft['id']} to retry next check",
+                                                               machine=name, step="fetch", task=ft["id"], status=ft["status"])
                     continue
-            acts.append(dict(op="release", key=key, why=f"done, it is on {M.hub()}" + (", archived" if archived else " (not archived)")))
-            sp = refill.info(mtq, key)["spec"]
-            try:
-                if sp and sp.get("recipe") and SG.on():
-                    acts.append(dict(op="smoke_real", key=key, mark=SG.mark(name, sp)))
-            except ValueError:
-                pass
-            continue
-        acts.append(dict(op="beat", key=key))
-        if t["state"] == "stopped" and not (a and a["state"] == "done"):
-            sg = None if a else io_task(s, "relay_stage", key, t.get("since") or 0)
-            if a and a["state"] != "stopped":
-                acts.append(dict(op="rstop", key=key, rkey=a["key"]))
-            elif sg is not None and sg["status"] in LIVE:
-                pass  # its staging has not ended: keep the claim, so a task it still adds over there is stopped from here next check
-            elif not (a and a.get("worker")):  # no longer claimed over there (or not staged yet)
-                acts[-1] = dict(op="release", key=key, why="stopped (taskq.py stop)" + ("; remote results kept" if a else ""))
-            continue
-        if a and a["state"] not in ("done", "failed", "bad") and a.get("nice") is not None and a["nice"] != t["nice"]:
-            acts.append(dict(op="rnice", key=key, rkey=a["key"], nice=t["nice"]))  # nice changed in the hub queue (set-nice): follow over there
-        since = t.get("since") or 0
-        if a is None:
-            sg = io_task(s, "relay_stage", key, since)
-            noslot = sg is not None and sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC
-            if sg is None or sg["status"] == "Success" or noslot or again(s, "relay_stage", key, since, code):
-                g, h = gate(name, rs, mtq, key), holds.get(key) or {}
-                if not g and h.get("bundle") in BG.in_use(name, rs.get("bundle"), rs.get("live")):
-                    g = (h["bundle"], h.get("err"))  # held by stage for this spec: do not queue again while the same bundle is still in use
-                if g:  # the bundle in use cannot run this spec: do not send yet, keep the claim, recheck after it switches bundles
-                    gated.add(key)
-                    if h.get("bundle") != g[0]:
-                        acts.append(dict(op="hold", key=key, bundle=g[0], err=g[1]))
-                    older = bool(rs.get("bundle")) and g[0] != rs["bundle"] and now - (h.get("since") or now) < proto.HELD_PATIENCE
-                    stuck[alert_id("bundlegate", name, key)] = alert(  # only an older bundle still used by running workers: it clears when they switch, so only record it for a while
-                        f"the bundle {g[0]} in use on {L} cannot run the spec for {key} ({g[1]}); not sending yet and keeping the claim until it switches bundles",
-                        level="info" if older else None, machine=name, key=key, bundle=g[0], err=g[1])
-                    continue
-                acts.append(dict(op="stage", key=key, nice=t["nice"]))
-                if noslot and now - since > proto.NOSLOT_ALERT:
-                    stuck[alert_id("site", name, "stage")] = alert(
-                        f"{key} for {L} has not been staged for {(now - since) / 3600:.0f} h (no CPU job slot, or the checkpoint source is still claimed)"
-                        f" ({M.hub()} task {sg['id']}, retried every check)", key=key, hours=round((now - since) / 3600, 1), task=sg["id"])
-            elif sg["status"] not in LIVE:
-                stuck[alert_id("relaystage", key)] = alert(f"staging {key} to {L} failed on {M.hub()} task {sg['id']} ({sg['status']}); claim kept."
-                                                           f" See pueue log {sg['id']}, then pueue remove {sg['id']} to retry next check",
-                                                           machine=name, step="stage", task=sg["id"], status=sg["status"])
-            continue
-        ast = a["state"]
-        if ast == "done" and proto.worker_holds(a, now):
-            pass  # done marker exists but the worker still claims it: the command is still writing results, so only beat and fetch after release; an expired claim (worker died without releasing) fetches as usual
-        elif ast == "done":
-            ft = fetched(key, since, "claim kept")
-            if ft:
-                late(key, ft)
-        elif ast == "stopped":
-            acts.append(dict(op="rresume", key=key, rkey=a["key"]))
-        elif ast == "input":  # remote side found missing inputs before starting (taskq.py missing): restage only the missing ones, rebuild views, then clear the marker
-            sg = io_task(s, "relay_stage", key, a.get("input_since") or since)
-            if (sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC)
-                    or again(s, "relay_stage", key, a.get("input_since") or since, code)):
-                acts.append(dict(op="restage", key=key))
-            elif sg["status"] not in LIVE:
-                stuck[alert_id("relaystage", key)] = alert(f"restaging missing inputs for {key} to {L} failed on {M.hub()} task {sg['id']} ({sg['status']}); claim kept."
-                                                           f" See pueue log {sg['id']}, then pueue remove {sg['id']} to retry next check",
-                                                           machine=name, step="restage", task=sg["id"], status=sg["status"])
-        elif ast == "failed":
-            if refill.site_progress(view.get(key)):
-                stuck[alert_id("site", name, "fail", key)] = alert(
-                    f"{key} ({a['key']}) failed {a.get('failures')} times on {L} with progress; claim kept."
-                    f" Check {proto.TASK_LOGS}/ over there; to give up: taskq.py release --worker {name} -- {key}",
-                    state="failed", progress=True, failures=a.get("failures"))
-            else:
-                acts[-1] = dict(op="release", key=key, skip=f"failed on {L}", failed=True,
-                                why=f"failed on {L} with no progress; released so {L} will not claim it again")
-                acts.append(dict(op="drop", key=key, rkey=a["key"]))
-        elif ast == proto.S_BAD:
-            stuck[alert_id("site", name, "fail", key)] = alert(f"{a['key']} ({key}) in the {L} queue is {ast}: {a.get('note')}",
-                                                               state=ast, progress=False, failures=a.get("failures"))
+                if k:  # once the store has it, drop the remote task and results without waiting for archive (executor disks are only staging)
+                    acts.append(dict(op="drop", key=key, rkey=key))
+                try:
+                    want = ft is not None and bool(RT.lookup(key).get("archive"))
+                except (RN.RelayError, S.SpecError):
+                    want = False
+                archived = at is not None and at["status"] == "Success"
+                if want and not archived:
+                    if at is not None:
+                        acts.append(dict(op="beat", key=key))
+                        stuck[alert_id("relayfetch", key)] = alert(f"archiving {key} to the backup machine failed on {M.hub()} task {at['id']} ({at['status']}); it is on {M.hub()} and the claim is kept."
+                                                                   f" See pueue log {at['id']}, then pueue remove {at['id']} to retry next check",
+                                                                   machine=name, step="archive", task=at["id"], status=at["status"])
+                        continue
+                    if not C.backup_down():  # backup machine usable: the hub queues archive separately and releases only after success; if it is just unreachable this time, retry next check
+                        acts.append(dict(op="beat", key=key))
+                        if not C.backup_down(s.get("ok")):
+                            acts.append(dict(op="archive", key=key))
+                        continue
+                acts.append(dict(op="release", key=key, why=f"done, it is on {M.hub()}" + (", archived" if archived else " (not archived)")))
+                sp = refill.info(mtq, key)["spec"]
+                try:
+                    if sp and sp.get("recipe") and SG.on():
+                        acts.append(dict(op="smoke_real", key=key, mark=SG.mark(name, sp)))
+                except ValueError:
+                    pass
+                continue
+            acts.append(dict(op="beat", key=key))
+            if t["state"] == "stopped" and not (a and a["state"] == "done"):
+                sg = None if a else io_task(s, "relay_stage", key, t.get("since") or 0)
+                if a and a["state"] != "stopped":
+                    acts.append(dict(op="rstop", key=key, rkey=a["key"]))
+                elif sg is not None and sg["status"] in LIVE:
+                    pass  # its staging has not ended: keep the claim, so a task it still adds over there is stopped from here next check
+                elif not (a and a.get("worker")):  # no longer claimed over there (or not staged yet)
+                    acts[-1] = dict(op="release", key=key, why="stopped (taskq.py stop)" + ("; remote results kept" if a else ""))
+                continue
+            if a and a["state"] not in ("done", "failed", "bad") and a.get("nice") is not None and a["nice"] != t["nice"]:
+                acts.append(dict(op="rnice", key=key, rkey=a["key"], nice=t["nice"]))  # nice changed in the hub queue (set-nice): follow over there
+            since = t.get("since") or 0
+            if a is None:
+                sg = io_task(s, "relay_stage", key, since)
+                noslot = sg is not None and sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC
+                if sg is None or sg["status"] == "Success" or noslot or again(s, "relay_stage", key, since, code):
+                    g, h = gate(name, rs, mtq, key), holds.get(key) or {}
+                    if not g and h.get("bundle") in BG.in_use(name, rs.get("bundle"), rs.get("live")):
+                        g = (h["bundle"], h.get("err"))  # held by stage for this spec: do not queue again while the same bundle is still in use
+                    if g:  # the bundle in use cannot run this spec: do not send yet, keep the claim, recheck after it switches bundles
+                        gated.add(key)
+                        if h.get("bundle") != g[0]:
+                            acts.append(dict(op="hold", key=key, bundle=g[0], err=g[1]))
+                        older = bool(rs.get("bundle")) and g[0] != rs["bundle"] and now - (h.get("since") or now) < proto.HELD_PATIENCE
+                        stuck[alert_id("bundlegate", name, key)] = alert(  # only an older bundle still used by running workers: it clears when they switch, so only record it for a while
+                            f"the bundle {g[0]} in use on {L} cannot run the spec for {key} ({g[1]}); not sending yet and keeping the claim until it switches bundles",
+                            level="info" if older else None, machine=name, key=key, bundle=g[0], err=g[1])
+                        continue
+                    acts.append(dict(op="stage", key=key, nice=t["nice"]))
+                    if noslot and now - since > proto.NOSLOT_ALERT:
+                        stuck[alert_id("site", name, "stage")] = alert(
+                            f"{key} for {L} has not been staged for {(now - since) / 3600:.0f} h (no CPU job slot, or the checkpoint source is still claimed)"
+                            f" ({M.hub()} task {sg['id']}, retried every check)", key=key, hours=round((now - since) / 3600, 1), task=sg["id"])
+                elif sg["status"] not in LIVE:
+                    stuck[alert_id("relaystage", key)] = alert(f"staging {key} to {L} failed on {M.hub()} task {sg['id']} ({sg['status']}); claim kept."
+                                                               f" See pueue log {sg['id']}, then pueue remove {sg['id']} to retry next check",
+                                                               machine=name, step="stage", task=sg["id"], status=sg["status"])
+                continue
+            ast = a["state"]
+            if ast == "done" and proto.worker_holds(a, now):
+                pass  # done marker exists but the worker still claims it: the command is still writing results, so only beat and fetch after release; an expired claim (worker died without releasing) fetches as usual
+            elif ast == "done":
+                ft = fetched(key, since, "claim kept")
+                if ft:
+                    late(key, ft)
+            elif ast == "stopped":
+                acts.append(dict(op="rresume", key=key, rkey=a["key"]))
+            elif ast == "input":  # remote side found missing inputs before starting (taskq.py missing): restage only the missing ones, rebuild views, then clear the marker
+                sg = io_task(s, "relay_stage", key, a.get("input_since") or since)
+                if (sg is None or sg["status"] == "Success" or (sg["status"] not in LIVE and sg.get("code") == NOSLOT_RC)
+                        or again(s, "relay_stage", key, a.get("input_since") or since, code)):
+                    acts.append(dict(op="restage", key=key))
+                elif sg["status"] not in LIVE:
+                    stuck[alert_id("relaystage", key)] = alert(f"restaging missing inputs for {key} to {L} failed on {M.hub()} task {sg['id']} ({sg['status']}); claim kept."
+                                                               f" See pueue log {sg['id']}, then pueue remove {sg['id']} to retry next check",
+                                                               machine=name, step="restage", task=sg["id"], status=sg["status"])
+            elif ast == "failed":
+                if refill.site_progress(view.get(key)):
+                    stuck[alert_id("site", name, "fail", key)] = alert(
+                        f"{key} ({a['key']}) failed {a.get('failures')} times on {L} with progress; claim kept."
+                        f" Check {proto.TASK_LOGS}/ over there; to give up: taskq.py release --worker {name} -- {key}",
+                        state="failed", progress=True, failures=a.get("failures"))
+                else:
+                    acts[-1] = dict(op="release", key=key, skip=f"failed on {L}", failed=True,
+                                    why=f"failed on {L} with no progress; released so {L} will not claim it again")
+                    acts.append(dict(op="drop", key=key, rkey=a["key"]))
+            elif ast == proto.S_BAD:
+                stuck[alert_id("site", name, "fail", key)] = alert(f"{a['key']} ({key}) in the {L} queue is {ast}: {a.get('note')}",
+                                                                   state=ast, progress=False, failures=a.get("failures"))
+        except Exception as e:  # noqa: BLE001  one task's error stays with it: its claim is kept (beat), the other tasks go on
+            del acts[n0:]
+            acts.append(dict(op="beat", key=t["key"]))
+            stuck[alert_id("site", name, "error", t["key"])] = alert(f"{t['key']} on {L}: planning it failed ({type(e).__name__}: {e}"[:300] + "); its claim is kept, the other tasks go on",
+                                                                   key=t["key"], error=f"{type(e).__name__}: {e}"[:300])
     mt = {t["key"]: t for t in (mtq or {}).get("tasks", [])}
     mk = {t["key"] for t in mine}
     for a in rs["taskq"]["tasks"]:
-        if a["key"] in owned:
-            continue
-        real = a["key"] if a["key"] in keys else None
-        m = mt.get(real) if real else None
-        if real is None:
-            stuck[alert_id("site", name, "orphan", a["key"])] = alert(f"cannot map {a['key']} in the {L} queue to a task (no placement record on the hub)",
-                                                                      unknown=True, state=a["state"])
-        elif a["state"] in ("claimed", "busy"):
-            stuck[alert_id("site", name, "orphan", real)] = alert(f"{L} is running {real}, but the hub queue does not have it claimed there; compare the hub queue and the {L} queue",
-                                                                  unknown=False, state=a["state"], assigned=(m or {}).get("worker"))
-        elif a["state"] == "done" and not (m and m["state"] == "done") and not proto.is_smoke(real):
-            # finished here, but the hub queue no longer has it on this machine (released, assigned elsewhere or removed) and does
-            # not show it as done: its results exist only here, so fetch them first; they are dropped once the store has them
-            if not proto.worker_holds(a, now):  # a worker still holding it is still writing results
-                ft = fetched(real, keys[real].get("staged") or 0, f"its results stay on {L}")
-                if ft and m is None:  # not in the hub queue (nothing will show it as done): the fetch verified what it placed
-                    acts.append(dict(op="drop", key=real, rkey=a["key"]))
-                elif ft:
-                    late(real, ft)
-        elif m is None or m["state"] == "done" or m.get("worker") and m["worker"] != name:  # done, or assigned to another executor: drop
-            acts.append(dict(op="drop", key=real, rkey=a["key"]))
-        elif a["state"] != "stopped":
-            acts.append(dict(op="rstop", key=real, rkey=a["key"]))
-        elif m["state"] != proto.S_STOPPED and not m.get("worker") and not refill.site_progress(view.get(real)):
-            acts.append(dict(op="drop", key=real, rkey=a["key"]))  # resumed in the hub queue unassigned, stopped over there with no progress → drop
+        n0 = len(acts)
+        try:
+            if a["key"] in owned:
+                continue
+            real = a["key"] if a["key"] in keys else None
+            m = mt.get(real) if real else None
+            if real is None:
+                stuck[alert_id("site", name, "orphan", a["key"])] = alert(f"cannot map {a['key']} in the {L} queue to a task (no placement record on the hub)",
+                                                                          unknown=True, state=a["state"])
+            elif a["state"] in ("claimed", "busy"):
+                stuck[alert_id("site", name, "orphan", real)] = alert(f"{L} is running {real}, but the hub queue does not have it claimed there; compare the hub queue and the {L} queue",
+                                                                      unknown=False, state=a["state"], assigned=(m or {}).get("worker"))
+            elif a["state"] == "done" and not (m and m["state"] == "done") and not proto.is_smoke(real):
+                # finished here, but the hub queue no longer has it on this machine (released, assigned elsewhere or removed) and does
+                # not show it as done: its results exist only here, so fetch them first; they are dropped once the store has them
+                if not proto.worker_holds(a, now):  # a worker still holding it is still writing results
+                    ft = fetched(real, keys[real].get("staged") or 0, f"its results stay on {L}")
+                    if ft and m is None:  # not in the hub queue (nothing will show it as done): the fetch verified what it placed
+                        acts.append(dict(op="drop", key=real, rkey=a["key"]))
+                    elif ft:
+                        late(real, ft)
+            elif m is None or m["state"] == "done" or m.get("worker") and m["worker"] != name:  # done, or assigned to another executor: drop
+                acts.append(dict(op="drop", key=real, rkey=a["key"]))
+            elif a["state"] != "stopped":
+                acts.append(dict(op="rstop", key=real, rkey=a["key"]))
+            elif m["state"] != proto.S_STOPPED and not m.get("worker") and not refill.site_progress(view.get(real)):
+                acts.append(dict(op="drop", key=real, rkey=a["key"]))  # resumed in the hub queue unassigned, stopped over there with no progress → drop
+        except Exception as e:  # noqa: BLE001  one remote task's error stays with it
+            del acts[n0:]
+            stuck[alert_id("site", name, "error", a.get("key"))] = alert(f"{a.get('key')} in the {L} queue: planning it failed ({type(e).__name__}: {e}"[:300] + "); the other tasks go on",
+                                                                       key=a.get("key"), error=f"{type(e).__name__}: {e}"[:300])
     for real, k in keys.items():  # remote task dropped but paths left (drop_remote recorded dropped): remove them again
         if real not in mk and real not in rt and k.get("dropped"):
             acts.append(dict(op="drop", key=real, rkey=real, gone=True))
@@ -554,8 +567,15 @@ def assign(s, ctxs, stuck=None, notes=None):
         return {}, {n: "hub queue is off or paused" for n in ctxs}
     if "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):  # staging is queued in hub pueue; running tasks are invisible
         return {}, {n: f"cannot read pueue on {M.hub()}" for n in ctxs}
-    tasks = [t for t in mtq.get("tasks", []) if t["state"] == proto.S_FREE and not t.get("bad") and t.get("spec")
-             and relayable(refill.info(mtq, t["key"])) and not refill.progress(s, t["key"])]
+    tasks, bad = [], {}  # bad {key: error}: one task's bad spec or plugin error stays with that task, the others are assigned
+    for t in mtq.get("tasks", []):
+        if t["state"] != proto.S_FREE or t.get("bad") or not t.get("spec"):
+            continue
+        try:
+            if relayable(refill.info(mtq, t["key"])) and not refill.progress(s, t["key"]):
+                tasks.append(t)
+        except Exception as e:  # noqa: BLE001
+            bad[t["key"]] = f"{type(e).__name__}: {e}"[:300]
     specs = {t["key"]: (t.get("recipe"), t["spec"]) for t in tasks}
     sites, gates, why = {}, {}, {}
     for n, c in ctxs.items():
@@ -569,9 +589,12 @@ def assign(s, ctxs, stuck=None, notes=None):
         sites[n], gates[n] = site, sg
         for t in tasks:  # smoke gate: for tasks this machine can take with a matching kind and envs, queue a smoke and alert if not past it (whether or not there is room this round)
             rec, sp = specs[t["key"]]
-            if n in refill.places(rec, sp) and n not in (t.get("skipped_by") or []) and refill.kind_of(sp) in site.room \
-                    and set(S.envs_of(sp)) <= site.envs:
-                sg.verdict(t["key"], sp)
+            try:
+                if n in refill.places(rec, sp) and n not in (t.get("skipped_by") or []) and refill.kind_of(sp) in site.room \
+                        and set(S.envs_of(sp)) <= site.envs:
+                    sg.verdict(t["key"], sp)
+            except Exception as e:  # noqa: BLE001
+                bad[t["key"]] = f"{type(e).__name__}: {e}"[:300]
     need = {p for t in tasks for p in specs[t["key"]][1].get("inputs") or [] if any(p not in x.ready for x in sites.values())}
     try:
         sizes = refill.data_sizes(need, lambda pats: RM.store_op("probe", dict(pats=pats, size=True)))
@@ -579,6 +602,9 @@ def assign(s, ctxs, stuck=None, notes=None):
         stuck[alert_id("relay", "store")] = f"cannot measure inputs to transfer on the store ({e}); assigning nothing this round"
         return {}, {n: "cannot measure inputs on the store" for n in ctxs}
     res = refill.choose(tasks, sites, specs, held_all(ctxs), sizes)
+    bad.update(res["errors"])
+    for k, e in bad.items():
+        stuck[alert_id("relaytask", k)] = alert(f"{k} cannot be sent to an executor ({e}); the other tasks are assigned as usual", key=k, error=e)
     for k in res["nowhere"]:
         stuck[alert_id("tqblocked", k)] = alert(f"{k}: every executor it can go to ({', '.join(refill.places(*specs[k]))}) released and skipped it, so it will not start;"
                                                 f" check why each released it, then taskq unskip {k}", key=k)

@@ -94,6 +94,12 @@ ok("out outside the data dir -> error (absolute, ..); done markers and fetch pat
    and raises(lambda: S.resolve("command", dict(G, fetch={"also": ["../x"]})))
    and raises(lambda: S.resolve("command", dict(G, fetch={"exclude": "x"})))
    and S.resolve("command", dict(G, out="guest/x/", done=["sub/DONE|ALT"], fetch={"extra": ["*.json"], "also": ["guest/y"]}))["out"] == "guest/x/")
+ok("out_gb must be a number of GB (a string of digits from k=v params is fine)",
+   raises(lambda: S.resolve("command", dict(G, out_gb="big"))) and raises(lambda: S.resolve("command", dict(G, out_gb=-1)))
+   and S.resolve("command", dict(G, out_gb="5"))["out_gb"] == "5")
+ok("a spec too long for one command-line argument (proto.SPEC_MAX) -> error at add and when an executor receives it",
+   raises(lambda: S.resolve("command", dict(G, inputs=[f"guest/in/{i:06d}.dat" for i in range(8000)])))
+   and raises(lambda: S.from_sent(dict(S.sendable(g), inputs=[f"guest/in/{i:06d}.dat" for i in range(8000)]))))
 ok("a spec sent to an executor is checked the same way (task name, out)",
    raises(lambda: S.from_sent(dict(S.sendable(g), key=".."))) and raises(lambda: S.from_sent(dict(S.sendable(g), out="/etc")))
    and S.from_sent(S.sendable(g))["key"] == "guest/x")

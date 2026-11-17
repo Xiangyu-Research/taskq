@@ -517,6 +517,14 @@ def test_assign():
         out, why, _ = run([mtask(K)] + cands, {NAME: (RS(rtask(K, "claimed", "1")), st)})
         assert out == {NAME: [("take", K2), ("take", K3)]}, (out, why)
         assert probed[-1] == ["prepared/D2_y", "prepared/D3_z"], probed  # do not measure what is already over there (D1_x)
+        bad = dict(cands[0], spec=dict(cands[0]["spec"], out_gb="big"))
+        out, why, stuck = run([mtask(K), bad, cands[1]], {NAME: (RS(rtask(K, "claimed", "1")), st)})
+        assert out == {NAME: [("take", K3)]} and "ValueError" in stuck.get(proto.alert_id("relaytask", K2), {}).get("msg", ""), (out, stuck)
+        real_info = relay.refill.info
+        with patched(relay.refill, info=lambda mtq, k: 1 / 0 if k == K2 else real_info(mtq, k)):
+            out, why, stuck = run([mtask(K)] + cands[:2], {NAME: (RS(rtask(K, "claimed", "1")), st)})
+        assert out == {NAME: [("take", K3)]} and "ZeroDivisionError" in stuck.get(proto.alert_id("relaytask", K2), {}).get("msg", ""), (out, stuck)
+        ok("assignment: one task's bad spec (out_gb='big') or a raising plugin only keeps that task back (alert relaytask:<key>); the others are assigned")
         berr = S0([mtask(K)] + cands)
         berr["pueue"] = {M.hub(): {"error": "pueue not responding"}}
         out, why, _ = run(None, {NAME: (RS(rtask(K, "claimed", "1")), st)}, s=berr)
@@ -681,6 +689,18 @@ def test_drop_refused():
             ST.update_state(lambda st: st.get("keys", {}).get(NAME, {}).pop(K, None))
     ok("remote refuses to drop (exit 3), or another failure/unreachable → remove no results and do not release; task already dropped (exit 4) → clean results as usual; "
        "task dropped but paths left → release as usual, record dropped, remove paths next round")
+
+
+def test_plan_task_error():
+    """One task raising while planning (a plugin, the bundle gate, a bad record) only affects that task: its actions are
+    rolled back, it keeps its claim (beat) and gets its own alert; the other tasks are planned as usual."""
+    K, K2 = "D1_x/tr/0", "D2_y/tr/0"
+    real_gate = relay.gate
+    with patched(relay, gate=lambda name, rs, mtq, key: 1 / 0 if key == K else real_gate(name, rs, mtq, key)):
+        acts, stuck = relay.plan(S0([mtask(K), mtask(K2)]), NAME, RS(), {})
+    assert ops(acts) == [("beat", K), ("beat", K2), ("stage", K2)], acts
+    assert "ZeroDivisionError" in stuck[proto.alert_id("site", NAME, "error", K)]["msg"], stuck
+    ok("plan: a task raising keeps its claim (beat only) with its own alert site:<machine>:error:<key>; the others are planned as usual")
 
 
 def test_beat_lost():
@@ -1790,6 +1810,7 @@ if __name__ == "__main__":
     test_paused()
     test_held_by()
     test_plan()
+    test_plan_task_error()
     test_assign()
     test_pueue_worker()
     test_slurm_topup_ready()

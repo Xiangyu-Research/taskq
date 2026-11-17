@@ -130,7 +130,16 @@ def resolve(recipe, params, exp=None):
         s["done"] = [s["done"]]
     _check(s)
     s.update(recipe=recipe, params={k: v for k, v in params.items()}, exp=exp, names=p)
+    _size_ok(sendable(s))
     return s
+
+
+def _size_ok(sent):
+    """A sent spec must fit in one command-line argument (P.SPEC_MAX) -> SpecError."""
+    n = len(json.dumps(sent, ensure_ascii=False, separators=(",", ":")).encode())
+    if n > P.SPEC_MAX:
+        raise SpecError(f"the spec is {n // 1024} KB, an executor gets it as one command-line argument (at most {P.SPEC_MAX // 1024} KB): "
+                        "put long lists in a file")
 
 
 RES = ("gpus", "cpus", "mem", "gpu_mem", "wait_gpu", "local_inputs")
@@ -215,6 +224,13 @@ def _check(s, progress=True):
             raise SpecError(f"res.{k} must be a number: {v!r}") from None
         if res[k] < 0:
             raise SpecError(f"res.{k} must not be negative: {v!r}")
+    if s.get("out_gb") is not None:
+        try:
+            good = not isinstance(s["out_gb"], bool) and float(s["out_gb"]) >= 0
+        except (TypeError, ValueError):
+            good = False
+        if not good:
+            raise SpecError(f"out_gb must be a number of GB: {s['out_gb']!r}")
     if (res.get("gpus") or 0) > 1:
         raise SpecError(f"res.gpus is at most 1 (a worker gives each task one GPU): {res['gpus']!r}")
     s["res"] = res
@@ -658,6 +674,7 @@ def from_sent(text):
     if isinstance(s["done"], str):
         s["done"] = [s["done"]]
     _check(s, progress=False)
+    _size_ok(s)
     return s
 
 

@@ -133,7 +133,10 @@ ok("places: then intersected with the spec's machines", R.places("x", dict(step=
 four = [ctq(f"c/{i}", order=i) for i in range(4)]
 got, res = pick(four, [site("site-pueue", dict(gpu=2)), site("site-slurm", dict(gpu=1)), site("site-slurm2", dict(gpu=1))])
 ok("two or three can take it: split by free slots (fill the preferred one first, then the next)",
-   got == {"c/0": "site-pueue", "c/1": "site-pueue", "c/2": "site-slurm", "c/3": "site-slurm2"} and res == dict(why={}, by_site={}, nowhere=[], noroom=[]))
+   got == {"c/0": "site-pueue", "c/1": "site-pueue", "c/2": "site-slurm", "c/3": "site-slurm2"} and res == dict(why={}, by_site={}, nowhere=[], noroom=[], errors={}))
+got, res = pick([ctq("c/0", order=0), ctq("c/1", order=1, out_gb="big"), ctq("c/2", order=2)], [site("site-pueue", dict(gpu=3))])
+ok("one task's bad spec (out_gb='big') or a raising plugin: only that task is not sent (errors), the others are",
+   got == {"c/0": "site-pueue", "c/2": "site-pueue"} and list(res["errors"]) == ["c/1"] and "ValueError" in res["errors"]["c/1"])
 got, res = pick(four, [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))])
 ok("not enough slots: the rest are not sent this round, say why for each", len(got) == 2 and set(res["why"]) == {"c/2", "c/3"}
    and "site-pueue: full" in res["why"]["c/2"] and "site-slurm: full" in res["why"]["c/2"] and res["noroom"] == []

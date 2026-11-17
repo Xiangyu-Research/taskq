@@ -131,6 +131,7 @@ NOSLOT_ALERT = 3 * 3600      # a claim this old that still cannot be staged (no 
 VIEW_KEEP = 6 * 3600         # input views built this recently are kept (a task just staged, not added yet, or just released)
 SITE_STATUS_TIMEOUT = 90     # reading an executor's status: skip it this round when its storage hangs this long
 NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are pushed
+SPEC_MAX = 120 * 1024        # bytes: a sent spec reaches run_task.sh as one command-line argument (Linux allows 128 KB per argument)
 TICK_SLOW = 25 * 60          # a health check round longer than this is reported (cron starts one every 30 minutes)
 TICK_STUCK = 2 * 3600        # a round still running after this long: the rounds it makes skip push an alert
 PUEUE_LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")  # pueue task statuses that are not finished
@@ -281,7 +282,7 @@ ALERTS = dict(
     site=("machine", "sub", "key"), topup=("machine", "qos", "kind"), advance=("step", "who"),
     relaystage=("key",), relayfetch=("key",), relay=("machine",), feed=("sub", "machine"),
     relayadd=("machine", "op", "key"),
-    bundlegate=("machine", "key"),
+    bundlegate=("machine", "key"), relaytask=("key",),
     health=("sub",),  # the health check itself (slow: the last round took longer than TICK_SLOW)
 )
 

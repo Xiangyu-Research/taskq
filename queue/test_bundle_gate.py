@@ -127,6 +127,17 @@ def test_cache_timeout(new):
     assert err and "exited 3" in err, err
     assert BG.main(["0" * 16]) == 0
     ok("timeout -> pass and do not cache (run again next time); wrong exit code -> block; command line: absent bundle passes")
+    real = BG.subprocess.run
+
+    def toolong(*a, **kw):
+        raise OSError(7, "Argument list too long")
+    BG.subprocess.run = toolong
+    try:
+        err = BG.check(dict(CMD, key="job/huge"), "f" * 16)
+    finally:
+        BG.subprocess.run = real
+    assert err and "Argument list too long" in err, err
+    ok("spec.py cannot even start (a spec too long for one argument): that spec is blocked with the reason, nothing raises")
 
 
 def test_current():
