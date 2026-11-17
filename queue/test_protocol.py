@@ -60,6 +60,7 @@ def code_lines(p):
 LITERALS = {
     "taskq_stage_": r"taskq_stage_",
     "/tmp/gpu_pad_": r"/tmp/gpu_pad_",
+    "taskq_gpu_pad_": r"taskq_gpu_pad_",
     "@@JSON": r"@@JSON",
     "gpu_pad_DISABLED": r"gpu_pad_DISABLED",
     "view.lock": r"view\.lock",

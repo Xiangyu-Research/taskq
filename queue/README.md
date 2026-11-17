@@ -470,6 +470,9 @@ is stopped and replaced.
 Inside a Slurm job, when the machine table has `gpu_pad=(floor, target, high)` (MiB), `queue/gpu_pad_start.sh` starts `queue/gpu_pad.py` in
 the job: hold floor while nothing trains; grow to target once training memory is stable; yield when total usage exceeds high. The worker
 grows it to floor before training (the `gpu_pad` consumer, or `taskq pad room`), and its memory is subtracted when computing free GPU memory.
+The pad and the worker talk through files in this account's private dir on the node (`proto.gpu_pad_base`: `/tmp/taskq_gpu_pad_<uid>/<job>.mib`,
+`.ready`, `.start`; the pad does not run when that dir is a link or another account's), read and written only as regular files of this
+account, never through a link; a pad started by an older bundle is still found at `proto.GPU_PAD_BASE`.
 Master switch: off while `R/queue/gpu_pad_DISABLED` exists in the executor root. Thresholds can also be given through `TASKQ_GPU_PAD_*`
 env vars.
 

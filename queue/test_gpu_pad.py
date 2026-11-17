@@ -238,6 +238,20 @@ with tempfile.TemporaryDirectory() as d:
     t[0] += 10
     p.step()
     ok("7d signal when training alone is above floor: nothing to release, still writes ready", os.path.exists(base + ".ready") and b.live[0] == 0)
+    # links planted at the handshake names are never followed: the pad's temp names, and a .start link (not a signal)
+    victim = os.path.join(d, "victim")
+    open(victim, "w").write("keep")
+    os.utime(victim, (t[0] + 100, t[0] + 100))
+    for x in (".mib", ".ready"):
+        os.symlink(victim, f"{base}{x}.{os.getpid()}.tmp")
+    os.remove(base + ".start")
+    os.symlink(victim, base + ".start")
+    lv, seen = b.live[0], p.seen_start
+    t[0] += 10
+    p.step()
+    p._write_ready()
+    ok("links planted at the pad's temp names and at .start: not followed (the file they point at unchanged, a .start link is no signal)",
+       open(victim).read() == "keep" and p.seen_start == seen and b.live[0] == lv and os.path.islink(f"{base}.mib.{os.getpid()}.tmp"))
     G.time.time = time.time
 
 b = FakeBackend(fallback=True)
@@ -311,7 +325,23 @@ ok("thresholds from env vars; settle 120 s, start_hold 900 s, 10 s rounds, below
    and a.settle == 120 and a.start_hold == 900 and a.interval == 10 and a.min_train_mib == 2000)
 os.environ["SLURM_JOB_ID"] = "4242"
 os.environ.pop("TASKQ_GPU_PAD_BASE", None)
-ok("default base is /tmp/gpu_pad_<job id>", G.parse_args([]).base == "/tmp/gpu_pad_4242")
+ok("default base is <job id> in this account's private dir (proto.gpu_pad_base)",
+   G.parse_args([]).base == G.proto.gpu_pad_base("4242", os.getuid()) == f"{G.proto.GPU_PAD_DIR}{os.getuid()}/4242")
+
+# the private dir: made 0700 by the pad; a link or another account's dir there means no pad (it would hold memory with no handshake)
+_dir = G.proto.GPU_PAD_DIR
+G.proto.GPU_PAD_DIR = os.path.join(fixture.tmpdir(), "padd_")
+pd = G.proto.GPU_PAD_DIR + str(os.getuid())
+os.symlink(fixture.tmpdir(), pd)
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = G.main(["--dry-run", "--iterations", "1", "--interval", "0"])
+os.unlink(pd)
+ok("private dir replaced by a link: the pad does not start (exit 1, says why)", rc == 1 and "not a private dir of this account" in buf.getvalue())
+with contextlib.redirect_stdout(io.StringIO()):
+    G.main(["--dry-run", "--iterations", "1", "--interval", "0"])  # makes the dir, then reads the GPU once if there is one
+ok("private dir: made 0700 by the pad", os.path.isdir(pd) and not os.path.islink(pd) and os.stat(pd).st_mode & 0o777 == 0o700)
+G.proto.GPU_PAD_DIR = _dir
 ok("the master switch defaults to TASKQ_STATE/gpu_pad/DISABLED", G.default_switch() == os.path.join(os.environ["TASKQ_STATE"], "gpu_pad", "DISABLED"))
 os.environ["TASKQ_GPU_PAD_FLOOR_MIB"] = "43000"
 f_new = G.parse_args([]).floor_mib

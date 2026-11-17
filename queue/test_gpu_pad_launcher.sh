@@ -138,4 +138,15 @@ waitfor 20 '(( $(lines) >= 5 ))'
 check "runs that lasted past RESET_AFTER: keep restarting, never give up" bash -c "test \$(wc -l < '$T/args') -ge 5 && ! grep -q \"not restarting\" '$T/wlog'"
 
 reset
+# no logs dir under TASKQ_DATA: the pad's log goes into this account's private handshake dir (made 0700), never a shared /tmp name
+touch "$T/afile"
+PD=$(python3 -c 'import os, sys; sys.path.insert(0, sys.argv[1]); import proto; print(proto.GPU_PAD_DIR + str(os.getuid()))' "$HERE")
+made=; [[ -e $PD ]] || made=1
+source_it "$T/bin" SLURM_JOB_ID=1016 CUDA_VISIBLE_DEVICES=0 TASKQ_DATA="$T/afile/data" > "$T/wlog"
+waitfor 20 '(( $(lines) >= 1 ))'; sleep 0.3
+check "no logs dir: the pad's log is in this account's private dir (0700)" \
+      bash -c "grep -q 'log=$PD/1016.log' '$T/wlog' && test -f '$PD/1016.log' && test ! -L '$PD' && test \$(stat -c %a '$PD') = 700"
+reset
+rm -f "$PD/1016.log"; [[ -n $made ]] && rmdir "$PD"
+
 if (( fails == 0 )); then echo "all passed"; else echo "$fails checks failed"; exit 1; fi
