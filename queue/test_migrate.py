@@ -296,7 +296,7 @@ write(os.path.join(TQ, Q["failures"], sf(INF)), "2026-11-01 10:00:00\t作业 lab
 write(os.path.join(TQ, Q["skips"], sf(SRC)), "2026-11-01 10:00:00\tlab1\t放不下\n2026-11-01 11:00:00\tsite-slurm\t放不下\n")
 write(os.path.join(TQ, Q["inputs"], sf(INF)), "1700000000\t缺 a\n")
 write(os.path.join(TQ, Q["stopped"], sf(EV)), "2026-11-01 10:00:00\t不要了\n")
-write(os.path.join(TQ, Q["released"], sf(GONE)), "1700000002.0 lab1\n")  # record of a dropped task: deleted too
+write(os.path.join(TQ, Q["released"], sf(GONE)), "1700000002.0 lab1\n")  # record of a task that is no step (added by hand): stays
 write(os.path.join(TQ, Q["claims"], sf(DUP), proto.CLAIM_INFO), json.dumps(dict(worker="lab1")))
 SM = os.path.join(TQ, proto.SMOKE_DIR)
 write(os.path.join(SM, "lab0.json"), json.dumps({"k1": dict(t=100, ok=True), "k2": dict(t=300, ok=True), "r|env=e|a=1|env=e": dict(t=50, ok=True)}))
@@ -368,7 +368,7 @@ write(os.path.join(Q1, Q["skips"], sf(GONE)), "2026-11-01 10:00:00\tlab0-gpu\t�
 write(os.path.join(Q1, Q["failures"], sf(INF)), "2026-11-01 10:00:00\t作业 lab0-gpu\tboom\n")
 os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(INF) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))
 write(os.path.join(R1, proto.ROOT["pins"], "other.json"), "{}")
-os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(DUP) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))  # dropped task, lapsed: deleted
+os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(DUP) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))  # not renamed (no step): kept
 os.utime(write(os.path.join(R1, proto.ROOT["pins"], sf(SRC) + ".json"), "{}"), (1, time.time() - proto.PIN_TTL - 60))  # keeps its name: kept
 write(os.path.join(R1, proto.ROOT["pins"], sf(EV) + ".json"), "{}")  # renamed but fresh (a transfer may be running): kept
 write(os.path.join(L1, f"{sf(INF)}__lab0-gpu_seg1.log"), "a")
@@ -460,8 +460,9 @@ ok("none of these changed anything on disk", diff(t0, tree()) == [])
 rc, out, err = run(*REN, *MERGE)
 d = diff(t0, tree())
 ok(f"without --apply: exit code 0, not one byte on disk changes ({d[:5]} {err.strip()[-300:]})", rc == 0 and d == [])
-ok("lists: dropped old tasks and why (no match, same instance as another)",
-   f"dropped {GONE}: no step in the experiment table has this output" in out and f"dropped {DUP}: same step instance {NINF} as another task" in out)
+ok("lists: tasks that are no step are left as they are (counted; named with the reason when their output is also a step's)",
+   "2 renamed to step instance names, 2 not steps of the experiment table (left as they are)" in out
+   and f"left as it is: {DUP} (its output is that of step instance {NINF}, which another task already is)" in out and "dropped" not in out)
 ok("lists: what each machine does (renamed part logs, existing target kept, merged root, dropped skip records, dropped pin records)",
    "part logs" in out and "kept" in out and f"{OLD1}/{proto.ROOT['data']}/{proto.TASK_LOGS} -> {R1}" in out
    and "skip records of workers that no longer exist" in out and "drop pin record" in out)
@@ -477,7 +478,7 @@ t1 = tree()
 rc, out, err = run("--apply", *REN, *MERGE)
 d = diff(t1, tree())
 ok(f"an executor (Slurm) queue has a claimed task that would be renamed: exit 1, says which machine and task, disk unchanged ({d[:5]} {err.strip()[-200:]})",
-   rc == 1 and "Slurm" in err and "would be renamed or dropped" in err and EV in err and d == [])
+   rc == 1 and "Slurm" in err and "would be renamed" in err and EV in err and d == [])
 os.remove(claim)
 os.rmdir(os.path.dirname(claim))
 os.rmdir(os.path.dirname(os.path.dirname(claim)))
@@ -508,7 +509,9 @@ ok("finally prints the command to delete the merged old root (the old root itsel
 
 # queue
 hub = {t["key"]: t for t in tasks_of(os.path.join(TQ, Q["tasks"]))}
-ok(f"queue: old tasks renamed to step instance names, unmatched and duplicate ones dropped ({sorted(hub)})", sorted(hub) == sorted([SRC, NINF, NEV]))
+ok(f"queue: old tasks renamed to step instance names; tasks that are no step (added by hand, or a second one with a step's output) stay ({sorted(hub)})",
+   sorted(hub) == sorted([SRC, NINF, NEV, DUP, GONE]) and hub[GONE]["params"] == P_GONE and hub[DUP]["params"] == P_DUP
+   and hub[GONE]["recipe"] == "command")
 ok("parameters the recipe no longer has (oldlogs) removed from the hub queue and the relay ledger",
    "oldlogs" not in hub[SRC]["params"] and hub[SRC]["params"].get("machines")
    and "oldlogs" not in HS.relay()["keys"]["site-slurm"][SRC]["params"])
@@ -571,9 +574,8 @@ ok("hub bookkeeping files read into the database: what relay last read, task rec
 ok("relay ledger: views merged (merged old roots dropped), last_ok max, bundle_for removed",
    st.get("views") == {"site-pueue": {VIEW: 10}, "site-slurm": {"v/dicc": 30, "prepared/D101_alpha": 40}}
    and st.get("last_ok") == {"site-pueue": 200, "site-slurm": 300} and "bundle_for" not in st and "held" not in st)
-ok("dropped tasks: claim, release and skip records removed on hub and executors",
-   not any(os.path.exists(os.path.join(TQ, Q[d], sf(k))) for d in ("claims", "released") for k in (DUP, GONE))
-   and not os.path.exists(os.path.join(Q1, Q["skips"], sf(GONE))))
+ok("tasks that are no step: their claim and release records stay",
+   os.path.exists(os.path.join(TQ, Q["claims"], sf(DUP), proto.CLAIM_INFO)) and os.path.exists(os.path.join(TQ, Q["released"], sf(GONE))))
 
 # executor queues
 q1 = {t["key"]: t for t in tasks_of(os.path.join(Q1, Q["tasks"]))}
@@ -623,7 +625,7 @@ ok("site-slurm, the store data dir, the store root's data dir: part logs renamed
    and os.listdir(os.path.join(DATA, proto.TASK_LOGS)) == [f"{sf(NEV)}__dicc_part1.log"]
    and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS)) == [f"{sf(NINF)}__x_part3.log"])
 ok("pin records: dropped for renamed tasks once lapsed (executors and store); fresh ones (a transfer may be running) and those of tasks keeping their name kept",
-   sorted(os.listdir(os.path.join(R1, proto.ROOT["pins"]))) == sorted(["other.json", sf(SRC) + ".json", sf(EV) + ".json"])
+   sorted(os.listdir(os.path.join(R1, proto.ROOT["pins"]))) == sorted(["other.json", sf(SRC) + ".json", sf(EV) + ".json", sf(DUP) + ".json"])
    and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["pins"])) == [])
 
 # state dir, database
@@ -649,11 +651,11 @@ t2 = tree()
 rc, out, err = run("--apply", *REN, *MERGE)
 d = diff(t2, tree())
 ok(f"--apply again: exit code 0, nothing on disk changes ({d[:5]} {(err or '').strip()[-300:]})", rc == 0 and d == [])
-ok("run again: no renames or drops; unchanged records are not listed as kept (only the same-name file in the old root remains)",
-   "0 renamed to step instance names, 0 dropped" in out and not re.search(r"renamed \d+ part logs|[1-9]\d* part logs rewritten", out)
+ok("run again: no renames, the same tasks left as they are; unchanged records are not listed as kept (only the same-name file in the old root remains)",
+   "0 renamed to step instance names, 2 not steps of the experiment table (left as they are)" in out and not re.search(r"renamed \d+ part logs|[1-9]\d* part logs rewritten", out)
    and [ln for ln in out.splitlines() if "kept" in ln and LO not in ln] == [])
 
-# ---------------- 7. pueue groups, done results nobody claims ----------------
+# ---------------- 7. pueue groups; which queue tasks take a step instance's name ----------------
 import migrate as MG  # noqa: E402
 import relay_remote as RMT  # noqa: E402
 have = {"gpu1": dict(status="Paused", parallel_tasks=1), "gpu0": dict(status="Running", parallel_tasks=2),
@@ -690,15 +692,15 @@ try:
 finally:
     RMT.rsh = saved_rsh
 ok("pueue groups: unreachable machine → said, nothing run", len(said) == 1 and "cannot read" in said[0])
-saved_op, got = RMT.store_op, {}
-RMT.store_op = lambda what, data, **kw: (got.update(data["items"]), {k: [] if k == "a" else ["x"] for k in data["items"]})[1]
-try:
-    kept = MG.done_dropped([dict(key="a", params=dict(out="{data}/old/a", done=[".a_done|A"])), dict(key="b", params=dict(out="old/b", done=["B"])),
-                            dict(key="c", params={})], [("a", "why"), ("b", "why"), ("c", "why")])
-finally:
-    RMT.store_op = saved_op
-ok("dropped tasks whose outputs are done on the store are listed (results no step claims any more)",
-   kept == [("a", "old/a")] and got == {"a": dict(out="old/a", done=[[".a_done", "A"]]), "b": dict(out="old/b", done=[["B"]])})
+HAND = dict(order=1, nice=0, key="mine/first", exp=None, recipe="command", params=old_p("mine/first", INST[NINF].outputs[0]))
+STEP = dict(order=2, nice=-100, key=NINF, exp=None, recipe="command", params=A.queue_params(INST[NINF]))
+FREE = dict(order=3, nice=0, key="mine/free", exp=None, recipe="command", params=old_p("mine/free", "mine/out"))
+keys, params, kept = MG.key_map([HAND, STEP, FREE])
+ok(f"a task added by hand listed before the step instance with the same output: the instance keeps its name, the other is left as it is ({keys} {kept})",
+   keys == {NINF: NINF} and sorted(params) == [NINF] and dict(kept)["mine/first"] and dict(kept)["mine/free"] is None)
+keys, params, kept = MG.key_map([HAND, dict(order=2, nice=0, key=NINF, exp=None, recipe="command", params=old_p(NINF, "elsewhere/x"))])
+ok(f"renaming never gives two tasks one name (a task with another output already has the instance's name: both left as they are) ({keys} {kept})",
+   keys == {} and dict(kept)["mine/first"] and dict(kept)[NINF] is None)
 
 print("all passed" if not fails else f"{fails} failures")
 sys.exit(1 if fails else 0)

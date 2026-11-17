@@ -10,8 +10,10 @@ and the store run `migrate.py root` from the new bundle through relay_remote.op:
 merge roots, collect view links.
 Nothing has to stop: the new bundle is first unpacked beside the one in use (also when only listing); with --apply each
 executor switches to it with its unclaimed tasks set aside for a moment (hold_and_switch). Claimed tasks keep running under
-their workers, which hand them to the new bundle at their next chance; a claimed task that would be renamed or dropped stops
-the run (wait for it to end). Their part logs are left as they are; run self migrate again once they have ended.
+their workers, which hand them to the new bundle at their next chance; a claimed task that would be renamed stops the run
+(wait for it to end). Their part logs are left as they are; run self migrate again once they have ended.
+Migrating never removes a task: one that is not a step of the experiment table (added by hand with taskq add) keeps its
+name, parameters and records.
 """
 import argparse
 import glob
@@ -264,28 +266,25 @@ def claimed(Q):
     return set(os.listdir(d)) if os.path.isdir(d) else set()
 
 
-def check_claimed(Q, keys, drop):
+def check_claimed(Q, keys):
     """On an executor, a claimed task keeps running under its worker (the old bundle's worker beats and releases it by name):
-    renaming or dropping it would stop it (the claim no longer found counts as lost). Such tasks -> Stop, listing them."""
+    renaming it would stop it (the claim no longer found counts as lost). Such tasks -> Stop, listing them."""
     busy = claimed(Q)
-    hit = sorted(k for k in set(drop) | {o for o, n in keys.items() if o != n} if safe(k) in busy)
+    hit = sorted(o for o, n in keys.items() if o != n and safe(o) in busy)
     if hit:
-        raise Stop(f"{Q}: {len(hit)} claimed task(s) would be renamed or dropped: {', '.join(hit[:5])}"
+        raise Stop(f"{Q}: {len(hit)} claimed task(s) would be renamed: {', '.join(hit[:5])}"
                    + (" ..." if len(hit) > 5 else "") + "; wait for them to end (or release them) and run again")
 
 
-def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
-    """Queue dir Q: rename tasks, fill in added, replace specs from specs {new task name: new spec}; delete tasks in drop
-    with their records; rename per-task-name records; add the reason to release records; keep only skips of workers
-    that still exist. On an executor (workers given) claimed tasks stay claimed and keep running (check_claimed)."""
+def fix_queue(Q, keys, workers, say, dry, specs=None):
+    """Queue dir Q: rename tasks, fill in added, replace specs from specs {new task name: new spec}; rename per-task-name
+    records; add the reason to release records; keep only skips of workers that still exist. On an executor (workers
+    given) claimed tasks stay claimed and keep running (check_claimed)."""
     import taskq
     tp = os.path.join(Q, proto.QUEUE["tasks"])
     if workers is not None:
-        check_claimed(Q, keys, drop)
-    drop = set(drop)
+        check_claimed(Q, keys)
     tasks = taskq.read_tasks(tp)
-    gone = [t["key"] for t in tasks if t["key"] in drop]
-    tasks = [t for t in tasks if t["key"] not in drop]
     n = m = 0
     specs = specs or {}
     for t in tasks:
@@ -301,15 +300,9 @@ def fix_queue(Q, keys, workers, say, dry, specs=None, drop=()):
             m += 1
     if not dry:
         taskq.write_tasks(tasks, tp)
-    say(f"{tp}: {len(tasks)} tasks, {n} renamed, {m} given a new spec" + "".join(f"\n  drop {k} (gone from the queue)" for k in gone))
+    say(f"{tp}: {len(tasks)} tasks, {n} renamed, {m} given a new spec")
     for d in PER_KEY:
         base = os.path.join(Q, proto.QUEUE[d])
-        for k in sorted(drop):
-            p = os.path.join(base, safe(k))
-            if os.path.lexists(p):
-                say(f"  drop {p}")
-                if not dry:
-                    shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
         for old, nk in keys.items():
             if old != nk and os.path.lexists(os.path.join(base, safe(old))):
                 move(os.path.join(base, safe(old)), os.path.join(base, safe(nk)), say, dry)
@@ -342,12 +335,12 @@ def this_bundle():
     return core[:-len(proto.BUNDLE_CORE) - 1]
 
 
-def hold_and_switch(R, Q, name, keys, drop, say):
+def hold_and_switch(R, Q, name, keys, say):
     """Switch the root's bundle to this one without stopping anything: under the queue lock set the unclaimed tasks aside
     (queue held file: nobody can claim them), record the machine name and switch code/current; then wait SWITCH_HOLD_S so a
     worker of the old bundle that looked at the bundle just before cannot claim a rewritten task (once it sees the switch it
     hands its running tasks to the new bundle before claiming). Running tasks stay claimed and keep running. Claimed tasks
-    that would be renamed or dropped -> Stop, nothing changed. The held tasks go back in put_back."""
+    that would be renamed -> Stop, nothing changed. The held tasks go back in put_back."""
     import taskq
     b = this_bundle()
     if os.path.realpath(os.path.dirname(b)) != os.path.realpath(os.path.join(R, proto.ROOT["code"])):
@@ -355,7 +348,7 @@ def hold_and_switch(R, Q, name, keys, drop, say):
     tp, hp = os.path.join(Q, proto.QUEUE["tasks"]), os.path.join(Q, proto.QUEUE["held"])
     cur = os.path.join(R, proto.ROOT["current"])
     with taskq.Lock():
-        check_claimed(Q, keys, drop)
+        check_claimed(Q, keys)
         if not os.path.exists(hp):  # an interrupted earlier run already set them aside
             busy = claimed(Q)
             tasks = taskq.read_tasks(tp)
@@ -386,8 +379,8 @@ def put_back(Q):
 
 def op_root(A):
     """On this machine (TASKQ_ROOT is its root): A = dict(dry, keys {old task name: new}, merge [old root], views {task
-    name: [views]}, data [extra data dirs], specs {new task name: spec resolved with the current recipes}, drop [old task
-    names gone from the queue]) -> dict(log [what was done], links {task name: {relative path: sha256}})."""
+    name: [views]}, data [extra data dirs], specs {new task name: spec resolved with the current recipes})
+    -> dict(log [what was done], links {task name: {relative path: sha256}})."""
     import cfg
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
     import mtab as M
@@ -401,12 +394,12 @@ def op_root(A):
         import taskq
         Q = cfg.state("taskq")
         if dry:
-            fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"], A["drop"])
+            fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"])
         else:
-            hold_and_switch(R, Q, me, keys, A["drop"], log.append)
+            hold_and_switch(R, Q, me, keys, log.append)
             with taskq.Lock():
                 put_back(Q)
-                fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"], A["drop"])
+                fix_queue(Q, keys, {w["id"] for w in M.workers(me)}, log.append, dry, A["specs"])
         busy = claimed(Q)
         if busy:
             log.append(f"{len(busy)} claimed task(s) keep running under their workers: " + ", ".join(sorted(busy)[:8]))
@@ -415,7 +408,7 @@ def op_root(A):
         rename_logs(d, keys, log.append, dry, busy)
         english_logs(d, log.append, dry, busy)
     pins = os.path.join(R, proto.ROOT["pins"])
-    for old in [k for k in keys if keys[k] != k] + list(A["drop"]):
+    for old in [k for k in keys if keys[k] != k]:
         p = os.path.join(pins, safe(old) + ".json")
         try:
             age = time.time() - os.path.getmtime(p)
@@ -424,7 +417,7 @@ def op_root(A):
         if age < proto.PIN_TTL:  # a transfer may still be running and refreshing it; it lapses by itself after PIN_TTL
             log.append(f"keep pin record {p} (written {age / 60:.0f} min ago: a transfer may be running)")
             continue
-        log.append(f"drop pin record {p} (renamed or dropped task, lapsed; a renamed task is pinned again on its next transfer)")
+        log.append(f"drop pin record {p} (renamed task, lapsed; it is pinned again on its next transfer)")
         if not dry:
             os.remove(p)
     return dict(log=log, links={k: view_links(R, D, v) for k, v in A["views"].items()})
@@ -455,8 +448,11 @@ def parse_pairs(xs, what):
 
 
 def key_map(tasks):
-    """Queue tasks with recipe command -> current experiment-table step instances (matched by output out): ({old: new},
-    {new: params}, [(old, why dropped)])."""
+    """Queue tasks with recipe command whose output (out) is that of exactly one current experiment-table step instance
+    take that instance's name and parameters: ({old: new}, {new: params}, [(task name, why it stays as it is)]). Every
+    other task keeps its name and parameters (a task added by hand with taskq add: no step has its output; listed with a
+    reason only when its output is also a step's, None otherwise). A task already named after its instance goes first, so
+    no two tasks end up with one name."""
     import advance
     from flow.compile import build
     flow = build(queue_tasks=[t for t in tasks if t["recipe"] != "command"])
@@ -466,20 +462,22 @@ def key_map(tasks):
     for i in flow.instances.values():
         if i.step:
             by_out.setdefault(os.path.normpath(i.outputs[0]), []).append(i)
-    keys, params, drop = {}, {}, []
+    names = {t["key"] for t in tasks}
+    keys, params, kept, one = {}, {}, [], []
     for t in tasks:
         if t["recipe"] != "command" or proto.is_smoke(t["key"]):
             continue
         hit = by_out.get(os.path.normpath(str(t["params"].get("out", "")).replace("{data}/", "")), [])
-        if len(hit) != 1:
-            drop.append((t["key"], "no step in the experiment table has this output" if not hit else f"output matches {len(hit)} step instances"))
-            continue
-        i = hit[0]
-        if i.id in params:
-            drop.append((t["key"], f"same step instance {i.id} as another task"))
+        if len(hit) == 1:
+            one.append((t, hit[0]))
+        else:
+            kept.append((t["key"], f"its output is that of {len(hit)} step instances" if hit else None))
+    for t, i in sorted(one, key=lambda x: x[0]["key"] != x[1].id):
+        if i.id in params or (t["key"] != i.id and i.id in names):
+            kept.append((t["key"], f"its output is that of step instance {i.id}, which another task already is"))
             continue
         keys[t["key"]], params[i.id] = i.id, advance.queue_params(i)
-    return keys, params, drop
+    return keys, params, kept
 
 
 def renamed_params(params):
@@ -504,16 +502,13 @@ def current_params(recipe, params):
 
 
 def plan_hub(ren):
-    """Queue -> (new task list, {old: new}, [(dropped old, why)], [lines to say])."""
+    """Queue -> (new task list, {old: new}, [lines to say])."""
     import experiments as E
     import taskq
     tasks = taskq.read_tasks()
-    keys, params, drop = key_map(tasks)
-    gone = {k for k, _ in drop}
+    keys, params, kept = key_map(tasks)
     new, say, stale = [], [], {}
     for t in tasks:
-        if t["key"] in gone:
-            continue
         t = dict(t)
         if t["key"] in keys:
             t["key"], t["params"], t["exp"] = keys[t["key"]], params[keys[t["key"]]], None
@@ -530,25 +525,12 @@ def plan_hub(ren):
         except Exception as e:  # noqa: BLE001
             raise Stop(f"{t['key']} cannot be resolved with the current recipes: {e}")
         new.append(t)
-    say.append(f"Queue: {len(tasks)} tasks, {sum(o != n for o, n in keys.items())} renamed to step instance names, {len(drop)} dropped")
-    say += [f"  dropped {k}: {why}" for k, why in drop]
+    say.append(f"Queue: {len(tasks)} tasks, {sum(o != n for o, n in keys.items())} renamed to step instance names, "
+               f"{len(kept)} not steps of the experiment table (left as they are)")
+    say += [f"  left as it is: {k} ({why})" for k, why in kept if why]
     if stale:
         say.append("Parameters the recipes no longer have, removed from queued tasks: " + ", ".join(f"{k} ({n})" for k, n in sorted(stale.items())))
-    return new, keys, drop, say
-
-
-def done_dropped(tasks, drop):
-    """Dropped tasks whose outputs are done on the store → [(key, out)]: results no step claims any more. When a step now writes
-    them elsewhere (its out moved in the experiment table), that step runs again unless they are moved there first."""
-    import relay_remote as RM
-    by, items = {t["key"]: t for t in tasks}, {}
-    for k, _ in drop:
-        p = (by.get(k) or {}).get("params") or {}
-        out = str(p.get("out") or "").replace("{data}/", "")
-        if out and p.get("done"):
-            items[k] = dict(out=out, done=proto.done_items(p["done"]))
-    miss = RM.store_op("done", dict(items=items)) if items else {}
-    return sorted((k, items[k]["out"]) for k, m in miss.items() if not m)
+    return new, keys, say
 
 
 def pueue_groups(name, dry, say):
@@ -591,13 +573,13 @@ def pueue_groups(name, dry, say):
             say(f"  pueue groups on {name}: failed ({RM.err_tail(err or out)}); run taskq site setup {name}")
 
 
-def fix_hub_queue(Q, tasks, keys, drop, ren, say, dry):
-    """Hub queue: write the new task list; rename per-task-name records and delete those of dropped tasks; rename machines
+def fix_hub_queue(Q, tasks, keys, ren, say, dry):
+    """Hub queue: write the new task list; rename per-task-name records; rename machines
     in claims, releases, failures and skips; add the reason to release records."""
     import taskq
     if not dry:
         taskq.write_tasks(tasks, os.path.join(Q, proto.QUEUE["tasks"]))
-    fix_queue(Q, keys, None, say, dry, drop=drop)
+    fix_queue(Q, keys, None, say, dry)
     cd = os.path.join(Q, proto.QUEUE["claims"])
     for f in sorted(os.listdir(cd)) if os.path.isdir(cd) else []:
         p = os.path.join(cd, f, proto.CLAIM_INFO)
@@ -663,10 +645,10 @@ def fix_smoke(Q, ren, say, dry):
         common.write_json(os.path.join(d, n + ".json"), recs)
 
 
-def fix_relay(st, keys, params, ren, links, merged, drop, say):
+def fix_relay(st, keys, params, ren, links, merged, say):
     """Relay ledger (edited in place): rename machines and tasks, replace recipe parameters, drop unq, move input
     links into link sets (relay_store.put_links; filled in from the views when a record has none); drop records of merged
-    old roots and of tasks gone from the queue; clear bundle-gate holds (held, recorded under the old bundle) so the new
+    old roots; clear bundle-gate holds (held, recorded under the old bundle) so the new
     bundle is judged afresh. -> {link set id: links} to store with the new state (relay_store.put_links)."""
     import relay_store as ST
     out, sets = {}, {}
@@ -676,9 +658,6 @@ def fix_relay(st, keys, params, ren, links, merged, drop, say):
             continue
         to = out.setdefault(ren.get(old, old), {})
         for k, r in recs.items():
-            if k in drop:
-                say(f"relay ledger: dropping {old} {k} (gone from the queue)")
-                continue
             r = {x: v for x, v in r.items() if x != "unq"}
             if "data" in r:  # old ledger: inputs were the files placed there, data was the spec's inputs
                 r["placed"], r["inputs"] = r.pop("inputs", []), r.pop("data")
@@ -836,10 +815,10 @@ def copy_hashes(say, dry):
     db.close()
 
 
-def root_args(name, keys, merge, ren, views, dry, specs, drop):
+def root_args(name, keys, merge, ren, views, dry, specs):
     import mtab as M
     return dict(dry=dry, keys=keys, merge=[r for o, r in merge.items() if ren.get(o, o) == name], views=views,
-                data=[M.data()] if name == M.store() else [], specs=specs.get(name, {}), drop=drop)
+                data=[M.data()] if name == M.store() else [], specs=specs.get(name, {}))
 
 
 def new_specs(st):
@@ -910,18 +889,9 @@ def main(argv):
                 raise Stop(f"cannot push bundle {bid} to {name}: {e} (nothing has been changed yet)")
         say(f"new bundle {bid} unpacked beside the one in use on {', '.join(roots)} (switched per machine with --apply)")
         with taskq.Lock():
-            tasks, keys, dropped, notes = plan_hub(ren)
-            drop = sorted(k for k, _ in dropped)
+            tasks, keys, notes = plan_hub(ren)
             for n in notes:
                 say(n)
-            try:
-                kept = done_dropped(taskq.read_tasks(), dropped)
-            except RuntimeError as e:
-                say(f"cannot ask the store which dropped tasks are done ({e})")
-                kept = []
-            if kept:
-                say(f"Done results no step claims any more ({len(kept)}): when a step now writes them elsewhere, move them there on the store"
-                    " before cron runs again, or that step runs again" + "".join(f"\n  {k}: {o}" for k, o in kept))
             views = {}
             for old, recs in (st.get("keys") or {}).items():
                 if old not in merge:
@@ -930,16 +900,16 @@ def main(argv):
                             views.setdefault(ren.get(old, old), {})[keys.get(k, k)] = r.get("views") or []
             links = {}
             for name in roots:  # look only, change nothing on any machine until all of them can be handled
-                res = on(name, root_args(name, keys, merge, ren, views.get(name, {}), True, {}, drop), "nothing has been changed yet")
+                res = on(name, root_args(name, keys, merge, ren, views.get(name, {}), True, {}), "nothing has been changed yet")
                 if res.get("stop"):
                     raise Stop(f"{RM.conf(name)['label']}: {res['stop']}")
                 links[name] = res["links"]
                 say(f"== {RM.conf(name)['label']}" + "".join("\n  " + ln for ln in res["log"]))
             params = {t["key"]: t["params"] for t in tasks if t["key"] in keys.values()}
-            sets = fix_relay(st, keys, params, ren, links, set(merge), set(drop), say)
+            sets = fix_relay(st, keys, params, ren, links, set(merge), say)
             specs = new_specs(st)
             say(f"Specs in executor queues replaced with the current recipes: {sum(map(len, specs.values()))}")
-            fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, say, True)
+            fix_hub_queue(taskq.TQ, tasks, keys, ren, say, True)
             fix_smoke(taskq.TQ, ren, say, True)
             hub_files_say(files, say)
             move_health_log(home, say, True)
@@ -957,7 +927,7 @@ def main(argv):
                 say("(listed only, nothing changed; add --apply when ready)")
                 return 0
             for name in roots:
-                res = on(name, root_args(name, keys, merge, ren, {}, False, specs, drop), "machines before this one are already changed, fix this and run again")
+                res = on(name, root_args(name, keys, merge, ren, {}, False, specs), "machines before this one are already changed, fix this and run again")
                 if res.get("stop"):
                     raise Stop(f"{RM.conf(name)['label']}: {res['stop']} (machines before this one are already changed, fix this and run again)")
             copy_hashes(quiet, False)  # before the bookkeeping below opens the hub database, which migrates it (dropping the hash table)
@@ -968,7 +938,7 @@ def main(argv):
                     HS.put_site(n, rec)
             if files["records"] is not None:
                 HS.update_records(lambda recs: files["records"] + recs)
-            fix_hub_queue(taskq.TQ, tasks, keys, drop, ren, quiet, False)
+            fix_hub_queue(taskq.TQ, tasks, keys, ren, quiet, False)
             fix_smoke(taskq.TQ, ren, quiet, False)
             for name in M.pueue_hosts():
                 pueue_groups(name, False, say)  # says only what failed

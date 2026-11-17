@@ -480,8 +480,8 @@ write checkpoints under `out`.
 When an on-disk format changes, run `taskq self migrate` once in a cutover (stop cron, hand back running tasks, push the code, switch every
 executor to the new bundle) (lists by default, `--apply` changes; `--rename old=new`, `--merge old=old root`): the hub queue, relay
 bookkeeping and smoke records on the hub, and queues and part logs in each executor and store root; it also creates missing pueue groups
-and resumes paused ones (manual groups left alone), and lists dropped tasks whose results are done on the store (when a step now writes
-them elsewhere, move them there first, or it runs again).
+and resumes paused ones (manual groups left alone). It never removes a task: one that is not a step of the experiment table (added by hand
+with `taskq add`) keeps its name, parameters and records.
 
 ## File layout
 
