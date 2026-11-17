@@ -680,7 +680,10 @@ def main(argv):
         snapshot(home, hub_v, say)
         if todo:
             import relay as RL
-            bid, path = RL.wanted_bundle()
+            try:
+                bid, path = RL.wanted_bundle()
+            except Exception as e:  # noqa: BLE001  (relay_bundle.BundleError, git errors)
+                raise Stop(f"cannot build the bundle for the roots: {type(e).__name__}: {e} (no root or hub state changed)") from None
             for n in todo:
                 done = "places before this one are migrated and stamped; fix this and run again"
                 try:
