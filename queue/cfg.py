@@ -7,6 +7,8 @@ an executor: that machine's root). See "Switches and config" in queue/README.md.
     cfg.py state [name...]           this machine's state dir (or a path in it, ~ expanded)
     cfg.py data                      this process's data dir (data_dir; empty when absent)
     cfg.py log <name>                where the log file <name>.log goes (~ expanded)
+    cfg.py boot-log                  where this machine's @reboot output goes (boot_log)
+    cfg.py gpu-log-dir               this machine's GPU usage records dir (gpu_log_dir)
 
 Plugins: each TASKQ_PLUGINS dir is searched by filename and only the names below (KINDS) are taken for each kind; other names
 (helpers, imports) do not enter the core; a plugin exporting none is an error. A plugin imports only taskq_api (taskq_api.py) from
@@ -178,10 +180,47 @@ def data_dir():
     return M.expand(M.machine(me)["data"]) if me and M.machine(me).get("data") else ""
 
 
+def _proto():
+    if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import proto
+    return proto
+
+
 def log(name):
-    """The log file <name>.log: env var <NAME>_LOG (for tests) > OUTPUTS["logs"] dir > home."""
+    """The log file <name>.log: env var <NAME>_LOG (for tests) > OUTPUTS["logs"] dir > logs/ in the state dir."""
     v = os.environ.get(name.upper() + "_LOG")
-    return os.path.expanduser(v or os.path.join(outputs("logs"), name + ".log"))
+    return os.path.expanduser(v or os.path.join(outputs("logs") or state(_proto().LOGS), name + ".log"))
+
+
+def machine_state(*parts):
+    """A path in this machine's own state dir, for files of the machine rather than of a process (boot log, GPU usage
+    records): TASKQ_STATE / TASKQ_ROOT when set (as state()), else the state/ of the root the machine table gives this
+    machine (cron and boot start these without TASKQ_ROOT), else the state dir."""
+    if not os.environ.get("TASKQ_STATE") and not os.environ.get("TASKQ_ROOT"):
+        try:
+            M = mtab()
+            me = M.whoami()
+            r = M.machine(me).get("root") if me else None
+        except Exception:  # noqa: BLE001  (no machine table here: the state dir)
+            r = None
+        if r:
+            return os.path.expanduser("/".join([r.rstrip("/"), _proto().ROOT["state"], *parts]))
+    return state(*parts)
+
+
+def boot_log():
+    """This machine's @reboot output (setup.sh's crontab line; the health check reads its last line): OUTPUTS["logs"] dir >
+    logs/ in this machine's own state dir (machine_state)."""
+    P = _proto()
+    d = outputs("logs")
+    return os.path.expanduser(os.path.join(d, P.BOOT_LOG + ".log")) if d else machine_state(P.LOGS, P.BOOT_LOG + ".log")
+
+
+def gpu_log_dir():
+    """This machine's GPU usage records (monitor/gpu_log.sh writes, TASK_GPU_IDLE reads): GPU_LOG_DIR > GPU_LOG_SUB in
+    this machine's own state dir (machine_state)."""
+    return os.path.expanduser(os.environ.get("GPU_LOG_DIR") or "") or machine_state(_proto().GPU_LOG_SUB)
 
 
 def env(name, default=None):
@@ -276,6 +315,10 @@ if __name__ == "__main__":
         print(data_dir())
     elif a[:1] == ["log"] and len(a) == 2:
         print(log(a[1]))
+    elif a == ["boot-log"]:
+        print(boot_log())
+    elif a == ["gpu-log-dir"]:
+        print(gpu_log_dir())
     elif a[:1] == ["get"] and len(a) == 2:
         try:
             v = outputs(a[1])

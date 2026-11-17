@@ -13,7 +13,7 @@
 # failing, timing out, unreadable output), checking every minute; with the task's
 # res.wait_gpu minutes, wait at most that long and then fail (exit 1), otherwise wait forever; with TASKQ_ADMITTED=1 set by the worker,
 # do not wait (it checked the GPU before claiming); with TASK_GPU_IDLE (minutes, a group env var in machines.py), also require that the
-# GPU usage records (monitor/gpu_log.sh, location in proto.py's GPU_LOG_DIR) show no one else on this GPU for that long.
+# GPU usage records (monitor/gpu_log.sh, in cfg.gpu_log_dir) show no one else on this GPU for that long.
 # Retry a failed training after 5 minutes, up to 3 times (a worker runs it once and releases the task to the queue).
 # Exit codes (README.md's "conventions"): 0 done; 3 command exited normally but training did not finish; 2 bad spec or env; 1 training
 # failed (the command's exit code is in the part log); 4 missing inputs (not all files in inputs, did not start); 5 disk unreadable,
@@ -112,7 +112,9 @@ gpu_free() {  # 0 when every GPU in CUDA_VISIBLE_DEVICES (indices or UUIDs, as g
 gpu_quiet() {  # no one else on these GPUs (GPU_IDX) in the last TASK_GPU_IDLE minutes of GPU usage records; if there is, GPU_SEEN gets the last time. No log files -> only look now
     GPU_SEEN=
     [[ -z ${TASK_GPU_IDLE:-} || ${TASK_GPU_IDLE} == 0 || -z ${CUDA_VISIBLE_DEVICES:-} || -n ${SLURM_JOB_ID:-} ]] && return 0
-    local dir=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}} since files f
+    local since files f
+    [[ -n ${GLD:-} ]] || GLD=$(python3 "$CORE/queue/cfg.py" gpu-log-dir) || return 0  # looked up once
+    local dir=$GLD
     since=$(date -d "-$TASK_GPU_IDLE min" '+%F %T')
     files=("$dir/$(date -d "-$TASK_GPU_IDLE min" +"$TQ_GPU_LOG_FILE")")
     f="$dir/$(date +"$TQ_GPU_LOG_FILE")"; [[ $f == "${files[0]}" ]] || files+=("$f")

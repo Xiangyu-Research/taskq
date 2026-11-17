@@ -7,6 +7,7 @@ import subprocess
 import time
 from collections import deque
 
+import cfg
 import proto
 
 
@@ -96,7 +97,7 @@ def gpu_seen(gpus, idle_min):
     ("%F %T"); None when never. No records -> only look now."""
     if not idle_min or idle_min == "0":
         return None
-    d = os.environ.get("GPU_LOG_DIR") or os.path.expanduser(proto.GPU_LOG_DIR)
+    d = cfg.gpu_log_dir()
     t0 = time.time() - int(idle_min) * 60
     since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0))
     files = []

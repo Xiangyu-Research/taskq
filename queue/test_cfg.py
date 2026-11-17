@@ -194,7 +194,7 @@ ok("cfg.py state: no OUTPUTS[\"state\"] -> the core default", r.stdout == os.pat
 r = cfg_get(cs, "log", "feed")
 ok("cfg.py log: <name>.log under OUTPUTS[\"logs\"]", r.returncode == 0 and r.stdout == os.path.join(HOME, "lg/feed.log") + "\n")
 r = cfg_get(c1, "log", "feed")
-ok("cfg.py log: no OUTPUTS[\"logs\"] -> ~/<name>.log", r.stdout == os.path.join(HOME, "feed.log") + "\n")
+ok("cfg.py log: no OUTPUTS[\"logs\"] -> logs/<name>.log in the state dir", r.stdout == os.path.join(HOME, ".local/state/taskq/logs/feed.log") + "\n")
 r = subprocess.run([sys.executable, os.path.join(HERE, "cfg.py"), "log", "feed"], capture_output=True, text=True,
                    env=dict(os.environ, TASKQ_CONFIG=cs, FEED_LOG="~/x.log"))
 ok("cfg.py log: <NAME>_LOG wins", r.stdout == os.path.join(HOME, "x.log") + "\n")

@@ -156,11 +156,9 @@ def kinds(name):
 
 
 def worker_env(w):
-    """pueue worker env vars {name: value} (cards, cpus, GPU wait rules; the worker reads its slots from the machine table itself)."""
+    """pueue worker env vars {name: value} (cards, GPU wait rules; the worker reads its slots and cpus from the machine table itself)."""
     V = proto.RUN_VARS
     env = {V["worker"]: w["id"], V["device"]: w["kind"], "CUDA_VISIBLE_DEVICES": w["gpu"] or ""}
-    if w.get("cpus"):
-        env["TASKQ_CPUS"] = str(w["cpus"])
     if w.get("idle"):
         env[V["gpu_idle"]] = str(w["idle"])
     if w.get("wait"):

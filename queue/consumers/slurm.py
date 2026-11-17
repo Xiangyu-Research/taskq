@@ -17,7 +17,7 @@ def setup(w):
     e = os.environ
     w.W = e["SLURM_JOB_ID"]
     w.mem_mb = int(e.get("SLURM_MEM_PER_NODE") or 0) or int(e.get("SLURM_MEM_PER_CPU") or 0) * w.ncpu
-    w.slots = w.table_slots(lambda x: x["kind"] == w.device)
+    w.slots = int(w.table_worker(lambda x: x["kind"] == w.device).get("slots") or 1)
     w.term_rc, w.term_why = 143, "likely the time limit"
     w.end_text = "not known yet, checking later"
     w.get_end = end_time

@@ -45,7 +45,7 @@ MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/log
 # this code run only where the stamp says exactly FORMAT (common.format_problem); taskq self migrate runs the numbered steps
 # up to FORMAT and writes the stamps. No stamp is format 0 (state from before stamps). A format change bumps FORMAT and adds
 # its step to migrate.STEPS in the same commit; code of older bundles does not read the stamp.
-FORMAT = 1
+FORMAT = 2
 FORMAT_FILE = "format"
 assert ROOT["format"] == ROOT["state"] + "/" + FORMAT_FILE
 SNAPSHOTS = "snapshots"  # under the hub state dir: <time>-format<N>/ copies of the hub queue, database and stamp self migrate takes before applying
@@ -114,9 +114,12 @@ DONE_LINE = "DONE"             # a part log line starting with it = done (run_ta
 STALL_LINE = "STALLED"         # a part log line starting with it = stopped by the worker as stalled (consume.py writes and counts)
 
 # ---------------- GPU usage records (monitor/gpu_log.sh writes; run_task.sh's TASK_GPU_IDLE and the health check read) ----------------
-GPU_LOG_DIR = "~/gpu_usage"      # override with GPU_LOG_DIR
+GPU_LOG_SUB = "gpu_usage"        # in this machine's own state dir (cfg.machine_state: its root's state/ when the table gives it a root); override with GPU_LOG_DIR
 GPU_LOG_FILE = "gpu_%Y-%m.csv"   # one per month (strftime)
-GPU_LOG_PID = "gpu_log.pid"      # in GPU_LOG_DIR: pid of the running gpu_log.sh, locked (flock) while it runs; on_boot.sh checks the lock
+GPU_LOG_PID = "gpu_log.pid"      # in the GPU log dir: pid of the running gpu_log.sh, locked (flock) while it runs; on_boot.sh checks the lock
+# ---------------- plain text logs (cfg.log, cfg.boot_log) ----------------
+LOGS = "logs"                    # in the state dir (policy.py's OUTPUTS["logs"] overrides): <name>.log of the hub's relay, feed, advance, health
+BOOT_LOG = "on_boot"             # the machine's @reboot output (crontab from setup.sh), in LOGS of this machine's own state dir
 
 # ---------------- key -> filename ----------------
 SAFE = "__"
@@ -364,7 +367,6 @@ ENV = dict(
     TASKQ_PROJECT=("run", "the user's project root (with .taskq.toml); when unset searches upward from the current dir (project.py)"),
     TASKQ_HOME=("run", "where install.sh clones taskq (default ~/.local/share/taskq)"),
     TASKQ_ORIGIN=("run", "where install.sh clones from (default the GitHub repo)"),
-    TASKQ_CPUS=("run", "max cores for a worker outside Slurm (pueue worker commands set it from machines.py's cpus)"),
     TASKQ_GPU_PAD=("run", "0 = no GPU pad for this job (set by inference and analysis scripts)"),
     TASKQ_GPU_PAD_STARTED=("run", "GPU pad already started (set by gpu_pad_start.sh to avoid starting twice)"),
     TASKQ_LIB=("run", "the scheduler core's queue/ dir (run_task.sh sets it for the task's command and puts the core's bin/ first on PATH)"),
@@ -563,7 +565,7 @@ TICK = "tick"  # in the health check's state dir: tick.lock is held (flock) by t
 HEALTH_NAMES = (PUEUE_SEEN, "health.log", TICK)
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
-               WHEELHOUSE, "envlock", DB, FORMAT_FILE, SNAPSHOTS)
+               WHEELHOUSE, "envlock", DB, FORMAT_FILE, SNAPSHOTS, LOGS, GPU_LOG_SUB)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
 EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
 # source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
@@ -578,7 +580,7 @@ def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_DIR_PREFIX": STAGE_DIR_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
            "TQ_WORKER_LOGS": WORKER_LOGS, "TQ_STALL_LINE": STALL_LINE, "TQ_DONE_LINE": DONE_LINE, "TQ_JSON_MARK": JSON_MARK,
            "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT,
-           "TQ_GPU_LOG_DIR": GPU_LOG_DIR, "TQ_GPU_LOG_FILE": GPU_LOG_FILE, "TQ_GPU_LOG_PID": GPU_LOG_PID,
+           "TQ_GPU_LOG_FILE": GPU_LOG_FILE, "TQ_GPU_LOG_PID": GPU_LOG_PID,
            "TQ_BUNDLE_CORE": BUNDLE_CORE,
            "TQ_LOG_HEAD_FMT": LOG_HEAD_FMT, "TQ_LOG_ENDED_FMT": LOG_ENDED_FMT, "TQ_LOG_NOT_STARTED_FMT": LOG_NOT_STARTED_FMT,
            "TQ_LOG_GPU_BUSY_FMT": LOG_GPU_BUSY_FMT, "TQ_LOG_UNREADABLE": LOG_UNREADABLE}

@@ -1312,7 +1312,7 @@ def test_env_auto():
         relay.env_builds(s, NAME, {}, now, False, st)
         assert adds == [] and not st and len([x for x in logs if "(switch off)" in x]) == 1, logs
         assert relay.env_builds(s, NAME, {}, now, True, {}) and adds == []
-        ok("AUTO['envs'] off: no queueing, no alerts, log once to ~/relay.log; dry only says what would be built")
+        ok("AUTO['envs'] off: no queueing, no alerts, log once to relay.log; dry only says what would be built")
         relay.P.AUTO["envs"] = {NAME: ["alt"]}
         M.MACHINES[NAME]["envs"] = {"base": ("conda", "x")}
         relay.env_builds(s, NAME, {}, now, False, {})

@@ -4,14 +4,14 @@
 # Started at boot by queue/on_boot.sh --gpu-log (not in tmux); run it by hand with:
 #   setsid -f bash <core>/monitor/gpu_log.sh > /dev/null 2>&1 < /dev/null
 # If records stop (no new row for 10 minutes) the health check on the hub reports it. Which machines run it is gpu_log in the machine table.
-# Writes proto.py's GPU_LOG_DIR/GPU_LOG_FILE; exits if another instance holds the GPU_LOG_PID lock in the same dir
-# (~/gpu_usage/gpu_<year-month>.csv, override with GPU_LOG_DIR):
+# Writes GPU_LOG_FILE (proto.py) in cfg.gpu_log_dir (gpu_usage/ in this machine's own state dir, override with GPU_LOG_DIR);
+# exits if another instance holds the GPU_LOG_PID lock in the same dir. Columns of <dir>/gpu_<year-month>.csv:
 #   time,gpu,util_pct,mem_used_mib,mem_total_mib,user,pid,proc_mem_mib,program
 set -u
 [[ ${1:-} == -h || ${1:-} == --help ]] && { sed -n '2,9p' "$0"; exit 0; }
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 eval "$(python3 "$CORE/queue/proto.py" sh)" || exit 1
-OUT=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}}
+OUT=$(python3 "$CORE/queue/cfg.py" gpu-log-dir) && [[ -n $OUT ]] || exit 1
 INTERVAL=${GPU_LOG_INTERVAL:-60}
 mkdir -p "$OUT"
 # One per account: holds $OUT/gpu_log.pid (proto.py's GPU_LOG_PID) while running; exit if another is running

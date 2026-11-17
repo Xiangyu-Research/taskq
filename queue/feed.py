@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The only entry point for sending tasks: the hub's health check (monitor/health.py, every 30 minutes) calls run_all,
 which hands off to queue/relay.py to handle the executors in the machine table (pueue and Slurm executors; details go to
-~/relay.log, with one line in ~/feed.log pointing there). It also checks tasks in the hub queue assigned to a name that is not
+relay.log, with one line in feed.log pointing there; both cfg.log). It also checks tasks in the hub queue assigned to a name that is not
 an executor (left over after a machine was renamed or removed) and reports feed:nobody.taskq plan shows what this round would send (health.py -n).
 """
 import os
@@ -44,7 +44,7 @@ def run_all(s, dry=False):
     except Exception as e:  # noqa: BLE001
         events, stuck = [], {alert_id("relay", "error"): f"queue/relay.py failed: {type(e).__name__}: {e}"[:300]}
     if events and not dry:
-        log([f"executors {(', '.join(sorted(M.executors())))} (relay.py): {len(events)} entries, see ~/relay.log"])
+        log([f"executors {(', '.join(sorted(M.executors())))} (relay.py): {len(events)} entries, see {cfg.log('relay')}"])
     stuck = dict(stuck)
     stuck.update(nobody((s.get("taskq") or {}).get(M.hub())))
     return events, stuck

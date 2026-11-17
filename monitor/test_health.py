@@ -617,6 +617,7 @@ def _health(plugins, hour, *args, config=None):
     log = os.path.join(_lt, "pushed.log")
     r = subprocess.run([sys.executable, _wrap, os.path.join(HERE, "health.py"), log, str(hour), *args],
                        env=env, capture_output=True, text=True, timeout=60)
+    _health.err = r.stderr
     return r.returncode, (open(log).read().splitlines() if os.path.exists(log) else [])
 
 
@@ -637,7 +638,7 @@ shutil.copytree(os.environ["TASKQ_CONFIG"], _bcfg)
 with open(os.path.join(_bcfg, "policy.py"), "a") as f:
     f.write("\nTHIS IS ( BROKEN\n")
 rc5, p5 = _health(os.environ["TASKQ_PLUGINS"], 12, config=_bcfg)
-ok("policy.py with a syntax error: health still starts, exits non-zero and pushes why (to the default channel file)",
+ok(f"policy.py with a syntax error: health still starts, exits non-zero and pushes why (to the default channel file) ({p5} {_health.err[-600:]})",
    rc5 != 0 and len(p5) == 1 and "policy.py" in p5[0] and "SyntaxError" in p5[0] and "/t0?" in p5[0])
 
 # ---------------- pueued gone: automatic recovery ----------------

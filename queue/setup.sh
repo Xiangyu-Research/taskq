@@ -57,7 +57,9 @@ core=$($M get . core)
 if [[ -n $core && $CORE == "$(readlink -f "$core")" ]]; then OB="bash $core/queue/on_boot.sh$GL"
 else OB="python3 $CORE/bin/taskq --project $($M get . repo) boot$GL"; fi
 crontab -l 2> /dev/null | grep -qE "on_boot\.sh|taskq.* boot" && { crontab -l | { grep -vE "on_boot\.sh|taskq.* boot" || true; } | crontab -; }
-cron "$OB >> $($C log on_boot) 2>&1" "@reboot"
+BL=$($C boot-log)
+mkdir -p "$(dirname "$BL")"
+cron "$OB >> $BL 2>&1" "@reboot"
 roles=" $($M get . roles) " entry=$($C get entry)
 if [[ $roles == *" hub "* && -n $entry ]]; then  # run from the cron-only clone (this machine's repo), so only committed code runs
     H=$($M get . repo)

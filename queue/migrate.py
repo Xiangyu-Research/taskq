@@ -434,12 +434,167 @@ def v1_hub(ctx, say, dry):
     drop_snapshots(snaps)
 
 
+# ---------------- step 2: the machine's own files out of the home dir ----------------
+# Older versions wrote these straight into the home dir; now they are in taskq's own dirs (cfg.log, cfg.boot_log, cfg.gpu_log_dir).
+OLD_HOME_LOGS = ("relay", "feed", "advance", "health", "ledger", "refill")  # the hub's <name>.log (ledger, refill: older versions')
+OLD_BOOT_LOG = "on_boot.log"  # @reboot output (setup.sh's crontab line redirected there)
+OLD_GPU_LOG_DIR = "gpu_usage"  # GPU usage records (monitor/gpu_log.sh)
+OLD_HOME_JUNK = ("git_pull.log",)  # output of a git-pull cron entry the executors no longer have
+BOOT_CRON = re.compile(r"^(@reboot .*(?:on_boot\.sh|taskq.* boot).* >> )(\S+)( 2>&1)\s*$")  # setup.sh's line
+
+
+def in_home(*p):
+    return os.path.join(os.path.expanduser("~"), *p)
+
+
+def same(a, b):
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def merge_into(src, dst):
+    """File src moved to dst. dst already there (written since) -> src's lines, then dst's (a first line both start with, such
+    as a CSV header, once); written to a temp file and moved over, then src removed."""
+    with open(src, "rb") as f:
+        a = f.read()
+    b = b""
+    if os.path.exists(dst):
+        with open(dst, "rb") as f:
+            b = f.read()
+    if a and b:
+        a += b"" if a.endswith(b"\n") else b"\n"
+        head = a.split(b"\n", 1)[0] + b"\n"
+        b = b[len(head):] if b.startswith(head) else b
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    C.atomic_write(dst, a + b)
+    os.remove(src)
+
+
+def fix_cron(dst, say, dry):
+    """The @reboot line setup.sh wrote (on_boot.sh / taskq boot) sends its output to dst instead of an older path."""
+    try:
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if r.returncode:
+        return  # no crontab
+    new, hit = [], False
+    for ln in r.stdout.splitlines():
+        m = BOOT_CRON.match(ln)
+        if m and m.group(2) != dst:
+            ln, hit = m.group(1) + dst + m.group(3), True
+        new.append(ln)
+    if not hit:
+        return
+    say(f"crontab: @reboot output to {dst}")
+    if dry:
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    w = subprocess.run(["crontab", "-"], input="\n".join(new) + "\n", capture_output=True, text=True, timeout=60)
+    if w.returncode:
+        raise Stop(f"cannot write the crontab: {(w.stderr or w.stdout).strip()}")
+
+
+def gpu_logger(d):
+    """pid of the gpu_log.sh writing into dir d (it holds a lock on its pid file there); none running -> None."""
+    import fcntl
+    p = os.path.join(d, proto.GPU_LOG_PID)
+    if not os.path.exists(p):
+        return None
+    with open(p, "a+") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return None
+        except OSError:
+            f.seek(0)
+            s = f.read().strip()
+    if not s.isdigit():
+        raise Stop(f"{p} is locked but holds no pid ({s!r}): stop the GPU usage recorder by hand and run again")
+    return int(s)
+
+
+def stop_logger(pid, d):
+    """Stop gpu_log.sh pid (its process group when it leads one, as setsid starts it: its sleep too) and wait until its lock in
+    d is free."""
+    import signal
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd = f.read().replace(b"\0", b" ").decode(errors="replace")
+    except OSError:
+        cmd = ""
+    if cmd and "gpu_log.sh" not in cmd:
+        raise Stop(f"pid {pid} in {os.path.join(d, proto.GPU_LOG_PID)} is not gpu_log.sh ({cmd[:100]}): check and run again")
+    if cmd:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGTERM) if os.getpgid(pid) == pid else os.kill(pid, signal.SIGTERM)
+    for _ in range(60):
+        if gpu_logger(d) is None:
+            return
+        time.sleep(0.5)
+    raise Stop(f"gpu_log.sh {pid} still holds its lock in {d} after 30 s: stop it by hand and run again")
+
+
+def machine_files(say, dry):
+    """This machine's @reboot output (and its crontab line) and GPU usage records: out of the home dir into this machine's own
+    state dir; a running GPU usage recorder is stopped for the move and started again from this code; leftovers deleted."""
+    import cfg
+    s, d = in_home(OLD_BOOT_LOG), cfg.boot_log()
+    if not same(s, d):
+        if os.path.isfile(s):
+            say(f"{s} -> {d}")
+            if not dry:
+                merge_into(s, d)
+        fix_cron(d, say, dry)
+    s, d = in_home(OLD_GPU_LOG_DIR), cfg.gpu_log_dir()
+    if os.path.isdir(s) and not same(s, d):
+        pid = gpu_logger(s)
+        files = sorted(f for f in os.listdir(s) if f != proto.GPU_LOG_PID and os.path.isfile(os.path.join(s, f)))
+        say(f"GPU usage records: {len(files)} files {s}/ -> {d}/" + (f" (gpu_log.sh {pid} stopped, started again from this code)" if pid else ""))
+        if not dry:
+            if pid:
+                stop_logger(pid, s)
+            for f in files:
+                merge_into(os.path.join(s, f), os.path.join(d, f))
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(os.path.join(s, proto.GPU_LOG_PID))
+            with contextlib.suppress(OSError):
+                os.rmdir(s)
+            if pid:
+                subprocess.run(["setsid", "-f", "bash", os.path.join(os.path.dirname(HERE), "monitor", "gpu_log.sh")],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    for f in OLD_HOME_JUNK:
+        if os.path.isfile(in_home(f)):
+            say(f"drop {in_home(f)}")
+            if not dry:
+                os.remove(in_home(f))
+
+
+def v2_root(ctx, say, dry):
+    """Step 2 on a root's machine: its boot log, crontab line and GPU usage records (machine_files)."""
+    machine_files(say, dry)
+
+
+def v2_hub(ctx, say, dry):
+    """Step 2 on the hub: its text logs out of the home dir into the logs dir (cfg.log), then machine_files (done already when
+    the hub's machine has a root: the root steps run first)."""
+    import cfg
+    for n in OLD_HOME_LOGS:
+        s, d = in_home(n + ".log"), cfg.log(n)
+        if os.path.isfile(s) and not same(s, d):
+            say(f"{s} -> {d}")
+            if not dry:
+                merge_into(s, d)
+    machine_files(say, dry)
+
+
 # ---------------- the steps (each format change adds one; MIN_FORMAT moves up once every place is past a step) ----------------
 STEPS = [
     Step(1, "part logs and failure records workers of untranslated bundles left in the old format (logs of "
             "claimed tasks stay as they are); on the hub, relay's bookkeeping, link sets, executor reads and task records from "
             "files into the hub database, smoke kind names, unused state-dir entries and old code snapshots",
          hub=v1_hub, root=v1_root),
+    Step(2, "the machine's own files out of the home dir: the hub's text logs into the logs dir, each machine's @reboot output "
+            "(and its crontab line) and GPU usage records into its own state dir; a running GPU usage recorder is started again "
+            "from the new code", hub=v2_hub, root=v2_root),
 ]
 assert [s.to for s in STEPS] == list(range(MIN_FORMAT + 1, proto.FORMAT + 1)), "one step per format from MIN_FORMAT + 1 to proto.FORMAT"
 

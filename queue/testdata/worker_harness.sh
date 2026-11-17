@@ -6,9 +6,9 @@ export TASKQ_POLL=1 TASKQ_IDLE_MAX=2 TASKQ_PATIENCE=0 TASKQ_MIN_LEFT=0 TASKQ_ADD
 # FIXTURE_CFG is the config in use without it (the fixture, or a bundle's packaged copy; no slots set: default 1). Cases set TASKQ_CONFIG=$(slots_cfg N) for N.
 FIXTURE_CFG=${TASKQ_CONFIG:-$(cd "$HERE" && python3 -c "import cfg; print(cfg.config_dir())")} || exit 1   # in a bundle: its packaged config
 if [[ -z ${TASKQ_CONFIG:-} ]]; then IN_BUNDLE=1; else IN_BUNDLE=; fi   # test_relay_bundle runs a few cases inside a bundle without TASKQ_CONFIG
-slots_cfg() {  # made in a temp dir and moved in whole (cases started in the background may ask at the same time)
-    local d=$T/slots_cfg$1 t
-    if [[ $1 == 1 && $IN_BUNDLE == 1 ]]; then  # the packaged table sets no slots: leave the config for the worker to find (.taskq.toml)
+slots_cfg() {  # slots_cfg <slots> [<cpus of site-pueue's CPU worker>]; made in a temp dir and moved in whole (cases started in the background may ask at the same time)
+    local d=$T/slots_cfg$1_${2:-} t
+    if [[ $1 == 1 && -z ${2:-} && $IN_BUNDLE == 1 ]]; then  # the packaged table sets no slots: leave the config for the worker to find (.taskq.toml)
         echo ""; return
     fi
     if [[ ! -d $d ]]; then
@@ -20,10 +20,12 @@ _s.loader.exec_module(_m)
 globals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
 for _w in MACHINES["site-pueue"]["workers"]:
     _w["slots"] = %d
+    if _w.get("cpus") and %s:
+        _w["cpus"] = %s
 for _n in ("site-slurm", "site-slurm2"):
     for _j in MACHINES[_n]["jobs"].values():
         _j["slots"] = %d
-' "'$FIXTURE_CFG/machines.py'" "$1" "$1" > "$t/machines.py"
+' "'$FIXTURE_CFG/machines.py'" "$1" "${2:-0}" "${2:-0}" "$1" > "$t/machines.py"
         mv -T "$t" "$d" 2> /dev/null || rm -rf "$t"
     fi
     echo "$d"

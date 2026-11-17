@@ -269,7 +269,7 @@ fi
 
 # unit. plugin decisions (no worker started): when gpu_share claims a second, gpu_pad making room, resident's slots, unreadable hours: no new claims and running tasks keep going
 if want unit; then
-TASKQ_CONFIG=$(slots_cfg 3) python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
+TASKQ_CONFIG=$(slots_cfg 3 16) python3 - "$HERE" "$T" << 'EOT' > "$T/unit.out" 2>&1
 import importlib.util, os, sys, time, types
 here, t = sys.argv[1:]
 sys.path.insert(0, here)
@@ -291,16 +291,18 @@ open(b + ".mib", "w").write("0"); said.clear(); pad.make_room(b, said.append)
 assert os.path.exists(b + ".start") and not said
 open(b + ".mib", "w").write("5000"); orig = time.sleep; time.sleep = lambda s: None; pad.make_room(b, said.append); time.sleep = orig
 assert said and "did not respond within 30 seconds" in said[0], said
-import consume  # resident slots: read for real from the machine table (TASKQ_CONFIG=slots_cfg 3, machine site-pueue)
+import consume  # resident slots and cpus: read for real from the machine table (TASKQ_CONFIG=slots_cfg 3 16, machine site-pueue)
 said.clear()
 w = types.SimpleNamespace(ncpu=64, W="site-pueue-gpu1", say=said.append)
-w.table_slots = lambda pick: consume.Worker.table_slots(w, pick)
-os.environ["TASKQ_SLOTS"] = "1"; os.environ["TASKQ_CPUS"] = "16"; os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+w.table_worker = lambda pick: consume.Worker.table_worker(w, pick)
+os.environ["TASKQ_SLOTS"] = "1"; os.environ["TASKQ_CPUS"] = "8"; os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # old env vars: not read
 res.setup(w)
-assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True) and not said, (vars(w), said)
-w.W = "site-pueue-gpu9"; res.setup(w)
-assert w.slots == 1 and said and said[0].startswith("!! no such worker of machine site-pueue"), (vars(w), said)
-os.environ.pop("TASKQ_SLOTS"); said.clear()
+assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (64, 3, ["-i", "1"], True) and not said, (vars(w), said)  # gpu1 sets no cpus
+w.W = "site-pueue-cpu"; res.setup(w)
+assert (w.ncpu, w.slots) == (16, 3) and not said, (vars(w), said)
+w.W, w.ncpu = "site-pueue-gpu9", 64; res.setup(w)
+assert (w.ncpu, w.slots) == (64, 1) and said and said[0].startswith("!! no such worker of machine site-pueue"), (vars(w), said)
+os.environ.pop("TASKQ_SLOTS"); os.environ.pop("TASKQ_CPUS"); said.clear()
 win = load("window")
 def broken(w):
     raise ImportError("broken")

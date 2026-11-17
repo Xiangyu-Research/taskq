@@ -16,6 +16,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "queue"))
+import cfg  # noqa: E402
 import proto  # noqa: E402
 
 GAP = timedelta(minutes=10)
@@ -25,7 +26,7 @@ FMT = "%Y-%m-%d %H:%M:%S"
 
 
 def default_dir():
-    return os.environ.get("GPU_LOG_DIR") or os.path.expanduser(proto.GPU_LOG_DIR)
+    return cfg.gpu_log_dir()
 
 
 def load(d, days):
@@ -134,7 +135,7 @@ def as_text(a, rows, S):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Summarize the GPU usage log written by gpu_log.sh")
-    ap.add_argument("dir", nargs="?", default=None, help="dir with the records (default GPU_LOG_DIR, or %s when unset)" % proto.GPU_LOG_DIR)
+    ap.add_argument("dir", nargs="?", default=None, help="dir with the records (default GPU_LOG_DIR, else gpu_usage/ in this machine's own state dir)")
     ap.add_argument("--me", default=None, help="your account (default: this account)")
     ap.add_argument("--days", type=int, default=14, help="only the last N days (0 = all)")
     ap.add_argument("--json", action="store_true", help="one line of JSON (proto GPU_USAGE_*)")

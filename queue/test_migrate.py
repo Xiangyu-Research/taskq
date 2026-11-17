@@ -117,9 +117,18 @@ os.makedirs(os.path.join(CONDA, "bin"))
 os.symlink(sys.executable, os.path.join(CONDA, "bin", "python3"))
 with open(FAKE_SSH, "w") as f:  # skip -o options; -O check (persistent connection) counts as reachable; a host with a marker file is unreachable; drop the host name, run locally, without hub-only variables
     f.write("#!/bin/bash\nwhile [[ $1 == -o ]]; do shift 2; done\n[[ $1 == -O ]] && exit 0\n"
-            f'[[ -e {T}/unreachable_$1 ]] && {{ echo "ssh: connect to host $1 port 22: Connection refused" >&2; exit 255; }}\nshift\n'
-            "cd / && exec env " + " ".join(f"-u {v}" for v in proto.HUB_ONLY_ENV) + ' bash -c "$*"\n')
-os.chmod(FAKE_SSH, 0o755)
+            f'[[ -e {T}/unreachable_$1 ]] && {{ echo "ssh: connect to host $1 port 22: Connection refused" >&2; exit 255; }}\nh=$1; shift\n'
+            "cd / && exec env " + " ".join(f"-u {v}" for v in proto.HUB_ONLY_ENV) + f' HOME={T}/home_$h bash -c "$*"\n')
+os.chmod(FAKE_SSH, 0o755)  # each host its own home dir
+for n, m in M.MACHINES.items():
+    if m.get("ssh"):
+        os.makedirs(os.path.join(T, "home_" + m["ssh"]), exist_ok=True)
+os.makedirs(os.path.join(T, "bin"))
+with open(os.path.join(T, "bin", "crontab"), "w") as f:  # crontab -l / crontab - on $HOME/.crontab: the real one is never touched
+    f.write('#!/bin/sh\nf="$HOME/.crontab"\nif [ "$1" = -l ]; then [ -f "$f" ] || { echo "no crontab" >&2; exit 1; }; cat "$f"\n'
+            'elif [ "$1" = - ]; then cat > "$f"; else exit 2; fi\n')
+os.chmod(os.path.join(T, "bin", "crontab"), 0o755)
+os.environ["PATH"] = os.path.join(T, "bin") + os.pathsep + os.environ["PATH"]
 for r in ROOTS.values():
     make_bundle(r, "oldbundle")
     os.symlink("oldbundle", os.path.join(r, proto.ROOT["current"]))
@@ -357,6 +366,24 @@ write(os.path.join(L2, f"{sf(B)}__dicc_seg1.log"), "f")
 # the store (the hub entry): part logs fetched into the store data dir and in its root's data dir
 write(os.path.join(DATA, proto.TASK_LOGS, f"{sf(B)}__dicc_seg1.log"), "g")
 write(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS, f"{sf(A)}__x_seg3.log"), "h")
+# step 2: the machine's own files older versions wrote into the home dir (the hub's text logs, boot logs and their crontab lines,
+# GPU usage records with their recorder running, a leftover); the hub's machine has a root, site-pueue's home is its own
+HH, PH = HOME, os.path.join(T, "home_fake-pueue-host")
+HUB_LOGS = {n: write(os.path.join(HH, n + ".log"), f"{n} old\n") for n in ("relay", "health", "ledger")}
+NEW_RELAY = write(cfg.log("relay"), "relay new\n")  # the new code wrote it before migrate ran
+write(os.path.join(HH, "on_boot.log"), "hub boot\n")
+HUB_CRON = write(os.path.join(HH, ".crontab"), f"5 * * * * true\n@reboot python3 /x/bin/taskq --project /p boot >> {HH}/on_boot.log 2>&1\n")
+write(os.path.join(PH, "on_boot.log"), "pueue boot\n")
+write(os.path.join(PH, ".crontab"), f"@reboot bash /r/code/current/scripts/taskq/queue/on_boot.sh --gpu-log >> {PH}/on_boot.log 2>&1\n")
+GL_OLD = os.path.join(PH, "gpu_usage")
+write(os.path.join(GL_OLD, "gpu_2026-10.csv"), "time,gpu\n2026-10-31 23:59:00,0\n")
+PULL = write(os.path.join(PH, "git_pull.log"), "x")
+FAKE_GL = write(os.path.join(T, "fakegl", "gpu_log.sh"), 'exec 9>> "$1/gpu_log.pid"; flock 9; echo $$ > "$1/gpu_log.pid"; sleep 600\n')
+LOGGER = subprocess.Popen(["bash", FAKE_GL, GL_OLD], start_new_session=True)  # the old recorder (its own process group, as setsid starts it)
+for _ in range(100):
+    if MG.gpu_logger(GL_OLD) == LOGGER.pid:
+        break
+    time.sleep(0.1)
 
 
 def tree():
@@ -411,6 +438,8 @@ ok(f"lists: this code's format, the hub in format 0 with step 1 and what it woul
    and "1 task records: from tasks.json" in out and "smoke records site-pueue.json: kind names without a repeated part, 3 -> 2 kinds" in out
    and "site-slurm.json" not in out
    and all(f"drop {p}" in out for p in JUNK + OLD_HUB) and not any(f"drop {p}" in out for p in KEEP))
+ok(f"lists step 2 and what its hub part would move ({out[out.find('step 2:'):][:800]})",
+   "step 2:" in out and f"{HH}/relay.log -> {cfg.log('relay')}" in out and f"{HH}/ledger.log -> {STATE}/{proto.LOGS}/ledger.log" in out)
 ok("lists: each root's format and the step it needs; says nothing changed",
    all(f"{M.MACHINES[n]['label']}: format 0 (no stamp)" in out for n in ROOTS) and "its root part, after switching to the new bundle" in out
    and "listed only, nothing changed" in out)
@@ -510,6 +539,31 @@ ok("smoke records: kind names without a repeated part, the newer record kept; a 
    and read(SM_SLURM) == json.dumps({"k3": dict(t=5, ok=True, kind="k3")}))
 ok("state dir: unused entries dropped; live ones kept (stamp, snapshots, last/ records, health round lock among them)",
    not any(os.path.lexists(p) for p in JUNK) and all(os.path.exists(p) for p in KEEP) and os.path.isdir(SNAPS))
+GL_NEW = os.path.join(ROOTS["site-pueue"], proto.ROOT["state"], proto.GPU_LOG_SUB)
+for _ in range(100):
+    NEW_GL = MG.gpu_logger(GL_NEW)
+    if NEW_GL:
+        break
+    time.sleep(0.1)
+ok("step 2, hub: its text logs out of the home dir into logs/ in the state dir (one written since: the old lines first)",
+   not any(os.path.exists(p) for p in HUB_LOGS.values()) and read(NEW_RELAY) == "relay old\nrelay new\n"
+   and read(cfg.log("health")) == "health old\n" and read(os.path.join(STATE, proto.LOGS, "ledger.log")) == "ledger old\n")
+HB = os.path.join(ROOTS["hub"], proto.ROOT["state"], proto.LOGS, "on_boot.log")
+ok("step 2, the hub's machine (it has a root): boot log into its root's state/logs, the crontab line follows, other lines kept",
+   read(HB) == "hub boot\n" and not os.path.exists(os.path.join(HH, "on_boot.log"))
+   and read(HUB_CRON) == f"5 * * * * true\n@reboot python3 /x/bin/taskq --project /p boot >> {HB} 2>&1\n")
+PB = os.path.join(ROOTS["site-pueue"], proto.ROOT["state"], proto.LOGS, "on_boot.log")
+ok("step 2, executor: boot log and its crontab line into the root's state/logs; the leftover git_pull.log dropped",
+   read(PB) == "pueue boot\n" and read(os.path.join(PH, ".crontab")).endswith(f">> {PB} 2>&1\n") and not os.path.exists(PULL))
+ok(f"step 2, executor: GPU usage records moved into its root's state dir; the old recorder stopped, a new one started there ({NEW_GL})",
+   LOGGER.wait(timeout=30) is not None and not os.path.exists(GL_OLD) and NEW_GL and NEW_GL != LOGGER.pid
+   and read(os.path.join(GL_NEW, "gpu_2026-10.csv")) == "time,gpu\n2026-10-31 23:59:00,0\n")
+if NEW_GL:  # the recorder migrate started (its pid from its lock in the test dir): stop it before comparing trees
+    os.killpg(NEW_GL, 15)
+    for _ in range(100):
+        if MG.gpu_logger(GL_NEW) is None:
+            break
+        time.sleep(0.1)
 
 # ---------------- 6. run again; a root left behind ----------------
 t2 = tree()
@@ -520,7 +574,7 @@ ok(f"--apply again: exit code 0, nothing to do, nothing on disk changes (no snap
 os.remove(ROOT_STAMP["site-slurm2"])  # say it was unreachable at the cutover and came back without a stamp
 rc, out, err = run()
 ok("listing: only that root still needs step 1", rc == 0 and "Slurm2: format 0 (no stamp)" in out and f"hub {STATE}: format {proto.FORMAT}, nothing to do" in out
-   and "pueue: format 1, nothing to do" in out)
+   and f"pueue: format {proto.FORMAT}, nothing to do" in out)
 t3 = tree()
 rc, out, err = run("--apply")
 d = diff(t3, tree())

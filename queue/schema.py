@@ -89,7 +89,7 @@ OUTPUT_FIELDS = {
     "push_url": ("str", "https://ntfy.sh", "push server (ntfy; your own server keeps messages off a public one); https only, except on this machine"),
     "push_token": ("str", "~/.config/taskq/ntfy_token", "file holding an access token for the push server (sent as Authorization: Bearer when the file exists)"),
     "push_detail": ("bool", True, "False: a push says only how many items need attention, never task names, paths or error text"),
-    "logs": ("str", "~", "dir for plain text logs (relay.log, advance.log, ...)"),
+    "logs": ("str?", None, "dir for plain text logs (relay.log, advance.log, on_boot.log, ...); None = logs/ in the state dir (a machine with a root: on_boot.log in its root's state/)"),
     "heartbeat": ("str?", None, "URL fetched after every finished health check round, so an outside service (a dead-man's switch) alerts when rounds stop"),
 }
 

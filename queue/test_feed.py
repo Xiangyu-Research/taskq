@@ -46,9 +46,9 @@ rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["site-pueue claimed a/x
 sys.modules["relay"] = rl
 hub = F.M.hub()
 ev, st = F.run_all(dict(taskq={hub: q_}, ok={}), dry=False)
-ok("hands off to relay.run_all, merges messages and problems, adds feed:nobody, writes one line in feed.log pointing at ~/relay.log",
+ok("hands off to relay.run_all, merges messages and problems, adds feed:nobody, writes one line in feed.log pointing at relay.log",
    rcalls == [False] and ev == ["site-pueue claimed a/x/0"] and set(st) == {"site:site-pueue:x", "feed:nobody:pueue-host"}
-   and "see ~/relay.log" in open(os.environ["FEED_LOG"]).read())
+   and f"see {F.cfg.log('relay')}" in open(os.environ["FEED_LOG"]).read())
 n0 = len(open(os.environ["FEED_LOG"]).read())
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)
 ok("dry: asks relay as usual (with dry), writes no feed.log", rcalls == [False, True] and len(open(os.environ["FEED_LOG"]).read()) == n0)

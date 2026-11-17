@@ -29,7 +29,7 @@ from flow import compile as FC  # noqa: E402
 from flow.graph import Graph  # noqa: E402
 from flow.model import SOURCE  # noqa: E402
 
-NOTES = []  # why nothing was queued this round (written to ~/advance.log, not reported as a problem)
+NOTES = []  # why nothing was queued this round (written to advance.log (cfg.log), not reported as a problem)
 STORED = None  # keys whose results are on the store, from the last plan() that could read the store (run() saves it in taskq.db)
 TQ_TIMEOUT = 420  # longer than the longest queue-lock wait (300 s): a lock timeout returns an exit code, not a timeout
 
@@ -243,7 +243,7 @@ def save_stored():
 
 
 def log(lines, stuck, live):
-    """Write ~/advance.log: skip a repeat of the last lines (same "would queue", "not queued", stuck)."""
+    """Write advance.log (cfg.log): skip a repeat of the last lines (same "would queue", "not queued", stuck)."""
     acted = ("queued ", "redid ", "deleted ")
     cur = dict(lines=[ln for ln in lines if not ln.startswith(acted)], stuck=sorted(stuck))
     out = [ln for ln in lines if ln.startswith(acted)]

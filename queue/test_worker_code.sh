@@ -82,16 +82,16 @@ check "outside Slurm: two failures shortly after start; claims no more and does 
 kill -TERM $wpid; wait $wpid 2> /dev/null
 fi
 
-# CPU worker outside Slurm (pueue cpu_worker): uses at most TASKQ_CPUS cores
+# CPU worker outside Slurm (pueue cpu_worker): uses at most its machine table worker's cpus cores, not an old TASKQ_CPUS in the environment
 if want 6f; then
 reset
 table << EOF
 t/c1 base cpu
 EOF
-(WORKER_ID=site-pueue-cpu WORKER_DEVICE=cpu TASKQ_CPUS=1 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/w6f.out" 2>&1 &
+(WORKER_ID=site-pueue-cpu WORKER_DEVICE=cpu TASKQ_CONFIG=$(slots_cfg 2 1) TASKQ_CPUS=4 TASKQ_IDLE_POLL=1 TASKQ_IDLE_EXIT=2 exec bash "$HERE/worker_start.sh") > "$T/w6f.out" 2>&1 &
 wpid=$!
 waitfor 30 '! kill -0 $wpid 2> /dev/null'; wait $wpid
-check "CPU worker outside Slurm: uses at most TASKQ_CPUS cores" 'grep -q "worker (cpu).*CPU 1," $T/w6f.out && grep -q "^start .* t/c1 .*cpus=1$" $T/train.log'
+check "CPU worker outside Slurm: uses at most the table's cpus cores (1), not TASKQ_CPUS=4" 'grep -q "worker (cpu).*CPU 1," $T/w6f.out && grep -q "^start .* t/c1 .*cpus=1$" $T/train.log'
 fi
 
 # 6e. bundles (<root>/code/<bundle>, current points at the one in use): when current changes and the worker is idle, exec the new bundle's worker_start.sh and keep running in the same process

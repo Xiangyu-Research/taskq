@@ -8,7 +8,8 @@
 #                            then) are started if paused now, others untouched
 #   interrupted tasks: ended between 15 minutes before boot (or --since) and now, without success (killed training / inference etc.).
 #   Training resumes from its checkpoint; inference skips work already done.
-# The crontab redirects output to ~/on_boot.log; the hub's health check pushes a notice when it sees a reboot.
+# The crontab redirects output to cfg.boot_log (logs/on_boot.log in this machine's own state dir); the hub's health check pushes a
+# notice when it sees a reboot.
 set -u
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root; the user repo root REPO (TASKQ_REPO, else as in cfg.py)
 P=$(python3 "$CORE/sites/mtab.py" get . pueue)
@@ -29,9 +30,8 @@ done
 [[ -n $GL ]] || GL=$(python3 "$CORE/sites/mtab.py" get . gpu_log 2> /dev/null)
 [[ -n $SINCE ]] || sleep "${ON_BOOT_WAIT:-30}"  # wait for network and data disks at boot
 eval "$(python3 "$CORE/queue/proto.py" sh)"
-GLD=${GPU_LOG_DIR:-${TQ_GPU_LOG_DIR/#\~/$HOME}}
 # a running gpu_log.sh holds a lock on its pid file; lockable = none running
-if [[ -n $GL ]] && mkdir -p "$GLD" && flock -n "$GLD/$TQ_GPU_LOG_PID" true; then
+if [[ -n $GL ]] && GLD=$(python3 "$CORE/queue/cfg.py" gpu-log-dir) && mkdir -p "$GLD" && flock -n "$GLD/$TQ_GPU_LOG_PID" true; then
     setsid -f bash "$CORE/monitor/gpu_log.sh" > /dev/null 2>&1 < /dev/null && log "started GPU usage records"
 fi
 if ! $P status > /dev/null 2>&1; then

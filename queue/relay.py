@@ -890,7 +890,7 @@ def env_builds(s, name, rows, now, dry, stuck):
     """Envs built from their spec (sites/envs.py): not built, spec changed, build stopped, or out of space past RETRY_S → queue
     one taskq site env in the hub's IO group (proto.IO_GROUP) (one at a time per machine; skip when one is already queued);
     broken builds, no space or missing wheelhouse packages alert site:<machine>:env:<env>. With AUTO["envs"] off, only log to
-    ~/relay.log. rows, now: remote marker files and time (envs.read_rows or envs_st from the status script). → messages"""
+    relay.log. rows, now: remote marker files and time (envs.read_rows or envs_st from the status script). → messages"""
     on, extra = envs_switch(name)
     want = EV.wanted(name, extra)
     if not want:

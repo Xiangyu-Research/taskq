@@ -31,6 +31,7 @@ try:  # everything that reads the config dir, the experiment table or plugins: w
     TQS = cfg.state("taskq", expand=False)
     import mtab as M  # noqa: E402
     import policy  # noqa: E402
+    import remote as R  # noqa: E402  sites/remote.py (reads policy.py at import)
     import notice as NT  # noqa: E402
     OUT = getattr(policy, "OUTPUTS", {})
     HDIR = os.path.expanduser(OUT.get("health") or cfg.state("health", expand=False))
@@ -104,13 +105,22 @@ def probe_ok(rc, out):
     return rc == 0 and "BOOT|" in out
 
 
+def own_state(m, *parts):
+    """A path in machine m's own state dir as m sees it (cfg.machine_state over there: its root's state/, else the state
+    dir), shell-quoted with a leading ~ left for m to expand."""
+    base = f"{m['root'].rstrip('/')}/{proto.ROOT['state']}" if m.get("root") else cfg.state_home().rstrip("/")
+    return R.q("/".join([base, *parts]))
+
+
 def probe_script(m):
     """What to check on a machine with a pueue group (per machine-table fields), one "item|value" per line."""
-    lines = ['echo "BOOT|$(uptime -s)|$(tail -1 ~/on_boot.log 2>/dev/null)"', GPU_PROBE]
+    logs = cfg.outputs("logs")
+    boot = R.q(os.path.join(logs, proto.BOOT_LOG + ".log")) if logs else own_state(m, proto.LOGS, proto.BOOT_LOG + ".log")
+    lines = [f'echo "BOOT|$(uptime -s)|$(tail -1 {boot} 2>/dev/null)"', GPU_PROBE]
     if m["disk"]:
         lines.append(f'echo "DISK|$(df -B1 --output=avail {m["disk"][0]} | tail -1 | tr -d \' \')"')
     if m["gpu_log"]:
-        lines.append(f'echo "GPULOG|$(tail -1 {proto.GPU_LOG_DIR}/$(date +{proto.GPU_LOG_FILE}) 2>/dev/null | cut -d, -f1)"')
+        lines.append(f'echo "GPULOG|$(tail -1 {own_state(m, proto.GPU_LOG_SUB)}/$(date +{proto.GPU_LOG_FILE}) 2>/dev/null | cut -d, -f1)"')
     return "\n".join(lines) + "\n"
 
 

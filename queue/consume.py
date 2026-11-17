@@ -243,10 +243,10 @@ class Worker:
         self.adopt()
 
     # ---------- machine table, code ----------
-    def table_slots(self, pick):
-        """How many trainings at once: the slots of this machine's machine table worker that pick(item) selects
-        (mtab.workers: a pueue worker by id, a Slurm jobs entry by kind), read when the worker starts; unreadable or not
-        in the table → 1, said in the log."""
+    def table_worker(self, pick):
+        """This machine's machine table worker that pick(item) selects (mtab.workers: a pueue worker by id, a Slurm jobs entry
+        by kind), read when the worker starts → its dict (slots, cpus, ...); unreadable or not in the table → {} (1 at once,
+        no core limit), said in the log."""
         try:
             m = cfg.mtab()
             name = m.whoami()
@@ -256,8 +256,8 @@ class Worker:
             x, why = None, f"cannot read the machine table ({type(e).__name__}: {e})"
         if why:
             self.say(f"!! {why}; running 1 at once")
-            return 1
-        return int(x["slots"] or 1)
+            return {}
+        return x
 
     def mget(self, field):
         try:
