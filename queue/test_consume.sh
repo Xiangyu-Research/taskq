@@ -178,6 +178,18 @@ rc=$?
 n=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))")
 check "Slurm: job id as the name, 1 slot without TASKQ_SLOTS (whatever the CPUs and memory), unknown time limit" '[[ $rc == 0 ]] && grep -q "job 900300 @ .*at most 1 at once, CPU $n, memory 65536M.*time limit not known yet, checking later" $T/wslurm.out && grep -q "done t/s" $T/wslurm.out'
 check "Slurm: local staging dir (TASKQ_STAGE_ROOT) and TASKQ_ADMITTED handed to run_task.sh, removed at the end" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 ]]'
+# a job submitted without TASKQ_SLOTS (by code from before it was passed) on a machine whose jobs entry says slots=2
+mkdir -p "$T/scfg"; cp -r "$TASKQ_CONFIG/." "$T/scfg/"
+printf 'import importlib.util as _u
+_s = _u.spec_from_file_location("_fx_machines", %s)
+_m = _u.module_from_spec(_s)
+_s.loader.exec_module(_m)
+globals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
+MACHINES["site-slurm"]["jobs"]["gpu"]["slots"] = 2
+' "'$TASKQ_CONFIG/machines.py'" > "$T/scfg/machines.py"
+(unset TASKQ_SLOTS; TASKQ_CONFIG=$T/scfg TASKQ_MACHINE=site-slurm SLURM_JOB_ID=900302 SLURM_MEM_PER_NODE=65536 TASKQ_IDLE_MAX=2 TASKQ_GPU_PAD_BASE=$T/nopad \
+  PATH=$T/bins:$PATH exec bash "$HERE/worker_start.sh") > "$T/wslurm2.out" 2>&1
+check "Slurm: a job without TASKQ_SLOTS takes the slots of its machine table jobs entry (slots=2)" 'grep -q "job 900302 @ .*at most 2 at once" $T/wslurm2.out || { tail -5 $T/wslurm2.out; false; }'
 fi
 
 # plug. consumers.py (CONSUMERS) in the user's plugin dir: hooks are still called; no claims while admit blocks
@@ -291,15 +303,6 @@ res.setup(w)
 assert (w.ncpu, w.slots, w.nvsel, w.tag_each) == (16, 3, ["-i", "1"], True), vars(w)
 os.environ.pop("TASKQ_SLOTS"); res.setup(w)
 assert w.slots == 1, vars(w)
-sl = load("slurm")
-os.environ.update(SLURM_JOB_ID="900301", SLURM_MEM_PER_NODE="1024")
-jobs = {"gpu": {"partition": "p", "slots": 2}, "cpu": {"partition": "c"}}
-w = types.SimpleNamespace(ncpu=4, device="gpu", mget=lambda f: jobs if f == "jobs" else "")
-sl.setup(w); assert w.slots == 2, "a job without TASKQ_SLOTS takes its jobs entry's slots"
-w.device = "cpu"; sl.setup(w); assert w.slots == 1, "an entry without slots: 1"
-w.mget = lambda f: ""; w.device = "gpu"; sl.setup(w); assert w.slots == 1, "unreadable machine table: 1"
-os.environ["TASKQ_SLOTS"] = "3"; w.mget = lambda f: jobs; sl.setup(w); assert w.slots == 3, "TASKQ_SLOTS wins"
-for k in ("TASKQ_SLOTS", "SLURM_JOB_ID", "SLURM_MEM_PER_NODE"): os.environ.pop(k)
 win = load("window")
 def broken(w):
     raise ImportError("broken")
@@ -363,7 +366,7 @@ assert real._smi("0", Q) is None
 os.environ["PATH"] = path
 print("ok")
 EOT
-check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, Slurm slots from the jobs entry without TASKQ_SLOTS, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
+check "plugins: gpu_share decisions, gpu_pad making room, resident CPUs and slots, unreadable machine table or hours" 'grep -qx ok $T/unit.out || { cat $T/unit.out; false; }'
 fi
 
 # secret. a spec with a token in vars: the worker hands it to run_task.sh and spec.py on stdin (a 0600 file already unlinked), so

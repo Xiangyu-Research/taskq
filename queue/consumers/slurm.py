@@ -27,10 +27,13 @@ def setup(w):
 
 
 def table_slots(w):
-    """This machine's jobs entry for the worker's device (gpu / cpu): its slots, None when unset or unreadable."""
-    jobs = w.mget("jobs")
-    entry = jobs.get(w.device) if isinstance(jobs, dict) else None
-    return entry.get("slots") if isinstance(entry, dict) else None
+    """This machine's jobs entry for the worker's device (gpu / cpu): its slots (mtab.workers), None when unreadable."""
+    try:
+        import cfg
+        m = cfg.mtab()
+        return next((x["slots"] for x in m.workers(m.whoami()) if x["kind"] == w.device), None)
+    except Exception:  # noqa: BLE001  an unreadable machine table leaves the default
+        return None
 
 
 def end_time(w):
