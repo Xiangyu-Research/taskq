@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for sync/tunnel.py: simulate the other side here (a fake ssh runs commands under a local HOME), with the server on 127.0.0.1. Run on the hub."""
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -163,23 +165,47 @@ def code_noua(path):
         return e.code
 
 
-def code(method, path, data=b""):
+def code(method, path, data=b"", token=None):
+    h = dict(tunnel.UA, **({tunnel.TOKEN_HEADER: token} if token is not None else {}))
     try:
-        return urllib.request.urlopen(urllib.request.Request(url + path, data=data, method=method, headers=tunnel.UA)).status
+        return urllib.request.urlopen(urllib.request.Request(url + path, data=data, method=method, headers=h)).status
     except urllib.error.HTTPError as e:
         return e.code
 
 
-ok("path not in the list 404 (including ..)", code("PUT", f"/{tok}/../../etc/x?off=0", b"x") == 404 and code("PUT", f"/{tok}/b.bin?off=0", b"x") == 404
-   and code("GET", f"/{tok}/a/x.bin") == 404)
+ok("path not in the list 404 (including ..)", code("PUT", "/../../etc/x?off=0", b"x", tok) == 404 and code("PUT", "/b.bin?off=0", b"x", tok) == 404
+   and code("GET", "/a/x.bin", token=tok) == 404 and code("GET", "/serve.key", token=tok) == 404)
 ok("requests without User-Agent rejected (like Cloudflare)", code_noua("/") == 403)
-ok("bad token 404 (including other file names in the server dir)", code("PUT", "/bad/a/x.bin?off=0", b"x") == 404 and code("GET", "/" + "A" * 32 + "/") == 404
-   and code("GET", "/serve.pid/") == 404 and code("GET", "/../serve/") == 404 and code("PUT", f"/{tok[:-1]}/a/x.bin?off=0", b"x") == 404)
-ok("good token: session recognized; chunk past the file size 400", code("GET", f"/{tok}/") == 200 and code("PUT", f"/{tok}/a/x.bin?off=3", b"xxxx") == 400)
-ok("good token and chunk: accepted", code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx") == 200)
+ok("bad or missing token 404", code("PUT", "/a/x.bin?off=0", b"x", "bad") == 404 and code("GET", "/", token="A" * 32) == 404
+   and code("PUT", "/a/x.bin?off=0", b"x") == 404 and code("PUT", "/a/x.bin?off=0", b"x", tok[:-1]) == 404)
+ok("the token in the URL path (the older form) is not accepted: tokens travel only in the header",
+   code("GET", f"/{tok}/") == 404 and code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx") == 404 and code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx", tok) == 404)
+ok("good token: session recognized; chunk past the file size 400", code("GET", "/", token=tok) == 200 and code("PUT", "/a/x.bin?off=3", b"xxxx", tok) == 400)
+ok("good token and chunk: accepted", code("PUT", "/a/x.bin?off=0", b"xxxxx", tok) == 200)
+q = urllib.parse.urlencode(dict(md5=hashlib.md5(b"xxxxx").hexdigest(), mtime=1_700_000_000_000_000_000, mode=0o6755))
+ok("a received file never gets setuid / setgid from the mode the other side sends (0o6755 -> 0o755)",
+   code("POST", f"/a/x.bin?{q}", b"", tok) == 200 and os.stat(os.path.join(T, "srv", "a/x.bin")).st_mode & 0o7777 == 0o755)
+nonce = "n" * 24
+c_ = urllib.request.urlopen(urllib.request.Request(url + "/", headers=dict(tunnel.UA, **{tunnel.CHALLENGE_HEADER: nonce})))
+key = open(os.path.join(SRV, tunnel.KEY_FILE)).read().strip()
+ok("GET / with a challenge: ok, this version and the proof made with the key only this account can read (0600 in the 0700 server dir)",
+   c_.read().decode().split() == ["ok", str(tunnel.SERVER_VERSION), tunnel.proof(key, nonce)] and os.stat(os.path.join(SRV, tunnel.KEY_FILE)).st_mode & 0o777 == 0o600
+   and os.stat(SRV).st_mode & 0o777 == 0o700 and tunnel.proof("other key", nonce) != tunnel.proof(key, nonce))
 sv.close()
-ok("after the session closes its token is 404", code("GET", f"/{tok}/") == 404 and code("PUT", f"/{tok}/a/x.bin?off=0", b"xxxxx") == 404)
+ok("after the session closes its token is 404", code("GET", "/", token=tok) == 404 and code("PUT", "/a/x.bin?off=0", b"xxxxx", tok) == 404)
 ok("session files deleted", not [f for f in os.listdir(SRV) if f.endswith((".json", ".out"))])
+
+# the downloading side never gives a file setuid / setgid either, whatever mode the plan carries
+mwd, mroot = os.path.join(T, "mask_wd"), os.path.join(T, "masked")
+os.makedirs(mwd)
+xs = os.stat(os.path.join(src, "a/x.bin"))
+sv = tunnel.Session({"a/x.bin": (xs.st_size, xs.st_mtime_ns, 0o6755)}, src=src)
+with open(os.path.join(mwd, "plan.json"), "w") as f:
+    json.dump(dict(base=sv.open(), token=sv.token, root=mroot, npar=1, files=[["a/x.bin", xs.st_size, xs.st_mtime_ns, 0o6755]]), f)
+r = subprocess.run([sys.executable, os.path.join(HERE, "tunnel.py"), "_fetch", "plan.json"], env=ENV, cwd=mwd, capture_output=True, text=True)
+sv.close()
+ok("_fetch: the plan's mode 0o6755 is placed as 0o755, content right (the token goes in a header, the plan's base has none)",
+   r.returncode == 0 and same(src, mroot, ["a/x.bin"]) and os.stat(os.path.join(mroot, "a/x.bin")).st_mode & 0o7777 == 0o755)
 
 # rsync stand-in
 big = {"frag/check/c1.prob": 1_500_000, "frag/check/c2.prob": 700_000, "frag/final.ckpt": 400_000, "frag/plans.json": 50}
@@ -316,6 +342,84 @@ for _ in range(100):
     time.sleep(0.1)
 ok("server exits after a few idle seconds (TUNNEL_IDLE) with no sessions", not tunnel.alive(pid) and not [f for f in os.listdir(SRV) if f.endswith((".json", ".out"))])
 
+# once our server has exited, anything may listen on bind. A stand-in server: answers every request "ok" (as the previous
+# version did for GET /), or with FAKE_VERSION a proof made with our key and that version; logs what it was sent; writes the
+# server dir's pid file only when run as "<script> _serve <bind> <server dir>" (how a server of ours runs)
+FAKE_SRV = os.path.join(T, "fake_server.py")
+with open(FAKE_SRV, "w") as f:
+    f.write(f"""import hashlib, hmac, http.server, os, sys
+bind, d = sys.argv[-2], sys.argv[-1]
+host, port = bind.rsplit(":", 1)
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        with open(os.environ["FAKE_LOG"], "a") as f:
+            f.write(f"{{self.command}} {{self.path}} {{'token' if self.headers.get({tunnel.TOKEN_HEADER!r}) else '-'}}\\n")
+        b, n = b"ok", self.headers.get({tunnel.CHALLENGE_HEADER!r})
+        if n and os.environ.get("FAKE_VERSION"):
+            k = open(os.path.join(d, {tunnel.KEY_FILE!r})).read().strip().encode()
+            b = ("ok " + os.environ["FAKE_VERSION"] + " " + hmac.new(k, b"xfer server " + n.encode(), hashlib.sha256).hexdigest()).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    do_PUT = do_POST = do_GET
+srv = http.server.HTTPServer((host, int(port)), H)
+if sys.argv[1] == "_serve":
+    open(os.path.join(d, {tunnel.PID_FILE!r}), "w").write(str(os.getpid()) + "\\n")
+srv.serve_forever()
+""")
+
+
+def fake(*args, **env):
+    log_ = os.path.join(T, f"fake_{len(os.listdir(T))}.log")
+    p = subprocess.Popen([sys.executable, FAKE_SRV, *args], env=dict(ENV, FAKE_LOG=log_, **env), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"http://{args[-2]}/", headers=tunnel.UA), timeout=1).read()
+            break
+        except OSError:
+            time.sleep(0.05)
+    return p, log_
+
+
+def stop(p):
+    if p.poll() is None:
+        p.kill()
+    p.wait()
+
+
+for ver, what in ((None, "a server of the previous version (answers GET / without a proof)"), ("1", "our server of an older version (proof, version 1)")):
+    p, flog = fake("_serve", f"127.0.0.1:{PORT}", SRV, **({"FAKE_VERSION": ver} if ver else {}))
+    shutil.rmtree(dst, ignore_errors=True)
+    r = run("push", HOST, src, "st/pushed", lst)
+    gone = p.poll() is not None
+    stop(p)
+    ok(f"{what} on bind, named by our pid file: stopped and replaced by this version's, the transfer works",
+       r.returncode == 0 and same(src, dst, FILES) and gone and f"stopping the file server pid {p.pid}" in r.stdout
+       and server_pid() not in (None, p.pid) and tunnel.alive(server_pid()))
+    ok(f"{what}: it was sent only the challenge (no token, no file)", open(flog).read().split("\n")[:-1] in (["GET / -"], ["GET / -"] * 2))
+    try:
+        os.kill(server_pid(), signal.SIGKILL)
+    except (ProcessLookupError, TypeError):
+        pass
+
+p, flog = fake("other", f"127.0.0.1:{PORT}", os.path.join(T, "elsewhere"))
+r = run("push", HOST, src, "st/pushed", lst)
+alive_ = p.poll() is None
+stop(p)
+ok("another process on bind (not ours, cannot answer with our key): the transfer refuses, says why, sends it no token and no file",
+   r.returncode != 0 and "is taken by a process that is not this account's file server" in r.stdout + r.stderr and alive_
+   and all(ln == "GET / -" for ln in open(flog).read().split("\n")[:-1]) and not [f for f in os.listdir(SRV) if f.endswith(".json")])
+
+ok("public address check: https anywhere, plain http only to this machine",
+   tunnel.url_ok("https://t.example.org") and tunnel.url_ok("http://127.0.0.1:1") and tunnel.url_ok("http://localhost:8")
+   and not tunnel.url_ok("http://t.example.org") and not tunnel.url_ok("ftp://t.example.org") and not tunnel.url_ok("https://"))
+r = run("push", HOST, src, "st/pushed", lst, env=dict(ENV, TUNNEL_URL="http://t.example.org"))
+ok("a non-https address for the file server: the transfer refuses before making a session", r.returncode != 0
+   and "is not https" in r.stdout + r.stderr and not [f for f in os.listdir(SRV) if f.endswith(".json")])
+
 # local executor (ssh is None): no tunnel, no lock, copy directly here
 lsrc, ldst = os.path.join(T, "lsrc"), os.path.join(T, "lhome_dst")
 make(lsrc, FILES)
@@ -366,8 +470,7 @@ ok("received files are flushed to disk before they get their final name (after a
 
 # push with sums and stat (how site_ops push sends blobs): the receiving side checks each file's sha256 in the read that checks
 # its MD5 and writes the record next to it once it is in place; a file whose content is not its sha256 is never placed
-import hashlib  # noqa: E402
-SUMS = {r: hashlib.sha256(open(os.path.join(src, r), "rb").read()).hexdigest() for r in FILES}
+SUMS ={r: hashlib.sha256(open(os.path.join(src, r), "rb").read()).hexdigest() for r in FILES}
 STAT = (".st", "{size} {mtime_ns}")
 
 

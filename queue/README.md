@@ -458,6 +458,12 @@ says which direction this machine uses: `push` (store -> here, the other side do
 `pull` (here -> store, chunked upload). Transfers on the same machine (such as a store that is also an executor, or an executor with
 `ssh=None`) copy directly, hardlinking blobs, write to `.tunnelpart` and rename. `taskq tunnel rsync` is an rsync stand-in: transfer
 through the tunnel first, then run rsync unchanged.
+The public address must be https (plain http only to localhost; `taskq check` reports it). Each transfer is a session whose random
+token travels in a request header, never in the URL, and allows only the files in its list; received files never get setuid, setgid
+or sticky bits. One file server process on the listen address serves all sessions and exits when idle; before using it, a transfer
+checks that the server answers a challenge with a key only this account can read (`tunnel_srv/serve.key` in the state dir, 0700):
+another account's process on that address makes the transfer fail without sending it anything, and our server of an older version
+is stopped and replaced.
 
 ### GPU pad
 
