@@ -315,6 +315,32 @@ for a new worker to stack another task onto. Stops the worker sends itself (`tas
 handling, a claim taken over) release the task without a failure; a task whose training or `run_task.sh` dies of a signal the worker
 did not send (an out-of-memory killer, an admin) is released as a failure, so one killed every time reaches the failure limit.
 
+#### Env vars of workers and tasks
+
+A worker inherits these from its launcher, `run_task.sh` from the worker, and the task's command from `run_task.sh` (names in
+`proto.RUN_ENV`, the `TASKQ_*` ones in `proto.ENV`):
+
+| env var | set by | meaning |
+|---|---|---|
+| `WORKER_ID` | the pueue worker command (`sites/mtab.py` worker_env) | the worker's name, `<machine>-<worker>`; a Slurm worker takes its job id instead |
+| `WORKER_DEVICE` | the pueue worker command; `queue/cpu_worker.sbatch` sets `cpu` | which tasks the worker claims: `gpu` (unset) or `cpu` |
+| `CUDA_VISIBLE_DEVICES` | the pueue worker command | the worker's GPU (the machine table worker's `gpu`) |
+| `TASK_GPU_IDLE` | the pueue worker command | minutes no one else may have used the GPU in the GPU usage records before a task starts (the worker's `idle`): the `gpu_idle` plugin checks it before claiming, `run_task.sh` started by hand waits for it |
+| `TASK_WAIT_GPU` | `spec.py shell` in `run_task.sh` | most minutes `run_task.sh` waits for a busy GPU, from the task's `res.wait_gpu` (empty = wait forever); it replaces the worker's `wait` that the pueue worker command sets |
+| `TASK_KEY` | the worker | the task's name |
+| `TASK_JOBTAG` | the worker | the job name in the part log name and first line: the worker's name, plus `-<start time>` for a resident worker; set means started by a worker (one try, and the training stops once the worker is gone); unset: `<hostname>-<time>` |
+| `TASK_PART` | the worker | the part number in the part log name (`1`; unset: `1`) |
+| `TASK_CPUS` | the worker | cores for this task: the worker's cores divided by its slots |
+| `TASKQ_ADMITTED` | the worker | `1`: the worker checked the GPU before claiming, `run_task.sh` does not wait for it again |
+| `TASKQ_STAGE_ROOT` | the `slurm` consumer plugin | node-local staging root: with `res.local_inputs` the inputs are copied there |
+| `TASK_INPUTS_ROOT` | `run_task.sh` | where the command reads its inputs, at the same relative paths as in the data dir: the data dir, or the node-local copy |
+| `TASKQ_DATA`, `TASKQ_LIB` | `run_task.sh` | the data dir; the core's `queue/` (the core's `bin/` comes first on `PATH`) |
+| the spec's `vars`, the machine table's `task_vars` | `run_task.sh` | exported for the command (minus `task_unset`; a `task_vars` entry set already keeps its value) |
+
+`RUN_TASK_TRIES`, `RUN_TASK_POLL`, `RUN_TASK_GPU_POLL`, `RUN_TASK_STOP_WAIT`, `RUN_TASK_BOSS_POLL` and `WORKER_TEST_GPU` replace
+timings and GPU records in tests only. The shell variables `spec.py shell` prints for `run_task.sh` (`TASK_CMD`, `TASK_OUT`, ...)
+are in `proto.SHELL_VARS`.
+
 #### Consumers
 
 Differences between executor kinds live in consumer plugins: the core's `queue/consumers/` (in this order), then the project's

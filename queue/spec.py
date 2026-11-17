@@ -807,11 +807,12 @@ def shell_lines(s, data, repo=REPO):
     if bad:
         raise SpecError(f"vars name {bad[0]!r} is not a shell variable name (letters, digits and _, not starting with a digit)")
     e = expand({k: s[k] for k in SHELL_FIELDS if k in s}, data, repo)
-    lines = [f"TASK_KEY={shlex.quote(e['key'])}", f"TASK_ENV={shlex.quote((envs_of(e) or [''])[0])}", f"TASK_CMD={shlex.quote(e['cmd'])}",
-             f"TASK_OUT={shlex.quote(os.path.join(data, e['out']))}", f"TASK_SAFE={shlex.quote(safe(e['key']))}",
-             f"TASK_WAIT_GPU={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
-             "TASK_INPUTS=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["inputs"]) + ")",
-             f"TASK_LOCAL={int(bool(e['res'].get('local_inputs')))}"]
+    V = P.SHELL_VARS
+    lines = [f"{V['key']}={shlex.quote(e['key'])}", f"{V['env']}={shlex.quote((envs_of(e) or [''])[0])}", f"{V['cmd']}={shlex.quote(e['cmd'])}",
+             f"{V['out']}={shlex.quote(os.path.join(data, e['out']))}", f"{V['safe']}={shlex.quote(safe(e['key']))}",
+             f"{V['wait_gpu']}={'' if e['res'].get('wait_gpu') is None else int(e['res']['wait_gpu'])}",
+             f"{V['inputs']}=(" + " ".join(shlex.quote(os.path.join(data, x)) for x in e["inputs"]) + ")",
+             f"{V['local']}={int(bool(e['res'].get('local_inputs')))}"]
     lines += [f"export {k}={shlex.quote(str(v))}" for k, v in e["vars"].items()]
     return "\n".join(lines)
 
