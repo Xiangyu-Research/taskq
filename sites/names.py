@@ -2,7 +2,6 @@
 (symlinks to blobs), params are sent as is and results come back at the same paths. The one exception: an
 absolute input outside the store data dir goes under abs/<path> over there, and the param becomes {data}/abs/<path>.
 Other plugins (relay_plugins.py in the project) list their files per params and check them after the fetch."""
-import fnmatch
 import glob
 import os
 import re
@@ -132,15 +131,10 @@ def export(spec, root):
 
 def import_(spec, src, dst, root, links=()):
     o = S.outputs(spec)
-    os_, out, extra, logs = o["outs"], o["outs"][0], o["extra"], o["logs"]
-    par = os.path.dirname(out)
+    out = o["outs"][0]
     got, odd = [], []
     for rel in RN.walk(src):
-        if any(C.under(rel, o) for o in os_) or (rel.startswith(logs) and "__" not in rel[len(logs):]) or (
-                par and os.path.dirname(rel) == par and any(fnmatch.fnmatch(os.path.basename(rel), x) for x in extra)):
-            got.append(rel)
-        else:
-            odd.append(rel)
+        (got if S.owns(o, rel) else odd).append(rel)
     if odd:
         raise RelayError(f"{spec['key']}: fetched files that do not belong here: {odd[:5]}")
     have = set(got) | set(links)

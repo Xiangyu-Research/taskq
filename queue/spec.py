@@ -16,6 +16,7 @@ Commands:
                                      {"version": ..., "tasks", "seglogs"[, "stuck", "errors"]}
 A k=v value starting with [ or { is read as JSON (e.g. done='["a","b|c"]'); everything else is a string.
 """
+import fnmatch
 import glob
 import json
 import os
@@ -30,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # the scheduler code root
 sys.path.insert(0, os.path.join(CORE, "queue"))
 import cfg as _cfg  # noqa: E402
+import common as _C  # noqa: E402
 import proto as P  # noqa: E402
 REPO = _cfg.REPO  # the user's repo root (cfg.py)
 BUILTIN = ("data", "repo")  # names expanded for this machine at run time
@@ -258,6 +260,15 @@ def outputs(s):
     return dict(outs=[os.path.normpath(o.strip("/")) for o in [s["out"]] + list(f.get("also") or [])],
                 done=P.done_items(s.get("done")), exclude=list(f.get("exclude") or []), extra=list(f.get("extra") or []),
                 archive=bool(s.get("archive")), logs=f"{P.TASK_LOGS}/{safe(s['key'])}{SAFE}" if s.get("key") else None)
+
+
+def owns(o, rel):
+    """Is this path (relative to the data dir) one of the task's results (o: outputs()): inside an output dir, one of its part
+    logs, or a file next to out that fetch.extra names? Fetching and placing take nothing else."""
+    par = os.path.dirname(o["outs"][0])
+    return (any(_C.under(rel, x) for x in o["outs"])
+            or bool(o["logs"]) and rel.startswith(o["logs"]) and SAFE not in rel[len(o["logs"]):]
+            or bool(par) and os.path.dirname(rel) == par and any(fnmatch.fnmatch(os.path.basename(rel), x) for x in o["extra"]))
 
 
 def done_missing(o, exists):

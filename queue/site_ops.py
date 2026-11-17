@@ -755,15 +755,19 @@ def op_pull(A):
     """frm: executor; spec; items [[relative path, bytes, mtime ns]], links [[relative path, target relative to the data dir]]:
     outputs listed by list over there → fetch into .relay_in/<safe key> under the store data dir (skip files from a previous
     partial fetch with matching size and mtime), verify against the spec (names.import_), then place them in the data dir
-    (place, markers last) → dict(files, links)."""
+    (place, markers last) → dict(files, links). The listing comes from the executor: a path that is not one of this task's
+    results (spec.owns; links only inside the output dirs) stops the fetch before anything is written."""
     _, N, S, T = mods()
     D = store_dir(A)
     sp = A["spec"]
-    outs = S.outputs(sp)["outs"]
+    o = S.outputs(sp)
     links = [(rel_ok(r), rel_ok(t)) for r, t in A["links"]]
-    off = [r for r, _ in links if not any(C.under(r, o) for o in outs)]
+    off = [r for r, _ in links if not any(C.under(r, x) for x in o["outs"])]
     if off:
         raise Bad(f"links for {sp['key']} are not inside the output dirs: {off[:3]}")
+    off = [i[0] for i in A["items"] if not S.owns(o, rel_ok(i[0]))]
+    if off:
+        raise Bad(f"files listed for {sp['key']} are not its results: {off[:3]}")
     host, troot = reach(A["frm"])
     inbox = os.path.join(D, proto.RELAY_INBOX, proto.safe(sp["key"]))
     out = inbox + ".real"

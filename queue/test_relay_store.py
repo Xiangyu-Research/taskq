@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for relay_store.py cleanup (gc): build a fake root in a temp dir, run site_ops.py gc locally (as relay_remote.op
-calls it), and fake free space with the free argument.
+calls it), and fake free space with the free argument. Also the store's pull: it takes only the task's own results from the
+executor's listing.
     python3 queue/test_relay_store.py
 """
 import hashlib
@@ -248,6 +249,7 @@ def main():
 
         gc_pins_read_once(tmp)
         gc_envs(tmp)
+        pull_listing(tmp)
 
         b0, G.budget = G.budget, lambda n: None
         try:
@@ -309,6 +311,51 @@ def gc_pins_read_once(tmp):
     assert left == hs[0:100:5], left
     assert loads <= 3 * 20, f"read pins {loads} times (20 pins, 180 blobs removed)"
     ok("GC: pins are not reread when unchanged, and pinned blobs are still kept")
+
+
+def pull_listing(tmp):
+    """pull: the listing of files to fetch comes from the executor. A path that is not one of the task's results (outside the
+    data dir through .., absolute, another task's output, a file next to out that fetch.extra does not name) stops the fetch
+    before anything is written; a clean listing is fetched and placed. The hub entry of the test machine table is local, so
+    its data dir (under a temp HOME) plays the executor."""
+    import mtab as M
+    home = os.path.join(tmp, "pull_home")
+    src = os.path.join(home, M.machine(M.hub())["root"].replace("~/", ""), "data")
+    D = os.path.join(tmp, "pull_store")
+    os.makedirs(D)
+    sp = S.resolve("command", dict(key="probe/pull1", cmd="true", env="base", out="proj/a/run1", done=["DONE"], relay="path",
+                                   fetch=dict(exclude=[], extra=["*.json"], also=[])))
+
+    def put(rel):
+        os.makedirs(os.path.dirname(os.path.join(src, rel)), exist_ok=True)
+        with open(os.path.join(src, rel), "w") as f:
+            f.write(rel)
+        return rel
+
+    def pull(items):
+        r = subprocess.run([sys.executable, SITE_OPS, "pull"], capture_output=True, text=True, cwd=REPO, timeout=120,
+                           env=dict(os.environ, TASKQ_ROOT=os.path.join(tmp, "pull_root"), HOME=home),
+                           input=json.dumps(dict(data=D, frm=M.hub(), spec=sp, items=items, links=[])))
+        return r.returncode, S.json_in(r.stdout), r.stderr
+
+    good = [put("proj/a/run1/r.csv"), put("proj/a/run1/sub/DONE.txt"), put("proj/a/run1/DONE"), put("proj/a/plans.json")]
+    for rel in ("proj/a/run2/r.csv", "proj/a/notes.txt", "other.txt"):
+        put(rel)
+    with open(os.path.join(home, "outside.txt"), "w") as f:
+        f.write("outside the data dir")
+    listing = [[r, os.path.getsize(os.path.join(src, r)), os.stat(os.path.join(src, r)).st_mtime_ns] for r in good]
+    up = os.path.relpath(os.path.join(home, "outside.txt"), src)
+    for bad in (up, "proj/a/run1/../../../" + up, os.path.join(home, "outside.txt"), "proj/a/run2/r.csv", "proj/a/notes.txt", "other.txt"):
+        rc, res, err = pull(listing + [[bad, 1, 0]])
+        assert rc and res is None and ("bad path" in err or "are not its results" in err), (bad, rc, res, err[-300:])
+        assert not os.listdir(D), (bad, os.listdir(D))
+    ok("pull: a listing naming a path that is not the task's result (through .., absolute, another task's, not in fetch.extra) "
+       "is refused before anything is written")
+    rc, res, err = pull(listing)
+    assert rc == 0 and res == dict(files=4, links=0), (rc, res, err[-300:])
+    got = sorted(os.path.relpath(os.path.join(dp, f), D) for dp, _, fs in os.walk(D) for f in fs)
+    assert got == sorted(good), got
+    ok("pull: a clean listing is fetched and placed (out, the fetch.extra file next to it)")
 
 
 if __name__ == "__main__":
