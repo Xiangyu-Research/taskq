@@ -48,6 +48,20 @@ for n in names:
     ok(f"{n}.yml loads and has a check", good)
     ok(f"{n}.check.py compiles", bool(compile(open(E.check_file(n), encoding="utf-8").read(), n, "exec")))
 ok("alt builds on base", E.load("alt")["base"] == "base")
+SAVE_YAML = sys.modules.get("yaml")
+sys.modules["yaml"] = None  # import yaml now raises ImportError, as without PyYAML
+try:
+    E.load("alt")
+    msg = ""
+except E.EnvError as e:
+    msg = str(e)
+finally:
+    if SAVE_YAML is None:
+        sys.modules.pop("yaml", None)
+    else:
+        sys.modules["yaml"] = SAVE_YAML
+ok("without PyYAML: reading a spec is an EnvError saying to install PyYAML on the hub", "install PyYAML on the hub" in msg
+   and "alt.yml" in msg, msg)
 ok("base has a cu128 variant", "cu128" in E.load("base")["torch"])
 ok("no lock yet: the hash = sha256 of the spec (a lock is added when present, see test_envlock.py)",
    not os.path.exists(M.lock_path("base"))
@@ -401,6 +415,18 @@ ok("offline build on this machine: .ok holds the hash, state ok, no temp dir lef
 r = subprocess.run(["bash", "-c", M.activate("toff", "tiny") + "\npython -c 'import tinypkg; print(tinypkg.__file__)'"],
                    capture_output=True, text=True)
 ok("offline build on this machine: the wheelhouse package imports after activation", r.returncode == 0 and f"{LD}/root/envs/tiny-" in r.stdout, r.stdout + r.stderr)
+SAVE_CHECK = open(f"{LD}/specs/tiny.check.py").read()
+open(f"{LD}/specs/tiny.check.py", "w").write("raise SystemExit(3)\n")
+open(f"{LD}/specs/tiny.yml", "a").write("# check fails\n")
+write_lock(M.SPECS, "tiny", "default", pip=[wpk])
+rc, out = E.build("toff", "tiny")
+fl = open(f"{LD}/root/state/envs/tiny{proto.ENV_MARK['failed']}").read() if os.path.isfile(f"{LD}/root/state/envs/tiny.failed") else ""
+ok("failed check on this machine: .failed is one line in proto.ENV_FAILED_FMT (hash, time, rc), .building removed, state check failed, "
+   "the old env stays in use", rc == 3 and len(fl.split()) > 1 and fl.split()[1].isdigit()
+   and fl == proto.ENV_FAILED_FMT % (E.vhash("tiny", "default"), int(fl.split()[1]), 3) + "\n"
+   and not os.path.exists(f"{LD}/root/state/envs/tiny.building")
+   and E.states("toff")["tiny"] == proto.ENV_STATE["failed"] and os.path.isfile(f"{LD}/root/envs/tiny/.activate"), (rc, fl, out))
+open(f"{LD}/specs/tiny.check.py", "w").write(SAVE_CHECK)
 hb = "0" * 64  # content does not match the hash in the lock
 os.makedirs(f"{WH}/00", exist_ok=True)
 shutil.copy(whl, f"{WH}/00/{hb}")

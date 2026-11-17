@@ -25,8 +25,10 @@ bash install.sh      # in a clone of taskq; to curl install.sh without cloning f
 It clones to `${TASKQ_HOME:-~/.local/share/taskq}` and links `~/.local/bin/taskq` to its `bin/taskq`; `TASKQ_ORIGIN` changes the clone
 source. Repeating is fine: an existing install is updated (`taskq self update`, pulls `origin/main`).
 
-Needs: Python 3 (the core uses only the standard library), ssh; [pueue](https://github.com/Nukesor/pueue) on pueue machines, the hub
-and the store (`queue/install_pueue.sh` installs it); conda on executors (the machine table's `conda`).
+Needs: Python 3 (the core uses only the standard library; PyYAML is needed on the hub only to build envs from env specs
+`<config>/specs/*.yml`), ssh; [pueue](https://github.com/Nukesor/pueue) on pueue machines, the hub and the store
+(`queue/install_pueue.sh` installs it, checking each file's sha256: pinned for the default version, given on the command line for any
+other); conda on executors (the machine table's `conda`).
 `taskq site setup [machine]` creates each machine's pueue daemon, groups and the hub's crontab.
 
 ## Project (`.taskq.toml`)
@@ -252,7 +254,7 @@ Exit codes (`proto.EXIT`):
 |---|---|
 | `taskq` itself | 0 fine; 1 error; 2 usage error, no project found, not on the hub and no local queue; 5 data dir unreadable (not created, disk not mounted) |
 | `taskq show`, `set`, `stop`, `nice`, `add --exp` | 4 not in the queue (or experiment table) (several keys: 4 when any is missing) |
-| `taskq rm` | 0 removed; 3 not removed (claimed, assigned, another task waits for it); 4 none of them in the queue |
+| `taskq rm` | 0 removed; 3 not removed (assigned to an executor, claimed, its part log just changed, or its files could not be read); 4 none of them in the queue. Tasks waiting for it are not checked, and a step instance the experiment table still wants is queued again by the next advance (`HOLD` keeps it out) |
 | `taskq status` | 1 queue unreadable |
 | `taskq worker next` | 0 claimed; 10 nothing to claim; 11 wait first (leave room for queued, recently stopped tasks); 12 paused (3 failures in 3 hours across the queue, or data dir unreadable) |
 | `taskq worker beat --strict` | 13 some claims are no longer ours |

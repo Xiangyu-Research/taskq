@@ -66,6 +66,7 @@ QUEUE = dict(
     held="tasks.held.jsonl",  # unclaimed tasks set aside while self migrate switches the bundle (nobody can claim them meanwhile)
 )
 CLAIM_INFO = "info"
+LOCK_OWNER = "owner"      # inside the queue lock dir (QUEUE["lock"]): one line host<TAB>pid<TAB>random token (taskq.py Lock)
 # fields of claims/<key>/info: claimed by a worker (executor queue) / assigned by the hub queue to an executor
 CLAIM_FIELDS = ("worker", "host", "since", "beat", "token", "log")  # log: job name in the part log (next --log-tag; same as worker when absent)
 ASSIGN_FIELDS = ("worker", "host", "since", "beat", "assigned")
@@ -114,6 +115,11 @@ JSON_MARK = "@@JSON "  # only the line starting with it is read (spec.json_out /
 STALE_BEAT = 20 * 60   # a claim whose heartbeat has not been renewed for this long is stale
 FRESH_LOG = 15 * 60    # a part log updated within this long counts as still running (not claimed)
 HALF_CLAIM = 5 * 60    # a claim with only a dir and no info is stale after this long
+# queue lock dir (taskq.py Lock): its holder touches it every LOCK_KEEP; one untouched this long is taken over, by what is known of
+# the holder: dead (no process here, or no owner file) / on another host (liveness unknown) / alive here (its pid may be reused)
+LOCK_KEEP = 30
+LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = 120, 600, 900
+LOCK_WAIT = 0.5        # retry interval while waiting for a lock
 BEAT = 5 * 60          # worker heartbeat interval
 FAIL_RETRY = 60 * 60   # after a task fails or stalls and is released, the same worker waits this long before claiming it again
                        # (after MAX_FAIL failures the queue marks it failed and nobody claims it)
@@ -287,6 +293,8 @@ ALERTS = dict(
     relayadd=("machine", "op", "key"),
     bundlegate=("machine", "key"), relaytask=("key",),
     health=("sub",),  # the health check itself (slow: the last round took longer than TICK_SLOW)
+    revive=("sub",),  # automatic pueued recovery (AUTO["revive"]) failed
+    db=("machine",),  # the hub database cannot be written
 )
 
 
@@ -339,7 +347,7 @@ ENV = dict(
     TASKQ_ENVS=("run", "envs a worker may claim (comma separated); when unset machines.py's envs"),
     TASKQ_PROG=("run", "command name bin/taskq passes to bash scripts (such as taskq boot), used in usage and errors; scripts unset it after reading"),
     TASKQ_TASK_DONE=("run", "set to its label when a task in the hub core group (IO_GROUP: transfer, fetch, archive, env build) finishes, to kick a health check (refill.then_check)"),
-    TASKQ_SLOTS=("tune", "max concurrent training tasks per worker; in Slurm by cores and memory (2 or 1), outside Slurm from machines.py slots"),
+    TASKQ_SLOTS=("tune", "max concurrent training tasks per worker: machines.py slots (a pueue worker's, or a Slurm jobs entry's; default 1)"),
     TASKQ_MACHINE=("run", "which machine in the machine table this is (set by pueue worker commands, worker.sbatch, relay_remote.prefix); when unset the unique hostname match"),
     TASKQ_HEAD_CMD=("test", "replaces the command that reads the code version"),
     TASKQ_GPU_PAD_SCRIPT=("test", "replaces gpu_pad.py"),
@@ -413,6 +421,19 @@ ENV_STATE = dict(
     missing="not built",
     not_spec="not spec-built",
 )
+
+# ---------------- env build marker files (sites/envs.py's build script and site_ops.py env_mark write them; envs.py and site_ops.py
+# env_states read them) ----------------
+# <env><suffix> in the marker dir (an executor's ROOT["envs_ok"]): ok holds the hash built; building and failed one line in the formats below
+ENV_MARK = dict(ok=".ok", failed=".failed", building=".building", log=".log")
+ENV_BUILDING_FMT = "%s %d"            # .building: hash, start time (epoch seconds)
+ENV_FAILED_FMT = "%s %d rc %d"        # .failed after a build failed: hash, time, exit code
+ENV_NOSPACE = "nospace"               # third word of .failed when the build was skipped for lack of space
+ENV_NOSPACE_FMT = "%s %d " + ENV_NOSPACE + " %d %d"  # hash, time, bytes needed, bytes free
+ENV_BUILD_MIN = 60                    # time limit of one build over there (minutes): Slurm job limit, pueue timeout
+ENV_BUILD_TIMEOUT = 4 * 3600          # how long the hub waits for one build at most (seconds)
+ENV_STALE = ENV_BUILD_TIMEOUT         # .building untouched this long counts as stopped
+ENV_RETRY = 6 * 3600                  # a build skipped for lack of space is retried after this long
 
 # ---------------- env locks (sites/envlock.py) ----------------
 WHEELHOUSE = "wheelhouse"      # under the state dir: each locked file wheelhouse/<first 2 of sha256>/<sha256>

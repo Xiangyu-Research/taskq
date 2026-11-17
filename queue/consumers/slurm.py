@@ -1,4 +1,5 @@
-"""Worker in a Slurm job: the job id is the worker name, slots come from the CPUs and memory allocated, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
+"""Worker in a Slurm job: the job id is the worker name, slots from TASKQ_SLOTS (the machine table jobs entry's slots, passed by
+sites/slurm.py submit_cmd; default 1), memory from the allocation, plus time limit, node-local staging dir, and exit after IDLE_MAX seconds idle."""
 import os
 import re
 import shutil
@@ -16,8 +17,7 @@ def setup(w):
     e = os.environ
     w.W = e["SLURM_JOB_ID"]
     w.mem_mb = int(e.get("SLURM_MEM_PER_NODE") or 0) or int(e.get("SLURM_MEM_PER_CPU") or 0) * w.ncpu
-    big = w.ncpu >= 24 and (w.mem_mb == 0 or w.mem_mb >= 56 * 1024)
-    w.slots = int(e.get("TASKQ_SLOTS") or (2 if big else 1))
+    w.slots = int(e.get("TASKQ_SLOTS") or 1)
     w.term_rc, w.term_why = 143, "likely the time limit"
     w.end_text = "not known yet, checking later"
     w.get_end = end_time

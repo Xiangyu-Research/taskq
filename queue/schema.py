@@ -38,7 +38,7 @@ MACHINE_FIELDS = {
     "root": ("str?", None, "root (blobs, data, code, queue, state, tmp); executors and the store need it"),
     "scheduler": ("sched?", None, "executor: pueue (resident worker) or slurm (submit worker jobs)"),
     "workers": ("workers", (), "pueue executor: this machine's workers, each see WORKER_FIELDS"),
-    "jobs": ("jobs", {}, "slurm executor: {gpu|cpu: sbatch options dict(partition, gres, cpus, mem)}; QOS, time limits and count in policy.py's SLURM"),
+    "jobs": ("jobs", {}, "slurm executor: {gpu|cpu: sbatch options dict(partition, gres, cpus, mem), plus slots: how many trainings one job runs at once (not an sbatch option; default 1)}; QOS, time limits and count in policy.py's SLURM"),
     "gpu_pad": ("triple?", None, "slurm: (floor, target, high) MiB for the worker job's own GPU pad"),
     "job_names": ("str?", None, "slurm: job name style (STYLES in sites/slurm.py); None = pair"),
     "envs": ("envs", {}, "{env name: ('conda', name) | ('venv', dir, base env) | 'spec' | ('spec', variant)}"),

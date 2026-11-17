@@ -128,7 +128,7 @@ def workers(name, kind=None):
     if m.get("scheduler") == "slurm":
         for k, o in (m["jobs"] or {}).items():
             out.append(dict(name=k, id=f"{name}-{k}", kind=k, group=None, gpu=None, cpus=o.get("cpus"),
-                            slots=None, hours=(), idle=None, wait=None))
+                            slots=o.get("slots") or 1, hours=(), idle=None, wait=None))
     elif m.get("scheduler") == "pueue":
         ws = m["workers"] or ()
         ncpu = sum(1 for w in ws if w.get("gpu") is None)

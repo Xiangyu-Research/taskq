@@ -117,11 +117,13 @@ def submit_cmd(name, qos, time_, kind):
     """The command that submits one kind (gpu / cpu) worker job (run over there). A leading ~ in the root is left for
     the other side to expand (assigned to R first)."""
     m = M.machine(name)
-    opts = " ".join(f"--{'cpus-per-task' if k == 'cpus' else k}={shlex.quote(str(v))}" for k, v in (m["jobs"][kind] or {}).items() if v is not None)
+    job = dict(m["jobs"][kind] or {})
+    slots = job.pop("slots", None) or 1  # the worker's, not an sbatch option
+    opts = " ".join(f"--{'cpus-per-task' if k == 'cpus' else k}={shlex.quote(str(v))}" for k, v in job.items() if v is not None)
     cur = f'"$R"/{proto.ROOT["current"]}'
     logs = f'"$R"/{proto.ROOT["data"]}/{proto.WORKER_LOGS}'
     return (f"R={R.q(m['root'].rstrip('/'))}; mkdir -p {logs} && sbatch --parsable -J {jobname(m.get('job_names'))} --qos={shlex.quote(qos)} "
-            f"--time={shlex.quote(time_)} --chdir=\"$R\" --output={logs}/%x_%j.out --export=ALL,TASKQ_ROOT=\"$R\",TASKQ_MACHINE={shlex.quote(name)} "
+            f"--time={shlex.quote(time_)} --chdir=\"$R\" --output={logs}/%x_%j.out --export=ALL,TASKQ_ROOT=\"$R\",TASKQ_MACHINE={shlex.quote(name)},TASKQ_SLOTS={int(slots)} "
             f"{opts} {cur}/{cfg.bundle_rel('queue', FILES[kind])} {cur}/{cfg.bundle_rel('queue', 'worker_start.sh')}")
 
 

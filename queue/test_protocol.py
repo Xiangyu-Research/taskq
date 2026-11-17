@@ -79,6 +79,10 @@ LITERALS = {
     "spec changed": r"""['"]spec changed['"]""",
     "not built": r"""['"]not built['"]""",
     "not spec-built": r"""['"]not spec-built['"]""",
+    # env build marker files and their lines (proto.ENV_MARK, ENV_*_FMT, ENV_NOSPACE); the queue lock's owner file (proto.LOCK_OWNER)
+    "env marker suffix": r"""\$\w+\.(ok|failed|building)\b|['"]\.(ok|failed|building)['"]""",
+    "nospace": r"""(?<![\[\w])['"]nospace['"]|\bnospace %""",
+    "lock owner": r"""join\([^)]*['"]owner['"]""",
     # time windows and status sets with one definition (proto.PAUSE_WINDOW / proto.hours, proto.PUEUE_LIVE)
     "3 hours": r"\b3 hours\b",
     "pueue live statuses": r"""['"]Running['"],\s*['"]Queued['"],\s*['"]Stashed['"]""",
@@ -115,6 +119,22 @@ class ProtoAlone(unittest.TestCase):
         self.assertTrue(proto.claim_alive({"beat": 0}, 0, now, log_age=60))
         self.assertFalse(proto.claim_alive({"beat": 0}, 0, now, log_age=proto.FRESH_LOG + 1))
 
+    def test_env_marker_lines(self):
+        """classify tells the two .failed forms apart by the third word; .building and .failed start with hash and time."""
+        h = "ab" * 32
+        self.assertEqual((proto.ENV_NOSPACE_FMT % (h, 7, 900, 100)).split()[:3], [h, "7", proto.ENV_NOSPACE])
+        self.assertNotEqual((proto.ENV_FAILED_FMT % (h, 7, 1)).split()[2], proto.ENV_NOSPACE)
+        self.assertEqual((proto.ENV_BUILDING_FMT % (h, 7)).split(), [h, "7"])
+        sfx = list(proto.ENV_MARK.values())
+        self.assertTrue(len(set(sfx)) == len(sfx) and all(s.startswith(".") for s in sfx), sfx)
+        self.assertLess(proto.ENV_BUILD_MIN * 60, proto.ENV_BUILD_TIMEOUT)
+
+    def test_lock_times(self):
+        """A holder that is working touches its lock long before anyone may take it over."""
+        self.assertLess(proto.LOCK_KEEP * 2, proto.LOCK_DEAD)
+        self.assertLessEqual(proto.LOCK_DEAD, proto.LOCK_REMOTE)
+        self.assertLessEqual(proto.LOCK_REMOTE, proto.LOCK_MAX)
+
     def test_part_log_lines(self):
         ts = "2026-11-01 10:00:00"
         self.assertEqual(re.fullmatch(proto.LOG_ENDED, f"{ts} " + proto.LOG_ENDED_FMT % (3, "rest")).groups(), (ts, "3", "rest"))
@@ -133,6 +153,16 @@ class NoCopies(unittest.TestCase):
         prefixes = {"TASKQ_GPU_PAD"}  # gpu_pad.py builds parameter names from the prefix
         missing = {v: f for v, f in seen.items() if v not in proto.ENV and v not in prefixes}
         self.assertEqual(missing, {}, "TASKQ_* must be registered in proto.ENV")
+
+    def test_alert_types_registered(self):
+        """Every problem id written as alert_id("<type>", ...) has its type in proto.ALERTS."""
+        seen = {}
+        for p in core_files():
+            for i, ln in code_lines(p):
+                for k in re.findall(r"""alert_id\(\s*['"]([A-Za-z_]+)['"]""", ln):
+                    seen.setdefault(k, f"{os.path.relpath(p, CORE)}:{i}")
+        self.assertIn("revive", seen)  # the scan finds them
+        self.assertEqual({k: f for k, f in seen.items() if k not in proto.ALERTS}, {}, "alert types must be in proto.ALERTS")
 
     def test_no_handwritten_literals(self):
         bad = []

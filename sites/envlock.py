@@ -5,6 +5,7 @@ Nothing is installed into a real env.
 
     taskq env lock <name> [--variant V]   lock one variant of one spec (default: default)
     taskq env lock --all                  every spec x the variants the machine table uses (plus default)
+    taskq env lock ... --build-sdist      also build pure-Python wheels from source packages (runs their setup code here)
 """
 import argparse
 import datetime
@@ -110,9 +111,12 @@ def http_get(url, dest):
 
 
 class Locker:
-    """run(cmd, env=None) → (exit code, stdout, stderr); get(url, dest file) downloads. Tests replace both."""
+    """run(cmd, env=None) → (exit code, stdout, stderr); get(url, dest file) downloads. Tests replace both. build_sdist: a req
+    with only a source package may be built here (that runs the package's setup code); off, it is an error unless a wheel
+    built earlier (wheelhouse/built) satisfies it."""
 
-    def __init__(self, conda=None, run=None, get=None, home=None, log=None):
+    def __init__(self, conda=None, run=None, get=None, home=None, log=None, build_sdist=False):
+        self.build_sdist = build_sdist
         self.run = run or run_cmd
         self.get = get or http_get
         self.home = home or cfg.state()
@@ -254,7 +258,12 @@ class Locker:
 
     def build_pure(self, py, rv, req, index, fl, floor, tmp):
         """A req with only a source package: build a wheel and put pure Python (none-any) ones into the wheelhouse and
-        find-links; anything that needs compiling is an error."""
+        find-links; anything that needs compiling is an error. Even reading a source package's metadata runs its setup code,
+        so without build_sdist nothing of it is fetched or run."""
+        if not self.build_sdist:
+            raise LockError(f"{req}: no wheel usable with glibc <= {floor} (and none built earlier); building one from its source package "
+                            f"runs that package's setup code on this machine, so it is off by default: rerun with --build-sdist to "
+                            f"allow it, or put a prebuilt wheel's URL in the spec")
         self.log(f"  {req}: no usable wheel, building from the source package")
         rpt = os.path.join(tmp, "sdist.json")
         rc, out, err = self.run(self.pip_base(py, rv) + ["install", "--dry-run", "--quiet", "--ignore-installed", "--no-deps",
@@ -537,11 +546,13 @@ def main(argv):
     p.add_argument("--variant", default="default", help="variant (default: default); a venv's variant is its base env's")
     p.add_argument("--all", action="store_true", help="every spec x the variants the machine table uses (plus default)")
     p.add_argument("--conda", help="which conda to use (default CONDA_EXE, PATH, or the hub entry's conda)")
+    p.add_argument("--build-sdist", action="store_true",
+                   help="a package with only a source package: build its pure-Python wheel here (runs the package's setup code)")
     a = ap.parse_args(argv)
     if bool(a.name) == a.all:
         ap.error("give a name, or --all")
     try:
-        lk = Locker(conda=a.conda)
+        lk = Locker(conda=a.conda, build_sdist=a.build_sdist)
         todo = targets() if a.all else [(a.name, a.variant)]
     except (LockError, EV.EnvError) as e:
         print(f"taskq env lock: {e}", file=sys.stderr)

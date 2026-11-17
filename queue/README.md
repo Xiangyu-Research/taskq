@@ -52,6 +52,8 @@ results), `backup` (archive). An entry with `root` and `scheduler` is an executo
   in order: with a GPU it is `gpu<number>`, without it `cpu` (`cpu<number>` when several); the id is `<machine>-<name>` and the pueue group
   has the same name.
 - `scheduler="slurm"`: write `jobs=dict(gpu=..., cpu=...)` (sbatch options); how many, QOS and time limits are in `policy.py`'s `SLURM`.
+  An entry's `slots` (default 1) is how many trainings one job runs at once (passed to the job as `TASKQ_SLOTS`, not to sbatch); each
+  task then gets its share of the job's cores and memory.
 
 Pueue executors, the hub and the store all have the core's own pueue group `taskq` (`proto.IO_GROUP`: transfer, fetch, archive, env build,
 unbounded concurrency). Manual groups are written in `manual_groups`; the core never queues into them (`taskq pueue-add` does). A `~` in
@@ -83,7 +85,7 @@ side to expand.
 | `root` | `str?` | `None` | root (blobs, data, code, queue, state, tmp); executors and the store need it |
 | `scheduler` | `sched?` | `None` | executor: pueue (resident worker) or slurm (submit worker jobs) |
 | `workers` | `workers` | `()` | pueue executor: this machine's workers, each see WORKER_FIELDS |
-| `jobs` | `jobs` | `{}` | slurm executor: {gpu\|cpu: sbatch options dict(partition, gres, cpus, mem)}; QOS, time limits and count in policy.py's SLURM |
+| `jobs` | `jobs` | `{}` | slurm executor: {gpu\|cpu: sbatch options dict(partition, gres, cpus, mem), plus slots: how many trainings one job runs at once (not an sbatch option; default 1)}; QOS, time limits and count in policy.py's SLURM |
 | `gpu_pad` | `triple?` | `None` | slurm: (floor, target, high) MiB for the worker job's own GPU pad |
 | `job_names` | `str?` | `None` | slurm: job name style (STYLES in sites/slurm.py); None = pair |
 | `envs` | `envs` | `{}` | {env name: ('conda', name) \| ('venv', dir, base env) \| 'spec' \| ('spec', variant)} |
@@ -331,7 +333,7 @@ of what has stopped, runs `on_exit` and exits 1.
 
 | plugin | what it does |
 |---|---|
-| `slurm` | in a Slurm job: job id as the worker name, concurrency from allocated CPUs and memory, job time limit, node-local staging dir, exit after an idle period |
+| `slurm` | in a Slurm job: job id as the worker name, concurrency from the jobs entry's `slots` (`TASKQ_SLOTS`, default 1), job time limit, node-local staging dir, exit after an idle period |
 | `resident` | resident worker in a pueue group: worker id as the name, cores and concurrency from the machine table's worker, exit after an idle period (exit 0, the hub starts it again next round) |
 | `gpu_pad` | with a GPU pad: grow it to floor before training, subtract its memory when computing free GPU memory |
 | `window` | the machine table worker's `hours`: do not claim outside the window; at the end of the window stop and release current tasks and exit |
@@ -494,6 +496,9 @@ built from an old description or on an old base.
 `taskq env lock <name> [--variant V]` (or `--all`) resolves a description into `<name>.<variant>.lock.json`: exact versions, URLs and sha256
 of every conda and pip package, with files downloaded into the hub state dir's `wheelhouse/`. With a lock, executors build offline: the hub
 sends the locked files as blobs into that root, and the machine runs `conda create --offline` and `pip install --no-index --require-hashes`.
+A pip package with no usable wheel is an error unless `--build-sdist` is given: building a wheel from its source package runs the
+package's setup code on the hub. Only pure-Python (`none-any`) wheels built that way are kept (`wheelhouse/built/`), and later locks
+use them without the flag.
 
 ### Smoke
 

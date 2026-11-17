@@ -30,13 +30,13 @@ Q = proto.QUEUE  # names inside the queue dir
 TASKS = Q["tasks"]
 STALE_BEAT = int(os.environ.get("TASKQ_STALE_BEAT", proto.STALE_BEAT))  # a heartbeat older than this is stale (env var for tests only)
 FRESH_LOG = int(os.environ.get("TASKQ_FRESH_LOG", proto.FRESH_LOG))    # a part log updated this recently means someone is training
-LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", 0.5))  # retry interval while waiting for the lock (seconds; env var for tests only)
-LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = 120, 600, 900  # take a lock dir untouched this long: holder dead / on another host (liveness unknown) / alive here (pid may be reused)
-LOCK_KEEP = float(os.environ.get("TASKQ_LOCK_KEEP", 30))  # a holder touches its lock dir this often: only a dead or frozen one goes untouched (env var for tests only)
+LOCK_WAIT = float(os.environ.get("TASKQ_LOCK_WAIT", proto.LOCK_WAIT))  # retry interval while waiting for the lock (seconds; env var for tests only)
+LOCK_DEAD, LOCK_REMOTE, LOCK_MAX = proto.LOCK_DEAD, proto.LOCK_REMOTE, proto.LOCK_MAX  # take a lock dir untouched this long: holder dead / on another host / alive here
+LOCK_KEEP = float(os.environ.get("TASKQ_LOCK_KEEP", proto.LOCK_KEEP))  # a holder touches its lock dir this often: only a dead or frozen one goes untouched (env var for tests only)
 HALF_CLAIM = proto.HALF_CLAIM  # a claim that only made the dir, no info, is stale after this long
 X = proto.EXIT
 NOTHING, WAIT, PAUSED = X["nothing"], X["wait"], X["paused"]   # claim exit codes
-REFUSED, GONE = X["refused"], X["gone"]  # remove exit codes: refused (claimed, assigned, another task needs it) / gone
+REFUSED, GONE = X["refused"], X["gone"]  # remove exit codes: refused (assigned, claimed, busy, files unreadable) / gone
 LOST = X["lost"]  # beat --strict: some claims are no longer ours
 safe = proto.safe
 
@@ -137,7 +137,7 @@ class Lock:
                 continue
             me = f"{socket.gethostname()}\t{os.getpid()}\t{os.urandom(6).hex()}\n"
             try:
-                with open(os.path.join(self.d, "owner"), "w") as f:
+                with open(os.path.join(self.d, proto.LOCK_OWNER), "w") as f:
                     f.write(me)
                 self.me = me
                 threading.Thread(target=self._keep, daemon=True).start()
@@ -164,7 +164,7 @@ class Lock:
         """Is the lock still ours (the owner file holds our token; without one, the dir is the one we made)?"""
         try:
             if self.me is not None:
-                return open(os.path.join(self.d, "owner")).read() == self.me
+                return open(os.path.join(self.d, proto.LOCK_OWNER)).read() == self.me
             st = os.stat(self.d)
             return (st.st_ino, st.st_mtime_ns) == self.dir_id
         except OSError:
@@ -180,7 +180,7 @@ class Lock:
         """Identify a lock: inode (ext4 reuses it quickly), mtime (ns), owner contents."""
         st = os.stat(d)
         try:
-            owner = open(os.path.join(d, "owner")).read()
+            owner = open(os.path.join(d, proto.LOCK_OWNER)).read()
         except OSError:
             owner = None
         return (st.st_ino, st.st_mtime_ns, owner)
@@ -188,7 +188,7 @@ class Lock:
     def _holder(self):
         """Holder -> alive (this host, process still there) / remote (another host) / dead (no process, no owner)."""
         try:
-            host, pid, _ = open(os.path.join(self.d, "owner")).read().split("\t")
+            host, pid, _ = open(os.path.join(self.d, proto.LOCK_OWNER)).read().split("\t")
             if host != socket.gethostname():
                 return "remote"
             os.kill(int(pid), 0)
@@ -201,7 +201,7 @@ class Lock:
     def __exit__(self, *a):
         Lock.held = None
         self.done.set()
-        p = os.path.join(self.d, "owner")
+        p = os.path.join(self.d, proto.LOCK_OWNER)
         try:
             if self.me is not None:
                 if open(p).read() != self.me:  # lock taken over by someone else
