@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -392,12 +393,41 @@ def from_step(v):
     return problem(v)
 
 
+def round_lock():
+    """Take the round lock (flock on <health dir>/tick.lock, held until this process exits) -> the open file; None when another
+    round is still running: say so, and push an alert once that round has run longer than proto.TICK_STUCK (daytime only)."""
+    import fcntl
+    os.makedirs(HDIR, exist_ok=True)
+    f = open(os.path.join(HDIR, proto.TICK + ".lock"), "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.seek(0)
+        pid, t0 = (f.read().split() + ["?", ""])[:2]
+        f.close()
+        age = int(time.time()) - int(t0) if t0.isdigit() else 0
+        print(f"another health check round (pid {pid}) has been running for {age // 60} min; skipping this round", file=sys.stderr)
+        if age >= proto.TICK_STUCK and proto.NIGHT[1] <= datetime.now().hour < proto.NIGHT[0]:
+            push(f"Health check stuck: the round started {age / 3600:.1f} h ago (pid {pid} on the hub) is still running, so no "
+                 "checks, sending or fetching happen until it ends", priority="high", tags="warning")
+        return None
+    f.seek(0)
+    f.truncate()
+    f.write(f"{os.getpid()} {int(time.time())}\n")
+    f.flush()
+    return f
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="One health check round: check machines, push problems, queue downstream steps, send tasks")
     ap.add_argument("-n", "--dry-run", action="store_true", help="what this round would do (taskq plan): problems, downstream steps, "
                     "tasks to send; push nothing, change no file")
     ap.add_argument("--test", action="store_true", help="push a test message")
     a = ap.parse_args(argv)
+    t0 = time.time()
+    lock = None if a.dry_run or a.test else round_lock()  # held until main returns: rounds never overlap (manual tick, slow round)
+    if not (a.dry_run or a.test) and lock is None:
+        return 0
     if LOAD_ERROR is not None:
         load_failed(LOAD_ERROR, dry=a.dry_run)
         return 1
@@ -458,6 +488,10 @@ def main(argv=None):
         stuck["feed:error"] = f"queue/feed.py failed: {type(e).__name__}: {e}"[:300]
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
+    took = NT.D.get_meta(db, "tick_took") if db is not None else None
+    if isinstance(took, (int, float)) and took > proto.TICK_SLOW:
+        P[alert_id("health", "slow")] = problem(f"the last health check round took {took / 60:.0f} min (cron starts one every 30 min): "
+                                                "rounds started while one runs are skipped, so checks and sending happen less often")
     if not a.dry_run and (db is None or not NT.D.writable(db)):
         P[alert_id("db", M.hub())] = problem(f"cannot write the hub database {NT.D.path()} (on a network disk, or created by a newer "
                                              "taskq): every check will push these problems again", level="urgent")
@@ -468,6 +502,11 @@ def main(argv=None):
             progress_snapshot(s, db)
         except Exception as e:  # noqa: BLE001
             print(f"progress snapshot not recorded: {type(e).__name__}: {e}", file=sys.stderr)
+        try:
+            with NT.D.tx(db):
+                NT.D.set_meta(db, "tick_took", round(time.time() - t0))
+        except Exception as e:  # noqa: BLE001  locked by a reader right now: next round
+            print(f"round time not recorded: {e}", file=sys.stderr)
     if a.dry_run:
         probs = []
         for pid, p in sorted(P.items()):

@@ -131,6 +131,8 @@ NOSLOT_ALERT = 3 * 3600      # a claim this old that still cannot be staged (no 
 VIEW_KEEP = 6 * 3600         # input views built this recently are kept (a task just staged, not added yet, or just released)
 SITE_STATUS_TIMEOUT = 90     # reading an executor's status: skip it this round when its storage hangs this long
 NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are pushed
+TICK_SLOW = 25 * 60          # a health check round longer than this is reported (cron starts one every 30 minutes)
+TICK_STUCK = 2 * 3600        # a round still running after this long: the rounds it makes skip push an alert
 PUEUE_LIVE = ("Running", "Queued", "Stashed", "Paused", "Locked")  # pueue task statuses that are not finished
 
 
@@ -280,6 +282,7 @@ ALERTS = dict(
     relaystage=("key",), relayfetch=("key",), relay=("machine",), feed=("sub", "machine"),
     relayadd=("machine", "op", "key"),
     bundlegate=("machine", "key"),
+    health=("sub",),  # the health check itself (slow: the last round took longer than TICK_SLOW)
 )
 
 
@@ -474,7 +477,8 @@ STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: o
 # the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate).
 # Relay's bookkeeping, what it read from each executor and the task records are in the hub database (hubstate.py)
 RELAY_NAMES = ("bundles",)
-HEALTH_NAMES = (PUEUE_SEEN, "health.log")
+TICK = "tick"  # in the health check's state dir: tick.lock is held (flock) by the running round, one round at a time; text "pid start-time"
+HEALTH_NAMES = (PUEUE_SEEN, "health.log", TICK)
 # names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
                WHEELHOUSE, "envlock", DB)

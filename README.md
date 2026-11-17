@@ -6,7 +6,9 @@ sent from the store to executors, results are fetched back to the store and arch
 disk is only a staging area. Downstream steps (inference, evaluation, summaries, ...) are queued automatically from the experiment table.
 
 On the hub, cron runs a health check every 30 minutes (`taskq tick`): check every machine, push problems, queue downstream steps,
-send tasks to executors, top up workers, and fetch results. The scheduler knows no specific model or training code: how a kind of task runs,
+send tasks to executors, top up workers, and fetch results. One round runs at a time: a round started while another is still
+running (a manual `taskq tick`, a slow round) skips itself, a round slower than 25 minutes is reported, and one still running after
+2 hours makes the skipped rounds push an alert. The scheduler knows no specific model or training code: how a kind of task runs,
 which env and data it needs, and how it counts as done all live in the project's recipes (plugins) and experiment table; how many
 tasks share a GPU and when to yield memory follows live state (GPU utilisation, memory, failure records).
 

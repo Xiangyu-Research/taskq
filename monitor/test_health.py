@@ -408,6 +408,56 @@ got.clear()
 H.main()
 ok("feed.py import failed: feed:error reported, the health check still finishes", "feed:error" in got and "advance:error" in got)
 
+# ---------------- one round at a time (round lock), slow and stuck rounds ----------------
+import fcntl  # noqa: E402
+import time  # noqa: E402
+gathered, pushed = [], []
+H.gather = lambda: gathered.append(1) or snap()
+_real_push, H.push = H.push, lambda msg, **kw: pushed.append(msg)
+_real_dt = H.datetime
+
+
+class _Noon(_real_dt):
+    @classmethod
+    def now(cls, tz=None):
+        return _real_dt(2026, 11, 3, 12, 0)
+
+
+H.datetime = _Noon
+_lk = open(os.path.join(H.HDIR, H.proto.TICK + ".lock"), "a+")
+fcntl.flock(_lk, fcntl.LOCK_EX)
+_lk.seek(0)
+_lk.truncate()
+_lk.write(f"4242 {int(time.time()) - 600}\n")
+_lk.flush()
+got.clear()
+rc = H.main([])
+ok("another round holds the lock: this round skips (exit 0, nothing gathered, nothing pushed while it is young)",
+   rc == 0 and not gathered and not got and not pushed)
+_lk.seek(0)
+_lk.truncate()
+_lk.write(f"4242 {int(time.time()) - H.proto.TICK_STUCK - 60}\n")
+_lk.flush()
+rc = H.main([])
+ok("the round holding the lock has run longer than TICK_STUCK: the skipped round pushes that the health check is stuck",
+   rc == 0 and not gathered and len(pushed) == 1 and "stuck" in pushed[0] and "4242" in pushed[0])
+H.main(["-n"])
+ok("taskq plan (dry run) does not need the round lock", gathered == [1])
+fcntl.flock(_lk, fcntl.LOCK_UN)
+_lk.close()
+H.main([])
+_db = NT.open_db(write=False)
+ok("lock free: the round runs, takes the lock (its pid in the lock file) and records how long it took",
+   len(gathered) == 2 and isinstance(NT.D.get_meta(_db, "tick_took"), int)
+   and open(os.path.join(H.HDIR, H.proto.TICK + ".lock")).read().split()[0] == str(os.getpid()))
+_wdb = NT.open_db()
+with NT.D.tx(_wdb):
+    NT.D.set_meta(_wdb, "tick_took", H.proto.TICK_SLOW + 300)
+got.clear()
+H.main([])
+ok("the last round took longer than TICK_SLOW: reported as a problem", "health:slow" in got and "took" in got["health:slow"]["msg"])
+H.push, H.datetime = _real_push, _real_dt
+
 # ---------------- plain wording (plain.py): labels, task key -> experiment name + task short name ----------------
 import plain as PL  # noqa: E402
 import experiments as EX  # noqa: E402
