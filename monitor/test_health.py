@@ -703,5 +703,45 @@ finally:
     H.policy.PAUSE = {}
     del H.M.MACHINES["loc"]
 
+# ---------------- push channel: server, access token, detail ----------------
+import push as PU  # noqa: E402
+_reqs, _po = [], {}
+_real_uo, _real_out = PU.urllib.request.urlopen, PU._out
+
+
+class _R2:
+    def read(self):
+        return b""
+
+
+PU.urllib.request.urlopen = lambda req, timeout=0: _reqs.append(req) or _R2()
+PU._out = lambda k: _po.get(k, _real_out(k))
+_tdir = fixture.tmpdir()
+open(os.path.join(_tdir, "topic"), "w").write("tp\n")
+_po.update(topic=os.path.join(_tdir, "topic"), push_token=os.path.join(_tdir, "token"))
+try:
+    PU.push("a/b failed\nc/d stuck", title="t")
+    r0 = _reqs[-1]
+    open(os.path.join(_tdir, "token"), "w").write("tk_secret\n")
+    _po.update(push_url="https://push.example.org/", push_detail=False)
+    PU.push("a/b failed\nc/d stuck", title="t")
+    r1 = _reqs[-1]
+    _po.update(push_url="http://push.example.org")
+    try:
+        PU.push("x")
+        plain_ok = False
+    except OSError:
+        plain_ok = True
+    _po.update(push_url="http://127.0.0.1:8090")
+    PU.push("x")
+    ok("push: default server ntfy.sh, no token header without the token file, the text as given",
+       r0.full_url.startswith("https://ntfy.sh/tp?") and "Authorization" not in r0.headers and r0.data == b"a/b failed\nc/d stuck")
+    ok("push: own server and access token (Authorization: Bearer); push_detail False sends only how many items, no names",
+       r1.full_url.startswith("https://push.example.org/tp?") and r1.headers.get("Authorization") == "Bearer tk_secret"
+       and b"a/b" not in r1.data and r1.data.startswith(b"2 items"))
+    ok("push: a plain http server is refused (except on this machine)", plain_ok and _reqs[-1].full_url.startswith("http://127.0.0.1:8090/tp?"))
+finally:
+    PU.urllib.request.urlopen, PU._out = _real_uo, _real_out
+
 print("All passed" if fails == 0 else f"{fails} failed")
 sys.exit(1 if fails else 0)
