@@ -173,10 +173,18 @@ taskq self test relay spec   # only names or paths containing these (relay -> te
 taskq self test --gpu        # also run tests that need a real GPU (files starting with "# needs-gpu")
 ```
 
-Each file runs at the core root with its own temp HOME, an environment holding only `PATH`, `LANG`, `HOME` and `TMPDIR`, and the fixed
-config in `queue/testdata/`; it does not read the user's project. One result line per file (result, seconds, count of "PASS:" lines,
-skip reason) is written to `~/.cache/taskq-test/report.tsv`, and each file's output to `log_<file>.txt` in the same dir. Tests missing
-numpy, pueue etc. exit 77 and count as skipped. Exit codes: 0 all pass (or skip), 1 some failed, 2 no matching tests.
+Each file runs at the core root with its own temp HOME, an environment holding only `PATH`, `LANG`, `HOME`, `TMPDIR` and `TQTEST_*`
+settings for optional tests, and the fixed config in `queue/testdata/`; it does not read the user's project. Tests use a fake ssh;
+`test_real_ssh.py` sends the core's ssh commands through a real sshd instead when `TQTEST_SSH_HOST` names one that logs into this same
+machine as this user with key auth (an alias in `~/.ssh/config` works), and skips otherwise. One result line per file (result, seconds,
+count of "PASS:" lines, skip reason) is written to `~/.cache/taskq-test/report.tsv`, and each file's output to `log_<file>.txt` in the
+same dir. Tests missing numpy, pueue, rsync etc. exit 77 and count as skipped; a file that leaves out only some checks prints a `SKIP:`
+line for each, and the reasons go in its note. Exit codes: 0 all pass (or skip), 1 some failed, 2 no matching tests.
+
+CI (`.github/workflows/test.yml`, job `test`) runs the lint, the whole suite and the example project check on every push to any branch
+and on every pull request, with the full git history (a shallow clone skips the checks that build old bundles from older commits); its
+job `ssh` starts a local sshd (key made on the fly) and runs `test_real_ssh.py` through it. `main` is a protected branch that requires
+the `test` check to pass: a change goes to a branch first, and reaches `main` (goes live) only once CI has passed on it.
 
 Which tests to run after changing which file (run the full suite once at the end of a change; shared files such as `queue/proto.py`
 and `bin/taskq` mean the full suite):
@@ -185,6 +193,7 @@ and `bin/taskq` mean the full suite):
 | changed | run |
 |---|---|
 | `bin/taskq` | `test_cli.py`, `test_cli_json.py`, `test_readme.py` |
+| `queue/run_tests.py` | `test_run_tests.py` |
 | `README.md`, `queue/README.md`, `queue/schema.py` | `test_readme.py`, `test_check.py` |
 | `queue/proto.py` | `test_protocol.py`, `test_core_clean.py`, then the full suite |
 | any core file (no specific project, machine or path) | `test_core_clean.py` |
@@ -220,6 +229,8 @@ and `bin/taskq` mean the full suite):
 | `monitor/overview.py` | `test_overview.py` |
 | `monitor/summary.py`, `queue/taskstate.py` | `test_summary.py`, `test_overview.py` |
 | `monitor/gpu_usage.py`, `monitor/gpu_log.sh` | `test_gpu_usage.py` |
+| frozen interfaces in `queue/taskq.py`, `queue/consume.py`, `queue/spec.py`, `queue/proto.py` (worker calls and exit codes, `status --json`, `collect --json`, bundle switch handoff, launcher path) | `test_compat.py` (pinned field names, and an old commit's worker and queue against the current ones; that part is skipped in a shallow clone) |
+| commands sent over ssh: `queue/common.py`, `queue/relay_remote.py`, `monitor/health.py`, `sync/tunnel.py` | `test_real_ssh.py` with `TQTEST_SSH_HOST` set (a real sshd; CI's `ssh` job starts one) |
 | anything crossing modules (send, transfer, finish, fetch in one round) | `test_e2e.py` (pueue, separate store and fake Slurm layouts) |
 <!-- /tests -->
 

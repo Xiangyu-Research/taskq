@@ -1,9 +1,16 @@
 # all core tests (taskq self test; needs-gpu ones are skipped) and the example project check (taskq --project example check)
+# on every push to any branch and on every pull request; main is a protected branch that requires this check (job "test")
 name: test
 
 on:
   push:
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+
+concurrency:  # a newer push to the same branch or pull request replaces a run still going (every commit on main is tested)
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -11,6 +18,10 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history: test_compat.py and test_bundle_gate.py build old bundles from older commits
+      - name: full history
+        run: test "$(git rev-parse --is-shallow-repository)" = false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -37,3 +48,61 @@ jobs:
         with:
           name: taskq-test-logs
           path: ${{ runner.temp }}/taskq-test
+
+  ssh:
+    # the core's ssh commands through a real sshd (the other tests use a fake ssh): a private sshd on 127.0.0.1:2222 run as this
+    # user, host and client keys made on the fly, reached as "taskq-test" from ~/.ssh/config (ssh reads it under any HOME)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: local sshd
+        run: |
+          if [ ! -x /usr/sbin/sshd ] || ! command -v rsync > /dev/null; then
+            sudo apt-get update -q && sudo apt-get install -y -q openssh-server openssh-client rsync
+          fi
+          D=$RUNNER_TEMP/sshd
+          mkdir -p "$D" ~/.ssh
+          chmod 700 "$D" ~/.ssh
+          ssh-keygen -q -t ed25519 -N "" -f "$D/host_key"
+          ssh-keygen -q -t ed25519 -N "" -f "$D/client_key"
+          cp "$D/client_key.pub" "$D/authorized_keys"
+          chmod 600 "$D/authorized_keys"
+          cat > "$D/sshd_config" << EOF
+          ListenAddress 127.0.0.1
+          Port 2222
+          HostKey $D/host_key
+          PidFile $D/sshd.pid
+          AuthorizedKeysFile $D/authorized_keys
+          AllowUsers $(id -un)
+          PubkeyAuthentication yes
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          UsePAM no
+          StrictModes no
+          EOF
+          /usr/sbin/sshd -f "$D/sshd_config" -E "$D/sshd.log"
+          echo "[127.0.0.1]:2222 $(cut -d' ' -f1,2 "$D/host_key.pub")" > "$D/known_hosts"
+          cat >> ~/.ssh/config << EOF
+          Host taskq-test
+            HostName 127.0.0.1
+            Port 2222
+            User $(id -un)
+            IdentityFile $D/client_key
+            IdentitiesOnly yes
+            UserKnownHostsFile $D/known_hosts
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 ~/.ssh/config
+          for i in 1 2 3 4 5; do ssh -o BatchMode=yes taskq-test true && break; sleep 1; done
+          ssh -o BatchMode=yes taskq-test 'echo "logged in as $(id -un) on $(hostname), home $HOME"'
+      - name: tests over real ssh
+        run: TQTEST_SSH_HOST=taskq-test python3 bin/taskq self test test_real_ssh -j 1 --out "$RUNNER_TEMP/taskq-test"
+      - name: test logs
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP"/taskq-test/log_*.txt 2> /dev/null
+          cat "$RUNNER_TEMP/sshd/sshd.log" 2> /dev/null

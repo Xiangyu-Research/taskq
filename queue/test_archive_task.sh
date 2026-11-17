@@ -3,6 +3,7 @@
 # machine table has no tunnel, nothing goes online.
 #   bash queue/test_archive_task.sh
 set -u
+command -v rsync > /dev/null || { echo "SKIP:no rsync on PATH (archive_task.sh copies and verifies with it)"; exit 77; }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/testdata/fixture.sh"
 T=$(mktemp -d)

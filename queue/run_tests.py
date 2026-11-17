@@ -5,14 +5,16 @@
     python3 queue/run_tests.py ... (same)
 
 Each file runs at the core root with its own temp HOME and a short TMPDIR (unix socket paths have a length limit); the
-environment holds only PATH, LANG, HOME and TMPDIR (no TASKQ_*; tests use their own fixed config in queue/testdata/).
+environment holds only PATH, LANG, HOME and TMPDIR (no TASKQ_*; tests use their own fixed config in queue/testdata/), plus
+TQTEST_* settings for optional tests (TQTEST_SSH_HOST: an sshd reaching this machine, for test_real_ssh.py).
 The temp HOME links this machine's conda (miniforge3 etc.), ~/envs/* and .gitconfig.
 Patterns: a file path or name, with * and ?, or part of a path (relay -> test_relay*.py).
 
-  Skip: files whose first lines say "# needs-gpu" (only with --gpu); a test exiting 77 (missing numpy, pueue etc.;
-        the reason is its "SKIP:" line).
+  Skip: files whose first lines say "# needs-gpu" (only with --gpu); a test exiting 77 (missing numpy, pueue, rsync etc.;
+        the reason is its "SKIP:" line). A test that runs but leaves out some checks (a missing tool, a shallow clone)
+        passes and prints a "SKIP:" line for each part; those reasons go in its note.
   Result: one line per file (test, result, seconds, count: lines starting "PASS:" plus unittest's Ran N tests, note:
-        skip reason, things written to HOME) on stdout and in <dir>/report.tsv; each file's output in
+        skip reason or skipped parts, things written to HOME) on stdout and in <dir>/report.tsv; each file's output in
         <dir>/log_<file>.txt. Default dir ~/.cache/taskq-test.
   Exit code: 0 all pass (or skip), 1 some failed, 2 usage error (no matching tests).
 """
@@ -31,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 CORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = ("queue", "sites", "sync", "monitor")
 SKIP = 77  # the test says it skips (automake style)
+TEST_VARS = "TQTEST_"  # environment variables passed through to every test: settings for optional tests
 GPU_MARK = re.compile(r"^#\s*needs-gpu")
 OUT = "~/.cache/taskq-test"
 PASS, SKIPPED = "PASS", "SKIP"
@@ -93,6 +96,11 @@ def env_path():
     return ":".join(seen)
 
 
+def child_env():
+    """The environment every test starts from (HOME and TMPDIR are added per file): PATH, LANG and the TQTEST_* settings."""
+    return {"PATH": env_path(), "LANG": "C.UTF-8", **{k: v for k, v in os.environ.items() if k.startswith(TEST_VARS)}}
+
+
 def skip_reason(log):
     lines = [ln.strip() for ln in open(log, encoding="utf-8", errors="replace").read().splitlines() if ln.strip()]
     hit = [ln for ln in lines if ln.startswith("SKIP:")]
@@ -141,9 +149,10 @@ def run_one(t, i, a, out, base, env):
     ran = re.search(r"^Ran (\d+) tests?\b", text, re.M)  # unittest tests
     n = sum(ln.lstrip().startswith("PASS:") for ln in text.splitlines()) + (int(ran.group(1)) if ran else 0)
     wrote = sorted(set(os.listdir(home)) - made)
-    note = ("wrote HOME: " + " ".join(wrote)) if wrote else ""
     if rc == SKIP:
         return t, SKIPPED, sec, n, skip_reason(log)
+    parts = [ln.strip()[5:].strip() for ln in text.splitlines() if ln.strip().startswith("SKIP:")]  # checks it left out (missing tool, shallow clone)
+    note = "; ".join((["skipped part: " + " | ".join(dict.fromkeys(parts))] if parts else []) + (["wrote HOME: " + " ".join(wrote)] if wrote else []))
     res = PASS if rc == 0 else f"timeout ({a.timeout}s)" if rc is None else f"failed ({rc})"
     return t, res, sec, n, note
 
@@ -195,7 +204,7 @@ def main(argv=None):
     rep = os.path.join(out, "report.tsv")
     last = last_seconds(rep)
     base = short_base()
-    env = {"PATH": env_path(), "LANG": "C.UTF-8"}
+    env = child_env()
     order = sorted(tests, key=lambda t: (-last.get(t, 0), t))
     rows, t0 = {}, time.time()
     print(f"run_tests: {len(tests)} files, {max(1, a.jobs)} at a time; logs in {out}", file=sys.stderr)
@@ -205,7 +214,7 @@ def main(argv=None):
             for fut in as_completed(futs):
                 r = fut.result()
                 rows[r[0]] = r
-                print(f"  {r[1]}  {r[0]} ({r[2]}s)" + (f": {r[4]}" if r[1] == SKIPPED else ""), file=sys.stderr, flush=True)
+                print(f"  {r[1]}  {r[0]} ({r[2]}s)" + (f": {r[4]}" if r[1] == SKIPPED or r[4].startswith("skipped part") else ""), file=sys.stderr, flush=True)
     finally:
         if not a.keep:
             shutil.rmtree(base, ignore_errors=True)
