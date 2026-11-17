@@ -176,8 +176,7 @@ mkdir -p "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300" "$T/bins"; printf '#!/bin/bash\n
   exec bash "$HERE/worker_start.sh") > "$T/wslurm.out" 2>&1
 rc=$?
 n=$(python3 -c "import os; print(len(os.sched_getaffinity(0)))")
-slots=$(( n >= 24 ? 2 : 1 ))
-check "Slurm: job id as the name, slots from CPUs and memory, unknown time limit" '[[ $rc == 0 ]] && grep -q "job 900300 @ .*at most $slots at once, CPU $n, memory 65536M.*time limit not known yet, checking later" $T/wslurm.out && grep -q "done t/s" $T/wslurm.out'
+check "Slurm: job id as the name, 1 slot without TASKQ_SLOTS (whatever the CPUs and memory), unknown time limit" '[[ $rc == 0 ]] && grep -q "job 900300 @ .*at most 1 at once, CPU $n, memory 65536M.*time limit not known yet, checking later" $T/wslurm.out && grep -q "done t/s" $T/wslurm.out'
 check "Slurm: local staging dir (TASKQ_STAGE_ROOT) and TASKQ_ADMITTED handed to run_task.sh, removed at the end" '[[ $(cat $T/stage) == "$TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 1" && ! -e $TMPDIR/${TQ_STAGE_DIR_PREFIX}900300 ]]'
 fi
 
