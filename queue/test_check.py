@@ -147,6 +147,13 @@ ok("transfer address over plain http to another host: reported", rc == 1
 rc, err = machines_err((TRANSFER, 'transfer=("http://127.0.0.1:18090", "127.0.0.1:18090"),'))
 ok("transfer address over plain http to this machine: fine", rc == 0 and "is not https" not in err)
 
+rc, err = machines_err(('jobs=dict(gpu=dict(partition="gpu-a", gres="gpu:a:1"), cpu=dict(partition="cpu-b"))',
+                        'jobs=dict(gpu=dict(partition="gpu-a", gres="gpu:a:1", slots=0), cpu=dict(partition="cpu-b"))'))
+rc2, err2 = machines_err(('jobs=dict(gpu=dict(partition="gpu-a", gres="gpu:a:1"), cpu=dict(partition="cpu-b"))',
+                          'jobs=dict(gpu=dict(partition="gpu-a", gres="gpu:a:1", slots=2), cpu=dict(partition="cpu-b"))'))
+ok("a Slurm jobs entry's slots must be a positive int (0 reported, 2 fine)", rc == 1 and "slots=trainings at once" in err
+   and rc2 == 0 and "slots" not in err2)
+
 # the store's data dir and an executor's data dir (<root>/data) on the same machine must not overlap either way: a worker's done
 # markers would make results count as already on the store, and the hub would delete the executor's copy (the only one)
 OVER = "data dir {} and the store's data dir {} overlap"

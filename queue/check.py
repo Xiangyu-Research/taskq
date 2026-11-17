@@ -126,8 +126,9 @@ TYPES = {  # type name -> (check, how to write it)
                                                      and isinstance(g[2], dict) for g in v.values()),
                "{group: (how many at once, GPU or None, {env vars})}"),
     "envs": (lambda v: isinstance(v, dict), "{env name: definition}"),
-    "jobs": (lambda v: isinstance(v, dict) and set(v) <= {"gpu", "cpu"} and all(isinstance(o, dict) for o in v.values()),
-             "{gpu|cpu: dict(partition, gres, cpus, mem)}"),
+    "jobs": (lambda v: isinstance(v, dict) and set(v) <= {"gpu", "cpu"} and all(isinstance(o, dict) for o in v.values())
+             and all(o.get("slots") is None or (type(o["slots"]) is int and o["slots"] >= 1) for o in v.values()),
+             "{gpu|cpu: dict(partition, gres, cpus, mem, slots=trainings at once, a positive int)}"),
     "workers": (lambda v: _tup(v) and all(isinstance(w, dict) for w in v), "list of workers (each a dict, see WORKER_FIELDS)"),
     "hours": (lambda v: _tup(v) and all(_tup(p, 4) and _hhmm(p[0]) and _hhmm(p[1]) and _day(p[2]) and _day(p[3]) for p in v),
               "[(\"HH:MM\", \"HH:MM\", first day \"YYYY-MM-DD\" or None, last day or None)]"),
