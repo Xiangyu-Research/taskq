@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envs as E  # noqa: E402
+import machine_name  # noqa: E402
 
 
 def main(argv):
@@ -29,6 +30,7 @@ def main(argv):
     p = sub.add_parser("envs", help="read only: each env's state (ok / spec changed / not built / check failed / no space / building)")
     p.add_argument("machine")
     a = ap.parse_args(argv)
+    a.machine = machine_name.key(a.machine)
     from proto import EXIT
     say = lambda msg: print(f"{ap.prog} {a.cmd}: {msg}", file=sys.stderr)  # noqa: E731
     try:

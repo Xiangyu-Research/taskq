@@ -226,7 +226,12 @@ mrun m4 CUDA_VISIBLE_DEVICES=0,1; rc=$?
 check "unreadable nvidia-smi output: not free, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m4/DONE ]] && mlog m4 | grep -q \"cannot tell: nvidia-smi gave '1, \\[N/A\\]' for GPU 1\""
 mrun m5 CUDA_VISIBLE_DEVICES=7; rc=$?
 check "a GPU nvidia-smi does not know: not free, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m5/DONE ]] && mlog m5 | grep -q 'nvidia-smi failed for GPU 7 (exit 6)'"
-NOSMI=$(tr ':' '\n' <<< "$PATH" | while read -r d; do [[ -n $d && ! -e $d/nvidia-smi ]] && echo "$d"; done | paste -sd:)
+# a PATH of links to everything on PATH but nvidia-smi: dropping its dir would also drop bash when they share one (/usr/bin)
+NOSMI=$T/nosmi-bin
+mkdir "$NOSMI"
+IFS=: read -ra _dirs <<< "$PATH"
+for _d in "${_dirs[@]}"; do [[ -d $_d ]] && ln -s "$_d"/* "$NOSMI"/ 2> /dev/null; done
+rm -f "$NOSMI/nvidia-smi"
 env PATH="$NOSMI" CUDA_VISIBLE_DEVICES=0 $R command key=toy/m6 'cmd=touch $TASKQ_DATA/toy/m6/DONE' env=base out=toy/m6 'done=["DONE"]' 'res={"wait_gpu": 0}' > /dev/null 2>&1; rc=$?
 check "no nvidia-smi at all: not free, not run" "(( rc == 1 )) && [[ ! -e $T/toy/m6/DONE ]] && mlog m6 | grep -q 'nvidia-smi failed for GPU 0 (exit 127)'"
 mgpu 1 1 0; mgpu GPU-abc 3 0

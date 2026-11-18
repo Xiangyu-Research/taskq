@@ -276,11 +276,11 @@ Merging tables with duplicate keys is an error.
 | want to know | look at |
 |---|---|
 | what is wrong now | `taskq problems` (the "Needs you" list of `taskq status`, each item with its id for `taskq notice ack`, then due notices; `--all` also lists info problems and ones not yet due for a push) |
-| what happened | `taskq events` (`--key`, `--site`, `--source`, `-f`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default `logs/` in the state dir: `relay.log` etc.; each machine's `on_boot.log` and GPU usage records are in its own state dir: its root's `state/` when it has one) |
+| what happened | `taskq events` (`--key`, `--site` with a machine name or label, `--source`, `-f`; relay lines carry their machine in `site`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default `logs/` in the state dir: `relay.log` etc.; each machine's `on_boot.log` and GPU usage records are in its own state dir: its root's `state/` when it has one) |
 | one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` (each change of hub queue state, progress, machine or word) |
 | what a state word means | `queue/taskstate.py` holds the one rule (words in `proto.TASK_WORDS`): `taskq status`, `taskq status --all --json` (`word`, `where`) and the progress snapshot each health round all use it |
 | what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
-| one executor | `taskq site status <machine>` (its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); what relay last read there is a `site` row in the hub database |
+| one executor | `taskq site status <machine>` (name or label; `bundle`, `resend`, `env`, `envs` and `taskq smoke` too, `site setup` takes the name only; its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); what relay last read there is a `site` row in the hub database |
 | the worker itself | `data/logs/workers/` under the executor root (worker, GPU pad, Slurm job output); `pueue log` on a pueue executor |
 | training output | part log `data/logs/tasks/<key>__<job>_part<part>.log` (on the executor; the fetch brings it to the same place in the store) |
 | whether config is right | `taskq check` (`--quick` does not contact the store) |

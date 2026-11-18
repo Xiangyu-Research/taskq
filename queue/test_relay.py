@@ -758,6 +758,19 @@ def test_fresh_site():
     ok("status unreadable with an old remote bundle (it cannot run the new status script) → try one switch and read again; already new but unreachable → no deploy, treat as unreachable")
 
 
+def test_log_site():
+    import events
+    seen, asked = [], []
+    with patched(events, lines=lambda src, msgs, **kw: seen.append((src, msgs, kw))), \
+            patched(relay, topup=lambda n, rs: ([], "", []), execute=lambda *a, **k: [], submit=lambda n, subs: (["submitted"], {})):
+        relay.finish({}, NAME, dict(rs={}, acts=[], stuck={}, notes=["a note"]), [], "", [], False)
+    assert seen == [("relay", ["a note", "submitted"], {"site": NAME})], seen
+    ok("a machine's relay lines go to the event log with its key in the site field")
+    with patched(relay, remote_status=lambda n: asked.append(n)), contextlib.redirect_stderr(io.StringIO()):
+        assert relay.main(["status", M.machine(NAME)["label"]]) == 1 and asked == [NAME], asked
+    ok("taskq site status takes the machine's label as well as its key")
+
+
 def test_paused():
     """Executors paused in policy.py PAUSE: do not read, assign or submit jobs this round; open their half-done tasks to other
     executors."""
@@ -1277,7 +1290,7 @@ def test_env_auto():
     s = {"pueue": {hub: {"tasks": []}}}
     lab = lambda env: f"{proto.ENV_BUILD}:{NAME}:{env}"  # noqa: E731
     with patched(relay.refill, add=lambda host, lbl, step, k, args, **kw: adds.append((host, lbl, step, k, args, kw)) or 77), \
-            patched(relay, log=lambda lines: logs.extend(lines)), mpatch(NAME, envs={"base": ("spec", "cu128"), "alt": "spec"}), \
+            patched(relay, log=lambda lines, name: logs.extend(lines)), mpatch(NAME, envs={"base": ("spec", "cu128"), "alt": "spec"}), \
             pdict(relay.P.AUTO, envs=True):
         st = {}
         msgs = relay.env_builds(s, NAME, {}, now, False, st)
@@ -1807,6 +1820,7 @@ if __name__ == "__main__":
     test_refcount()
     test_fresh_site()
     test_paused()
+    test_log_site()
     test_held_by()
     test_plan()
     test_plan_task_error()

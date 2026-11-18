@@ -179,12 +179,24 @@ def as_json(d):
     return out
 
 
+def site_key(name):
+    """--site takes a machine's key or its label; rows store the key. Without a machine table, the name as given."""
+    if not name:
+        return name
+    try:
+        cfg.mtab()
+        import machine_name
+        return machine_name.key(name)
+    except Exception:  # noqa: BLE001
+        return name
+
+
 def cmd_events(argv):
     ap = argparse.ArgumentParser(prog="taskq events", description="event log: what happened (scheduler, health check, notes)")
     ap.add_argument("--since", help="from when (default 24 hours ago; unlimited with -n or --key; 'all' is everything)")
     ap.add_argument("--until", help="to when (same form as --since)")
     ap.add_argument("--key", help="only this task (task name; events without a task name match text that mentions it)")
-    ap.add_argument("--site", help="only this machine")
+    ap.add_argument("--site", help="only this machine (name or label)")
     ap.add_argument("--source", help="relay, feed, advance, health, note, ...")
     ap.add_argument("--kind", help="event kind (kind in --json)")
     ap.add_argument("--level", help="info, normal, urgent")
@@ -205,7 +217,7 @@ def cmd_events(argv):
     if db is None:
         print(f"taskq events: no database at {D.path()} (the first tick on the hub creates it)", file=sys.stderr)
         return 1
-    q = dict(since=since, until=until, key=a.key, site=a.site, source=a.source, kind=a.kind, level=a.level, grep=a.grep)
+    q = dict(since=since, until=until, key=a.key, site=site_key(a.site), source=a.source, kind=a.kind, level=a.level, grep=a.grep)
     rows = query(db, limit=a.n, **q)
     show = (lambda d: print(json.dumps(as_json(d), ensure_ascii=False))) if a.json else (lambda d: print(fmt(d)))
     for d in rows:
@@ -232,7 +244,7 @@ def cmd_note(argv):
     ap = argparse.ArgumentParser(prog="taskq note", description="record a line in the event log (what happened, what was done)")
     ap.add_argument("text", nargs="*", help="text to record (read from stdin when omitted)")
     ap.add_argument("--key", help="which task (task name)")
-    ap.add_argument("--site", help="which machine")
+    ap.add_argument("--site", help="which machine (name or label)")
     ap.add_argument("--kind", default="note", help="for example incident, fix, change, decision, remark (default note)")
     ap.add_argument("--at", help="when it happened (default now)")
     ap.add_argument("--uid", help="unique id: a second row with the same uid is not recorded (for imports)")
@@ -256,7 +268,7 @@ def cmd_note(argv):
         print(f"taskq note: no database at {D.path()} (run on the hub; `taskq db migrate` creates it)", file=sys.stderr)
         return 1
     n = db.total_changes
-    _insert(db, [_row(a.source, text, kind=a.kind, key=a.key, site=a.site, t=t, uid=a.uid, data=data)])
+    _insert(db, [_row(a.source, text, kind=a.kind, key=a.key, site=site_key(a.site), t=t, uid=a.uid, data=data)])
     added = db.total_changes > n
     db.close()
     print("recorded" if added else f"already there (uid {a.uid})")

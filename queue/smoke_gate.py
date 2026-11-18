@@ -24,6 +24,7 @@ import proto  # noqa: E402
 from proto import alert, alert_id, is_smoke  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import mtab as M  # noqa: E402
+import machine_name  # noqa: E402
 import policy as P  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import spec as S  # noqa: E402
@@ -468,6 +469,8 @@ def main(argv):
     p = sub.add_parser("adopt", help="mark kinds assigned to executors and finished there as passed")
     p.add_argument("-n", "--dry-run", action="store_true")
     a = ap.parse_args(argv)
+    if getattr(a, "site", None):
+        a.site = machine_name.key(a.site)
     if getattr(a, "site", None) and a.site not in M.executors():
         print(f"no executor {a.site} (have: {', '.join(M.executors())})", file=sys.stderr)
         return proto.EXIT["gone"]

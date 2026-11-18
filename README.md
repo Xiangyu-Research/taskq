@@ -92,7 +92,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq notice clear` | remove (<name>...) |
 | `taskq notice list` | every posted notice, also those waiting for --at (due ones are under Notes in taskq problems; [--json]) |
 | `taskq notice ack` | acknowledge "things that happened" reported by the health check (such as a reboot; <problem id or prefix>...), not listed again |
-| `taskq events` | event log: what happened (--since --key --site --source --kind --grep, -f, --json) |
+| `taskq events` | event log: what happened (--since --key --site --source --kind --grep, -f, --json; --site takes a machine name or label) |
 | `taskq note` | record a line in the event log (what happened, what was done) |
 | `taskq progress` | task progress over time ([--key K] [--since T] [--json]) |
 | `taskq notify` | push a message to a phone (ntfy) and record it in the event log |
@@ -106,7 +106,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq site resend` | replace the specs of sent tasks there with the hub's current recipe and params |
 | `taskq site env` | build envs on that machine and run checks |
 | `taskq site envs` | dry run: each env's state on that machine |
-| `taskq site setup` | pueue daemon, groups, crontab (no name: this machine) |
+| `taskq site setup` | pueue daemon, groups, crontab (no name: this machine; takes the table name only) |
 | `taskq env lock` | resolve an env description into a lock <name>.<variant>.lock.json and download the files into the wheelhouse (not installed anywhere) |
 | `taskq smoke status` | each machine's records ([executor] [--json]) |
 | `taskq smoke retry` | queue failed kinds again (<executor> [kind]) |
@@ -229,6 +229,7 @@ and `bin/taskq` mean the full suite):
 | `queue/migrate.py` | `test_migrate.py` |
 | `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_bundle_paths.py`, `test_e2e.py` (the Slurm chain) |
 | `sites/envs.py`, `sites/envs_cli.py` | `test_envs.py` |
+| `sites/machine_name.py` | `test_adapters.py`, `test_relay.py`, `test_db.py` |
 | `sites/envlock.py` | `test_envlock.py` |
 | `sync/tunnel.py`, `sync/tunnel_push.sh` | `test_tunnel.py` |
 | `monitor/health.py`, `monitor/notice.py`, `monitor/plain.py`, `monitor/push.py` | `test_health.py`, `test_probe.py`, `test_db.py` |

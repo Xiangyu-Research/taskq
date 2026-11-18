@@ -17,7 +17,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
 2. Everything at once: `taskq tick -n`. It uses the same checks as the scheduled health round, prints each problem (`[level/kind] id + text`) and what this round would do, pushes nothing and changes no file. `taskq plan` shows only the "what it would do" part.
 3. Details, only as needed:
    - All tasks with state, machine, progress and expected finish: `taskq status --all`. The hub queue: `taskq status`.
-   - One executor's queue, disk, bundle and jobs: `taskq site status <machine>`. Machine names come from `taskq machines names`; event text may show a machine's label instead, and `site` commands do not accept labels.
+   - One executor's queue, disk, bundle and jobs: `taskq site status <machine>`. Use a name from `taskq machines names` or the label shown in event text.
    - pueue tasks, including those finished in the last 24 hours: `taskq pueue-status`.
    - What the scheduler did recently: `taskq events --since <time>`, filtered with `--source relay|shift|feed|advance|flow|health|note`.
    - Problems not yet due for a push: `taskq problems --all`.

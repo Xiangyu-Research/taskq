@@ -331,7 +331,7 @@ def test_off():
         assert T in [a["key"] for a in kinds_of(more, "take")] and not kinds_of(more, "smoke_add") and not stuck, more
         assert notes and "would queue smoke" in notes[0] and "V_off" in notes[0], notes
         before = os.path.getsize(os.environ["RELAY_LOG"]) if os.path.exists(os.environ["RELAY_LOG"]) else 0
-        relay.log(notes)
+        relay.log(notes, NAME)
         assert os.path.getsize(os.environ["RELAY_LOG"]) > before
     finally:
         relay.P.AUTO["smoke"] = True

@@ -87,6 +87,7 @@ def setup():
         with open(os.path.join(home, "groups.json"), "w") as f:
             json.dump({"default": {}, "gpu1": {}, "other": {}}, f)  # gpu1 exists already; other was made by hand
         env = dict(os.environ, HOME=home, PATH=fb + os.pathsep + os.environ["PATH"], TASKQ_MACHINE=me, TASKQ_REPO=CORE,
+                   TASKQ_STATE=os.path.join(home, "state"),  # the boot log goes here, not under the table's root (not writable on a test machine)
                    SETUP_CODE=M.code("site-pueue") + "/" + proto.BUNDLE_CORE, SETUP_CORE=CORE)
         r = subprocess.run(["bash", os.path.join(CORE, "queue", "setup.sh"), *args], env=env, capture_output=True, text=True, timeout=120)
         log = open(os.path.join(home, "pueue.log")).read().splitlines() if os.path.exists(os.path.join(home, "pueue.log")) else []
@@ -122,6 +123,20 @@ def setup():
     r, _, _ = run("hub", "NOPE")
     assert r.returncode == proto.EXIT["gone"] and "no NOPE in the machine table" in r.stderr, r
     ok("site setup: a machine with no pueue groups (Slurm) → exit 1 and pueue untouched; a name not in the table → exit EXIT['gone']")
+
+
+def machine_names():
+    """Commands that take a machine accept its key or its label (machine_name.key)."""
+    import machine_name as MN
+    assert [MN.key(x) for x in ("site-slurm2", "Slurm2", "slurm2")] == ["site-slurm2"] * 3
+    assert MN.key("NOPE") == "NOPE" and MN.key(None) is None
+    old = M.MACHINES["hub"]["label"]
+    M.MACHINES["hub"]["label"] = "Slurm2"
+    try:
+        assert MN.key("Slurm2") == "Slurm2"
+    finally:
+        M.MACHINES["hub"]["label"] = old
+    ok("machine_name.key: a key stays, a label (any case) gives the key; an unknown or ambiguous label comes back as typed")
 
 
 def main():
@@ -211,6 +226,7 @@ def main():
        "sh execs all the way to worker_start.sh, so pueue waits for the worker to finish when stopping the task")
 
     setup()
+    machine_names()
 
     # ---- slurm ----
     old = dict(P.SLURM)

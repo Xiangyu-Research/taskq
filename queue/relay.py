@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(CORE, "sync"))
 sys.path.insert(0, os.path.join(CORE, "monitor"))
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
+import machine_name  # noqa: E402
 import policy as P  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
@@ -873,9 +874,10 @@ def write_status(name, rs, st):
                            envs_ok=rs.get("envs_ok")))
 
 
-def log(lines):
+def log(lines, name):
+    """Lines about one machine in the event log, with its key in the site field (taskq events --site)."""
     import events
-    events.lines("relay", lines)
+    events.lines("relay", lines, site=name)
 
 
 def envs_switch(name):
@@ -916,7 +918,7 @@ def env_builds(s, name, rows, now, dry, stuck):
         return [f"would build {what}"]
     if not on:
         if C.changed(f"envs_{name}", lab):
-            log([f"(switch off) would build {what}"])
+            log([f"(switch off) would build {what}"], name)
         return []
     cmd = f"python3 {shlex.quote(cfg.local('sites', 'envs_cli.py'))} env {name} {shlex.quote(env)} --variant {shlex.quote(v)}"
     try:
@@ -1022,7 +1024,7 @@ def finish(s, name, c, more, why, snotes, dry):
     """Carry out prepare's actions and assign's tasks, then top up workers → (messages, stuck)."""
     L, rs, acts, stuck, notes = RM.conf(name)["label"], c["rs"], c["acts"], c["stuck"], c["notes"]
     if snotes and not dry and C.changed(f"smoke_{name}", snotes):
-        log(snotes)
+        log(snotes, name)
     subs, swhy, failed = (topup(name, rs) if rs is not None else ([], "unreachable", []))
     for wid, tid, state in failed:
         stuck[alert_id("site", name, "worker", wid)] = alert(f"{L} previous {wid} (pueue task {tid}) failed ({state}); check the pueue log over there, then pueue remove that task to retry next check",
@@ -1037,7 +1039,7 @@ def finish(s, name, c, more, why, snotes, dry):
     m2, st2 = submit(name, subs)
     msgs += m2
     stuck.update(st2)
-    log(msgs)
+    log(msgs, name)
     return msgs, stuck
 
 
@@ -1061,6 +1063,8 @@ def main(argv):
     p = sub.add_parser("resend", help="replace staged tasks' specs in the remote queue with the hub's current ones")
     p.add_argument("name")
     a = ap.parse_args(argv)
+    if getattr(a, "name", None):
+        a.name = machine_name.key(a.name)
     why = C.format_problem() if a.cmd in ("stage", "fetch", "archive") else None
     if why:  # steps of a hub round: not on state in another format (taskq self migrate first)
         print(f"{ap.prog} {a.cmd}: not run: {why}", file=sys.stderr)

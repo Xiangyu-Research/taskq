@@ -57,6 +57,10 @@ ok("add / lines → rows with source, kind, key, site", [(r["source"], r["kind"]
 ok("query by key, source, grep", [r["msg"] for r in EV.query(db, key="demo/a/0")] == ["site-a claimed demo/a/0"]
    and len(EV.query(db, source="advance")) == 2 and [r["msg"] for r in EV.query(db, grep="y$")] == ["queued y"])
 
+ok("--site: the machine's key or label finds rows stored under the key; an unknown name stays as typed",
+   EV.site_key("site-slurm2") == EV.site_key("Slurm2") == "site-slurm2" and EV.site_key("NOPE") == "NOPE" and EV.site_key(None) is None
+   and [r["msg"] for r in EV.query(db, site=EV.site_key("site-a"))] == ["site-a claimed demo/a/0"])
+
 # spool: a database that cannot be written right now
 lk = D.connect()
 lk.execute("BEGIN IMMEDIATE")
