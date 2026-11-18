@@ -19,7 +19,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
    - All tasks with state, machine, progress and expected finish: `taskq status --all`. The hub queue: `taskq status`.
    - One executor's queue, disk, bundle and jobs: `taskq site status <machine>`. Use a name from `taskq machines names` or the label shown in event text.
    - pueue tasks, including those finished in the last 24 hours: `taskq pueue-status`.
-   - What the scheduler did recently: `taskq events --since <time>`, filtered with `--source relay|shift|feed|advance|flow|health|note`.
+   - What the scheduler did recently: `taskq events --since <time>`, filtered with `--source relay|feed|advance|health|notify|note`.
    - Problems not yet due for a push: `taskq problems --all`.
    - One task: `taskq show <key>`, `taskq log <key>`, `taskq progress --key <key>`.
 
