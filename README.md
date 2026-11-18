@@ -25,6 +25,11 @@ bash install.sh      # in a clone of taskq; to curl install.sh without cloning f
 It clones to `${TASKQ_HOME:-~/.local/share/taskq}` and links `~/.local/bin/taskq` to its `bin/taskq`; `TASKQ_ORIGIN` changes the clone
 source. Repeating is fine: an existing install is updated (`taskq self update`, pulls `origin/main`).
 
+Claude Code skills for operating taskq are in [`skills/`](skills/): `taskq-check` (read-only check), `taskq-triage` (alerts and failures)
+and `taskq-ship` (releasing changes). `install.sh` runs `skills/link.sh`, which links them into `~/.claude/skills` when `~/.claude` exists;
+run it again after an update that adds or removes a skill (a hub's cron can run it after `taskq self update`). The skills hold only what
+is general; a project adds its own notes in `.claude/taskq/check.md`, `triage.md` and `ship.md`, which each skill reads first.
+
 Needs: Python 3 (the core uses only the standard library; PyYAML is needed on the hub only to build envs from env specs
 `<config>/specs/*.yml`), ssh; [pueue](https://github.com/Nukesor/pueue) on pueue machines, the hub and the store
 (`queue/install_pueue.sh` installs it, checking each file's sha256: pinned for the default version, given on the command line for any

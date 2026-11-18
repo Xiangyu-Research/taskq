@@ -16,6 +16,12 @@ through a config dir (`machines.py`, `policy.py`), a plugins dir and the command
 - Before releasing a new scheduler script, run it once in the cron environment: `env -i HOME=$HOME PATH=/usr/bin:/bin bin/taskq --project <user repo> plan`
   (the dry-run form), not only the unit tests.
 
+## Skills
+
+- `skills/taskq-*` are Claude Code skills, held to the same rule as the core (`test_core_clean.py` scans them): nothing about a specific
+  project or machine. Project specifics go in that project's `.claude/taskq/<check|triage|ship>.md`. Skills and `skills/link.sh` are not in
+  executor bundles, so changing them does not change the bundle. When a command or convention they mention changes, update them too.
+
 ## Tests
 
 - `bin/taskq self test` (everything, several files at once; `-l` lists them, `taskq self test <pattern>` runs only related ones). Run the

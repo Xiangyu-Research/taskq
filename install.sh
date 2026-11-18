@@ -1,5 +1,6 @@
 #!/bin/bash
-# Install taskq: clone to ${TASKQ_HOME:-~/.local/share/taskq} and link ~/.local/bin/taskq to its bin/taskq. Repeating is fine:
+# Install taskq: clone to ${TASKQ_HOME:-~/.local/share/taskq}, link ~/.local/bin/taskq to its bin/taskq and its skills into
+# ~/.claude/skills (skills/link.sh; only when ~/.claude exists). Repeating is fine:
 # an existing install is updated (taskq self update, pulls origin/main).
 #   bash install.sh
 #   curl -fsSL https://raw.githubusercontent.com/Xiangyu-Research/taskq/main/install.sh | bash
@@ -22,5 +23,6 @@ else
 fi
 mkdir -p "$BIN"
 ln -sfn "$DEST/bin/taskq" "$BIN/taskq"
+bash "$DEST/skills/link.sh" || echo "install.sh: some Claude Code skills were not linked" >&2
 echo "taskq $(python3 "$BIN/taskq" self version) -> $BIN/taskq"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "($BIN is not on PATH)" ;; esac

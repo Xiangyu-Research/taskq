@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for bin/taskq: every command's --help exits 0 and touches no files; commands routed to modules match the old scripts; --version,
-path, project lookup, self update and install.sh (temp HOME, local origin repo). Connects to no machine.  python3 queue/test_cli.py"""
+path, project lookup, self update, install.sh and skill links (temp HOME, local origin repo). Connects to no machine.  python3 queue/test_cli.py"""
 import importlib.machinery
 import importlib.util
 import json
@@ -404,6 +404,50 @@ class Self(unittest.TestCase):
         r = subprocess.run(["bash", os.path.join(CORE, "install.sh")], env=ienv, capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, "installing again is fine")
         self.assertEqual(os.path.realpath(link), os.path.join(dest, "bin", "taskq"))
+        os.makedirs(os.path.join(HOME, ".claude"))
+        r = subprocess.run(["bash", os.path.join(CORE, "install.sh")], env=ienv, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.path.realpath(os.path.join(HOME, ".claude", "skills", "taskq-check")), os.path.join(dest, "skills", "taskq-check"),
+                         "install links the installed copy's skills")
+        shutil.rmtree(os.path.join(HOME, ".claude"))
+
+    def test_skills_are_well_formed(self):
+        root = os.path.join(CORE, "skills")
+        names = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+        self.assertEqual(names, ["taskq-check", "taskq-ship", "taskq-triage"])
+        for d in names:
+            with open(os.path.join(root, d, "SKILL.md"), encoding="utf-8") as f:
+                head = f.read().split("---")[1]
+            self.assertIn(f"name: {d}\n", head)
+            self.assertRegex(head, r"description: \S")
+
+    def test_skill_links(self):
+        home = os.path.join(T, "skill_home")
+        dest = os.path.join(home, ".claude", "skills")
+        src = os.path.realpath(os.path.join(CORE, "skills"))
+        os.makedirs(home)
+        env = dict(ENV, HOME=home)
+        link = lambda: subprocess.run(["bash", os.path.join(src, "link.sh")], env=env, capture_output=True, text=True, timeout=30)  # noqa: E731
+        self.assertEqual(link().returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(home, ".claude")), "no ~/.claude: nothing is created")
+        os.makedirs(os.path.join(home, ".claude"))
+        r = link()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.readlink(os.path.join(dest, "taskq-check")), os.path.join(src, "taskq-check"))
+        self.assertEqual(link().stdout, "", "repeating changes nothing")
+        os.symlink(os.path.join(src, "taskq-gone"), os.path.join(dest, "taskq-gone"))
+        os.symlink("/nonexistent/taskq-other", os.path.join(dest, "taskq-other"))
+        self.assertEqual(link().returncode, 0)
+        self.assertFalse(os.path.lexists(os.path.join(dest, "taskq-gone")), "a link to a removed skill goes")
+        self.assertTrue(os.path.islink(os.path.join(dest, "taskq-other")), "a link to somewhere else stays")
+        os.remove(os.path.join(dest, "taskq-check"))
+        os.makedirs(os.path.join(dest, "taskq-check"))
+        os.remove(os.path.join(dest, "taskq-ship"))
+        os.symlink("/elsewhere/taskq-ship", os.path.join(dest, "taskq-ship"))
+        r = link()
+        self.assertEqual(r.returncode, 1, "a name already taken is reported")
+        self.assertTrue(os.path.isdir(os.path.join(dest, "taskq-check")) and not os.path.islink(os.path.join(dest, "taskq-check")))
+        self.assertEqual(os.readlink(os.path.join(dest, "taskq-ship")), "/elsewhere/taskq-ship")
 
 
 if __name__ == "__main__":
