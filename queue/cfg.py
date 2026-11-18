@@ -193,15 +193,30 @@ def log(name):
     return os.path.expanduser(v or os.path.join(outputs("logs") or state(_proto().LOGS), name + ".log"))
 
 
+def bundle_root():
+    """The root this core runs from a bundle of (<root>/code/<bundle>/BUNDLE_CORE, with the root's machine file, as relay
+    deploy leaves it) -> its path; not run from a root's bundle -> None."""
+    P = _proto()
+    if not CORE.endswith("/" + P.BUNDLE_CORE):
+        return None
+    code = os.path.dirname(CORE[:-len(P.BUNDLE_CORE) - 1])
+    r = os.path.dirname(code)
+    ok = os.path.basename(code) == P.ROOT["code"] and os.path.isfile(os.path.join(r, P.ROOT["machine"]))
+    return r if ok else None
+
+
 def machine_state(*parts):
     """A path in this machine's own state dir, for files of the machine rather than of a process (boot log, GPU usage
-    records): TASKQ_STATE / TASKQ_ROOT when set (as state()), else the state/ of the root the machine table gives this
-    machine (cron and boot start these without TASKQ_ROOT), else the state dir."""
+    records): TASKQ_STATE / TASKQ_ROOT when set (as state()), else the state/ of the root whose bundle this core runs from
+    (cron and boot start these without TASKQ_ROOT; the hostname need not match the table), else of the root the machine
+    table gives this machine, else the state dir."""
     if not os.environ.get("TASKQ_STATE") and not os.environ.get("TASKQ_ROOT"):
+        r = bundle_root()
         try:
-            M = mtab()
-            me = M.whoami()
-            r = M.machine(me).get("root") if me else None
+            if not r:
+                M = mtab()
+                me = M.whoami()
+                r = M.machine(me).get("root") if me else None
         except Exception:  # noqa: BLE001  (no machine table here: the state dir)
             r = None
         if r:

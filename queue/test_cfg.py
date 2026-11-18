@@ -167,6 +167,37 @@ def cfg_get(config, *args):
     return subprocess.run([sys.executable, os.path.join(HERE, "cfg.py"), *args], env=env, capture_output=True, text=True)
 
 
+# this machine's own state dir (boot log, GPU usage records) for processes started without TASKQ_ROOT (cron, boot, by hand)
+MENV = {k: v for k, v in os.environ.items() if k not in ("TASKQ_STATE", "TASKQ_ROOT", "TASKQ_MACHINE", "GPU_LOG_DIR")}
+
+
+def cfg_at(core, *args, **env):
+    return subprocess.run([sys.executable, os.path.join(core, "queue", "cfg.py"), *args], capture_output=True, text=True,
+                          env=dict(MENV, TASKQ_CONFIG=fixture.CONFIG, **env)).stdout.strip()
+
+
+import proto  # noqa: E402
+CORE = os.path.dirname(HERE)
+BR = os.path.join(T, "broot")
+BCORE = os.path.join(BR, "code", "b1", *proto.BUNDLE_CORE.split("/"))
+os.makedirs(os.path.dirname(BCORE))
+os.symlink(CORE, BCORE)
+os.symlink("b1", os.path.join(BR, "code", "current"))
+TROOT = ("import sys; sys.path.insert(0, sys.argv[1]); import os, cfg; cfg.use_config(); "
+         "print(os.path.expanduser(cfg.mtab().MACHINES[sys.argv[2]]['root']))")
+WS, HUBR = (subprocess.run([sys.executable, "-c", TROOT, HERE, n], capture_output=True, text=True,
+                           env=dict(MENV, TASKQ_CONFIG=fixture.CONFIG)).stdout.strip() for n in ("site-pueue", "hub"))
+ok("machine_state: no root env, machine named (TASKQ_MACHINE) -> its table root's state/",
+   cfg_at(CORE, "gpu-log-dir", TASKQ_MACHINE="site-pueue") == f"{WS}/state/gpu_usage"
+   and cfg_at(CORE, "boot-log", TASKQ_MACHINE="site-pueue") == f"{WS}/state/logs/on_boot.log")
+ok("machine_state: a bundle in a dir without a root's machine file -> not taken for a root (the table root by hostname: the fixture hub matches whichever machine runs the tests)",
+   cfg_at(os.path.join(BR, "code", "current", proto.BUNDLE_CORE), "gpu-log-dir") == f"{HUBR}/state/gpu_usage")
+with open(os.path.join(BR, proto.ROOT["machine"]), "w") as f:
+    f.write("site-pueue\n")
+ok("machine_state: run from a root's bundle (through code/current or code/<bundle>), hostname matching no machine -> that root's state/",
+   all(cfg_at(c, "gpu-log-dir") == f"{BR}/state/gpu_usage" and cfg_at(c, "boot-log") == f"{BR}/state/logs/on_boot.log"
+       for c in (BCORE, os.path.join(BR, "code", "current", proto.BUNDLE_CORE))))
+ok("machine_state: TASKQ_ROOT still wins", cfg_at(BCORE, "gpu-log-dir", TASKQ_ROOT=WS) == f"{WS}/state/gpu_usage")
 r = cfg_get(fixture.CONFIG, "get", "name")
 ok("cfg.py get: a string as-is", r.returncode == 0 and r.stdout == "Demo\n")
 r = cfg_get(fixture.CONFIG, "get", "code_dirs")
