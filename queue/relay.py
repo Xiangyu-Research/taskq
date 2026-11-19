@@ -545,7 +545,7 @@ def site_for(name, rs, st, mtq):
         return f"the bundle {g[0]} in use cannot run this spec ({g[1]})" if g else sg.verdict(key, sp)
     site = refill.Site(name, {k: R.ready(name) - have[k] for k in kinds}, {p for k in keys.values() for p in k.get("inputs") or []},
                        M.ready_envs(name, rs.get("envs_ok")), (rootk, root_gb), (blobk, rs.get("blob_free", rs.get("free", 0)) / 1e9),
-                       c["budget"][1], block=block, took=sg.took, idle=idle_by)
+                       c["budget"][1], block=block, took=sg.took, idle=idle_by, busy=bool(on))
     return site, sg
 
 

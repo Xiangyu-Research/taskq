@@ -84,6 +84,12 @@ ok("Needs you: active problems but not notices; an executor with no news for ove
    "something broke" in AT and "a note" not in AT and any("no news from Slurm2" in a for a in AT))
 ok("each item under Needs you has an id: the problem's, overdue:<key>, stale:<machine>",
    [a["id"] for a in o["attention"]] == ["site:x", f"overdue:{LATE}", "stale:site-slurm2"] and o["attention"][0]["since"] == 1)
+_P = __import__("policy")
+_pause = dict(_P.PAUSE)
+_P.PAUSE["site-slurm2"] = (None, "test")
+ok("a paused machine (PAUSE) is not read, so no news from it is not listed", not any(a["id"] == "stale:site-slurm2" for a in SU.build(d, NOW)["attention"]))
+_P.PAUSE.clear()
+_P.PAUSE.update(_pause)
 _ids = SU.attention_lines(o, ids=True)
 ok("attention_lines: the same items for taskq status and taskq problems; with ids for notice ack",
    SU.attention_lines(o)[:3] == ["", "Needs you", "  ! something broke"] and _ids[3] == "      site:x (since 1)"

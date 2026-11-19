@@ -173,6 +173,10 @@ ok("space: the spec's out_gb is used when set", got == {"g/3": "site-pueue"})
 got, res = pick([ctq("g/4", inputs=["in/c"], out_gb=1)],
                 [site("site-pueue", dict(gpu=1), root=(("a", 1), 100.0), blob=(("a", 2), 10.0), keep=5)], sizes={"in/c": 20.0})
 ok("space: when blobs are on another disk, inputs are charged to blobs", got == {} and "no room" in res["why"]["g/4"])
+got, res = pick([ctq("g/5", inputs=["in/c"])], [site("site-pueue", dict(gpu=1), root=(("a", 1), 30.0), keep=15, busy=True)],
+                sizes={"in/c": 20.0})
+ok("space: an executor holding tasks of its own gets the space back when they finish, so too little space is a wait, not noroom",
+   got == {} and "no room" in res["why"]["g/5"] and res["noroom"] == [])
 w = site("site-pueue", dict(gpu=1), root=(("a", 1), 20.0), keep=15).fit(ctq("z/1"), dict(device="gpu", env="base"), {}, {})
 ok("space: fit returns a structured reason (kind noroom, the text unchanged for display)", w is not None and w.kind == "noroom"
    and str(w).startswith("no room (after "))

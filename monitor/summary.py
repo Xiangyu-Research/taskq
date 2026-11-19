@@ -118,7 +118,7 @@ def build(d, now):
                              jobs=(jobs.count("RUNNING"), jobs.count("PENDING")) if r.get("squeue") is not None else None,
                              held=[held_line(k, h, r, now) for k, h in sorted(held.items())],
                              running=[t for t in mine if t["word"] in (RUNNING, OVERDUE)]))
-        if r and age >= proto.SITE_FRESH:
+        if r and age >= proto.SITE_FRESH and not M.paused(n):  # a paused machine is not read (policy.py PAUSE)
             attention.append(dict(id=f"stale:{n}", since=None,
                                   text=f"no news from {label(n)} for {ago(age)} (last recorded {when(r['time'], now)})"))
     steps = {}

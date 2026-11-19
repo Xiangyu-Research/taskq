@@ -106,11 +106,13 @@ class Site:
     item of machines.py budget); block(key, spec) -> why this executor will not take it this round (bundle cannot
     run it, smoke gate); took(key, spec): tell the gate it was taken; idle {kind: [dict(key, nice, out=its out_gb)]}:
     prepared but unclaimed tasks with no progress, the one most worth yielding first; when full, yield one per kind
-    to make room for a more important task."""
+    to make room for a more important task; busy: this executor holds tasks of its own (queued, running or not yet fetched),
+    whose space comes back when they finish, so too little space is a wait ("disk"), not "noroom" (waiting will not help)."""
 
-    def __init__(self, name, room, ready=(), envs=(), root=(None, 0.0), blob=None, keep=0, block=None, took=None, idle=None):
+    def __init__(self, name, room, ready=(), envs=(), root=(None, 0.0), blob=None, keep=0, block=None, took=None, idle=None,
+                 busy=False):
         self.name, self.room, self.ready, self.envs = name, dict(room), set(ready), set(envs)
-        self.root, self.blob, self.keep = root, blob or root, keep
+        self.root, self.blob, self.keep, self.busy = root, blob or root, keep, busy
         self.block, self._took, self.idle = block, took, {k: list(v) for k, v in (idle or {}).items()}
         self.take, self.swaps = [], []  # tasks taken this round; [(yielded, swapped in)]
 
@@ -137,7 +139,7 @@ class Site:
         left = self.root[1] - planned.get(self.root[0], 0.0) + back - out - (gb if same else 0.0)
         bleft = left if same else self.blob[1] - planned.get(self.blob[0], 0.0) - gb
         if min(left, bleft) < self.keep:
-            return Why("noroom", f"no room (after {gb:.0f} GB input and {out:.0f} GB output, {min(left, bleft) + self.keep:.0f} GB left, "
+            return Why("disk" if self.busy else "noroom", f"no room (after {gb:.0f} GB input and {out:.0f} GB output, {min(left, bleft) + self.keep:.0f} GB left, "
                                   f"need to keep {self.keep:.0f} GB)")
         why = self.block(t["key"], sp) if self.block else None
         if why:
