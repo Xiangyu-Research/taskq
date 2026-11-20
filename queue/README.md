@@ -478,7 +478,8 @@ operations is at the top of `site_ops.py`: for an executor root, `status`, `stat
 
 - **blob**: data files on an executor are stored by sha256 at `R/blobs/<first two>/<sha256>` (`proto.blob`); the adjacent `.st` records size
   and mtime once the sha256 is checked (when ingested, or by the receiving side of `push` in the same read that checks the MD5, after the
-  file is in place), so later operations compare those instead of reading the file again; a mismatch means drop and ingest again. A pushed
+  file is in place), so later operations compare those instead of reading the file again; a mismatch means drop and ingest again. A blob
+  without a record counts as missing for `missing` (no hashing under its short timeout); `ingest` then checks its sha256 and records it. A pushed
   file whose content is not its sha256 is not placed and not sent again in that run. The store's `export` lists the files and sha256 for a task (cached in
   `R/state/hashes.db`), and `push` sends only what is missing there; existing files on the same disk are hardlinked in (`ingest`).
 - **views**: each task's inputs under `R/data` are built as symlinks to blobs following the store data dir's relative paths (`view`, never

@@ -1599,6 +1599,16 @@ def test_ingest():
     assert run_op("missing", R, [h])[:2] == (0, []) and open(b, "rb").read() == body
     ok("a hard-link source modified in place: missing notices it and drops the blob and record (source untouched); mismatched content is not taken, matching content is ingested again")
 
+    os.remove(b + proto.BLOB_STAT)  # a blob from before records existed: missing does not hash it, ingest checks and records it
+    assert run_op("missing", R, [h])[:2] == (0, [h]) and os.path.isfile(b)
+    assert run_op("ingest", R, dict(srcs=[], files={h: [None, 5000]}))[:2] == (0, [h]) and os.path.isfile(b + proto.BLOB_STAT)
+    assert run_op("missing", R, [h])[:2] == (0, [])
+    os.remove(b + proto.BLOB_STAT)
+    with open(b, "r+b") as f:
+        f.write(b"Y" * 10)
+    assert run_op("ingest", R, dict(srcs=[], files={h: [None, 5000]}))[:2] == (0, []) and not os.path.lexists(b)
+    ok("a blob without a record: missing reports it without hashing; ingest checks it and records it, or drops it on a mismatch")
+
     R2 = fixture.tmpdir(dir=T, prefix="ing2_")
     shm = other_disk(R2)
     if not shm:

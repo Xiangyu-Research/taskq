@@ -91,10 +91,11 @@ def record(R, h):
     C.atomic_write(blob_path(R, h) + proto.BLOB_STAT, stamp(blob_path(R, h)))
 
 
-def blob_ok(R, h):
+def blob_ok(R, h, verify=True):
     """The blob exists and still matches h: size and mtime equal the recorded values (ingest and push record them once the
-    sha256 is checked, push while receiving); without a record compute sha256 once and record it. On a mismatch (a hard-link
-    source was modified in place, or a bad transfer) remove the blob and its record (the source is left alone) and return False."""
+    sha256 is checked, push while receiving); without a record compute sha256 once and record it (verify=False: report it
+    as not ok and leave it, so the hashing happens in ingest with its long timeout). On a mismatch (a hard-link source was
+    modified in place, or a bad transfer) remove the blob and its record (the source is left alone) and return False."""
     p = blob_path(R, h)
     if not os.path.isfile(p):
         return False
@@ -104,6 +105,8 @@ def blob_ok(R, h):
         rec = None
     if rec is not None and rec == stamp(p):
         return True
+    if rec is None and not verify:
+        return False
     if rec is None and C.sha256(p) == h:
         record(R, h)
         return True
@@ -115,8 +118,9 @@ def blob_ok(R, h):
 
 
 def op_missing(A):
+    """Blobs not present with a matching record. No hashing here (short timeout); unrecorded blobs are checked by ingest."""
     R = root()
-    return [h for h in A if not blob_ok(R, h)]
+    return [h for h in A if not blob_ok(R, h, verify=False)]
 
 
 def op_pin(A):
@@ -130,13 +134,17 @@ def op_pin(A):
 
 
 def op_ingest(A):
-    """files {h: [relative path, size]}, srcs: data dirs to look in. Same disk (st_dev), matching size and sha256 → hard link
-    into blobs and record it."""
+    """files {h: [relative path, size]}, srcs: data dirs to look in. A blob already there without a record is sha256-checked
+    and recorded (dropped on a mismatch). Otherwise same disk (st_dev), matching size and sha256 → hard link into blobs and
+    record it."""
     R = root()
     B = sub(R, "blobs")
     bdev = os.stat(B if os.path.isdir(B) else R).st_dev
     got = []
     for h, (rel, size) in A["files"].items():
+        if blob_ok(R, h):
+            got.append(h)
+            continue
         if not rel:
             continue
         t = blob_path(R, h)
