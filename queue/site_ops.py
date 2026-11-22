@@ -436,6 +436,8 @@ def pins(R):
 def op_gc(A):
     """When free space (free / blob_free, measured if absent) is below soft_gb: first remove views in views and under scan that
     are not in keep, then remove blobs least recently used first (not referenced by a view, not pinned, only one link).
+    orphans (seconds, the store only, whose blobs are hard links of its data dir): whatever the free space, also remove such
+    blobs whose ctime (when their other link went away) is at least this old.
     → dict(freed, removed_views, removed_blobs, free[, blob_free])."""
     R = root()
     soft = int(A["soft_gb"] * 1e9)
@@ -495,7 +497,9 @@ def op_gc(A):
             rmtree(d)
             out["removed_views"].append(rel)
         L.close()
-    if bfree() < soft and blobs_ok:
+    orphans = A.get("orphans")
+    if (bfree() < soft or orphans is not None) and blobs_ok:
+        now = time.time()
         used = set()
         for dp, dns, fns in os.walk(D):
             for f in fns + dns:
@@ -524,10 +528,10 @@ def op_gc(A):
                     continue
                 if x.st_nlink != 1:
                     continue
-                cand.append((max(x.st_atime, x.st_mtime), p, x.st_size, f))
-        for _, p, sz, h in sorted(cand):
-            if bfree() >= soft:
-                break
+                cand.append((max(x.st_atime, x.st_mtime), p, x.st_size, f, x.st_ctime))
+        for _, p, sz, h, ct in sorted(cand):
+            if bfree() >= soft and (orphans is None or now - ct < orphans):
+                continue
             if not C.inside(p, B) or h in pins(R):
                 continue
             try:

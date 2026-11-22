@@ -249,6 +249,7 @@ def main():
 
         gc_pins_read_once(tmp)
         gc_envs(tmp)
+        gc_orphans(tmp)
         pull_listing(tmp)
 
         b0, G.budget = G.budget, lambda n: None
@@ -260,6 +261,46 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("all passed")
+
+
+def gc_orphans(tmp):
+    """The store's orphan sweep: with plenty of space, blobs whose data-dir hard link is gone (one link, no view, not pinned) are
+    removed once their ctime is old enough; blobs still linked from the data dir, used by a view or pinned stay; no view is removed."""
+    R, outside = build(fixture.tmpdir(dir=tmp))
+    D = os.path.join(R, "data")
+    data = os.path.join(tmp, "store_data_" + os.path.basename(os.path.dirname(R)))
+    os.makedirs(data)
+    linked = blob(R, "st_linked", 700)
+    os.link(linked, os.path.join(data, "kept.npz"))
+    gone = blob(R, "st_gone", 900)
+    os.link(gone, os.path.join(data, "pruned.npz"))
+    os.remove(os.path.join(data, "pruned.npz"))  # pruned from the data dir: only the blob holds it now
+    pinned = blob(R, "st_pinned", 400)
+    os.makedirs(os.path.join(R, "state", "pins"), exist_ok=True)
+    with open(os.path.join(R, "state", "pins", "k.json"), "w") as f:
+        json.dump([H("st_pinned")], f)
+    stat_rec = gone + proto.BLOB_STAT
+    open(stat_rec, "w").close()
+    keep = ["prepared/ds_keep"]
+    big = 5000  # GB: far above any soft limit
+    r = G.gc("x", keep, local_rpy(R), soft_gb=1.0, free=big * GB, orphans=True)
+    assert r["removed_blobs"] == 0 and not r["removed_views"] and exists(R, "st_gone"), r
+    ok("orphan sweep: an orphan whose link went away less than ORPHAN_KEEP ago stays")
+    r = local_rpy(R)("x", "gc", dict(soft_gb=1.0, keep=keep, free=big * GB, views=[], scan=["prepared"], orphans=0))
+    want = {"dd1", "st_gone", "st_pinned"}  # dd1 is unreferenced with one link in the fixture: an orphan too
+    assert not exists(R, "st_gone") and not exists(R, "dd1") and not os.path.exists(stat_rec), r
+    assert r["removed_blobs"] == 2 and r["freed"] == 900 + 3000 and not r["removed_views"], r
+    assert all(exists(R, h) for h in ("aa1", "bb1", "cc1", "ee1", "ff1", "st_linked", "st_pinned")), want
+    assert os.path.isdir(os.path.join(D, "prepared", "ds_old")) and os.path.getsize(outside) == 500
+    ok("orphan sweep with plenty of space: removes only one-link blobs no view uses and nobody pinned (and their records); "
+       "views, linked, used and pinned blobs stay")
+    b0, G.budget = G.budget, lambda n: None
+    try:
+        assert G.gc("x", keep, local_rpy(R), free=big * GB, orphans=True)["removed_blobs"] == 0
+        assert G.gc("x", keep, lambda *a, **k: 1 / 0) is None
+    finally:
+        G.budget = b0
+    ok("orphan sweep also runs on a store without budget (no space-based cleanup there)")
 
 
 def gc_envs(tmp):

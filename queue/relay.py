@@ -939,8 +939,11 @@ def prepare(s, name, dry):
             reg = (st.get("views") or {}).get(name) or {}
             keep = {v for k in ST.keys_of(st, name).values() for v in ST.paths_of(k)}
             keep |= {v for v, t in reg.items() if time.time() - t < proto.VIEW_KEEP}
+            orph = name == M.store() and time.time() - (st.get("orphans_at") or {}).get(name, 0) >= proto.ORPHAN_EVERY
             g = ST.gc(name, keep, RM.op, views=reg, free=rs.get("free") if RM.conf(name).get("cap") else None,
-                      blob_free=rs.get("blob_free") if RM.conf(name).get("blob_cap") else None)
+                      blob_free=rs.get("blob_free") if RM.conf(name).get("blob_cap") else None, orphans=orph)
+            if orph and g is not None:
+                ST.update_state(lambda x: x.setdefault("orphans_at", {}).update({name: time.time()}))
             if g and g["removed_views"]:
                 ST.update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
             if g and (g["removed_views"] or g["removed_blobs"]):

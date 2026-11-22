@@ -511,7 +511,9 @@ operations is at the top of `site_ops.py`: for an executor root, `status`, `stat
   transferred or whose view is not ready pins its blobs (`R/state/pins/`).
 - **cleanup** (`gc`, `queue/relay_store.py`): when free space is below the first `budget` item, delete views the hub queue no longer wants
   first, then blobs with no links by least recently used; pinned and half-transferred ones are left alone. `cap` and `blob_cap` limit the
-  root and blobs.
+  root and blobs. On the store, whose blobs are hard links of its data dir, a blob left with one link (its data-dir file was deleted or
+  replaced) holds space for nothing: once every `ORPHAN_EVERY` the hub also has the store remove such blobs whose last change is at least
+  `ORPHAN_KEEP` old (not used by a view, not pinned), whatever the free space.
 - **fetch** (`fetch` -> the store's `pull`): that side lists outputs (`list`, same rule as "done") and fetches them to `.relay_in/<key>` under
   the store data dir, verifies them, moves them into place, and writes marker files (`MANIFEST.json`, top-level files) last. Done is judged
   by actual files on disk; while a copy, fetch or transfer is running it is not done and the source is not cleaned up.

@@ -1341,6 +1341,25 @@ def test_env_auto():
             relay.prepare(ts, NAME, False)
         assert [x[1] for x in adds] == [lab("base")], adds
         adds.clear()
+        calls = []
+        with patched(relay, remote_status=lambda n: dict(envs_st={}, now=now, bundle="bX"), wanted_bundle=lambda: ("bX", "/nonexistent"),
+                     write_status=lambda *a: None, plan=lambda *a: ([], {})), \
+                patched(ST, gc=lambda *a, **kw: calls.append(kw["orphans"]) or dict(freed=0, removed_views=[], removed_blobs=0, free=0)):
+            st0 = ST.load_state().get("orphans_at")
+            ST.update_state(lambda x: x.pop("orphans_at", None))
+            try:
+                store = M.store()
+                relay.prepare(ts, store, False)
+                relay.prepare(ts, store, False)
+                relay.prepare(ts, NAME, False) if NAME != store else None
+                assert calls[:2] == [True, False] and not any(calls[2:]), calls
+                ST.update_state(lambda x: x["orphans_at"].update({store: time.time() - proto.ORPHAN_EVERY - 1}))
+                relay.prepare(ts, store, False)
+                assert calls[-1] is True, calls
+            finally:
+                ST.update_state(lambda x: x.update(orphans_at=st0) if st0 else x.pop("orphans_at", None))
+        adds.clear()
+        ok("the store's blobs are swept for orphans once per ORPHAN_EVERY (other executors never)")
         open(os.path.join(T, "master_down"), "w").close()
         try:
             c = relay.prepare(ts, NAME, False)

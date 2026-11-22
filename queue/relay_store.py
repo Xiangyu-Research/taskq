@@ -17,6 +17,7 @@ import cfg  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
+import proto  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import hubstate as HS  # noqa: E402
 
@@ -99,18 +100,20 @@ def budget(name):
     return M.machine(name).get("budget")
 
 
-def gc(name, keep_dirs, op, soft_gb=None, free=None, views=(), blob_free=None):
+def gc(name, keep_dirs, op, soft_gb=None, free=None, views=(), blob_free=None, orphans=False):
     """Cleanup for machine name → dict(freed, removed_views, removed_blobs, free); no budget → None.
     keep_dirs: views assigned to this machine that are needed or just built (relative to R/data). views: registered views
     (state.json views). op: relay_remote.op. free: remaining bytes (executors with cap pass relay.py's cap-based value; without
     it, look at the disk). blob_free: remaining on the blob disk when blobs are on another disk with blob_cap (computed by
     relay.py from blob_cap): removing blobs looks only at it; removing views looks at whichever side is below the soft limit;
-    without it both use free. removed_views also includes registered views that are already gone (drop them from the registry)."""
+    without it both use free. removed_views also includes registered views that are already gone (drop them from the registry).
+    orphans: name is the store, also sweep blobs whose data-dir link went away at least ORPHAN_KEEP ago (whatever the free space)."""
     if soft_gb is None:
         b = budget(name)
-        if not b:
+        if not b and not orphans:
             return None
-        soft_gb = b[0]
+        soft_gb = b[0] if b else 0
     sys.path.insert(0, os.path.join(CORE, "sites"))
     import names as N
-    return op(name, "gc", dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS, blob_free=blob_free))
+    return op(name, "gc", dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS, blob_free=blob_free,
+                                orphans=proto.ORPHAN_KEEP if orphans else None))
