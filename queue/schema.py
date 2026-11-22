@@ -37,7 +37,7 @@ MACHINE_FIELDS = {
     "quick": ("pair?", None, "store: temporary tunnel (cloudflared image, regex matching temporary addresses)"),
     # execution
     "root": ("str?", None, "root (blobs, data, code, queue, state, tmp); executors and the store need it"),
-    "scheduler": ("sched?", None, "executor: pueue (resident worker) or slurm (submit worker jobs)"),
+    "scheduler": ("sched?", None, "executor type: pueue (resident workers), slurm (submit worker jobs) or one from the executors plugin"),
     "workers": ("workers", (), "pueue executor: this machine's workers, each see WORKER_FIELDS"),
     "jobs": ("jobs", {}, "slurm executor: {gpu|cpu: sbatch options dict(partition, gres, cpus, mem), plus slots: how many trainings one job runs at once (not an sbatch option; default 1)}; QOS, time limits and count in policy.py's SLURM"),
     "gpu_pad": ("triple?", None, "slurm: (floor, target, high) MiB for the worker job's own GPU pad"),

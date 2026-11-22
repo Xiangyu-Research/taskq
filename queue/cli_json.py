@@ -30,13 +30,13 @@ def _fail(msg, rc=1):
 
 # ---------------- taskq machines show ----------------
 def machine_json(n):
-    import pueue as PQ
     import remote as R
     import spec as S
     M = cfg.mtab()
     m = M.machine(n)
     ws = M.workers(n)
-    cmds = {w["id"]: PQ.worker_cmd(n, w) for w in ws if w["group"]} if m["scheduler"] == "pueue" and m["root"] else {}
+    t = cfg.executors().get(m["scheduler"]) if m["root"] else None
+    cmds = {w["id"]: c for w in ws if t and (c := t.worker_cmd(n, w))}
     return dict(name=n, label=m["label"], scheduler=m["scheduler"], roles=list(M.roles(n)), executor=M.is_exec(n),
                 paused=M.paused(n), kinds=list(M.kinds(n)), workers=ws, worker_cmds=cmds, groups=M.groups(n),
                 root=m["root"], root_q=R.q(m["root"]) if m["root"] else None, ready_envs=sorted(M.ready_envs(n)),

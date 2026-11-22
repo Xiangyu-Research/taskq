@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""How tasks are sent to executors (choose, Site) and how Slurm workers are topped up (topup_plan, cpu_plan, slurm_plan);
+"""How tasks are sent to executors (choose, Site) and how workers are topped up (pueue_plan; Slurm: topup_plan, cpu_plan, slurm_plan);
 queue/relay.py calls this each round. The rules are described in queue/README.md; policy comes from policy.py (PLACE, SLURM).
 """
 import os
@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.join(CORE, "sites"))
 import mtab as M  # noqa: E402
 import policy as P  # noqa: E402
 import slurm as SL  # noqa: E402
+import pueue as PQ  # noqa: E402
+import remote as R  # noqa: E402
 import spec as S  # noqa: E402
 import common as C  # noqa: E402
 
@@ -315,3 +317,29 @@ def slurm_plan(tq, st, conf):
         subs += csub
         why = why if csub else "; ".join(x for x in (why, f"CPU: {cwhy}") if x)
     return subs, why
+
+
+def pueue_plan(name, rs):
+    """Workers a pueue machine should start -> (workers, why none, {problem id: alert}): each machines.py worker when it is inside
+    its hours window, none is alive, the previous one did not fail, and there is a staged unclaimed task of its kind; a previous
+    one that failed is an alert (pueue task id, state) and is not restarted."""
+    if rs.get("jobs") is None:
+        return [], "cannot read pueue", {}
+    L, subs, why, failed = M.machine(name)["label"], [], [], {}
+    for w in M.workers(name):
+        mine = PQ.tasks_of(w, rs["jobs"])
+        if any(j[2] != "Done" for j in mine):
+            why.append(f"{w['id']} is running")
+        elif mine and mine[-1][3] not in ("Success", "Killed"):
+            tid, state = mine[-1][0], mine[-1][3]
+            failed[proto.alert_id("site", name, "worker", w["id"])] = proto.alert(
+                f"{L} previous {w['id']} (pueue task {tid}) failed ({state}); check the pueue log over there, then pueue remove that task to retry next check",
+                worker=w["id"], start=False)
+            why.append(f"previous {w['id']} (pueue task {tid}) failed ({state})")
+        elif not M.working(name, w):
+            why.append(f"{w['id']} is outside its hours window")
+        elif not unclaimed(rs["taskq"], w["kind"]):
+            why.append(f"no staged unclaimed {R.kname(w['kind'])}task over there for {w['id']}")  # an idle worker exits after 30 minutes; start one when work appears
+        else:
+            subs.append(w)
+    return subs, "; ".join(why), failed

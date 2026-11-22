@@ -22,6 +22,7 @@ import notice as NT  # noqa: E402
 import hubstate as HS  # noqa: E402
 
 M = cfg.mtab()
+X = cfg.executors()
 P = proto
 
 import taskstate as TS  # noqa: E402
@@ -75,7 +76,7 @@ def held_line(k, h, r, now):
 
 
 def slot_plan(n, now):
-    """pueue machine -> (slots of workers inside their hours now, slots outside them, their windows as written, in that machine's
+    """Machine with resident workers (pueue) -> (slots of workers inside their hours now, slots outside them, their windows as written, in that machine's
     time zone when it differs from here)."""
     t = now.timestamp()
     on = off = 0
@@ -111,7 +112,7 @@ def build(d, now):
                                       text=f"{k} on {label(n)}: past its estimated finish ({t['eta']:%m-%d %H:%M}){last}"))
         mine = [t for t in tasks.values() if t["where"] == n]
         count = {w: sum(t["word"] == w for t in mine) for w in ORDER}
-        slots, later, wins = slot_plan(n, now) if M.MACHINES[n].get("scheduler") == "pueue" else (None, 0, "")
+        slots, later, wins = slot_plan(n, now) if getattr(X.get(M.MACHINES[n].get("scheduler")), "RESIDENT", False) else (None, 0, "")
         jobs = [j[2] for j in r.get("squeue") or []]
         machines.append(dict(name=n, label=label(n), paused=M.paused(n), age=age if r else None, stale=not r or age >= proto.SITE_FRESH,
                              count=count, slots=slots, later=later, windows=wins,

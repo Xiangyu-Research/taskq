@@ -115,6 +115,15 @@ def mtab():
     return m
 
 
+def executors():
+    """The executor types (core sites/executors.py)."""
+    d = os.path.join(CORE, "sites")
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    import executors as x
+    return x
+
+
 def use_config():
     d = config_dir()
     sys.path.insert(0, d)
@@ -261,6 +270,7 @@ KINDS = {
     "consumers": ("CONSUMERS",),
     "smoke": ("SMOKE",),
     "labels": ("STEPS", "QUIET", "PLAN_TITLES"),
+    "executors": ("EXECUTORS",),
 }
 
 

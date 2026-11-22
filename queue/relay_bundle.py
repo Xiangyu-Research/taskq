@@ -84,7 +84,8 @@ def rules(commit):
 BC = proto.BUNDLE_CORE  # where the core sits in the bundle (fixed, independent of where the local core lives)
 CORE_REF = "HEAD"  # core files come from this commit of the core repo (the installed checkout)
 # Scheduler files executors need (relative to the core root; placed under BC/ in the bundle): worker entry point and loop,
-# task runner, queue, task specs, experiment table, GPU pad, local copies of inputs; machine-level pieces (boot, pueue setup,
+# task runner, queue, task specs, experiment table, GPU pad, local copies of inputs; the machine table and executor types (workers,
+# groups, the status op's scheduler read); machine-level pieces (boot, pueue setup,
 # group setup, GPU usage log and summary; pueue executors also use the bundle, not a repo clone); bin/taskq (if present) and
 # the taskq log it uses over there; the rest (hub planning, staging, health checks, sync) does not go in.
 RUNTIME = (
@@ -94,10 +95,11 @@ RUNTIME = (
     "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
     "queue/site_ops.py", "queue/schema.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
     "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "queue/project.py", "sites/mtab.py",
+    "sites/executors.py", "sites/pueue.py", "sites/slurm.py", "sites/remote.py",
     "monitor/gpu_log.sh", "monitor/gpu_usage.py", "queue/tasklog.py", "bin/taskq",
     # used by store operations (site_ops export, push, pull, collect, smoke, archive)
     "sites/names.py", "queue/relay_plugins.py", "sync/tunnel.py", "sync/agent_box.py", "sync/agent.py", "sync/xssh",
-    "queue/archive_task.sh", "sites/slurm.py", "sites/remote.py",
+    "queue/archive_task.sh",
     # run over there by self migrate (migrate.py root, from the new bundle before it is switched)
     "queue/migrate.py")
 CODE = (".py", ".sh", ".R", ".sbatch")

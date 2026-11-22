@@ -345,9 +345,10 @@ e = merged_fn(plugdir("j", """
 ok("extend: a function given as something else -> error", isinstance(e, ValueError) and "FN" in str(e) and "function" in str(e))
 # names exported by each plugin kind: cfg.KINDS matches the core modules and test plugins
 ok("KINDS: recipes exports RECIPES, HOOKS; relay_plugins exports PLUGINS, ACCEPTS, VIEW_ROOTS; consumers exports CONSUMERS; "
-   "smoke exports SMOKE; labels exports STEPS, QUIET, PLAN_TITLES",
+   "smoke exports SMOKE; labels exports STEPS, QUIET, PLAN_TITLES; executors exports EXECUTORS",
    cfg.KINDS == {"recipes": ("RECIPES", "HOOKS"), "relay_plugins": ("PLUGINS", "ACCEPTS", "VIEW_ROOTS"),
-                 "consumers": ("CONSUMERS",), "smoke": ("SMOKE",), "labels": ("STEPS", "QUIET", "PLAN_TITLES")})
+                 "consumers": ("CONSUMERS",), "smoke": ("SMOKE",), "labels": ("STEPS", "QUIET", "PLAN_TITLES"),
+                 "executors": ("EXECUTORS",)})
 setenv(TASKQ_PLUGINS=fixture.PLUGINS)
 r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import recipes, relay_plugins; "
                     "print(sorted(recipes.RECIPES), sorted(recipes.HOOKS), sorted(relay_plugins.PLUGINS), "

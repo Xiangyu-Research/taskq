@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for sites/pueue.py, slurm.py, remote.py, mtab.py (workers and groups) and queue/setup.sh (taskq site setup):
 fake outputs, checking the parsing and the start / top-up commands; setup.sh really runs with fake pueue, crontab and ssh."""
+import inspect
 import json
 import os
 import re
@@ -171,7 +172,7 @@ def main():
     assert PQ.parse(json.loads(raw), w["group"]) == jobs
     assert PQ.parse("not json", w["group"]) is None and PQ.parse(None, w["group"]) is None
     ok("pueue.parse: only the worker's group, the Done result is read out; unreadable → None")
-    assert [j[0] for j in PQ.workers(w, jobs)] == [3, 7]
+    assert [j[0] for j in PQ.tasks_of(w, jobs)] == [3, 7]
     ok("pueue.workers: only the label worker:<id> counts")
 
     fake = Fake([("add -g", (0, "New task added (id 9).\n"))])
@@ -201,8 +202,8 @@ def main():
     ok("pueue: a CPU worker in its own group, WORKER_DEVICE=cpu, no GPUs (no slots or cpus: the worker reads them from the table), entry point worker_start.sh")
     raw2 = pueue_json((3, w["group"], wl, "Running"), (4, cw["group"], f"worker:{cw['id']}", "Queued"), (5, "gpu0", "x", "Running"))
     jobs2 = PQ.parse(raw2, [w["group"], cw["group"]])
-    assert [j[0] for j in jobs2] == [3, 4] and [j[0] for j in PQ.workers(cw, jobs2)] == [4]
-    assert [j[0] for j in PQ.workers(w, jobs2)] == [3]
+    assert [j[0] for j in jobs2] == [3, 4] and [j[0] for j in PQ.tasks_of(cw, jobs2)] == [4]
+    assert [j[0] for j in PQ.tasks_of(w, jobs2)] == [3]
     ok("pueue.parse reads several groups; workers matches labels per worker")
 
     home = fixture.tmpdir()
@@ -312,9 +313,10 @@ def main():
         res = SL.start_workers("site-slurm2", [("long", "1", 3, "gpu"), ("normal", "1", 1, "gpu")], fake)
         assert [r["ids"] for r in res] == [[], []] and res[0]["err"] == "QOSMaxSubmitJobPerUserLimit" and len(fake.calls) == 2
         ok("slurm.start_workers: a submit error stops that QOS and moves on to the next")
-        assert not any(hasattr(SL, f) for f in ("plan", "ensure_workers", "jobs", "sbatch_cmd"))
+        assert not any(hasattr(SL, f) for f in ("ensure_workers", "jobs", "sbatch_cmd"))
         assert not any(hasattr(PQ, f) for f in ("ensure_workers", "status"))
-        ok("how many to start is computed by the caller only (relay.topup, refill.topup_plan), never in the adapters")
+        assert "refill.slurm_plan(" in inspect.getsource(SL.plan) and "refill.pueue_plan(" in inspect.getsource(PQ.plan)
+        ok("how many to start is computed only in refill (pueue_plan, slurm_plan); the types' plan reads state and calls it")
     finally:
         P.SLURM.clear()
         P.SLURM.update(old)
