@@ -14,6 +14,7 @@ import ast
 import datetime as dt
 import fnmatch
 import glob
+import importlib
 import json
 import os
 import re
@@ -99,6 +100,36 @@ def _when(x):
         return False
 
 
+def _sched():
+    """Executor types (sites/executors.py); plugins that cannot be merged are reported by check_plugins, so only built-ins here."""
+    X = cfg.executors()
+    try:
+        return list(X.types())
+    except Exception:  # noqa: BLE001
+        return list(X.BUILTIN)
+
+
+def _etype(t):
+    """Executor type t's module (as _sched: only built-ins when plugins cannot be merged); not one → None."""
+    X = cfg.executors()
+    if t not in _sched():
+        return None
+    try:
+        return X.get(t)
+    except Exception:  # noqa: BLE001
+        return importlib.import_module(X.BUILTIN[t])
+
+
+class _Text:
+    """A description computed when shown."""
+
+    def __init__(self, f):
+        self.f = f
+
+    def __str__(self):
+        return self.f()
+
+
 TYPES = {  # type name -> (check, how to write it)
     "str": (lambda v: isinstance(v, str), "a string"),
     "str?": (lambda v: v is None or isinstance(v, str), "a string or None"),
@@ -118,7 +149,7 @@ TYPES = {  # type name -> (check, how to write it)
               "(dir, GB, GB or None) or None"),
     "tunnel": (lambda v: _tup(v) and set(v) <= {"push", "pull"}, "a tuple of push, pull"),
     "roles": (lambda v: _tup(v) and set(v) <= {"hub", "store", "backup"}, "a tuple of hub, store, backup"),
-    "sched?": (lambda v: v in (None, "pueue", "slurm"), "pueue, slurm or None"),
+    "sched?": (lambda v: v is None or v in _sched(), _Text(lambda: f"{', '.join(_sched())} or None")),
     "device": (lambda v: v in ("gpu", "cpu"), "gpu or cpu"),
     "strmap": (lambda v: isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, str) for k, x in v.items()), "{string: string}"),
     "intmap": (lambda v: isinstance(v, dict) and all(isinstance(x, int) and x >= 0 for x in v.values()), "{machine: integer >= 0}"),
@@ -164,7 +195,6 @@ def fields(r, g, where, d, table):
 # ---------------- machine table ----------------
 def check_machines(r):
     M = cfg.mtab()
-    import slurm as SL
     import tunnel as TU
     g = "machines"
     for n, m in M.MACHINES.items():
@@ -209,17 +239,11 @@ def check_machines(r):
             r.bad(g, f"{where}: an executor (scheduler is set) needs root")
         if m.get("root") and not m.get("scheduler") and n not in (st, hub):
             r.bad(g, f"{where}: root is set but scheduler is not (only the store and hub may have just a root)")
-        if m.get("scheduler") == "pueue" and not m.get("workers"):
-            r.bad(g, f"{where}: a pueue executor needs workers")
-        if m.get("scheduler") == "slurm":
-            if not m.get("jobs"):
-                r.bad(g, f"{where}: a slurm executor needs jobs")
-            if m.get("workers"):
-                r.bad(g, f"{where}: a slurm executor does not write workers (it submits jobs from jobs)")
-            if m.get("job_names") is not None and m["job_names"] not in SL.STYLES:
-                r.bad(g, f"{where}: job_names {m['job_names']!r} is not in slurm.STYLES ({sorted(SL.STYLES)})")
-        if m.get("scheduler") != "pueue" and m.get("workers"):
-            r.bad(g, f"{where}: only a pueue executor writes workers")
+        t = _etype(m.get("scheduler"))
+        for p in t.check(n, m) if t else ():
+            r.bad(g, f"{where}: {p}")
+        if not getattr(t, "RESIDENT", False) and m.get("workers"):
+            r.bad(g, f"{where}: only a {' or '.join(x for x in _sched() if getattr(_etype(x), 'RESIDENT', False))} executor writes workers")
         if M.is_exec(n):
             ws = M.workers(n)
             ids = [w["name"] for w in ws]
@@ -421,6 +445,29 @@ def check_labels(r):
             r.bad(g, f"PLAN_TITLES() in the labels plugin must return {{number: title}} (all strings), got {type(got).__name__}")
 
 
+def check_executors(r):
+    """The executors plugin: merges with the built-in types, and every type provides the interface (sites/executors.py)."""
+    g = "plugins"
+    X = cfg.executors()
+    try:
+        ts = X.types()
+        r.checked(g)
+    except Exception as e:  # noqa: BLE001
+        r.bad(g, f"merging the executors plugin into the core failed: {e}")
+        return
+    for t in ts:
+        if t in X.BUILTIN:
+            continue
+        r.checked(g)
+        try:
+            lack = X.missing(X.get(t))
+        except Exception as e:  # noqa: BLE001
+            r.bad(g, f"executor type {t} from the executors plugin cannot be loaded: {type(e).__name__}: {e}")
+            continue
+        if lack:
+            r.bad(g, f"executor type {t} from the executors plugin lacks {', '.join(lack)} (sites/executors.py)")
+
+
 def check_plugins(r):
     g = "plugins"
     core = core_modules() - {"taskq_api"}
@@ -438,6 +485,7 @@ def check_plugins(r):
         r.checked(g, 2)
     except Exception as e:  # noqa: BLE001
         r.bad(g, f"merging plugins into the core failed: {e}")
+    check_executors(r)
     for d in cfg.plugin_dirs():
         for p in sorted(glob.glob(os.path.join(d, "*.py")) + glob.glob(os.path.join(d, "*", "*.py"))):
             if "/tests/" in p or os.path.basename(p).startswith("test_"):

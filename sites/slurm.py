@@ -1,11 +1,12 @@
-"""The Slurm adapter (machines with scheduler="slurm"): read job counts per QOS, share slots, submit worker jobs.
-Like pueue.py, the caller decides how many to submit (refill.py topup_plan) and start_workers submits them; it submits
+"""The Slurm executor type (machines with scheduler="slurm"; interface in executors.py): read job counts per QOS, share slots,
+submit worker jobs. plan decides how many to submit (refill.py slurm_plan) and start_workers submits them; it submits
 the core's queue/worker.sbatch (GPU) and cpu_worker.sbatch (CPU), with partition, cards, cpus, memory (the table's jobs),
 QOS, time limit (policy.py SLURM), logs, TASKQ_ROOT and TASKQ_MACHINE on the command line; worker_start.sh is found
 through code/current when the job starts, so it uses that bundle. run: fn(command) → (exit code, output)."""
 import os
 import secrets
 import shlex
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "queue"))
@@ -16,7 +17,9 @@ import policy as P  # noqa: E402
 import proto  # noqa: E402
 import mtab as M  # noqa: E402
 import remote as R  # noqa: E402
+from proto import alert  # noqa: E402
 
+RESIDENT = False
 SUBMIT_CAP = 10  # used when a QOS's submit limit is unreadable
 FILES = {"gpu": "worker.sbatch", "cpu": "cpu_worker.sbatch"}  # worker kind → sbatch file; workers are told apart by squeue's %o (the submitted script)
 
@@ -45,6 +48,39 @@ STYLES = {
 def jobname(style=None):
     """A random job name, by style (a STYLES key; none → pair)."""
     return STYLES[style or "pair"]()
+
+
+def check(name, m):
+    out = [] if m.get("jobs") else ["a slurm executor needs jobs"]
+    if m.get("workers"):
+        out.append("a slurm executor does not write workers (it submits jobs from jobs)")
+    if m.get("job_names") is not None and m["job_names"] not in STYLES:
+        out.append(f"job_names {m['job_names']!r} is not in slurm.STYLES ({sorted(STYLES)})")
+    return out
+
+
+def workers(name, m):
+    """One per jobs entry (name and kind are the jobs keys, no pueue group)."""
+    return [dict(name=k, id=f"{name}-{k}", kind=k, group=None, gpu=None, cpus=o.get("cpus"), slots=o.get("slots") or 1,
+                 hours=(), idle=None, wait=None) for k, o in (m["jobs"] or {}).items()]
+
+
+def groups(name, ws):
+    return {}
+
+
+def status_args(name):
+    return {}
+
+
+def read_status(A):
+    q = subprocess.run(["squeue", "-u", os.environ.get("USER", ""), "-h", "-o", "%i|%j|%T|%M|%q|%R"], capture_output=True, text=True, timeout=60)
+    return q.stdout if q.returncode == 0 else None
+
+
+def parse_status(name, raw):
+    """→ squeue: our jobs (squeue)."""
+    return dict(squeue=squeue(raw))
 
 
 def kind_of(command):
@@ -113,6 +149,44 @@ def distribute(qos, counts, room, kind):
     return out
 
 
+def plan(name, rs, run):
+    """Kinds this machine can run from policy.py SLURM, submitted by refill.slurm_plan → subs [(QOS, time limit, count, kind)]."""
+    import refill
+    conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
+    if not conf_:
+        return [], "not in policy.py SLURM", {}
+    st = status(name, run)
+    if st is None:
+        return [], "cannot read job counts", {}
+    return refill.slurm_plan(rs["taskq"], st, conf_) + ({},)
+
+
+def describe(sub):
+    return f"submit {sub[2]} {R.wname(sub[3])} to {sub[0]}"
+
+
+def bundles(cur, live):
+    """A running worker keeps the bundle it started with until it claims a new task: current plus live."""
+    return [cur] + list(live or ())
+
+
+def env_launch(name, m, minutes):
+    """The entry's env_job (else transfer_job; minutes is added when it has no time limit) in a CPU-partition srun (queue and
+    wait, no -I: giving up and resubmitting resets the wait time and schedules worse)."""
+    job = m.get("env_job") or m.get("transfer_job")
+    if not job:
+        raise ValueError(f"{name}'s entry has no env_job (the CPU partition's srun options)")
+    args = shlex.split(job)
+    if any(a in ("--gres", "-G") or a.startswith(("--gres=", "--gpus", "-G")) or "gpu" in a.lower() for a in args):
+        raise ValueError(f"{name}'s env_job asks for a GPU: {job}")
+    timed = any(a in ("-t", "--time") or a.startswith("--time=") for a in args)
+    return f"srun {job}" + ("" if timed else f" -t {minutes}")
+
+
+def worker_cmd(name, w):
+    return None
+
+
 def submit_cmd(name, qos, time_, kind):
     """The command that submits one kind (gpu / cpu) worker job (run over there). A leading ~ in the root is left for
     the other side to expand (assigned to R first)."""
@@ -141,3 +215,14 @@ def start_workers(name, subs, run):
             ids.append(out.strip().splitlines()[-1])
         res.append(dict(qos=q, time=t, n=n, kind=k, ids=ids, err=err))
     return res
+
+
+def start(name, subs, run):
+    L, msgs, stuck = M.machine(name)["label"], [], {}
+    for r in start_workers(name, subs, run):
+        k = r["kind"]
+        if r["err"] is not None:
+            stuck[R.kkey("topup", name, r["qos"], wkind=k)] = alert(f"failed to submit more {R.wname(k)} jobs to {L} {r['qos']}: {r['err']}", qos=r["qos"], kind=k)
+        if r["ids"]:
+            msgs.append(f"{L} {r['qos']} submitted {len(r['ids'])} {R.wname(k)} jobs {', '.join(r['ids'])} (each {r['time']})")
+    return msgs, stuck

@@ -3,8 +3,8 @@
 queue/schema.py), and this module says how to use it. Core code imports mtab as M, never machines directly.
 
 Roles: hub (hub queue, health checks, no tasks), store (data dir, operated through site_ops.py), backup (archives),
-executor (has root and scheduler: pueue workers or Slurm jobs). Worker names (gpu<card>, cpu), ids
-(<machine>-<name>) and pueue groups are computed here.
+executor (has root and scheduler, an executor type in sites/executors.py: pueue workers or Slurm jobs). Worker names
+(gpu<card>, cpu), ids (<machine>-<name>) and pueue groups come from the executor type.
 
 Commands:
   mtab.py whoami                 this machine's name (exit 1 when unrecognised)
@@ -96,7 +96,7 @@ def executors():
 
 
 def names(kind=None):
-    """Machine names: kind is a role (hub, store, backup), exec (executors) or a scheduler (pueue, slurm); None = all."""
+    """Machine names: kind is a role (hub, store, backup), exec (executors) or an executor type (scheduler); None = all."""
     if kind == "exec":
         return executors()
     return [n for n in MACHINES if kind is None or kind in roles(n) or kind == MACHINES[n].get("scheduler")]
@@ -120,27 +120,13 @@ def local(name):
 # ---------------- workers ----------------
 
 def workers(name, kind=None):
-    """This machine's workers (ordered): [dict(name, id, kind, group, gpu, cpus, slots, hours, idle, wait)].
-    pueue: one per workers entry, named gpu<card> or cpu (cpu<n> when there are several CPU workers), with a pueue
-    group of the same name; slurm: one per jobs entry (name and kind are the jobs keys, no pueue group)."""
+    """This machine's workers (ordered): [dict(name, id, kind, group, gpu, cpus, slots, hours, idle, wait)], as its executor
+    type gives them (sites/executors.py; pueue: one per workers entry with a pueue group of the same name; slurm: one per
+    jobs entry); not an executor → []."""
+    import executors as X
     m = machine(name)
-    out = []
-    if m.get("scheduler") == "slurm":
-        for k, o in (m["jobs"] or {}).items():
-            out.append(dict(name=k, id=f"{name}-{k}", kind=k, group=None, gpu=None, cpus=o.get("cpus"),
-                            slots=o.get("slots") or 1, hours=(), idle=None, wait=None))
-    elif m.get("scheduler") == "pueue":
-        ws = m["workers"] or ()
-        ncpu = sum(1 for w in ws if w.get("gpu") is None)
-        icpu = 0
-        for w in ws:
-            w = schema.defaults(schema.WORKER_FIELDS, w)
-            if w["gpu"] is not None:
-                wn = "gpu" + str(w["gpu"]).replace(",", "")
-            else:
-                icpu += 1
-                wn = "cpu" if ncpu == 1 else f"cpu{icpu}"
-            out.append(dict(w, name=wn, id=f"{name}-{wn}", kind="gpu" if w["gpu"] is not None else "cpu", group=wn))
+    t = X.get(m.get("scheduler"))
+    out = t.workers(name, m) if t else []
     return [w for w in out if kind is None or w["kind"] == kind]
 
 
@@ -167,15 +153,14 @@ def worker_env(w):
 
 
 def groups(name):
-    """This machine's pueue groups {group: (parallel, gpu, {env})}: one per pueue worker (one worker at a time), plus
-    the core's own group on pueue machines, the hub and the store (proto.IO_GROUP: transfers, fetches, archives), plus
-    manual_groups."""
+    """This machine's pueue groups {group: (parallel, gpu, {env})}: those of its executor type (pueue: one per worker, one
+    worker at a time, plus the core's own group proto.IO_GROUP: transfers, fetches, archives), the core's own group on the
+    hub and the store, plus manual_groups."""
+    import executors as X
     m = machine(name)
-    out = {}
-    for w in workers(name):
-        if w["group"]:
-            out[w["group"]] = (1, w["gpu"], {})
-    if m.get("scheduler") == "pueue" or {"hub", "store"} & set(roles(name)):
+    t = X.get(m.get("scheduler"))
+    out = dict(t.groups(name, workers(name))) if t else {}
+    if {"hub", "store"} & set(roles(name)):
         out[proto.IO_GROUP] = (0, None, {})
     out.update(m["manual_groups"] or {})
     return out

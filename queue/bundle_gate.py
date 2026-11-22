@@ -2,9 +2,9 @@
 """Bundle gate: before sending a task spec to an executor, run what the executor does with the spec (CMDS) on this machine
 using the bundle in use there (the same-named one under relay_bundle.OUT on the hub). If it fails, do not send it: the task is
 recorded as held (proto.HELD["bundle"]) and bundlegate is reported.
-Bundles in use: the one code/current points at there, plus those of running Slurm workers (consume.py switches to current only
-when claiming a new task and uses its start bundle until then; a worker touches its bundle on every heartbeat, and one touched
-within STALE_BEAT counts as in use). A pueue worker stops claiming new tasks when its code changes, so only current counts.
+Bundles in use (the executor type's bundles): the one code/current points at there, plus those of running Slurm workers (consume.py
+switches to current only when claiming a new task and uses its start bundle until then; a worker touches its bundle on every heartbeat,
+and one touched within STALE_BEAT counts as in use). A pueue worker stops claiming new tasks when its code changes, so only current counts.
 Unknown bundle, no such bundle on the hub, or timeout -> allow. Results are cached in-process by (bundle name, spec hash).
 Recorded in relay state held (<name> -> {key: dict(why, bundle, err, since)}), rechecked after the bundle in use changes.
 
@@ -27,6 +27,7 @@ import relay_remote as RM  # noqa: E402
 import relay_store as ST  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "sites"))
 import remote as R  # noqa: E402
+import executors as EX  # noqa: E402
 
 TIMEOUT = 10  # max seconds per command; timeout allows
 # what an executor does with a sent spec: run_task.sh and the worker (consume.py) call spec.py shell / done with it (taskq.py add --spec-stdin parses like shell)
@@ -86,8 +87,8 @@ def check(spec, bid, out=None):
 
 
 def in_use(name, cur, live=()):
-    """Bundles on this machine that must run the spec: current, plus running workers' (live) on Slurm."""
-    ids = [cur] + (list(live or ()) if RM.conf(name)["scheduler"] == "slurm" else [])
+    """Bundles on this machine that must run the spec, as its executor type says: current, plus running workers' (live) on Slurm."""
+    ids = EX.of(name).bundles(cur, live)
     return list(dict.fromkeys(x for x in ids if x))
 
 

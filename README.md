@@ -227,7 +227,8 @@ and `bin/taskq` mean the full suite):
 | `queue/db.py`, `queue/events.py`, `queue/tasklog.py`, `queue/hubstate.py` | `test_db.py`, `test_tasklog.py`, `test_common.py`, `test_relay.py` |
 | `queue/cli_json.py` | `test_cli_json.py` |
 | `queue/migrate.py` | `test_migrate.py` |
-| `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_bundle_paths.py`, `test_e2e.py` (the Slurm chain) |
+| `sites/executors.py` | `test_executors.py`, `test_adapters.py` |
+| `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_executors.py`, `test_bundle_paths.py`, `test_e2e.py` (the Slurm chain) |
 | `sites/envs.py`, `sites/envs_cli.py` | `test_envs.py` |
 | `sites/machine_name.py` | `test_adapters.py`, `test_relay.py`, `test_db.py` |
 | `sites/envlock.py` | `test_envlock.py` |

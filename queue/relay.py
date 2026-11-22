@@ -44,8 +44,7 @@ import common as C  # noqa: E402
 import taskq  # noqa: E402
 import refill  # noqa: E402
 import remote as R  # noqa: E402
-import pueue as PQ  # noqa: E402
-import slurm as SL  # noqa: E402
+import executors as EX  # noqa: E402
 import relay_plugins as RN  # noqa: E402
 import relay_bundle as RB  # noqa: E402
 import relay_remote as RM  # noqa: E402
@@ -88,7 +87,7 @@ def remote_status(name):
     if RM.master_down(c):
         return None
     try:
-        rs = RM.op(name, "status", dict(sched=c["scheduler"], pueue=c.get("pueue"), cap=c.get("cap"), blob_cap=c.get("blob_cap"), env_root=M.env_root(name),
+        rs = RM.op(name, "status", dict(sched=c["scheduler"], **EX.of(name).status_args(name), cap=c.get("cap"), blob_cap=c.get("blob_cap"), env_root=M.env_root(name),
                                              envs=sorted(EV.wanted(name, envs_switch(name)[1]))), timeout=proto.SITE_STATUS_TIMEOUT)
     except RuntimeError:
         return None
@@ -107,15 +106,13 @@ def current_bundle(name):
 
 
 def parse_sched(name, rs):
-    """Raw scheduler output read back by the status script → rs["jobs"] (pueue: tasks in each worker's group) or rs["squeue"]
-    (Slurm); cannot read → None. One ssh reads everything, and the hub parses it with the adapters (sites/pueue.py, slurm.py):
-    each machine is contacted once per check, so the state is from one moment."""
-    raw, c = rs.pop("sched_raw", None), RM.conf(name)
+    """Raw scheduler output read back by the status script → fields its executor type parses it into (sites/executors.py:
+    pueue rs["jobs"], the tasks in each worker's group; Slurm rs["squeue"]); cannot read → None. One ssh reads everything, and
+    the hub parses it: each machine is contacted once per check, so the state is from one moment."""
+    raw = rs.pop("sched_raw", None)
     rs["jobs"] = rs["squeue"] = None
-    if raw is not None and c["scheduler"] == "pueue":
-        rs["jobs"] = PQ.parse(raw, [w["group"] for w in M.workers(name)])
-    elif raw is not None:
-        rs["squeue"] = SL.squeue(raw)
+    if raw is not None:
+        rs.update(EX.of(name).parse_status(name, raw))
     return rs
 
 
@@ -630,56 +627,11 @@ def assign(s, ctxs, stuck=None, notes=None):
     return out, why
 
 
-def kname(kind):
-    return "" if kind == "gpu" else f"{kind.upper()} "
-
-
-def wname(kind):
-    return f"{kname(kind)}worker"
-
-
-def kkey(kind, *args, wkind="gpu"):
-    """Problem id: unchanged for GPU, other kinds get :<kind> appended."""
-    return alert_id(kind, *args, None if wkind == "gpu" else wkind)
-
-
-def sub_kind(x):
-    """One topup result → its kind."""
-    return x[1]["kind"] if x[0] == "pueue" else x[3]
-
-
 def topup(name, rs, run=None):
-    """→ (workers to start, why none, previous jobs that failed). How many is computed only here; adapters just read state
-    and start them:
-    pueue machines: start each machines.py worker when it is inside its hours window, none is alive, the previous one did not
-    fail, and there is a staged unclaimed task of its kind → ("pueue", worker); failed: [(worker id, pueue task id, state)];
-    Slurm machines: kinds this machine can run from policy.py SLURM, submitted by refill.slurm_plan → (QOS, time limit, count, sbatch file).
-    run: fn(name, command) → (exit code, output, error), replaced in tests."""
-    if RM.conf(name)["scheduler"] == "pueue":
-        if rs.get("jobs") is None:
-            return [], "cannot read pueue", []
-        subs, why, failed = [], [], []
-        for w in M.workers(name):
-            mine = PQ.workers(w, rs["jobs"])
-            if any(j[2] != "Done" for j in mine):
-                why.append(f"{w['id']} is running")
-            elif mine and mine[-1][3] not in ("Success", "Killed"):
-                failed.append((w["id"], mine[-1][0], mine[-1][3]))
-                why.append(f"previous {w['id']} (pueue task {mine[-1][0]}) failed ({mine[-1][3]})")
-            elif not M.working(name, w):
-                why.append(f"{w['id']} is outside its hours window")
-            elif not refill.unclaimed(rs["taskq"], w["kind"]):
-                why.append(f"no staged unclaimed {kname(w['kind'])}task over there for {w['id']}")  # an idle worker exits after 30 minutes; start one when work appears
-            else:
-                subs.append(("pueue", w))
-        return subs, "; ".join(why), failed
-    conf_ = {k: v for k, v in (P.SLURM.get(name) or {}).items() if k in M.kinds(name)}
-    if not conf_:
-        return [], "not in policy.py SLURM", []
-    st = SL.status(name, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
-    if st is None:
-        return [], "cannot read job counts", []
-    return refill.slurm_plan(rs["taskq"], st, conf_) + ([],)
+    """→ (workers to start, why none, {problem id: alert} for previous workers that failed), decided by the machine's executor
+    type (sites/executors.py plan; pueue: each worker in the table, Slurm: refill.slurm_plan); adapters just read state and
+    start them. run: fn(name, command) → (exit code, output, error), replaced in tests."""
+    return EX.of(name).plan(name, rs, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
 
 
 def label(op, key):
@@ -829,27 +781,11 @@ def execute(name, acts, s, run_add=None, stuck=None):
 
 
 def submit(name, subs):
-    """Start workers as topup decided (sites/pueue.py, slurm.py) → (messages, failures {problem id: text})."""
-    L, msgs, stuck = RM.conf(name)["label"], [], {}
-
+    """Start workers as topup decided (the executor type's start) → (messages, failures {problem id: text})."""
     def run(c):
         r = RM.rsh(name, c)
         return r[0], r[1] + r[2]
-    if RM.conf(name)["scheduler"] == "pueue":
-        for _, w in subs:
-            ok, out = PQ.start_worker(name, run, w)
-            if ok:
-                msgs.append(f"{L} started {w['id']} ({out[-80:]})")
-            else:
-                stuck[alert_id("site", name, "worker", w["id"])] = alert(f"failed to start {w['id']} on {L}: {out}", worker=w["id"], start=True)
-        return msgs, stuck
-    for r in SL.start_workers(name, subs, run):
-        k = r["kind"]
-        if r["err"] is not None:
-            stuck[kkey("topup", name, r["qos"], wkind=k)] = alert(f"failed to submit more {wname(k)} jobs to {L} {r['qos']}: {r['err']}", qos=r["qos"], kind=k)
-        if r["ids"]:
-            msgs.append(f"{L} {r['qos']} submitted {len(r['ids'])} {wname(k)} jobs {', '.join(r['ids'])} (each {r['time']})")
-    return msgs, stuck
+    return EX.of(name).start(name, subs, run)
 
 
 def site_view(name, rs, st):
@@ -1025,13 +961,11 @@ def finish(s, name, c, more, why, snotes, dry):
     L, rs, acts, stuck, notes = RM.conf(name)["label"], c["rs"], c["acts"], c["stuck"], c["notes"]
     if snotes and not dry and C.changed(f"smoke_{name}", snotes):
         log(snotes, name)
-    subs, swhy, failed = (topup(name, rs) if rs is not None else ([], "unreachable", []))
-    for wid, tid, state in failed:
-        stuck[alert_id("site", name, "worker", wid)] = alert(f"{L} previous {wid} (pueue task {tid}) failed ({state}); check the pueue log over there, then pueue remove that task to retry next check",
-                                                               worker=wid, start=False)
+    subs, swhy, failed = (topup(name, rs) if rs is not None else ([], "unreachable", {}))
+    stuck.update(failed)
     todo = [a for a in acts if a["op"] != "beat"]
     desc = ", ".join(f"{a['op']} {a['key']}" for a in todo + more)
-    sdesc = ", ".join(f"start {x[1]['id']}" if x[0] == "pueue" else f"submit {x[2]} {wname(sub_kind(x))} to {x[0]}" for x in subs)
+    sdesc = ", ".join(EX.of(name).describe(x) for x in subs)
     if dry:
         return [f"{L}: would {desc}" if desc else f"{L}: nothing to do ({why})",
                 f"{L}: would {sdesc}" if sdesc else f"{L}: submitting no jobs ({swhy})"] + notes, stuck

@@ -151,11 +151,11 @@ def test_pueue_worker():
     g1, g0, cw = M.workers("site-pueue")
     assert (g1["id"], g0["id"], cw["id"], cw["kind"]) == ("site-pueue-gpu1", "site-pueue-gpu0", "site-pueue-cpu", "cpu"), (g1, g0, cw)
     lab = lambda w: proto.WORKER_LABEL + w["id"]  # noqa: E731
-    ids = lambda subs: [w["id"] for _, w in subs]  # noqa: E731
+    ids = lambda subs: [w["id"] for w in subs]  # noqa: E731
     ready = dict(tasks=[dict(key="a/x/0", state="free"), dict(key="a/x/1", state="claimed")])
     none = dict(tasks=[dict(key="a/x/1", state="claimed")])
     nocpu = f"no staged unclaimed CPU task over there for {cw['id']}"
-    assert relay.topup("site-pueue", dict(jobs=None, taskq=ready)) == ([], "cannot read pueue", [])
+    assert relay.topup("site-pueue", dict(jobs=None, taskq=ready)) == ([], "cannot read pueue", {})
     subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=ready))
     assert ids(subs) == [g1["id"], g0["id"]] and why == nocpu, (subs, why)
     subs, why, _ = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Running", None]], taskq=ready))
@@ -164,11 +164,12 @@ def test_pueue_worker():
     assert ids(subs) == [g1["id"], g0["id"]], (subs, why)
     subs, why, failed = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "{'Failed': 1}"]], taskq=ready))
     assert ids(subs) == [g0["id"]] and why.startswith(f"previous {g1['id']} (pueue task 3) failed ({{'Failed': 1}})")
-    assert failed == [(g1["id"], 3, "{'Failed': 1}")], failed
+    assert list(failed) == [f"site:site-pueue:worker:{g1['id']}"] and failed[f"site:site-pueue:worker:{g1['id']}"]["data"] == dict(worker=g1["id"], start=False) \
+        and "(pueue task 3) failed ({'Failed': 1}); check the pueue log" in failed[f"site:site-pueue:worker:{g1['id']}"]["msg"], failed
     ok("pueue executor (site-pueue): each worker in the machine table is judged separately; start one only when none is alive, and not after the previous one failed")
     gpu_none = "; ".join(f"no staged unclaimed task over there for {w['id']}" for w in (g1, g0))
-    assert relay.topup("site-pueue", dict(jobs=[], taskq=none)) == ([], f"{gpu_none}; {nocpu}", [])
-    assert relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Success"]], taskq=none)) == ([], f"{gpu_none}; {nocpu}", [])
+    assert relay.topup("site-pueue", dict(jobs=[], taskq=none)) == ([], f"{gpu_none}; {nocpu}", {})
+    assert relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Success"]], taskq=none)) == ([], f"{gpu_none}; {nocpu}", {})
     ok("pueue executor: no worker is started without such a staged task (an idle exit is not a failure), and one starts when work appears")
     cpu = dict(tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu")), dict(key="a/x/1", state="claimed")])
     subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=cpu))
@@ -192,7 +193,7 @@ def test_slurm_topup_ready():
     assert subs == [] and "full" in why
     subs, why, _ = relay.topup(NAME, dict(taskq=dict(enabled=True, tasks=[])), run=probe(f"QOS|{q}|10|0|0\n"))
     assert subs == [] and "no GPU tasks in the queue" in why
-    assert relay.topup(NAME, dict(taskq=two), run=lambda n, c: (1, "", "ssh down")) == ([], "cannot read job counts", [])
+    assert relay.topup(NAME, dict(taskq=two), run=lambda n, c: (1, "", "ssh down")) == ([], "cannot read job counts", {})
     ok("Slurm executor (site-slurm2): with tasks, fill the quota (to build queue time); submit nothing when full, without tasks, or when job counts cannot be read")
     cpu = dict(enabled=True, tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu"))])
     subs, why, _ = relay.topup(NAME, dict(taskq=cpu), run=probe(f"QOS|{q}|10|0|0\n"))
@@ -208,7 +209,7 @@ def test_slurm_topup_ready():
         assert subs == [] and "CPU" not in why, (subs, why)
     with pdict(relay.P.SLURM):
         relay.P.SLURM.pop(NAME)
-        assert relay.topup(NAME, dict(taskq=two), run=probe("")) == ([], "not in policy.py SLURM", [])
+        assert relay.topup(NAME, dict(taskq=two), run=probe("")) == ([], "not in policy.py SLURM", {})
     ok("Slurm executor: one with cpu in jobs (site-slurm) submits CPU workers for pure CPU tasks; one without (site-slurm2) does not even with cpu in SLURM; "
        "a machine not in SLURM submits nothing")
 
@@ -762,7 +763,7 @@ def test_log_site():
     import events
     seen, asked = [], []
     with patched(events, lines=lambda src, msgs, **kw: seen.append((src, msgs, kw))), \
-            patched(relay, topup=lambda n, rs: ([], "", []), execute=lambda *a, **k: [], submit=lambda n, subs: (["submitted"], {})):
+            patched(relay, topup=lambda n, rs: ([], "", {}), execute=lambda *a, **k: [], submit=lambda n, subs: (["submitted"], {})):
         relay.finish({}, NAME, dict(rs={}, acts=[], stuck={}, notes=["a note"]), [], "", [], False)
     assert seen == [("relay", ["a note", "submitted"], {"site": NAME})], seen
     ok("a machine's relay lines go to the event log with its key in the site field")
@@ -807,9 +808,9 @@ def test_tilde_root():
     with mpatch(NAME, root="~/st/t 123"), mpatch("site-pueue", root="~/pq"):
         p = RM.prefix(NAME)
         assert p == f"cd ~/'st/t 123'/code/current && TASKQ_ROOT=~/'st/t 123' TASKQ_MACHINE={NAME}", p
-        c = relay.SL.submit_cmd(NAME, "long", "1:00:00", "gpu")
+        c = relay.EX.get("slurm").submit_cmd(NAME, "long", "1:00:00", "gpu")
         assert c.startswith("R=~/'st/t 123'; ") and '"~' not in c and '--chdir="$R"' in c, c
-        w = relay.PQ.worker_cmd("site-pueue", M.workers("site-pueue")[0])
+        w = relay.EX.get("pueue").worker_cmd("site-pueue", M.workers("site-pueue")[0])
         assert "R=~/pq;" in w and '"~' not in w, w
         assert RM.root(NAME) == "~/st/t 123"
     ok("root ~/...: the ~ is unquoted in commands (expanded remotely), including job submission and worker start commands")
@@ -837,11 +838,11 @@ def test_adapters_in_relay():
             and "CPU worker" in msgs[0], (seen, msgs)
         seen.clear()
         cw = M.workers("site-pueue")[2]
-        msgs, stuck = relay.submit("site-pueue", [("pueue", g1), ("pueue", cw)])
+        msgs, stuck = relay.submit("site-pueue", [g1, cw])
         assert not stuck and len(seen) == 2 and f" add -g {g1['group']} -l {lab(g1)} -- " in seen[0][1] \
             and f" add -g {cw['group']} -l {lab(cw)} -- " in seen[1][1], seen
     with patched(RM, rsh=lambda name, cmd, input=None, timeout=300: (1, "boom", "")):
-        _, stuck = relay.submit("site-pueue", [("pueue", g1), ("pueue", cw)])
+        _, stuck = relay.submit("site-pueue", [g1, cw])
         assert list(stuck) == [f"site:site-pueue:worker:{g1['id']}", f"site:site-pueue:worker:{cw['id']}"], stuck
         _, stuck = relay.submit(NAME, [("long", "1:00:00", 1, "gpu")])
         assert list(stuck) == [f"topup:{NAME}:long"], stuck

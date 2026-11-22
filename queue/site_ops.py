@@ -372,19 +372,22 @@ def env_states(R, A):
     return oks, st
 
 
+def executor_type(t):
+    """Executor type t's module (sites/executors.py; it reads config and plugins, so only status loads it)."""
+    if core_path("sites") not in sys.path:
+        sys.path.insert(0, core_path("sites"))
+    import executors
+    return executors.get(t)
+
+
 def op_status(A):
-    """A: sched (pueue / slurm), pueue, cap, blob_cap, env_root, envs."""
+    """A: sched (the executor type), its status_args, cap, blob_cap, env_root, envs."""
     R = root()
     st = local_status()
     sp = [{k: t["spec"].get(k) for k in proto.COLLECT_FIELDS} for t in st["tasks"] if t.get("spec")]
     col = versioned(["spec.py", "collect", "--json"], json.dumps(dict(specs=sp, root=sub(R, "data"), wait=None)))
     try:
-        if A.get("sched") == "pueue":
-            q = subprocess.run([os.path.expanduser(A["pueue"]), "status", "--json"], capture_output=True, text=True, timeout=60)
-        else:
-            q = subprocess.run(["squeue", "-u", os.environ.get("USER", ""), "-h", "-o", "%i|%j|%T|%M|%q|%R"],
-                               capture_output=True, text=True, timeout=60)
-        raw = q.stdout if q.returncode == 0 else None
+        raw = executor_type(A.get("sched")).read_status(A)
     except Exception:
         raw = None
     oks, envs_st = env_states(R, A)

@@ -303,20 +303,16 @@ def online_lines(env, sp, v):
 def runner(name):
     """→ (the command to run on that machine, ssh name (None = this machine)). The command saves stdin to a temp file in
     the state dir before running it (conda and pip in the build must not read the rest of the script), and runs on the
-    CPU only: Slurm uses the entry's env_job (else transfer_job; BUILD_MIN is added when it has no time limit) in a
-    CPU-partition srun (queue and wait, no -I); anything else uses nice, sees no GPUs and stops after BUILD_MIN minutes."""
+    CPU only: the executor type's env_launch (Slurm: the entry's env_job in a CPU-partition srun that queues and waits; the hub
+    waits at most BUILD_TIMEOUT); anything else uses nice, sees no GPUs and stops after BUILD_MIN minutes."""
+    import executors as EX
     m = M.machine(name)
-    if m["scheduler"] == "slurm":
-        job = m.get("env_job") or m.get("transfer_job")
-        if not job:
-            raise EnvError(f"{name}'s entry has no env_job (the CPU partition's srun options)")
-        args = shlex.split(job)
-        if any(a in ("--gres", "-G") or a.startswith(("--gres=", "--gpus", "-G")) or "gpu" in a.lower() for a in args):
-            raise EnvError(f"{name}'s env_job asks for a GPU: {job}")
-        timed = any(a in ("-t", "--time") or a.startswith("--time=") for a in args)
-        # keep waiting in the queue (no -I: giving up and resubmitting resets the wait time and schedules worse); the hub waits at most BUILD_TIMEOUT
-        launch = f"srun {job}" + ("" if timed else f" -t {BUILD_MIN}")
-    else:
+    t = EX.of(name)
+    try:
+        launch = t.env_launch(name, m, BUILD_MIN) if t else None
+    except ValueError as e:
+        raise EnvError(str(e)) from None
+    if launch is None:
         launch = f"timeout -k 60 {BUILD_MIN}m nice -n 10 env CUDA_VISIBLE_DEVICES="
     sd = sh_path(state_dir(m))
     cmd = (f'mkdir -p {sd} && f=$(mktemp {sd}/.build.XXXXXX) && cat > "$f" && {{ {launch} bash "$f" < /dev/null; rc=$?; '
