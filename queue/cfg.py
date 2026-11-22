@@ -217,7 +217,7 @@ def bundle_root():
 def machine_state(*parts):
     """A path in this machine's own state dir, for files of the machine rather than of a process (boot log, GPU usage
     records): TASKQ_STATE / TASKQ_ROOT when set (as state()), else the state/ of the root whose bundle this core runs from
-    (cron and boot start these without TASKQ_ROOT; the hostname need not match the table), else of the root the machine
+    (the clock and boot start these without TASKQ_ROOT; the hostname need not match the table), else of the root the machine
     table gives this machine, else the state dir."""
     if not os.environ.get("TASKQ_STATE") and not os.environ.get("TASKQ_ROOT"):
         r = bundle_root()
@@ -234,7 +234,7 @@ def machine_state(*parts):
 
 
 def boot_log():
-    """This machine's @reboot output (setup.sh's crontab line; the health check reads its last line): OUTPUTS["logs"] dir >
+    """This machine's @reboot output (setup.sh's agent clock entry; the health check reads its last line): OUTPUTS["logs"] dir >
     logs/ in this machine's own state dir (machine_state)."""
     P = _proto()
     d = outputs("logs")

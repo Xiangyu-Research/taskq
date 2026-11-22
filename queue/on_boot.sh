@@ -1,5 +1,5 @@
 #!/bin/bash
-# After boot (crontab's @reboot, written by queue/setup.sh): start the pueue daemon and put tasks interrupted by the reboot back in
+# After boot (the agent clock's @reboot entry, written by queue/setup.sh): start the pueue daemon and put tasks interrupted by the reboot back in
 # place. With --gpu-log (machines with gpu_log in the machine table; setup.sh adds it) also start GPU usage records
 # (monitor/gpu_log.sh).
 #   on_boot.sh [--gpu-log]   without it, uses this machine's table entry
@@ -8,7 +8,7 @@
 #                            then) are started if paused now, others untouched
 #   interrupted tasks: ended between 15 minutes before boot (or --since) and now, without success (killed training / inference etc.).
 #   Training resumes from its checkpoint; inference skips work already done.
-# The crontab redirects output to cfg.boot_log (logs/on_boot.log in this machine's own state dir); the hub's health check pushes a
+# The clock entry redirects output to cfg.boot_log (logs/on_boot.log in this machine's own state dir); the hub's health check pushes a
 # notice when it sees a reboot.
 set -u
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root; the user repo root REPO (TASKQ_REPO, else as in cfg.py)

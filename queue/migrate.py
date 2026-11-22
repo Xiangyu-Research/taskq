@@ -10,7 +10,7 @@ MIN_FORMAT are deleted once every place is past them; state that old is refused 
 Without --apply (or with --list) it only lists: each place's format (roots read over ssh), the steps each still needs and
 what the hub's steps would change. Nothing is written anywhere: no bundle built or pushed, no lock taken, no database opened
 for writing. With --apply:
-  1. hold the health check's round lock (no round runs meanwhile; cron should be stopped anyway);
+  1. hold the health check's round lock (no round runs meanwhile; the hub's clock should be stopped anyway);
   2. snapshot the hub queue dir, the hub database and the stamp into <state dir>/snapshots/<time>-format<N>/ (the newest
      proto.SNAPSHOT_KEEP stay);
   3. each root behind: push the new bundle beside the one in use and run `migrate.py root` from it there (relay_remote.op):
@@ -22,8 +22,8 @@ cannot be done, stops the run with nothing changed. A run stopped later leaves e
 it again to continue. Run again after a full run, it does nothing.
 
 Until a place is stamped with this code's format, hub rounds refuse to run (taskq tick) and workers of this code claim
-nothing there (common.format_problem); workers of older bundles never read the stamp. Cutover: stop cron, push the code,
-(switch executors with taskq site bundle, or let this do it), taskq self migrate --apply, start cron.
+nothing there (common.format_problem); workers of older bundles never read the stamp. Cutover: stop the hub's clock, push the code,
+(switch executors with taskq site bundle, or let this do it), taskq self migrate --apply, start the clock (taskq site setup).
 """
 import argparse
 import contextlib
@@ -731,7 +731,7 @@ def round_lock():
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
-        raise Stop("a health check round is running (stop cron, wait for it to end) - nothing changed") from None
+        raise Stop("a health check round is running (stop the hub's clock, wait for it to end) - nothing changed") from None
     return f
 
 
@@ -860,7 +860,7 @@ def main(argv):
     except Stop as e:
         print(f"taskq self migrate: {e}", file=sys.stderr)
         return 1
-    say(f"migration complete, every place in format {proto.FORMAT} ({time.strftime('%F %T')}); start cron again")
+    say(f"migration complete, every place in format {proto.FORMAT} ({time.strftime('%F %T')}); start the clock again (taskq site setup)")
     return 0
 
 

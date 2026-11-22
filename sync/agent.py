@@ -4,11 +4,20 @@ server (sync/tunnel.py) over HTTPS. It long-polls the hub's mailbox for commands
 streams stdin in and stdout / stderr back, and reports the exit code. The hub side (mailbox, server routes, the ssh stand-in
 xssh) is sync/agent_box.py; the protocol is in the README ("Agents").
 
-    agent.py ensure <machine>        start the agent in the background unless one already runs (cron: @reboot and every 10 minutes)
+    agent.py ensure <machine>        start the agent in the background unless one already runs (cron, every minute)
     agent.py run <machine>           the agent itself (foreground; holds the lock)
-    agent.py cron <machine> <python> add the two crontab lines (marked "# taskq-agent <machine>")
+    agent.py cron <machine> <python> [<agent.py>]  the one crontab line that keeps the agent running (marked "# taskq-agent
+                                     <machine>"; replaces older lines with that mark); <agent.py> defaults to this file
+    agent.py clock <machine>         set this machine's clock from stdin: JSON [[when, shell command], ...]
     agent.py stop <machine>          stop the running agent
     agent.py selftest                exit 0 (an update is checked with it before it replaces this file)
+
+Clock: besides running the hub's commands, the agent runs this machine's own timed commands (taskq site setup writes them:
+the hub's health check and the project's other OUTPUTS["cron"] entries, @reboot boot steps), so nothing else is in crontab.
+when is a crontab time ("5,35 * * * *", local time) or "@reboot" (once per boot: run when the agent first starts after the
+machine booted; the very first start, with no record of an earlier boot, runs nothing). Minutes missed while the agent was down
+are made up for at most CATCHUP minutes back, each command once. Commands run in bash with the agent's clean environment
+in their own session, are not waited for, and their output goes to agent-<machine>.clock.log next to the agent log.
 
 Config: ~/.config/taskq/agent-<machine>.json {machine, url, key} (0600, written by taskq site agent install); TASKQ_AGENT_HOME
 overrides ~ (tests). Every request is signed with the machine's key (sign()); commands and code from the hub carry the hub's
@@ -38,6 +47,8 @@ ALIVE_EVERY = float(os.environ.get("TASKQ_AGENT_ALIVE", 10))  # seconds between 
 SKEW = 900  # a command older than this (by the hub's clock) is refused: a replay, or the caller gave up long ago
 CHUNK = 8 << 20  # most bytes per request (Cloudflare refuses bodies over 100 MB)
 MARK = "# taskq-agent"
+CATCHUP = 10  # minutes: after a gap (agent down, machine asleep), clock entries due within this many minutes still run, once each
+BOOT_ID = "/proc/sys/kernel/random/boot_id"
 BASE_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 
 
@@ -63,6 +74,18 @@ def lock_path(m):
 
 def log_path(m):
     return os.path.join(home(), ".local", "state", "taskq", "agent-%s.log" % m)
+
+
+def clock_path(m):
+    return os.path.join(home(), ".config", "taskq", "agent-%s.clock.json" % m)
+
+
+def clock_state_path(m):
+    return os.path.join(home(), ".local", "state", "taskq", "agent-%s.clock" % m)
+
+
+def clock_log_path(m):
+    return os.path.join(home(), ".local", "state", "taskq", "agent-%s.clock.log" % m)
 
 
 def code_sha():
@@ -303,6 +326,7 @@ class Agent:
 
     def loop(self):
         threading.Thread(target=self.alive_loop, daemon=True).start()
+        threading.Thread(target=clock_loop, args=(self.m,), daemon=True).start()
         pause, refused = 1, None
         log("agent %s up (pid %d, sha %s, hub %s)" % (self.m, os.getpid(), self.sha[:12], self.url))
         while True:
@@ -326,6 +350,138 @@ class Agent:
             if want and want != self.sha and want != refused and not self.running:
                 if not self.update(want):
                     refused = want
+
+
+# ---------------- clock ----------------
+_SPAN = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def cron_field(f, lo, hi):
+    """One crontab field → set of values; ValueError when it is not one."""
+    out = set()
+    for part in f.split(","):
+        rng, _, step = part.partition("/")
+        st = int(step) if step else 1
+        if rng == "*":
+            a, b = lo, hi
+        elif "-" in rng:
+            a, b = (int(x) for x in rng.split("-", 1))
+        else:
+            a = b = int(rng)
+            if step:
+                b = hi
+        if st < 1 or a < lo or b > hi or a > b:
+            raise ValueError("bad crontab field %r" % f)
+        out.update(range(a, b + 1, st))
+    return out
+
+
+def cron_due(when, t):
+    """Does crontab time when (5 fields) match local time t (seconds; its minute)? Day of month and day of week: either
+    matches when both are restricted, as cron does."""
+    fs = when.split()
+    if len(fs) != 5:
+        raise ValueError("a crontab time has 5 fields: %r" % when)
+    mi, hr, dom, mon, dow = (cron_field(f, *_SPAN[i]) for i, f in enumerate(fs))
+    if 7 in dow:
+        dow.add(0)
+    lt = time.localtime(t)
+    wd = (lt.tm_wday + 1) % 7  # cron: 0 = Sunday
+    if lt.tm_min not in mi or lt.tm_hour not in hr or lt.tm_mon not in mon:
+        return False
+    if fs[2] != "*" and fs[4] != "*":
+        return lt.tm_mday in dom or wd in dow
+    return lt.tm_mday in dom and wd in dow
+
+
+def boot_id():
+    try:
+        with open(BOOT_ID) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def read_json(p, default):
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(p, d, mode=0o600):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    os.write(fd, json.dumps(d).encode())
+    os.close(fd)
+    os.replace(p + ".tmp", p)
+
+
+def set_clock(m, entries):
+    """Check and store this machine's clock entries [[when, command], ...]."""
+    if not isinstance(entries, list):
+        raise ValueError("clock entries are a list")
+    for e in entries:
+        if not (isinstance(e, list) and len(e) == 2 and all(isinstance(x, str) and x.strip() for x in e)):
+            raise ValueError("a clock entry is [when, command]: %r" % (e,))
+        if e[0] != "@reboot":
+            cron_due(e[0], time.time())
+    write_json(clock_path(m), entries)
+
+
+def clock_start(m, when, cmd):
+    """Start one clock command in its own session and leave it (setsid -f: not this process's child, nothing to reap)."""
+    os.makedirs(os.path.dirname(clock_log_path(m)), exist_ok=True)
+    with open(clock_log_path(m), "ab") as lf:
+        lf.write(("%s %s: %s\n" % (time.strftime("%F %T"), when, cmd)).encode())
+        lf.flush()
+        try:
+            subprocess.call(["setsid", "-f", "bash", "-c", cmd], cwd=home(), env=clean_env(), stdin=subprocess.DEVNULL,
+                            stdout=lf, stderr=subprocess.STDOUT)
+        except OSError as e:
+            log("clock: cannot start %r: %s" % (cmd, e))
+
+
+def clock_tick(m, now, start=clock_start):
+    """One clock step at time now: @reboot entries once per boot, crontab entries for each minute since the last step (at
+    most CATCHUP back), each once. → the commands started, as (when, command)."""
+    st = read_json(clock_state_path(m), None)
+    entries = read_json(clock_path(m), [])
+    cur = int(now // 60)
+    ran = []
+    if not isinstance(st, dict):
+        st = dict(boot=boot_id(), minute=cur - 1)  # first start: no record of an earlier boot, so no @reboot
+    b = boot_id()
+    todo = []
+    if b != st.get("boot"):
+        todo += [e for e in entries if e[0] == "@reboot"]
+        st["boot"] = b
+    last = st.get("minute", cur - 1)
+    mins = range(max(last + 1, cur - CATCHUP + 1), cur + 1)
+    for when, cmd in entries:
+        if when == "@reboot":
+            continue
+        try:
+            if any(cron_due(when, x * 60) for x in mins):
+                todo.append([when, cmd])
+        except ValueError as e:
+            log("clock: %s" % e)
+    st["minute"] = max(last, cur)
+    write_json(clock_state_path(m), st)  # recorded before starting: a crash in between skips a run rather than doubling it
+    for when, cmd in todo:
+        start(m, when, cmd)
+        ran.append((when, cmd))
+    return ran
+
+
+def clock_loop(m):
+    while True:
+        try:
+            clock_tick(m, time.time())
+        except Exception as e:  # noqa: BLE001  the clock keeps going whatever one step does
+            log("clock: step failed: %s" % e)
+        time.sleep(60 - time.time() % 60 + 1)
 
 
 def clean_env():
@@ -385,14 +541,14 @@ def ensure(m):
     return 1
 
 
-def cron(m, py):
-    me = os.path.abspath(__file__)
+def cron(m, py, me=None):
+    me = me or os.path.abspath(__file__)
     tag = "%s %s" % (MARK, m)
     r = subprocess.Popen(["crontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     old = r.communicate()[0].decode()
     keep = [ln for ln in old.splitlines() if not ln.rstrip().endswith(tag)]
     line = "%s %s ensure %s > /dev/null 2>&1 %s" % (py, me, m, tag)
-    new = "\n".join(keep + ["@reboot " + line, "*/10 * * * * " + line]) + "\n"
+    new = "\n".join(keep + ["* * * * * " + line]) + "\n"
     p = subprocess.Popen(["crontab", "-"], stdin=subprocess.PIPE)
     p.communicate(new.encode())
     return p.returncode
@@ -422,8 +578,15 @@ def main(argv):
         return ensure(argv[1])
     if len(argv) == 2 and argv[0] == "stop":
         return stop(argv[1])
-    if len(argv) == 3 and argv[0] == "cron":
-        return cron(argv[1], argv[2])
+    if len(argv) in (3, 4) and argv[0] == "cron":
+        return cron(*argv[1:])
+    if len(argv) == 2 and argv[0] == "clock":
+        try:
+            set_clock(argv[1], json.load(sys.stdin))
+        except ValueError as e:
+            sys.stderr.write("agent.py clock: %s\n" % e)
+            return 2
+        return 0
     sys.stderr.write(__doc__)
     return 2
 

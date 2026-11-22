@@ -101,7 +101,102 @@ def signed(method, path, body=b"", key=None, ts=None, nonce=None):
         return e.code, nonce
 
 
+def clock_tests():
+    """The clock (in process, its own HOME): crontab times, @reboot once per boot, catch-up after a gap, the clock and cron
+    subcommands."""
+    h = os.path.join(T, "clock_home")
+    os.makedirs(h)
+    old_home, old_boot = os.environ.get("TASKQ_AGENT_HOME"), A.BOOT_ID
+    os.environ["TASKQ_AGENT_HOME"] = h
+    bid = os.path.join(T, "boot_id")
+    A.BOOT_ID = bid
+    try:
+        def at(s):  # local time "YYYY-mm-dd HH:MM" → seconds
+            return time.mktime(time.strptime(s, "%Y-%m-%d %H:%M"))
+        due = [A.cron_due(w, at(t)) for w, t in (("5,35 * * * *", "2026-11-22 10:35"), ("5,35 * * * *", "2026-11-22 10:36"),
+                                                 ("30 8-20/2 * * *", "2026-11-22 10:30"), ("30 8-20/2 * * *", "2026-11-22 09:30"),
+                                                 ("30 8-20/2 * * *", "2026-11-22 22:30"), ("*/15 * * * 0", "2026-11-22 10:45"),
+                                                 ("*/15 * * * 7", "2026-11-22 10:45"), ("0 0 1 * 1", "2026-11-23 00:00"),
+                                                 ("0 0 1 * 1", "2026-11-24 00:00"), ("0 0 1 * *", "2026-11-23 00:00"))]
+        ok("cron_due: lists, ranges with steps, day of week 0 and 7 = Sunday (11/22 is one), day of month OR day of week when both are set",
+           due == [True, False, True, False, False, True, True, True, False, False], due)
+        bad = []
+        for w in ("5 * * *", "60 * * * *", "* 24 * * *", "*/0 * * * *", "x * * * *", "5-3 * * * *"):
+            try:
+                A.cron_due(w, 0)
+                bad.append(w)
+            except ValueError:
+                pass
+        ok("cron_due: wrong field count, out of range, zero step, junk → ValueError", not bad, bad)
+
+        def put_boot(b):
+            with open(bid, "w") as f:
+                f.write(b + "\n")
+        put_boot("boot-1")
+        A.set_clock("m", [["@reboot", "echo boot"], ["5,35 * * * *", "echo health"], ["30 8-20/2 * * *", "echo registry"]])
+        got = []
+
+        def tick(t):
+            got.clear()
+            return A.clock_tick("m", at(t), start=lambda m, w, c: got.append(c))
+        tick("2026-11-22 10:04")
+        ok("clock: the very first start (no record of an earlier boot) runs no @reboot entry", got == [], got)
+        tick("2026-11-22 10:05")
+        ok("clock: a crontab entry runs in its minute", got == ["echo health"], got)
+        tick("2026-11-22 10:05")
+        ok("clock: the same minute twice (restart, execv) runs it once", got == [], got)
+        tick("2026-11-22 10:31")
+        ok("clock: after a gap, entries due in the last CATCHUP minutes run once each", got == ["echo registry"], got)
+        tick("2026-11-22 10:40")
+        ok("clock: and one due just inside the window too", got == ["echo health"], got)
+        tick("2026-11-22 13:31")
+        ok("clock: entries due before the window are not made up", got == [], got)
+        put_boot("boot-2")
+        tick("2026-11-22 13:32")
+        ok("clock: a new boot id runs the @reboot entries once", got == ["echo boot"], got)
+        tick("2026-11-22 13:33")
+        ok("clock: and not again in that boot", got == [], got)
+
+        A.clock_start("m", "* * * * *", "echo started-$((1+1)) > clock_out")
+        for _ in range(50):
+            if os.path.exists(os.path.join(h, "clock_out")):
+                break
+            time.sleep(0.1)
+        out = open(os.path.join(h, "clock_out")).read() if os.path.exists(os.path.join(h, "clock_out")) else ""
+        ok("clock_start: runs the command in bash from HOME and logs it", out == "started-2\n" and "echo started" in
+           open(A.clock_log_path("m")).read(), out)
+
+        env = dict(os.environ, TASKQ_AGENT_HOME=h)
+        r = subprocess.run([sys.executable, CODE, "clock", "m"], input='[["5 * * *", "x"]]', capture_output=True, text=True, env=env)
+        ok("agent.py clock: a bad crontab time → exit 2 and the clock is kept", r.returncode == 2 and json.load(
+            open(A.clock_path("m")))[0] == ["@reboot", "echo boot"], r.stderr)
+        r = subprocess.run([sys.executable, CODE, "clock", "m"], input='[["@reboot", "a"], ["*/5 * * * *", "b"]]', capture_output=True,
+                           text=True, env=env)
+        ok("agent.py clock: stores the entries", r.returncode == 0 and json.load(open(A.clock_path("m"))) == [["@reboot", "a"], ["*/5 * * * *", "b"]],
+           r.stderr)
+
+        fb = os.path.join(T, "clock_bin")
+        os.makedirs(fb)
+        with open(os.path.join(fb, "crontab"), "w") as f:
+            f.write(f'#!/bin/bash\nf={h}/crontab.txt\nif [[ $1 == -l ]]; then [[ -f $f ]] && cat "$f"; else cat > "$f"; fi\n')
+        os.chmod(os.path.join(fb, "crontab"), 0o755)
+        with open(os.path.join(h, "crontab.txt"), "w") as f:
+            f.write("0 3 * * * backup\n@reboot py old ensure m > /dev/null 2>&1 # taskq-agent m\n*/10 * * * * py old ensure m > /dev/null 2>&1 # taskq-agent m\n")
+        r = subprocess.run([sys.executable, CODE, "cron", "m", "/usr/bin/python3", "/x/agent.py"], capture_output=True, text=True,
+                           env=dict(env, PATH=fb + os.pathsep + os.environ["PATH"]))
+        ok("agent.py cron: one line every minute replaces the earlier ones with the mark, other lines stay",
+           open(os.path.join(h, "crontab.txt")).read().splitlines() == [
+               "0 3 * * * backup", "* * * * * /usr/bin/python3 /x/agent.py ensure m > /dev/null 2>&1 # taskq-agent m"], r.stdout + r.stderr)
+    finally:
+        A.BOOT_ID = old_boot
+        if old_home is None:
+            os.environ.pop("TASKQ_AGENT_HOME", None)
+        else:
+            os.environ["TASKQ_AGENT_HOME"] = old_home
+
+
 def main():
+    clock_tests()
     # before install: no agent, so site-pueue (agent=True) has no mailbox -> 255 at once, without falling back to ssh
     r = box("status")
     ok("status before install lists the enabled machine as not installed", "not installed" in r.stdout, r.stdout + r.stderr)

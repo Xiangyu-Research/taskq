@@ -9,7 +9,7 @@ Alerts come from the hub's scheduled health check, `taskq tick`. Goal: separate 
 
 ## Project notes
 
-The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's crontab names it (`crontab -l | grep -- --project`). If `<project root>/.claude/taskq/triage.md` exists, read it first and follow it: it holds the project's rules on what to fix alone and what to ask about, and wins over this file.
+The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's agent clock names it (`grep -h -- --project ~/.config/taskq/agent-*.clock.json`). If `<project root>/.claude/taskq/triage.md` exists, read it first and follow it: it holds the project's rules on what to fix alone and what to ask about, and wins over this file.
 
 ## Order of investigation
 

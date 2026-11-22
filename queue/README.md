@@ -7,7 +7,7 @@ each part runs, where files live, and how to add things.
 
 ```
                          hub (role hub in machines.py)
-   cron every 30 min ─→ taskq tick (monitor/health.py)
+  clock every 30 min ─→ taskq tick (monitor/health.py)
                         ├─ check every machine, push problems (monitor/plain.py, push.py), record them in the hub database (queue/db.py, events.py)
                         ├─ queue/advance.py   downstream steps: look at the store for finished work, add the next step to the hub queue
                         └─ queue/feed.py → queue/relay.py   send tasks, transfer data, top up workers, fetch, archive
@@ -80,7 +80,7 @@ side to expand.
 | `transfer_job` | `str?` | `None` | slurm: srun args for large transfers on a compute node |
 | `env_job` | `str?` | `None` | slurm: srun args for building envs on a compute node; None = use transfer_job |
 | `roles` | `roles` | `()` | hub (hub queue, health check), store (home of results, data dir in data), backup (archive backups go to backup) |
-| `repo` | `str?` | `None` | hub: the project clone cron uses |
+| `repo` | `str?` | `None` | hub: the project clone its timed commands use |
 | `data` | `str?` | `None` | store: data dir (home of results) |
 | `backup` | `str?` | `None` | backup: where archive backups go (data dir layout) |
 | `transfer` | `pair?` | `None` | store: file service (public address, listen address:port) |
@@ -142,7 +142,7 @@ Each worker of a pueue executor (each entry in `workers`):
 |---|---|---|---|
 | `state` | `str` | `'~/.local/state/taskq/'` | state dir |
 | `entry` | `str?` | `None` | main loop entry (relative to the hub's repo) |
-| `cron` | `cron` | `()` | ((time, subcommand), ...): taskq site setup writes it into the hub's crontab |
+| `cron` | `cron` | `()` | ((time, subcommand), ...): taskq site setup puts it into the hub's agent clock |
 | `origin` | `str?` | `None` | where the hub's repo is cloned from |
 | `bundle` | `strs` | `()` | extra dirs or files carried in the executor bundle |
 | `bundle_skip` | `strs` | `()` | left out of the bundle (fnmatch wildcards) |
@@ -303,7 +303,7 @@ there are records for failures, skips, missing inputs, releases and stops. Task 
 Claim order: lower nice first; within a nice, half-done tasks first (has a checkpoint, or this machine has part logs and no failure record);
 then arrival order. The whole queue pauses claiming after 3 failures in 3 hours. A `taskq stop`ped task is not claimed again; a worker
 of the same queue running it stops and releases it within 30 seconds, while for a task the hub sent to an executor the stop reaches
-the executor at the hub's next check (cron, every 30 minutes); `taskq resume` undoes it. After the release the entry stays in the
+the executor at the hub's next check (every 30 minutes); `taskq resume` undoes it. After the release the entry stays in the
 executor's queue as `stopped` (its results kept) and does not disappear: check that a stop has finished by the "released" line in
 `taskq events --source relay` or by the hub queue's state. Resumed before the release, the task continues on the same executor;
 resumed after it, the next check deletes the executor's copy and its results and the hub queue dispatches it again with its current
@@ -554,12 +554,19 @@ the command. An agent not seen for 2 minutes is unreachable: xssh exits 255 at o
   the hub carry the hub's signature, and the agent refuses anything without it, so the public address and the proxy in front of it
   cannot inject commands.
 - Install: `taskq site agent install <machine>` (on the hub; the one step that still uses ssh, or runs here for the hub's own
-  machine) puts `~/.local/share/taskq/agent.py` and the key there, adds two crontab lines (`@reboot` and every 10 minutes: start it
-  unless it runs) and starts it. Then set `agent=True` for that machine in the machine table. The agent updates itself: when the
+  machine) puts `~/.local/share/taskq/agent.py` and the key there, adds one crontab line (every minute: start it unless it
+  runs) and starts it. Then set `agent=True` for that machine in the machine table. The agent updates itself: when the
   hub's `agent.py` differs, it fetches it, checks signature and digest, runs its selftest and restarts on it while idle.
 - Watch: `taskq site agent status` (last call, host, python, version); the health check reports `agent:<machine>` when an agent
   has not called for 30 minutes (`taskq site agent start <machine>` starts it over ssh when cron cannot). The agent's own log is
   `~/.local/state/taskq/agent-<machine>.log` on that machine.
+- Clock: the agent also runs the machine's timed commands, so crontab holds only the agent's own line. `taskq site setup` writes
+  them into `~/.config/taskq/agent-<machine>.clock.json`: on every pueue machine the boot step (`@reboot`: `on_boot.sh` or
+  `taskq boot`, output to the boot log), on the hub also each `OUTPUTS["cron"]` entry calling `OUTPUTS["entry"]` (the health
+  check). Times are crontab times in local time; `@reboot` runs once per boot (the boot id changed since the agent last ran).
+  Minutes missed while the agent was down are made up for at most 10 minutes back, each command once; commands run detached and
+  log their start and output to `~/.local/state/taskq/agent-<machine>.clock.log`. Stop the hub's clock with
+  `echo '[]' | python3 ~/.local/share/taskq/agent.py clock <hub>`, start it again with `taskq site setup`.
 
 ### GPU pad
 
@@ -640,8 +647,8 @@ bundle (an executor switches to it with its unclaimed tasks set aside for a mome
 it does nothing; a root that was unreachable is migrated on a later run.
 
 A format change bumps `proto.FORMAT` and adds its step in the same commit; steps up to `migrate.MIN_FORMAT` are deleted once every place
-is past them. The cutover: stop cron, push the code, (switch executors with `taskq site bundle`, or let migrate do it), `taskq self
-migrate --apply`, start cron.
+is past them. The cutover: stop the hub's clock, push the code, (switch executors with `taskq site bundle`, or let migrate do it), `taskq self
+migrate --apply`, start the clock (`taskq site setup`).
 
 ## File layout
 

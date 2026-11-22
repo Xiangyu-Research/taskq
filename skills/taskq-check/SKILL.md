@@ -9,7 +9,7 @@ Goal: answer "how is it going, does anything need me, when will it finish" withi
 
 ## Project notes
 
-The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's crontab names it (`crontab -l | grep -- --project`). If `<project root>/.claude/taskq/check.md` exists, read it first and follow it: it adds the project's own checks and report format, and wins over this file on project matters.
+The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's agent clock names it (`grep -h -- --project ~/.config/taskq/agent-*.clock.json`). If `<project root>/.claude/taskq/check.md` exists, read it first and follow it: it adds the project's own checks and report format, and wins over this file on project matters.
 
 ## Steps (send what can run in parallel together)
 

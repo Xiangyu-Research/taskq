@@ -5,10 +5,11 @@
 #   taskq site setup <name>    on the hub for another machine: compute groups and gpu_log from the machine table, ssh over and run
 #                              setup.sh from that bundle (telling it TASKQ_MACHINE); ssh=None (the hub's machine) runs here
 # Create all groups for the whole machine and set their concurrency; leave other groups (not in the table, created by hand) alone.
-# crontab (machines without linger cannot use systemd user services, so everything is cron):
+# Timed commands go into this machine's agent clock (sync/agent.py clock), not crontab; crontab keeps only the agent's own line
+# (written by taskq site agent install, refreshed here when the agent is installed). Lines earlier versions wrote are removed.
 #   every pueue machine: @reboot on_boot.sh (start pueued, put tasks interrupted by the reboot back; add --gpu-log with gpu_log),
 #                        run from the bundle, a repo clone or an installed taskq (taskq boot)
-#   role hub: clone policy.py's OUTPUTS["origin"] into this machine's repo and write cron entries from OUTPUTS["cron"] calling OUTPUTS["entry"]
+#   role hub: clone policy.py's OUTPUTS["origin"] into this machine's repo and add OUTPUTS["cron"] entries calling OUTPUTS["entry"]
 set -euo pipefail
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # this scheduler code's root (cfg.py finds the project itself)
 M="python3 $CORE/sites/mtab.py"
@@ -48,7 +49,7 @@ for gp in $groups; do
     [[ " $have " == *" $g "* ]] || $P group add "$g"
     $P parallel -g "$g" "$n"
 done
-cron() { { crontab -l 2> /dev/null | grep -vF "$1" || true; echo "$2 $1"; } | crontab -; }
+clock=()  # "when<TAB>command" lines for the agent clock
 # This core is this machine's scheduler code (mtab core: found through the current link inside a bundle, still found after a switch;
 # or in a repo clone): run its on_boot.sh. Installed elsewhere (taskq installed on the hub): use this core's taskq boot with the
 # table's repo as project (the current dir at boot has no .taskq.toml)
@@ -56,16 +57,31 @@ core=$($M get . core)
 [[ -n ${SETUP_GPU_LOG-$($M get . gpu_log)} ]] && GL=" --gpu-log" || GL=
 if [[ -n $core && $CORE == "$(readlink -f "$core")" ]]; then OB="bash $core/queue/on_boot.sh$GL"
 else OB="python3 $CORE/bin/taskq --project $($M get . repo) boot$GL"; fi
-crontab -l 2> /dev/null | grep -qE "on_boot\.sh|taskq.* boot" && { crontab -l | { grep -vE "on_boot\.sh|taskq.* boot" || true; } | crontab -; }
 BL=$($C boot-log)
 mkdir -p "$(dirname "$BL")"
-cron "$OB >> $BL 2>&1" "@reboot"
-roles=" $($M get . roles) " entry=$($C get entry)
-if [[ $roles == *" hub "* && -n $entry ]]; then  # run from the cron-only clone (this machine's repo), so only committed code runs
+clock+=("@reboot"$'\t'"$OB >> $BL 2>&1")
+roles=" $($M get . roles) " entry=$($C get entry) old_entry=
+if [[ $roles == *" hub "* && -n $entry ]]; then  # run from the hub-only clone (this machine's repo), so only committed code runs
     H=$($M get . repo)
+    old_entry="$H/$entry"
     [[ -d $H/.git ]] || git clone -q --recurse-submodules "$($C get origin)" "$H"
     while read -r line; do
-        [[ -n $line ]] && cron "bash $H/$entry ${line##* }" "${line% *}"
+        [[ -n $line ]] && clock+=("${line% *}"$'\t'"bash $H/$entry ${line##* }")
     done <<< "$($C get cron)"
 fi
+printf '%s\n' "${clock[@]}" | python3 -c 'import json, sys; print(json.dumps([l.rstrip("\n").split("\t", 1) for l in sys.stdin if l.strip()]))' \
+    | python3 "$CORE/sync/agent.py" clock "$me"
+# crontab: drop the lines earlier versions wrote (boot steps, the hub entry); keep the agent's own line, refreshed when installed
+AG=${TASKQ_AGENT_HOME:-$HOME}/.local/share/taskq/agent.py
+if command -v crontab > /dev/null; then
+    cur=$(crontab -l 2> /dev/null || true)
+    new=$(printf '%s\n' "$cur" | grep -vE "on_boot\.sh|taskq.* boot" | { if [[ -n $old_entry ]]; then grep -vF "$old_entry"; else cat; fi; } || true)
+    [[ $new == "$cur" ]] || printf '%s\n' "$new" | crontab -
+    if [[ -f $AG ]]; then
+        python3 "$CORE/sync/agent.py" cron "$me" "$(command -v python3)" "$AG"
+        python3 "$AG" ensure "$me" || echo "$me: the agent did not start" >&2
+    fi
+fi
+[[ -f $AG ]] || echo "$me: no agent installed, its clock does not run until taskq site agent install $me (on the hub)" >&2
+echo "$me clock:"; printf '  %s\n' "${clock[@]}"
 $P status

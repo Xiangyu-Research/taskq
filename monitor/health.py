@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Health check for the machines in the machine table: cron on the hub runs it every 30 minutes, pushes problems to the phone (ntfy)
+"""Health check for the machines in the machine table: the hub's agent clock runs it every 30 minutes, pushes problems to the phone (ntfy)
 and stores them in the hub database. Each problem has an id and is pushed once. gather() reads all machine state and is read-only.
 
     taskq tick              check, push, update state
@@ -486,7 +486,7 @@ def main(argv=None):
 
 
 def heartbeat():
-    """OUTPUTS heartbeat: fetch that URL after a finished round, so an outside service notices when rounds stop (cron gone, the
+    """OUTPUTS heartbeat: fetch that URL after a finished round, so an outside service notices when rounds stop (clock gone, the
     hub down, the config broken, a crash every round)."""
     url = cfg.outputs("heartbeat")
     if not url:
@@ -585,7 +585,7 @@ def one_round(a):
         P[pid] = from_step(v)
     took = NT.D.get_meta(db, "tick_took") if db is not None else None
     if isinstance(took, (int, float)) and took > proto.TICK_SLOW:
-        P[alert_id("health", "slow")] = problem(f"the last health check round took {took / 60:.0f} min (cron starts one every 30 min): "
+        P[alert_id("health", "slow")] = problem(f"the last health check round took {took / 60:.0f} min (the clock starts one every 30 min): "
                                                 "rounds started while one runs are skipped, so checks and sending happen less often")
     if not a.dry_run and (db is None or not NT.D.writable(db)):
         P[alert_id("db", M.hub())] = problem(f"cannot write the hub database {NT.D.path()} (on a network disk, or created by a newer "

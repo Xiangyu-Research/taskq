@@ -9,11 +9,11 @@ Light testing: unit tests plus at most one real run, then release. No repeated b
 
 ## Project notes
 
-The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's crontab names it (`crontab -l | grep -- --project`). If `<project root>/.claude/taskq/ship.md` exists, read it first and follow it: it lists the project's tests, how its code reaches the machines, and how it records changes.
+The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's agent clock names it (`grep -h -- --project ~/.config/taskq/agent-*.clock.json`). If `<project root>/.claude/taskq/ship.md` exists, read it first and follow it: it lists the project's tests, how its code reaches the machines, and how it records changes.
 
 ## Two sides, released separately
 
-- **The core** is its own repo with one version, `main`. Pushing to `main` is going live: the hub's cron picks it up at its next `taskq self update`. Develop in a separate checkout; the installed copy (`taskq path core`) is the one cron updates, so never edit it.
+- **The core** is its own repo with one version, `main`. Pushing to `main` is going live: the hub picks it up at its next `taskq self update`. Develop in a separate checkout; the installed copy (`taskq path core`) is the one cron updates, so never edit it.
 - **The project** releases through its own repo, as its notes describe.
 - When both change: push the core first, then the project, so the core arrives before anything needs it.
 

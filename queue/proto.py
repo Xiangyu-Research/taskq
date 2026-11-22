@@ -119,7 +119,7 @@ GPU_LOG_FILE = "gpu_%Y-%m.csv"   # one per month (strftime)
 GPU_LOG_PID = "gpu_log.pid"      # in the GPU log dir: pid of the running gpu_log.sh, locked (flock) while it runs; on_boot.sh checks the lock
 # ---------------- plain text logs (cfg.log, cfg.boot_log) ----------------
 LOGS = "logs"                    # in the state dir (policy.py's OUTPUTS["logs"] overrides): <name>.log of the hub's relay, feed, advance, health
-BOOT_LOG = "on_boot"             # the machine's @reboot output (crontab from setup.sh), in LOGS of this machine's own state dir
+BOOT_LOG = "on_boot"             # the machine's @reboot output (agent clock from setup.sh), in LOGS of this machine's own state dir
 
 # ---------------- key -> filename ----------------
 SAFE = "__"
@@ -168,7 +168,7 @@ ORPHAN_KEEP = 24 * 3600      # an orphan blob on the store is removed once its l
 SITE_STATUS_TIMEOUT = 90     # reading an executor's status: skip it this round when its storage hangs this long
 NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are pushed
 SPEC_MAX = 120 * 1024        # bytes: most a sent spec holds (workers pass it on stdin; it still fits in one command-line argument, Linux allows 128 KB, for run_task.sh --spec <JSON> by hand)
-TICK_SLOW = 25 * 60          # a health check round longer than this is reported (cron starts one every 30 minutes)
+TICK_SLOW = 25 * 60          # a health check round longer than this is reported (the hub's clock starts one every 30 minutes)
 TICK_STUCK = 2 * 3600        # a round still running after this long: the rounds it makes skip push an alert
 PROBLEM_KEEP = 6 * 3600      # a state problem that went away is remembered this long: back within it (flapping) it is not pushed again;
                              # back later it is a new problem (pushed again)
@@ -569,7 +569,7 @@ GPU_USAGE_TOTAL = ("gpu", "user", "hours")
 DB = "taskq.db"  # under the state dir
 DB_COMPACT = (0.5, 64 << 20)  # the hub tick compacts the database (VACUUM) when free pages are over this share and this many bytes
 STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: one blob transfer (missing → ingest → push → view) at a time
-# live names in the hub's relay/ and health/ state dirs (each also with its .lock); taskq self migrate (cron stopped) deletes
+# live names in the hub's relay/ and health/ state dirs (each also with its .lock); taskq self migrate (clock stopped) deletes
 # the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate).
 # Relay's bookkeeping, what it read from each executor and the task records are in the hub database (hubstate.py)
 RELAY_NAMES = ("bundles",)

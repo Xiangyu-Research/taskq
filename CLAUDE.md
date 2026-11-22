@@ -36,7 +36,7 @@ through a config dir (`machines.py`, `policy.py`), a plugins dir and the command
 ## Changing formats (on-disk layout, queue, marker files, JSON fields, bundles)
 
 - When a format changes, put the rewrite of old state into `taskq self migrate` (`queue/migrate.py`) and do it in the same cutover: stop
-  cron, hand back running tasks, push the code, switch every executor to the new bundle, run migrate, start cron. Code keeps no branch
+  the hub's clock, hand back running tasks, push the code, switch every executor to the new bundle, run migrate, start the clock. Code keeps no branch
   reading the old format and no old entry point "to delete after the transition".
 - Changes that go live without a cutover do not change:
   - the arguments and exit codes of `taskq worker next/beat/release`; the tests in `self test` guarding this interface (worker calls,

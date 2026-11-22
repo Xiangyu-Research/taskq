@@ -5,7 +5,7 @@ joined through a machine table that claim tasks from the queue, train, and relea
 sent from the store to executors, results are fetched back to the store and archived to a backup machine when needed, and executor
 disk is only a staging area. Downstream steps (inference, evaluation, summaries, ...) are queued automatically from the experiment table.
 
-On the hub, cron runs a health check every 30 minutes (`taskq tick`): check every machine, push problems, queue downstream steps,
+On the hub, the agent's clock runs a health check every 30 minutes (`taskq tick`): check every machine, push problems, queue downstream steps,
 send tasks to executors, top up workers, and fetch results. One round runs at a time: a round started while another is still
 running (a manual `taskq tick`, a slow round) skips itself, a round slower than 25 minutes is reported, and one still running after
 2 hours makes the skipped rounds push an alert; a broken config or a crashing round is pushed too, and with `OUTPUTS["heartbeat"]`
@@ -27,14 +27,15 @@ source. Repeating is fine: an existing install is updated (`taskq self update`, 
 
 Claude Code skills for operating taskq are in [`skills/`](skills/): `taskq-check` (read-only check), `taskq-triage` (alerts and failures)
 and `taskq-ship` (releasing changes). `install.sh` runs `skills/link.sh`, which links them into `~/.claude/skills` when `~/.claude` exists;
-run it again after an update that adds or removes a skill (a hub's cron can run it after `taskq self update`). The skills hold only what
+run it again after an update that adds or removes a skill (a hub's clock can run it after `taskq self update`). The skills hold only what
 is general; a project adds its own notes in `.claude/taskq/check.md`, `triage.md` and `ship.md`, which each skill reads first.
 
 Needs: Python 3 (the core uses only the standard library; PyYAML is needed on the hub only to build envs from env specs
 `<config>/specs/*.yml`), ssh; [pueue](https://github.com/Nukesor/pueue) on pueue machines, the hub and the store
 (`queue/install_pueue.sh` installs it, checking each file's sha256: pinned for the default version, given on the command line for any
 other); conda on executors (the machine table's `conda`).
-`taskq site setup [machine]` creates each machine's pueue daemon, groups and the hub's crontab.
+`taskq site setup [machine]` creates each machine's pueue daemon and groups and writes its agent clock (boot step; on the hub the
+health check).
 
 ## Project (`.taskq.toml`)
 
@@ -86,7 +87,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 |---|---|
 | `taskq tick` | one health check (really does it: push, queue downstream steps, send tasks; -n is taskq plan) |
 | `taskq plan` | dry run of one health check: problems it would find, what it would queue downstream, which tasks it would send |
-| `taskq boot` | boot (@reboot): start pueued, put interrupted tasks back |
+| `taskq boot` | boot (the clock's @reboot): start pueued, put interrupted tasks back |
 | `taskq problems` | what needs you (the same list as taskq status, with ids for notice ack) and due notices ([--all] [--json]) |
 | `taskq notice set` | post or edit text (<name> [text...]; reads stdin without text) |
 | `taskq notice clear` | remove (<name>...) |
@@ -107,7 +108,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq site env` | build envs on that machine and run checks |
 | `taskq site envs` | dry run: each env's state on that machine |
 | `taskq site agent` | resident agent on that machine: install, start, status (the hub reaches machines with `agent=True` through it instead of ssh) |
-| `taskq site setup` | pueue daemon, groups, crontab (no name: this machine; takes the table name only) |
+| `taskq site setup` | pueue daemon, groups, agent clock (no name: this machine; takes the table name only) |
 | `taskq env lock` | resolve an env description into a lock <name>.<variant>.lock.json and download the files into the wheelhouse (not installed anywhere) |
 | `taskq smoke status` | each machine's records ([executor] [--json]) |
 | `taskq smoke retry` | queue failed kinds again (<executor> [kind]) |
@@ -259,7 +260,7 @@ The fixed test config [`queue/testdata/`](queue/testdata/) shows every field in 
 
 ## Conventions
 
-- One version only: pushing to `main` is going live; the hub's cron runs `taskq self update` next round, executor bundles are rebuilt and
+- One version only: pushing to `main` is going live; the hub runs `taskq self update` next round, executor bundles are rebuilt and
   pushed next round, and running workers switch bundles when they go idle.
 - On-disk names, time constants, task states, exit codes, field tables, alert formats and `TASKQ_*` env vars are defined only in
   `queue/proto.py`; when a format changes, `proto.FORMAT` goes up and the rewrite of old state goes into `taskq self migrate` as that

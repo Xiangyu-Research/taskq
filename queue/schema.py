@@ -30,7 +30,7 @@ MACHINE_FIELDS = {
     "env_job": ("str?", None, "slurm: srun args for building envs on a compute node; None = use transfer_job"),
     # roles
     "roles": ("roles", (), "hub (hub queue, health check), store (home of results, data dir in data), backup (archive backups go to backup)"),
-    "repo": ("str?", None, "hub: the project clone cron uses"),
+    "repo": ("str?", None, "hub: the project clone its timed commands use"),
     "data": ("str?", None, "store: data dir (home of results)"),
     "backup": ("str?", None, "backup: where archive backups go (data dir layout)"),
     "transfer": ("pair?", None, "store: file service (public address, listen address:port)"),
@@ -77,7 +77,7 @@ POLICY_FIELDS = {
 OUTPUT_FIELDS = {
     "state": ("str", "~/.local/state/taskq/", "state dir"),
     "entry": ("str?", None, "main loop entry (relative to the hub's repo)"),
-    "cron": ("cron", (), "((time, subcommand), ...): taskq site setup writes it into the hub's crontab"),
+    "cron": ("cron", (), "((time, subcommand), ...): taskq site setup puts it into the hub's agent clock"),
     "origin": ("str?", None, "where the hub's repo is cloned from"),
     "bundle": ("strs", (), "extra dirs or files carried in the executor bundle"),
     "bundle_skip": ("strs", (), "left out of the bundle (fnmatch wildcards)"),

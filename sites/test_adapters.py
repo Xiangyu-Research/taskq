@@ -81,10 +81,13 @@ def setup():
             f.write(text)
         os.chmod(path, 0o755)
 
-    def run(me, *args):
+    def run(me, *args, crontab=None):
         for x in ("pueue.log", "crontab.txt", "ssh.argv"):
             if os.path.exists(os.path.join(home, x)):
                 os.remove(os.path.join(home, x))
+        if crontab is not None:
+            with open(os.path.join(home, "crontab.txt"), "w") as f:
+                f.write(crontab)
         with open(os.path.join(home, "groups.json"), "w") as f:
             json.dump({"default": {}, "gpu1": {}, "other": {}}, f)  # gpu1 exists already; other was made by hand
         env = dict(os.environ, HOME=home, PATH=fb + os.pathsep + os.environ["PATH"], TASKQ_MACHINE=me, TASKQ_REPO=CORE,
@@ -95,21 +98,44 @@ def setup():
         cron = open(os.path.join(home, "crontab.txt")).read() if os.path.exists(os.path.join(home, "crontab.txt")) else ""
         return r, log, cron
 
+    def clock(me):
+        with open(os.path.join(home, ".config", "taskq", f"agent-{me}.clock.json")) as f:
+            return json.load(f)
+
     r, log, cron = run("site-pueue")
     assert r.returncode == 0, r.stdout + r.stderr
     par = [x for x in log if x.startswith("parallel ")]
     assert par == ["parallel -g gpu1 1", "parallel -g gpu0 1", "parallel -g cpu 1", f"parallel -g {proto.IO_GROUP} 0"], log
     assert [x for x in log if x.startswith("group add")] == ["group add gpu0", "group add cpu", f"group add {proto.IO_GROUP}"], log
     assert not any("remove" in x for x in log), log
-    assert "@reboot" in cron and "--gpu-log" in cron, cron
-    ok("site setup (this machine): all worker groups plus the core group, existing ones only get their concurrency; other groups (other) are left alone; @reboot carries --gpu-log")
+    c = clock("site-pueue")
+    assert len(c) == 1 and c[0][0] == "@reboot" and "--gpu-log" in c[0][1] and not cron.strip(), (c, cron)
+    assert "no agent installed" in r.stderr, r.stderr
+    ok("site setup (this machine): all worker groups plus the core group, existing ones only get their concurrency; other groups (other) "
+       "are left alone; the boot step (with --gpu-log) goes into the agent clock, not crontab; says when no agent is installed")
 
-    r, log, cron = run("hub")
+    ag = os.path.join(home, ".local", "share", "taskq", "agent.py")  # an installed agent (ensure: already running)
+    os.makedirs(os.path.dirname(ag))
+    with open(ag, "w") as f:
+        f.write("import sys\nsys.exit(0)\n")
+    old_cron = (f"MAILTO=x\n@reboot python3 /x/bin/taskq --project {home}/auto/demo boot >> /x/on_boot.log 2>&1\n"
+                f"5,35 * * * * bash {home}/auto/demo/bin/loop.sh health\n0 3 * * * /usr/bin/backup.sh\n"
+                "@reboot /usr/bin/python3 /old/agent.py ensure hub > /dev/null 2>&1 # taskq-agent hub\n"
+                "*/10 * * * * /usr/bin/python3 /old/agent.py ensure hub > /dev/null 2>&1 # taskq-agent hub\n")  # earlier versions' lines + someone else's
+
+    r, log, cron = run("hub", crontab=old_cron)
     assert r.returncode == 0, r.stdout + r.stderr
     assert [x for x in log if x.startswith("parallel ")] == [f"parallel -g {proto.IO_GROUP} 0", "parallel -g gpu 1"], log
-    assert not any("remove" in x for x in log) and "--gpu-log" not in cron, (log, cron)
-    assert all(f"bash {home}/auto/demo/bin/loop.sh {c}" in cron for _, c in cfg.outputs("cron")), cron
-    ok("site setup (hub, no scheduler): creates the core group and manual_groups, writes the health-check cron")
+    assert not any("remove" in x for x in log), log
+    c = clock("hub")
+    assert c[0][0] == "@reboot" and "--gpu-log" not in c[0][1] and c[1:] == [[t, f"bash {home}/auto/demo/bin/loop.sh {sub}"]
+                                                                            for t, sub in cfg.outputs("cron")], c
+    lines = cron.splitlines()
+    assert lines[:2] == ["MAILTO=x", "0 3 * * * /usr/bin/backup.sh"] and len(lines) == 3, lines
+    assert lines[2].startswith("* * * * * ") and f"{ag} ensure hub" in lines[2] and lines[2].endswith("# taskq-agent hub"), lines
+    ok("site setup (hub, no scheduler): creates the core group and manual_groups; the boot step and OUTPUTS['cron'] go into the agent "
+       "clock; crontab loses the lines earlier versions wrote (boot, the hub entry, the agent's two lines) and keeps others, plus the "
+       "agent's one line every minute")
 
     r, log, cron = run("hub", "site-pueue")
     assert r.returncode == 0, r.stdout + r.stderr
