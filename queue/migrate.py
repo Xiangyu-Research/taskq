@@ -247,7 +247,9 @@ def snapshot(home, v, say):
     if os.path.exists(C.format_path()):
         shutil.copy2(C.format_path(), os.path.join(tmp, proto.FORMAT_FILE))
     os.rename(tmp, to)
-    old = sorted(os.path.join(base, f) for f in os.listdir(base) if not f.endswith(proto.TMP))
+    def age(x):  # by the time in the name, then mtime: two in the same second must not sort by their format label
+        return os.path.basename(x)[:15], os.stat(x).st_mtime_ns, x
+    old = sorted((os.path.join(base, f) for f in os.listdir(base) if not f.endswith(proto.TMP)), key=age)
     for x in old[:-proto.SNAPSHOT_KEEP] + [os.path.join(base, f) for f in os.listdir(base) if f.endswith(proto.TMP)]:
         shutil.rmtree(x, ignore_errors=True)
     say(f"snapshot of the hub queue, database and stamp: {to} (to undo: stop, copy them back, run the older taskq)")

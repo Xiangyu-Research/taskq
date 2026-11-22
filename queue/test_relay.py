@@ -1235,8 +1235,10 @@ def test_status_blob_cap():
         assert st["blob_free"] == 0 and st["blob_dev"] != st["dev"] and st["sched_raw"] is None, st
         st = RM.op(NAME, "status", dict(arg, blob_cap=1))
         assert st["blob_free"] == min(shutil.disk_usage(shm).free, int(1e9) - used_b), (st["blob_free"], used_b)
+        f0 = shutil.disk_usage(shm).free  # other processes write to /dev/shm too: bracket the reading
         st = RM.op(NAME, "status", arg)
-        assert abs(st["blob_free"] - shutil.disk_usage(shm).free) < 1e6, st["blob_free"]
+        f1 = shutil.disk_usage(shm).free
+        assert min(f0, f1) - 1e6 < st["blob_free"] < max(f0, f1) + 1e6, (st["blob_free"], f0, f1)
     finally:
         os.remove(B0)
         os.rename(saved, B0)

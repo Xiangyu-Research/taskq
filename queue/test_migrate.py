@@ -427,12 +427,13 @@ ok(f"--apply: only that root migrated (and a new snapshot), nothing else changes
    and all(p in (ROOT_STAMP["site-slurm2"], ROOT_MARK["site-slurm2"]) or p.startswith(SNAPS) for p in d) and len(os.listdir(SNAPS)) == 2)
 
 # ---------------- 7. snapshots kept; this code itself has nothing to do ----------------
-for _ in range(proto.SNAPSHOT_KEEP + 1):
-    MG.snapshot(STATE, proto.FORMAT, lambda _: None)
+made = []
+for _ in range(proto.SNAPSHOT_KEEP + 1):  # the ones above carry the higher label format<FAKE>, likely from the same second
+    made.append(os.path.basename(MG.snapshot(STATE, proto.FORMAT, lambda _: None)))
     time.sleep(0.01)
 left = sorted(os.listdir(SNAPS))
-ok(f"snapshots: only the newest {proto.SNAPSHOT_KEEP} stay, no half-written one ({left})",
-   len(left) == proto.SNAPSHOT_KEEP and not any(x.endswith(proto.TMP) for x in left))
+ok(f"snapshots: only the newest {proto.SNAPSHOT_KEEP} stay, by time not by label, no half-written one ({left})",
+   left == sorted(made[-proto.SNAPSHOT_KEEP:]) and not any(x.endswith(proto.TMP) for x in left))
 for p in [HUB_STAMP, *ROOT_STAMP.values()]:
     write(p, f"{F}\n")
 t4 = tree()
