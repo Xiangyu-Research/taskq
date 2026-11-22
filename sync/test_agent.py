@@ -225,6 +225,16 @@ def main():
     argv = RM.site_argv("hub", "true")
     ok("site_argv: hub machine with agent=True -> xssh --machine", argv[:3] == [RM.C.XSSH, "--machine", "hub"], argv)
 
+    # store operations run from the hub machine's bundle (TASKQ_ROOT set) use the same file server dir as the hub's commands
+    probe = "import sys; sys.path.insert(0, sys.argv[1]); import tunnel; print(tunnel.srv_dir(), tunnel.lock_path())"
+    env = {k: v for k, v in ENV.items() if k not in ("TUNNEL_LOCK", "TASKQ_ROOT", "TASKQ_STATE")}
+    st = os.path.join(T, "acct_state")
+    os.makedirs(st, mode=0o700, exist_ok=True)
+    dirs = [subprocess.run([sys.executable, "-c", probe, os.path.join(CORE, "sync")], capture_output=True, text=True,
+                           env=dict(env, TASKQ_STATE=st, **extra)) for extra in ({}, {"TASKQ_ROOT": os.path.join(T, "someroot")})]
+    ok("file server dir and transfer locks do not depend on TASKQ_ROOT",
+       dirs[0].returncode == 0 and dirs[0].stdout == dirs[1].stdout and dirs[0].stdout.startswith(st), [r.stdout + r.stderr for r in dirs])
+
     print(f"\n{len(FAILS)} failed" if FAILS else "\nall passed")
     return 1 if FAILS else 0
 

@@ -78,6 +78,16 @@ def state(*parts, **kw):
     return cfg.state(*parts, **kw)
 
 
+def account_state(*parts):
+    """A path in this account's own state dir, the same whether or not this process runs inside an executor root
+    (TASKQ_ROOT): the file server, its keys, agent mailboxes and transfer locks are one per account, shared by the hub's
+    commands and store operations running from the hub machine's bundle."""
+    machines()
+    import cfg
+    base = os.environ.get("TASKQ_STATE") or cfg.state_home()
+    return os.path.expanduser(os.path.join(base, *parts))
+
+
 def ssh(host, cmd, check=True, input=None, timeout=300):
     """Run one short command on the other side, bounded there too so a hang in storage leaves no process."""
     r = subprocess.run(SSH + [host, f"timeout -k 10 {timeout - 15} bash -c {shlex.quote(cmd)}"], input=input, capture_output=True, text=True,
@@ -439,7 +449,7 @@ def serve_main(bind, d):
 
 
 def srv_dir():
-    d = os.path.join(os.path.dirname(lock_path()), "tunnel_srv")
+    d = os.path.join(os.path.dirname(os.path.expanduser(LOCK)), "tunnel_srv") if LOCK is not None else account_state("tunnel_srv")
     sys.path.insert(0, os.path.join(CORE, "queue"))
     import common
     if not common.private_dir(d):
@@ -590,7 +600,7 @@ def quick_tunnel(bind):
 
 
 def lock_path(host=None):
-    base = os.path.expanduser(LOCK) if LOCK is not None else state("tunnel_push.lock")
+    base = os.path.expanduser(LOCK) if LOCK is not None else account_state("tunnel_push.lock")
     return base if host is None else f"{base}.{re.sub(r'[^A-Za-z0-9_.-]', '_', host)}"
 
 
