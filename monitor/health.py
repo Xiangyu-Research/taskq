@@ -9,6 +9,7 @@ and stores them in the hub database. Each problem has an id and is pushed once. 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -131,6 +132,7 @@ def sh(cmd, inp=None, timeout=120):
 
 
 AGENT_DOWN = 30 * 60  # seconds without a call from a machine's agent before agent:<machine>
+AGENT_REVIVE = 5 * 60  # seconds without a call before the round starts that agent again over ssh (AUTO["revive"])
 
 
 def run_on(m, script, timeout=120):
@@ -209,6 +211,44 @@ def pueue_seen(s, dry=False):
     if not dry:
         C.write_json(p, seen)
     return seen
+
+
+def revive_agents(s, dry=False):
+    """Agents that stopped calling (switch AUTO["revive"]): start them again the way taskq site agent start does (real ssh, or
+    here for the hub's own machine), only when that ssh can be opened safely (ssh_master: its master connection is up). Agents
+    that never called (not installed) are left alone. -> (events, {machine: why it still fails})."""
+    if not policy.AUTO.get("revive"):
+        return [], {}
+    sys.path.insert(0, os.path.join(CORE, "sync"))
+    import agent_box
+    events, still = [], {}
+    for name, a in (s.get("agents") or {}).items():
+        if a is None or a <= AGENT_REVIVE or M.paused(name):
+            continue
+        m = M.machine(name)
+        if m.get("ssh_master") and m.get("ssh") and subprocess.run(
+                [os.environ.get("TASKQ_REAL_SSH", "ssh"), "-O", "check", m["ssh"]], capture_output=True, timeout=30).returncode:
+            still[name] = "not started again automatically: its ssh master connection is down"
+            continue
+        if dry:
+            events.append(f"{L(name)} agent has not called for {int(a // 60)} minutes: it will be started again over ssh")
+            continue
+        t0 = time.time()
+        rc = agent_box.start(name)
+        back = False
+        for _ in range(60 if rc == 0 else 0):
+            b = agent_box.ages().get(name)
+            if b is not None and b < time.time() - t0 + 1:
+                back = True
+                break
+            time.sleep(1)
+        if back:
+            events.append(f"{L(name)} agent had not called for {int(a // 60)} minutes; started again automatically")
+            import events as EV
+            EV.add("health", events[-1], kind="revive", site=name)
+        else:
+            still[name] = f"starting it again over ssh failed (exit {rc})" if rc else "started again over ssh but it has not called within 60s"
+    return events, still
 
 
 def revive(s, seen, dry=False):
@@ -559,6 +599,20 @@ def one_round(a):
             P.pop(alert_id("pueued", name), None)
     for name, why in still.items():
         pid = alert_id("pueued", name)
+        if pid in P:
+            P[pid] = dict(P[pid], msg=f"{P[pid]['msg']}; {why}")
+    try:
+        back, still_a = revive_agents(s, dry=a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        back, still_a = [], {}
+        P[alert_id("revive", "error")] = problem(f"automatic agent restart failed: {type(e).__name__}: {e}"[:300])
+    revived = list(revived) + back
+    for line in back:
+        name = next((n for n in (s.get("agents") or {}) if line.startswith(L(n) + " ")), None)
+        if name and "started again automatically" in line:
+            P.pop(alert_id("agent", name), None)
+    for name, why in still_a.items():
+        pid = alert_id("agent", name)
         if pid in P:
             P[pid] = dict(P[pid], msg=f"{P[pid]['msg']}; {why}")
     # An error in these steps (including an import error) must not stop the health check itself (alerts and the ledger depend on it):

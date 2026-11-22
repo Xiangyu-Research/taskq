@@ -668,7 +668,7 @@ Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (bundles and
 (`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; and the hub's bookkeeping, `queue/hubstate.py`:
 what relay last read on each executor, the task records of pueue tasks the core added, relay's placement record per staged task and
 each distinct set of staged input links once; the health check compacts it when mostly free pages), `format` (on-disk format stamp),
-`snapshots/` (taken by `taskq self migrate --apply`), `wheelhouse/`, `tunnel*` etc. `taskq self migrate` deletes other entries there.
+`snapshots/` (taken by `taskq self migrate --apply`), `wheelhouse/`, `tunnel*` etc.
 
 Core source:
 

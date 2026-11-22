@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """Tests for queue/migrate.py (taskq self migrate) and the on-disk format stamp: the testdata machine table, the hub state dir,
-each machine's root and the store data dir all in temp dirs, built in format 0 (no stamps, the state before them).
-  1. log_rename, the English rewrite of old part logs and failure records, the format stamp helpers (common.format_*);
-  2. STEPS are numbered one per format from MIN_FORMAT + 1 to proto.FORMAT;
+each machine's root and the store data dir all in temp dirs, stamped with this code's format.
+  1. the format stamp helpers (common.format_*);
+  2. STEPS are numbered one per format from MIN_FORMAT + 1 to proto.FORMAT; pending;
+  3-7 run the framework with a fake step (FAKE_SRC: to format proto.FORMAT + 1, it appends one line to a marker file in each
+     place), installed in the hub process and in the new bundle's migrate.py, since every real step is deleted once all places
+     are past it:
   3. the default (and --list) only lists: not one byte changes anywhere (no bundle pushed, no lock, no database written);
-  4. Stops (a root cannot be read, a root newer than this code, a hub step that cannot be done, both a ledger file and a
-     ledger in the database): exit 1, disk unchanged;
-  5. --apply: snapshot of the hub queue and database; each root switched to the new bundle, its part logs and failure records
-     in the new format (claimed tasks' logs left), stamped; the hub bookkeeping in the database, smoke kinds, unused state-dir
-     entries dropped; the hub stamped last;
-  6. running --apply again: nothing to do, nothing on disk changes; a root left behind (stamp gone) is migrated alone;
-  7. snapshots: only the newest proto.SNAPSHOT_KEEP stay.
+  4. Stops (a root cannot be read, a root newer than this code, a root older than MIN_FORMAT, a hub step that cannot be done,
+     a health check round running): exit 1, disk unchanged;
+  5. --apply: snapshot of the hub queue, database and stamp; each root switched to the new bundle (claimed tasks left), the
+     root step applied once, stamped; the hub step applied once, the hub stamped last;
+  6. running --apply again: nothing to do, nothing on disk changes; a root left behind is migrated alone;
+  7. snapshots: only the newest proto.SNAPSHOT_KEEP stay; this code itself (no fake step) finds nothing to do;
+  8. the stamp binds this code: workers claim nothing, hub rounds and relay steps refuse; new roots are stamped.
 The root half really runs migrate.py root from the new bundle through relay_remote.op: the bundle is hand-built (this core at
 proto.BUNDLE_CORE, .taskq.toml points to the test config and plugins); the hub (the store, ssh=None) runs locally, other
 machines via fake ssh locally (a marker file makes one unreachable). The hub half runs migrate.main in a process started by
-this file with --run (the process points each machine's root, conda and the store data dir at temp dirs).
+this file with --run (fake step) or --run-real (the process points each machine's root, conda and the store data dir at
+temp dirs).
     python3 queue/test_migrate.py
 """
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +33,7 @@ CORE = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(HERE, "testdata"))
 import fixture  # noqa: E402
 
-DRIVER = sys.argv[1:2] == ["--run"]
+DRIVER = sys.argv[1:2] in (["--run"], ["--run-real"])
 if DRIVER:  # child process started by this file: environment (HOME, TASKQ_DB, RELAY_SSH, TQM_T) set by the parent
     fixture.use()
     T = os.environ["TQM_T"]
@@ -59,15 +62,78 @@ EXECS = ("site-pueue", "site-slurm", "site-slurm2")
 FAKE_SSH = os.path.join(T, "fake_ssh")
 NEWB = "newbundle0000001"  # the bundle self migrate pushes (relay.wanted_bundle / deploy replaced in the driver process)
 os.environ["TASKQ_SWITCH_HOLD"] = "0"
+F = proto.FORMAT  # this code's format: every place starts there
+FAKE = F + 1      # the fake step's
+# A step to format proto.FORMAT + 1, run inside migrate's module namespace: on the hub and in each root it appends one JSON
+# line (what the framework handed it) to a marker file; a hub state dir holding fake_stop makes the hub step impossible.
+FAKE_SRC = '''
+def _fake_mark(p, rec, say, dry):
+    say(f"fake step: append to {p}")
+    if not dry:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a") as f:
+            f.write(json.dumps(rec) + "\\n")
 
 
-def make_bundle(root, bid):
-    """Hand-built bundle <root>/code/<bid>: this core at proto.BUNDLE_CORE, .taskq.toml points to the test config and plugins."""
+def _fake_hub(ctx, say, dry):
+    if os.path.exists(os.path.join(ctx["home"], "fake_stop")):
+        raise Stop("the fake hub step cannot be done")
+    _fake_mark(os.path.join(ctx["home"], "fake_step"), dict(queue=ctx["queue"]), say, dry)
+
+
+def _fake_root(ctx, say, dry):
+    _fake_mark(os.path.join(ctx["root"], proto.ROOT["state"], "fake_step"),
+               dict(queue=ctx["queue"], busy=sorted(ctx["busy"]), data=ctx["data"]), say, dry)
+
+
+MIN_FORMAT = proto.FORMAT
+proto.FORMAT += 1
+STEPS = [Step(proto.FORMAT, "fake step (test_migrate.py)", hub=_fake_hub, root=_fake_root)]
+'''
+MAIN = '\nif __name__ == "__main__":'
+
+
+def install_fake(mod):
+    exec(FAKE_SRC, mod.__dict__)
+
+
+def write(p, text):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
+    return p
+
+
+def read(p):
+    with open(p, encoding="utf-8") as f:
+        return f.read()
+
+
+def jl(rows):
+    return "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+
+
+def make_bundle(root, bid, fake=False):
+    """Hand-built bundle <root>/code/<bid>: this core at proto.BUNDLE_CORE, .taskq.toml points to the test config and plugins.
+    fake: the core's entries linked one by one, except queue/migrate.py: a copy with FAKE_SRC before its main."""
     b = os.path.join(root, proto.ROOT["code"], bid)
     if os.path.isdir(b):
         return b
-    os.makedirs(os.path.dirname(os.path.join(b, proto.BUNDLE_CORE)))
-    os.symlink(CORE, os.path.join(b, proto.BUNDLE_CORE))
+    bc = os.path.join(b, proto.BUNDLE_CORE)
+    if not fake:
+        os.makedirs(os.path.dirname(bc))
+        os.symlink(CORE, bc)
+    else:
+        os.makedirs(os.path.join(bc, "queue"))
+        for f in os.listdir(CORE):
+            if f not in ("queue", ".git", "__pycache__"):
+                os.symlink(os.path.join(CORE, f), os.path.join(bc, f))
+        for f in os.listdir(HERE):
+            if f not in ("migrate.py", "__pycache__"):
+                os.symlink(os.path.join(HERE, f), os.path.join(bc, "queue", f))
+        src = read(os.path.join(HERE, "migrate.py"))
+        assert src.count(MAIN) == 1
+        write(os.path.join(bc, "queue", "migrate.py"), src.replace(MAIN, "\n" + FAKE_SRC + MAIN))
     with open(os.path.join(b, ".taskq.toml"), "w", encoding="utf-8") as f:
         f.write(f"config = {json.dumps(fixture.CONFIG)}\nplugins = {json.dumps([fixture.PLUGINS])}\n")
     return b
@@ -75,7 +141,7 @@ def make_bundle(root, bid):
 
 def fake_deploy(name, bid, path, claims=None, switch=True):
     r = os.path.expanduser(M.MACHINES[name]["root"])
-    make_bundle(r, bid)
+    make_bundle(r, bid, fake=True)
     with open(os.path.join(r, proto.ROOT["machine"]), "w") as f:
         f.write(name + "\n")
 
@@ -94,13 +160,13 @@ if DRIVER:
     import migrate  # noqa: E402
     import relay  # noqa: E402
     relay.wanted_bundle, relay.deploy = (lambda: (NEWB, None)), fake_deploy
+    if sys.argv[1] == "--run":
+        install_fake(migrate)
     sys.exit(migrate.main(sys.argv[2:]))
 
 os.environ["RELAY_SSH"] = FAKE_SSH
 import common as C  # noqa: E402
 import migrate as MG  # noqa: E402
-import hubstate as HS  # noqa: E402
-import relay_store as ST  # noqa: E402
 import db as DB  # noqa: E402
 
 fails = 0
@@ -123,122 +189,11 @@ os.chmod(FAKE_SSH, 0o755)  # each host its own home dir
 for n, m in M.MACHINES.items():
     if m.get("ssh"):
         os.makedirs(os.path.join(T, "home_" + m["ssh"]), exist_ok=True)
-os.makedirs(os.path.join(T, "bin"))
-with open(os.path.join(T, "bin", "crontab"), "w") as f:  # crontab -l / crontab - on $HOME/.crontab: the real one is never touched
-    f.write('#!/bin/sh\nf="$HOME/.crontab"\nif [ "$1" = -l ]; then [ -f "$f" ] || { echo "no crontab" >&2; exit 1; }; cat "$f"\n'
-            'elif [ "$1" = - ]; then cat > "$f"; else exit 2; fi\n')
-os.chmod(os.path.join(T, "bin", "crontab"), 0o755)
-os.environ["PATH"] = os.path.join(T, "bin") + os.pathsep + os.environ["PATH"]
 for r in ROOTS.values():
     make_bundle(r, "oldbundle")
     os.symlink("oldbundle", os.path.join(r, proto.ROOT["current"]))
     os.makedirs(os.path.join(r, proto.ROOT["state"]))
 
-
-def write(p, text):
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(text)
-    return p
-
-
-def read(p):
-    with open(p, encoding="utf-8") as f:
-        return f.read()
-
-
-def jl(rows):
-    return "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
-
-
-# ---------------- 1. log_rename, English rewrite, format stamp helpers ----------------
-ok("log_rename: _seg<part> becomes _part<part> (multi-digit part too)",
-   MG.log_rename("infer__base__piece_0__job1_seg1.log") == "infer__base__piece_0__job1_part1.log"
-   and MG.log_rename("D101_alpha__V_save__0__w_seg12.log") == "D101_alpha__V_save__0__w_part12.log")
-ok("log_rename: already a new name -> None", MG.log_rename("infer__t0_f0__job1_part1.log") is None)
-ok("log_rename: _seg not followed by a part number and .log: unchanged",
-   MG.log_rename("a__job_segx.log") is None and MG.log_rename("a__job_seg1.txt") is None)
-ok("log_rename: a job name that already has _seg only gets the last one changed", MG.log_rename("a__j_seg_seg2.log") == "a__j_seg_part2.log")
-
-EL = os.path.join(T, "english")
-ED = os.path.join(EL, "data")
-out, say = [], [].append
-
-
-def old_head(job, part, key, env="base", code="abc1234", t="2026-11-01 10:00:00"):
-    return f"作业 {job}_{part} @ node1，任务={key}，第 {part} 段，环境 {env}，代码 {code}，{t}\n"
-
-
-CASES = {
-    "done": "done/key",
-    "gpu": "gpu/key",
-    "failed": "failed/key",
-    "not_started": "not_started/key",
-    "unreadable": "unreadable/key",
-    "stalled": "stalled/key",
-}
-write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('done/key')}__j_2_part1.log"),
-      old_head("j", 2, "done/key") + "训完 2026-11-01 11:00:00\n")
-write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('gpu/key')}__j_1_part1.log"),
-      old_head("j", 1, "gpu/key") + "2026-11-01 10:02:00 卡 0 被别人占着，等了 30 分钟还没空出来，不跑\n")
-write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('failed/key')}__j_1_part1.log"),
-      old_head("j", 1, "failed/key") + "2026-11-01 10:03:00 命令结束（退出码 1），没训完（第 1 次）\n")
-write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('not_started/key')}__j_1_part1.log"),
-      old_head("j", 1, "not_started/key") + "2026-11-01 10:04:00 没开训：这台机器没有环境 x\n")
-write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('unreadable/key')}__j_1_part1.log"),
-      old_head("j", 1, "unreadable/key") + "2026-11-01 10:05:00 命令结束（退出码 1），读不了盘，判断不了训完没有\n")
-write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('stalled/key')}__w_1_part1.log"),
-      old_head("w", 1, "stalled/key")
-      + "当作卡住 2026-11-01 11:00:00：日志和结果文件夹 30 分钟没有变化，作业 w 停掉它\n")
-MG.english_logs(ED, say, False)
-import tasklog as TL  # noqa: E402
-st = {k: TL.parse(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe(CASES[k])}__"
-                               f"{'w' if k == 'stalled' else 'j'}_1_part1.log"), CASES[k])[0]
-      for k in CASES if k != "done"}
-st["done"] = TL.parse(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('done/key')}__j_2_part1.log"), "done/key")[0]
-ok("english_logs: migrated logs parse to the same states, exit codes and part number",
-   {k: a["state"] for k, a in st.items()} == {"done": "done", "gpu": "gpu_busy", "failed": "failed", "not_started": "not_started",
-                                               "unreadable": "unreadable", "stalled": "stalled"}
-   and st["done"]["part"] == 2 and st["done"]["code"] == "abc1234" and st["failed"]["exit"] == 1
-   and st["not_started"]["note"] == "this machine has no env x (machine table machines.py)"
-   and st["stalled"]["note"] == "log and output dir unchanged for 30 minutes, job w stopped it")
-ok("english_logs: no Chinese left in the migrated logs",
-   not any(re.search(r"[一-鿿]", read(os.path.join(ED, proto.TASK_LOGS, f))) for f in os.listdir(os.path.join(ED, proto.TASK_LOGS))))
-BEFORE = {f: read(os.path.join(ED, proto.TASK_LOGS, f)) for f in os.listdir(os.path.join(ED, proto.TASK_LOGS))}
-out2, say2 = [], [].append
-MG.english_logs(ED, say2, False)
-ok("english_logs: a second run changes nothing and reports nothing",
-   {f: read(os.path.join(ED, proto.TASK_LOGS, f)) for f in os.listdir(os.path.join(ED, proto.TASK_LOGS))} == BEFORE and not out2)
-HALF = write(os.path.join(ED, proto.TASK_LOGS, "half__j_part1.log"),
-             old_head("j", 1, "half/key") + "DONE 2026-11-01 11:00:00\n" + "2026-11-01 11:01:00 命令结束（退出码 0），没训完（第 1 次）\n")
-MG.english_logs(ED, say2, False)
-ok("english_logs: a half-rewritten log comes out fully new",
-   read(HALF) == (proto.LOG_HEAD_FMT % ("j_1", "node1", "half/key", 1, "base", "abc1234", "2026-11-01 10:00:00") + "\n"
-                  + "DONE 2026-11-01 11:00:00\n" + "2026-11-01 11:01:00 command ended (exit 0), not done (attempt 1)\n"))
-BUSY_OLD = write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('busy/old')}__j_part1.log"),
-                 old_head("j", 1, "busy/old") + "2026-11-01 10:03:00 命令结束（退出码 1），没训完（第 1 次）\n")
-BUSY_NEW = write(os.path.join(ED, proto.TASK_LOGS, f"{proto.safe('busy/new')}__j_part1.log"), read(HALF))
-said = []
-MG.english_logs(ED, said.append, False, busy=[proto.safe("busy/old"), proto.safe("busy/new")])
-OLD_TEXT = read(BUSY_OLD)
-said_new = []
-MG.english_logs(ED, said_new.append, False, busy=[proto.safe("busy/new")])
-ok(f"english_logs: logs of claimed tasks are not touched; only those still in the old format are listed ({said})",
-   len(said) == 1 and "1 logs of claimed tasks still in the old format" in said[0] and os.path.basename(BUSY_OLD) in said[0]
-   and "命令结束" in OLD_TEXT
-   and said_new == [f"{os.path.join(ED, proto.TASK_LOGS)}: 1 part logs rewritten to English"] and "命令结束" not in read(BUSY_OLD))
-
-FQ = os.path.join(EL, "queue")
-write(os.path.join(FQ, proto.QUEUE["failures"], proto.safe("k/a")),
-      "2026-11-01 10:00:00\t作业 1\tboom\tA\n2026-11-01 10:01:00\tjob 2\tboom\tB\n")
-MG.english_failures(FQ, say2, False)
-import taskq  # noqa: E402
-KEEP_TQ = taskq.TQ
-taskq.TQ = FQ
-ok("english_failures: old job field rewritten, new line kept, fail_lines counts both",
-   read(os.path.join(FQ, proto.QUEUE["failures"], proto.safe("k/a")))
-   == "2026-11-01 10:00:00\tjob 1\tboom\tA\n2026-11-01 10:01:00\tjob 2\tboom\tB\n" and taskq.failures("k/a") == 2)
-taskq.TQ = KEEP_TQ
 
 # the format stamp helpers (the check on: TASKQ_FORMAT_ANY=0)
 os.environ["TASKQ_FORMAT_ANY"] = "0"
@@ -263,86 +218,37 @@ del os.environ["TASKQ_ROOT"]
 ok("format stamp: on the hub it is <state dir>/format", C.format_path() == os.path.join(STATE, proto.FORMAT_FILE))
 os.environ["TASKQ_FORMAT_ANY"] = "1"
 
+
 # ---------------- 2. the steps ----------------
 ok(f"STEPS: one per format from MIN_FORMAT + 1 to proto.FORMAT ({[s.to for s in MG.STEPS]}), each with something to do",
    [s.to for s in MG.STEPS] == list(range(MG.MIN_FORMAT + 1, proto.FORMAT + 1)) and all(s.hub or s.root for s in MG.STEPS))
-ok("pending: the steps after the stamp, up to proto.FORMAT", [s.to for s in MG.pending(proto.FORMAT - 1)] == [proto.FORMAT]
-   and [s.to for s in MG.pending(MG.MIN_FORMAT)] == [s.to for s in MG.STEPS] and MG.pending(proto.FORMAT) == [])
+ok("pending: nothing for a place in this code's format", MG.pending(proto.FORMAT) == [])
 for bad, word in ((proto.FORMAT + 1, "newer"), (MG.MIN_FORMAT - 1, "older taskq"), (None, "cannot read")):
     try:
         MG.pending(bad)
         ok(f"pending({bad}) stops", False)
     except MG.Stop as e:
         ok(f"pending({bad}) stops: {e}", word in str(e))
+KEEP_STEPS = (MG.STEPS, MG.MIN_FORMAT, proto.FORMAT)
+install_fake(MG)
+ok("pending with a step: the steps after the stamp, up to proto.FORMAT",
+   [s.to for s in MG.pending(F)] == [FAKE] and MG.pending(FAKE) == [] and proto.FORMAT == FAKE)
+MG.STEPS, MG.MIN_FORMAT, proto.FORMAT = KEEP_STEPS
 
-# ---------------- old snapshot dir ----------------
-JUNK_SNAP = os.path.dirname(write(os.path.join(STATE, MG.OLD_SNAPSHOTS, ".lock"), ""))  # old snapshot dir with no snapshot left
-ok("old snapshot dir holding only files: no snapshots to delete; the dir itself is unused",
-   MG.old_snapshots(STATE) == ([], []) and JUNK_SNAP in MG.leftovers(STATE))
-SNAP = os.path.join(T, "snap")
-os.makedirs(os.path.join(SNAP, MG.OLD_SNAPSHOTS, "abc"))
-write(os.path.join(SNAP, MG.OLD_SNAPSHOTS, ".lock"), "")
-ok("... while a snapshot dir is left, it is not unused", os.path.join(SNAP, MG.OLD_SNAPSHOTS) not in MG.leftovers(SNAP))
-
-# ---------------- step 1: both a ledger file and a ledger in the database ----------------
-BOTH = os.path.join(T, "both")
-write(os.path.join(BOTH, MG.OLD_RELAY_STATE), json.dumps(dict(keys={"site-pueue": {"k": dict(linkset="x")}})))
-KEEP_DB = os.environ["TASKQ_DB"]
-os.environ["TASKQ_DB"] = os.path.join(BOTH, proto.DB)
-HS.update_relay(lambda s: s["keys"].setdefault("site-pueue", {}).update(k2=dict(linkset="y")))
-said = []
-try:
-    MG.v1_hub(dict(home=BOTH, queue=os.path.join(BOTH, "taskq")), said.append, True)
-    stopped = None
-except MG.Stop as e:
-    stopped = str(e)
-os.environ["TASKQ_DB"] = KEEP_DB
-ok(f"step 1: relay/state.json while the database already holds a ledger -> Stop (no guess which is right) ({stopped})",
-   stopped and "both" in stopped and "relay/state.json" in stopped)
-
-# ---------------- format-0 disk state ----------------
+# ---------------- disk state in this code's format ----------------
 sf = proto.safe
 Q = proto.QUEUE
 TQ = os.path.join(STATE, "taskq")
 R1, R2, R3 = ROOTS["site-pueue"], ROOTS["site-slurm"], ROOTS["site-slurm2"]
 Q1, Q2 = os.path.join(R1, proto.ROOT["queue"]), os.path.join(R2, proto.ROOT["queue"])
-D1, D2 = os.path.join(R1, proto.ROOT["data"]), os.path.join(R2, proto.ROOT["data"])
-L1, L2 = os.path.join(D1, proto.TASK_LOGS), os.path.join(D2, proto.TASK_LOGS)
-A, B, CK, BUSY = "infer/t0_f0", "eval/t0_f0", "D101_alpha/V_save/0", "D101_alpha/V_save/1"
-
-# hub queue (step 1 leaves it as it is)
+A, CK, BUSY = "infer/t0_f0", "D101_alpha/V_save/0", "D101_alpha/V_save/1"
 HUBQ = write(os.path.join(TQ, Q["tasks"]), jl([dict(order=1, nice=0, key=CK, exp=None, recipe="command", params=dict(cmd="x"), added=0)]))
-SM = os.path.join(TQ, proto.SMOKE_DIR)
-write(os.path.join(SM, "site-pueue.json"), json.dumps({"k1": dict(t=100, ok=True, kind="k1"), "r|env=e|a=1|env=e": dict(t=50, ok=True),
-                                                        "r|env=e|a=1": dict(t=60, ok=False)}))
-SM_SLURM = write(os.path.join(SM, "site-slurm.json"), json.dumps({"k3": dict(t=5, ok=True, kind="k3")}))  # already current: not rewritten
-# the hub's bookkeeping files from before the database held them (read in, then deleted)
-A_LINKS = {"results/x/frag_0/final.ckpt": "ab" * 32}
-EV_LINKS = {"x/y.dat": "cd" * 32}
-REC_A = dict(recipe="command", params=dict(cmd="a"), inputs=["raw/in"], staged=1.0, views=["results/x"], placed=[], outs=["preds/a"],
-             cleanup=[], links=A_LINKS)  # from before link sets: carries its links
-REC_B = dict(recipe="command", params=dict(cmd="b"), inputs=[], staged=2.0, views=[], placed=[], outs=["preds/b"], cleanup=[], linkset="e0")
-REC_CK = dict(recipe="toy", params=dict(ds="D"), inputs=[], staged=3.0, views=[], placed=[], outs=["ck"], cleanup=[])  # neither
-LEDGER = dict(keys={"site-pueue": {A: REC_A}, "site-slurm": {B: REC_B, CK: REC_CK}}, views={"site-pueue": {"results/x": 10}},
-              last_ok={"site-pueue": 100, "site-slurm": 50}, held={B: 1.0})
-write(os.path.join(STATE, MG.OLD_RELAY_STATE), json.dumps(LEDGER))
-OLD_LS = os.path.dirname(write(os.path.join(STATE, MG.OLD_LINKSETS, "e0.json"), json.dumps(EV_LINKS)))
-write(os.path.join(OLD_LS, "dead.json"), json.dumps({"a": "ef" * 32}))  # named by no record: not kept
-OLD_SITES = {"site-pueue": dict(time=5.0, label="L1", tasks={}, seglogs=[], bundle="b1")}
-OLD_RECS = [dict(machine="hub", id=4, label="fetch:x", added=1.0, step="fetch", key=CK)]
-OLD_HUB = [os.path.join(STATE, MG.OLD_RELAY_STATE), OLD_LS, write(os.path.join(STATE, MG.OLD_SITES), json.dumps(OLD_SITES)),
-           write(os.path.join(STATE, MG.OLD_RECORDS), json.dumps(OLD_RECS)), write(os.path.join(STATE, "tasks.json.lock"), ""),
-           write(os.path.join(STATE, "relay", "state.json.lock"), "")]
-# unused and kept entries in the state dir
-JUNK = [write(os.path.join(STATE, "shift.json"), "{}"), write(os.path.join(STATE, "relay", "state.json.bak"), "{}"),
-        write(os.path.join(STATE, "relay", "push_lab0.log"), "x"), os.path.dirname(write(os.path.join(STATE, "relay", "old", "a"), "x")),
-        write(os.path.join(STATE, "health", "status.json"), "{}"), write(os.path.join(STATE, "relay", "names.json.lock"), ""),
-        write(os.path.join(STATE, "relay", "stage_gone.lock"), ""), os.path.dirname(write(os.path.join(STATE, "health", "notices", "a"), "x")),
-        JUNK_SNAP]
-KEEP = [write(os.path.join(STATE, "health", "pueue_seen.json"), "{}"),
-        write(os.path.join(STATE, "relay", f"stage_{next(iter(cfg.mtab().MACHINES))}.lock"), ""),
-        write(os.path.join(STATE, "relay", "bundles", "x", "f"), "x"), write(os.path.join(STATE, "last", "a.json"), "[]")]
-# hub database in schema 3 (before the bookkeeping tables)
+# executors: an unclaimed task and a claimed one (its worker keeps it)
+write(os.path.join(Q1, Q["tasks"]), jl([dict(order=1, nice=0, key=A, exp=None, recipe="command", params=dict(cmd="a"), added=0),
+                                        dict(order=2, nice=0, key=BUSY, exp=None, recipe="command", params=dict(cmd="c"), added=0)]))
+BUSY_CLAIM = write(os.path.join(Q1, Q["claims"], sf(BUSY), proto.CLAIM_INFO), json.dumps(dict(worker="1234", token="tk")))
+write(os.path.join(Q2, Q["tasks"]), "")
+# hub database (only the snapshot reads it)
 con = sqlite3.connect(os.environ["TASKQ_DB"])
 for i in range(3):
     con.executescript(DB.SCHEMA[i])
@@ -350,40 +256,13 @@ con.execute("INSERT INTO meta(k, v) VALUES('mark', '\"before\"')")
 con.execute("PRAGMA user_version=3")
 con.commit()
 con.close()
-
-# executors: part logs and failure records an old bundle's worker wrote; a claimed task whose old log is still being written
-SEG = write(os.path.join(L1, f"{sf(A)}__w1_seg1.log"), old_head("w1", 1, A) + "训完 2026-11-01 11:00:00\n")
-write(os.path.join(L1, f"{sf(B)}__w1_seg2.log"), "old")
-KEPT_NEW = write(os.path.join(L1, f"{sf(B)}__w1_part2.log"), "new")  # target exists already: not overwritten
-OTHER = write(os.path.join(L1, f"{sf(A)}__x__j_part1.log"), old_head("j", 1, "other/key") + "2026-11-01 10:00:01 开始\n")
-write(os.path.join(Q1, Q["tasks"]), jl([dict(order=1, nice=0, key=A, exp=None, recipe="command", params=dict(cmd="a"), added=0),
-                                        dict(order=2, nice=0, key=BUSY, exp=None, recipe="command", params=dict(cmd="c"), added=0)]))
-FAIL1 = write(os.path.join(Q1, Q["failures"], sf(A)), "2026-11-01 10:00:00\t作业 w1\tboom\toldbundle\n")
-BUSY_CLAIM = write(os.path.join(Q1, Q["claims"], sf(BUSY), proto.CLAIM_INFO), json.dumps(dict(worker="1234", token="tk")))
-BUSY_LOG = write(os.path.join(L1, f"{sf(BUSY)}__1234_seg1.log"), old_head("1234", 1, BUSY))
-write(os.path.join(Q2, Q["tasks"]), "")
-write(os.path.join(L2, f"{sf(B)}__dicc_seg1.log"), "f")
-# the store (the hub entry): part logs fetched into the store data dir and in its root's data dir
-write(os.path.join(DATA, proto.TASK_LOGS, f"{sf(B)}__dicc_seg1.log"), "g")
-write(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS, f"{sf(A)}__x_seg3.log"), "h")
-# step 2: the machine's own files older versions wrote into the home dir (the hub's text logs, boot logs and their crontab lines,
-# GPU usage records with their recorder running, a leftover); the hub's machine has a root, site-pueue's home is its own
-HH, PH = HOME, os.path.join(T, "home_fake-pueue-host")
-HUB_LOGS = {n: write(os.path.join(HH, n + ".log"), f"{n} old\n") for n in ("relay", "health", "ledger")}
-NEW_RELAY = write(cfg.log("relay"), "relay new\n")  # the new code wrote it before migrate ran
-write(os.path.join(HH, "on_boot.log"), "hub boot\n")
-HUB_CRON = write(os.path.join(HH, ".crontab"), f"5 * * * * true\n@reboot python3 /x/bin/taskq --project /p boot >> {HH}/on_boot.log 2>&1\n")
-write(os.path.join(PH, "on_boot.log"), "pueue boot\n")
-write(os.path.join(PH, ".crontab"), f"@reboot bash /r/code/current/scripts/taskq/queue/on_boot.sh --gpu-log >> {PH}/on_boot.log 2>&1\n")
-GL_OLD = os.path.join(PH, "gpu_usage")
-write(os.path.join(GL_OLD, "gpu_2026-10.csv"), "time,gpu\n2026-10-31 23:59:00,0\n")
-PULL = write(os.path.join(PH, "git_pull.log"), "x")
-FAKE_GL = write(os.path.join(T, "fakegl", "gpu_log.sh"), 'exec 9>> "$1/gpu_log.pid"; flock 9; echo $$ > "$1/gpu_log.pid"; sleep 600\n')
-LOGGER = subprocess.Popen(["bash", FAKE_GL, GL_OLD], start_new_session=True)  # the old recorder (its own process group, as setsid starts it)
-for _ in range(100):
-    if MG.gpu_logger(GL_OLD) == LOGGER.pid:
-        break
-    time.sleep(0.1)
+ROOT_STAMP = {n: os.path.join(r, proto.ROOT["format"]) for n, r in ROOTS.items()}
+HUB_STAMP = os.path.join(STATE, proto.FORMAT_FILE)
+for p in [HUB_STAMP, *ROOT_STAMP.values()]:
+    write(p, f"{F}\n")
+HUB_MARK = os.path.join(STATE, "fake_step")
+ROOT_MARK = {n: os.path.join(r, proto.ROOT["state"], "fake_step") for n, r in ROOTS.items()}
+LABEL = {n: M.MACHINES[n]["label"] for n in ROOTS}
 
 
 def tree():
@@ -412,8 +291,9 @@ def taskq_cli(*args):
     return r.returncode, r.stdout + r.stderr
 
 
-def run(*args):
-    r = subprocess.run([sys.executable, os.path.abspath(__file__), "--run", *args], capture_output=True, text=True, timeout=900)
+def run(*args, real=False):
+    r = subprocess.run([sys.executable, os.path.abspath(__file__), "--run-real" if real else "--run", *args],
+                       capture_output=True, text=True, timeout=900)
     return r.returncode, r.stdout, r.stderr
 
 
@@ -421,8 +301,10 @@ def stamp(p):
     return C.format_on_disk(p)
 
 
-ROOT_STAMP = {n: os.path.join(r, proto.ROOT["format"]) for n, r in ROOTS.items()}
-HUB_STAMP = os.path.join(STATE, proto.FORMAT_FILE)
+def marks(p):
+    """The marker file's records, one per time the fake step ran there; None when it never ran."""
+    return [json.loads(x) for x in read(p).splitlines()] if os.path.exists(p) else None
+
 
 # ---------------- 3. listing changes nothing ----------------
 rc, out = taskq_cli("--help")
@@ -432,16 +314,11 @@ rc, out, err = run()
 d = diff(t0, tree())
 ok(f"default (list): exit code 0, not one byte changes anywhere: no bundle pushed, no lock, no database ({d[:5]} {err.strip()[-300:]})",
    rc == 0 and d == [] and not os.path.exists(os.path.join(R1, proto.ROOT["code"], NEWB)))
-ok(f"lists: this code's format, the hub in format 0 with step 1 and what it would change ({out[:1500]})",
-   f"this taskq: on-disk format {proto.FORMAT}" in out and f"hub {STATE}: format 0 (no stamp)" in out and "step 1:" in out
-   and "relay ledger (3 records) and 3 link sets: from relay/state.json" in out and "on 1 executors: from relay/status.json" in out
-   and "1 task records: from tasks.json" in out and "smoke records site-pueue.json: kind names without a repeated part, 3 -> 2 kinds" in out
-   and "site-slurm.json" not in out
-   and all(f"drop {p}" in out for p in JUNK + OLD_HUB) and not any(f"drop {p}" in out for p in KEEP))
-ok(f"lists step 2 and what its hub part would move ({out[out.find('step 2:'):][:800]})",
-   "step 2:" in out and f"{HH}/relay.log -> {cfg.log('relay')}" in out and f"{HH}/ledger.log -> {STATE}/{proto.LOGS}/ledger.log" in out)
+ok(f"lists: this code's format, the hub in format {F} with the step and what its hub part would change ({out[:1500]})",
+   f"this taskq: on-disk format {FAKE} (migrates from format {F} on)" in out and f"hub {STATE}: format {F}\n" in out
+   and f"step {FAKE}: fake step" in out and f"fake step: append to {HUB_MARK}" in out)
 ok("lists: each root's format and the step it needs; says nothing changed",
-   all(f"{M.MACHINES[n]['label']}: format 0 (no stamp)" in out for n in ROOTS) and "its root part, after switching to the new bundle" in out
+   all(f"{LABEL[n]}: format {F}\n" in out for n in ROOTS) and "its root part, after switching to the new bundle" in out
    and "listed only, nothing changed" in out)
 rc, out2, err = run("--list")
 ok("--list: the same listing", rc == 0 and out2 == out and diff(t0, tree()) == [])
@@ -459,111 +336,78 @@ d = diff(t1, tree())
 ok(f"--apply with a root that cannot be read: exit 1, no traceback, says which, nothing changed ({d[:5]} {err.strip()[-300:]})",
    rc == 1 and "Traceback" not in err and "Slurm2" in err and "nothing changed" in err and d == [])
 os.remove(unreach)
-write(ROOT_STAMP["site-slurm2"], f"{proto.FORMAT + 1}\n")
+write(ROOT_STAMP["site-slurm2"], f"{FAKE + 1}\n")
 t1 = tree()
 rc, out, err = run("--apply")
 d = diff(t1, tree())
 ok(f"--apply with a root newer than this code: exit 1, says update taskq, nothing changed ({d[:5]} {err.strip()[-200:]})",
    rc == 1 and "newer than this taskq" in err and d == [])
 os.remove(ROOT_STAMP["site-slurm2"])
-bad_sites = os.path.join(STATE, MG.OLD_SITES)
-good = read(bad_sites)
-write(bad_sites, "{not json")
 t1 = tree()
 rc, out, err = run("--apply")
 d = diff(t1, tree())
-ok(f"--apply when a hub step cannot be done (unreadable old file): exit 1 before anything changes, roots untouched ({d[:5]} {err.strip()[-200:]})",
-   rc == 1 and "hub step 1" in err and MG.OLD_SITES in err and d == [])
-write(bad_sites, good)
-ok("after the Stop cases: disk is back to how it was", diff(t0, tree()) == [])
+ok(f"--apply with a root older than MIN_FORMAT (no stamp: format 0): exit 1, says use an older taskq, nothing changed ({d[:5]} {err.strip()[-200:]})",
+   rc == 1 and f"from format {F} on" in err and "older taskq" in err and d == [])
+write(ROOT_STAMP["site-slurm2"], f"{F}\n")
+STOP = write(os.path.join(STATE, "fake_stop"), "")
+t1 = tree()
+rc, out, err = run("--apply")
+d = diff(t1, tree())
+ok(f"--apply when a hub step cannot be done: exit 1 before anything changes, roots untouched ({d[:5]} {err.strip()[-200:]})",
+   rc == 1 and f"hub step {FAKE}: the fake hub step cannot be done" in err and d == [])
+os.remove(STOP)
+LOCK = MG.round_lock()  # a health check round holds its lock
+t1 = tree()
+rc, out, err = run("--apply")
+d = diff(t1, tree())
+LOCK.close()
+ok(f"--apply while a health check round runs: exit 1, says so, nothing changed ({d[:5]} {err.strip()[-200:]})",
+   rc == 1 and "a health check round is running" in err and d == [])
+LOCKFILE = LOCK.name
+t0[os.path.dirname(LOCKFILE)], t0[LOCKFILE] = ("dir",), ("file", b"")
+ok("after the Stop cases: disk is back to how it was (but for the round lock file)", diff(t0, tree()) == [])
 
 # ---------------- 5. --apply ----------------
 before_hubq = read(HUBQ)
+with open(os.environ["TASKQ_DB"], "rb") as f:
+    before_db = f.read()
 rc, out, err = run("--apply")
 ok(f"--apply: exit code 0 ({(err or out).strip()[-800:]})", rc == 0 and "migration complete" in out)
-ok("every place stamped with this code's format: the hub and every root",
-   stamp(HUB_STAMP) == proto.FORMAT and all(stamp(p) == proto.FORMAT for p in ROOT_STAMP.values())
-   and read(HUB_STAMP) == f"{proto.FORMAT}\n")
+ok("every place stamped with the step's format: the hub and every root",
+   stamp(HUB_STAMP) == FAKE and all(stamp(p) == FAKE for p in ROOT_STAMP.values()) and read(HUB_STAMP) == f"{FAKE}\n")
 SNAPS = os.path.join(STATE, proto.SNAPSHOTS)
 snaps = sorted(os.listdir(SNAPS)) if os.path.isdir(SNAPS) else []
 snap_ok = False
 if len(snaps) == 1:
     sd = os.path.join(SNAPS, snaps[0])
     sc = sqlite3.connect(os.path.join(sd, proto.DB))
-    snap_ok = (snaps[0].endswith("-format0") and read(os.path.join(sd, "taskq", Q["tasks"])) == before_hubq
-               and os.path.exists(os.path.join(sd, "taskq", proto.SMOKE_DIR, "site-pueue.json"))
+    snap_ok = (snaps[0].endswith(f"-format{F}") and read(os.path.join(sd, "taskq", Q["tasks"])) == before_hubq
                and sc.execute("PRAGMA user_version").fetchone()[0] == 3
                and sc.execute("SELECT v FROM meta WHERE k='mark'").fetchone() == ('"before"',)
-               and not os.path.exists(os.path.join(sd, proto.FORMAT_FILE)))
+               and read(os.path.join(sd, proto.FORMAT_FILE)) == f"{F}\n")
     sc.close()
-ok(f"a snapshot before applying: the hub queue as it was, the database as it was (schema 3), no stamp then ({snaps})", snap_ok)
-ok("the hub queue itself: step 1 leaves it as it was", read(HUBQ) == before_hubq)
+ok(f"a snapshot before applying: the hub queue, the database and the stamp as they were ({snaps})", snap_ok)
+with open(os.environ["TASKQ_DB"], "rb") as f:
+    ok("the hub queue and database themselves: the step did not touch them, nor did the run", read(HUBQ) == before_hubq and f.read() == before_db)
+ok(f"the hub step ran once, on the hub queue ({marks(HUB_MARK)})", marks(HUB_MARK) == [dict(queue=TQ)])
 ok("executors switched to the new bundle, the machine name recorded, no held tasks left",
    all(os.readlink(os.path.join(ROOTS[n], proto.ROOT["current"])) == NEWB
        and read(os.path.join(ROOTS[n], proto.ROOT["machine"])) == n + "\n"
        and not os.path.exists(os.path.join(ROOTS[n], proto.ROOT["queue"], Q["held"])) for n in EXECS))
-ok(f"executor part logs: _seg -> _part and English; an existing target not overwritten (both kept) ({sorted(os.listdir(L1))})",
-   sorted(os.listdir(L1)) == sorted([f"{sf(A)}__w1_part1.log", f"{sf(B)}__w1_seg2.log", f"{sf(B)}__w1_part2.log",
-                                     f"{sf(A)}__x__j_part1.log", os.path.basename(BUSY_LOG)])
-   and read(os.path.join(L1, f"{sf(A)}__w1_part1.log")) == proto.LOG_HEAD_FMT % ("w1_1", "node1", A, 1, "base", "abc1234",
-                                                                                   "2026-11-01 10:00:00") + "\nDONE 2026-11-01 11:00:00\n"
-   and read(KEPT_NEW) == "new" and "kept" in out
-   and read(OTHER) == "job j_1 @ node1, task=other/key, part 1, env base, code abc1234, 2026-11-01 10:00:00\n2026-11-01 10:00:01 开始\n")
-ok("a claimed task: claim, queue entry and its open old log left as they are (listed)",
-   read(BUSY_CLAIM) == json.dumps(dict(worker="1234", token="tk")) and read(BUSY_LOG) == old_head("1234", 1, BUSY)
-   and BUSY in read(os.path.join(Q1, Q["tasks"])) and "1 claimed task(s) keep running" in out and "still in the old format" in out)
-ok("executor failure records: the old job field in English", read(FAIL1) == "2026-11-01 10:00:00\tjob w1\tboom\toldbundle\n")
-ok("site-slurm, the store data dir, the store root's data dir: part logs renamed",
-   os.listdir(L2) == [f"{sf(B)}__dicc_part1.log"] and os.listdir(os.path.join(DATA, proto.TASK_LOGS)) == [f"{sf(B)}__dicc_part1.log"]
-   and os.listdir(os.path.join(ROOTS["hub"], proto.ROOT["data"], proto.TASK_LOGS)) == [f"{sf(A)}__x_part3.log"])
-ok("the store root (not an executor): not switched here (relay does it), stamped",
-   os.readlink(os.path.join(ROOTS["hub"], proto.ROOT["current"])) == "oldbundle" and stamp(ROOT_STAMP["hub"]) == proto.FORMAT)
-st = HS.relay()
-ks = st.get("keys") or {}
-ra, rb, rck = ks.get("site-pueue", {}).get(A, {}), ks.get("site-slurm", {}).get(B, {}), ks.get("site-slurm", {}).get(CK, {})
-ok(f"relay ledger in the database: every record and field as in the file; links carried by a record became its link set ({st})",
-   {n: sorted(r) for n, r in ks.items()} == {"site-pueue": [A], "site-slurm": sorted([B, CK])}
-   and {k: v for k, v in ra.items() if k != "linkset"} == {k: v for k, v in REC_A.items() if k != "links"}
-   and ST.links_of(ra) == A_LINKS and rb == REC_B and ST.links_of(rb) == EV_LINKS and ST.links_of(rck) == {} and "linkset" in rck
-   and st.get("views") == LEDGER["views"] and st.get("last_ok") == LEDGER["last_ok"] and st.get("held") == LEDGER["held"])
-con = sqlite3.connect(os.environ["TASKQ_DB"])
-LSIDS = sorted(i for (i,) in con.execute("SELECT id FROM linkset"))
-ver = con.execute("PRAGMA user_version").fetchone()[0]
-con.close()
-ok("link sets: those records name kept (the dead one dropped); the database migrated to the current schema",
-   LSIDS == sorted({ra.get("linkset"), rb.get("linkset"), rck.get("linkset")}) and "dead" not in LSIDS and ver == DB.VERSION)
-ok("what relay last read and the task records read into the database; the old files are gone",
-   HS.sites() == OLD_SITES and HS.records() == OLD_RECS and not any(os.path.lexists(p) for p in OLD_HUB))
-ok("smoke records: kind names without a repeated part, the newer record kept; a file already current not rewritten",
-   json.load(open(os.path.join(SM, "site-pueue.json"))) == {"k1": dict(t=100, ok=True, kind="k1"), "r|env=e|a=1": dict(t=60, ok=False, kind="r|env=e|a=1")}
-   and read(SM_SLURM) == json.dumps({"k3": dict(t=5, ok=True, kind="k3")}))
-ok("state dir: unused entries dropped; live ones kept (stamp, snapshots, last/ records, health round lock among them)",
-   not any(os.path.lexists(p) for p in JUNK) and all(os.path.exists(p) for p in KEEP) and os.path.isdir(SNAPS))
-GL_NEW = os.path.join(ROOTS["site-pueue"], proto.ROOT["state"], proto.GPU_LOG_SUB)
-for _ in range(100):
-    NEW_GL = MG.gpu_logger(GL_NEW)
-    if NEW_GL:
-        break
-    time.sleep(0.1)
-ok("step 2, hub: its text logs out of the home dir into logs/ in the state dir (one written since: the old lines first)",
-   not any(os.path.exists(p) for p in HUB_LOGS.values()) and read(NEW_RELAY) == "relay old\nrelay new\n"
-   and read(cfg.log("health")) == "health old\n" and read(os.path.join(STATE, proto.LOGS, "ledger.log")) == "ledger old\n")
-HB = os.path.join(ROOTS["hub"], proto.ROOT["state"], proto.LOGS, "on_boot.log")
-ok("step 2, the hub's machine (it has a root): boot log into its root's state/logs, the crontab line follows, other lines kept",
-   read(HB) == "hub boot\n" and not os.path.exists(os.path.join(HH, "on_boot.log"))
-   and read(HUB_CRON) == f"5 * * * * true\n@reboot python3 /x/bin/taskq --project /p boot >> {HB} 2>&1\n")
-PB = os.path.join(ROOTS["site-pueue"], proto.ROOT["state"], proto.LOGS, "on_boot.log")
-ok("step 2, executor: boot log and its crontab line into the root's state/logs; the leftover git_pull.log dropped",
-   read(PB) == "pueue boot\n" and read(os.path.join(PH, ".crontab")).endswith(f">> {PB} 2>&1\n") and not os.path.exists(PULL))
-ok(f"step 2, executor: GPU usage records moved into its root's state dir; the old recorder stopped, a new one started there ({NEW_GL})",
-   LOGGER.wait(timeout=30) is not None and not os.path.exists(GL_OLD) and NEW_GL and NEW_GL != LOGGER.pid
-   and read(os.path.join(GL_NEW, "gpu_2026-10.csv")) == "time,gpu\n2026-10-31 23:59:00,0\n")
-if NEW_GL:  # the recorder migrate started (its pid from its lock in the test dir): stop it before comparing trees
-    os.killpg(NEW_GL, 15)
-    for _ in range(100):
-        if MG.gpu_logger(GL_NEW) is None:
-            break
-        time.sleep(0.1)
+RM1 = marks(ROOT_MARK["site-pueue"])
+ok(f"the root step ran once in each executor, with its queue dir, its claimed tasks and its data dir ({RM1})",
+   RM1 == [dict(queue=Q1, busy=[sf(BUSY)], data=[os.path.join(R1, proto.ROOT["data"])])]
+   and all(marks(ROOT_MARK[n]) == [dict(queue=os.path.join(ROOTS[n], proto.ROOT["queue"]), busy=[],
+                                        data=[os.path.join(ROOTS[n], proto.ROOT["data"])])] for n in ("site-slurm", "site-slurm2")))
+ok("a claimed task: claim and queue entry left as they are, listed; the unclaimed one back in the queue",
+   read(BUSY_CLAIM) == json.dumps(dict(worker="1234", token="tk")) and BUSY in read(os.path.join(Q1, Q["tasks"]))
+   and A in read(os.path.join(Q1, Q["tasks"])) and "1 claimed task(s) keep running" in out)
+ok(f"the store root (not an executor): not switched here (relay does it), the step ran once with the store's data dir, stamped "
+   f"({marks(ROOT_MARK['hub'])})",
+   os.readlink(os.path.join(ROOTS["hub"], proto.ROOT["current"])) == "oldbundle" and stamp(ROOT_STAMP["hub"]) == FAKE
+   and marks(ROOT_MARK["hub"]) == [dict(queue=None, busy=[], data=[os.path.join(ROOTS["hub"], proto.ROOT["data"]), DATA])])
+ok(f"each root reports its format change ({out[out.find('== '):][:400]})",
+   all(f"== {LABEL[n]}: format {F} -> {FAKE}" in out for n in ROOTS) and f"hub: format {FAKE}" in out)
 
 # ---------------- 6. run again; a root left behind ----------------
 t2 = tree()
@@ -571,24 +415,35 @@ rc, out, err = run("--apply")
 d = diff(t2, tree())
 ok(f"--apply again: exit code 0, nothing to do, nothing on disk changes (no snapshot either) ({d[:5]} {(err or '').strip()[-300:]})",
    rc == 0 and "nothing to do" in out and d == [])
-os.remove(ROOT_STAMP["site-slurm2"])  # say it was unreachable at the cutover and came back without a stamp
+write(ROOT_STAMP["site-slurm2"], f"{F}\n")  # say it was unreachable at the cutover and came back behind
 rc, out, err = run()
-ok("listing: only that root still needs step 1", rc == 0 and "Slurm2: format 0 (no stamp)" in out and f"hub {STATE}: format {proto.FORMAT}, nothing to do" in out
-   and f"pueue: format {proto.FORMAT}, nothing to do" in out)
+ok("listing: only that root still needs the step", rc == 0 and f"Slurm2: format {F}\n" in out and f"hub {STATE}: format {FAKE}, nothing to do" in out
+   and f"pueue: format {FAKE}, nothing to do" in out)
 t3 = tree()
 rc, out, err = run("--apply")
 d = diff(t3, tree())
 ok(f"--apply: only that root migrated (and a new snapshot), nothing else changes ({d})",
-   rc == 0 and stamp(ROOT_STAMP["site-slurm2"]) == proto.FORMAT
-   and all(p == ROOT_STAMP["site-slurm2"] or p.startswith(SNAPS) for p in d) and len(os.listdir(SNAPS)) == 2)
+   rc == 0 and stamp(ROOT_STAMP["site-slurm2"]) == FAKE and len(marks(ROOT_MARK["site-slurm2"])) == 2
+   and all(p in (ROOT_STAMP["site-slurm2"], ROOT_MARK["site-slurm2"]) or p.startswith(SNAPS) for p in d) and len(os.listdir(SNAPS)) == 2)
 
-# ---------------- 7. snapshots kept ----------------
+# ---------------- 7. snapshots kept; this code itself has nothing to do ----------------
 for _ in range(proto.SNAPSHOT_KEEP + 1):
     MG.snapshot(STATE, proto.FORMAT, lambda _: None)
     time.sleep(0.01)
 left = sorted(os.listdir(SNAPS))
 ok(f"snapshots: only the newest {proto.SNAPSHOT_KEEP} stay, no half-written one ({left})",
    len(left) == proto.SNAPSHOT_KEEP and not any(x.endswith(proto.TMP) for x in left))
+for p in [HUB_STAMP, *ROOT_STAMP.values()]:
+    write(p, f"{F}\n")
+t4 = tree()
+rc, out, err = run(real=True)
+ok(f"this code (no fake step), every place in its format: the listing says nothing to do everywhere ({out.strip()[-500:]} {err.strip()[-300:]})",
+   rc == 0 and f"hub {STATE}: format {F}, nothing to do" in out and all(f"{LABEL[n]}: format {F}, nothing to do" in out for n in ROOTS)
+   and "step " not in out)
+rc, out, err = run("--apply", real=True)
+d = diff(t4, tree())
+ok(f"... and --apply: exit 0, nothing to do, nothing on disk changes ({d[:5]} {out.strip()[-200:]} {err.strip()[-300:]})",
+   rc == 0 and f"everything is in format {F} already; nothing to do" in out and d == [])
 
 # ---------------- 8. the stamp binds this code: workers claim nothing, hub rounds and relay steps refuse; new roots stamped ----------------
 ENVX = {k: v for k, v in os.environ.items() if k not in ("TASKQ_DIR", "TASKQ_STATE", "TASKQ_DATA", "TASKQ_ROOT", "TASKQ_MACHINE")}

@@ -569,13 +569,12 @@ GPU_USAGE_TOTAL = ("gpu", "user", "hours")
 DB = "taskq.db"  # under the state dir
 DB_COMPACT = (0.5, 64 << 20)  # the hub tick compacts the database (VACUUM) when free pages are over this share and this many bytes
 STAGE_LOCK = "stage_{}.lock"  # under the hub's relay state dir, per executor: one blob transfer (missing → ingest → push → view) at a time
-# live names in the hub's relay/ and health/ state dirs (each also with its .lock); taskq self migrate (clock stopped) deletes
-# the rest, temp files included (stage locks only for machines in the machine table; health.log there is moved to the logs dir by migrate).
+# live names in the hub's relay/ and health/ state dirs (each also with its .lock; relay/ also holds the stage locks)
 # Relay's bookkeeping, what it read from each executor and the task records are in the hub database (hubstate.py)
 RELAY_NAMES = ("bundles",)
 TICK = "tick"  # in the health check's state dir: tick.lock is held (flock) by the running round, one round at a time; text "pid start-time"
-HEALTH_NAMES = (PUEUE_SEEN, "health.log", TICK)
-# names at the top level of the state dir (cfg.state): taskq self migrate deletes those not listed (left by older versions)
+HEALTH_NAMES = (PUEUE_SEEN, TICK)
+# names at the top level of the state dir (cfg.state)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
                WHEELHOUSE, "envlock", DB, FORMAT_FILE, SNAPSHOTS, LOGS, GPU_LOG_SUB)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line

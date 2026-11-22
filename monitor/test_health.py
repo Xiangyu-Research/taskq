@@ -704,6 +704,64 @@ finally:
     H.policy.PAUSE = {}
     del H.M.MACHINES["loc"]
 
+# revive_agents: an agent that stopped calling is started again over the real ssh, only when that is safe
+import types  # noqa: E402
+_fab = types.ModuleType("agent_box")
+_fab_state = dict(started=[], ages={}, rc=0, comes_back=True)
+
+
+def _fab_start(name):
+    _fab_state["started"].append(name)
+    if _fab_state["comes_back"]:
+        _fab_state["ages"][name] = 0.0
+    return _fab_state["rc"]
+
+
+_fab.start, _fab.ages = _fab_start, lambda: dict(_fab_state["ages"])
+_real_ab = sys.modules.get("agent_box")
+sys.modules["agent_box"] = _fab
+_fake_ssh = os.path.join(fixture.tmpdir(), "ssh")
+with open(_fake_ssh, "w") as f:
+    f.write('#!/bin/bash\n[[ $1 == -O && -f "$0.up" ]]\n')
+os.chmod(_fake_ssh, 0o755)
+_env_ssh = os.environ.get("TASKQ_REAL_SSH")
+os.environ["TASKQ_REAL_SSH"] = _fake_ssh
+_ev_added.clear()
+_EV.add = lambda source, msg, db=None, **kw: _ev_added.append((source, msg, kw))
+try:
+    _sa = dict(agents={PH: 3600.0, "site-slurm": 3600.0, "hub": 10.0, "site-slurm2": None})
+    H.policy.AUTO["revive"] = False
+    ok("revive_agents: switch off does nothing", H.revive_agents(_sa) == ([], {}) and not _fab_state["started"])
+    H.policy.AUTO["revive"] = True
+    ev, still = H.revive_agents(_sa, dry=True)
+    ok("revive_agents: dry only says what it would do", not _fab_state["started"] and len(ev) == 1 and "will be started again" in ev[0])
+    ev, still = H.revive_agents(_sa)
+    ok("revive_agents: a silent agent is started again and logged (health/revive); a recent one and one never installed are left alone; "
+       "ssh_master with its master down is not touched and says why",
+       _fab_state["started"] == [PH] and len(ev) == 1 and "started again automatically" in ev[0]
+       and _ev_added[-1][2] == dict(kind="revive", site=PH) and "master connection is down" in still.get("site-slurm", ""))
+    open(_fake_ssh + ".up", "w").close()
+    _fab_state.update(started=[], ages={}, rc=1)
+    ev, still = H.revive_agents(dict(agents={"site-slurm": 3600.0}))
+    ok("revive_agents: ssh_master with its master up is started; a failed start returns the reason",
+       _fab_state["started"] == ["site-slurm"] and ev == [] and "failed (exit 1)" in still.get("site-slurm", ""))
+    H.policy.PAUSE = {PH: (None, "maintenance")}
+    _fab_state.update(started=[], rc=0)
+    H.revive_agents(dict(agents={PH: 3600.0}))
+    ok("revive_agents: paused machines are left alone", not _fab_state["started"])
+finally:
+    H.policy.AUTO.pop("revive", None)
+    H.policy.PAUSE = {}
+    _EV.add = _EV_add
+    if _real_ab is not None:
+        sys.modules["agent_box"] = _real_ab
+    else:
+        sys.modules.pop("agent_box", None)
+    if _env_ssh is None:
+        os.environ.pop("TASKQ_REAL_SSH", None)
+    else:
+        os.environ["TASKQ_REAL_SSH"] = _env_ssh
+
 # ---------------- push channel: server, access token, detail ----------------
 import push as PU  # noqa: E402
 _reqs, _po = [], {}

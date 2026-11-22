@@ -30,7 +30,7 @@ SCHEMA = [
     CREATE TABLE progress(t REAL NOT NULL, key TEXT NOT NULL, state TEXT, progress REAL, site TEXT, data TEXT, PRIMARY KEY(key, t));
     CREATE INDEX progress_t ON progress(t);
     """,
-    # 2: the sha256 cache moved to the store (site_ops.hashes); taskq self migrate copies it there first
+    # 2: the sha256 cache moved to the store (site_ops.hashes)
     """
     DROP TABLE hash;
     """,
@@ -38,8 +38,8 @@ SCHEMA = [
     """
     CREATE TABLE stored(key TEXT PRIMARY KEY, t REAL NOT NULL);
     """,
-    # 4: hub bookkeeping that lived in JSON files (hubstate.py; taskq self migrate moves relay/state.json, relay/linksets/,
-    # relay/status.json and tasks.json in)
+    # 4: hub bookkeeping that lived in JSON files (hubstate.py; formerly relay/state.json, relay/linksets/,
+    # relay/status.json and tasks.json)
     """
     CREATE TABLE site(name TEXT PRIMARY KEY, body TEXT NOT NULL);
     CREATE TABLE record(seq INTEGER PRIMARY KEY, body TEXT NOT NULL);
