@@ -17,6 +17,7 @@ MACHINE_FIELDS = {
     "label": ("str", REQUIRED, "name shown in alerts and pages"),
     "hostname": ("regex", REQUIRED, "regex matching this machine's hostname (hostname -s)"),
     "ssh": ("str?", None, "ssh name the hub connects to; None = the machine the hub runs on"),
+    "agent": ("bool", False, "the hub reaches this machine through its resident agent (taskq site agent install) instead of ssh"),
     "ssh_master": ("bool", False, "ssh only over a persistent connection (ControlMaster); do not connect while it is down"),
     "tz": ("str?", None, "this machine's time zone (IANA name, e.g. Asia/Kuala_Lumpur); worker hours use it; None = local time zone"),
     "conda": ("pair", None, "(conda location, env the worker and GPU pad run in: a name in envs, else a conda env of that install)"),

@@ -106,6 +106,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq site resend` | replace the specs of sent tasks there with the hub's current recipe and params |
 | `taskq site env` | build envs on that machine and run checks |
 | `taskq site envs` | dry run: each env's state on that machine |
+| `taskq site agent` | resident agent on that machine: install, start, status (the hub reaches machines with `agent=True` through it instead of ssh) |
 | `taskq site setup` | pueue daemon, groups, crontab (no name: this machine; takes the table name only) |
 | `taskq env lock` | resolve an env description into a lock <name>.<variant>.lock.json and download the files into the wheelhouse (not installed anywhere) |
 | `taskq smoke status` | each machine's records ([executor] [--json]) |
@@ -232,6 +233,7 @@ and `bin/taskq` mean the full suite):
 | `sites/machine_name.py` | `test_adapters.py`, `test_relay.py`, `test_db.py` |
 | `sites/envlock.py` | `test_envlock.py` |
 | `sync/tunnel.py`, `sync/tunnel_push.sh` | `test_tunnel.py` |
+| `sync/agent.py`, `sync/agent_box.py`, `sync/xssh` | `test_agent.py` |
 | `monitor/health.py`, `monitor/notice.py`, `monitor/plain.py`, `monitor/push.py` | `test_health.py`, `test_probe.py`, `test_db.py` |
 | `monitor/overview.py` | `test_overview.py` |
 | `monitor/summary.py`, `queue/taskstate.py` | `test_summary.py`, `test_overview.py` |

@@ -40,7 +40,7 @@ JOB_WAIT = 600
 STALL = int(os.environ.get("TUNNEL_STALL", 3600))
 ROUNDS = 3  # retry missing or mismatched files within the same run (a few drop when there are many)
 POLL = float(os.environ.get("TUNNEL_POLL", 60))
-SSH = shlex.split(os.environ.get("TUNNEL_SSH", "ssh"))
+SSH = shlex.split(os.environ.get("TUNNEL_SSH", os.path.join(HERE, "xssh")))
 LOCK = os.environ.get("TUNNEL_LOCK")
 IDLE = float(os.environ.get("TUNNEL_IDLE", 300))
 EXITING = 3  # seconds our server that is exiting (idle) may still hold bind without answering; "other" only if it lasts
@@ -52,7 +52,7 @@ STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
 # GET / with CHALLENGE_HEADER: a nonce -> "ok <SERVER_VERSION> <proof>", proof = HMAC of the nonce with the key only this
 # account can read (<server dir>/serve.key): a transfer process uses a server only when it proves it is ours, and restarts
 # our server of an older version
-SERVER_VERSION = 2
+SERVER_VERSION = 3  # 3: /agent/ routes (sync/agent_box.py), stays up while agents have mailboxes
 TOKEN_HEADER = "X-Xfer-Token"
 CHALLENGE_HEADER = "X-Xfer-Challenge"
 NONCE_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
@@ -290,7 +290,7 @@ class Registry:
         return n
 
 
-def handler(reg, key):
+def handler(reg, key, box=None):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -319,6 +319,8 @@ def handler(reg, key):
             return reg.get(self.headers.get(TOKEN_HEADER) or ""), urllib.parse.unquote(p.path[1:]), urllib.parse.parse_qs(p.query)
 
         def do_GET(self):
+            if box and self.path.startswith("/agent/"):
+                return box.handle(self, "GET")
             if self.path == "/" and TOKEN_HEADER not in self.headers:
                 n = self.headers.get(CHALLENGE_HEADER) or ""
                 return self.reply(200, f"ok {SERVER_VERSION} {proof(key, n)}".encode() if NONCE_RE.fullmatch(n) else b"ok")
@@ -369,6 +371,8 @@ def handler(reg, key):
             self.reply(200 if got == n else 400)
 
         def do_POST(self):
+            if box and self.path.startswith("/agent/"):
+                return box.handle(self, "POST")
             S, rel, q = self.session()
             if S is None or S.dst is None or rel not in S.files:
                 return self.reply(404)
@@ -391,11 +395,17 @@ def handler(reg, key):
 
 def serve_main(bind, d):
     """Shared file server (tunnel.py _serve); exits if bind already has one."""
+    try:
+        import agent_box
+        box = agent_box.Box(d)
+    except ImportError as e:  # an old bundle without the agent files: files only
+        log(f"no agent routes ({e})")
+        agent_box = box = None
     reg = Registry(d)
     key = server_key(d)
     host, port = bind.rsplit(":", 1)
     try:
-        srv = http.server.ThreadingHTTPServer((host, int(port)), handler(reg, key))
+        srv = http.server.ThreadingHTTPServer((host, int(port)), handler(reg, key, box))
     except OSError as e:
         log(f"{bind} already has a server ({e}), not starting another")
         return 0
@@ -411,7 +421,9 @@ def serve_main(bind, d):
         n = reg.prune()
         if n is None:
             break
-        if n:
+        if box:
+            box.prune()
+        if n or (box and agent_box.resident(d)):
             last = time.time()
         elif time.time() - last >= IDLE:
             break
@@ -422,7 +434,7 @@ def serve_main(bind, d):
             os.unlink(pidf)
     except OSError:
         pass
-    log("no sessions left, file server exits")
+    log("no sessions or agents left, file server exits")
     return 0
 
 
@@ -433,6 +445,40 @@ def srv_dir():
     if not common.private_dir(d):
         raise RuntimeError(f"{d} is not a private dir of this account; not using the file server")
     return d
+
+
+def ensure_server(bind, d, key):
+    """Make sure our file server runs on bind → True when it answers as ours now. Nothing there: start one (of two started at
+    once, the second cannot bind and exits). Our server of an older version (or ours not answering): stop it and start
+    this one; sessions live in files, so transfers of this version continue (their requests retry), an older version's
+    transfers fail and are queued again. Anything else on bind (for longer than EXITING, the moment our server takes to
+    exit): RuntimeError, nothing is sent to it."""
+    who = probe(bind, d, key)
+    until = time.time() + EXITING
+    while who == "other" and time.time() < until:  # our server exiting when idle: listening, no answer, pid file gone
+        time.sleep(0.2)
+        who = probe(bind, d, key)
+    if who == "ours":
+        return True
+    if who == "other":
+        raise RuntimeError(f"{bind} is taken by a process that is not this account's file server (it cannot answer with "
+                           f"the key in {d}); not transferring through it")
+    if who == "older":
+        pid = server_pid(bind, d)
+        if pid:
+            log(f"stopping the file server pid {pid} (older version, or not answering) to start this one")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for _ in range(100):
+                if not alive(pid):
+                    break
+                time.sleep(0.1)
+    with open(os.path.join(d, "serve.log"), "a") as lf:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "_serve", bind, d],
+                         cwd=d, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+    return False
 
 
 class Session:
@@ -456,37 +502,7 @@ class Session:
         os.replace(tmp, self.base + ".json")
 
     def ensure(self):
-        """Make sure our file server runs on bind → True when it answers as ours now. Nothing there: start one (of two started at
-        once, the second cannot bind and exits). Our server of an older version (or ours not answering): stop it and start
-        this one; sessions live in files, so transfers of this version continue (their requests retry), an older version's
-        transfers fail and are queued again. Anything else on bind (for longer than EXITING, the moment our server takes to
-        exit): RuntimeError, nothing is sent to it."""
-        who = probe(self.bind, self.dir, self.key)
-        until = time.time() + EXITING
-        while who == "other" and time.time() < until:  # our server exiting when idle: listening, no answer, pid file gone
-            time.sleep(0.2)
-            who = probe(self.bind, self.dir, self.key)
-        if who == "ours":
-            return True
-        if who == "other":
-            raise RuntimeError(f"{self.bind} is taken by a process that is not this account's file server (it cannot answer with "
-                               f"the key in {self.dir}); not transferring through it")
-        if who == "older":
-            pid = server_pid(self.bind, self.dir)
-            if pid:
-                log(f"stopping the file server pid {pid} (older version, or not answering) to start this one")
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                for _ in range(100):
-                    if not alive(pid):
-                        break
-                    time.sleep(0.1)
-        with open(os.path.join(self.dir, "serve.log"), "a") as lf:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__), "_serve", self.bind, self.dir],
-                             cwd=self.dir, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
-        return False
+        return ensure_server(self.bind, self.dir, self.key)
 
     def open(self, quick=False):
         """→ address for the other side. quick: use a temporary address (this machine's quick, an executor's quick_tunnel) instead of this machine's fixed address.

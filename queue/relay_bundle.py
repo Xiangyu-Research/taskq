@@ -96,7 +96,8 @@ RUNTIME = (
     "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "queue/project.py", "sites/mtab.py",
     "monitor/gpu_log.sh", "monitor/gpu_usage.py", "queue/tasklog.py", "bin/taskq",
     # used by store operations (site_ops export, push, pull, collect, smoke, archive)
-    "sites/names.py", "queue/relay_plugins.py", "sync/tunnel.py", "queue/archive_task.sh", "sites/slurm.py", "sites/remote.py",
+    "sites/names.py", "queue/relay_plugins.py", "sync/tunnel.py", "sync/agent_box.py", "sync/agent.py", "sync/xssh",
+    "queue/archive_task.sh", "sites/slurm.py", "sites/remote.py",
     # run over there by self migrate (migrate.py root, from the new bundle before it is switched)
     "queue/migrate.py")
 CODE = (".py", ".sh", ".R", ".sbatch")

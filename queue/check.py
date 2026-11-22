@@ -195,6 +195,10 @@ def check_machines(r):
                 r.bad(g, f"store ({st}) needs {k}: {why}")
         if tunneled and not sm.get("transfer"):
             r.bad(g, f"store ({st}) needs transfer: {', '.join(tunneled)} transfer files through the tunnel and the file service runs on the store")
+        agents = [n for n in M.MACHINES if M.MACHINES[n].get("agent")]
+        if agents and (not sm.get("transfer") or st != hub):
+            r.bad(g, f"{', '.join(agents)} have agent=True: their agents call the file service on the store, and the hub and the "
+                  f"store send them commands from the same mailbox, so the store ({st}) must be the hub's machine and have transfer")
         local = [n for n in M.executors() if M.MACHINES[n].get("ssh") is None]
         if local and sm.get("ssh") is not None:
             r.bad(g, f"{', '.join(local)} share the hub's machine (ssh is None); store ({st}) on another machine cannot reach it, so the store must also be here")

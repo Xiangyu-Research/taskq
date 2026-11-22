@@ -20,6 +20,8 @@ SPEC=$2 DRY=${3:-}
 if [[ $SPEC == - ]]; then SPEC=$(cat); exec < /dev/null; fi  # read the spec first; nothing after reads this stdin
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler core root
 M="python3 $CORE/sites/mtab.py"
+XSSH=$CORE/sync/xssh  # ssh, or the backup machine's resident agent (sync/agent_box.py)
+export RSYNC_RSH=${RSYNC_RSH:-$XSSH}
 HOST=$($M names store | head -1)
 LD=${TASKQ_DATA:?run on the store: TASKQ_DATA is the data dir of the store}
 BK=$($M backups | grep -vx "$HOST" | head -1)
@@ -36,7 +38,7 @@ RB=(python3 "$CORE/sync/tunnel.py" rsync -rlt --partial)
 [[ $DRY == --dry-run ]] && RB+=(-n --itemize-changes)
 
 log "1. backup: ${OUTS[*]} ($HOST -> $BK)"
-[[ $DRY == --dry-run ]] || ssh "$BKH" "mkdir -p ${OUTS[*]/#/$BKD/} $BKD/logs/tasks"
+[[ $DRY == --dry-run ]] || "$XSSH" "$BKH" "mkdir -p ${OUTS[*]/#/$BKD/} $BKD/logs/tasks"
 for x in ${EXTRA[@]+"${EXTRA[@]}"}; do
     compgen -G "$LD/$PARENT/$x" > /dev/null && "${RB[@]}" "$LD/$PARENT/"$x "$BKH:$BKD/$PARENT/"
 done

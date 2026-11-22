@@ -130,6 +130,9 @@ def sh(cmd, inp=None, timeout=120):
     return rc, out if rc == 0 or out else err
 
 
+AGENT_DOWN = 30 * 60  # seconds without a call from a machine's agent before agent:<machine>
+
+
 def run_on(m, script, timeout=120):
     remote = f"timeout -k 10 {max(timeout - 15, 10)} bash -s"
     return sh(["bash", "-s"] if m["ssh"] is None else C.SSH + [m["ssh"], remote], inp=script, timeout=timeout)
@@ -180,6 +183,15 @@ def gather(remote=True):
             s["collect"][st] = str(e)[-300:]
     db = NT.open_db(write=False)
     s["notices"] = {n: v["text"] for n, v in NT.notices(db).items()} if db else {}
+    if remote:  # resident agents (sync/agent_box.py): when each last called the hub; also restarts the file server they call
+        sys.path.insert(0, os.path.join(CORE, "sync"))
+        import agent_box
+        s["agents"] = agent_box.ages()
+        if s["agents"]:
+            try:
+                agent_box.server()
+            except Exception as e:  # noqa: BLE001
+                s["agents_err"] = str(e)
     return s
 
 
@@ -272,6 +284,12 @@ def check(s):
             er = sorted(d["errors"].items())
             add(alert_id("readerr", name), f"{L(name)}: reading status of {len(er)} tasks failed, not assigning or releasing them yet: "
                 f"{'; '.join(f'{k} ({v})' for k, v in er[:3])}{' ...' if len(er) > 3 else ''}", after=60, data=dict(n=len(er)))
+    for name, a in (s.get("agents") or {}).items():
+        if (a is None or a > AGENT_DOWN) and not M.paused(name):
+            add(alert_id("agent", name), f"The agent on {L(name)} has not called the hub {'yet' if a is None else f'for {int(a // 60)} minutes'} "
+                f"(taskq site agent status {name}; start it again: taskq site agent start {name})", data=dict(seen=a))
+    if s.get("agents_err"):
+        add(alert_id("agent", M.hub()), f"The file server the agents call cannot start: {s['agents_err']}")
     # --- hub queue (on the hub) ---
     hub = M.hub()
     ctq = s.get("taskq", {}).get(hub)

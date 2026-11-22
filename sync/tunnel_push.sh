@@ -24,6 +24,7 @@ USAGE="usage: $PROG <machine> <source dir here> <target dir there (relative to h
 HOST=$1 SRC=$2 DEST=$3
 shift 3
 CORE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)  # scheduler code root; REPO is the user's repo root (TASKQ_REPO, as cfg.py when unset)
+XSSH=${TUNNEL_SSH:-$CORE/sync/xssh}  # ssh, or that machine's resident agent (sync/agent_box.py)
 if [[ -n ${TASKQ_REPO:-} ]]; then REPO=$TASKQ_REPO; elif [[ $CORE == */scripts/taskq ]]; then REPO=${CORE%/scripts/taskq}; else eval "$(python3 "$CORE/queue/project.py" sh 2> /dev/null)"; REPO=${TASKQ_REPO:-$CORE}; fi
 eval "$(python3 "$CORE/queue/proto.py" sh)"  # TQ_INCOMPLETE
 rc=0
@@ -39,18 +40,18 @@ trap 'rm -rf "$W"' EXIT
 N=$(wc -l < "$W/files.txt")
 (( N > 0 )) || { echo "no files" >&2; exit 1; }
 MARKS=$(printf " ~/$DEST/%q/$TQ_INCOMPLETE" "${SUBS[@]}")
-ssh "$H" "for f in $MARKS; do mkdir -p \"\$(dirname \$f)\" && touch \$f; done"
+"$XSSH" "$H" "for f in $MARKS; do mkdir -p \"\$(dirname \$f)\" && touch \$f; done"
 python3 "$CORE/sync/tunnel.py" push "$HOST" "$SRC" "$DEST" "$W/files.txt"
 
 # check: compute MD5 on both sides (following symlinks, so a symlink there also matches), list files missing or different there
 echo "$(date '+%F %T') checking checksums (mismatched files are listed below; nothing listed = match)"
 BAD=$(diff <(cd "$SRC" && xargs -d '\n' -a "$W/files.txt" md5sum) \
-           <(ssh "$H" "cd $(printf %q "$DEST") && xargs -d '\n' md5sum 2> /dev/null" < "$W/files.txt") \
+           <("$XSSH" "$H" "cd $(printf %q "$DEST") && xargs -d '\n' md5sum 2> /dev/null" < "$W/files.txt") \
       | sed -n 's/^< [0-9a-f]*  //p' || true)
 if [[ -n $BAD ]]; then
     echo "$BAD" | head -20
     echo "mismatch: $(echo "$BAD" | wc -l) files (rerun this script to retry files with the wrong size; for files with the right size but wrong content, delete them on $HOST and rerun)"
     exit 1
 fi
-ssh "$H" "rm -f $MARKS"
+"$XSSH" "$H" "rm -f $MARKS"
 echo "$(date '+%F %T') all $N files match"

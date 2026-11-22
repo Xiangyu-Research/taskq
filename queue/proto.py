@@ -322,6 +322,7 @@ ALERTS = dict(
     health=("sub",),  # the health check itself (slow: the last round took longer than TICK_SLOW)
     revive=("sub",),  # automatic pueued recovery (AUTO["revive"]) failed
     db=("machine",),  # the hub database cannot be written
+    agent=("machine",),  # a machine's resident agent has not called the hub (sync/agent_box.py)
 )
 
 
@@ -357,6 +358,15 @@ def alert_data(v):
 
 # ---------------- env vars (TASKQ_*): who sets them, what they mean; kind = run (set in production) / tune (threshold, default in production) / test (tests only) ----------------
 ENV = dict(
+    TASKQ_AGENT_STALE=("tune", "seconds without a call from a machine's agent before xssh treats it as unreachable (default 120; sync/agent_box.py)"),
+    TASKQ_AGENT_GONE=("tune", "seconds a caller's .alive may go stale before the agent stops its command (default 30)"),
+    TASKQ_AGENT_CLAIM=("tune", "seconds a command may wait for the agent to pick it up (default 60)"),
+    TASKQ_AGENT_WAIT=("tune", "seconds one long poll of the agent may hang on the hub (default 25; sync/agent.py)"),
+    TASKQ_AGENT_ALIVE=("tune", "seconds between the agent's reports of running commands (default 10)"),
+    TASKQ_AGENT_HOME=("test", "home dir of the agent's files instead of ~ (tests only)"),
+    TASKQ_AGENT_CODE=("test", "the agent.py the hub serves instead of sync/agent.py (tests only)"),
+    TASKQ_AGENT_URL=("test", "the hub address taskq site agent install gives the agent instead of the store's transfer (tests only)"),
+    TASKQ_REAL_SSH=("test", "the ssh xssh runs for machines without an agent (default ssh; tests point it at a fake)"),
     TASKQ_DATA=("run", "this process's data dir (run_task.sh, worker_start.sh set it from cfg.data_dir for the task's command); when unset cfg.data_dir derives it from TASKQ_ROOT or the store's data"),
     TASKQ_ROOT=("run", "process on an executor: this machine's root (set by pueue worker commands, worker.sbatch, relay_remote.prefix); queue, state and data dir derive from it (cfg.state, cfg.data_dir)"),
     TASKQ_DIR=("test", "queue dir (tests only); when unset cfg.state('taskq'); when set the on-disk format stamp is not checked (common.format_problem)"),

@@ -184,7 +184,9 @@ def du(paths, skip_top=(), follow=False):
 
 
 # ---------------- Run commands (locally or over ssh) ----------------
-SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+# ssh stand-in: machines with agent=True go through their resident agent, the rest through ssh (sync/agent_box.py)
+XSSH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sync", "xssh")
+SSH = [XSSH, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 
 
 def remote_timeout(cmd, timeout):

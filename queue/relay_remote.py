@@ -66,7 +66,7 @@ def py(name):
 
 
 def ssh_argv():
-    return shlex.split(os.environ.get("RELAY_SSH", "ssh")) + C.SSH[1:]  # RELAY_SSH is for tests only
+    return shlex.split(os.environ.get("RELAY_SSH", C.XSSH)) + C.SSH[1:]  # RELAY_SSH is for tests only
 
 
 def master_down(m):
@@ -80,8 +80,10 @@ def master_down(m):
 def site_argv(name, cmd, timeout=300):
     """Argument list for running one shell command on an executor: over ssh (with a remote timeout too, common.remote_timeout);
     a local executor (ssh=None) runs it in the home dir on this machine with hub-only variables removed (proto.HUB_ONLY_ENV),
-    the same as when logging in over ssh."""
+    the same as when logging in over ssh. With agent=True both go through the machine's resident agent (xssh, sync/agent_box.py)."""
     host = conf(name)["ssh"]
+    if host is None and conf(name).get("agent"):
+        return [C.XSSH, "--machine", name, C.remote_timeout(f"bash -c {shlex.quote(cmd)}", timeout)]
     if host is None:
         return ["env", *[a for v in proto.HUB_ONLY_ENV for a in ("-u", v)], "bash", "-c", f"cd ~ && {cmd}"]
     return ssh_argv() + [host, C.remote_timeout(f"bash -c {shlex.quote(cmd)}", timeout)]

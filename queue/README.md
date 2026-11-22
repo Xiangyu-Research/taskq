@@ -67,6 +67,7 @@ side to expand.
 | `label` | `str` | required | name shown in alerts and pages |
 | `hostname` | `regex` | required | regex matching this machine's hostname (hostname -s) |
 | `ssh` | `str?` | `None` | ssh name the hub connects to; None = the machine the hub runs on |
+| `agent` | `bool` | `False` | the hub reaches this machine through its resident agent (taskq site agent install) instead of ssh |
 | `ssh_master` | `bool` | `False` | ssh only over a persistent connection (ControlMaster); do not connect while it is down |
 | `tz` | `str?` | `None` | this machine's time zone (IANA name, e.g. Asia/Kuala_Lumpur); worker hours use it; None = local time zone |
 | `conda` | `pair` | `None` | (conda location, env the worker and GPU pad run in: a name in envs, else a conda env of that install) |
@@ -280,6 +281,7 @@ Merging tables with duplicate keys is an error.
 | one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` (each change of hub queue state, progress, machine or word) |
 | what a state word means | `queue/taskstate.py` holds the one rule (words in `proto.TASK_WORDS`): `taskq status`, `taskq status --all --json` (`word`, `where`) and the progress snapshot each health round all use it |
 | what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
+| a machine's agent | `taskq site agent status` (when each agent last called the hub); on that machine `~/.local/state/taskq/agent-<machine>.log` |
 | one executor | `taskq site status <machine>` (name or label; `bundle`, `resend`, `env`, `envs` and `taskq smoke` too, `site setup` takes the name only; its queue, in the format of `taskq status --queue`), `taskq site envs <machine>` (envs); what relay last read there is a `site` row in the hub database |
 | the worker itself | `data/logs/workers/` under the executor root (worker, GPU pad, Slurm job output); `pueue log` on a pueue executor |
 | training output | part log `data/logs/tasks/<key>__<job>_part<part>.log` (on the executor; the fetch brings it to the same place in the store) |
@@ -508,6 +510,32 @@ or sticky bits. One file server process on the listen address serves all session
 checks that the server answers a challenge with a key only this account can read (`tunnel_srv/serve.key` in the state dir, 0700):
 another account's process on that address makes the transfer fail without sending it anything, and our server of an older version
 is stopped and replaced.
+
+#### Agents
+
+Every command the hub runs on another machine (reading status, adding tasks, starting workers, submitting Slurm jobs, starting and
+polling transfers, archive backups) goes through `sync/xssh`, an ssh stand-in. For a machine with `agent=True` in the machine table
+it goes to that machine's resident agent (`sync/agent.py`) instead of ssh; for every other machine it runs the real ssh unchanged.
+The agent only connects out, to the same file server and public address as transfers (a VPN or inbound ssh is not needed once it
+runs): it long-polls `/agent/<machine>/next` for commands, runs each in bash in the home dir as an ssh login would (`~/.bashrc`
+first, a clean environment however the agent was started), streams stdin in and stdout / stderr back while the command runs (so
+`rsync -e xssh` works), and reports the exit code. A caller that is killed stops refreshing its `.alive` file and the agent stops
+the command. An agent not seen for 2 minutes is unreachable: xssh exits 255 at once, as ssh does when it cannot connect, and
+`-O check` answers for an ssh master the same way.
+
+- Mailbox on the hub: `tunnel_srv/agent/<machine>/` in the state dir (`key`, `seen`, `info.json`, `inbox/`, `run/`; details in
+  `sync/agent_box.py`). The file server stays up while any machine has a mailbox; each health round restarts it if it died.
+- Security: each machine has its own key (on the hub in the mailbox, on the machine in `~/.config/taskq/agent-<machine>.json`,
+  both 0600). Every agent request is signed (timestamp within 5 minutes, nonce never reused); commands, stdin and agent code from
+  the hub carry the hub's signature, and the agent refuses anything without it, so the public address and the proxy in front of it
+  cannot inject commands.
+- Install: `taskq site agent install <machine>` (on the hub; the one step that still uses ssh, or runs here for the hub's own
+  machine) puts `~/.local/share/taskq/agent.py` and the key there, adds two crontab lines (`@reboot` and every 10 minutes: start it
+  unless it runs) and starts it. Then set `agent=True` for that machine in the machine table. The agent updates itself: when the
+  hub's `agent.py` differs, it fetches it, checks signature and digest, runs its selftest and restarts on it while idle.
+- Watch: `taskq site agent status` (last call, host, python, version); the health check reports `agent:<machine>` when an agent
+  has not called for 30 minutes (`taskq site agent start <machine>` starts it over ssh when cron cannot). The agent's own log is
+  `~/.local/state/taskq/agent-<machine>.log` on that machine.
 
 ### GPU pad
 

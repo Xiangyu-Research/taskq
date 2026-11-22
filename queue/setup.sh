@@ -26,7 +26,7 @@ if [[ -n ${1:-} && $1 != "$($M whoami 2> /dev/null)" ]]; then
     # scheduler code on that machine (mtab core: in the bundle or a repo clone)
     ssh=$($M get "$1" ssh) core=$($M get "$1" core)
     [[ -n $ssh && -n $core ]] || { echo "$1: no ssh, or no root/repo in the table (cannot tell where its scheduler code is)" >&2; exit 1; }
-    exec ssh "$ssh" "TASKQ_MACHINE='$1' SETUP_GROUPS='$($M groups "$1" | tr '\n' ' ')' SETUP_GPU_LOG='$($M get "$1" gpu_log)' bash $core/queue/setup.sh"
+    exec "$CORE/sync/xssh" "$ssh" "TASKQ_MACHINE='$1' SETUP_GROUPS='$($M groups "$1" | tr '\n' ' ')' SETUP_GPU_LOG='$($M get "$1" gpu_log)' bash $core/queue/setup.sh"
 fi
 me=$($M whoami) || { echo "this machine ($(hostname -s)) is not in the machine table (machines.py)" >&2; exit 1; }
 P=$($M get . pueue)
