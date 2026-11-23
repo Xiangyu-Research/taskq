@@ -347,6 +347,8 @@ def check(s):
         if "error" in d:
             add(alert_id("pueued", name), f"pueue on {L(name)} is not responding: {d['error'][:120]}")
             continue
+        own = set(M.groups(name))  # groups the machine table gives this machine; others belong to someone else's work on a shared pueue
+        d = dict(d, tasks=[t for t in d["tasks"] if t["group"] in own])
         ident = {t["id"]: C.identify(name, t, s.get("records") or []) for t in d["tasks"]}
         newer = {}
         for i, r in ident.items():

@@ -93,6 +93,8 @@ s = snap(pueue={PH: {"groups": {}, "tasks": [
     task(9, "gpu0", "Failed (1)", "bash s", "worker:w2", end=NOW - timedelta(hours=1))]}})
 P = H.check(s)
 ok("failed tasks and dependency failures are both reported", any(p.startswith(f"pueue:{PH}:1:") for p in P) and any(p.startswith(f"pueue:{PH}:2:") for p in P))
+_P3 = H.check(snap(pueue={PH: {"groups": {}, "tasks": [task(31, "other", "Failed (1)", "x", "someone_else", end=NOW - timedelta(hours=1))]}}))
+ok("failures in a pueue group the machine table does not give this machine are not reported", not any(p.startswith(f"pueue:{PH}:31:") for p in _P3))
 ok("failures older than 24 hours are not reported", not any(p.startswith(f"pueue:{PH}:3:") for p in P))
 _rr = [dict(machine=PH, id=i, label="relay_fetch:k", step="relay_fetch", key="k", added=0.0) for i in (21, 22)]
 _P2 = H.check(snap(records=_rr, pueue={PH: {"groups": {}, "tasks": [
