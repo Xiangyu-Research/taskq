@@ -110,6 +110,7 @@ def gpu_pad_base(job, uid):
 TASK_LOGS = "logs/tasks"       # under the data dir: part logs <safe key>__<job>_part<part>.log
 WORKER_LOGS = "logs/workers"   # workers, GPU pad, Slurm's %x_%j.out
 LOG_PART = "part"
+SEGLOG_CACHE = "logs/seglogs.json"  # under the data dir: what collect last read from each part log (spec.seg_logs), so unchanged logs are not reread
 DONE_LINE = "DONE"             # a part log line starting with it = done (run_task.sh writes, spec.py reads)
 STALL_LINE = "STALLED"         # a part log line starting with it = stopped by the worker as stalled (consume.py writes and counts)
 

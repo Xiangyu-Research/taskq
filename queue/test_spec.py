@@ -517,6 +517,41 @@ ok("collect: toy_log reads 1 epoch done; a part log under logs/tasks counts as o
    rc and rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1
    and [x["trained"] for x in rc["seglogs"] if x["name"] == os.path.basename(_lg)] == [True])
 
+_cache = os.path.join(rr, proto.SEGLOG_CACHE)
+_cl = json.load(open(_cache))["logs"]
+ok("seg_logs: what was read from each part log is kept in SEGLOG_CACHE", _cl.get(os.path.basename(_lg), [0, 0, 0, 0])[2:] == ["job 123_1", True])
+_un = os.path.join(os.path.dirname(_lg), S.safe(ns["key"]) + proto.SAFE + "124_" + proto.LOG_PART + "1.log")
+open(_un, "w").write("job 124_1\n")
+_seg = lambda: {x["name"]: (x["first"], x["trained"]) for x in S.seg_logs(rr)}  # noqa: E731
+ok("seg_logs: a new untrained log is read", _seg()[os.path.basename(_un)] == ("job 124_1", False))
+_st = os.stat(_lg)
+open(_lg, "w").write("JOB 999_9\nx: Epoch time: 300 s\n")
+os.utime(_lg, ns=(_st.st_atime_ns, _st.st_mtime_ns))
+ok("seg_logs: same size and mtime -> not reread", _seg()[os.path.basename(_lg)] == ("job 123_1", True))
+open(_lg, "a").write("more\n")
+ok("seg_logs: a trained log that grew -> not reread (stays trained, first line kept)", _seg()[os.path.basename(_lg)] == ("job 123_1", True))
+open(_lg, "w").write("job 125_1\n")
+ok("seg_logs: a trained log that shrank -> reread", _seg()[os.path.basename(_lg)] == ("job 125_1", False))
+open(_un, "a").write("DONE\n")
+ok("seg_logs: an untrained log that changed -> reread", _seg()[os.path.basename(_un)] == ("job 124_1", True))
+os.remove(_un)
+ok("seg_logs: a removed log leaves the output and the cache",
+   os.path.basename(_un) not in _seg() and os.path.basename(_un) not in json.load(open(_cache))["logs"])
+_c = json.load(open(_cache))
+_c["marks"] = ["something else"]
+_c["logs"][os.path.basename(_lg)][2] = "stale"
+json.dump(_c, open(_cache, "w"))
+ok("seg_logs: cache written with other TRAINED markers -> all reread", _seg()[os.path.basename(_lg)] == ("job 125_1", False))
+open(_cache, "w").write("{broken")
+ok("seg_logs: broken cache -> read everything, no error", _seg()[os.path.basename(_lg)] == ("job 125_1", False)
+   and json.load(open(_cache))["logs"])
+_mv = _lg + ".away"
+os.rename(_lg, _mv)
+ok("seg_logs: no part log left -> cache removed", S.seg_logs(rr) == [] and not os.path.exists(_cache))
+os.rename(_mv, _lg)
+open(_lg, "w").write("job 123_1\nx: Epoch time: 300 s\n")
+rc = S.collect([{k: ns.get(k) for k in S.COLLECT_FIELDS}], rr)
+
 # spec.py collect --json: site_ops on the store and executors read progress through it
 _r = subprocess.run([sys.executable, os.path.join(HERE, "spec.py"), "collect", "--json"], capture_output=True, text=True,
                     input=json.dumps({"specs": [{k: ns.get(k) for k in S.COLLECT_FIELDS}], "root": rr, "wait": 30}))

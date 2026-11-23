@@ -742,19 +742,62 @@ def one_task(s, root):
                 metrics=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd), resumable=resumable(s, fd))
 
 
+SEGLOG_FLUSH = 100  # seg_logs saves its cache after this many logs read, so a scan cut short by collect's wait still makes progress
+
+
 def seg_logs(root):
-    """Part logs for collect: [{name, first, trained}]."""
-    out = {"seglogs": []}
-    for p in glob.glob(os.path.join(root, P.TASK_LOGS, f"*_{P.LOG_PART}*.log")):
-        first, trained = "", False
+    """Part logs for collect: [{name, first, trained}]. A log is read again only when it is new, shrank, or changed while not yet
+    trained (a trained log stays trained and its first line does not change); what was read is kept in SEGLOG_CACHE."""
+    path = os.path.join(root, P.SEGLOG_CACHE)
+    marks = sorted(TRAINED) + [P.DONE_LINE]
+    try:
+        with open(path) as f:
+            c = json.load(f)
+        old = c["logs"] if c.get("marks") == marks else {}
+    except Exception:  # noqa: BLE001
+        old = {}
+    new, out, n = {}, [], 0
+
+    def save():
         try:
-            with open(p, errors="replace") as f:
-                first = f.readline().strip()
-                trained = any(line.startswith(P.DONE_LINE) or any(x in line for x in TRAINED) for line in f)  # at least one epoch
-        except Exception:  # noqa: BLE001
+            _C.write_json(path, {"marks": marks, "logs": dict(old, **new)}, indent=None)
+        except OSError:
             pass
-        out["seglogs"].append(dict(name=os.path.basename(p), first=first, trained=trained))
-    return out["seglogs"]
+
+    logs = sorted(glob.glob(os.path.join(root, P.TASK_LOGS, f"*_{P.LOG_PART}*.log")))
+    if not logs:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return []
+    for p in logs:
+        name = os.path.basename(p)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        sz, mt = st.st_size, st.st_mtime_ns
+        e = old.get(name)
+        if e and (sz, mt) == (e[0], e[1]) or e and e[3] and sz >= e[0]:
+            first, trained = e[2], e[3]
+        else:
+            first, trained = "", False
+            try:
+                with open(p, errors="replace") as f:
+                    first = f.readline().strip()
+                    trained = any(line.startswith(P.DONE_LINE) or any(x in line for x in TRAINED) for line in f)  # at least one epoch
+            except Exception:  # noqa: BLE001
+                pass
+            n += 1
+            if n % SEGLOG_FLUSH == 0:
+                save()
+        new[name] = [sz, mt, first, trained]
+        out.append(dict(name=name, first=first, trained=trained))
+    if n or set(old) != set(new):
+        old = {}
+        save()
+    return out
 
 
 # ---------------- looking up tasks ----------------

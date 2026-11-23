@@ -659,7 +659,7 @@ Executor and store root R (the machine table's `root`, `proto.ROOT`):
 | `code/<bundle>/`, `code/current` | bundles; `current` points at the one in use |
 | `queue/` | this machine's task queue (`ENABLED` is the master switch: without it queued workers exit at start) |
 | `blobs/<first two>/<sha256>` | data files (may be symlinks to another disk) |
-| `data/` | data dir: task views and outputs, `logs/tasks/` (part logs), `logs/workers/` |
+| `data/` | data dir: task views and outputs, `logs/tasks/` (part logs), `logs/seglogs.json` (what the health check last read from each part log; only new or changed logs are read again), `logs/workers/` |
 | `state/` | `pins/`, `envs/` (env `.ok`), `hashes.db`, `view.lock`, `deploy.lock`, `format` (on-disk format stamp) |
 | `tmp/` | half-transferred files |
 | `envs/` | envs built on this machine |
