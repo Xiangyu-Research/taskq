@@ -414,7 +414,7 @@ class Self(unittest.TestCase):
     def test_skills_are_well_formed(self):
         root = os.path.join(CORE, "skills")
         names = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
-        self.assertEqual(names, ["taskq-add", "taskq-check", "taskq-eta", "taskq-ship", "taskq-slurm", "taskq-triage"])
+        self.assertEqual(names, ["taskq-add", "taskq-check", "taskq-ship", "taskq-slurm"])
         for d in names:
             with open(os.path.join(root, d, "SKILL.md"), encoding="utf-8") as f:
                 head = f.read().split("---")[1]

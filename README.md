@@ -25,9 +25,8 @@ bash install.sh      # in a clone of taskq; to curl install.sh without cloning f
 It clones to `${TASKQ_HOME:-~/.local/share/taskq}` and links `~/.local/bin/taskq` to its `bin/taskq`; `TASKQ_ORIGIN` changes the clone
 source. Repeating is fine: an existing install is updated (`taskq self update`, pulls `origin/main`).
 
-Claude Code skills for operating taskq are in [`skills/`](skills/): `taskq-check` (read-only check), `taskq-triage` (alerts and failures),
-`taskq-ship` (releasing changes), `taskq-add` (adding work to the queue), `taskq-eta` (when Slurm executors get their next GPU) and
-`taskq-slurm` (Slurm job utilisation, cancellation risk, priority). `install.sh` runs `skills/link.sh`, which links them into `~/.claude/skills` when `~/.claude` exists;
+Claude Code skills for operating taskq are in [`skills/`](skills/): `taskq-check` (check, alerts and failures), `taskq-ship` (releasing
+changes), `taskq-add` (adding work to the queue) and `taskq-slurm` (Slurm executors: next GPU, utilisation, cancellation risk, priority). `install.sh` runs `skills/link.sh`, which links them into `~/.claude/skills` when `~/.claude` exists;
 run it again after an update that adds or removes a skill (a hub's clock can run it after `taskq self update`). The skills hold only what
 is general; a project adds its own notes in `.claude/taskq/<skill name without taskq->.md` (`check.md`, `add.md`, ...), which each skill reads first.
 
