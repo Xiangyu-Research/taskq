@@ -380,6 +380,21 @@ def executor_type(t):
     return executors.get(t)
 
 
+def outputs_used(data, specs):
+    """Bytes the queued tasks' outputs (spec out under data) already use (views are links, not counted): offsets the space
+    reserved for them when choosing an executor. Only those dirs are walked: walking the whole data dir took minutes on a
+    parallel file system and pushed the status read past its timeout."""
+    outs = set()
+    for s in specs:
+        if not s.get("out"):
+            continue
+        try:
+            outs.add(rel_ok(s["out"]))
+        except Bad:
+            continue
+    return C.du([p for p in (os.path.join(data, o) for o in sorted(outs)) if os.path.lexists(p)])[0]
+
+
 def op_status(A):
     """A: sched (the executor type), its status_args, cap, blob_cap, env_root, envs."""
     R = root()
@@ -392,7 +407,7 @@ def op_status(A):
         raw = None
     oks, envs_st = env_states(R, A)
     free = capped_free(R, A.get("cap"))
-    out_used = C.du([sub(R, "data")])[0]  # outputs tasks have already written (views are links, not counted): offsets space reserved for them when choosing an executor
+    out_used = outputs_used(sub(R, "data"), sp)
     cdir = sub(R, "code")
     live = [d for d in (os.listdir(cdir) if os.path.isdir(cdir) else []) if ".tmp" not in d and os.path.isdir(os.path.join(cdir, d))
             and time.time() - os.stat(os.path.join(cdir, d)).st_mtime < proto.STALE_BEAT]

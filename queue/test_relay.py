@@ -1214,6 +1214,29 @@ def other_disk(R):
     return d
 
 
+def test_outputs_used():
+    """Status out_used: only the queued tasks' out dirs (hard links once, symlinks not counted); other results in the data dir,
+    missing and bad paths are ignored."""
+    D = tempfile.mkdtemp(dir=T)
+
+    def put(rel, n):
+        p = os.path.join(D, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(b"x" * n)
+        return os.lstat(p).st_blocks * 512
+    a = put("res/a/f0/ck.pth", 300_000) + put("res/a/f0/sub/log.txt", 10_000)
+    b = put("pred/b/f1/x.nii.gz", 200_000)
+    put("res/old/f0/ck.pth", 5_000_000)
+    os.link(os.path.join(D, "pred/b/f1/x.nii.gz"), os.path.join(D, "pred/b/f1/y.nii.gz"))
+    os.symlink(os.path.join(D, "res/old/f0/ck.pth"), os.path.join(D, "res/a/f0/view.pth"))
+    specs = [dict(out="res/a/f0"), dict(out="pred/b/f1"), dict(out="res/a/f0"), dict(out="gone/f9"), dict(out="../x"), dict(out=None), {}]
+    assert SO.outputs_used(D, specs) == a + b, (SO.outputs_used(D, specs), a, b)
+    assert SO.outputs_used(D, []) == 0
+    shutil.rmtree(D)
+    ok("status out_used: walks only the queued tasks' out dirs (hard links once, symlinks not counted); other results, missing and bad paths ignored")
+
+
 def test_status_blob_cap():
     """Status: blobs on another disk with blob_cap → blob_free = min(free on that disk, blob_cap − blobs used); without it → free
     on that disk."""
@@ -1865,6 +1888,7 @@ if __name__ == "__main__":
     test_run_lines()
     test_err_tail()
     test_e2e_path(test_e2e())
+    test_outputs_used()
     test_status_blob_cap()
     test_env_remote()
     test_env_auto()
