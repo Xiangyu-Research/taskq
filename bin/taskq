@@ -270,6 +270,8 @@ TREE = {
         "envs": Cmd("dry run: each env's state on that machine", py("envs_cli", "envs", prog="taskq site"), own_help=True),
         "agent": Cmd("resident agent on that machine: install | start | status (sync/agent_box.py)", py("agent_box", prog="taskq site agent"),
                      own_help=True),
+        "eta": Cmd("Slurm executors: when each gets its next GPU (simulated from a snapshot of the whole partition; --record, --backtest, --replay)",
+                   py("slurm_eta", prog="taskq site eta"), own_help=True),
         "setup": Cmd("pueue daemon, groups, crontab (no name: this machine)", sh("queue/setup.sh"), "[name]",
                      "on this machine, or from the hub over ssh for another pueue machine; safe to run again"),
     }),

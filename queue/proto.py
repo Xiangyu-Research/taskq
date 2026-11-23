@@ -506,6 +506,11 @@ ENV_BUILD_TIMEOUT = 4 * 3600          # how long the hub waits for one build at 
 ENV_STALE = ENV_BUILD_TIMEOUT         # .building untouched this long counts as stopped
 ENV_RETRY = 6 * 3600                  # a build skipped for lack of space is retried after this long
 
+# ---------------- Slurm GPU start prediction (sites/slurm_eta.py) ----------------
+ETA = "slurm_eta"  # under the state dir: <partition>/ with the queue snapshots and predictions of taskq site eta (sites/slurm_eta.py)
+ETA_FILES = dict(raw="raw", pred="predictions.jsonl", starts="starts.json", running="running.json", ends="ends.json",
+                 base="user_base.json", ours="our_jobs.json", users="users.json")
+
 # ---------------- env locks (sites/envlock.py) ----------------
 WHEELHOUSE = "wheelhouse"      # under the state dir: each locked file wheelhouse/<first 2 of sha256>/<sha256>
 LOCK_SUFFIX = ".lock.json"     # lock next to an env description <name>.<variant>.lock.json
@@ -576,7 +581,7 @@ TICK = "tick"  # in the health check's state dir: tick.lock is held (flock) by t
 HEALTH_NAMES = (PUEUE_SEEN, TICK)
 # names at the top level of the state dir (cfg.state)
 STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunnel_push.lock", "gpu_pad",
-               WHEELHOUSE, "envlock", DB, FORMAT_FILE, SNAPSHOTS, LOGS, GPU_LOG_SUB)
+               WHEELHOUSE, ETA, "envlock", DB, FORMAT_FILE, SNAPSHOTS, LOGS, GPU_LOG_SUB)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
 EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
 # source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
