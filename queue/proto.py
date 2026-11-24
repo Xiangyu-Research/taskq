@@ -297,7 +297,7 @@ OVERVIEW_SOURCE = ("name", "label", "kind", "time")        # where training stat
 OVERVIEW_MACHINE = ("name", "label", "scheduler", "ok", "why", "gpus", "pueue")  # gpus: [{gpu, uuid, util, mem, apps: [{pid, mem, args}]}]
 OVERVIEW_PUEUE = ("groups", "tasks", "error")              # each task: qs --json fields plus start_ts, end_ts (seconds), about (plain.label: [experiment, what, short] or null)
 OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
-                 "eta", "parts", "commits", "word", "where")  # word, where: taskstate.py (as taskq status shows it)
+                 "eta", "parts", "commits", "word", "where", "since")  # word, where, since (start on the executor, seconds; null unless running): taskstate.py (as taskq status shows it)
 OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank: position among unfinished tasks in the hub queue (1-based)
 OVERVIEW_COPY = ("where", "source", "final", "epochs", "start", "last", "runs", "metrics", "debug", "resumable")
 OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part log: job, part number, machine, at least one round done, code commit

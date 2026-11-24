@@ -82,6 +82,13 @@ ok("sources: machines first, executors after", [(x["label"], x["kind"]) for x in
 ok("problems are empty when there is no health record", o["health"] == dict(checked=None, problems=[]))
 ok("JSON is one line and reads back", "\n" not in line and json.loads(line)["version"] == proto.VERSION)
 ok("the text table has every task", all(k in O.text(o) for k in keys))
+_tc = O.TS.compute
+O.TS.compute = lambda *a: dict(_tc(*a), **{A: dict(_tc(*a).get(A) or {}, word=proto.TASK_WORDS["running"], where="site-pueue", since=123.0)})
+try:
+    T = {t["key"]: t for t in O.build(s, relay=relay)["tasks"]}
+finally:
+    O.TS.compute = _tc
+ok("since: a running task carries its start on the executor from taskstate, others null", T[A]["since"] == 123.0 and T[B]["since"] is None)
 
 # the store's machine is also an executor: relay's record of its root has the same label as the store read directly
 _lab = (O.M.MACHINES["hub"] or {}).get("label", "hub")

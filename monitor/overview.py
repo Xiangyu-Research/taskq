@@ -161,7 +161,8 @@ def build(s, relay=None):
                       resumable=f.get("resumable")) if f else None,
             total=total, progress=pg["frac"], eta=eta.strftime("%Y-%m-%d %H:%M") if eta else None,
             parts=parts, commits=list(dict.fromkeys(p["commit"] for p in parts if p["commit"] and p["trained"])),
-            word=(words.get(key) or {}).get("word"), where=(words.get(key) or {}).get("where")))
+            word=(words.get(key) or {}).get("word"), where=(words.get(key) or {}).get("where"),
+            since=(words.get(key) or {}).get("since")))
     return dict(version=proto.VERSION, now=now.strftime("%Y-%m-%d %H:%M:%S"), hub=hub,
                 data=dict(machine=M.store(), path=M.data()),
                 queue=dict(enabled=bool(q and q.get("enabled")), readable=q is not None), sources=src_info, machines=machines,
