@@ -203,6 +203,19 @@ sv.close()
 ok("_fetch: the plan's mode 0o6755 is placed as 0o755, content right (the token goes in a header, the plan's base has none)",
    r.returncode == 0 and same(src, mroot, ["a/x.bin"]) and os.stat(os.path.join(mroot, "a/x.bin")).st_mode & 0o7777 == 0o755)
 
+sv = tunnel.Session({"a/x.bin": (xs.st_size, xs.st_mtime_ns, 0o644)}, src=src)
+cu, ct = sv.open(), sv.token
+gr = urllib.request.urlopen(urllib.request.Request(cu + "/a/x.bin?r=" + tunnel.RUN, headers=dict(tunnel.UA, **{tunnel.TOKEN_HEADER: ct})))
+gb, gcc = gr.read(), gr.headers.get("Cache-Control", "")
+try:
+    urllib.request.urlopen(urllib.request.Request(cu + "/nope.png", headers=dict(tunnel.UA, **{tunnel.TOKEN_HEADER: ct})))
+    ncc = ""
+except urllib.error.HTTPError as e:
+    ncc = e.headers.get("Cache-Control", "")
+sv.close()
+ok("downloads say no-store (a CDN must not answer one transfer's file from another's cache); the per-run query is ignored by the server",
+   gb == open(os.path.join(src, "a/x.bin"), "rb").read() and "no-store" in gcc and "no-store" in ncc and len(tunnel.RUN) == 16)
+
 # rsync stand-in (needs the real rsync)
 if not shutil.which("rsync", path=ENV["PATH"]):
     print("SKIP:no rsync on PATH: the rsync stand-in checks are not run")

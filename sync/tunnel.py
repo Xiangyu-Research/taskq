@@ -54,6 +54,8 @@ STAGE_RE = re.compile(r"\.tunnel_stage_[0-9a-f]{12}$")
 # our server of an older version
 SERVER_VERSION = 3  # 3: /agent/ routes (sync/agent_box.py), stays up while agents have mailboxes
 TOKEN_HEADER = "X-Xfer-Token"
+NO_CACHE = "no-store, no-transform, private"
+RUN = secrets.token_hex(8)
 CHALLENGE_HEADER = "X-Xfer-Challenge"
 NONCE_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
 KEY_FILE, PID_FILE = "serve.key", "serve.pid"  # in the server dir (0700)
@@ -318,6 +320,7 @@ def handler(reg, key, box=None):
         def reply(self, code, body=b""):
             self.send_response(code)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", NO_CACHE)
             self.end_headers()
             self.wfile.write(body)
 
@@ -344,6 +347,7 @@ def handler(reg, key, box=None):
             with open(os.path.join(S.src, rel), "rb") as f:
                 self.send_response(200)
                 self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", NO_CACHE)
                 self.end_headers()
                 while n < size and (b := f.read(min(1 << 20, size - n))):
                     self.wfile.write(b)
@@ -878,7 +882,7 @@ def remote_fetch(plan):
         else:
             def get():
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-                cfg = {"url": plan["base"] + "/" + urllib.parse.quote(rel), "user-agent": UA["User-Agent"], "output": p + ".tunnelpart"}
+                cfg = {"url": plan["base"] + "/" + urllib.parse.quote(rel) + "?r=" + RUN, "user-agent": UA["User-Agent"], "output": p + ".tunnelpart"}
                 if plan.get("token"):
                     cfg["header"] = f"{TOKEN_HEADER}: {plan['token']}"
                 cfg = "".join(f'{k} = "{v.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"\n' for k, v in cfg.items())

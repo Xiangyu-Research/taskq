@@ -248,6 +248,7 @@ def send(h, code, body=b"", headers=None):
     for k, v in (headers or {}).items():
         h.send_header(k, v)
     h.send_header("Content-Length", str(len(body)))
+    h.send_header("Cache-Control", "no-store, no-transform, private")
     h.end_headers()
     h.wfile.write(body)
 
