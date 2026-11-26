@@ -239,7 +239,7 @@ default) may hold only letters, digits, spaces and `_@%+=:,./-`, so it cannot ad
 | `done` | `strs` | required | done markers: files under out, every item required; 'a\|b' needs one |
 | `vars` | `dict` | `{}` | env vars set before running (names: letters, digits and _, not starting with a digit) |
 | `log` | `str?` | `'*.log'` | logs under out (glob): how long since the last update judges whether someone is working |
-| `progress` | `str?` | `None` | progress reader (spec.py PROGRESS, readers/ plugins; progress_json = out/PROGRESS.json) |
+| `progress` | `str?` | `None` | progress reader (spec.py PROGRESS, readers/ plugins); `None` or `progress_json`: out/PROGRESS.json if the command writes it |
 | `resume` | `strs?` | `None` | checkpoints under out (glob): any one means progress, kept there on release for the same machine to continue; None = none |
 | `res` | `dict` | `{}` | resources: gpus, cpus, mem, gpu_mem, wait_gpu (minutes), local_inputs (1 = copy to node-local disk after start) |
 | `owner` | `str?` | `None` | whose task (None = own) |
@@ -273,6 +273,12 @@ Plugins are found by filename in the plugins dir (`.taskq.toml`'s `plugins`); on
 | `readers/*.py` | `PROGRESS`, `INFO`, `TRAINED` | how to read progress, training settings and whether a round finished (`queue/spec.py` reads them, standard library only) |
 
 Merging tables with duplicate keys is an error.
+
+A task without its own progress reader (a plain command) can still report progress: `run_task.sh` gives its command
+`TASKQ_PROGRESS` (`<out>/PROGRESS.json`). A command that writes `{"done": n, "total": m}` there (a temp file, then rename) gets a
+percentage, and from the points each health check sees (kept under the data dir in `logs/progress.json` for 6 h) an expected
+finish time, in `taskq status --all` and `taskq progress`, carried to the hub like training progress. A task with its own reader
+ignores the file.
 
 ## Where to look when something is wrong
 
@@ -345,6 +351,7 @@ A worker inherits these from its launcher, `run_task.sh` from the worker, and th
 | `TASKQ_STAGE_ROOT` | the `slurm` consumer plugin | node-local staging root: with `res.local_inputs` the inputs are copied there |
 | `TASK_INPUTS_ROOT` | `run_task.sh` | where the command reads its inputs, at the same relative paths as in the data dir: the data dir, or the node-local copy |
 | `TASKQ_DATA`, `TASKQ_LIB` | `run_task.sh` | the data dir; the core's `queue/` (the core's `bin/` comes first on `PATH`) |
+| `TASKQ_PROGRESS` | `run_task.sh` | where the task's command may write its progress: `<out>/PROGRESS.json` |
 | the spec's `vars`, the machine table's `task_vars` | `run_task.sh` | exported for the command (minus `task_unset`; a `task_vars` entry set already keeps its value) |
 
 `RUN_TASK_TRIES`, `RUN_TASK_POLL`, `RUN_TASK_GPU_POLL`, `RUN_TASK_STOP_WAIT`, `RUN_TASK_BOSS_POLL` and `WORKER_TEST_GPU` replace
@@ -431,6 +438,9 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
      backup machine; release only after success);
    - failed there: no progress -> `release --skip` (this machine will not claim it again); with progress -> keep the claim and report it;
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
+     `taskq nice` on the hub does the `rnice` part at once for the keys it changes (`relay_remote.push_nice`: reads that queue, then
+     `set-nice` there for keys queued or running there; a running task keeps running, only its stored nice changes; keys not sent yet,
+     done, failed or bad are left as is; paused or ssh master down: not contacted, the round follows later); `-n` prints both sides only;
    - stopped in the hub queue before it reached that queue: the staging does not send it (it asks the hub queue before the transfer
      and again before placing and adding), and the claim is released only once its staging has ended;
    - blocked by the bundle gate or smoke gate -> `hold`; unblocked -> `unhold`.

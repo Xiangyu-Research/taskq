@@ -148,7 +148,7 @@ RECIPE_FIELDS = {
     "done": ("strs", REQUIRED, "done markers: files under out, every item required; 'a|b' needs one"),
     "vars": ("dict", {}, "env vars set before running (names: letters, digits and _, not starting with a digit)"),
     "log": ("str?", "*.log", "logs under out (glob): how long since the last update judges whether someone is working"),
-    "progress": ("str?", None, "progress reader (spec.py PROGRESS, readers/ plugins; progress_json = out/PROGRESS.json)"),
+    "progress": ("str?", None, "progress reader (spec.py PROGRESS, readers/ plugins); `None` or `progress_json`: out/PROGRESS.json if the command writes it"),
     "resume": ("strs?", None, "checkpoints under out (glob): any one means progress, kept there on release for the same machine to continue; None = none"),
     "res": ("dict", {}, "resources: gpus, cpus, mem, gpu_mem, wait_gpu (minutes), local_inputs (1 = copy to node-local disk after start)"),
     "owner": ("str?", None, "whose task (None = own)"),

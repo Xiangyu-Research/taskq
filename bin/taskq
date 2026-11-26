@@ -241,7 +241,7 @@ TREE = {
     # queue
     "add": Cmd("add a task: experiment table (--exp), recipe (--recipe) or task sheet (--file)", py("taskq", "add"), own_help=True),
     "set": Cmd("change a task's params", py("taskq", "set"), own_help=True),
-    "nice": Cmd("change nice (order)", py("taskq", "nice"), own_help=True),
+    "nice": Cmd("change nice (order); a task sent to an executor changes there too (-n: only show)", py("taskq", "nice"), own_help=True),
     "show": Cmd("one task's full spec and state", py("taskq", "show"), own_help=True),
     "log": Cmd("one task's training parts (part log), event log rows about it, hub task records", py("tasklog", prog="taskq log"), own_help=True),
     "status": Cmd("on the hub: a one-screen summary (--all: every task by state; <machine>: one machine; <words>: matching tasks)", cmd_status,

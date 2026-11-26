@@ -582,17 +582,38 @@ def progress_of(f, tz=None):
     return out
 
 
-def progress_json(fd):
-    """The task's own out/PROGRESS.json ({"done": n, "total": m}) -> one progress entry; absent or unreadable -> None."""
-    p = os.path.join(fd, "PROGRESS.json")
+def progress_json(fd, seen=None):
+    """The task's own out/PROGRESS_FILE ({"done": n, "total": m}, written by its command) -> (one progress entry, its points to
+    keep); absent or unreadable -> None. seen: earlier points of this file ([[epoch seconds, done], ...]); tl holds them too, so
+    eta_at has a rate."""
+    p = os.path.join(fd, P.PROGRESS_FILE)
     try:
         d = json.load(open(p))
         done = int(d.get("done") or 0)
-        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(p)))
+        mt = os.path.getmtime(p)
     except (OSError, ValueError, TypeError, AttributeError):
         return None
     total = d.get("total")
-    return dict(start=None, end=t, epochs_done=done, total=int(total) if isinstance(total, (int, float)) else None, tl=[[t, done]])
+    pts = progress_points(seen, mt, done)
+    tl = [[time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a)), n] for a, n in pts]
+    return dict(start=None, end=tl[-1][0], epochs_done=done, total=int(total) if isinstance(total, (int, float)) else None, tl=tl), pts
+
+
+def progress_points(seen, mt, done):
+    """Points of a progress file seen so far plus the one read now (mtime, done) -> points to keep: the last PROGRESS_KEEP seconds,
+    at least two; a file that went back (rewritten from the start) starts over."""
+    pts = good_points(seen)
+    if pts and (mt < pts[-1][0] or done < pts[-1][1]):
+        pts = []
+    if not pts or pts[-1] != [mt, done]:
+        pts.append([mt, done])
+    return [x for x in pts[:-2] if x[0] >= mt - P.PROGRESS_KEEP] + pts[-2:]
+
+
+def good_points(seen):
+    """Points as kept in PROGRESS_CACHE, damaged ones left out."""
+    return [list(x) for x in (seen if isinstance(seen, list) else []) if isinstance(x, list) and len(x) == 2
+            and all(isinstance(v, (int, float)) for v in x)]
 
 
 def resumable(s, fd):
@@ -698,7 +719,8 @@ def collect(specs, root, wait=None):
             errors[k] = f"{type(e).__name__}: {e}"[:300]
             return None
 
-    jobs = [(s["key"], lambda s=s: one_task(s, root)) for s in specs] + [("@seglogs", lambda: seg_logs(root))]
+    seen, pts = progress_cache(root), {}
+    jobs = [(s["key"], lambda s=s: one_task(s, root, seen, pts)) for s in specs] + [("@seglogs", lambda: seg_logs(root))]
     if wait is None:
         res = {k: run(k, fn) for k, fn in jobs}
     else:
@@ -712,6 +734,7 @@ def collect(specs, root, wait=None):
         for th in ths:
             th.join(max(0, end - time.time()))
         res, errors = dict(res), dict(errors)
+    progress_cache(root, seen, dict(pts))
     out = {"tasks": {s["key"]: res[s["key"]] for s in specs if res.get(s["key"]) is not None}, "seglogs": res.get("@seglogs") or []}
     stuck = [k for k, _ in jobs if k not in res and k not in errors]
     if stuck:
@@ -721,8 +744,10 @@ def collect(specs, root, wait=None):
     return out
 
 
-def one_task(s, root):
-    """One task for collect; no output dir yet -> None."""
+def one_task(s, root, seen=None, pts=None):
+    """One task for collect; no output dir yet -> None. A task without its own progress reader (progress None or progress_json)
+    whose command writes out/PROGRESS_FILE gets one run from it (end: the latest of it and its logs) instead of the log runs, which
+    carry only mtimes; seen: PROGRESS_CACHE as read, pts: where its points to keep go ({out dir relative to root: points})."""
     fd = out_dir(s, root)
     if not os.path.isdir(fd):
         return None
@@ -734,12 +759,44 @@ def one_task(s, root):
             runs.append(parse(p))
         except OSError:
             pass
-    if s.get("progress") == "progress_json":
-        pj = progress_json(fd)
-        if pj:
-            runs.append(pj)
+    ck = os.path.relpath(fd, root)
+    pj = progress_json(fd, (seen or {}).get(ck)) if s.get("progress") in (None, "progress_json") else None
+    if pj:
+        run, kept = pj
+        run["end"] = max([run["end"]] + [r["end"] for r in runs if r.get("end")])
+        runs = [run]
+        if pts is not None:
+            pts[ck] = kept
     return dict(runs=runs, final=is_done(s, root),
                 metrics=metrics(s, fd), debug=INFO.get(s.get("info"), INFO[None])(fd), resumable=resumable(s, fd))
+
+
+def progress_cache(root, seen=None, now=None):
+    """PROGRESS_CACHE under the data dir root. Without now: read it -> {out dir relative to root: points} (absent or unreadable
+    -> {}). With now (the same from this collect): save those, plus entries from seen not read this time whose progress file
+    is still there and whose last point is within PROGRESS_KEEP (another caller's tasks); nothing left -> remove the file."""
+    path = os.path.join(root, P.PROGRESS_CACHE)
+    if now is None:
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+    cut = time.time() - P.PROGRESS_KEEP
+    try:
+        keep = dict({k: v for k, v in (seen or {}).items() if (good_points(v) or [[0]])[-1][0] >= cut
+                     and os.path.isfile(os.path.join(root, k, P.PROGRESS_FILE))}, **now)
+        if keep == (seen or {}):
+            return None
+        if keep:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _C.write_json(path, keep, indent=None)
+        else:
+            os.remove(path)
+    except Exception:  # noqa: BLE001  a damaged cache only costs the rate; never the collect
+        pass
+    return None
 
 
 SEGLOG_FLUSH = 100  # seg_logs saves its cache after this many logs read, so a scan cut short by collect's wait still makes progress

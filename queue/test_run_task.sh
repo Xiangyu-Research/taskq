@@ -270,9 +270,10 @@ check "hub (no task_unset): passed to the task as usual" "[[ \$(cat $T/toy/v.uns
 tvrun site-slurm; rc=$?
 check "site-slurm (no task_vars): not exported" "(( rc == 0 )) && [[ \$(cat $T/toy/v.vars) == none/none ]]"
 
-# the task's command sees the core: TASKQ_LIB = the core's queue/, the core's bin/ first on PATH
-$R command key=toy/lib 'cmd=echo "$TASKQ_LIB|${PATH%%:*}" > $TASKQ_DATA/toy/lib.txt; touch $TASKQ_DATA/toy/lib/DONE' env=base out=toy/lib 'done=["DONE"]' > /dev/null; rc=$?
+# the task's command sees the core: TASKQ_LIB = the core's queue/, the core's bin/ first on PATH; TASKQ_PROGRESS = its progress file
+$R command key=toy/lib 'cmd=echo "$TASKQ_LIB|${PATH%%:*}" > $TASKQ_DATA/toy/lib.txt; echo "$TASKQ_PROGRESS" > $TASKQ_DATA/toy/lib.pf; touch $TASKQ_DATA/toy/lib/DONE' env=base out=toy/lib 'done=["DONE"]' > /dev/null; rc=$?
 check "task env: TASKQ_LIB and the core's bin/ first on PATH" "(( rc == 0 )) && [[ \$(cat $T/toy/lib.txt) == \"$(cd "$HERE" && pwd)|$(cd "$HERE/.." && pwd)/bin\" ]]"
+check "task env: TASKQ_PROGRESS = PROGRESS.json in its out dir" "[[ \$(cat $T/toy/lib.pf) == $T/toy/lib/PROGRESS.json ]]"
 
 TASK_PART=2 $R command key=toy/o2 'cmd=touch $TASKQ_DATA/toy/o2/DONE' env=base out=toy/o2 'done=["DONE"]' > /dev/null; rc=$?
 check "new worker: TASK_PART=2 -> _part2.log, the first line says part 2" "(( rc == 0 )) && head -1 $T/logs/tasks/toy__o2__test-1_part2.log | grep -q 'part 2'"

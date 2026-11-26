@@ -109,6 +109,49 @@ def rtq(name, args, timeout=180, input=None):
     return None if rc in (proto.EXIT["timeout"], 255) else (rc, (out + err).strip())
 
 
+def set_nice(name, keys, nice):
+    """Change only the stored nice of keys in that executor's queue (taskq.py set-nice there) → (exit code, output); None when
+    unreachable."""
+    return rtq(name, f"set-nice --nice {int(nice)} -- " + " ".join(shlex.quote(k) for k in keys))
+
+
+def push_nice(name, keys, nice, dry=False):
+    """taskq nice on the hub, for keys assigned to executor name: change their nice in its queue now, as the health check's rnice
+    would on its next round (only that field, only those keys) → lines to print. Left as is there: keys not sent yet (staging
+    sends the hub's nice), done, failed or bad ones (rnice skips them too); a running one keeps running, only its stored nice
+    changes. Paused, ssh master down or queue unreadable: nothing is sent (no new connection), the health check follows later.
+    dry: only the lines, with "would set"."""
+    m = conf(name)
+    L = m["label"]
+    later = "the health check sets it there once it can read that queue"
+    if M.paused(name) or master_down(m):
+        return [f"{L}: not contacted (paused, or its ssh master connection is down); {later}"]
+    r = rtq(name, "status --json --internal")
+    q = S.json_in(r[1]) if r and r[0] == 0 else None
+    if not isinstance(q, dict):
+        return [f"{L}: cannot read its queue ({err_tail((r or [0, 'ssh unreachable'])[1], 150)}); {later}"]
+    rt = {t["key"]: t for t in q.get("tasks") or []}
+    lines, todo = [], []
+    for k in keys:
+        a = rt.get(k)
+        if a is None:
+            lines.append(f"{k} on {L}: not in its queue yet, staging sends it with nice {nice}")
+        elif a["state"] in (proto.S_DONE, proto.S_FAILED, proto.S_BAD):
+            lines.append(f"{k} on {L}: {a['state']} there, left at {a['nice']}")
+        elif a["nice"] == nice:
+            lines.append(f"{k} on {L}: already {nice}")
+        else:
+            run = " (running there: it keeps running, only the stored nice changes)" if a["state"] in (proto.S_CLAIMED, proto.S_BUSY) else ""
+            lines.append(f"{'would set ' if dry else ''}{k} on {L}: {a['nice']} -> {nice}{run}")
+            todo.append(k)
+    if todo and not dry:
+        r = set_nice(name, todo, nice)
+        if not r or r[0]:
+            return [ln for ln in lines if " -> " not in ln] + [
+                f"could not change nice on {L} for {', '.join(todo)}: {err_tail((r or [0, 'ssh unreachable'])[1], 150)}; {later}"]
+    return lines
+
+
 def run_lines(argv, input, timeout, say):
     """Run a command → (exit code, stdout, stderr); pass stderr to say line by line (long transfers and archives show progress
     while running). Timeout → 124. stdin, stdout and stderr each get their own thread (communicate also reads stderr and drops

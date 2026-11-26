@@ -1620,7 +1620,7 @@ def main_store():
         step(f"{out} fetched into the store's data dir, the done marker placed last", seq and seq[-1] == f"{out}/{done}", seq)
     step("the executor's tasks and views are gone", not keys() and relay.remote_status(NAME)["taskq"]["tasks"] == [], keys())
     left = sorted(os.path.relpath(p, SD) for p in files_under(SD))
-    extra = [p for p in left if not p.startswith(("e2e/code/", "e2e/d1/", "e2e/r/s1/", "e2e/mid/", "e2e/use/", proto.TASK_LOGS + "/", proto.SEGLOG_CACHE))]
+    extra = [p for p in left if not p.startswith(("e2e/code/", "e2e/d1/", "e2e/r/s1/", "e2e/mid/", "e2e/use/", proto.TASK_LOGS + "/", proto.SEGLOG_CACHE, proto.PROGRESS_CACHE))]
     step("the store's data dir has only inputs, results, part logs and what was read from them", not extra, extra)
     # the hub's disk: everything under T except the other machines (the store's and executor's root and data dir, their temp dirs, the executor's pueued)
     other = {os.path.join(T, x) for x in ("sr", "sd", "r", "pq_site")} | set(glob.glob(os.path.join(T, "tmp_fake-*")))

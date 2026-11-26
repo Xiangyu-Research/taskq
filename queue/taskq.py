@@ -900,17 +900,32 @@ def cmd_set(a):
 
 
 def cmd_set_nice(a):
+    """Change nice in this queue; on the hub, also in the queue of the executor each task is assigned to (relay_remote.push_nice).
+    -n: only print what would change, here and there."""
+    would = "would set " if a.dry_run else ""
     with Lock():
         tasks = read_tasks()
         for t in tasks:
             if t["key"] in a.keys:
-                print(f"{t['key']}: {t['nice']} -> {a.nice}")
+                print(f"{would}{t['key']}: {t['nice']} -> {a.nice}")
                 t["nice"] = a.nice
-        write_tasks(tasks)
-    missing = set(a.keys) - {t["key"] for t in tasks}
-    for k in sorted(missing):
+        if not a.dry_run:
+            write_tasks(tasks)
+    have = {t["key"] for t in tasks}
+    for k in sorted(set(a.keys) - have):
         print(f"not in queue: {k}", file=sys.stderr)
-    return 0 if not missing else GONE
+    sites = {}
+    if here() == queue_host():
+        for k in a.keys:
+            s = (claim_info(k) or {}).get("assigned") if k in have else None
+            if s and cfg.mtab().is_exec(s):
+                sites.setdefault(s, []).append(k)
+    if sites:
+        import relay_remote as RM
+        for s, ks in sorted(sites.items()):
+            for ln in RM.push_nice(s, ks, a.nice, dry=a.dry_run):
+                print(ln)
+    return 0 if have >= set(a.keys) else GONE
 
 
 RECORDS = tuple(Q[k] for k in ("failures", "stopped", "inputs", "released"))  # records removed together with the task (executor queues also remove skips/)
@@ -1163,6 +1178,7 @@ def main(argv):
     p.add_argument("kv", nargs="+")
     p = named("set-nice", "nice")
     p.add_argument("--nice", type=int, required=True)
+    p.add_argument("-n", "--dry-run", action="store_true", help="only print what would change, in this queue and in the executor queues the tasks were sent to")
     p.add_argument("keys", nargs="+")
     p = named("remove", "rm")
     p.add_argument("keys", nargs="+")

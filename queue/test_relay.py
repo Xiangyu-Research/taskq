@@ -1059,6 +1059,30 @@ def test_e2e():
     assert len(recs) == 1, recs
     ok("staging again: no retransfer and no duplicate add")
 
+    def rnice():
+        return {r["key"]: r["nice"] for r in (json.loads(x) for x in open(rq) if x.strip())}
+    before = open(rq).read()
+    lines = RM.push_nice(NAME, [sp["key"], "D9_none/tr/0"], -7, dry=True)
+    assert open(rq).read() == before and lines == [f"would set {sp['key']} on Slurm2: 5 -> -7",
+                                                   "D9_none/tr/0 on Slurm2: not in its queue yet, staging sends it with nice -7"], lines
+    assert RM.push_nice(NAME, [sp["key"]], -7) == [f"{sp['key']} on Slurm2: 5 -> -7"] and rnice() == {sp["key"]: -7}
+    after = [json.loads(x) for x in open(rq) if x.strip()]
+    assert [dict(r, nice=5) for r in after] == [json.loads(x) for x in before.splitlines() if x.strip()], after
+    assert RM.push_nice(NAME, [sp["key"]], -7) == [f"{sp['key']} on Slurm2: already -7"]
+    open(os.path.join(T, "master_down"), "w").close()
+    try:
+        assert "not contacted" in RM.push_nice(NAME, [sp["key"]], 5)[0] and rnice() == {sp["key"]: -7}
+    finally:
+        os.remove(os.path.join(T, "master_down"))
+    with patched(RM, rtq=lambda name, args, timeout=180, input=None: (0, proto.JSON_MARK + json.dumps(dict(version=proto.VERSION, tasks=[
+            dict(key="a/b/0", state="done", nice=1), dict(key="a/b/1", state="claimed", nice=1)])))):
+        lines = RM.push_nice(NAME, ["a/b/0", "a/b/1"], 2, dry=True)
+    assert lines == ["a/b/0 on Slurm2: done there, left at 1",
+                     "would set a/b/1 on Slurm2: 1 -> 2 (running there: it keeps running, only the stored nice changes)"], lines
+    assert RM.push_nice(NAME, [sp["key"]], 5) == [f"{sp['key']} on Slurm2: -7 -> 5"] and rnice() == {sp["key"]: 5}
+    ok("push_nice (taskq nice on the hub): -n changes nothing; otherwise only that key's nice in the executor queue (rest of the record as it was); "
+       "not sent yet, done there, or already that nice: left as is; running: only the stored nice; ssh master down: not contacted")
+
     D = os.path.join(RROOT, "data")
     rout = os.path.join(D, sp["out"])
     for c in TN.CASES[:2]:

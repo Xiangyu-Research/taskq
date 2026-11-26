@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -165,6 +166,59 @@ open(os.path.join(gd, "PROGRESS.json"), "w").write("{broken")
 ok("collect: broken PROGRESS.json -> no error, no progress", max(r["epochs_done"] for r in S.collect([gs], gr)["tasks"]["guest/x"]["runs"]) == 0)
 open(os.path.join(gd, "ckpt_0003.pt"), "w").close()
 ok("collect: a checkpoint in resume -> resumable", S.collect([gs], gr)["tasks"]["guest/x"]["resumable"])
+# A command without its own progress reader: the progress file it writes (TASKQ_PROGRESS) gives done/total, and the points seen
+# across collects (PROGRESS_CACHE) give the rate for an estimated finish
+cs = {k: S.resolve("command", dict(G, key="guest/c", out="guest/c")).get(k) for k in S.COLLECT_FIELDS}
+cd = os.path.join(gr, "guest/c")
+os.makedirs(cd)
+open(os.path.join(cd, "run.log"), "w").write("x\n")
+cs["log"] = "*.log"
+pf, pc = os.path.join(cd, proto.PROGRESS_FILE), os.path.join(gr, proto.PROGRESS_CACHE)
+c0 = S.collect([cs], gr)["tasks"]["guest/c"]
+ok("collect: command without a progress file -> its log runs as before, no progress, no cache entry",
+   len(c0["runs"]) == 1 and c0["runs"][0]["epochs_done"] == 0 and "guest/c" not in S.progress_cache(gr))
+t1 = time.time() - 1200
+open(pf, "w").write('{"done": 2, "total": 10}')
+os.utime(pf, (t1, t1))
+c1 = S.collect([cs], gr)["tasks"]["guest/c"]
+p1 = S.progress_of(c1)
+ok("collect: progress file -> one run (2 of 10, end = the newer of it and the log), 20%, no finish time from one point",
+   len(c1["runs"]) == 1 and c1["runs"][0]["epochs_done"] == 2 and c1["runs"][0]["total"] == 10
+   and c1["runs"][0]["end"] == c0["runs"][0]["end"] and p1["frac"] == 0.2 and p1["eta"] is None)
+open(pf, "w").write('{"done": 4, "total": 10}')
+os.utime(pf, (t1 + 600, t1 + 600))
+c2 = S.collect([cs], gr)["tasks"]["guest/c"]
+p2 = S.progress_of(c2)
+want = datetime.fromtimestamp(int(t1) + 600 + 1800)
+ok("collect: a second point -> finish estimated from the rate (2 per 10 min, 6 left -> 30 min after the last write)",
+   p2["frac"] == 0.4 and p2["eta"] is not None and abs((p2["eta"] - want).total_seconds()) <= 2
+   and [n for _, n in S.progress_cache(gr)["guest/c"]] == [2, 4])
+c2b = S.collect([cs], gr)["tasks"]["guest/c"]
+ok("collect: unchanged progress file -> same points", c2b["runs"][0]["tl"] == c2["runs"][0]["tl"])
+open(pf, "w").write('{"done": 1, "total": 10}')
+os.utime(pf, (t1 + 900, t1 + 900))
+ok("collect: progress file went back (rewritten from the start) -> points start over",
+   [n for _, n in S.collect([cs], gr)["tasks"]["guest/c"]["runs"][0]["tl"]] == [1])
+for _d in ("gone/a", "other/b"):
+    os.makedirs(os.path.join(gr, _d))
+    open(os.path.join(gr, _d, proto.PROGRESS_FILE), "w").write('{"done": 1, "total": 5}')
+old_pts = dict(S.progress_cache(gr), **{"gone/a": [[time.time() - proto.PROGRESS_KEEP - 60, 1]], "other/b": [[time.time(), 3]],
+                                        "other/d": [[time.time(), 3]]})
+open(pc, "w").write(json.dumps(old_pts))
+open(pf, "w").write('{"done": 2, "total": 10}')
+S.collect([cs], gr)
+_pc = S.progress_cache(gr)
+ok("cache: entries of other callers kept while recent and their file is there; old ones, or whose file is gone, dropped",
+   {"guest/c", "other/b"} <= set(_pc) and not {"gone/a", "other/d"} & set(_pc))
+open(pc, "w").write("{broken")
+ok("cache: broken -> no error, rebuilt", S.collect([cs], gr)["tasks"]["guest/c"]["runs"][0]["epochs_done"] == 2
+   and set(S.progress_cache(gr)) == {"guest/c"})
+open(pc, "w").write(json.dumps({"guest/c": [["x", None]], "bad": 5}))
+ok("cache: damaged entries -> ignored, no error", S.collect([cs], gr)["tasks"]["guest/c"]["runs"][0]["epochs_done"] == 2)
+os.remove(pf)
+open(pc, "w").write(json.dumps({"gone/a": [[time.time() - proto.PROGRESS_KEEP - 60, 1]]}))
+S.collect([cs], gr)
+ok("cache: nothing recent left -> file removed", not os.path.exists(pc))
 # Storage hangs: one task's file cannot be read -> that task goes to stuck and is skipped; others read normally; total wait is bounded
 import threading  # noqa: E402
 hang = threading.Event()
@@ -516,6 +570,11 @@ rc = S.collect([{k: ns.get(k) for k in S.COLLECT_FIELDS}], rr)
 ok("collect: toy_log reads 1 epoch done; a part log under logs/tasks counts as one epoch done",
    rc and rc["tasks"][ns["key"]]["runs"][0]["epochs_done"] == 1
    and [x["trained"] for x in rc["seglogs"] if x["name"] == os.path.basename(_lg)] == [True])
+open(os.path.join(od, proto.PROGRESS_FILE), "w").write('{"done": 7, "total": 9}')
+ok("collect: a task with its own progress reader ignores a progress file in its out dir (training progress unchanged)",
+   S.collect([{k: ns.get(k) for k in S.COLLECT_FIELDS}], rr)["tasks"][ns["key"]]["runs"] == rc["tasks"][ns["key"]]["runs"]
+   and not os.path.exists(os.path.join(rr, proto.PROGRESS_CACHE)))
+os.remove(os.path.join(od, proto.PROGRESS_FILE))
 
 _cache = os.path.join(rr, proto.SEGLOG_CACHE)
 _cl = json.load(open(_cache))["logs"]

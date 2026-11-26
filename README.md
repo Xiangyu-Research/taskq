@@ -72,7 +72,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 |---|---|
 | `taskq add` | add a task: experiment table (--exp), recipe (--recipe) or task file (--file) |
 | `taskq set` | change a task's params |
-| `taskq nice` | change nice (order) |
+| `taskq nice` | change nice (order); a task sent to an executor changes there too (-n: only show) |
 | `taskq show` | one task's full spec and state |
 | `taskq log` | one task's training parts (part logs), event log rows about it, hub task records |
 | `taskq status` | on the hub: a one-screen summary (--all: every task by state; <machine>: one machine; <words>: matching tasks) |

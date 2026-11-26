@@ -1249,5 +1249,51 @@ check("released_info: (time, worker, reason); released_at is the time in it",
       and taskq.released_info("nosuch/key") is None)
 taskq.TQ = tq_orig
 
+# ---------------- set-nice on the hub: the executor copy follows ----------------
+TQN = os.path.join(T, "taskq_nice")
+ENVN = dict(ENV, TASKQ_DIR=TQN)
+write_jsonl(os.path.join(TQN, "tasks.jsonl"), [(1, 5, "D1_a/V_s/0"), (2, 5, "D1_a/V_s/1"), (3, 5, "D1_a/V_s/2")])
+subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "take", "--worker", "site-slurm2", "--assign", "D1_a/V_s/0"], env=ENVN, capture_output=True)
+subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "take", "--worker", "nosuch-machine", "--assign", "D1_a/V_s/2"], env=ENVN, capture_output=True)
+pushed = []
+fake_rm = type(sys)("relay_remote")
+fake_rm.push_nice = lambda name, keys, nice, dry=False: pushed.append((name, keys, nice, dry)) or [f"pushed {name}"]
+saved = dict(TQ=taskq.TQ, here=taskq.here, queue_host=taskq.queue_host, rm=sys.modules.get("relay_remote"))
+taskq.TQ, taskq.here, taskq.queue_host, sys.modules["relay_remote"] = TQN, (lambda: "hub"), (lambda: "hub"), fake_rm
+
+
+def nice_main(*args):
+    import contextlib
+    import io
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        rc = taskq.main(["nice", *args])
+    return rc, b.getvalue()
+
+
+def nices():
+    return {t["key"]: t["nice"] for t in taskq.read_tasks(os.path.join(TQN, "tasks.jsonl"))}
+
+
+try:
+    rc, out = nice_main("-n", "--nice", "-3", "D1_a/V_s/0", "D1_a/V_s/1", "D1_a/V_s/2")
+    check("set-nice -n on the hub: prints the hub change and asks the assigned executor for a dry run; changes nothing",
+          rc == 0 and nices() == {"D1_a/V_s/0": 5, "D1_a/V_s/1": 5, "D1_a/V_s/2": 5} and pushed == [("site-slurm2", ["D1_a/V_s/0"], -3, True)]
+          and "would set D1_a/V_s/1: 5 -> -3" in out and "pushed site-slurm2" in out)
+    pushed.clear()
+    rc, out = nice_main("--nice", "-3", "D1_a/V_s/0", "D1_a/V_s/1")
+    check("set-nice on the hub: hub nice changed, executor push only for the key assigned there (not for unassigned or non-executor claims)",
+          rc == 0 and nices() == {"D1_a/V_s/0": -3, "D1_a/V_s/1": -3, "D1_a/V_s/2": 5} and pushed == [("site-slurm2", ["D1_a/V_s/0"], -3, False)])
+    pushed.clear()
+    taskq.here = lambda: "site-slurm2"
+    rc, out = nice_main("--nice", "4", "D1_a/V_s/0")
+    check("set-nice in an executor queue (not the hub): only the local queue, no push", rc == 0 and nices()["D1_a/V_s/0"] == 4 and not pushed)
+finally:
+    taskq.TQ, taskq.here, taskq.queue_host = saved["TQ"], saved["here"], saved["queue_host"]
+    if saved["rm"] is None:
+        sys.modules.pop("relay_remote", None)
+    else:
+        sys.modules["relay_remote"] = saved["rm"]
+
 print("\nall passed" if ok else "\nfailed")
 sys.exit(0 if ok else 1)

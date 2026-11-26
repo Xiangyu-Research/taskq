@@ -767,7 +767,7 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 BG.unhold(name, k)
                 msgs.append(f"{k} is no longer held on {L} (the bundle changed or the task no longer waits to be sent)")
             elif a["op"] == "rnice":
-                r = RM.rtq(name, f"set-nice --nice {int(a['nice'])} -- {shlex.quote(a['rkey'])}")
+                r = RM.set_nice(name, [a["rkey"]], a["nice"])
                 msgs.append(f"{k} on {L} set to nice {a['nice']}" if r and r[0] == 0 else f"could not change nice for {k} on {L}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
             elif a["op"] in ("rstop", "rresume"):
                 r = RM.rtq(name, ("stop --why stopped-from-hub-queue -- " if a["op"] == "rstop" else "resume -- ") + shlex.quote(a["rkey"]))

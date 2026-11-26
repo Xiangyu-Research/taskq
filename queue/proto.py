@@ -111,6 +111,9 @@ TASK_LOGS = "logs/tasks"       # under the data dir: part logs <safe key>__<job>
 WORKER_LOGS = "logs/workers"   # workers, GPU pad, Slurm's %x_%j.out
 LOG_PART = "part"
 SEGLOG_CACHE = "logs/seglogs.json"  # under the data dir: what collect last read from each part log (spec.seg_logs), so unchanged logs are not reread
+PROGRESS_FILE = "PROGRESS.json"  # in a task's out dir: {"done": n, "total": m}, written by its command (path in TASKQ_PROGRESS)
+PROGRESS_CACHE = "logs/progress.json"  # under the data dir: {out dir: [[time, done], ...]} collect saw in each PROGRESS_FILE (spec.progress_points)
+PROGRESS_KEEP = 6 * 3600  # PROGRESS_CACHE keeps points this recent (spec.eta_at uses the last 3 h)
 DONE_LINE = "DONE"             # a part log line starting with it = done (run_task.sh writes, spec.py reads)
 STALL_LINE = "STALLED"         # a part log line starting with it = stopped by the worker as stalled (consume.py writes and counts)
 
@@ -383,6 +386,7 @@ ENV = dict(
     TASKQ_GPU_PAD=("run", "0 = no GPU pad for this job (set by inference and analysis scripts)"),
     TASKQ_GPU_PAD_STARTED=("run", "GPU pad already started (set by gpu_pad_start.sh to avoid starting twice)"),
     TASKQ_LIB=("run", "the scheduler core's queue/ dir (run_task.sh sets it for the task's command and puts the core's bin/ first on PATH)"),
+    TASKQ_PROGRESS=("run", "where the task's command may write its progress, {\"done\": n, \"total\": m} (run_task.sh sets it to <out>/PROGRESS_FILE)"),
     TASKQ_ENVS=("run", "envs a worker may claim (comma separated); when unset machines.py's envs"),
     TASKQ_PROG=("run", "command name bin/taskq passes to bash scripts (such as taskq boot), used in usage and errors; scripts unset it after reading"),
     TASKQ_TASK_DONE=("run", "set to its label when a task in the hub core group (IO_GROUP: transfer, fetch, archive, env build) finishes, to kick a health check (refill.then_check)"),
@@ -597,7 +601,7 @@ def sh_vars():
     out = {"TQ_SAFE": SAFE, "TQ_STAGE_DIR_PREFIX": STAGE_DIR_PREFIX, "TQ_GPU_PAD_BASE": GPU_PAD_BASE, "TQ_TASK_LOGS": TASK_LOGS,
            "TQ_WORKER_LOGS": WORKER_LOGS, "TQ_STALL_LINE": STALL_LINE, "TQ_DONE_LINE": DONE_LINE, "TQ_JSON_MARK": JSON_MARK,
            "TQ_INCOMPLETE": INCOMPLETE, "TQ_STALE_BEAT": STALE_BEAT, "TQ_FRESH_LOG": FRESH_LOG, "TQ_BEAT": BEAT,
-           "TQ_GPU_LOG_FILE": GPU_LOG_FILE, "TQ_GPU_LOG_PID": GPU_LOG_PID,
+           "TQ_GPU_LOG_FILE": GPU_LOG_FILE, "TQ_GPU_LOG_PID": GPU_LOG_PID, "TQ_PROGRESS_FILE": PROGRESS_FILE,
            "TQ_BUNDLE_CORE": BUNDLE_CORE,
            "TQ_LOG_HEAD_FMT": LOG_HEAD_FMT, "TQ_LOG_ENDED_FMT": LOG_ENDED_FMT, "TQ_LOG_NOT_STARTED_FMT": LOG_NOT_STARTED_FMT,
            "TQ_LOG_GPU_BUSY_FMT": LOG_GPU_BUSY_FMT, "TQ_LOG_UNREADABLE": LOG_UNREADABLE}
