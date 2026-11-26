@@ -440,7 +440,9 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
      `taskq nice` on the hub does the `rnice` part at once for the keys it changes (`relay_remote.push_nice`: reads that queue, then
      `set-nice` there for keys queued or running there; a running task keeps running, only its stored nice changes; keys not sent yet,
-     done, failed or bad are left as is; paused or ssh master down: not contacted, the round follows later); `-n` prints both sides only;
+     done, failed or bad are left as is; paused or ssh master down: not contacted, the round follows later); `-n` prints both sides only.
+     `rnice` reads the hub queue's nice again just before sending (`relay.hub_nice`): a round can run for minutes, and a value
+     `taskq nice` set meanwhile is not set back to the one the round read;
    - stopped in the hub queue before it reached that queue: the staging does not send it (it asks the hub queue before the transfer
      and again before placing and adding), and the claim is released only once its staging has ended;
    - blocked by the bundle gate or smoke gate -> `hold`; unblocked -> `unhold`.

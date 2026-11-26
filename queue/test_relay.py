@@ -269,6 +269,20 @@ def test_plan():
     finally:
         RM.rtq = old_rtq
     assert calls == [f"set-nice --nice -101 -- {A}"] and "nice -101" in msgs[0], (calls, msgs)
+    calls.clear()
+    RM.rtq = lambda name, args, timeout=180, input=None: calls.append(args) or (0, "")
+    try:
+        with patched(relay, hub_nice=lambda k: -102):
+            msgs = relay.execute(NAME, [dict(op="rnice", key=K, rkey=A, nice=-101)], S0([mtask(K)]))
+    finally:
+        RM.rtq = old_rtq
+    assert calls == [] and "after this check read it" in msgs[0], (calls, msgs)
+    ok("the hub queue's nice changed after the check read it (taskq nice set it over there meanwhile) → not set back")
+    with patched(relay.taskq, read_tasks=lambda: [dict(key=K, nice=-3)]):
+        assert relay.hub_nice(K) == -3 and relay.hub_nice("other") is None
+    with patched(relay.taskq, read_tasks=lambda: (_ for _ in ()).throw(SystemExit("bad lines"))):
+        assert relay.hub_nice(K) is None
+    ok("hub_nice: the hub queue as it is now; not there or unreadable → None (rnice goes ahead as planned)")
     ok("nice changed in the hub queue → follow over there (set-nice); done ones are not changed")
 
     acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(), {})

@@ -652,6 +652,15 @@ def smoke_tail(name, rkey, n=20):
     return out.strip()
 
 
+def hub_nice(key):
+    """key's nice in the hub queue as it is now (a check's snapshot can be minutes old: taskq nice may have changed it and set it
+    over there since); not there or unreadable -> None."""
+    try:
+        return next((t["nice"] for t in taskq.read_tasks() if t["key"] == key), None)
+    except (OSError, SystemExit, ValueError):
+        return None
+
+
 def execute(name, acts, s, run_add=None, stuck=None):
     """Run actions → [messages]. A failing step is reported in the messages and later ones still run. Failing to add a hub task
     (stage, fetch, archive) goes to stuck; the next check retries and the alert disappears once it succeeds."""
@@ -767,6 +776,10 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 BG.unhold(name, k)
                 msgs.append(f"{k} is no longer held on {L} (the bundle changed or the task no longer waits to be sent)")
             elif a["op"] == "rnice":
+                now_nice = hub_nice(k)
+                if now_nice not in (None, a["nice"]):
+                    msgs.append(f"{k}: nice changed to {now_nice} in the hub queue after this check read it; left as is on {L}, the next check follows")
+                    continue
                 r = RM.set_nice(name, [a["rkey"]], a["nice"])
                 msgs.append(f"{k} on {L} set to nice {a['nice']}" if r and r[0] == 0 else f"could not change nice for {k} on {L}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
             elif a["op"] in ("rstop", "rresume"):
