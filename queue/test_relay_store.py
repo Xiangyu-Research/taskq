@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # root of the scheduler code
@@ -265,9 +266,62 @@ def main():
         import relay_transfer as RT
         assert seen == [None, G.proto.ORPHAN_GC_TIMEOUT] and RT.missing_timeout(0) == 600 and RT.missing_timeout(27000) == 1950, seen
         ok("timeouts: the orphan sweep (whole data and blob dirs) gets ORPHAN_GC_TIMEOUT, other cleanups the site op default; missing grows with the file count")
+        sweep_last()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("all passed")
+
+
+def sweep_last():
+    import relay as R
+    import types
+    order, st = [], {"orphans_at": {}}
+    fm = types.SimpleNamespace(executors=lambda: ["store", "b"], paused=lambda n: False, hub=lambda: "h", store=lambda: "store")
+    stub = dict(M=fm, taskq=types.SimpleNamespace(queue_host=lambda: "q"), update_code=lambda stuck: [], prune_bundles=lambda b: None,
+                wanted_bundle=lambda: ("bid", "path"), log=lambda lines, n: None, assign=lambda s, c, stuck, sn: ({}, {}),
+                prepare=lambda s, n, dry: (order.append(("prepare", n)), dict(rs={}))[1],
+                finish=lambda s, n, c, more, why, sn, dry: (order.append(("finish", n)), ([f"{n} sent"], {}))[1],
+                cleanup=lambda n, rs, orphans=False: (order.append(("sweep", n, orphans)), ([f"{n} swept"], True))[1])
+    saved = {k: getattr(R, k) for k in stub}
+    sst = (R.ST.load_state, R.ST.update_state)
+    try:
+        for k, v in stub.items():
+            setattr(R, k, v)
+        R.ST.load_state = lambda: st
+        s = dict(ok={"h": True}, taskq={"q": {"tasks": []}})
+        ev, _ = R.run_all(s)
+        assert order == [("prepare", "store"), ("prepare", "b"), ("finish", "store"), ("finish", "b"), ("sweep", "store", True)], order
+        assert ev[-1] == "store swept", ev
+        st["orphans_at"]["store"] = time.time()
+        order.clear()
+        R.run_all(s)
+        assert ("sweep", "store", True) not in order and order[-1] == ("finish", "b"), order
+        st["orphans_at"]["store"] = 0
+        order.clear()
+        R.run_all(s, dry=True)
+        assert ("sweep", "store", True) not in order, order
+    finally:
+        for k, v in saved.items():
+            setattr(R, k, v)
+        R.ST.load_state, R.ST.update_state = sst
+    calls = []
+    try:
+        R.ST.load_state, R.ST.update_state = (lambda: {}), (lambda fn: calls.append("orphans_at"))
+        g0, rc0 = R.ST.gc, R.RM.conf
+        R.RM.conf = lambda n: dict(label=n)
+        R.ST.gc = lambda *a, **k: (calls.append(k["orphans"]), None)[1]
+        assert R.cleanup("x", {}) == ([], False) and calls == [False], calls
+        R.ST.gc = lambda *a, **k: 1 / 0
+        msgs, freed = R.cleanup("x", {}, orphans=True)
+        assert not freed and "cleanup failed" in msgs[0] and "orphans_at" not in calls, (msgs, calls)
+        R.ST.gc = lambda *a, **k: dict(removed_views=[], removed_blobs=3, freed=5e9, free=9e9)
+        msgs, freed = R.cleanup("x", {}, orphans=True)
+        assert freed and calls[-1] == "orphans_at" and "3 blobs" in msgs[0], (msgs, calls)
+    finally:
+        R.ST.load_state, R.ST.update_state = sst
+        R.ST.gc, R.RM.conf = g0, rc0
+    ok("the store's orphan sweep runs after every executor's prepare and send (not in prepare, whose cleanup skips it), only when due"
+       " and not in a dry run; orphans_at is recorded only when it ran")
 
 
 def gc_orphans(tmp):

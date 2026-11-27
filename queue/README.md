@@ -540,7 +540,8 @@ operations is at the top of `site_ops.py`: for an executor root, `status`, `stat
   first, then blobs with no links by least recently used; pinned and half-transferred ones are left alone. `cap` and `blob_cap` limit the
   root and blobs. On the store, whose blobs are hard links of its data dir, a blob left with one link (its data-dir file was deleted or
   replaced) holds space for nothing: once every `ORPHAN_EVERY` the hub also has the store remove such blobs whose last change is at least
-  `ORPHAN_KEEP` old (not used by a view, not pinned), whatever the free space.
+  `ORPHAN_KEEP` old (not used by a view, not pinned), whatever the free space. This sweep walks the store's whole data and blob dirs, so it
+  runs at the end of the health check, after every executor has been sent its work, with its own timeout (`ORPHAN_GC_TIMEOUT`).
 - **fetch** (`fetch` -> the store's `pull`): that side lists outputs (`list`, same rule as "done") and fetches them to `.relay_in/<key>` under
   the store data dir, verifies them, moves them into place, and writes marker files (`MANIFEST.json`, top-level files) last. Done is judged
   by actual files on disk; while a copy, fetch or transfer is running it is not done and the source is not cleaned up.

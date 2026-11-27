@@ -1436,17 +1436,22 @@ def test_env_auto():
             ST.update_state(lambda x: x.pop("orphans_at", None))
             try:
                 store = M.store()
-                relay.prepare(ts, store, False)
-                relay.prepare(ts, store, False)
+                c = relay.prepare(ts, store, False)
                 relay.prepare(ts, NAME, False) if NAME != store else None
-                assert calls[:2] == [True, False] and not any(calls[2:]), calls
-                ST.update_state(lambda x: x["orphans_at"].update({store: time.time() - proto.ORPHAN_EVERY - 1}))
-                relay.prepare(ts, store, False)
-                assert calls[-1] is True, calls
+                assert calls and not any(calls), calls
+                calls.clear()
+                with patched(relay, log=lambda *a: None):
+                    relay.sweep_orphans({store: c})
+                    relay.sweep_orphans({store: c})
+                    relay.sweep_orphans({NAME: c}) if NAME != store else None
+                    assert calls == [True], calls
+                    ST.update_state(lambda x: x["orphans_at"].update({store: time.time() - proto.ORPHAN_EVERY - 1}))
+                    relay.sweep_orphans({store: c})
+                    assert calls == [True, True], calls
             finally:
                 ST.update_state(lambda x: x.update(orphans_at=st0) if st0 else x.pop("orphans_at", None))
         adds.clear()
-        ok("the store's blobs are swept for orphans once per ORPHAN_EVERY (other executors never)")
+        ok("the store's blobs are swept for orphans once per ORPHAN_EVERY by sweep_orphans (other executors never), never in prepare")
         open(os.path.join(T, "master_down"), "w").close()
         try:
             c = relay.prepare(ts, NAME, False)

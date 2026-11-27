@@ -897,7 +897,7 @@ def env_builds(s, name, rows, now, dry, stuck):
 
 def run_all(s, dry=False):
     """Called by health.py → (messages, stuck {problem id: text}). Read and prepare each executor (prepare), assign unclaimed
-    hub tasks to them in one pass (assign), then act per machine (finish)."""
+    hub tasks to them in one pass (assign), act per machine (finish), then the store's daily orphan sweep (sweep_orphans)."""
     events, stuck, ctxs = [], {}, {}
     if not dry:  # switch bundles first: store and executor operations (hub queue status, collect) use them, even when the hub queue is unreadable (a fresh install or format change recovers on its own)
         events += update_code(stuck)
@@ -924,6 +924,10 @@ def run_all(s, dry=False):
         events += ev
         stuck.update(st_)
     if not dry:
+        try:
+            events += sweep_orphans(ctxs)
+        except Exception as e:  # noqa: BLE001
+            stuck[alert_id("relay", "orphans")] = f"queue/relay.py orphan sweep failed: {type(e).__name__}: {e}"[:300]
         try:
             prune_bundles(wanted_bundle()[0])
         except Exception as e:  # noqa: BLE001
@@ -962,29 +966,50 @@ def prepare(s, name, dry):
         ST.update_state(lambda x: x.setdefault("last_ok", {}).update({name: time.time()}))
         write_status(name, rs, ST.load_state())
     if rs is not None and not dry:
-        try:
-            st = ST.load_state()
-            reg = (st.get("views") or {}).get(name) or {}
-            keep = {v for k in ST.keys_of(st, name).values() for v in ST.paths_of(k)}
-            keep |= {v for v, t in reg.items() if time.time() - t < proto.VIEW_KEEP}
-            orph = name == M.store() and time.time() - (st.get("orphans_at") or {}).get(name, 0) >= proto.ORPHAN_EVERY
-            g = ST.gc(name, keep, RM.op, views=reg, free=rs.get("free") if RM.conf(name).get("cap") else None,
-                      blob_free=rs.get("blob_free") if RM.conf(name).get("blob_cap") else None, orphans=orph)
-            if orph and g is not None:
-                ST.update_state(lambda x: x.setdefault("orphans_at", {}).update({name: time.time()}))
-            if g and g["removed_views"]:
-                ST.update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
-            if g and (g["removed_views"] or g["removed_blobs"]):
-                notes.append(f"{L} cleanup: removed {len(g['removed_views'])} data views and {g['removed_blobs']} blobs,"
-                             f" freed {g['freed'] / 1e9:.0f} GB, {g['free'] / 1e9:.0f} GB left")
-                rs = remote_status(name) or rs
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"{L} cleanup failed: {e}")
+        msg, freed = cleanup(name, rs)
+        notes += msg
+        if freed:
+            rs = remote_status(name) or rs
     st = ST.load_state()
     acts, stuck = plan(s, name, rs, st)
     if rs is not None and "envs_st" in rs:
         notes += env_builds(s, name, rs["envs_st"], rs["now"], dry, stuck)
     return dict(rs=rs, st=st, acts=acts, stuck=stuck, notes=notes)
+
+
+def cleanup(name, rs, orphans=False):
+    """Remove data views and blobs nothing needs on name (relay_store.gc; orphans: also the store's orphan sweep, which records
+    orphans_at when it ran) → (notes, whether anything was removed)."""
+    L = RM.conf(name)["label"]
+    try:
+        st = ST.load_state()
+        reg = (st.get("views") or {}).get(name) or {}
+        keep = {v for k in ST.keys_of(st, name).values() for v in ST.paths_of(k)}
+        keep |= {v for v, t in reg.items() if time.time() - t < proto.VIEW_KEEP}
+        g = ST.gc(name, keep, RM.op, views=reg, free=rs.get("free") if RM.conf(name).get("cap") else None,
+                  blob_free=rs.get("blob_free") if RM.conf(name).get("blob_cap") else None, orphans=orphans)
+        if orphans and g is not None:
+            ST.update_state(lambda x: x.setdefault("orphans_at", {}).update({name: time.time()}))
+        if g and g["removed_views"]:
+            ST.update_state(lambda x: [((x.get("views") or {}).get(name) or {}).pop(v, None) for v in g["removed_views"]])
+        if g and (g["removed_views"] or g["removed_blobs"]):
+            return [f"{L} cleanup: removed {len(g['removed_views'])} data views and {g['removed_blobs']} blobs,"
+                    f" freed {g['freed'] / 1e9:.0f} GB, {g['free'] / 1e9:.0f} GB left"], True
+    except Exception as e:  # noqa: BLE001
+        return [f"{L} cleanup failed: {e}"], False
+    return [], False
+
+
+def sweep_orphans(ctxs):
+    """The store's orphan sweep, once per proto.ORPHAN_EVERY, after every executor has been sent its work: it walks the store's
+    whole data and blob dirs (minutes on cold metadata), and the sites are handled one after another → messages."""
+    name = M.store()
+    c = ctxs.get(name)
+    if not c or c["rs"] is None or time.time() - (ST.load_state().get("orphans_at") or {}).get(name, 0) < proto.ORPHAN_EVERY:
+        return []
+    msgs = cleanup(name, c["rs"], orphans=True)[0]
+    log(msgs, name)
+    return msgs
 
 
 def finish(s, name, c, more, why, snotes, dry):
