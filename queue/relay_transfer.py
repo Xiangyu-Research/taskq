@@ -133,8 +133,13 @@ def ensure_blobs(name, files, say=print, src=None, what=None, n=None):
         return _ensure_blobs(name, files, say, src, what, n)
 
 
+def missing_timeout(n):
+    """Seconds for site_ops missing over n files (proto.MISSING_TIMEOUT)."""
+    return int(proto.MISSING_TIMEOUT[0] + proto.MISSING_TIMEOUT[1] * n)
+
+
 def _ensure_blobs(name, files, say, src, what, n):
-    miss = RM.op(name, "missing", sorted(files))
+    miss = RM.op(name, "missing", sorted(files), timeout=missing_timeout(len(files)))
     say(f"{what or name}: {len(files) if n is None else n} files, {len(miss)} missing over there")
     if miss:
         got = set(RM.op(name, "ingest", dict(srcs=RM.same_disk_srcs(name), files={h: files[h][:2] for h in miss}),

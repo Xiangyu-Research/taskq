@@ -116,4 +116,4 @@ def gc(name, keep_dirs, op, soft_gb=None, free=None, views=(), blob_free=None, o
     sys.path.insert(0, os.path.join(CORE, "sites"))
     import names as N
     return op(name, "gc", dict(soft_gb=soft_gb, keep=sorted(keep_dirs), free=free, views=sorted(views), scan=N.VIEW_ROOTS, blob_free=blob_free,
-                                orphans=proto.ORPHAN_KEEP if orphans else None))
+                                orphans=proto.ORPHAN_KEEP if orphans else None), **({"timeout": proto.ORPHAN_GC_TIMEOUT} if orphans else {}))

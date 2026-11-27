@@ -258,6 +258,13 @@ def main():
         finally:
             G.budget = b0
         ok("machines without budget are not cleaned")
+
+        seen = []
+        G.gc("x", keep, lambda name, what, data=None, **kw: seen.append(kw.get("timeout")), soft_gb=1.0, free=0)
+        G.gc("x", keep, lambda name, what, data=None, **kw: seen.append(kw.get("timeout")), soft_gb=1.0, free=0, orphans=True)
+        import relay_transfer as RT
+        assert seen == [None, G.proto.ORPHAN_GC_TIMEOUT] and RT.missing_timeout(0) == 600 and RT.missing_timeout(27000) == 1950, seen
+        ok("timeouts: the orphan sweep (whole data and blob dirs) gets ORPHAN_GC_TIMEOUT, other cleanups the site op default; missing grows with the file count")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("all passed")
