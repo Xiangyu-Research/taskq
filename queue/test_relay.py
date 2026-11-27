@@ -392,6 +392,30 @@ def test_plan():
     assert f"site:{NAME}:fail" in stuck, stuck
     ok("remote FAIL: no progress → release (--skip, recorded as a failure event) and drop; progress or bad → keep and alert site:<name>:fail:<key>; remote paused → site:<name>:fail")
 
+    why = "RuntimeError: CUDA out of memory"
+    tail = dict(time="2026-11-27 08:00:00", job="w9", log="x.log", machine=None,
+                lines=["step 1", why, "2026-11-27 08:00:00 " + proto.LOG_ENDED_FMT % (1, "after 3 s")])
+    rf = dict(rtask(A, "failed"), fail_tail=tail)
+    acts, _ = relay.plan(S0([mtask(K)]), NAME, RS(rf), st)
+    rel, ft = [a for a in acts if a["op"] == "release"], [a for a in acts if a["op"] == "failtail"]
+    assert ops(acts) == [("drop", K), ("failtail", K), ("release", K)] and ft[0]["tail"]["machine"] == NAME and ft[0]["tail"]["lines"] == tail["lines"], acts
+    assert rel[0]["skip"] == f"failed on {RM.conf(NAME)['label']}: {why}" and rel[0]["reason"] == why, rel
+    acts, _ = relay.plan(S0([dict(mtask(K), fail_tail=dict(tail, machine=NAME))]), NAME, RS(rf), st)
+    assert "failtail" not in [a["op"] for a in acts], acts
+    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rf, tasks={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
+    al = stuck[f"site:{NAME}:fail:{K}"]
+    assert ops(acts) == [("beat", K), ("failtail", K)] and why in al["msg"] and f"taskq show {K}" in al["msg"] and al["data"]["why"] == why, (acts, al)
+    import plain
+    assert f"({why})" in plain.problem(f"site:{NAME}:fail:{K}", al), plain.problem(f"site:{NAME}:fail:{K}", al)
+    wrote, logged = [], []
+    with patched(relay.taskq, central=lambda args, timeout=300: (0, "", ""), write_fail_tail=lambda k, r: wrote.append((k, r)) or True), \
+            patched(events, add=lambda *a, **kw: logged.append((a, kw))):
+        relay.execute(NAME, rel + ft, S0([]))
+    assert wrote == [(K, ft[0]["tail"])] and logged[0][1]["data"] == dict(why=why) and logged[0][0][1].endswith(why), (wrote, logged)
+    txt = relay.taskq.queue_text(dict(enabled=True, tasks=[dict(rf, spec=None, nice=0, failures=1)]))
+    assert f"; last failure: {why}" in txt, txt
+    ok("a failure over there carries the end of its log: copied into the hub queue once (failtail), named in the release skip, the failure event, the alert and site status")
+
     ri = dict(rtask(A, "input"), input_since=5000.0)
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(ri), st)
     assert ops(acts) == [("beat", K), ("restage", K)] and not stuck, acts

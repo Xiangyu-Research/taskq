@@ -281,8 +281,8 @@ def smoke_step(name, mtq, t, a, k, now):
 
 def plan(s, name, rs, st, now=None):
     """→ (actions, stuck {problem id: text}). rs: remote state (None = unreachable); st: load_state().
-    An action is dict(op=beat|release|stage|restage|fetch|drop|rstop|rresume|rnice|archive|hold|unhold, key, ...); rkey: the key
-    in the remote queue."""
+    An action is dict(op=beat|release|stage|restage|fetch|drop|rstop|rresume|rnice|archive|hold|unhold|failtail, key, ...); rkey: the key
+    in the remote queue; failtail copies the end of the log of a failure over there into the hub queue (taskq show)."""
     now = now or time.time()
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     L, keys = RM.conf(name)["label"], ST.keys_of(st, name)
@@ -333,6 +333,8 @@ def plan(s, name, rs, st, now=None):
             a = rt.get(key) if k else None
             if a:
                 owned.add(a["key"])
+                if newer_tail(a.get("fail_tail"), t.get("fail_tail")):
+                    acts.append(dict(op="failtail", key=key, tail=dict(a["fail_tail"], machine=name)))
             if proto.is_smoke(key):
                 sm = smoke_step(name, mtq, t, a, k, now)
                 if sm is not None:
@@ -436,13 +438,15 @@ def plan(s, name, rs, st, now=None):
                                                                f" See pueue log {sg['id']}, then pueue remove {sg['id']} to retry next check",
                                                                machine=name, step="restage", task=sg["id"], status=sg["status"])
             elif ast == "failed":
+                why = taskq.tail_reason(a.get("fail_tail"))
                 if refill.site_progress(view.get(key)):
                     stuck[alert_id("site", name, "fail", key)] = alert(
                         f"{key} ({a['key']}) failed {a.get('failures')} times on {L} with progress; claim kept."
-                        f" Check {proto.TASK_LOGS}/ over there; to give up: taskq.py release --worker {name} -- {key}",
-                        state="failed", progress=True, failures=a.get("failures"))
+                        + (f" Last log line: {why}." if why else "")
+                        + f" taskq show {key} has the end of its log; to give up: taskq.py release --worker {name} -- {key}",
+                        state="failed", progress=True, failures=a.get("failures"), why=why or None)
                 else:
-                    acts[-1] = dict(op="release", key=key, skip=f"failed on {L}", failed=True,
+                    acts[-1] = dict(op="release", key=key, skip=f"failed on {L}" + (f": {why}" if why else ""), failed=True, reason=why,
                                     why=f"failed on {L} with no progress; released so {L} will not claim it again")
                     acts.append(dict(op="drop", key=key, rkey=a["key"]))
             elif ast == proto.S_BAD:
@@ -606,7 +610,7 @@ def assign(s, ctxs, stuck=None, notes=None):
         stuck[alert_id("relaytask", k)] = alert(f"{k} cannot be sent to an executor ({e}); the other tasks are assigned as usual", key=k, error=e)
     for k in res["nowhere"]:
         stuck[alert_id("tqblocked", k)] = alert(f"{k}: every executor it can go to ({', '.join(refill.places(*specs[k]))}) released and skipped it, so it will not start;"
-                                                f" check why each released it, then taskq unskip {k}", key=k)
+                                                f" check why each released it (taskq show {k}), then taskq unskip {k}", key=k)
     for k in res["noroom"]:
         stuck[alert_id("tqroom", k)] = alert(f"{k}: no executor it can go to has room ({res['why'][k]}); free space or lower this step's out_gb", after=60, key=k)
     out = {}
@@ -632,6 +636,13 @@ def topup(name, rs, run=None):
     type (sites/executors.py plan; pueue: each worker in the table, Slurm: refill.slurm_plan); adapters just read state and
     start them. run: fn(name, command) → (exit code, output, error), replaced in tests."""
     return EX.of(name).plan(name, rs, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
+
+
+def newer_tail(remote, hub):
+    """Is the executor's failure tail one the hub queue does not have yet (another time or job)?"""
+    if not isinstance(remote, dict) or not isinstance(remote.get("lines"), list):
+        return False
+    return not isinstance(hub, dict) or (remote.get("time"), remote.get("job")) != (hub.get("time"), hub.get("job"))
 
 
 def label(op, key):
@@ -725,7 +736,11 @@ def execute(name, acts, s, run_add=None, stuck=None):
                 msgs.append(f"{L} released {k}: {a['why']}" if r and r[0] == 0 else f"{L} failed to release {k}: {RM.err_tail((r or [0, 'ssh unreachable'])[1], 150)}")
                 if r and r[0] == 0 and a.get("failed"):  # counted as a failure (taskq status: last 24 hours)
                     import events
-                    events.add("relay", f"{k} failed on {L}", kind=proto.EV_FAILED, key=k, site=name)
+                    events.add("relay", f"{k} failed on {L}" + (f": {a['reason']}" if a.get("reason") else ""), kind=proto.EV_FAILED, key=k, site=name,
+                               data=dict(why=a["reason"]) if a.get("reason") else None)
+            elif a["op"] == "failtail":
+                if not taskq.write_fail_tail(k, a["tail"]):
+                    msgs.append(f"could not record the end of {k}'s log from {L} in the hub queue")
             elif a["op"] == "take":
                 r = master(f"take --worker {name} --assign -- {shlex.quote(k)}")
                 if r is None or r[0]:

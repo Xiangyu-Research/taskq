@@ -130,6 +130,7 @@ t/b base
 EOF
 SLURM_JOB_ID=900109 FAKE_FAIL=t/a TASKQ_CONFIG=$(slots_cfg 1) timeout 60 bash "$HERE/worker_start.sh" > "$T/w2d.out" 2>&1
 check "training fails: one failure recorded, next task claimed" '[[ $(wc -l < $TASKQ_DIR/failures/t__a) == 1 ]] && grep -q "end .* t/b" $T/train.log && [[ $(grep -c "start .* t/a" $T/train.log) == 1 ]]'
+check "training fails: the end of its part log kept in failtail/" 'python3 -c "import json,sys; r=json.load(open(sys.argv[1])); sys.exit(not (r[\"log\"] == \"t__a__900109_part1.log\" and any(\"command ended (exit 1)\" in x for x in r[\"lines\"])))" $TASKQ_DIR/failtail/t__a'
 fi
 
 # 2d2. missing inputs (run_task.sh exit code 4): release, record missing inputs, not a failure, claim the next

@@ -73,6 +73,7 @@ QUEUE = dict(
     skips="skips",
     inputs="inputs",          # missing inputs
     released="released",      # last release: "<time> <worker> <why>" (see RELEASE_WHY)
+    failtail="failtail",      # failtail/<safe key>: the end of the part log of the last failure (JSON, FAIL_TAIL_FIELDS)
     stopped="stopped",        # stopped/<safe key>: stopped tasks; running workers check every 5 seconds
     enabled="ENABLED",        # master switch: a queued worker exits at start when it is absent (worker_start.sh)
     lock="lock",
@@ -257,7 +258,8 @@ EXIT = dict(
 # ---------------- field tables ----------------
 # taskq.local_status() per task (beyond a line of tasks.jsonl)
 STATUS_FIELDS = ("spec", "state", "note", "worker", "host", "since", "assigned", "input_since", "beat", "log_age",
-                 "task_log_age", "out_age", "failures", "skipped_by", "progress")  # progress: half-done on this machine (taskq.has_progress)
+                 "task_log_age", "out_age", "failures", "skipped_by", "progress",  # progress: half-done on this machine (taskq.has_progress)
+                 "fail_tail")  # fail_tail: the last failure's log tail (FAIL_TAIL_FIELDS) or None
 STATUS_TOP = ("enabled", "tasks", "recent_failures", "paused", "recent_skips")
 TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec", "added")  # a line of tasks.jsonl; added: when it entered this queue
 # third item of released/<key>: why it was released (taskq.py records it from release's arguments; worker calls do not change)
@@ -386,6 +388,7 @@ ENV = dict(
     TASKQ_GPU_PAD=("run", "0 = no GPU pad for this job (set by inference and analysis scripts)"),
     TASKQ_GPU_PAD_STARTED=("run", "GPU pad already started (set by gpu_pad_start.sh to avoid starting twice)"),
     TASKQ_LIB=("run", "the scheduler core's queue/ dir (run_task.sh sets it for the task's command and puts the core's bin/ first on PATH)"),
+    TASKQ_TASK=("run", "key of the task whose command this process runs (run_task.sh sets it for the command); hub-only queue edits (HUB_EDITS) refuse to write to the executor queue TASKQ_ROOT points at when it is set"),
     TASKQ_PROGRESS=("run", "where the task's command may write its progress, {\"done\": n, \"total\": m} (run_task.sh sets it to <out>/PROGRESS_FILE)"),
     TASKQ_ENVS=("run", "envs a worker may claim (comma separated); when unset machines.py's envs"),
     TASKQ_PROG=("run", "command name bin/taskq passes to bash scripts (such as taskq boot), used in usage and errors; scripts unset it after reading"),
@@ -417,7 +420,7 @@ ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state dir>/taskq.
 # local executor (a machine in machines.py with ssh=None that is also the hub): the hub process's own variables are not passed to it (as when
 # sshing elsewhere), otherwise its worker and taskq.py would use the hub's config, data dir and queue. relay_remote.site_argv and sites/pueue.py worker commands strip them
 HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_DATA", "TASKQ_DIR", "TASKQ_STATE",
-                "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_LAST")
+                "TASKQ_LIB", "TASKQ_ENVS", "TASKQ_MACHINE", "TASKQ_LAST", "TASKQ_TASK")
 ENV["TASKQ_TEST_NOW"] = ("test", "a file holding a time (epoch seconds): the window plugin treats it as now")
 ENV["TASKQ_SWITCH_HOLD"] = ("test", "seconds self migrate keeps unclaimed tasks aside after switching a bundle (default SWITCH_HOLD_S)")
 ENV["TASKQ_FORMAT_ANY"] = ("test", "1 = skip the on-disk format stamp check (tests that build state by hand; testdata/fixture.py and fixture.sh set it)")
@@ -567,6 +570,15 @@ TASKLOG_STATES = dict(
 
 # failure record line failures/<key> (taskq.py writes and reads): time, job, reason, bundle that ran it
 FAIL_LINE_FMT = "%s\tjob %s\t%s\t%s"
+# failtail/<key> (QUEUE["failtail"]): the end of the failed run's part log, written by release --failed on the executor and copied to the
+# hub queue by the relay (the executor's records and logs go when the task is dropped there). machine: set by the relay
+FAIL_TAIL_FIELDS = ("time", "job", "log", "machine", "lines")
+FAIL_TAIL_LINES = 50     # at most this many lines
+FAIL_TAIL_WIDTH = 300    # each cut to this many characters
+FAIL_TAIL_BYTES = 8000   # all lines together at most this many characters (oldest dropped first)
+FAIL_TAIL_READ = 64 * 1024  # bytes read from the end of the part log
+# queue edits that belong to the hub queue: refused inside a task's command (TASKQ_TASK) when the queue is the executor's own (TASKQ_ROOT)
+HUB_EDITS = ("add", "set", "set-nice", "take", "remove", "stop", "resume", "unskip")
 
 # ---------------- GPU usage summary (taskq gpu usage, monitor/gpu_usage.py) ----------------
 GPU_USAGE_TOP = ("version", "dir", "me", "days", "from", "to", "hours", "spans", "totals")  # hours: {weekday|weekend: [GPU_USAGE_HOUR]}

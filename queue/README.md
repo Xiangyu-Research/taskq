@@ -286,7 +286,7 @@ ignores the file.
 |---|---|
 | what is wrong now | `taskq problems` (the "Needs you" list of `taskq status`, each item with its id for `taskq notice ack`, then due notices; `--all` also lists info problems and ones not yet due for a push) |
 | what happened | `taskq events` (`--key`, `--site` with a machine name or label, `--source`, `-f`; relay lines carry their machine in `site`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default `logs/` in the state dir: `relay.log` etc.; each machine's `on_boot.log` and GPU usage records are in its own state dir: its root's `state/` when it has one) |
-| one task | `taskq show <key>` (spec and state), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` (each change of hub queue state, progress, machine or word) |
+| one task | `taskq show <key>` (spec, state, failure and skip records, the end of the last failed run's log), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` (each change of hub queue state, progress, machine or word) |
 | what a state word means | `queue/taskstate.py` holds the one rule (words in `proto.TASK_WORDS`): `taskq status`, `taskq status --all --json` (`word`, `where`) and the progress snapshot each health round all use it |
 | what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
 | a machine's agent | `taskq site agent status` (when each agent last called the hub); on that machine `~/.local/state/taskq/agent-<machine>.log` |
@@ -305,6 +305,18 @@ fixed. "Things that happened" such as a reboot are acknowledged with `taskq noti
 The hub queue and each executor queue are the same kind of queue (`queue/taskq.py`): `tasks.jsonl` has one task per line (nice `nice`,
 arrival `order`, key, recipe, params), `claims/<key>/` is a claim (heartbeat every 5 minutes, stale after 20 minutes without one), and
 there are records for failures, skips, missing inputs, releases and stops. Task states are in `proto.STATES`.
+
+A failure keeps the end of its own log: `release --failed` also writes `failtail/<key>`, the last 50 lines of the run's part log (each
+cut to 300 characters, about 8 KB at most; for progress bars only the text after the last carriage return), and the hub's check copies
+it into the hub queue (with the machine), so it stays after the executor drops the task and its logs. `taskq show <key>` prints it with
+the failure and skip records; `taskq status --queue` and `taskq site status` add its last meaningful line (`; last failure: ...`) to
+the task's line, and the hub's release, event and alert for the failure name it too.
+
+Commands that edit the hub queue (`add`, `set`, `nice`, `take`, `rm`, `stop`, `resume`, `unskip`, `proto.HUB_EDITS`) refuse to run
+inside a task's command when the queue they would edit is the executor's own (`TASKQ_TASK` set by `run_task.sh` and `TASKQ_ROOT`
+pointing at that executor root): there `taskq add` would silently go to the executor's queue, where the hub never placed it. Run them
+on the hub without `TASKQ_ROOT` and `TASKQ_STATE`. The hub's own calls to executor queues (relay, `taskq nice`) run outside task
+commands, and a local executor's calls drop `TASKQ_TASK` with the other hub-only variables.
 
 Claim order: lower nice first; within a nice, half-done tasks first (has a checkpoint, or this machine has part logs and no failure record);
 then arrival order. The whole queue pauses claiming after 3 failures in 3 hours. A `taskq stop`ped task is not claimed again; a worker
@@ -352,6 +364,7 @@ A worker inherits these from its launcher, `run_task.sh` from the worker, and th
 | `TASK_INPUTS_ROOT` | `run_task.sh` | where the command reads its inputs, at the same relative paths as in the data dir: the data dir, or the node-local copy |
 | `TASKQ_DATA`, `TASKQ_LIB` | `run_task.sh` | the data dir; the core's `queue/` (the core's `bin/` comes first on `PATH`) |
 | `TASKQ_PROGRESS` | `run_task.sh` | where the task's command may write its progress: `<out>/PROGRESS.json` |
+| `TASKQ_TASK` | `run_task.sh` | the task's key; with `TASKQ_ROOT` set, hub queue edits from the command are refused (see "Task queues") |
 | the spec's `vars`, the machine table's `task_vars` | `run_task.sh` | exported for the command (minus `task_unset`; a `task_vars` entry set already keeps its value) |
 
 `RUN_TASK_TRIES`, `RUN_TASK_POLL`, `RUN_TASK_GPU_POLL`, `RUN_TASK_STOP_WAIT`, `RUN_TASK_BOSS_POLL` and `WORKER_TEST_GPU` replace
@@ -437,6 +450,7 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
    - present on the store -> `drop` (remove the task and results there); if it needs archiving, `archive` first (store backs up to the
      backup machine; release only after success);
    - failed there: no progress -> `release --skip` (this machine will not claim it again); with progress -> keep the claim and report it;
+     a failure tail there that the hub queue does not have yet -> `failtail` (copied into the hub queue for `taskq show`);
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
      `taskq nice` on the hub does the `rnice` part at once for the keys it changes (`relay_remote.push_nice`: reads that queue, then
      `set-nice` there for keys queued or running there; a running task keeps running, only its stored nice changes; keys not sent yet,

@@ -1295,5 +1295,85 @@ finally:
     else:
         sys.modules["relay_remote"] = saved["rm"]
 
+# a failure keeps the end of its part log (failtail/<key>): release --failed reads the claim's part log (its log tag), the hub copies it
+proto, X_NOQ = taskq.proto, taskq.X["no_queue"]
+tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps([cspec("x/t1"), cspec("x/t2")]))
+held = {}
+for _ in range(2):
+    rc, out = tqx("next", "--worker", "w9", "--envs", "stats", "--log-tag", "w9-5", "--exclude", *held)
+    held[out.splitlines()[0]] = out.splitlines()[-1]
+os.makedirs(os.path.join(DATA, proto.TASK_LOGS), exist_ok=True)
+tlog = os.path.join(DATA, proto.TASK_LOGS, f"{taskq.safe('x/t1')}{proto.SAFE}w9-5_{proto.LOG_PART}1.log")
+with open(tlog, "w") as f:
+    f.write("job w9-5_1 @ n1, task=x/t1, part 1, env stats, code c1, 2026-01-01 00:00:00\n")
+    f.writelines(f"step {i}\n" for i in range(80))
+    f.write("epoch 3:  10%|#  |\repoch 3:  55%|#####  |\n" + "y" * 900 + "\n")
+    f.write("Traceback (most recent call last):\nRuntimeError: CUDA out of memory\n")
+    f.write(time.strftime("%F %T") + " " + proto.LOG_ENDED_FMT % (1, "after 3 s") + "\n")
+rc, _ = tqx("release", "--worker", "w9", "--token", held["x/t1"], "--failed", "exit 1 after 3 s", "x/t1")
+rc2, _ = tqx("release", "--worker", "w9", "--token", held["x/t2"], "--failed", "exit 2 before the log", "x/t2")
+ft = json.load(open(xp("failtail", "x/t1")))
+check("release --failed: failtail holds the end of the claim's part log (log tag), at most 50 lines of 300 characters, a progress bar's last state",
+      rc == 0 and ft["log"] == os.path.basename(tlog) and ft["job"] == "w9" and len(ft["lines"]) <= proto.FAIL_TAIL_LINES
+      and max(map(len, ft["lines"])) <= proto.FAIL_TAIL_WIDTH and "epoch 3:  55%|#####  |" in ft["lines"] and "step 79" in ft["lines"]
+      and "step 0" not in ft["lines"] and sum(len(x) + 1 for x in ft["lines"]) <= proto.FAIL_TAIL_BYTES)
+check("the reason is the last line that is not the runner's own", taskq.tail_reason(ft) == "RuntimeError: CUDA out of memory")
+check("release --failed with no part log: failtail holds the failure reason", rc2 == 0 and json.load(open(xp("failtail", "x/t2")))["lines"] == ["exit 2 before the log"])
+st = sx()
+rc, txt = tqx("status")
+rc2, shown = tqx("show", "x/t1")
+check("status --json carries fail_tail; status and show name the failure and print the tail",
+      st["x/t1"]["fail_tail"]["lines"] == ft["lines"] and st["x/b"].get("fail_tail") is None
+      and "x/t1" in txt and "last failure: RuntimeError: CUDA out of memory" in txt
+      and rc2 == 0 and "failed " in shown and "exit 1 after 3 s" in shown and "    | RuntimeError: CUDA out of memory" in shown
+      and os.path.basename(tlog) in shown)
+saved_tq, taskq.TQ = taskq.TQ, TQX
+try:
+    wrote = taskq.write_fail_tail("x/t2", dict(ft, machine="site-slurm2"))
+finally:
+    taskq.TQ = saved_tq
+check("write_fail_tail (the hub's copy) records the machine; show prints it", wrote is True
+      and json.load(open(xp("failtail", "x/t2")))["machine"] == "site-slurm2" and "on site-slurm2" in tqx("show", "x/t2")[1])
+rc, _ = tqx("remove", "x/t1", "x/t2")
+check("remove deletes failtail too", rc == 0 and not os.path.exists(xp("failtail", "x/t1")) and not os.path.exists(xp("failtail", "x/t2")))
+
+# hub queue edits inside a task's command (TASKQ_TASK) on an executor (TASKQ_ROOT): refused instead of going to the executor's own queue
+XR = os.path.join(T, "xroot")
+os.makedirs(os.path.join(XR, proto.ROOT["queue"]))
+open(os.path.join(XR, proto.ROOT["queue"], "tasks.jsonl"), "w").close()
+HS = os.path.join(T, "hubstate")
+os.makedirs(os.path.join(HS, "taskq"))
+open(os.path.join(HS, "taskq", "tasks.jsonl"), "w").close()
+base = {k: v for k, v in ENV.items() if k not in ("TASKQ_DIR", "TASKQ_STATE", "TASKQ_ROOT", "TASKQ_TASK")}
+base.update(TASKQ_FORMAT_ANY="1", TASKQ_DATA=DATA)
+
+
+def tqe(env, *args, stdin=None):
+    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), *args], env=dict(base, **env), capture_output=True, text=True, input=stdin)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def keys_in(q):
+    return {t["key"] for t in taskq.read_tasks(os.path.join(q, "tasks.jsonl"))}
+
+
+XQ, HQ = os.path.join(XR, proto.ROOT["queue"]), os.path.join(HS, "taskq")
+in_task = dict(TASKQ_ROOT=XR, TASKQ_TASK="j2/job", TASKQ_MACHINE="site-slurm2")
+rc, out = tqe(in_task, "add", "--nice", "0", "--recipe", "command", "key=x/h1", "cmd=true", "env=stats", "out=x/x/h1", "done=DONE")
+rcs = [tqe(in_task, *c)[0] for c in (("rm", "x/h1"), ("stop", "x/h1"), ("resume", "x/h1"), ("nice", "--nice", "1", "x/h1"),
+                                       ("set", "x/h1", "cmd=false"), ("unskip", "x/h1"), ("take", "--worker", "w", "--assign", "x/h1"))]
+check("inside a task's command on an executor: add and the other hub queue edits are refused (exit 2), the executor queue is unchanged",
+      rc == X_NOQ and set(rcs) == {X_NOQ} and "edits the hub queue" in out and "j2/job" in out and "without TASKQ_ROOT" in out
+      and not keys_in(XQ))
+rc2, out2 = tqe(in_task, "status")
+rc3, _ = tqe(dict(TASKQ_ROOT=XR, TASKQ_MACHINE="site-slurm2"), "add", "--nice", "0", "--spec-stdin", stdin=json.dumps(cspec("x/h2")))
+check("reads stay allowed there; the hub's own calls into an executor queue (TASKQ_ROOT, no TASKQ_TASK) still add", rc2 == 0 and rc3 == 0
+      and keys_in(XQ) == {"x/h2"})
+rc4, out4 = tqe(dict(TASKQ_TASK="j2/job", TASKQ_STATE=HS), "add", "--nice", "0", "--recipe", "command", "key=x/h3", "cmd=true", "env=stats",
+                "out=x/x/h3", "done=DONE")
+check("a task's command calling taskq without TASKQ_ROOT (the project's hub() helper): adds to the hub queue", rc4 == 0 and keys_in(HQ) == {"x/h3"}
+      and keys_in(XQ) == {"x/h2"})
+check("a local executor's calls drop TASKQ_TASK with the other hub-only variables", "TASKQ_TASK" in proto.HUB_ONLY_ENV)
+
 print("\nall passed" if ok else "\nfailed")
 sys.exit(0 if ok else 1)

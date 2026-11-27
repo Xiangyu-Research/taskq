@@ -317,6 +317,52 @@ def failures(key):
     return len(fail_lines(key))
 
 
+def read_tail(path):
+    """The last lines of a part log for a failure record (proto.FAIL_TAIL_*): only what follows the last carriage return of each
+    line (progress bars), oldest lines dropped first; unreadable -> []."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - proto.FAIL_TAIL_READ))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    lines = [ln.rsplit("\r", 1)[-1].rstrip()[:proto.FAIL_TAIL_WIDTH] for ln in text.split("\n")]
+    lines = [ln for ln in lines if ln][-proto.FAIL_TAIL_LINES:]
+    while len(lines) > 1 and sum(len(ln) + 1 for ln in lines) > proto.FAIL_TAIL_BYTES:
+        lines.pop(0)
+    return lines
+
+
+def write_fail_tail(key, rec):
+    """Replace failtail/<key> with rec (proto.FAIL_TAIL_FIELDS); cannot write -> False."""
+    try:
+        os.makedirs(os.path.join(TQ, Q["failtail"]), exist_ok=True)
+        write_json(os.path.join(TQ, Q["failtail"], safe(key)), {k: rec.get(k) for k in proto.FAIL_TAIL_FIELDS}, indent=None)
+        return True
+    except OSError:
+        return False
+
+
+def fail_tail(key):
+    """failtail/<key> -> dict (proto.FAIL_TAIL_FIELDS), or None when absent or unreadable."""
+    try:
+        r = json.load(open(os.path.join(TQ, Q["failtail"], safe(key)), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return r if isinstance(r, dict) and isinstance(r.get("lines"), list) else None
+
+
+def tail_reason(tail, width=200):
+    """The line of a failure tail that most likely says why: the last one that is not the runner's own end, stall or done line."""
+    import re
+    skip = [re.compile(proto.LOG_ENDED), re.compile(proto.LOG_STALLED), re.compile(r"^" + proto.LOG_TS + r"(?:\.\d+)?:? ?$")]
+    for ln in reversed((tail or {}).get("lines") or []):
+        if ln.strip() and not ln.startswith(proto.DONE_LINE) and not any(r.match(ln) for r in skip):
+            return " ".join(ln.split())[:width]
+    return ""
+
+
 def skips(key=None):
     """Records in skips/ -> [(timestamp, worker, reason)]: a task this machine cannot run (usually does not fit); only this machine stops claiming it, and it is not a failure (does not affect MAX_FAIL or pausing). key=None: all tasks."""
     out = []
@@ -622,9 +668,22 @@ def _release(a, key):
         os.makedirs(os.path.join(TQ, Q["failures"]), exist_ok=True)
         with open(os.path.join(TQ, Q["failures"], safe(key)), "a") as f:
             f.write(proto.FAIL_LINE_FMT % (time.strftime('%F %T'), a.worker, ' '.join(a.failed.split()), code_mine()) + "\n")
+        if owns(ci, a):
+            _record_tail(key, ci, a)
     if owns(ci, a):
         _mark_released(key, a.worker, "failed" if a.failed else "skip" if a.skip else "back")
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _record_tail(key, ci, a):
+    """failtail/<key> for a failed run: the end of the part log of this claim (its log tag, else the worker); no log -> the reason."""
+    log = f"{safe(key)}{proto.SAFE}{ci.get('log') or ci['worker']}_{proto.LOG_PART}1.log"
+    try:
+        data = cfg.data_dir()
+    except Exception:  # noqa: BLE001  no data dir here: the failure is still recorded
+        data = ""
+    lines = read_tail(os.path.join(data, proto.TASK_LOGS, log)) if data else []
+    write_fail_tail(key, dict(time=time.strftime('%F %T'), job=str(a.worker), log=log, lines=lines or [' '.join(a.failed.split())]))
 
 
 def cmd_missing(a):
@@ -928,7 +987,7 @@ def cmd_set_nice(a):
     return 0 if have >= set(a.keys) else GONE
 
 
-RECORDS = tuple(Q[k] for k in ("failures", "stopped", "inputs", "released"))  # records removed together with the task (executor queues also remove skips/)
+RECORDS = tuple(Q[k] for k in ("failures", "stopped", "inputs", "released", "failtail"))  # records removed together with the task (executor queues also remove skips/)
 
 
 def cmd_remove(a):
@@ -1034,6 +1093,16 @@ def cmd_show(a):
     if s:
         for k in ("env", "cmd", "out", "done", "inputs"):
             print(f"  {k:6} {s[k]}")
+    for ts, w, why in sorted(fail_lines(t["key"]))[-5:]:
+        print(f"  failed {time.strftime('%F %T', time.localtime(ts))} {w}: {why}")
+    for ts, w, why in sorted(skips(t["key"]))[-5:]:
+        print(f"  skipped {time.strftime('%F %T', time.localtime(ts))} by {w}: {why}")
+    ft = fail_tail(t["key"])
+    if ft:
+        on = f" on {ft['machine']}" if ft.get("machine") else ""
+        print(f"  last failure {ft.get('time')}{on}, job {ft.get('job')}, {proto.TASK_LOGS}/{ft.get('log')}, its last {len(ft['lines'])} lines:")
+        for ln in ft["lines"]:
+            print(f"    | {ln}")
     return 0
 
 
@@ -1043,6 +1112,10 @@ def local_status():
     tasks = read_tasks()
     F = facts(tasks)
     out = []
+    try:
+        tails = set(os.listdir(os.path.join(TQ, Q["failtail"])))
+    except OSError:
+        tails = set()
     for t in tasks:
         f = F.get(t["key"])
         st, note = state(t, f) if f else ("bad", t.get("bad", ""))
@@ -1053,7 +1126,8 @@ def local_status():
                         beat=ci.get("beat"), log_age=f["log_age"] if f else None,
                         task_log_age=(f["tag_age"].get(str(ci.get("log") or ci.get("worker"))) if f and ci else None),
                         out_age=f["out_age"] if f and st == "claimed" else None, failures=failures(t["key"]),
-                        skipped_by=sorted({w for _, w, _ in skips(t["key"])}), progress=has_progress(t, f)))
+                        skipped_by=sorted({w for _, w, _ in skips(t["key"])}), progress=has_progress(t, f),
+                        fail_tail=fail_tail(t["key"]) if safe(t["key"]) in tails else None))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
     return dict(enabled=os.path.exists(os.path.join(TQ, Q["enabled"])), tasks=out, recent_failures=nf, paused=nf >= proto.PAUSE_N,
@@ -1066,6 +1140,14 @@ def central(args, timeout=420):  # longer than the longest lock wait (300 s): an
     argv = shlex.split(args) if isinstance(args, str) else list(args)
     r = subprocess.run([sys.executable, os.path.abspath(__file__)] + argv, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout, r.stderr
+
+
+def in_task_on_executor():
+    """Is this a task's command (TASKQ_TASK, set by run_task.sh) using the queue of the executor root it runs in (TASKQ_ROOT)?"""
+    r = os.environ.get("TASKQ_ROOT")
+    if not (os.environ.get("TASKQ_TASK") and r) or os.environ.get("TASKQ_DIR"):
+        return False
+    return os.path.realpath(TQ) == os.path.realpath(os.path.join(os.path.expanduser(r), proto.ROOT["queue"]))
 
 
 def queue_host():
@@ -1115,7 +1197,9 @@ def queue_text(s, internal=False):
         n[t["state"]] = n.get(t["state"], 0) + 1
         if t["state"] != proto.S_DONE:
             env = ",".join(S.envs_of(t.get("spec"))) or "?"
-            out.append(f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}".rstrip())
+            why = tail_reason(t.get("fail_tail"))
+            out.append((f"  {t['nice']:>5} {t['key']:60} {env:10} {t['state']} {t['note']}".rstrip()
+                        + (f"; last failure: {why}" if why else "")))
     out.append("; ".join(f"{k} {v}" for k, v in sorted(n.items())) + (f"; {smoke} smoke (taskq smoke status)" if smoke else ""))
     return "\n".join(out)
 
@@ -1197,6 +1281,11 @@ def main(argv):
     if extra:  # usage lists only this subcommand's arguments
         sub.choices[a.cmd].error(f"unrecognized arguments: {' '.join(extra)}")
     cmd = {"nice": "set-nice", "rm": "remove"}.get(a.cmd, a.cmd)
+    if cmd in proto.HUB_EDITS and in_task_on_executor():
+        print(f"taskq {a.cmd} edits the hub queue, but this runs inside the command of task {os.environ['TASKQ_TASK']}, where TASKQ_ROOT"
+              f" points at this executor's own queue ({TQ}); not changed. Run it on the hub ({queue_host()}) without TASKQ_ROOT and"
+              f" TASKQ_STATE (env -u TASKQ_ROOT -u TASKQ_STATE taskq {a.cmd} ...), for example over ssh", file=sys.stderr)
+        return X["no_queue"]
     if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
             and not have_queue() and here() != queue_host():
         print(f"the hub queue is on {queue_host()}, run it there (no {tasks_path()} here)", file=sys.stderr)

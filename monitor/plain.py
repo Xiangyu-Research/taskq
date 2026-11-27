@@ -210,7 +210,8 @@ def problem(pid, p):
                 return f"{site} failed too many jobs in the last {proto.hours(proto.PAUSE_WINDOW)}; claiming new tasks is paused"
             if sub == "fail" and "progress" in d:
                 if d["progress"]:
-                    return f"{key_name(key)} failed on {site} with progress; decide whether to resume or drop it"
+                    return (f"{key_name(key)} failed on {site} with progress" + (f" ({d['why'][:120]})" if d.get("why") else "")
+                            + "; decide whether to resume or drop it")
                 return f"No training started for {key_name(key)} on {site}"
             if sub == "orphan" and "unknown" in d:
                 if d["unknown"]:

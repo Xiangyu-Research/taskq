@@ -220,8 +220,8 @@ export TASK_INPUTS_ROOT
 trap '[[ -n $CPID ]] && kill "$CPID" 2> /dev/null; [[ -n $WPID ]] && kill "$WPID" 2> /dev/null' EXIT
 for (( try = 1; ; try++ )); do
     [[ ${TASKQ_ADMITTED:-} == 1 ]] || wait_gpu || exit "$TQ_EXIT_RUN_FAILED"  # the consumer checked the GPU before claiming
-    # own process group so a stop takes the whole group; the task's command gets the core's library (TASKQ_LIB), commands (bin/ first on PATH) and its progress file (TASKQ_PROGRESS)
-    ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE TASKQ_PROGRESS="$TASK_OUT/$TQ_PROGRESS_FILE" PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
+    # own process group so a stop takes the whole group; the task's command gets the core's library (TASKQ_LIB), commands (bin/ first on PATH), its progress file (TASKQ_PROGRESS) and its key (TASKQ_TASK)
+    ( eval "$ACT" && cd "$REPO" && export TASKQ_LIB=$HERE TASKQ_PROGRESS="$TASK_OUT/$TQ_PROGRESS_FILE" TASKQ_TASK="$TASK_KEY" PATH="$CORE/bin:$PATH" && exec setsid -w bash -c "$TASK_CMD" ) >> "$LOG" 2>&1 < /dev/null &
     train_pid=$! train_up=1
     [[ -n ${TASK_JOBTAG:-} ]] && { watch_boss "$train_pid" > /dev/null 2>&1 < /dev/null & WPID=$!; }
     wait "$train_pid"; rc=$?; train_up=
