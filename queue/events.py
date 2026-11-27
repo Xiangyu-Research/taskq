@@ -263,6 +263,8 @@ def cmd_note(argv):
     except ValueError as e:
         print(f"taskq note: {e}", file=sys.stderr)
         return 2
+    if cfg.refuse_in_task("note", D.path()):
+        return 2
     db = D.connect()
     if db is None or not D.has(db, "log"):
         print(f"taskq note: no database at {D.path()} (run on the hub; `taskq db migrate` creates it)", file=sys.stderr)

@@ -1363,7 +1363,7 @@ rc, out = tqe(in_task, "add", "--nice", "0", "--recipe", "command", "key=x/h1", 
 rcs = [tqe(in_task, *c)[0] for c in (("rm", "x/h1"), ("stop", "x/h1"), ("resume", "x/h1"), ("nice", "--nice", "1", "x/h1"),
                                        ("set", "x/h1", "cmd=false"), ("unskip", "x/h1"), ("take", "--worker", "w", "--assign", "x/h1"))]
 check("inside a task's command on an executor: add and the other hub queue edits are refused (exit 2), the executor queue is unchanged",
-      rc == X_NOQ and set(rcs) == {X_NOQ} and "edits the hub queue" in out and "j2/job" in out and "without TASKQ_ROOT" in out
+      rc == X_NOQ and set(rcs) == {X_NOQ} and "edits the hub" in out and "j2/job" in out and "without TASKQ_ROOT" in out
       and not keys_in(XQ))
 rc2, out2 = tqe(in_task, "status")
 rc3, _ = tqe(dict(TASKQ_ROOT=XR, TASKQ_MACHINE="site-slurm2"), "add", "--nice", "0", "--spec-stdin", stdin=json.dumps(cspec("x/h2")))
@@ -1374,6 +1374,24 @@ rc4, out4 = tqe(dict(TASKQ_TASK="j2/job", TASKQ_STATE=HS), "add", "--nice", "0",
 check("a task's command calling taskq without TASKQ_ROOT (the project's hub() helper): adds to the hub queue", rc4 == 0 and keys_in(HQ) == {"x/h3"}
       and keys_in(XQ) == {"x/h2"})
 check("a local executor's calls drop TASKQ_TASK with the other hub-only variables", "TASKQ_TASK" in proto.HUB_ONLY_ENV)
+
+
+def tqm(env, script, *args):
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), script), *args], env=dict(base, **env), capture_output=True,
+                       text=True, stdin=subprocess.DEVNULL)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+XDB = os.path.join(XR, proto.ROOT["state"], proto.DB)
+dbe = dict(TASKQ_DB="")
+got = [tqm(dict(in_task, **dbe), *c) for c in (("queue/events.py", "note", "x"), ("monitor/push.py", "x"), ("monitor/notice.py", "set", "n", "x"),
+                                            ("monitor/notice.py", "clear", "n"), ("monitor/notice.py", "ack", "boot:x"))]
+check("inside a task's command on an executor: note, notify and notice set/clear/ack are refused (exit 2) before writing or pushing",
+      all(rc == 2 and "edits the hub" in o and "j2/job" in o for rc, o in got) and not os.path.exists(XDB))
+rc5, out5 = tqm(dict(in_task, **dbe), "monitor/notice.py", "list")
+rc6, out6 = tqm(dict(TASKQ_TASK="j2/job", TASKQ_STATE=HS, **dbe), "queue/events.py", "note", "x")
+check("notice list stays allowed there; note without TASKQ_ROOT (the project's hub() helper) goes to the hub's database",
+      rc5 == 0 and rc6 != 2 and "edits the hub" not in out6 and HS in out6)
 
 print("\nall passed" if ok else "\nfailed")
 sys.exit(0 if ok else 1)

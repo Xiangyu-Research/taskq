@@ -1142,14 +1142,6 @@ def central(args, timeout=420):  # longer than the longest lock wait (300 s): an
     return r.returncode, r.stdout, r.stderr
 
 
-def in_task_on_executor():
-    """Is this a task's command (TASKQ_TASK, set by run_task.sh) using the queue of the executor root it runs in (TASKQ_ROOT)?"""
-    r = os.environ.get("TASKQ_ROOT")
-    if not (os.environ.get("TASKQ_TASK") and r) or os.environ.get("TASKQ_DIR"):
-        return False
-    return os.path.realpath(TQ) == os.path.realpath(os.path.join(os.path.expanduser(r), proto.ROOT["queue"]))
-
-
 def queue_host():
     """Host of the hub queue: hub from machines.py in the config dir; without a hub (a relay site's bundle) this host."""
     M = cfg.mtab()
@@ -1281,10 +1273,7 @@ def main(argv):
     if extra:  # usage lists only this subcommand's arguments
         sub.choices[a.cmd].error(f"unrecognized arguments: {' '.join(extra)}")
     cmd = {"nice": "set-nice", "rm": "remove"}.get(a.cmd, a.cmd)
-    if cmd in proto.HUB_EDITS and in_task_on_executor():
-        print(f"taskq {a.cmd} edits the hub queue, but this runs inside the command of task {os.environ['TASKQ_TASK']}, where TASKQ_ROOT"
-              f" points at this executor's own queue ({TQ}); not changed. Run it on the hub ({queue_host()}) without TASKQ_ROOT and"
-              f" TASKQ_STATE (env -u TASKQ_ROOT -u TASKQ_STATE taskq {a.cmd} ...), for example over ssh", file=sys.stderr)
+    if cmd in proto.HUB_EDITS and not os.environ.get("TASKQ_DIR") and cfg.refuse_in_task(a.cmd, TQ):
         return X["no_queue"]
     if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
             and not have_queue() and here() != queue_host():

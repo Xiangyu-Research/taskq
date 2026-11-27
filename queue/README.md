@@ -312,9 +312,10 @@ it into the hub queue (with the machine), so it stays after the executor drops t
 the failure and skip records; `taskq status --queue` and `taskq site status` add its last meaningful line (`; last failure: ...`) to
 the task's line, and the hub's release, event and alert for the failure name it too.
 
-Commands that edit the hub queue (`add`, `set`, `nice`, `take`, `rm`, `stop`, `resume`, `unskip`, `proto.HUB_EDITS`) refuse to run
-inside a task's command when the queue they would edit is the executor's own (`TASKQ_TASK` set by `run_task.sh` and `TASKQ_ROOT`
-pointing at that executor root): there `taskq add` would silently go to the executor's queue, where the hub never placed it. Run them
+Commands that edit the hub queue (`add`, `set`, `nice`, `take`, `rm`, `stop`, `resume`, `unskip`, `proto.HUB_EDITS`) or write the hub
+database (`note`, `notify`, `notice set` / `clear` / `ack`) refuse to run inside a task's command when what they would write is the
+executor's own copy (`TASKQ_TASK` set by `run_task.sh` and `TASKQ_ROOT` pointing at that executor root; `cfg.refuse_in_task`): there
+`taskq add` would silently go to the executor's queue, where the hub never placed it, and `taskq note` to a database nobody reads. Run them
 on the hub without `TASKQ_ROOT` and `TASKQ_STATE`. The hub's own calls to executor queues (relay, `taskq nice`) run outside task
 commands, and a local executor's calls drop `TASKQ_TASK` with the other hub-only variables.
 
@@ -364,7 +365,7 @@ A worker inherits these from its launcher, `run_task.sh` from the worker, and th
 | `TASK_INPUTS_ROOT` | `run_task.sh` | where the command reads its inputs, at the same relative paths as in the data dir: the data dir, or the node-local copy |
 | `TASKQ_DATA`, `TASKQ_LIB` | `run_task.sh` | the data dir; the core's `queue/` (the core's `bin/` comes first on `PATH`) |
 | `TASKQ_PROGRESS` | `run_task.sh` | where the task's command may write its progress: `<out>/PROGRESS.json` |
-| `TASKQ_TASK` | `run_task.sh` | the task's key; with `TASKQ_ROOT` set, hub queue edits from the command are refused (see "Task queues") |
+| `TASKQ_TASK` | `run_task.sh` | the task's key; with `TASKQ_ROOT` set, hub queue and database edits from the command are refused (see "Task queues") |
 | the spec's `vars`, the machine table's `task_vars` | `run_task.sh` | exported for the command (minus `task_unset`; a `task_vars` entry set already keeps its value) |
 
 `RUN_TASK_TRIES`, `RUN_TASK_POLL`, `RUN_TASK_GPU_POLL`, `RUN_TASK_STOP_WAIT`, `RUN_TASK_BOSS_POLL` and `WORKER_TEST_GPU` replace

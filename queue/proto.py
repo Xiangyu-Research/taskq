@@ -390,7 +390,7 @@ ENV = dict(
     TASKQ_GPU_PAD=("run", "0 = no GPU pad for this job (set by inference and analysis scripts)"),
     TASKQ_GPU_PAD_STARTED=("run", "GPU pad already started (set by gpu_pad_start.sh to avoid starting twice)"),
     TASKQ_LIB=("run", "the scheduler core's queue/ dir (run_task.sh sets it for the task's command and puts the core's bin/ first on PATH)"),
-    TASKQ_TASK=("run", "key of the task whose command this process runs (run_task.sh sets it for the command); hub-only queue edits (HUB_EDITS) refuse to write to the executor queue TASKQ_ROOT points at when it is set"),
+    TASKQ_TASK=("run", "key of the task whose command this process runs (run_task.sh sets it for the command); hub queue edits (HUB_EDITS) and hub database writes (note, notify, notice) refuse to write under the executor root TASKQ_ROOT points at when it is set"),
     TASKQ_PROGRESS=("run", "where the task's command may write its progress, {\"done\": n, \"total\": m} (run_task.sh sets it to <out>/PROGRESS_FILE)"),
     TASKQ_ENVS=("run", "envs a worker may claim (comma separated); when unset machines.py's envs"),
     TASKQ_PROG=("run", "command name bin/taskq passes to bash scripts (such as taskq boot), used in usage and errors; scripts unset it after reading"),

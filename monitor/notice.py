@@ -20,6 +20,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "queue"))
 import proto  # noqa: E402
+import cfg  # noqa: E402
 import db as D  # noqa: E402
 
 TF = "%Y-%m-%d %H:%M:%S"
@@ -200,6 +201,8 @@ def main(argv):
             except ValueError as e:
                 print(e, file=sys.stderr)
                 return 2
+    if cfg.refuse_in_task(f"notice {a.cmd}", D.path()):
+        return 2
     db = open_db()
     if db is None or not D.writable(db):
         print(f"taskq: cannot write the database at {D.path()} (on a network file system, or created by a newer taskq)", file=sys.stderr)

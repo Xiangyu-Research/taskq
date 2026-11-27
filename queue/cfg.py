@@ -172,6 +172,25 @@ def state(*parts, expand=True):
     return os.path.expanduser(p) if expand else p
 
 
+def refuse_in_task(cmd, path):
+    """True (after saying why on stderr) when taskq <cmd>, which edits the hub's queue or database, runs inside a task's command
+    (TASKQ_TASK, set by run_task.sh) and would write path under the executor root TASKQ_ROOT points at instead of on the hub."""
+    task, root = os.environ.get("TASKQ_TASK"), os.environ.get("TASKQ_ROOT")
+    if not (task and root):
+        return False
+    r = os.path.realpath(os.path.expanduser(root))
+    if os.path.commonpath([r, os.path.realpath(path)]) != r:
+        return False
+    try:
+        hub = f" ({mtab().hub()})"
+    except Exception:  # noqa: BLE001  no hub in this machine table: the advice still holds
+        hub = ""
+    print(f"taskq {cmd} edits the hub, but this runs inside the command of task {task}, where TASKQ_ROOT points at this executor's own"
+          f" copy ({path}); not changed. Run it on the hub{hub} without TASKQ_ROOT and TASKQ_STATE"
+          f" (env -u TASKQ_ROOT -u TASKQ_STATE taskq {cmd} ...), for example over ssh", file=sys.stderr)
+    return True
+
+
 def data_dir():
     """This process's data dir (expands ~): TASKQ_DATA (set by run_task.sh for a task's command) > data under TASKQ_ROOT (processes
     on an executor) > the store's data dir when this machine is the store; none -> ""."""

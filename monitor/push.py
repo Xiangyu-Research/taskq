@@ -75,6 +75,9 @@ def main(argv):
     except ValueError as e:
         print(f"taskq notify: --data: {e}", file=sys.stderr)
         return 2
+    import db as D
+    if cfg.refuse_in_task("notify", D.path()):
+        return 2
     try:
         push(text, title=a.title, priority=a.priority, tags=a.tags)
     except OSError as e:
