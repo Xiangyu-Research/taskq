@@ -81,7 +81,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq status` | on the hub: a one-screen summary (--all: every task by state; <machine>: one machine; <words>: matching tasks) |
 | `taskq stop` | stop a task (not claimed again; running in this queue: stops within 30 seconds; sent to an executor: at the hub's next check) |
 | `taskq resume` | undo a stop |
-| `taskq unskip` | let executors that released a task claim it again (--worker: only that one) |
+| `taskq retry` | run failed or skipped tasks again now: clears skips, failures and the failure tail here and on the executor (--site, --exp, --all-failed; worker <machine>/<worker>: restart a failed pueue worker) |
 | `taskq rm` | remove an unclaimed task |
 | `taskq wait` | wait until tasks are running, done, failed or settled, then exit (reads only; the exit code says which, `proto.WAIT_EXIT`) |
 

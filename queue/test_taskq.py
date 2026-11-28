@@ -326,6 +326,30 @@ rc2, _ = tq2("unskip", SWK)
 check("unskip --worker: removes only that machine's skip record; without --worker: removes all and deletes the record file",
       sorted(sk0) == ["other-host", "pueue-host"] and rc1 == 0 and sk1 == ["pueue-host"] and rc2 == 0 and skipped_by(SWK) == []
       and not os.path.exists(os.path.join(TQ2, "skips", taskq.safe(SWK))))
+t0, TQ1, taskq.TQ = time.time(), taskq.TQ, TQ2
+tq2("release", "--worker", "site-a", SWK, "--skip", taskq.proto.FAIL_SKIP + "A: boom")
+tq2("release", "--worker", "site-b", SWK, "--skip", "does not fit")
+sk, at = taskq.skip_state(SWK, t0)
+sk2, at2 = taskq.skip_state(SWK, t0 + taskq.proto.RETRY["skip"][0] + 5)
+check("a failure skip (proto.FAIL_SKIP) holds that executor off for the first RETRY skip wait, then expires; other skips stay",
+      sk == {"site-a", "site-b"} and set(at) == {"site-a"} and t0 + 3500 < at["site-a"] < t0 + 3700 and sk2 == {"site-b"} and at2 == {})
+for _ in range(taskq.proto.RETRY["skip"][3] - 1):
+    tq2("release", "--worker", "site-a", SWK, "--skip", taskq.proto.FAIL_SKIP + "A: boom")
+sk3, at3 = taskq.skip_state(SWK, t0 + 10 ** 6)
+check("after RETRY skip tries in a row the failure skip no longer expires (until taskq retry)", sk3 == {"site-a", "site-b"} and at3 == {})
+row = next(t for t in taskq.S.json_in(subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "status", "--json", "--internal"], env=ENV2,
+                                                      capture_output=True, text=True).stdout)["tasks"] if t["key"] == SWK)
+check("status --json: skipped_by and retry_at fields", row["skipped_by"] == ["site-a", "site-b"] and row["retry_at"] == {})
+rc, out = tq2("retry", "--site", "site-a", SWK)
+check("retry --site: removes that executor's skips only", rc == 0 and "4 skip(s)" in out and taskq.skip_state(SWK)[0] == {"site-b"})
+nf = len(open(os.path.join(TQ2, "failures", taskq.safe(UM))).readlines())
+rc, out = tq2("forget", UM)
+check("forget: clears the failures (and failure tail) of a task in this queue so it is claimed again",
+      nf == 1 and rc == 0 and "1 failure(s)" in out and not os.path.exists(os.path.join(TQ2, "failures", taskq.safe(UM))))
+rc, out = tq2("retry")
+check("retry with nothing to select: exit code gone", rc == taskq.GONE)
+tq2("retry", SWK)
+taskq.TQ = TQ1
 rc, out = tq2("beat", "--worker", "504", "--strict", SWK)
 check("beat --strict: the claim is its own, exit code 0", rc == 0 and out == "")
 rc, out = tq2("beat", "--worker", "999", "--strict", SWK, "gone/x/0")

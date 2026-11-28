@@ -165,6 +165,28 @@ CODE_KEEP_S = 4 * 86400      # bundles under the root's code/ touched within thi
 CODE_CLAIM_SLACK = 3600      # also keep bundles touched since this long before the earliest claim among tasks still claimed: a task that keeps running after a switch still uses its claim's bundle
 MAX_FAIL = 2                 # a task that failed this many times (on the bundle in use) is failed in that queue; nobody claims it
 PAUSE_N, PAUSE_WINDOW = 3, 3 * 3600  # a queue stops claiming when it has this many failures within this window
+# automatic retries: kind -> (first wait s, factor, longest wait s, tries); wait before try n+1 = min(first * factor**(n-1), longest).
+# skip: an executor that failed a task without progress may take it again after the wait (the hub's skip line expires); after the
+# last try the skip stays until taskq retry. progress: a task that failed with progress is cleared on its executor and resumed there.
+# worker: a pueue worker whose task failed is started again.
+RETRY = dict(skip=(3600, 3, 12 * 3600, 4), progress=(1800, 3, 6 * 3600, 3), worker=(1800, 2, 4 * 3600, 3))
+RETRY_KEEP = 3 * 86400       # failures further apart than this start the count again
+FAIL_SKIP = "failed on "     # a hub skip line whose reason starts with this was written by the relay for a failure (expires by RETRY skip)
+# failure classes from the end of the part log (first match wins; none: "error")
+FAIL_CLASSES = (("oom", r"out of memory|OutOfMemoryError|CUDA error: out of memory|MemoryError|oom-kill|Cannot allocate memory"),
+                ("missing", r"No such file or directory|FileNotFoundError|does not exist"),
+                ("killed", r"\bKilled\b|SIGKILL|signal 9|DUE TO TIME LIMIT|CANCELLED"))
+
+
+def retry_wait(kind, n):
+    first, factor, longest, _ = RETRY[kind]
+    return min(first * factor ** (max(n, 1) - 1), longest)
+
+
+def fail_class(lines):
+    import re
+    text = "\n".join(lines or [])
+    return next((c for c, rx in FAIL_CLASSES if re.search(rx, text)), "error")
 # hub side
 SITE_FRESH = 2 * 3600        # executor state recorded by relay counts as current for this long; a machine with claimed tasks unreadable this long is reported
 FETCH_LATE = 3600            # a fetch/archive that succeeded this long ago while the hub still does not see the task done is reported
@@ -264,7 +286,8 @@ EXIT = dict(
 # taskq.local_status() per task (beyond a line of tasks.jsonl)
 STATUS_FIELDS = ("spec", "state", "note", "worker", "host", "since", "assigned", "input_since", "beat", "log_age",
                  "task_log_age", "out_age", "failures", "skipped_by", "progress",  # progress: half-done on this machine (taskq.has_progress)
-                 "fail_tail")  # fail_tail: the last failure's log tail (FAIL_TAIL_FIELDS) or None
+                 "fail_tail",  # fail_tail: the last failure's log tail (FAIL_TAIL_FIELDS) or None
+                 "retry_at")  # retry_at: {executor: when its failure skip expires}
 STATUS_TOP = ("enabled", "tasks", "recent_failures", "paused", "recent_skips")
 TASK_FIELDS = ("order", "nice", "key", "exp", "recipe", "params", "spec", "added")  # a line of tasks.jsonl; added: when it entered this queue
 # third item of released/<key>: why it was released (taskq.py records it from release's arguments; worker calls do not change)
@@ -290,8 +313,9 @@ STATUS_DOC = (
         since="claimed at (seconds)", assigned="executor it is assigned to (claimed by the hub for an executor)",
         input_since="missing inputs recorded at (seconds)", beat="last heartbeat (seconds)", log_age="seconds since its part log changed",
         task_log_age="seconds since the claiming job's own log changed", out_age="seconds since its output dir changed (claimed tasks)",
-        failures="failures counted against it", skipped_by="executors that released it as unable to run it",
-        progress="half-done somewhere (has epochs or a checkpoint)", fail_tail="the last failure's log tail, or null")),
+        failures="failures counted against it", skipped_by="executors that do not take it now (released it as unable to run it, or failed it: see retry_at)",
+        progress="half-done somewhere (has epochs or a checkpoint)", fail_tail="the last failure's log tail, or null",
+        retry_at="{executor: when (seconds) an executor that failed it may take it again}; absent: not retried automatically (taskq retry)")),
     ("taskq status --all --json: every task with its copies (overview.py)", dict(
         version="format version", now="when it was built", hub="hub machine", data="data dir", queue="hub queue switch and readability",
         sources="where state was read and when", machines="each machine: reachable, GPUs, pueue", tasks="one entry per task, fields below",
@@ -689,7 +713,7 @@ FAIL_TAIL_WIDTH = 300    # each cut to this many characters
 FAIL_TAIL_BYTES = 8000   # all lines together at most this many characters (oldest dropped first)
 FAIL_TAIL_READ = 64 * 1024  # bytes read from the end of the part log
 # queue edits that belong to the hub queue: refused inside a task's command (TASKQ_TASK) when the queue is the executor's own (TASKQ_ROOT)
-HUB_EDITS = ("add", "set", "set-nice", "take", "remove", "stop", "resume", "unskip")
+HUB_EDITS = ("add", "set", "set-nice", "take", "remove", "stop", "resume", "unskip", "retry")
 
 # ---------------- GPU usage summary (taskq gpu usage, monitor/gpu_usage.py) ----------------
 GPU_USAGE_TOP = ("version", "dir", "me", "days", "from", "to", "hours", "spans", "totals")  # hours: {weekday|weekend: [GPU_USAGE_HOUR]}
@@ -712,6 +736,9 @@ STATE_NAMES = ("taskq", "relay", "health", "last", "tunnel", "tunnel_srv", "tunn
                WHEELHOUSE, ETA, "envlock", DB, FORMAT_FILE, SNAPSHOTS, LOGS, GPU_LOG_SUB)
 EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "msg", "data")  # taskq events --json, one per line
 EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
+EV_RETRY = "retry"  # event kind: an automatic retry (key: the task, or worker:<id> for a restarted pueue worker; site: the executor)
+EV_RETRY_CLEAR = "retry_clear"  # event kind: taskq retry; automatic retries of that key (on that site, or all when site is empty) count from here
+RETRY_WORKER = "worker:"  # key prefix of a pueue worker's retry events (then its id)
 # source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
 TEXT_LOGS = {"relay": "relay", "feed": "feed", "advance": "advance", "health": "health"}
 PROGRESS_TOP = ("version", "rows")  # taskq progress --json

@@ -162,11 +162,21 @@ def test_pueue_worker():
     assert ids(subs) == [g0["id"]] and why == f"{g1['id']} is running; {nocpu}", (subs, why)
     subs, why, _ = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Killed"], [4, "other", "Running", None]], taskq=ready))
     assert ids(subs) == [g1["id"], g0["id"]], (subs, why)
-    subs, why, failed = relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "{'Failed': 1}"]], taskq=ready))
-    assert ids(subs) == [g0["id"]] and why.startswith(f"previous {g1['id']} (pueue task 3) failed ({{'Failed': 1}})")
-    assert list(failed) == [f"site:site-pueue:worker:{g1['id']}"] and failed[f"site:site-pueue:worker:{g1['id']}"]["data"] == dict(worker=g1["id"], start=False) \
-        and "(pueue task 3) failed ({'Failed': 1}); check the pueue log" in failed[f"site:site-pueue:worker:{g1['id']}"]["msg"], failed
-    ok("pueue executor (site-pueue): each worker in the machine table is judged separately; start one only when none is alive, and not after the previous one failed")
+    import events
+    gone = [[3, lab(g1), "Done", "{'Failed': 1}"]]
+    with patched(events, retries=lambda k, site, now=None: []):
+        subs, why, failed = relay.topup("site-pueue", dict(jobs=gone, taskq=ready))
+    assert ids(subs) == [g1["id"], g0["id"]] and subs[0]["retry"] == "pueue task 3 failed ({'Failed': 1}); restart 1 of 3" and not failed, (subs, why, failed)
+    with patched(events, retries=lambda k, site, now=None: [time.time() - 60] if k == proto.RETRY_WORKER + g1["id"] else []):
+        subs, why, failed = relay.topup("site-pueue", dict(jobs=gone, taskq=ready))
+    assert ids(subs) == [g0["id"]] and why.startswith(f"previous {g1['id']} (pueue task 3) failed ({{'Failed': 1}}); started again from") and not failed, (subs, why)
+    with patched(events, retries=lambda k, site, now=None: [time.time() - 3 * 86400 + 60] * 3):
+        subs, why, failed = relay.topup("site-pueue", dict(jobs=gone, taskq=ready))
+    fid = f"site:site-pueue:worker:{g1['id']}"
+    assert ids(subs) == [g0["id"]] and list(failed) == [fid] and failed[fid]["data"] == dict(worker=g1["id"], start=False, retries=3) \
+        and "after 3 automatic restarts" in failed[fid]["msg"] and f"taskq retry worker site-pueue/{g1['name']}" in failed[fid]["msg"], failed
+    ok("pueue executor (site-pueue): each worker in the machine table is judged separately; start one only when none is alive; a failed one is"
+       " started again after the RETRY worker wait (carrying why), and once those restarts are used up it is an alert pointing at taskq retry worker")
     gpu_none = "; ".join(f"no staged unclaimed task over there for {w['id']}" for w in (g1, g0))
     assert relay.topup("site-pueue", dict(jobs=[], taskq=none)) == ([], f"{gpu_none}; {nocpu}", {})
     assert relay.topup("site-pueue", dict(jobs=[[3, lab(g1), "Done", "Success"]], taskq=none)) == ([], f"{gpu_none}; {nocpu}", {})
@@ -174,8 +184,9 @@ def test_pueue_worker():
     cpu = dict(tasks=[dict(key="e/x/0", state="free", spec=dict(device="cpu")), dict(key="a/x/1", state="claimed")])
     subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=cpu))
     assert ids(subs) == [cw["id"]] and why == gpu_none, (subs, why)
-    subs, why, _ = relay.topup("site-pueue", dict(jobs=[[5, lab(cw), "Done", "{'Failed': 1}"]], taskq=dict(tasks=cpu["tasks"] + ready["tasks"][:1])))
-    assert ids(subs) == [g1["id"], g0["id"]] and why == f"previous {cw['id']} (pueue task 5) failed ({{'Failed': 1}})", (subs, why)
+    with patched(events, retries=lambda k, site, now=None: [time.time()] * 3):
+        subs, why, _ = relay.topup("site-pueue", dict(jobs=[[5, lab(cw), "Done", "{'Failed': 1}"]], taskq=dict(tasks=cpu["tasks"] + ready["tasks"][:1])))
+    assert ids(subs) == [g1["id"], g0["id"]] and why == f"previous {cw['id']} (pueue task 5) failed ({{'Failed': 1}}), restarts used up", (subs, why)
     with patched(relay.M, working=lambda n, w, t=None: w["id"] != g0["id"]):
         subs, why, _ = relay.topup("site-pueue", dict(jobs=[], taskq=ready))
     assert ids(subs) == [g1["id"]] and f"{g0['id']} is outside its hours window" in why, (subs, why)
@@ -392,6 +403,32 @@ def test_plan():
     assert f"site:{NAME}:fail" in stuck, stuck
     ok("remote FAIL: no progress → release (--skip, recorded as a failure event) and drop; progress or bad → keep and alert site:<name>:fail:<key>; remote paused → site:<name>:fail")
 
+    assert [a for a in relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed")), st)[0] if a["op"] == "release"][0]["skip"].startswith(proto.FAIL_SKIP)
+    prog = dict(final=False, runs=[dict(epochs_done=3)])
+    nf = lambda acts: [o for o in ops(acts) if o[0] != "failtail"]  # noqa: E731
+
+    def failed_at(ago, lines=("Traceback", "RuntimeError: CUDA out of memory")):
+        return dict(rtask(A, "failed"), fail_tail=dict(time=time.strftime("%F %T", time.localtime(time.time() - ago)), lines=list(lines)))
+    first = proto.retry_wait("progress", 1)
+    with patched(relay.events, retries=lambda k, site, now=None: []):
+        acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(failed_at(first + 60), tasks={A: prog}), st)
+        assert nf(acts) == [("beat", K), ("forget", K)] and not stuck and "(oom)" in acts[-1]["why"] and "retry 1 of 3" in acts[-1]["why"], (acts, stuck)
+        acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(failed_at(first - 60), tasks={A: prog}), st)
+        assert nf(acts) == [("beat", K)] and not stuck, (acts, stuck)
+    t3 = [time.time() - 9 * 3600, time.time() - 6 * 3600, time.time() - 3 * 3600]
+    with patched(relay.events, retries=lambda k, site, now=None: t3):
+        acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(failed_at(first + 60), tasks={A: prog}), st)
+    al = stuck.get(f"site:{NAME}:fail:{K}") or {}
+    assert nf(acts) == [("beat", K)] and "after 3 automatic retries" in al.get("msg", "") and al["data"]["cls"] == "oom" \
+        and f"taskq retry {K}" in al["msg"], (acts, stuck)
+    sent, logged = [], []
+    fg = [dict(op="forget", key=K, rkey=A, why="w")]
+    with patched(relay.RM, rtq=lambda n, args, **kw: sent.append(args) or (0, "")), patched(events, add=lambda *a, **kw: logged.append(kw)):
+        msgs = relay.execute(NAME, fg, S0([]))
+    assert sent == [f"forget -- {A}"] and [(kw["kind"], kw["key"], kw["site"]) for kw in logged] == [(proto.EV_RETRY, K, NAME)], (sent, logged, msgs)
+    ok("remote FAIL with progress: after the RETRY progress wait from the failure, forget there (clears its failures so it resumes) and log a retry event;"
+       " before the wait nothing; after the last retry an alert naming the failure class and taskq retry; no progress: the skip starts with FAIL_SKIP")
+
     why = "RuntimeError: CUDA out of memory"
     tail = dict(time="2026-11-27 08:00:00", job="w9", log="x.log", machine=None,
                 lines=["step 1", why, "2026-11-27 08:00:00 " + proto.LOG_ENDED_FMT % (1, "after 3 s")])
@@ -402,7 +439,8 @@ def test_plan():
     assert rel[0]["skip"] == f"failed on {RM.conf(NAME)['label']}: {why}" and rel[0]["reason"] == why, rel
     acts, _ = relay.plan(S0([dict(mtask(K), fail_tail=dict(tail, machine=NAME))]), NAME, RS(rf), st)
     assert "failtail" not in [a["op"] for a in acts], acts
-    acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rf, tasks={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
+    with patched(relay.events, retries=lambda k, site, now=None: [time.time() - 3600] * 3):
+        acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rf, tasks={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
     al = stuck[f"site:{NAME}:fail:{K}"]
     assert ops(acts) == [("beat", K), ("failtail", K)] and why in al["msg"] and f"taskq show {K}" in al["msg"] and al["data"]["why"] == why, (acts, al)
     import plain
@@ -411,7 +449,7 @@ def test_plan():
     with patched(relay.taskq, run=lambda args, timeout=300: (0, "", ""), write_fail_tail=lambda k, r: wrote.append((k, r)) or True), \
             patched(events, add=lambda *a, **kw: logged.append((a, kw))):
         relay.execute(NAME, rel + ft, S0([]))
-    assert wrote == [(K, ft[0]["tail"])] and logged[0][1]["data"] == dict(why=why) and logged[0][0][1].endswith(why), (wrote, logged)
+    assert wrote == [(K, ft[0]["tail"])] and logged[0][1]["data"] == dict(why=why, cls="oom") and logged[0][0][1].endswith(why), (wrote, logged)
     txt = relay.taskq.queue_text(dict(enabled=True, tasks=[dict(rf, spec=None, nice=0, failures=1)]))
     assert f"; last failure: {why}" in txt, txt
     ok("a failure over there carries the end of its log: copied into the hub queue once (failtail), named in the release skip, the failure event, the alert and site status")

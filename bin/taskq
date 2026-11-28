@@ -263,7 +263,7 @@ TREE = {
                   + status_doc()),
     "stop": Cmd("stop a task (not claimed again; running in this queue: stops within 30 seconds; sent to an executor: at the hub's next check)", py("taskq", "stop"), own_help=True),
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
-    "unskip": Cmd("let executors that released a task claim it again (--worker: only that one)", py("taskq", "unskip"), own_help=True),
+    "retry": Cmd("run failed or skipped tasks again now: clears skips, failures and the failure tail here and on the executor (--site, --exp, --all-failed; worker <machine>/<worker>: restart a failed pueue worker)", py("taskq", "retry"), own_help=True),
     "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
     "wait": Cmd("wait until tasks are running, done, failed or settled, then exit (reads only; exit code says which)", py("wait", prog="taskq wait"),
                 own_help=True),
@@ -392,7 +392,7 @@ TREE = {
     }, hidden=True),
 }
 
-SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "unskip", "rm", "wait"]),
+SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "retry", "rm", "wait"]),
             ("scheduling", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
             ("switches", ["queue", "drain", "undrain", "pause", "unpause", "switch"]),
             ("executors and experiments", ["site", "env", "smoke", "exp"]),

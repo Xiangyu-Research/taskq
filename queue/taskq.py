@@ -407,6 +407,33 @@ def tail_reason(tail, width=200):
     return ""
 
 
+def skip_state(key, now=None):
+    """Which executors do not take key now -> (set of workers, {worker: when its failure skip expires}). A skip for any other reason
+    always counts; failure skips (proto.FAIL_SKIP, written by the relay) count while that executor's run of failures (each within
+    RETRY_KEEP of the next) has used up RETRY skip, or until the last one plus its wait."""
+    now = time.time() if now is None else now
+    out, at, fails = set(), {}, {}
+    for ts, w, why in skips(key):
+        if why.startswith(proto.FAIL_SKIP):
+            fails.setdefault(w, []).append(ts)
+        else:
+            out.add(w)
+    for w, tss in fails.items():
+        if w in out:
+            continue
+        tss.sort()
+        n = 1
+        while n < len(tss) and tss[-n] - tss[-n - 1] <= proto.RETRY_KEEP:
+            n += 1
+        until = tss[-1] + proto.retry_wait("skip", n)
+        if n >= proto.RETRY["skip"][3]:
+            out.add(w)
+        elif now < until:
+            out.add(w)
+            at[w] = until
+    return out, at
+
+
 def skips(key=None):
     """Records in skips/ -> [(timestamp, worker, reason)]: a task this machine cannot run (usually does not fit); only this machine stops claiming it, and it is not a failure (does not affect MAX_FAIL or pausing). key=None: all tasks."""
     out = []
@@ -734,6 +761,81 @@ def cmd_unskip(a):
                 continue
             print(f"{k}: removed {n[0] - n[1]} skip record(s)")
     return 0
+
+
+def _clear_failures(k):
+    """Remove key's failure lines and failure tail -> what was removed, in words."""
+    n = ST().keep_lines("failures", k, lambda ln: False)
+    out = [f"{n[0]} failure(s)"] if n and n[0] else []
+    return out + (["the failure tail"] if ST().drop("failtail", k) else [])
+
+
+def cmd_forget(a):
+    """Clear the failures of keys in this queue (failures and failtail), so a task that failed here is claimed again and resumes
+    from its progress (the hub's taskq retry and automatic retries call it on the executor)."""
+    with Lock():
+        for k in a.keys:
+            got = _clear_failures(k)
+            print(f"{k}: removed {', '.join(got)}" if got else f"{k}: no failures recorded")
+    return 0
+
+
+def cmd_retry(a):
+    """Let failed or skipped tasks run again: remove their skip lines (--worker: only that executor's), failures and failure tail
+    here, and on the hub also clear the failures in the queue of the executor each one is assigned to (relay_remote.push_forget)."""
+    if a.keys[:1] == ["worker"]:
+        return _retry_workers(a.keys[1:])
+    tasks = read_tasks()
+    keys = list(a.keys) + [t["key"] for t in tasks if a.exp and t.get("exp") == a.exp]
+    if a.all_failed:
+        tails = ST().names("failtail")
+        keys += [t["key"] for t in tasks if safe(t["key"]) in tails or ST().lines("failures", t["key"])
+                 or any(why.startswith(proto.FAIL_SKIP) for _, _, why in skips(t["key"]))]
+    keys = list(dict.fromkeys(keys))
+    if not keys:
+        print("nothing to retry (give keys, --exp or --all-failed)", file=sys.stderr)
+        return GONE
+    have = {t["key"] for t in tasks}
+    sites = {}
+    with Lock():
+        for k in keys:
+            n = ST().keep_lines("skips", k, lambda ln: a.worker is not None and ln.split("\t")[1:2] != [a.worker])
+            got = ([f"{n[0] - n[1]} skip(s)"] if n and n[0] > n[1] else []) + _clear_failures(k)
+            print(f"{k}: removed {', '.join(got)}" if got else f"{k}: nothing recorded here" + ("" if k in have else " (not in the queue)"))
+            s = (claim_info(k) or {}).get("assigned") if k in have else None
+            if s and (a.worker is None or a.worker == s):
+                sites.setdefault(s, []).append(k)
+    if here() != queue_host():
+        return 0
+    import events
+    import relay_remote as RM
+    for k in keys:
+        events.add("taskq", f"taskq retry {k}: automatic retries count from here", kind=proto.EV_RETRY_CLEAR, key=k, site=a.worker)
+    for s, ks in sorted(sites.items()):
+        if cfg.mtab().is_exec(s):
+            for ln in RM.push_forget(s, ks):
+                print(ln)
+    return 0
+
+
+def _retry_workers(targets):
+    """taskq retry worker <machine>/<worker>: its failed pueue worker is started again at the next round, with the automatic
+    restarts counted from now."""
+    if here() != queue_host() or not targets:
+        print("taskq retry worker <machine>/<worker> ... runs on the hub", file=sys.stderr)
+        return 2
+    import events
+    M, bad = cfg.mtab(), 0
+    for t in targets:
+        m, _, wn = t.partition("/")
+        w = next((w for w in M.workers(m) if w["name"] == wn), None) if m in M.MACHINES else None
+        if w is None:
+            print(f"no worker {t} (as <machine>/<worker>: taskq machines names, workers in machines.py)", file=sys.stderr)
+            bad = 1
+            continue
+        events.add("taskq", f"taskq retry worker {t}: restarts count from here", kind=proto.EV_RETRY_CLEAR, key=proto.RETRY_WORKER + w["id"], site=m)
+        print(f"{t}: the next round starts it again when it has work")
+    return bad
 
 
 def cmd_take(a):
@@ -1094,6 +1196,8 @@ def cmd_show(a):
         print(f"  failed {time.strftime('%F %T', time.localtime(ts))} {w}: {why}")
     for ts, w, why in sorted(skips(t["key"]))[-5:]:
         print(f"  skipped {time.strftime('%F %T', time.localtime(ts))} by {w}: {why}")
+    for w, at in sorted(skip_state(t["key"])[1].items()):
+        print(f"  {w} may take it again from {time.strftime('%F %T', time.localtime(at))} (automatic retry; taskq retry {t['key']} for now)")
     ft = fail_tail(t["key"])
     if ft:
         on = f" on {ft['machine']}" if ft.get("machine") else ""
@@ -1115,13 +1219,14 @@ def local_status():
         st, note = state(t, f) if f else ("bad", t.get("bad", ""))
         s = spec_of(t)
         ci = claim_info(t["key"]) or {}
+        sk, at = skip_state(t["key"])
         out.append(dict(t, spec=s, state=st, note=note, worker=ci.get("worker"), host=ci.get("host"), since=ci.get("since"),
                         assigned=ci.get("assigned"), input_since=(input_info(t["key"]) or (None,))[0],
                         beat=ci.get("beat"), log_age=f["log_age"] if f else None,
                         task_log_age=(f["tag_age"].get(str(ci.get("log") or ci.get("worker"))) if f and ci else None),
                         out_age=f["out_age"] if f and st == "claimed" else None, failures=failures(t["key"]),
-                        skipped_by=sorted({w for _, w, _ in skips(t["key"])}), progress=has_progress(t, f),
-                        fail_tail=fail_tail(t["key"]) if safe(t["key"]) in tails else None))
+                        skipped_by=sorted(sk), progress=has_progress(t, f),
+                        fail_tail=fail_tail(t["key"]) if safe(t["key"]) in tails else None, retry_at=at))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
     return dict(enabled=ST().enabled(), tasks=out, recent_failures=nf, paused=nf >= proto.PAUSE_N,
@@ -1239,6 +1344,13 @@ def main(argv):
     p = sub.add_parser("unskip")
     p.add_argument("--worker")
     p.add_argument("keys", nargs="+")
+    p = sub.add_parser("forget")
+    p.add_argument("keys", nargs="+")
+    p = sub.add_parser("retry", description="let failed or skipped tasks run again: clear their skips, failures and failure tail here and on the executor holding them")
+    p.add_argument("--worker", "--site", dest="worker", metavar="EXECUTOR", help="only that executor's skips and claim")
+    p.add_argument("--exp", help="every task of this experiment")
+    p.add_argument("--all-failed", action="store_true", help="every task with failures, a failure tail or a failure skip")
+    p.add_argument("keys", nargs="*")
     p = sub.add_parser("take")
     p.add_argument("--worker", required=True)
     p.add_argument("--assign", action="store_true", required=True, help="assign to an executor: never expires")
@@ -1285,7 +1397,7 @@ def main(argv):
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,
                 stop=cmd_stop, resume=cmd_resume,
-                missing=cmd_missing, input_ok=cmd_input_ok, unskip=cmd_unskip)[cmd.replace("-", "_")](a)
+                missing=cmd_missing, input_ok=cmd_input_ok, unskip=cmd_unskip, forget=cmd_forget, retry=cmd_retry)[cmd.replace("-", "_")](a)
 
 
 if __name__ == "__main__":

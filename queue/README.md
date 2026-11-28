@@ -343,7 +343,13 @@ it into the hub queue (with the machine), so it stays after the executor drops t
 the failure and skip records; `taskq status --queue` and `taskq site status` add its last meaningful line (`; last failure: ...`) to
 the task's line, and the hub's release, event and alert for the failure name it too.
 
-Commands that edit the hub queue (`add`, `set`, `nice`, `take`, `rm`, `stop`, `resume`, `unskip`, `proto.HUB_EDITS`) or write the hub
+`taskq retry <key>... | --exp E | --all-failed [--site M]` clears the skips (only that executor's with `--site`), failures and failure
+tail in the hub queue, clears the failures in the queue of the executor holding the task (`relay_remote.push_forget`), and logs an
+`EV_RETRY_CLEAR` event from which automatic retries count again. `taskq retry worker <machine>/<worker>` does the same for a pueue
+worker whose restarts are used up: a worker whose pueue task failed is started again by the next round after the `RETRY["worker"]` wait
+(at once, then 30 min, 1 h), three times, then reported.
+
+Commands that edit the hub queue (`add`, `set`, `nice`, `take`, `rm`, `stop`, `resume`, `retry`, `proto.HUB_EDITS`) or write the hub
 database (`note`, `notify`, `notice set` / `clear` / `ack`) refuse to run inside a task's command when what they would write is the
 executor's own copy (`TASKQ_TASK` set by `run_task.sh` and `TASKQ_ROOT` pointing at that executor root; `cfg.refuse_in_task`): there
 `taskq add` would silently go to the executor's queue, where the hub never placed it, and `taskq note` to a database nobody reads. Run them
@@ -482,7 +488,11 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
    - queued or training there -> `beat` (renew the hub queue claim); finished there -> `fetch` (fetch to the store and verify);
    - present on the store -> `drop` (remove the task and results there); if it needs archiving, `archive` first (store backs up to the
      backup machine; release only after success);
-   - failed there: no progress -> `release --skip` (this machine will not claim it again); with progress -> keep the claim and report it;
+   - failed there: no progress -> `release --skip "failed on <machine>: ..."` (`proto.FAIL_SKIP`): that machine takes it again only after
+     the `RETRY["skip"]` wait (1 h, 3 h, 9 h), and after the fourth failure in a row (each within `RETRY_KEEP` of the next) not until
+     `taskq retry`; with progress -> keep the claim and, after the `RETRY["progress"]` wait from the failure, `forget` there (`taskq.py
+     forget`: clears its failures and failure tail, so a worker there claims it again and resumes), at most three times (`proto.EV_RETRY`
+     events count them), then report it with the failure class (`proto.FAIL_CLASSES` on the failure tail: oom, missing, killed, error);
      a failure tail there that the hub queue does not have yet -> `failtail` (copied into the hub queue for `taskq show`);
    - stopped in the hub queue, stop undone, nice changed -> `rstop`, `rresume`, `rnice`; missing inputs there -> `restage`;
      `taskq nice` on the hub does the `rnice` part at once for the keys it changes (`relay_remote.push_nice`: reads that queue, then
@@ -502,7 +512,8 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
      stagings sharing files do not send the same blob twice.
 3. **Assign** (`assign`, `refill.choose`): unclaimed tasks in the hub queue are assigned to machines in one pass. Order: nice -> half-done
    first -> arrival order. Each task's possible executors = intersection of `PLACE[step or recipe]` and the spec's `machines`, limited to
-   machines with that worker kind (gpu / cpu); drop machines that skipped it (all skipped -> report `tqblocked`); a half-done task only goes
+   machines with that worker kind (gpu / cpu); drop machines that skipped it (`skipped_by`; all skipped -> report `tqblocked`, unless a
+   failure skip expires later: `retry_at`, then it waits); a half-done task only goes
    to the machine with its progress; tasks whose inputs are already there come first. A machine must pass each of (`Site.fit`): has that
    worker kind, env ready, free slot (ready unclaimed below `READY[machine]`, negative nice does not count; when full it may swap out one
    without progress), inputs present on the store, fits (after inputs + `out_gb` at least the second `budget` item remains; with `blob_cap`

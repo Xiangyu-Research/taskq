@@ -128,6 +128,27 @@ def ahead(s, now=None):
     return 2 * now - when(s, now) if re.fullmatch(r"\d+(?:\.\d+)?[mhd]", s.strip()) else when(s, now)
 
 
+def retries(key, site, now=None):
+    """Times of the automatic retries (proto.EV_RETRY) of key on site within proto.RETRY_KEEP since the last taskq retry
+    (EV_RETRY_CLEAR) of it, oldest first; no database -> []."""
+    now = time.time() if now is None else now
+    db = D.connect(ro=True)
+    if db is None:
+        return []
+    out = []
+    try:
+        for r in query(db, since=now - proto.RETRY_KEEP, key=key):
+            if r.get("key") != key:
+                continue
+            if r.get("kind") == proto.EV_RETRY_CLEAR and r.get("site") in (None, "", site):
+                out = []
+            elif r.get("kind") == proto.EV_RETRY and r.get("site") == site:
+                out.append(r["t"])
+        return out
+    finally:
+        db.close()
+
+
 def query(db, since=None, until=None, key=None, site=None, source=None, kind=None, level=None, grep=None, limit=None, after_id=None):
     """-> [row dicts with id], oldest first. key matches the key column; rows without a key match the text."""
     if not D.has(db, "log"):

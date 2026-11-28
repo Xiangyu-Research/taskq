@@ -145,6 +145,10 @@ got, res = pick([ctq("s/1", skipped_by=["site-pueue"])], [site("site-pueue", dic
 ok("skipped by one: send to another that can take it", got == {"s/1": "site-slurm"})
 got, res = pick([ctq("s/2", skipped_by=["site-pueue", "site-slurm", "site-slurm2"])], [site("site-pueue", dict(gpu=1))])
 ok("every candidate skipped it: not sent, recorded in nowhere (relay alerts)", got == {} and res["nowhere"] == ["s/2"])
+t = dict(ctq("s/4", skipped_by=["site-pueue", "site-slurm", "site-slurm2"]), retry_at={"site-slurm": 2e9, "site-pueue": 1.9e9})
+got, res = pick([t], [site("site-pueue", dict(gpu=1))])
+ok("every candidate skipped it but a failure skip expires later (retry_at): not nowhere, it waits and says who takes it again when",
+   got == {} and res["nowhere"] == [] and res["why"]["s/4"].startswith("every executor it can go to failed it; site-pueue may take it again at"))
 got, res = pick([ctq("s/3", step="p1", skipped_by=["site-slurm"])], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))])
 ok("PLACE allows one only and it skipped: also nowhere, do not go elsewhere", got == {} and res["nowhere"] == ["s/3"])
 ts = [ctq("h/1", order=2), ctq("h/2", order=1)]

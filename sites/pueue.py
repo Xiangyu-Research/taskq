@@ -139,7 +139,10 @@ def start(name, subs, run):
     for w in subs:
         ok, out = start_worker(name, run, w)
         if ok:
-            msgs.append(f"{L} started {w['id']} ({out[-80:]})")
+            msgs.append(f"{L} started {w['id']} ({out[-80:]})" + (f" again: {w['retry']}" if w.get("retry") else ""))
+            if w.get("retry"):
+                import events
+                events.add("relay", f"{L} started {w['id']} again: {w['retry']}", kind=proto.EV_RETRY, key=proto.RETRY_WORKER + w["id"], site=name)
         else:
             stuck[alert_id("site", name, "worker", w["id"])] = alert(f"failed to start {w['id']} on {L}: {out}", worker=w["id"], start=True)
     return msgs, stuck

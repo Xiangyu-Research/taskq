@@ -152,6 +152,18 @@ def push_nice(name, keys, nice, dry=False):
     return lines
 
 
+def push_forget(name, keys):
+    """taskq retry on the hub, for keys assigned to executor name: clear their failures in its queue now (taskq.py forget there), so
+    a failed one is claimed again and resumes from its progress → lines to print. Paused or ssh master down: nothing is sent."""
+    L = conf(name)["label"]
+    if M.paused(name) or master_down(conf(name)):
+        return [f"{L}: not contacted (paused, or its ssh master connection is down); run taskq retry again once it is reachable"]
+    r = rtq(name, "forget -- " + " ".join(shlex.quote(k) for k in keys))
+    if not r or r[0]:
+        return [f"could not clear failures on {L} for {', '.join(keys)}: {err_tail((r or [0, 'ssh unreachable'])[1], 150)}"]
+    return [f"{L}: {ln}" for ln in r[1].splitlines() if ln.strip()]
+
+
 def run_lines(argv, input, timeout, say):
     """Run a command → (exit code, stdout, stderr); pass stderr to say line by line (long transfers and archives show progress
     while running). Timeout → 124. stdin, stdout and stderr each get their own thread (communicate also reads stderr and drops

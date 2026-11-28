@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # root of the scheduling code
@@ -168,7 +169,7 @@ def choose(tasks, sites, specs, held=None, sizes=None):
     or None} (measured on the store, data_sizes). Order: nice, then half-done within the same nice, then queue order.
     -> dict(why={key: why it was not sent this round} (text for display),
     by_site={key: [(executor, that executor's reason)]} (the same reasons as data),
-    nowhere=[keys whose every candidate skipped it],
+    nowhere=[keys whose every candidate skipped it for good (no failure skip that expires: retry_at)],
     noroom=[keys that fit on none of this round's available executors] (not full: waiting will not help, free space or
     lower out_gb),
     errors={key: error} (its spec or a plugin raised: that task is not sent, the others go on))."""
@@ -182,7 +183,12 @@ def choose(tasks, sites, specs, held=None, sizes=None):
             return
         skipped = set(t.get("skipped_by") or [])
         if set(opts) <= skipped:
-            nowhere.append(t["key"])
+            at = {n: v for n, v in (t.get("retry_at") or {}).items() if n in opts}
+            if at:
+                n = min(at, key=at.get)
+                why[t["key"]] = f"every executor it can go to failed it; {n} may take it again at {time.strftime('%m-%d %H:%M', time.localtime(at[n]))}"
+            else:
+                nowhere.append(t["key"])
             return
         opts = [n for n in opts if n not in skipped]
         hs = held.get(t["key"])
@@ -322,21 +328,32 @@ def slurm_plan(tq, st, conf):
 
 def pueue_plan(name, rs):
     """Workers a pueue machine should start -> (workers, why none, {problem id: alert}): each machines.py worker when it is inside
-    its hours window, none is alive, the previous one did not fail, and there is a staged unclaimed task of its kind; a previous
-    one that failed is an alert (pueue task id, state) and is not restarted."""
+    its hours window, none is alive, it is not drained, and there is a staged unclaimed task of its kind. A previous one that
+    failed is started again after the RETRY worker wait (the worker carries retry: why); once those restarts are used up it is
+    an alert (pueue task id, state) until taskq retry worker."""
     if rs.get("jobs") is None:
         return [], "cannot read pueue", {}
-    L, subs, why, failed = M.machine(name)["label"], [], [], {}
+    import events
+    L, subs, why, failed, now = M.machine(name)["label"], [], [], {}, time.time()
     for w in M.workers(name):
         mine = PQ.tasks_of(w, rs["jobs"])
+        retry = None
+        if mine and mine[-1][2] == "Done" and mine[-1][3] not in ("Success", "Killed"):
+            tid, state = mine[-1][0], mine[-1][3]
+            done, tries = events.retries(proto.RETRY_WORKER + w["id"], name, now), proto.RETRY["worker"][3]
+            at = done[-1] + proto.retry_wait("worker", len(done)) if done else now
+            if len(done) >= tries:
+                failed[proto.alert_id("site", name, "worker", w["id"])] = proto.alert(
+                    f"{L} previous {w['id']} (pueue task {tid}) failed ({state}) after {len(done)} automatic restarts; check the pueue log over there,"
+                    f" then taskq retry worker {name}/{w['name']}", worker=w["id"], start=False, retries=len(done))
+                why.append(f"previous {w['id']} (pueue task {tid}) failed ({state}), restarts used up")
+                continue
+            if now < at:
+                why.append(f"previous {w['id']} (pueue task {tid}) failed ({state}); started again from {time.strftime('%H:%M', time.localtime(at))}")
+                continue
+            retry = f"pueue task {tid} failed ({state}); restart {len(done) + 1} of {tries}"
         if any(j[2] != "Done" for j in mine):
             why.append(f"{w['id']} is running")
-        elif mine and mine[-1][3] not in ("Success", "Killed"):
-            tid, state = mine[-1][0], mine[-1][3]
-            failed[proto.alert_id("site", name, "worker", w["id"])] = proto.alert(
-                f"{L} previous {w['id']} (pueue task {tid}) failed ({state}); check the pueue log over there, then pueue remove that task to retry next check",
-                worker=w["id"], start=False)
-            why.append(f"previous {w['id']} (pueue task {tid}) failed ({state})")
         elif switches.drained(name, w["name"]):
             why.append(f"{w['id']} is drained ({switches.why(switches.drained(name, w['name']))})")
         elif not M.working(name, w):
@@ -344,5 +361,5 @@ def pueue_plan(name, rs):
         elif not unclaimed(rs["taskq"], w["kind"]):
             why.append(f"no staged unclaimed {R.kname(w['kind'])}task over there for {w['id']}")  # an idle worker exits after 30 minutes; start one when work appears
         else:
-            subs.append(w)
+            subs.append(dict(w, retry=retry) if retry else w)
     return subs, "; ".join(why), failed
