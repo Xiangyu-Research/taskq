@@ -278,7 +278,8 @@ def sweep_last():
     order, st = [], {"orphans_at": {}}
     fm = types.SimpleNamespace(executors=lambda: ["store", "b"], paused=lambda n: False, hub=lambda: "h", store=lambda: "store")
     stub = dict(M=fm, taskq=types.SimpleNamespace(queue_host=lambda: "q"), update_code=lambda stuck: [], prune_bundles=lambda b: None,
-                wanted_bundle=lambda: ("bid", "path"), log=lambda lines, n: None, assign=lambda s, c, stuck, sn: ({}, {}),
+                wanted_bundle=lambda: ("bid", "path"), log=lambda lines, n: None,
+                assign=lambda s, c, stuck, sn, placed=None: (placed.update(keys={"k": "b: full"}, by_site={"k": [("b", "full")]}), ({}, {"b": "full"}))[1],
                 prepare=lambda s, n, dry: (order.append(("prepare", n)), dict(rs={}))[1],
                 finish=lambda s, n, c, more, why, sn, dry: (order.append(("finish", n)), ([f"{n} sent"], {}))[1],
                 cleanup=lambda n, rs, orphans=False: (order.append(("sweep", n, orphans)), ([f"{n} swept"], True))[1])
@@ -298,8 +299,11 @@ def sweep_last():
         assert ("sweep", "store", True) not in order and order[-1] == ("finish", "b"), order
         st["orphans_at"]["store"] = 0
         order.clear()
+        pl = R.HS.placement()
+        assert pl.get("keys") == {"k": "b: full"} and pl.get("by_site") == {"k": [["b", "full"]]} and pl.get("sites") == {"b": "full"}, pl
         R.run_all(s, dry=True)
-        assert ("sweep", "store", True) not in order, order
+        assert ("sweep", "store", True) not in order and R.HS.placement()["t"] == pl["t"], order
+        ok("each real round records why the assignment sent each task nowhere (taskq why reads it); a dry round does not")
     finally:
         for k, v in saved.items():
             setattr(R, k, v)

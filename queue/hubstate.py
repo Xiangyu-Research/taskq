@@ -62,6 +62,27 @@ def put_site(name, rec):
         db.close()
 
 
+def put_placement(rec):
+    """What the last real round's assignment decided (relay.run_all): dict(t, keys={key: why it was not sent}, by_site={key:
+    [[executor, reason]]}, sites={executor: why it got nothing}); read by taskq why."""
+    db = _write()
+    try:
+        with D.tx(db):
+            D.set_meta(db, "placement", rec)
+    finally:
+        db.close()
+
+
+def placement():
+    db = _read()
+    if db is None:
+        return {}
+    try:
+        return D.get_meta(db, "placement") or {}
+    finally:
+        db.close()
+
+
 # ---------------- records ----------------
 def _records(db):
     return [json.loads(b) for (b,) in db.execute("SELECT body FROM record ORDER BY seq")]

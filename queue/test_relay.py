@@ -856,7 +856,7 @@ def test_paused():
     ctx = lambda n: dict(rs={}, st={}, acts=[], stuck={}, notes=[])  # noqa: E731
     with pdict(relay.P.PAUSE, **{NAME: (None, "test")}), \
             patched(relay, update_code=lambda stuck: [], prepare=lambda s, n, dry: (seen.append(n), ctx(n))[1],
-                    assign=lambda s, ctxs, stuck, notes: (seen.append(("assign", sorted(ctxs))), ({}, {}))[1],
+                    assign=lambda s, ctxs, stuck, notes, placed=None: (seen.append(("assign", sorted(ctxs))), ({}, {}))[1],
                     finish=lambda s, n, c, more, why, sn, dry: (seen.append(("finish", n)), ([], {}))[1]):
         relay.run_all(s, dry=True)
         assert NAME not in seen and ("assign", sorted(n for n in M.executors() if n != NAME)) in seen, seen

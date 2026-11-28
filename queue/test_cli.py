@@ -389,6 +389,8 @@ class Project(unittest.TestCase):
             r = taskq("status", "--json", cwd=empty)
             self.assertEqual((r.returncode, r.stdout), (0, want), "outside any project")
             self.assertIn("reading the hub's live project", r.stderr)
+            self.assertIn("reading the hub's live project", taskq("intents", cwd=roots["dev"]).stderr, "listing intents reads only")
+            self.assertNotIn("live project", taskq("intents", "--drop", "1", cwd=roots["dev"]).stderr, "--drop changes things")
             for args, cwd, env in ((("--here", "status", "--json"), roots["dev"], None), (("status", "--json"), roots["other"], None),
                                    (("status", "--json"), roots["live"], None), (("--project", roots["dev"], "status", "--json"), empty, None),
                                    (("status", "--json"), empty, dict(ENV, TASKQ_PROJECT=roots["dev"])), (("stop", "nope"), roots["dev"], None)):

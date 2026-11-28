@@ -572,11 +572,11 @@ def held_all(ctxs):
     return refill.holders(views, lambda n: M.is_exec(n) and not M.paused(n))
 
 
-def assign(s, ctxs, stuck=None, notes=None):
+def assign(s, ctxs, stuck=None, notes=None, placed=None):
     """Assign every unclaimed task in the hub queue to executors in one pass (refill.choose). ctxs {executor: dict(rs=remote
     state or None, st=load_state())}. → ({executor: [actions]} (take, drop + release when yielding to make room, smoke_add
     from the smoke gate, ...), {executor: why it got nothing}). Tasks skipped by every possible executor alert tqblocked; smoke
-    gate alerts go to stuck and its shadow-mode notes to notes."""
+    gate alerts go to stuck and its shadow-mode notes to notes; placed (a dict) gets refill.choose's why and by_site."""
     stuck = {} if stuck is None else stuck
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
@@ -620,6 +620,8 @@ def assign(s, ctxs, stuck=None, notes=None):
         return {}, {n: "cannot measure inputs on the store" for n in ctxs}
     import intents
     res = refill.choose(tasks, sites, specs, held_all(ctxs), sizes, only=intents.only())
+    if placed is not None:
+        placed.update(keys=res["why"], by_site=res["by_site"])
     bad.update(res["errors"])
     for k, e in bad.items():
         stuck[alert_id("relaytask", k)] = alert(f"{k} cannot be sent to an executor ({e}); the other tasks are assigned as usual", key=k, error=e)
@@ -944,12 +946,17 @@ def run_all(s, dry=False, times=None):
         except Exception as e:  # noqa: BLE001
             stuck[alert_id("relay", name)] = f"queue/relay.py ({name}) failed: {type(e).__name__}: {e}"[:300]
         lap(f"prepare:{name}")
-    snotes = {}
+    snotes, placed = {}, {}
     try:
-        more, why = assign(s, ctxs, stuck, snotes)
+        more, why = assign(s, ctxs, stuck, snotes, placed)
     except Exception as e:  # noqa: BLE001
         more, why = {}, {n: "assignment failed" for n in ctxs}
         stuck[alert_id("relay", "assign")] = f"queue/relay.py assignment failed: {type(e).__name__}: {e}"[:300]
+    if not dry:
+        try:
+            HS.put_placement(dict(t=time.time(), keys=placed.get("keys") or {}, by_site=placed.get("by_site") or {}, sites=why))
+        except Exception as e:  # noqa: BLE001
+            events.append(f"placement reasons not recorded: {type(e).__name__}: {e}")
     lap("assign")
     for name, c in ctxs.items():
         try:

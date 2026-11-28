@@ -84,6 +84,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq retry` | run failed or skipped tasks again now: clears skips, failures and the failure tail here and on the executor (--site, --exp, --all-failed; worker <machine>/<worker>: restart a failed pueue worker) |
 | `taskq rm` | remove tasks; one in use is stopped now and removed once its executor releases it |
 | `taskq wait` | wait until tasks are running, done, failed or settled, then exit (reads only; the exit code says which, `proto.WAIT_EXIT`) |
+| `taskq why` | one task on one page: its state, claim, marks, failures and retry times, why the last round sent it to no executor (each executor's reason), switches and intents touching it, recent events, one suggested next command |
 
 **One-step operations** (kept in the hub database and carried on by each health check round; `taskq intents` lists them)
 
@@ -229,6 +230,7 @@ and `bin/taskq` mean the full suite):
 | changed | run |
 |---|---|
 | `bin/taskq`, `monitor/wait.py` | `test_cli.py`, `test_cli_json.py`, `test_readme.py` |
+| `monitor/why.py` | `test_why.py`, `test_relay_store.py` |
 | `queue/run_tests.py` | `test_run_tests.py` |
 | `README.md`, `queue/README.md`, `queue/schema.py` | `test_readme.py`, `test_check.py` |
 | `queue/proto.py` | `test_protocol.py`, `test_core_clean.py`, then the full suite |
