@@ -413,7 +413,7 @@ def keys(name=NAME):
 
 
 def central(args):
-    rc, out, err = taskq.central(args)
+    rc, out, err = taskq.run(args)
     assert rc == 0, out + err
     return out
 

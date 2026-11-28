@@ -29,7 +29,6 @@ import policy as P  # noqa: E402
 import relay_remote as RM  # noqa: E402
 import spec as S  # noqa: E402
 import taskq  # noqa: E402
-from common import write_json  # noqa: E402
 
 SMOKE = {}
 cfg.extend(globals(), "smoke")
@@ -141,16 +140,8 @@ def mark(site, sp):
 
 
 # ---------------- records ----------------
-def path(site):
-    return os.path.join(taskq.TQ, proto.SMOKE_DIR, f"{site}.json")
-
-
 def load(site):
-    try:
-        with open(path(site)) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    return taskq.ST().smoke_get(site)
 
 
 _HELD = set()  # executors this process already holds the lock for (update inside enqueue must not flock again: a second flock in the same process waits for itself)
@@ -158,11 +149,22 @@ _HELD = set()  # executors this process already holds the lock for (update insid
 
 @contextlib.contextmanager
 def locked(site):
+    """One check at a time per executor: a write transaction when the hub queue is in the database, else a flock next to its file."""
+    st = taskq.ST()
     if site in _HELD:
         yield
         return
-    os.makedirs(os.path.dirname(path(site)), exist_ok=True)
-    with open(path(site) + ".lock", "a") as lk:
+    if st.db:
+        with st.tx():
+            _HELD.add(site)
+            try:
+                yield
+            finally:
+                _HELD.discard(site)
+        return
+    p = st.path(proto.SMOKE_DIR, f"{site}.json")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".lock", "a") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         _HELD.add(site)
         try:
@@ -175,7 +177,7 @@ def update(site, fn):
     with locked(site):
         recs = load(site)
         out = fn(recs)
-        write_json(path(site), recs)
+        taskq.ST().smoke_put(site, recs)
     return out
 
 
@@ -350,7 +352,7 @@ def _enqueue(site, op, m):
     except S.SpecError as e:
         record(site, m, state=FAILED, src="smoke", key=op["key"], bundle=op.get("bundle"), why=f"cannot resolve: {e}"[:300])
         return False, f"{site}: cannot resolve the {m['kind']} smoke task: {e}"
-    rc, out, err = taskq.central(["add", f"--nice={proto.SMOKE_NICE}", "--recipe"] + S.kv_args(op["recipe"], op["params"]))
+    rc, out, err = taskq.run(["add", f"--nice={proto.SMOKE_NICE}", "--recipe"] + S.kv_args(op["recipe"], op["params"]))
     if rc:
         record(site, m, state=FAILED, src="smoke", key=op["key"], bundle=op.get("bundle"), why=f"cannot add: {(out + err).strip()[-200:]}")
         return False, f"{site}: cannot add the {m['kind']} smoke task to the queue: {(out + err).strip()[-150:]}"

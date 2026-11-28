@@ -46,7 +46,7 @@ MKDIRS = ("code", "queue", "blobs", "tmp", "state", "data/logs/tasks", "data/log
 # this code run only where the stamp says exactly FORMAT (common.format_problem); taskq self migrate runs the numbered steps
 # up to FORMAT and writes the stamps. No stamp is format 0 (state from before stamps). A format change bumps FORMAT and adds
 # its step to migrate.STEPS in the same commit; code of older bundles does not read the stamp.
-FORMAT = 2
+FORMAT = 3
 FORMAT_FILE = "format"
 assert ROOT["format"] == ROOT["state"] + "/" + FORMAT_FILE
 SNAPSHOTS = "snapshots"  # under the hub state dir: <time>-format<N>/ copies of the hub queue, database and stamp self migrate takes before applying
@@ -471,6 +471,7 @@ ENV = dict(
     TASKQ_DATA=("run", "this process's data dir (run_task.sh, worker_start.sh set it from cfg.data_dir for the task's command); when unset cfg.data_dir derives it from TASKQ_ROOT or the store's data"),
     TASKQ_ROOT=("run", "process on an executor: this machine's root (set by pueue worker commands, worker.sbatch, relay_remote.prefix); queue, state and data dir derive from it (cfg.state, cfg.data_dir)"),
     TASKQ_DIR=("test", "queue dir (tests only); when unset cfg.state('taskq'); when set the on-disk format stamp is not checked (common.format_problem)"),
+    TASKQ_QSTORE=("test", "db / files: keep the hub queue in the hub database or in the queue dir whatever qstore.hub_db() would pick (tests only)"),
     TASKQ_CONFIG=("run", "config dir (machines.py, policy.py); when unset the user repo's .taskq.toml config, or <repo>/config without .taskq.toml (cfg.py)"),
     TASKQ_PLUGINS=("run", "plugins dir; when unset the user repo's .taskq.toml plugins (cfg.py)"),
     TASKQ_STATE=("run", "root of the state dir; when unset the one from config (cfg.py)"),

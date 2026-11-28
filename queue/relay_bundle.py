@@ -92,7 +92,7 @@ RUNTIME = (
     "queue/worker_start.sh", "queue/run_task.sh", "queue/gpu_pad_start.sh", "queue/gpu_pad.py",
     "queue/consume.py", "queue/consumers/__init__.py", "queue/consumers/slurm.py", "queue/consumers/resident.py",
     "queue/consumers/gpu_pad.py", "queue/consumers/gpu_share.py", "queue/consumers/gpu_idle.py", "queue/consumers/window.py",
-    "queue/taskq.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
+    "queue/taskq.py", "queue/qstore.py", "queue/spec.py", "queue/common.py", "queue/cfg.py", "queue/taskq_api.py", "queue/recipes.py", "queue/experiments.py",
     "queue/site_ops.py", "queue/schema.py", "queue/inputs.py", "queue/worker.sbatch", "queue/cpu_worker.sbatch",
     "queue/on_boot.sh", "queue/setup.sh", "queue/install_pueue.sh", "queue/proto.py", "queue/project.py", "sites/mtab.py",
     "sites/executors.py", "sites/pueue.py", "sites/slurm.py", "sites/remote.py",

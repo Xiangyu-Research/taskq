@@ -47,6 +47,19 @@ SCHEMA = [
     CREATE TABLE linkset(id TEXT PRIMARY KEY, links TEXT NOT NULL);
     CREATE TABLE relay(name TEXT PRIMARY KEY, body TEXT NOT NULL);
     """,
+    # 5: the hub queue (qstore.DbStore; formerly the hub queue dir: tasks.jsonl, claims/, the record dirs, smoke/ and ENABLED;
+    # self migrate step 3 copies it in). Record rows are named like the files were (proto.safe(key)).
+    """
+    CREATE TABLE task(key TEXT PRIMARY KEY, ord INTEGER NOT NULL, nice INTEGER NOT NULL, exp TEXT, recipe TEXT, params TEXT NOT NULL,
+                      spec TEXT, added REAL);
+    CREATE TABLE claim(name TEXT PRIMARY KEY, info TEXT, t REAL NOT NULL);
+    CREATE TABLE mark(kind TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, t REAL NOT NULL, PRIMARY KEY(kind, name));
+    CREATE TABLE line(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, t REAL NOT NULL);
+    CREATE INDEX line_name ON line(kind, name);
+    CREATE TABLE smoke(site TEXT PRIMARY KEY, body TEXT NOT NULL);
+    CREATE TABLE switch(name TEXT NOT NULL, target TEXT NOT NULL, value TEXT NOT NULL, t REAL NOT NULL, until REAL, why TEXT, by TEXT,
+                        PRIMARY KEY(name, target));
+    """,
 ]
 VERSION = len(SCHEMA)
 
@@ -116,17 +129,22 @@ def migrate(db, v):
 
 
 class tx:
-    """with tx(db): ... -> BEGIN IMMEDIATE ... COMMIT (ROLLBACK on error)."""
+    """with tx(db): ... -> BEGIN IMMEDIATE ... COMMIT (ROLLBACK on error). Inside a transaction already (a hub queue edit,
+    qstore.DbStore.tx): part of it, committed or rolled back with it."""
 
     def __init__(self, db):
         self.db = db
+        self.outer = False
 
     def __enter__(self):
-        self.db.execute("BEGIN IMMEDIATE")
+        if not self.db.in_transaction:
+            self.db.execute("BEGIN IMMEDIATE")
+            self.outer = True
         return self.db
 
     def __exit__(self, et, e, tb):
-        self.db.execute("ROLLBACK" if et else "COMMIT")
+        if self.outer:
+            self.db.execute("ROLLBACK" if et else "COMMIT")
         return False
 
 

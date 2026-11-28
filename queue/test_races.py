@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Concurrency and half-failed cases: lock takeover, relay only renewing when the hub's pueue is unreadable, cleanup racing
 stage for pins, and lock wait timeouts.
-Run: python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin|central_timeout] (all without arguments,
+Run: python3 queue/test_races.py [lock|lock_noowner|relay_err_release|relay_err_fetch|gc_pin|db_race] (all without arguments,
 each reported separately).
 Everything is in temp dirs: HOME, TASKQ_STATE and TASKQ_DIR point there, with fixture config and test_relay's fake ssh; no network."""
 import json
@@ -187,18 +187,55 @@ def test_gc_pin():
     assert os.path.exists(blob), (f"stage pinned while cleanup was running and cleanup still deleted the blob: {r.stdout.strip()}")
 
 
-def test_central_timeout():
-    import inspect
-    wait = inspect.signature(taskq.Lock).parameters["tries"].default * 0.5
-    t = inspect.signature(taskq.central).parameters["timeout"].default
-    assert t > wait + 30, f"central() timeout {t}s is not longer than the lock's max wait {wait}s: a held lock gives the caller TimeoutExpired instead of an exit code"
-    import advance
-    assert "timeout=TQ_TIMEOUT" in inspect.getsource(advance.taskq_add)
-    assert advance.TQ_TIMEOUT > wait + 30, f"advance.TQ_TIMEOUT {advance.TQ_TIMEOUT}s is not longer than the lock's max wait {wait}s"
+def test_db_race():
+    """The hub queue in the hub database (TASKQ_QSTORE=db): eight processes assign the same task at once -> exactly one wins;
+    take racing rm -> the task ends up either assigned or gone, never removed with a claim left; a write transaction held
+    elsewhere makes an edit wait for it instead of failing."""
+    import sqlite3
+    dbp, data = os.path.join(TMP, "race.db"), os.path.join(TMP, "race_data")
+    os.makedirs(data, exist_ok=True)
+    env = dict(os.environ, TASKQ_QSTORE="db", TASKQ_DB=dbp, TASKQ_DATA=data, TASKQ_MACHINE="hub")
+
+    def tq(*a):
+        return subprocess.Popen([sys.executable, os.path.join(HERE, "taskq.py"), *a], env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+
+    def done(p):
+        out, err = p.communicate(timeout=120)
+        return p.returncode, out + err
+
+    def rows(sql):
+        c = sqlite3.connect(dbp)
+        try:
+            return c.execute(sql).fetchall()
+        finally:
+            c.close()
+    for f in ("0", "1"):
+        rc, out = done(tq("add", "--nice", "100", "--recipe", "toy", "ds=D113_delta", "variant=V_save", f"frag={f}"))
+        assert rc == 0, out
+    k0, k1 = sorted(r[0] for r in rows("SELECT key FROM task"))
+    res = [done(p) for p in [tq("take", "--worker", f"w{i}", "--assign", k0) for i in range(8)]]
+    won = [i for i, (rc, _) in enumerate(res) if rc == 0]
+    claims = rows("SELECT info FROM claim")
+    assert len(won) == 1 and len(claims) == 1 and json.loads(claims[0][0])["worker"] == f"w{won[0]}", (won, claims, res)
+    take, rm = tq("take", "--worker", "wx", "--assign", k1), tq("rm", k1)
+    done(take), done(rm)
+    task = rows(f"SELECT 1 FROM task WHERE key='{k1}'")
+    claim = rows(f"SELECT 1 FROM claim WHERE name='{k1.replace('/', '__')}'")
+    assert bool(task) == bool(claim), f"take racing rm left task={task} claim={claim}"
+    c = sqlite3.connect(dbp, isolation_level=None)
+    c.execute("BEGIN IMMEDIATE")
+    p = tq("stop", "--why", "race", k0)
+    time.sleep(1.5)
+    waited = p.poll() is None
+    c.execute("COMMIT")
+    c.close()
+    rc, out = done(p)
+    assert waited and rc == 0 and rows(f"SELECT body FROM mark WHERE kind='stopped' AND name='{k0.replace('/', '__')}'"), (waited, rc, out)
 
 
 TESTS = dict(lock=test_lock, lock_noowner=test_lock_noowner, relay_err_release=test_relay_err_release, relay_err_fetch=test_relay_err_fetch, gc_pin=test_gc_pin,
-             central_timeout=test_central_timeout)
+             db_race=test_db_race)
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(TESTS)

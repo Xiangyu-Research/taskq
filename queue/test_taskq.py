@@ -25,6 +25,7 @@ fixture.use()
 ENV.update(TASKQ_CONFIG=fixture.CONFIG, TASKQ_PLUGINS=fixture.PLUGINS)
 os.environ.update(TASKQ_DIR=TQ, TASKQ_LOCK_WAIT="0.05")  # lock retry interval in this process (try_lock cases that must not get it)
 import taskq  # noqa: E402
+from common import write_json  # noqa: E402
 import spec as S  # noqa: E402
 import experiments as E  # noqa: E402
 
@@ -881,7 +882,7 @@ try:
     os.makedirs(os.path.join(TQR, "inputs"), exist_ok=True)
     open(os.path.join(TQR, "inputs", taskq.safe("r/inp")), "w").write(f"{time.time()}\tW\tx\n")
     os.makedirs(os.path.join(TQR, "claims", taskq.safe("r/inp")), exist_ok=True)
-    taskq.write_json(os.path.join(TQR, "claims", taskq.safe("r/inp"), "info"), dict(worker="W2", host="h", since=time.time(), beat=time.time()), indent=None)
+    write_json(os.path.join(TQR, "claims", taskq.safe("r/inp"), "info"), dict(worker="W2", host="h", since=time.time(), beat=time.time()), indent=None)
     st_i = taskq.state(t_i, taskq.S.facts([dict(spec=taskq.spec_of(t_i), since=t_i.get("added"), tags=["W2"])], DATA)["r/inp"])
     check("missing-input marker + someone holds it -> claimed", st_i[0] == "claimed")
     # just released: facts were read a while before state() looks at them (a long queue); the log is from before the release
@@ -1038,7 +1039,7 @@ for sub, line in (("failures", f"{now_s}\tjob 1\tx\t\n"), ("inputs", f"{time.tim
     open(xp(sub, "x/b"), "w").write(line)
 tqx("stop", "x/b")
 os.makedirs(xp("claims", "x/b"))
-taskq.write_json(os.path.join(xp("claims", "x/b"), "info"), dict(worker="old", host="h", since=time.time() - 7200, beat=time.time() - 7200), indent=None)
+write_json(os.path.join(xp("claims", "x/b"), "info"), dict(worker="old", host="h", since=time.time() - 7200, beat=time.time() - 7200), indent=None)
 rc, out = tqx("remove", "x/b")
 left = [sub for sub in ("failures", "stopped", "inputs", "released", "skips", "claims") if os.path.exists(xp(sub, "x/b"))]
 tqx("add", "--nice", "0", "--spec-stdin", stdin=json.dumps(xb))
@@ -1145,9 +1146,9 @@ check("proto.claim_alive matches the reference (default and changed thresholds)"
 # next claimed but was stopped before printing: drop the claim instead of leaving it to expire; still exits from the signal
 TQK = os.path.join(T, "taskq_kill")
 write_jsonl(os.path.join(TQK, "tasks.jsonl"), [(1, 0, "D103_y/V_save/0")])
-KILL_NEXT = ("import os,signal,sys\nsys.path.insert(0, sys.argv.pop(1))\nimport taskq\n_w = taskq.write_json\n"
+KILL_NEXT = ("import os,signal,sys\nsys.path.insert(0, sys.argv.pop(1))\nimport taskq\n_w = taskq.qstore.write_json\n"
              "def w(p, *a, **k):\n    _w(p, *a, **k)\n    os.kill(os.getpid(), signal.SIGTERM)\n"
-             "taskq.write_json = w\nsys.exit(taskq.main(sys.argv[1:]))")
+             "taskq.qstore.write_json = w\nsys.exit(taskq.main(sys.argv[1:]))")
 r = subprocess.run([sys.executable, "-c", KILL_NEXT, HERE, "next", "--worker", "600", "--envs", ALL], env=dict(ENV, TASKQ_DIR=TQK),
                    capture_output=True, text=True)
 left = os.listdir(os.path.join(TQK, "claims")) if os.path.isdir(os.path.join(TQK, "claims")) else []

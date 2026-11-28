@@ -48,7 +48,7 @@ def ok(msg):
 
 
 def central(*args):
-    rc, out, err = taskq.central(list(args))
+    rc, out, err = taskq.run(list(args))
     assert rc == 0, (args, out, err)
     return out
 

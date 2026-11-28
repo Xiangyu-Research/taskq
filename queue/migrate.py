@@ -77,7 +77,158 @@ def pending(v, where="the state here"):
 
 
 # ---------------- the steps (each format change adds one; MIN_FORMAT moves up once every place is past a step) ----------------
-STEPS = []
+QDIRS = ("claims", "failures", "skips", "stopped", "inputs", "released", "failtail")  # proto.QUEUE names the step copies (with tasks, enabled, smoke)
+
+
+class _Frozen:
+    """time with time() fixed: both status reads that hub_to_db compares judge claim ages and failure windows at one moment."""
+
+    def __init__(self, t):
+        self.t = t
+
+    def time(self):
+        return self.t
+
+    def __getattr__(self, n):
+        return getattr(time, n)
+
+
+def _status(taskq, store, F, t0):
+    """taskq.local_status() as read from store (None: the queue dir), with the task files read once (F) and time fixed at t0,
+    normalized for comparing: tasks by key, every task field present."""
+    real_facts, real_time = taskq.facts, taskq.time
+    taskq.facts = lambda ts: F.setdefault("f", real_facts(ts))
+    taskq.time = _Frozen(t0)
+    try:
+        taskq.use_db(store)
+        s = dict(taskq.local_status())
+    finally:
+        taskq.facts, taskq.time = real_facts, real_time
+        taskq.use_db(None)
+    s["tasks"] = {t["key"]: {k: t.get(k) for k in sorted(set(t) | set(proto.TASK_FIELDS))} for t in s["tasks"]}
+    return s
+
+
+def _differences(a, b):
+    out = [f"{k}: {a.get(k)!r} vs {b.get(k)!r}" for k in sorted(set(a) | set(b)) if k != "tasks" and a.get(k) != b.get(k)]
+    for key in sorted(set(a["tasks"]) | set(b["tasks"])):
+        x, y = a["tasks"].get(key), b["tasks"].get(key)
+        if x != y:
+            f = [k for k in sorted(set(x) | set(y)) if x.get(k) != y.get(k)] if x and y else ["missing on one side"]
+            out.append(f"{key}: {', '.join(f)}")
+    return out
+
+
+def _file_rows(fs):
+    """Everything in the hub queue dir as database rows -> dict(task=[recs], claim=[(name, info, t)], mark=[(kind, name, body, t)],
+    line=[(kind, name, body, t)], smoke=[(site, body)], enabled=bool, junk=[names left out]); unreadable task lines -> Stop."""
+    import qstore
+    tasks, bad = fs.read_tasks()
+    if bad:
+        raise Stop(f"{fs.where()}: line {bad[0][0]} cannot be read ({bad[0][1][:80]}); fix or delete it by hand first")
+    out = dict(task=tasks, claim=[], mark=[], line=[], smoke=[], enabled=fs.enabled(), junk=[])
+    cd = fs.path(proto.QUEUE["claims"])
+    for name in sorted(fs.claim_names()):
+        d = os.path.join(cd, name)
+        if ".old" in name or not os.path.isdir(d):  # a stale claim being taken away when its taker was killed
+            out["junk"].append(f"{proto.QUEUE['claims']}/{name}")
+            continue
+        try:
+            info = open(os.path.join(d, proto.CLAIM_INFO), encoding="utf-8").read()
+        except OSError:
+            info = None  # made but never written: the same half claim in the database (stale after a few minutes)
+        out["claim"].append((name, info, os.stat(d).st_mtime))
+    for kind in QDIRS[1:]:
+        for name in sorted(fs.names(kind)):
+            p = fs.path(proto.QUEUE[kind], name)
+            body, t = open(p, encoding="utf-8").read(), os.stat(p).st_mtime
+            if kind in qstore.MANY:
+                out["line"] += [(kind, name, ln, t) for ln in body.splitlines()]
+            else:
+                out["mark"].append((kind, name, body, t))
+    for site in fs.smoke_sites():
+        out["smoke"].append((site, open(fs.path(proto.SMOKE_DIR, f"{site}.json"), encoding="utf-8").read()))
+    return out
+
+
+def _drop_files(q, say):
+    """Remove the hub queue dir's records (the snapshot keeps a copy); the dir itself stays."""
+    gone = []
+    for n in (proto.QUEUE["tasks"], proto.QUEUE["enabled"], proto.SMOKE_DIR) + tuple(proto.QUEUE[k] for k in QDIRS):
+        p = os.path.join(q, n)
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+            gone.append(n + "/")
+        elif os.path.lexists(p):
+            os.remove(p)
+            gone.append(n)
+    if gone:
+        say(f"removed from {q}: {' '.join(gone)}")
+
+
+def hub_to_db(ctx, say, dry):
+    """Format 3: the hub queue moves from its dir (tasks file, claims, record dirs, smoke records, ENABLED) into the hub
+    database's queue tables (db.py schema 5, qstore.DbStore). Under the dir's queue lock: read every file, insert all in one
+    transaction, compare taskq.local_status() of both inside it (any difference rolls back and stops), mark the database as
+    holding the queue (meta qstore.QUEUE_META), commit, then remove the files."""
+    import db as D
+    import qstore
+    import taskq
+    q = ctx["queue"]
+    fs = qstore.FileStore(q)
+    c = D.connect(ro=True)
+    moved = bool(c and D.has(c, "task") and D.get_meta(c, qstore.QUEUE_META) == "db")
+    if c:
+        c.close()
+    if moved:
+        left = [n for n in (proto.QUEUE["tasks"],) + tuple(proto.QUEUE[k] for k in QDIRS) if os.path.lexists(os.path.join(q, n))]
+        if left:
+            say(f"the hub queue is in the hub database already; {'would remove' if dry else 'removing'} what is left in {q}: {' '.join(left)}")
+            if not dry:
+                _drop_files(q, say)
+        return
+    rows = _file_rows(fs)
+    n = dict(task=len(rows["task"]), claim=len(rows["claim"]), mark=len(rows["mark"]), line=len(rows["line"]), smoke=len(rows["smoke"]))
+    what = (f"{n['task']} tasks, {n['claim']} claims, {n['mark']} records (stopped, inputs, released, failtail), {n['line']} failure and skip"
+            f" lines, smoke records of {n['smoke']} executors" + ("" if rows["enabled"] else "; the queue is off (no ENABLED): its switch row says off"))
+    if dry:
+        say(f"copy the hub queue in {q} into the hub database {D.path()}: {what}; compare both, then remove the files (the snapshot keeps them)"
+            + (f"; left out: {', '.join(rows['junk'])}" if rows["junk"] else ""))
+        return
+    st = qstore.DbStore()
+    with taskq.Lock():
+        rows, F, t0 = _file_rows(fs), {}, time.time()
+        try:
+            before = _status(taskq, None, F, t0)
+        except taskq.DiskError as e:
+            raise Stop(f"cannot read the task files to compare both copies: {e}") from None
+        with st.tx() as c:
+            full = [t for t in ("task", "claim", "mark", "line", "smoke") if c.execute(f"SELECT 1 FROM {t} LIMIT 1").fetchone()]
+            if full:
+                raise Stop(f"the hub database {st.p} already has rows in its queue tables ({', '.join(full)}) though it does not hold the queue;"
+                           " look at them (a test run against it?), empty those tables and run again")
+            st.write_tasks(rows["task"])
+            c.executemany("INSERT INTO claim(name, info, t) VALUES(?,?,?)", rows["claim"])
+            c.executemany("INSERT INTO mark(kind, name, body, t) VALUES(?,?,?,?)", rows["mark"])
+            c.executemany("INSERT INTO line(kind, name, body, t) VALUES(?,?,?,?)", rows["line"])
+            c.executemany("INSERT INTO smoke(site, body) VALUES(?,?)", rows["smoke"])
+            if not rows["enabled"]:
+                c.execute("INSERT INTO switch(name, target, value, t, why, by) VALUES('queue', '', 'off', ?, ?, 'self migrate')",
+                          (time.time(), f"no {proto.QUEUE['enabled']} in the hub queue dir when it moved into the database"))
+            diff = [f"{k}/{nm}" for k, nm, _, _ in rows["mark"] if fs.get(k, nm) != st.get(k, nm)]
+            diff += [f"{k} lines" for k in qstore.MANY if sorted(fs.lines(k)) != sorted(st.lines(k))]
+            diff += [f"{proto.QUEUE['claims']}/{nm}" for nm, _, _ in rows["claim"] if fs.claim(nm) != st.claim(nm) or fs.claim_made(nm) != st.claim_made(nm)]
+            diff += [f"smoke/{x}" for x, _ in rows["smoke"] if fs.smoke_get(x) != st.smoke_get(x)]
+            diff += _differences(before, _status(taskq, st, F, t0))
+            if diff:
+                raise Stop(f"the copy in the database differs from the queue dir ({len(diff)}: {'; '.join(diff[:6])}); rolled back, nothing changed")
+            D.set_meta(c, qstore.QUEUE_META, "db")
+        say(f"copied the hub queue into the hub database {st.p}: {what}" + (f"; left out: {', '.join(rows['junk'])}" if rows["junk"] else ""))
+        _drop_files(q, say)
+    taskq.use_db(st)
+
+
+STEPS = [Step(3, "the hub queue moves from its dir into the hub database", hub=hub_to_db)]
 assert [s.to for s in STEPS] == list(range(MIN_FORMAT + 1, proto.FORMAT + 1)), "one step per format from MIN_FORMAT + 1 to proto.FORMAT"
 
 

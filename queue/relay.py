@@ -690,12 +690,12 @@ def execute(name, acts, s, run_add=None, stuck=None):
             raise
 
     def master(args):
-        r = taskq.central(args)
+        r = taskq.run(args)
         return r[0], r[1] + r[2]
     beats = [a["key"] for a in acts if a["op"] == "beat"]
     lost = set()  # no longer assigned to it in the hub queue (released or reassigned elsewhere): do not touch these this round
     if beats:
-        rc, out, err = taskq.central(["beat", "--strict", "--worker", name, "--"] + beats)
+        rc, out, err = taskq.run(["beat", "--strict", "--worker", name, "--"] + beats)
         if rc == proto.EXIT["lost"]:
             lost = set(out.split()) & set(beats)
             msgs.append(f"{L} no longer holds the claim on: {', '.join(sorted(lost))}; leaving them alone this round")

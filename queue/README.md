@@ -309,7 +309,9 @@ happened" such as a reboot are acknowledged with `taskq notice ack`. A slow roun
 
 The hub queue and each executor queue are the same kind of queue (`queue/taskq.py`): `tasks.jsonl` has one task per line (nice `nice`,
 arrival `order`, key, recipe, params), `claims/<key>/` is a claim (heartbeat every 5 minutes, stale after 20 minutes without one), and
-there are records for failures, skips, missing inputs, releases and stops. Task states are in `proto.STATES`.
+there are records for failures, skips, missing inputs, releases and stops. Task states are in `proto.STATES`. The hub keeps the same
+records in its database `taskq.db` instead of files (`queue/qstore.py`, tables `task`, `claim`, `mark`, `line`, `smoke`, `switch`), each
+edit one transaction; executor queues stay files. The hub queue has no `ENABLED` file: its master switch is the `queue` row of `switch`.
 
 A failure keeps the end of its own log: `release --failed` also writes `failtail/<key>`, the last 50 lines of the run's part log (each
 cut to 300 characters, about 8 KB at most; for progress bars only the text after the last carriage return), and the hub's check copies
@@ -647,7 +649,7 @@ use them without the flag.
 With `AUTO["smoke"]` on, before a kind of task (recipe + params listed in `by` in the plugin's `smoke.py` + env) is first sent to an
 executor, a small smoke task runs there (key `_smoke/<executor>/...`, nice -1000); only after it passes are real tasks sent. Definition:
 `SMOKE = {recipe: dict(by=[param names], params=..., vars=...)}`; `params` and `vars` may be functions (real task params, store data dir)
-computed on the store. Records live in the hub queue's `smoke/<executor>.json` (passed, failed, queued); a real task of that kind finishing
+computed on the store. Records live in the hub database's `smoke` table, one row per executor (passed, failed, queued); a real task of that kind finishing
 there also counts as passed. `taskq smoke status`, `retry`, `adopt`.
 
 ### Other people's tasks (task files)
@@ -677,7 +679,9 @@ what the hub's steps would change; it builds, pushes and writes nothing. `--appl
 (anything wrong: nothing changes), holds the health check's round lock, copies the hub queue, database and stamp to
 `<state dir>/snapshots/<time>-format<N>/` (the newest `proto.SNAPSHOT_KEEP` stay), migrates each root that is behind from the new
 bundle (an executor switches to it with its unclaimed tasks set aside for a moment; claimed tasks keep running), then the hub. Run again,
-it does nothing; a root that was unreachable is migrated on a later run.
+it does nothing; a root that was unreachable is migrated on a later run. A step that changes only the hub's own storage (format 3: the
+hub queue moves from `taskq/` into `taskq.db`) keeps every claim, copies the records one to one and compares the hub queue's status
+before and after inside the same transaction; any difference rolls it back and stops.
 
 A format change bumps `proto.FORMAT` and adds its step in the same commit; steps up to `migrate.MIN_FORMAT` are deleted once every place
 is past them. The cutover: stop the hub's clock, push the code, (switch executors with `taskq site bundle`, or let migrate do it), `taskq self
@@ -697,8 +701,8 @@ Executor and store root R (the machine table's `root`, `proto.ROOT`):
 | `tmp/` | half-transferred files |
 | `envs/` | envs built on this machine |
 
-Hub state dir (`proto.STATE_NAMES`): `taskq/` (hub queue), `relay/` (bundles and stage locks; `proto.RELAY_NAMES`), `health/`
-(`proto.HEALTH_NAMES`), `taskq.db` (events, problems, progress, results on the store; and the hub's bookkeeping, `queue/hubstate.py`:
+Hub state dir (`proto.STATE_NAMES`): `taskq/` (the hub queue up to format 2; format 3 moves it into `taskq.db`), `relay/` (bundles and stage locks; `proto.RELAY_NAMES`), `health/`
+(`proto.HEALTH_NAMES`), `taskq.db` (the hub queue, `queue/qstore.py`; events, problems, progress, results on the store; and the hub's bookkeeping, `queue/hubstate.py`:
 what relay last read on each executor, the task records of pueue tasks the core added, relay's placement record per staged task and
 each distinct set of staged input links once; the health check compacts it when mostly free pages), `format` (on-disk format stamp),
 `snapshots/` (taken by `taskq self migrate --apply`), `wheelhouse/`, `tunnel*` etc.

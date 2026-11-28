@@ -381,7 +381,7 @@ def test_plan():
     assert ops(acts) == [("drop", K), ("release", K)] and [a for a in acts if a["op"] == "release"][0].get("skip"), acts
     import events
     rel, logged = [a for a in acts if a["op"] == "release"], []
-    with patched(relay.taskq, central=lambda args, timeout=300: (0, "", "")), patched(events, add=lambda *a, **kw: logged.append((a, kw))):
+    with patched(relay.taskq, run=lambda args, timeout=300: (0, "", "")), patched(events, add=lambda *a, **kw: logged.append((a, kw))):
         relay.execute(NAME, rel, S0([]))
     assert [(kw["kind"], kw["key"], kw["site"]) for _, kw in logged] == [(proto.EV_FAILED, K, NAME)], logged
     acts, stuck = relay.plan(S0([mtask(K)]), NAME, RS(rtask(A, "failed"), tasks={A: dict(final=False, runs=[dict(epochs_done=3)])}), st)
@@ -408,7 +408,7 @@ def test_plan():
     import plain
     assert f"({why})" in plain.problem(f"site:{NAME}:fail:{K}", al), plain.problem(f"site:{NAME}:fail:{K}", al)
     wrote, logged = [], []
-    with patched(relay.taskq, central=lambda args, timeout=300: (0, "", ""), write_fail_tail=lambda k, r: wrote.append((k, r)) or True), \
+    with patched(relay.taskq, run=lambda args, timeout=300: (0, "", ""), write_fail_tail=lambda k, r: wrote.append((k, r)) or True), \
             patched(events, add=lambda *a, **kw: logged.append((a, kw))):
         relay.execute(NAME, rel + ft, S0([]))
     assert wrote == [(K, ft[0]["tail"])] and logged[0][1]["data"] == dict(why=why) and logged[0][0][1].endswith(why), (wrote, logged)
@@ -693,7 +693,7 @@ def test_drop_refused():
     seen, central = [], []
     acts = [dict(op="drop", key=K, rkey=K), dict(op="release", key=K, why="test")]
     rop = lambda name, what, data=None, **kw: (seen.append((what, data)), 1)[1]  # noqa: E731
-    with patched(RM, op=rop), patched(relay.taskq, central=lambda args, timeout=300: (central.append(args), (0, "", ""))[1]):
+    with patched(RM, op=rop), patched(relay.taskq, run=lambda args, timeout=300: (central.append(args), (0, "", ""))[1]):
         try:
             for r in [(relay.taskq.REFUSED, f"not dropping: {K}: claimed, someone is working on it"), (1, f"not in the queue: {K}"), (1, "Traceback"), None]:
                 seen.clear()
@@ -751,7 +751,7 @@ def test_beat_lost():
         return 0, "", ""
     acts = [dict(op="beat", key=K), dict(op="beat", key=K2), dict(op="drop", key=K, rkey=K), dict(op="release", key=K, why="x"),
             dict(op="drop", key=K2, rkey=K2), dict(op="release", key=K2, why="x")]
-    with patched(relay.taskq, central=central), patched(RT, drop_remote=lambda name, k, rk, gone=False: removed.append(k)):
+    with patched(relay.taskq, run=central), patched(RT, drop_remote=lambda name, k, rk, gone=False: removed.append(k)):
         msgs = relay.execute(NAME, acts, S0([]))
     assert calls[0][:2] == ["beat", "--strict"] and set(calls[0][-2:]) == {K, K2}, calls
     assert removed == [K2] and [c for c in calls if c[0] == "release"] == [["release", "--worker", NAME, "--", K2]], (removed, calls)

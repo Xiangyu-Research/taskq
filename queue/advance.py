@@ -8,7 +8,6 @@ concerns and those after them (flow.blocked); it is reported as advance:flow. ta
 """
 import fnmatch
 import os
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +30,6 @@ from flow.model import SOURCE  # noqa: E402
 
 NOTES = []  # why nothing was queued this round (written to advance.log (cfg.log), not reported as a problem)
 STORED = None  # keys whose results are on the store, from the last plan() that could read the store (run() saves it in taskq.db)
-TQ_TIMEOUT = 420  # longer than the longest queue-lock wait (300 s): a lock timeout returns an exit code, not a timeout
 
 
 def done_items(inst):
@@ -164,10 +162,10 @@ def plan(s):
 
 
 def taskq_add(nice, params):
-    """Add to the queue (local taskq.py on the hub) -> (exit code, output)."""
-    r = subprocess.run([sys.executable, os.path.join(HERE, "taskq.py"), "add", "--nice", str(nice), "--recipe",
-                        *S.kv_args("command", params)], cwd=cfg.REPO, capture_output=True, text=True, timeout=TQ_TIMEOUT)
-    return r.returncode, (r.stdout + r.stderr).strip()
+    """Add to the hub queue (taskq.py add, in this process) -> (exit code, output)."""
+    import taskq
+    rc, out, err = taskq.run(["add", "--nice", str(nice), "--recipe", *S.kv_args("command", params)])
+    return rc, (out + err).strip()
 
 
 def run(s, dry=False, tq=None, store=None, say=None):

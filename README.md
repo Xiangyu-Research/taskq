@@ -214,7 +214,7 @@ and `bin/taskq` mean the full suite):
 | `queue/common.py` | `test_common.py` |
 | `queue/check.py` | `test_check.py`, `test_example.py` |
 | `example/` | `test_example.py` |
-| `queue/taskq.py` | `test_taskq.py`, `test_races.py`, `test_worker.sh` |
+| `queue/taskq.py`, `queue/qstore.py` | `test_taskq.py`, `test_hubq.py`, `test_races.py`, `test_worker.sh` |
 | `queue/consume.py`, `queue/consumers/`, `queue/worker_start.sh` | `test_consume.sh`, `test_worker.sh`, `test_worker_code.sh`, `test_worker_stall.sh`, `test_worker_stop.sh` |
 | `queue/run_task.sh`, `queue/inputs.py` | `test_run_task.sh`, `test_inputs.py` |
 | `queue/gpu_pad.py`, `queue/gpu_pad_start.sh` | `test_gpu_pad.py`, `test_pad_room.py`, `test_gpu_pad_launcher.sh`; with a GPU also `test_gpu_pad_integration.sh` (`--gpu`) |
@@ -233,7 +233,7 @@ and `bin/taskq` mean the full suite):
 | `queue/archive_task.sh` | `test_archive_task.sh` |
 | `queue/db.py`, `queue/events.py`, `queue/tasklog.py`, `queue/hubstate.py` | `test_db.py`, `test_tasklog.py`, `test_common.py`, `test_relay.py` |
 | `queue/cli_json.py` | `test_cli_json.py` |
-| `queue/migrate.py` | `test_migrate.py` |
+| `queue/migrate.py` | `test_migrate.py`, `test_hubq.py` |
 | `sites/executors.py` | `test_executors.py`, `test_adapters.py` |
 | `sites/slurm_eta.py` | `test_slurm_eta.py` |
 | `sites/pueue.py`, `sites/slurm.py`, `sites/remote.py`, `queue/setup.sh`, `queue/worker.sbatch`, `queue/cpu_worker.sbatch` | `test_adapters.py`, `test_executors.py`, `test_bundle_paths.py`, `test_e2e.py` (the Slurm chain) |

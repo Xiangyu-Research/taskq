@@ -23,6 +23,7 @@ sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
 from proto import alert_id, alert_type  # noqa: E402
+import qstore  # noqa: E402
 from push import push  # noqa: E402  (falls back to the default channel file when policy.py cannot be read)
 
 NT = None
@@ -335,10 +336,12 @@ def check(s):
     ctq = s.get("taskq", {}).get(hub)
     for name, why in (s.get("collect") or {}).items():
         add(alert_id("collect", name), f"Collecting job status on {L(name)} failed: {why}", after=30)
+    hdb = qstore.hub_db()
     if hub in s.get("taskq", {}) and ctq is None:
-        add(alert_id("taskq", hub), f"{L(hub)} cannot read the hub queue ({TQS}/){(': ' + s['why']['taskq']) if s.get('why', {}).get('taskq') else ''}")
+        add(alert_id("taskq", hub), f"{L(hub)} cannot read the hub queue ({hdb.where() if hdb else TQS + '/'}){(': ' + s['why']['taskq']) if s.get('why', {}).get('taskq') else ''}")
     elif ctq and not ctq.get("enabled"):
-        add(alert_id("tqoff", hub), f"The hub queue on {L(hub)} is off ({TQS}/{proto.QUEUE['enabled']} missing); no tasks are sent to executors", after=60)
+        off = "its queue switch in the hub database is off" if hdb else f"{TQS}/{proto.QUEUE['enabled']} missing"
+        add(alert_id("tqoff", hub), f"The hub queue on {L(hub)} is off ({off}); no tasks are sent to executors", after=60)
     # --- pueue ---
     for name in M.pueue_hosts():
         if not s["ok"].get(name):

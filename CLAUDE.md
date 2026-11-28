@@ -36,8 +36,9 @@ through a config dir (`machines.py`, `policy.py`), a plugins dir and the command
 ## Changing formats (on-disk layout, queue, marker files, JSON fields, bundles)
 
 - When a format changes, put the rewrite of old state into `taskq self migrate` (`queue/migrate.py`) and do it in the same cutover: stop
-  the hub's clock, hand back running tasks, push the code, switch every executor to the new bundle, run migrate, start the clock. Code keeps no branch
-  reading the old format and no old entry point "to delete after the transition".
+  the hub's clock, push the code, switch every executor to the new bundle, run migrate, start the clock. Hand back running tasks when the
+  executor format or the worker interface changes; a change to the hub's own storage keeps claims and is migrated one to one. Code keeps
+  no branch reading the old format and no old entry point "to delete after the transition".
 - Changes that go live without a cutover do not change:
   - the arguments and exit codes of `taskq worker next/beat/release`; the tests in `self test` guarding this interface (worker calls,
     stops, bundles) must pass;

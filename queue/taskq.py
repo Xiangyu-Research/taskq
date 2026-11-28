@@ -12,6 +12,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -23,7 +24,8 @@ import cfg  # noqa: E402
 cfg.use_config()
 import spec as S  # noqa: E402
 import proto  # noqa: E402
-from common import atomic_write, format_problem, write_json  # noqa: E402
+import qstore  # noqa: E402
+from common import format_problem  # noqa: E402
 
 TQ = os.path.expanduser(os.environ.get("TASKQ_DIR", cfg.state("taskq", expand=False)))  # TASKQ_DIR: tests and relay sites (relay.py)
 Q = proto.QUEUE  # names inside the queue dir
@@ -39,64 +41,70 @@ NOTHING, WAIT, PAUSED = X["nothing"], X["wait"], X["paused"]   # claim exit code
 REFUSED, GONE = X["refused"], X["gone"]  # remove exit codes: refused (assigned, claimed, busy, files unreadable) / gone
 LOST = X["lost"]  # beat --strict: some claims are no longer ours
 safe = proto.safe
+_DB = qstore.hub_db()  # the hub queue in the hub database (format 3 on); None: the queue dir TQ
+
+
+def ST():
+    """This queue's store (qstore.py): the hub database's queue tables, or the queue dir TQ."""
+    return _DB or qstore.FileStore(TQ)
+
+
+def use_db(store):
+    """From now on this process keeps the queue in store (a qstore.DbStore; self migrate, right after copying the queue in)."""
+    global _DB
+    _DB = store
 
 
 def tasks_path():
-    return os.path.join(TQ, TASKS)
+    return ST().where()
 
 
 def have_queue():
-    return os.path.exists(tasks_path())
+    return ST().exists()
 
 
-# ---------------- files ----------------
+# ---------------- tasks ----------------
 _bad = {}  # tasks file -> its lines that could not be read [(line number, text)], as of the last read_tasks
+
+
+def _bad_key(path):
+    return "db" if _DB and not path else os.path.abspath(path or tasks_path())
 
 
 def bad_lines(path=None):
     """Why the tasks file cannot be rewritten (it has lines read_tasks could not read; rewriting would drop them), or None."""
-    path = path or tasks_path()
-    bad = _bad.get(os.path.abspath(path))
+    bad = _bad.get(_bad_key(path))
     if not bad:
         return None
     more = f" and {len(bad) - 1} more" if len(bad) > 1 else ""
-    return f"{path}: line {bad[0][0]}{more} cannot be read ({bad[0][1][:80]}); fix or delete it by hand, the queue is not changed until then"
+    return f"{path or tasks_path()}: line {bad[0][0]}{more} cannot be read ({bad[0][1][:80]}); fix or delete it by hand, the queue is not changed until then"
 
 
 def read_tasks(path=None):
-    path = path or tasks_path()
-    out, bad = [], []
-    if os.path.exists(path):
-        for n, ln in enumerate(open(path, encoding="utf-8"), 1):
-            if ln.startswith("#") or not ln.strip():
-                continue
-            try:
-                t = json.loads(ln)
-                t["order"], t["nice"] = int(t["order"]), int(t["nice"])
-                t.setdefault("exp", None)
-                t.setdefault("params", {})
-                out.append(t)
-            except (ValueError, KeyError, TypeError):
-                bad.append((n, ln.strip()))
-    _bad[os.path.abspath(path)] = bad
+    """The queue's tasks by (nice, order); path: that tasks file instead (self migrate's held tasks)."""
+    out, bad = qstore.FileStore(TQ).read_tasks(path) if path else ST().read_tasks()
+    _bad[_bad_key(path)] = bad
     return sorted(out, key=lambda t: (t["nice"], t["order"]))
 
 
 def write_tasks(tasks, path=None):
-    """Replace the tasks file (written whole to a temp name and synced, then moved over). Stops instead when this process no
-    longer holds the queue lock, or when the file had lines read_tasks could not read: they are not in tasks and would be gone."""
+    """Replace the queue's tasks (a tasks file is written whole to a temp name and synced, then moved over). Stops instead when
+    this process no longer holds the queue lock, or when the file had lines read_tasks could not read: they are not in tasks
+    and would be gone."""
     if Lock.held:
         Lock.held.check()
-    path = path or tasks_path()
     if bad_lines(path):
         raise SystemExit(bad_lines(path))
-    lines = []
+    recs = []
     for t in sorted(tasks, key=lambda t: (t["nice"], t["order"])):
         rec = {k: t.get(k) for k in proto.TASK_FIELDS if k != "spec"}
         if t.get("spec"):
             rec["spec"] = t["spec"]  # executor queue: the spec the hub resolved
-        lines.append(json.dumps(rec, ensure_ascii=False) + "\n")
-    atomic_write(path, "".join(lines))
+        recs.append(rec)
+    if path:
+        qstore.FileStore(TQ).write_tasks(recs, path)
+    else:
+        ST().write_tasks(recs)
 
 
 class Lock:
@@ -105,6 +113,11 @@ class Lock:
     and is taken over (LOCK_DEAD / LOCK_REMOTE / LOCK_MAX). A frozen holder may wake up later: check() before changing the
     queue stops it from writing what it read back then."""
     held = None  # the lock this process holds
+
+    def __new__(cls, tries=600):
+        if _DB is not None:
+            return _DbLock(_DB, tries)
+        return super().__new__(cls)
 
     def __init__(self, tries=600):
         self.d = os.path.join(TQ, Q["lock"])
@@ -218,6 +231,42 @@ class Lock:
             pass
 
 
+class _DbLock:
+    """The queue lock of the hub queue in the hub database: one write transaction (BEGIN IMMEDIATE, waiting as long as the
+    queue dir's lock would), committed on leaving, rolled back on an error. Inside one already: part of it."""
+
+    def __init__(self, store, tries):
+        self.store, self.tries, self.outer = store, tries, False
+
+    def __enter__(self):
+        c = self.store.conn()
+        if not c.in_transaction:
+            end = time.time() + self.tries * LOCK_WAIT
+            while True:
+                try:
+                    c.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError as e:
+                    if "locked" not in str(e) or time.time() >= end:
+                        raise SystemExit(f"cannot acquire the queue lock ({e})") from None
+                    time.sleep(LOCK_WAIT)
+            self.outer = True
+            Lock.held = self
+        return self
+
+    def mine(self):
+        return True
+
+    def check(self):
+        pass
+
+    def __exit__(self, et, e, tb):
+        if self.outer:
+            Lock.held = None
+            self.store.conn().execute("ROLLBACK" if et else "COMMIT")
+        return False
+
+
 # ---------------- task specs ----------------
 _specs = {}
 
@@ -272,10 +321,7 @@ def facts(tasks):
 
 # ---------------- state ----------------
 def claim_info(key):
-    try:
-        return json.load(open(os.path.join(TQ, Q["claims"], safe(key), proto.CLAIM_INFO)))
-    except Exception:  # noqa: BLE001
-        return None
+    return ST().claim(key)
 
 
 def code_now():
@@ -299,17 +345,16 @@ def fail_lines(key=None):
     """Countable failures in failures/ -> [(timestamp, job, reason)]: on the bundle in use, and ones not run from a bundle (empty bundle field);
     when the bundle in use here is unknown (not in an executor root), all count. key=None: all tasks."""
     now, out = code_now(), []
-    for p in glob.glob(os.path.join(TQ, Q["failures"], safe(key) if key else "*")):
-        for ln in open(p, encoding="utf-8").read().splitlines():
-            x = ln.split("\t")
-            if len(x) != 4:
-                continue
-            if now and x[3] and x[3] != now:
-                continue
-            try:
-                out.append((time.mktime(time.strptime(x[0], "%Y-%m-%d %H:%M:%S")), x[1], x[2]))
-            except ValueError:
-                pass
+    for ln in ST().lines("failures", key):
+        x = ln.split("\t")
+        if len(x) != 4:
+            continue
+        if now and x[3] and x[3] != now:
+            continue
+        try:
+            out.append((time.mktime(time.strptime(x[0], "%Y-%m-%d %H:%M:%S")), x[1], x[2]))
+        except ValueError:
+            pass
     return out
 
 
@@ -337,18 +382,17 @@ def read_tail(path):
 def write_fail_tail(key, rec):
     """Replace failtail/<key> with rec (proto.FAIL_TAIL_FIELDS); cannot write -> False."""
     try:
-        os.makedirs(os.path.join(TQ, Q["failtail"]), exist_ok=True)
-        write_json(os.path.join(TQ, Q["failtail"], safe(key)), {k: rec.get(k) for k in proto.FAIL_TAIL_FIELDS}, indent=None)
+        ST().put("failtail", key, json.dumps({k: rec.get(k) for k in proto.FAIL_TAIL_FIELDS}, ensure_ascii=False))
         return True
-    except OSError:
+    except (OSError, sqlite3.Error):
         return False
 
 
 def fail_tail(key):
     """failtail/<key> -> dict (proto.FAIL_TAIL_FIELDS), or None when absent or unreadable."""
     try:
-        r = json.load(open(os.path.join(TQ, Q["failtail"], safe(key)), encoding="utf-8"))
-    except (OSError, ValueError):
+        r = json.loads(ST().get("failtail", key) or "")
+    except ValueError:
         return None
     return r if isinstance(r, dict) and isinstance(r.get("lines"), list) else None
 
@@ -366,30 +410,27 @@ def tail_reason(tail, width=200):
 def skips(key=None):
     """Records in skips/ -> [(timestamp, worker, reason)]: a task this machine cannot run (usually does not fit); only this machine stops claiming it, and it is not a failure (does not affect MAX_FAIL or pausing). key=None: all tasks."""
     out = []
-    for p in glob.glob(os.path.join(TQ, Q["skips"], safe(key) if key else "*")):
-        for ln in open(p, encoding="utf-8"):
-            f = ln.rstrip("\n").split("\t")
-            try:
-                out.append((time.mktime(time.strptime(f[0], "%Y-%m-%d %H:%M:%S")), f[1], f[2] if len(f) > 2 else ""))
-            except (ValueError, IndexError):
-                pass
+    for ln in ST().lines("skips", key):
+        f = ln.split("\t")
+        try:
+            out.append((time.mktime(time.strptime(f[0], "%Y-%m-%d %H:%M:%S")), f[1], f[2] if len(f) > 2 else ""))
+        except (ValueError, IndexError):
+            pass
     return out
 
 
 def stopped_info(key):
     """Stop record -> "time reason"; None if absent."""
-    try:
-        return open(os.path.join(TQ, Q["stopped"], safe(key)), encoding="utf-8").read().strip().replace("\t", " ")
-    except OSError:
-        return None
+    r = ST().get("stopped", key)
+    return None if r is None else r.strip().replace("\t", " ")
 
 
 def input_info(key):
     """Missing-input record -> (timestamp, note); None if absent."""
     try:
-        f = open(os.path.join(TQ, Q["inputs"], safe(key)), encoding="utf-8").read().rstrip("\n").split("\t")
+        f = ST().get("inputs", key).rstrip("\n").split("\t")
         return float(f[0]), " ".join(f[1:])
-    except (OSError, ValueError, IndexError):
+    except (AttributeError, ValueError, IndexError):
         return None
 
 
@@ -397,9 +438,9 @@ def released_info(key):
     """Last release -> (time, worker, why proto.RELEASE_WHY); None if absent. A worker of a bundle from before self migrate
     writes no reason (it may run for weeks after the switch): counts as an ordinary release."""
     try:
-        f = open(os.path.join(TQ, Q["released"], safe(key))).read().split()
+        f = ST().get("released", key).split()
         return float(f[0]), f[1], f[2] if len(f) > 2 else proto.RELEASE_WHY["back"]
-    except (OSError, ValueError, IndexError):
+    except (AttributeError, ValueError, IndexError):
         return None
 
 
@@ -409,9 +450,7 @@ def released_at(key):
 
 
 def _mark_released(key, worker, why):
-    os.makedirs(os.path.join(TQ, Q["released"]), exist_ok=True)
-    with open(os.path.join(TQ, Q["released"], safe(key)), "w") as f:
-        f.write(f"{time.time()} {worker} {proto.RELEASE_WHY[why]}\n")
+    ST().put("released", key, f"{time.time()} {worker} {proto.RELEASE_WHY[why]}\n")
 
 
 def recent_failures(window=proto.PAUSE_WINDOW):
@@ -450,14 +489,12 @@ def state(t, f):
 
 def claim_state(key, age):
     """Claim record (age: seconds since the part log last changed) -> None (absent) / ("claimed", note) (alive) / ("stale", note) (expired, can be claimed again)."""
-    d = os.path.join(TQ, Q["claims"], safe(key))
     ci = claim_info(key)
     now = time.time()
     if ci is None:
         # only the dir was made, info was never written (the claiming process was killed): stale after a few minutes, the next claim takes it
-        try:
-            made = os.stat(d).st_mtime
-        except OSError:
+        made = ST().claim_made(key)
+        if made is None:
             return None
         return ("claimed", "being claimed") if proto.claim_alive(None, made, now, half=HALF_CLAIM) else ("stale", "incomplete claim (dir only, no info)")
     if ci.get("assigned"):
@@ -472,7 +509,7 @@ def _claim(a, pick):
     """Claim the first free / stale task in order for which pick(t) is not None -> (exit code, pick result)."""
     if not have_queue():
         # not the same as "no tasks" (exit code 10): then every started job would exit at once and queued jobs would all be used up in minutes
-        print(f"no {tasks_path()}", file=sys.stderr)
+        print(f"no {ST().where()}", file=sys.stderr)
         return X["no_queue"], None
     why = format_problem()
     if why:  # the state here is not in this code's on-disk format (self migrate has not reached it): claim nothing, as when paused
@@ -502,26 +539,16 @@ def _claim(a, pick):
             if busy_ahead >= a.free_slots and time.time() < a.patience_until:
                 return WAIT, None  # keep the slot for an earlier task; wait until its log is older than 15 minutes
             Lock.held.check()  # looking at every task can take long
-            d = os.path.join(TQ, Q["claims"], safe(t["key"]))
-            if st == "stale":
-                gone = f"{d}.old{os.getpid()}"
-                try:
-                    os.rename(d, gone)
-                    shutil.rmtree(gone, ignore_errors=True)
-                except OSError:
-                    continue
-            try:
-                os.makedirs(os.path.dirname(d), exist_ok=True)
-                os.mkdir(d)
-            except FileExistsError:
+            if st == "stale" and not ST().claim_clear(t["key"]):
                 continue
-            a.claim_dir = d
             now = time.time()
-            a.token = os.urandom(6).hex()
+            a.claim_key, a.token = t["key"], os.urandom(6).hex()  # set first: a kill while claiming drops the claim (_unclaim)
             info = dict(worker=a.worker, host=socket.gethostname().split(".")[0], since=now, beat=now, token=a.token)
             if getattr(a, "log_tag", None):
                 info["log"] = a.log_tag  # job name in the part log differs from the worker name (outside Slurm)
-            write_json(os.path.join(d, proto.CLAIM_INFO), info, indent=None)
+            if not ST().claim_new(t["key"], info):
+                a.claim_key = None
+                continue
             return 0, out
     return NOTHING, None
 
@@ -575,7 +602,7 @@ def cmd_next(a):
         # claimed but stopped before printing: the worker does not know which task it got; drop the claim instead of leaving it to expire
         for n in sigs:
             signal.signal(n, signal.SIG_IGN)
-        if not printed and getattr(a, "claim_dir", None):
+        if not printed and getattr(a, "claim_key", None):
             _unclaim(a)
         signal.signal(e.args[0], signal.SIG_DFL)
         os.kill(os.getpid(), e.args[0])
@@ -592,12 +619,9 @@ class _Killed(Exception):
 def _unclaim(a):
     try:
         with Lock(tries=40):
-            try:
-                ci = json.load(open(os.path.join(a.claim_dir, proto.CLAIM_INFO)))
-            except (OSError, ValueError):
-                ci = None
+            ci = claim_info(a.claim_key)
             if ci is None or ci.get("token") == getattr(a, "token", None):
-                shutil.rmtree(a.claim_dir, ignore_errors=True)
+                ST().claim_drop(a.claim_key)
     except (SystemExit, OSError):
         pass
 
@@ -613,11 +637,10 @@ def cmd_beat(a):
     lost = []
     with Lock():  # same lock as claiming: nobody can take over between reading our record and writing it back
         for key in a.keys:
-            p = os.path.join(TQ, Q["claims"], safe(key), proto.CLAIM_INFO)
             ci = claim_info(key)
             if owns(ci, a):
                 ci["beat"] = time.time()
-                write_json(p, ci, indent=None)
+                ST().claim_put(key, ci)
             elif ci is not None or _no_claim(key):  # unreadable records do not count as lost
                 lost.append(key)
     if a.strict and lost:
@@ -627,10 +650,7 @@ def cmd_beat(a):
 
 
 def _no_claim(key):
-    try:
-        return safe(key) not in os.listdir(os.path.join(TQ, Q["claims"]))
-    except OSError:
-        return False
+    return ST().no_claim(key)
 
 
 def unwanted(key, worker):
@@ -654,25 +674,20 @@ def cmd_release(a):
 
 
 def _release(a, key):
-    d = os.path.join(TQ, Q["claims"], safe(key))
     ci = claim_info(key)
     if getattr(a, "token", None) and not owns(ci, a):  # late release (a new round took over the claim, or it is gone): record nothing
         if ci is None and (a.failed or a.skip):
             print(f"{key}: this round's claim is gone (expired and claimed elsewhere, or already released); not recording failure / skip")
         return
     if a.skip:
-        os.makedirs(os.path.join(TQ, Q["skips"]), exist_ok=True)
-        with open(os.path.join(TQ, Q["skips"], safe(key)), "a") as f:
-            f.write(f"{time.strftime('%F %T')}\t{a.worker}\t{a.skip}\n")
+        ST().add_line("skips", key, f"{time.strftime('%F %T')}\t{a.worker}\t{a.skip}")
     if a.failed:
-        os.makedirs(os.path.join(TQ, Q["failures"]), exist_ok=True)
-        with open(os.path.join(TQ, Q["failures"], safe(key)), "a") as f:
-            f.write(proto.FAIL_LINE_FMT % (time.strftime('%F %T'), a.worker, ' '.join(a.failed.split()), code_mine()) + "\n")
+        ST().add_line("failures", key, proto.FAIL_LINE_FMT % (time.strftime('%F %T'), a.worker, ' '.join(a.failed.split()), code_mine()))
         if owns(ci, a):
             _record_tail(key, ci, a)
     if owns(ci, a):
         _mark_released(key, a.worker, "failed" if a.failed else "skip" if a.skip else "back")
-        shutil.rmtree(d, ignore_errors=True)
+        ST().claim_drop(key)
 
 
 def _record_tail(key, ci, a):
@@ -697,19 +712,15 @@ def _missing(a):
     if not owns(ci, a):
         print(f"{a.key} is not claimed by {a.worker}", file=sys.stderr)
         return 1
-    os.makedirs(os.path.join(TQ, Q["inputs"]), exist_ok=True)
-    with open(os.path.join(TQ, Q["inputs"], safe(a.key)), "w", encoding="utf-8") as f:
-        f.write(f"{time.time()}\t{a.worker}\t{(a.why or '').replace(chr(9), ' ').replace(chr(10), ' ')}\n")
+    ST().put("inputs", a.key, f"{time.time()}\t{a.worker}\t{(a.why or '').replace(chr(9), ' ').replace(chr(10), ' ')}\n")
     _mark_released(a.key, a.worker, "missing")
-    shutil.rmtree(os.path.join(TQ, Q["claims"], safe(a.key)), ignore_errors=True)
+    ST().claim_drop(a.key)
     return 0
 
 
 def cmd_input_ok(a):
     for k in a.keys:
-        p = os.path.join(TQ, Q["inputs"], safe(k))
-        if os.path.exists(p):
-            os.remove(p)
+        if ST().drop("inputs", k):
             print(f"inputs complete: {k}")
     return 0
 
@@ -717,32 +728,30 @@ def cmd_input_ok(a):
 def cmd_unskip(a):
     with Lock():
         for k in a.keys:
-            p = os.path.join(TQ, Q["skips"], safe(k))
-            try:
-                lines = open(p, encoding="utf-8").readlines()
-            except OSError:
+            n = ST().keep_lines("skips", k, lambda ln: a.worker is not None and ln.split("\t")[1:2] != [a.worker])
+            if n is None:
                 print(f"{k}: no skip record")
                 continue
-            keep = [ln for ln in lines if a.worker is not None and ln.split("\t")[1:2] != [a.worker]]
-            if keep:
-                atomic_write(p, "".join(keep))
-            else:
-                os.remove(p)
-            print(f"{k}: removed {len(lines) - len(keep)} skip record(s)")
+            print(f"{k}: removed {n[0] - n[1]} skip record(s)")
     return 0
 
 
 def cmd_take(a):
-    """Assign one key to executor a.worker (called by relay.py): no expiry; only free / stale tasks; assigning one that is already its own succeeds again (since unchanged)."""
+    """Assign one key to executor a.worker (called by relay.py): no expiry; only free / stale tasks; assigning one that is already its own succeeds again (since unchanged).
+    The task's files are read before the lock (they may be on the store); its claim and records are checked again under it."""
+    t = next((t for t in read_tasks() if t["key"] == a.key), None)
+    if t is None:
+        print(f"no {a.key} in the queue")
+        return NOTHING
+    try:
+        f = facts([t]).get(a.key)
+    except DiskError as e:
+        print(e)
+        return NOTHING
     with Lock():
         t = next((t for t in read_tasks() if t["key"] == a.key), None)
         if t is None:
             print(f"no {a.key} in the queue")
-            return NOTHING
-        try:
-            f = facts([t]).get(a.key)
-        except DiskError as e:
-            print(e)
             return NOTHING
         ci = claim_info(a.key)
         mine = bool(ci) and str(ci.get("worker")) == str(a.worker)
@@ -753,18 +762,13 @@ def cmd_take(a):
         if st in ("done", "stopped", "bad") or (not mine and st not in ("free", "stale")):
             print(f"{a.key}: {st} {note}")
             return NOTHING
-        d = os.path.join(TQ, Q["claims"], safe(a.key))
         if ci or st == "stale":
-            shutil.rmtree(d, ignore_errors=True)
-        os.makedirs(os.path.dirname(d), exist_ok=True)
-        try:
-            os.mkdir(d)
-        except FileExistsError:
-            print(f"{a.key}: just claimed by someone else")
-            return NOTHING
+            ST().claim_clear(a.key)
         now = time.time()
         info = dict(worker=a.worker, host=a.worker, since=ci.get("since", now) if mine else now, beat=now, assigned=a.worker)
-        write_json(os.path.join(d, proto.CLAIM_INFO), info, indent=None)
+        if not ST().claim_new(a.key, info):
+            print(f"{a.key}: just claimed by someone else")
+            return NOTHING
         print(t["key"])
         return 0
 
@@ -987,21 +991,23 @@ def cmd_set_nice(a):
     return 0 if have >= set(a.keys) else GONE
 
 
-RECORDS = tuple(Q[k] for k in ("failures", "stopped", "inputs", "released", "failtail"))  # records removed together with the task (executor queues also remove skips/)
+RECORDS = ("failures", "stopped", "inputs", "released", "failtail")  # records removed together with the task (executor queues also remove skips/)
 
 
 def cmd_remove(a):
     """Remove tasks nobody is working on (for example, move steps queued on a stopped executor back to the hub). Not removed when a live claim exists (any state) or the part log just changed. Removal also deletes failures, stop, missing-input and release records and the stale claim (the same key added later is a new task); skips/ are removed only in an executor queue (records with a spec), and kept in the hub queue (a machine that cannot run it may still be able to later).
-    Result files are left alone. Exit code 0 removed (keys already absent are skipped); REFUSED not removed; GONE none of them were in the queue (nothing removed)."""
+    Result files are left alone. Exit code 0 removed (keys already absent are skipped); REFUSED not removed; GONE none of them were in the queue (nothing removed).
+    The tasks' files are read before the lock (they may be on the store); claims and records are checked under it."""
+    by = {t["key"]: t for t in read_tasks()}
+    try:
+        F = facts([by[k] for k in a.keys if k in by])
+    except DiskError as e:
+        print(f"not removed: {e}", file=sys.stderr)
+        return REFUSED
     with Lock():
         tasks = read_tasks()
         by = {t["key"]: t for t in tasks}
         missing = [k for k in a.keys if k not in by]
-        try:
-            F = facts([by[k] for k in a.keys if k in by])
-        except DiskError as e:
-            print(f"not removed: {e}", file=sys.stderr)
-            return REFUSED
         bad = []
         for k in a.keys:
             if k in by:
@@ -1025,12 +1031,7 @@ def cmd_remove(a):
             return GONE
         write_tasks([t for t in tasks if t["key"] not in keys])
         for k in keys:
-            for sub in RECORDS + ((Q["skips"],) if by[k].get("spec") else ()):
-                try:
-                    os.remove(os.path.join(TQ, sub, safe(k)))
-                except FileNotFoundError:
-                    pass
-            shutil.rmtree(os.path.join(TQ, Q["claims"], safe(k)), ignore_errors=True)  # only stale claims are left
+            ST().forget(k, RECORDS + (("skips",) if by[k].get("spec") else ()))  # only stale claims are left
     for k in keys:
         print(f"removed: {k}")
     return 0
@@ -1044,11 +1045,9 @@ def cmd_stop(a):
             print(f"not in queue: {k}", file=sys.stderr)
         if missing:
             return GONE
-        os.makedirs(os.path.join(TQ, Q["stopped"]), exist_ok=True)
         for k in a.keys:
             ci = claim_info(k)
-            with open(os.path.join(TQ, Q["stopped"], safe(k)), "w", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%F %T')}\t{a.why or ''}\n")
+            ST().put("stopped", k, f"{time.strftime('%F %T')}\t{a.why or ''}\n")
             w = str((ci or {}).get("worker", ""))
             if (ci or {}).get("assigned"):
                 print(f"stopped: {k} (assigned to {ci['assigned']}; the hub stops and releases it on its next check)")
@@ -1063,9 +1062,7 @@ def cmd_stop(a):
 
 def cmd_resume(a):
     for k in a.keys:
-        p = os.path.join(TQ, Q["stopped"], safe(k))
-        if os.path.exists(p):
-            os.remove(p)
+        if ST().drop("stopped", k):
             print(f"stop undone: {k}")
         else:
             print(f"not stopped: {k}")
@@ -1112,10 +1109,7 @@ def local_status():
     tasks = read_tasks()
     F = facts(tasks)
     out = []
-    try:
-        tails = set(os.listdir(os.path.join(TQ, Q["failtail"])))
-    except OSError:
-        tails = set()
+    tails = ST().names("failtail")
     for t in tasks:
         f = F.get(t["key"])
         st, note = state(t, f) if f else ("bad", t.get("bad", ""))
@@ -1130,16 +1124,25 @@ def local_status():
                         fail_tail=fail_tail(t["key"]) if safe(t["key"]) in tails else None))
     nf = recent_failures()
     day = [w for ts, w, _ in skips() if ts >= time.time() - 86400]
-    return dict(enabled=os.path.exists(os.path.join(TQ, Q["enabled"])), tasks=out, recent_failures=nf, paused=nf >= proto.PAUSE_N,
+    return dict(enabled=ST().enabled(), tasks=out, recent_failures=nf, paused=nf >= proto.PAUSE_N,
                 recent_skips={w: day.count(w) for w in set(day)})
 
 
-def central(args, timeout=420):  # longer than the longest lock wait (300 s): an unavailable lock gives an exit code, not a timeout
-    """Edit the hub queue on the hub: run taskq.py <args> locally (argument list or a shell string) -> (exit code, stdout, stderr)."""
-    import subprocess
-    argv = shlex.split(args) if isinstance(args, str) else list(args)
-    r = subprocess.run([sys.executable, os.path.abspath(__file__)] + argv, capture_output=True, text=True, timeout=timeout)
-    return r.returncode, r.stdout, r.stderr
+def run(args):
+    """taskq.py <args> in this process (argument list or a shell string) -> (exit code, stdout, stderr): the hub's own rounds
+    edit the hub queue this way (relay, smoke_gate, advance)."""
+    import contextlib
+    import io
+    argv = shlex.split(args) if isinstance(args, str) else [str(x) for x in args]
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = main(argv)
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) or e.code is None else 1
+            if not isinstance(e.code, int) and e.code is not None:
+                print(e.code, file=sys.stderr)
+    return rc or 0, out.getvalue(), err.getvalue()
 
 
 def queue_host():
@@ -1277,7 +1280,7 @@ def main(argv):
         return X["no_queue"]
     if cmd in ("add", "set", "set-nice", "take", "show", "remove", "stop", "resume", "status") \
             and not have_queue() and here() != queue_host():
-        print(f"the hub queue is on {queue_host()}, run it there (no {tasks_path()} here)", file=sys.stderr)
+        print(f"the hub queue is on {queue_host()}, run it there (no {ST().where()} here)", file=sys.stderr)
         return X["no_queue"]
     return dict(next=cmd_next, beat=cmd_beat, release=cmd_release, take=cmd_take, add=cmd_add, set=cmd_set,
                 set_nice=cmd_set_nice, show=cmd_show, remove=cmd_remove, status=cmd_status,
