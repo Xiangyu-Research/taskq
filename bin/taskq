@@ -268,6 +268,18 @@ TREE = {
     "wait": Cmd("wait until tasks are running, done, failed or settled, then exit (reads only; exit code says which)", py("wait", prog="taskq wait"),
                 own_help=True),
     # scheduling
+    "switch": Group("day-to-day switches that override policy.py until cleared or ended (queue, drain, pause, auto, ready, hold, gpu_pad)", {
+        "list": Cmd("switches in force ([--json])", py("switches", "list", prog="taskq switch"), own_help=True),
+        "set": Cmd("set one (<name> <target> <value> [--for 4h | --until TIME] [--why TEXT])", py("switches", "set", prog="taskq switch"), own_help=True),
+        "clear": Cmd("remove one (<name> [<target>])", py("switches", "clear", prog="taskq switch"), own_help=True),
+    }),
+    "drain": Cmd("stop a machine's or one worker's tasks now and start none (--soft: let them finish; --for / --until: ends by itself)",
+                 py("switches", "drain"), own_help=True),
+    "undrain": Cmd("end a drain", py("switches", "undrain"), own_help=True),
+    "pause": Cmd("no connections or sends to a machine (--for / --until, --why)", py("switches", "pause"), own_help=True),
+    "unpause": Cmd("end a pause", py("switches", "unpause"), own_help=True),
+    "queue": Cmd("the hub queue's master switch: on | off (off: nothing is assigned or sent; running tasks keep running)",
+                 py("switches", "queue"), own_help=True),
     "tick": Cmd("one health check (really does it: push, queue downstream steps, send tasks; -n is taskq plan)",
                 lambda argv, prog: script(os.path.join("monitor", "health.py"), argv, prog), own_help=True),
     "plan": Cmd("dry run of one health check: problems it would find, what it would queue downstream, which tasks it would send",
@@ -382,6 +394,7 @@ TREE = {
 
 SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "unskip", "rm", "wait"]),
             ("scheduling", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
+            ("switches", ["queue", "drain", "undrain", "pause", "unpause", "switch"]),
             ("executors and experiments", ["site", "env", "smoke", "exp"]),
             ("dependencies", ["who", "dag"]),
             ("other", ["tunnel", "gpu", "pad", "pueue-add", "pueue-status", "check", "db", "path", "machines", "self"])]
@@ -410,7 +423,8 @@ def unknown(name, choices, prog):
     return USAGE
 
 
-READ_ONLY = {"status", "problems", "events", "show", "log", "progress", "wait", "pueue-status", "site status", "notice list", "smoke status"}
+READ_ONLY = {"status", "problems", "events", "show", "log", "progress", "wait", "pueue-status", "site status", "notice list", "smoke status",
+             "switch list"}
 
 
 def live_root(found):

@@ -27,6 +27,7 @@ ROOT = dict(
     deploy_lock="state/deploy.lock",  # lock for pushing bundles (relay.py deploy)
     tmp="tmp",                   # temp files for half-transferred files
     envs="envs",                 # envs installed on the executor (conda, venv)
+    overrides="state/overrides.json",  # the executor's switches from the hub (queue/switches.py site_doc): {"drain": {worker id or "*": {value, until, why}}}; consumers/drain.py reads it
     machine="machine",           # this root's machine name, one line (relay.py deploy and self migrate write it): processes started without TASKQ_MACHINE read it (worker_start.sh)
     format="state/format",       # this root's on-disk format stamp (FORMAT_FILE under state/, what cfg.state(FORMAT_FILE) gives there)
 )
@@ -568,6 +569,21 @@ AUTO_SWITCHES = {  # policy.AUTO switches
     "revive": "health check restores pueued when it is gone",
     "smoke": "run a smoke task the first time an executor trains a kind, and after an env switch",
 }
+# day-to-day switches (queue/switches.py; table switch in the hub database): name -> (target, values, what it does). A set
+# switch overrides policy.py until it is cleared or expires; executors get theirs in ROOT["overrides"] and the GPU pad file.
+SWITCHES = dict(
+    queue=("", ("off",), "the hub queue's master switch: off = nothing is assigned or sent; running tasks keep running"),
+    drain=("machine or machine/worker", ("on", "soft"), "on: stop the workers there now (running tasks are released and resume later or"
+           " elsewhere) and start none; soft: running tasks finish, nothing new is claimed; a drained machine is sent no new tasks and"
+           " a drained Slurm executor submits no jobs"),
+    pause=("machine", ("on",), "no connections or sends to that machine (as policy.py PAUSE)"),
+    auto=("part of policy.py AUTO", ("on", "off"), "turn one automatic part on or off (as policy.py AUTO)"),
+    ready=("executor", "int", "how many unclaimed tasks to keep ready there (as policy.py READY)"),
+    hold=("step pattern", ("on",), "do not queue matching downstream steps (added to policy.py HOLD)"),
+    gpu_pad=("executor", ("off",), "no GPU pad on that machine's jobs (the hub makes and removes its gpu_pad_DISABLED file)"),
+)
+SWITCH_FIELDS = ("name", "target", "value", "t", "until", "why", "by")  # taskq switch list --json rows
+SWITCH_TOP = ("version", "switches")
 PUEUE_SEEN = "pueue_seen.json"  # in the health check's state dir: {pueue machine: {t: last time pueued was seen, running: [groups running then]}} (for revive)
 
 # ---------------- smoke (smoke_gate.py) ----------------

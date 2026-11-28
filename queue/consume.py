@@ -29,7 +29,7 @@ X = proto.EXIT
 PY = sys.executable or "python3"
 TASKQ = os.path.join(HERE, "taskq.py")
 RUN_TASK = os.path.join(HERE, "run_task.sh")
-BUILTIN = ("slurm", "resident", "gpu_pad", "window", "gpu_idle", "gpu_share")
+BUILTIN = ("slurm", "resident", "gpu_pad", "drain", "window", "gpu_idle", "gpu_share")
 HOOKS = ("active", "setup", "admit", "env", "before_start", "tick", "idle", "on_exit")
 # what the worker does instead when a hook raises (Worker.guard; idle and get_end say it where they are called)
 HOOK_FALLBACK = dict(active="using the plugin anyway, so its admit still decides", setup="keeping the plugin, its settings may be incomplete",

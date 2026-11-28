@@ -18,7 +18,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
 3. When utilisation is low, check in this order:
    - Startup: the first minutes of a worker job copy data and build the env; low use then is normal. `taskq site status` and the worker log show the phase.
    - I/O: data read from shared storage instead of node-local scratch; look at the worker log and the job's working dir.
-   - The GPU pad: Slurm workers keep a pad on the GPU (`gpu_pad` in the machine table: floor, target, high in MiB) where the cluster requires a minimum use; check it is running and in range. It is a cluster requirement, not waste.
+   - The GPU pad: Slurm workers keep a pad on the GPU (`gpu_pad` in the machine table: floor, target, high in MiB) where the cluster requires a minimum use; check it is running and in range. It is a cluster requirement, not waste. To turn it off on one machine for a while: `taskq switch set gpu_pad <machine> off --for <length> --why <reason>`.
    - CPU: too few CPUs for the data loading (`sstat -j <id>`, `top` through `srun --overlap`).
    - The task itself: between tasks, or a task that does little GPU work.
 4. Compare with the cluster's cancellation rule in the project notes and say how close the job is to it.

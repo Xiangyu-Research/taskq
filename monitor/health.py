@@ -24,6 +24,7 @@ import cfg  # noqa: E402
 import proto  # noqa: E402
 from proto import alert_id, alert_type  # noqa: E402
 import qstore  # noqa: E402
+import switches  # noqa: E402
 from push import push  # noqa: E402  (falls back to the default channel file when policy.py cannot be read)
 
 NT = None
@@ -218,7 +219,7 @@ def revive_agents(s, dry=False):
     """Agents that stopped calling (switch AUTO["revive"]): start them again the way taskq site agent start does (real ssh, or
     here for the hub's own machine), only when that ssh can be opened safely (ssh_master: its master connection is up). Agents
     that never called (not installed) are left alone. -> (events, {machine: why it still fails})."""
-    if not policy.AUTO.get("revive"):
+    if not switches.auto("revive", bool(policy.AUTO.get("revive"))):
         return [], {}
     sys.path.insert(0, os.path.join(CORE, "sync"))
     import agent_box
@@ -257,7 +258,7 @@ def revive(s, seen, dry=False):
     --resume (the groups open then) there, which starts pueued, puts back interrupted tasks and reopens those groups. on_boot.sh
     uses that machine's scheduling code (mtab.core: the bundle, or a clone of the repo).
     -> (events, {machine: why it still fails}). A recovered machine is not reported as pueued this round."""
-    if not policy.AUTO.get("revive"):
+    if not switches.auto("revive", bool(policy.AUTO.get("revive"))):
         return [], {}
     events, still = [], {}
     for name in M.pueue_hosts():
@@ -340,7 +341,9 @@ def check(s):
     if hub in s.get("taskq", {}) and ctq is None:
         add(alert_id("taskq", hub), f"{L(hub)} cannot read the hub queue ({hdb.where() if hdb else TQS + '/'}){(': ' + s['why']['taskq']) if s.get('why', {}).get('taskq') else ''}")
     elif ctq and not ctq.get("enabled"):
-        off = "its queue switch in the hub database is off" if hdb else f"{TQS}/{proto.QUEUE['enabled']} missing"
+        sw = switches.queue_off() if hdb else None
+        off = (f"taskq queue off: {switches.why(sw)}; taskq queue on turns it back on" if sw else
+               "its queue switch in the hub database is off" if hdb else f"{TQS}/{proto.QUEUE['enabled']} missing")
         add(alert_id("tqoff", hub), f"The hub queue on {L(hub)} is off ({off}); no tasks are sent to executors", after=60)
     # --- pueue ---
     for name in M.pueue_hosts():
@@ -641,6 +644,10 @@ def one_round(a):
                 events.add("health", f"compacted {NT.D.path()}: {n / 1e6:.0f} MB of free pages given back", db=db)
         except Exception as e:  # noqa: BLE001  locked by a reader right now: next round
             print(f"database not compacted: {e}", file=sys.stderr)
+        try:
+            switches.prune()
+        except Exception as e:  # noqa: BLE001
+            print(f"expired switches not removed: {e}", file=sys.stderr)
     if a.test:
         push("test: a health check push reaches the phone", tags="tada")
         print("test message pushed")

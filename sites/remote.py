@@ -20,8 +20,13 @@ def conf(name):
 
 
 def ready(name):
-    """How many unclaimed tasks to keep ready on the executor (per worker kind): policy.py's READY, default 1."""
-    return P.READY.get(name, 1)
+    """How many unclaimed tasks to keep ready on the executor (per worker kind): taskq switch ready, else policy.py's READY,
+    default 1."""
+    try:
+        import switches
+    except ImportError:
+        return P.READY.get(name, 1)
+    return switches.ready(name, P.READY.get(name, 1))
 
 
 def q(path):

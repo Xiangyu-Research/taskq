@@ -210,8 +210,15 @@ def working(name, w, t=None):
 # ---------------- pause ----------------
 
 def paused(name, t=None):
-    """Reason if this machine is paused in policy.py's PAUSE right now; None when absent or expired. The expiry time is
-    the hub's local time "YYYY-MM-DD HH:MM"."""
+    """Reason if this machine is paused right now (taskq pause, else policy.py's PAUSE); None when absent or expired. The
+    PAUSE expiry time is the hub's local time "YYYY-MM-DD HH:MM"."""
+    try:
+        import switches
+        r = switches.paused(name, t)
+    except ImportError:
+        r = None
+    if r:
+        return r
     import policy as P
     x = (getattr(P, "PAUSE", None) or {}).get(name)
     if not x:

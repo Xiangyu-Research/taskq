@@ -19,6 +19,7 @@ executors; finally execute the plan and top up worker jobs. See queue/README.md 
 """
 import argparse
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -53,6 +54,7 @@ import hubstate as HS  # noqa: E402
 import relay_transfer as RT  # noqa: E402
 import bundle_gate as BG  # noqa: E402
 import smoke_gate as SG  # noqa: E402
+import switches  # noqa: E402
 import names as N  # noqa: E402
 import envs as EV  # noqa: E402
 
@@ -567,7 +569,8 @@ def assign(s, ctxs, stuck=None, notes=None):
     stuck = {} if stuck is None else stuck
     mtq = s.get("taskq", {}).get(taskq.queue_host())
     if not mtq or not mtq.get("enabled") or mtq.get("paused"):
-        return {}, {n: "hub queue is off or paused" for n in ctxs}
+        off = switches.queue_off()
+        return {}, {n: f"hub queue is off ({switches.why(off)})" if off else "hub queue is off or paused" for n in ctxs}
     if "error" in (s.get("pueue", {}).get(M.hub()) or {"error": 1}):  # staging is queued in hub pueue; running tasks are invisible
         return {}, {n: f"cannot read pueue on {M.hub()}" for n in ctxs}
     tasks, bad = [], {}  # bad {key: error}: one task's bad spec or plugin error stays with that task, the others are assigned
@@ -635,7 +638,10 @@ def assign(s, ctxs, stuck=None, notes=None):
 def topup(name, rs, run=None):
     """→ (workers to start, why none, {problem id: alert} for previous workers that failed), decided by the machine's executor
     type (sites/executors.py plan; pueue: each worker in the table, Slurm: refill.slurm_plan); adapters just read state and
-    start them. run: fn(name, command) → (exit code, output, error), replaced in tests."""
+    start them; none on a drained machine (taskq drain). run: fn(name, command) → (exit code, output, error), replaced in tests."""
+    d = switches.machine_drained(name, [w["name"] for w in M.workers(name)])
+    if d:
+        return [], f"drained ({switches.why(d)})", {}
     return EX.of(name).plan(name, rs, lambda c: (lambda r: (r[0], r[1] + r[2]))((run or RM.rsh)(name, c)))
 
 
@@ -846,11 +852,11 @@ def log(lines, name):
 
 
 def envs_switch(name):
-    """policy.py AUTO["envs"] → (enabled, extra envs to prebuild for this machine, each an env or (env, variant))."""
+    """policy.py AUTO["envs"] (taskq switch auto envs on|off overrides whether) → (enabled, extra envs to prebuild for this
+    machine, each an env or (env, variant))."""
     a = P.AUTO.get("envs")
-    if isinstance(a, dict):
-        return True, list(a.get(name) or [])
-    return bool(a), []
+    extra = list(a.get(name) or []) if isinstance(a, dict) else []
+    return switches.auto("envs", bool(a)), extra
 
 
 def env_builds(s, name, rows, now, dry, stuck):
@@ -1026,11 +1032,59 @@ def sweep_orphans(ctxs):
     return msgs
 
 
+def push_switches(name, rs, dry, now=False, run=None):
+    """Bring machine name's copy of its switches up to date: switches.site_doc → ROOT["overrides"] (read by consumers/drain.py),
+    taskq switch gpu_pad → the GPU pad file (removed only when the hub made it), and SIGTERM the pueue workers a drain "on" covers
+    that still run (they release their tasks and exit 0; a Slurm worker stops on reading the file). Writes only what differs
+    from what was last written there (meta switches_pushed:<machine>). rs: this round's remote state (its pueue jobs), or None
+    (now=True: taskq drain right after the change; a paused machine or a down ssh master is left to the next round).
+    → (lines, {problem id: alert}); dry: the lines only."""
+    m = RM.conf(name)
+    L = m["label"]
+    ws = M.workers(name)
+    doc = switches.site_doc(name, {w["name"]: w["id"] for w in ws})
+    pad = switches.gpu_pad_off(name)
+    was = switches.pushed(name) or {}
+    jobs = (rs or {}).get("jobs")
+    kill = [w for w in ws if (switches.drained(name, w["name"]) or {}).get("value") == "on" and m.get("scheduler") == "pueue"
+            and (jobs is None or any(j[2] != "Done" for j in EX.of(name).tasks_of(w, jobs)))]
+    write = doc != was.get("doc", {}) or pad != bool(was.get("pad"))
+    if not write and not kill:
+        return [], {}
+    what = (["switches" if doc else "no switches"] if doc != was.get("doc", {}) else []) \
+        + ([f"GPU pad {'off' if pad else 'back on'}"] if pad != bool(was.get("pad")) else []) + [f"stop {w['id']}" for w in kill]
+    if dry:
+        return [f"{L}: would push {', '.join(what)}"], {}
+    if now and (M.paused(name) or RM.master_down(m)):
+        return [f"{L}: not contacted now (paused, or its ssh master connection is down); the next health check pushes it"], {}
+    run = run or (lambda c, i=None: RM.rsh(name, c, input=i))
+    msgs, stuck, aid = [], {}, alert_id("site", name, "switches")
+    if write:
+        r, f = R.q(RM.root(name)), proto.ROOT["overrides"]
+        pf = f"{r}/{proto.ROOT['queue']}/{proto.QUEUE['gpu_pad_off']}"
+        cmd = (f"mkdir -p {r}/{os.path.dirname(f)} && cat > {r}/{f}.tmp && mv {r}/{f}.tmp {r}/{f}"
+               + (f" && touch {pf}" if pad else f" && rm -f {pf}" if was.get("pad") else ""))
+        res = run(cmd, json.dumps(doc, ensure_ascii=False))
+        if res[0] != 0:
+            stuck[aid] = alert(f"cannot write the switches on {L} ({RM.err_tail(res[1] + res[2], 150)}); a drain or GPU pad change"
+                               " there waits until it can", after=60)
+            return [], stuck
+        switches.mark_pushed(name, dict(doc=doc, pad=pad))
+        msgs.append(f"{L}: pushed {', '.join(x for x in what if not x.startswith('stop '))}")
+    for w in kill:
+        ok, out = EX.of(name).stop_worker(name, lambda c: (lambda r: (r[0], r[1] + r[2]))(run(c)), w)
+        msgs.append(f"{L}: {'stopped' if ok else 'could not stop'} {w['id']} (drained){'' if ok else ': ' + out}")
+    return msgs, stuck
+
+
 def finish(s, name, c, more, why, snotes, dry):
-    """Carry out prepare's actions and assign's tasks, then top up workers → (messages, stuck)."""
+    """Carry out prepare's actions and assign's tasks, push switches, then top up workers → (messages, stuck)."""
     L, rs, acts, stuck, notes = RM.conf(name)["label"], c["rs"], c["acts"], c["stuck"], c["notes"]
     if snotes and not dry and C.changed(f"smoke_{name}", snotes):
         log(snotes, name)
+    sw, sst = push_switches(name, rs, dry) if rs is not None else ([], {})
+    stuck.update(sst)
+    notes = notes + sw
     subs, swhy, failed = (topup(name, rs) if rs is not None else ([], "unreachable", {}))
     stuck.update(failed)
     todo = [a for a in acts if a["op"] != "beat"]

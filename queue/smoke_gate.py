@@ -39,7 +39,8 @@ TAG = "{smoke}"
 
 
 def on():
-    return bool(P.AUTO.get("smoke"))
+    import switches
+    return switches.auto("smoke", bool(P.AUTO.get("smoke")))
 
 
 class DefError(Exception):

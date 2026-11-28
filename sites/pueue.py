@@ -127,6 +127,13 @@ def start_worker(name, run, w):
     return rc == 0, out.strip()[-200:]
 
 
+def stop_worker(name, run, w):
+    """Stop worker w the way a drain does: SIGTERM to its pueue group, so it stops training, releases its tasks and exits 0
+    → (ok, output)."""
+    rc, out = run(f"{M.machine(name)['pueue']} kill -s SIGTERM -g {shlex.quote(w['group'])}")
+    return rc == 0, out.strip()[-200:]
+
+
 def start(name, subs, run):
     L, msgs, stuck = M.machine(name)["label"], [], {}
     for w in subs:

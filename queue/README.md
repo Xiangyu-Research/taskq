@@ -162,6 +162,29 @@ Each worker of a pueue executor (each entry in `workers`):
 State dir order: `TASKQ_STATE` > `TASKQ_ROOT` (processes on an executor: queue in `R/queue`, the rest in `R/state`) > `OUTPUTS["state"]` >
 `~/.local/state/taskq/`. Data dir order: `TASKQ_DATA` > `TASKQ_ROOT/data` > the machine table's `data` when this machine is the store.
 
+### Day-to-day switches
+
+`policy.py` and the machine table hold the defaults; a temporary change is a switch in the hub database (table `switch`,
+`queue/switches.py`), set with a command and ended by a command or by its own end time (`--for 4h`, `--until "YYYY-MM-DD HH:MM"`
+or `--until HH:MM`), never by editing config. Each set, clear and end is one event (source `switch`) with who and why; an ended
+switch stops counting at once and the next health check removes it. `proto.SWITCHES` lists them:
+
+| switch | target | what it does |
+|---|---|---|
+| `queue` (`taskq queue off`) | none | the hub queue's master switch: nothing is assigned or sent; running tasks keep running; alerts `tqoff` with the reason |
+| `drain` (`taskq drain`) | machine or machine/worker | `on`: stop those workers now (pueue: SIGTERM to the worker's group; any worker: `consumers/drain.py`), release their tasks, start none; `soft`: running tasks finish, nothing new is claimed. A drained machine is sent no tasks and a drained Slurm executor submits no jobs |
+| `pause` (`taskq pause`) | machine | as `policy.py` `PAUSE`: no connections or sends |
+| `auto` | part of `AUTO` | turn one automatic part on or off |
+| `ready` | executor | as `READY` |
+| `hold` | step pattern | added to `HOLD` |
+| `gpu_pad` | executor | `off`: the hub makes that machine's `R/queue/gpu_pad_DISABLED` (and removes it when the switch ends, only if the hub made it) |
+
+Executors get their part each round (`relay.push_switches`, and at once after `taskq drain`/`undrain`): `R/state/overrides.json`
+(`ROOT["overrides"]`: each drained worker id, or `*` for the whole machine, with its value, end time and reason) and the GPU pad
+file; a write that fails alerts `site:<machine>:switches` and is retried next round. The end time travels with the entry, so a drain
+ends on time even while the hub cannot reach the machine. `machines.py` worker `hours` stay the weekly timetable; a one-off stop is a
+drain.
+
 ### Experiment table
 
 The file `OUTPUTS["experiments"]` points to holds `EXPERIMENTS = [dict(...), ...]` (one per experiment) and may also define
@@ -286,6 +309,7 @@ ignores the file.
 |---|---|
 | what is wrong now | `taskq problems` (the "Needs you" list of `taskq status`, each item with its id for `taskq notice ack`, then due notices; `--all` also lists info problems and ones not yet due for a push) |
 | what happened | `taskq events` (`--key`, `--site` with a machine name or label, `--source`, `-f`; relay lines carry their machine in `site`); `relay`, `feed`, `advance` and `health` also write a plain text log (`OUTPUTS`'s `logs` dir, default `logs/` in the state dir: `relay.log` etc.; each machine's `on_boot.log` and GPU usage records are in its own state dir: its root's `state/` when it has one) |
+| a machine or worker gets nothing, the queue is off | `taskq switch list` (drains, pauses, queue off, with reason and end), `taskq events --source switch` |
 | one task | `taskq show <key>` (spec, state, failure and skip records, the end of the last failed run's log), `taskq log <key>` (each part, events, hub task records), `taskq progress --key <key>` (each change of hub queue state, progress, machine or word) |
 | what a state word means | `queue/taskstate.py` holds the one rule (words in `proto.TASK_WORDS`): `taskq status`, `taskq status --all --json` (`word`, `where`) and the progress snapshot each health round all use it |
 | what this round would do | `taskq plan` (read-only: the problems, downstream steps and sending of one health check) |
@@ -406,6 +430,7 @@ of what has stopped, runs `on_exit` and exits 1.
 | `slurm` | in a Slurm job: job id as the worker name, concurrency from the jobs entry's `slots` (read when the job starts, default 1), job time limit, node-local staging dir, exit after an idle period |
 | `resident` | resident worker in a pueue group: worker id as the name, cores and concurrency from the machine table's worker, exit after an idle period (exit 0, the hub starts it again next round) |
 | `gpu_pad` | with a GPU pad: grow it to floor before training, subtract its memory when computing free GPU memory |
+| `drain` | `taskq drain` (the hub writes `ROOT["overrides"]` over there): while this worker or its whole machine is drained, claim nothing; `on`: stop and release current tasks and exit 0; `soft`: exit once nothing runs; an entry past its end time no longer counts |
 | `window` | the machine table worker's `hours`: do not claim outside the window; at the end of the window stop and release current tasks and exit |
 | `gpu_idle` | claim only when, on every GPU in `CUDA_VISIBLE_DEVICES` (by index or UUID), no one else's processes are there and the usage records show no one else in the last `idle` minutes; a GPU nvidia-smi cannot tell about (missing, failing, timing out, unreadable output) is not free (`run_task.sh` waits the same way when started by hand) |
 | `gpu_share` | a second task on one GPU: after the first has trained for a while, claim another when average utilisation is low and half the memory is still free |
@@ -611,7 +636,7 @@ grows it to floor before training (the `gpu_pad` consumer, or `taskq pad room`),
 The pad and the worker talk through files in this account's private dir on the node (`proto.gpu_pad_base`: `/tmp/taskq_gpu_pad_<uid>/<job>.mib`,
 `.ready`, `.start`; the pad does not run when that dir is a link or another account's), read and written only as regular files of this
 account, never through a link; a pad started by an older bundle is still found at `proto.GPU_PAD_BASE`.
-Master switch: off while `R/queue/gpu_pad_DISABLED` exists in the executor root. Thresholds can also be given through `TASKQ_GPU_PAD_*`
+Master switch: off while `R/queue/gpu_pad_DISABLED` exists in the executor root (`taskq switch set gpu_pad <machine> off` makes it). Thresholds can also be given through `TASKQ_GPU_PAD_*`
 env vars.
 
 ### Envs

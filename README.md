@@ -102,6 +102,19 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq progress` | task progress over time ([--key K] [--since T] [--json]) |
 | `taskq notify` | push a message to a phone (ntfy) and record it in the event log |
 
+**Switches** (override `policy.py` until cleared or ended; each change is one event, see queue/README.md "Day-to-day switches")
+
+| command | what it does |
+|---|---|
+| `taskq queue` | the hub queue's master switch: on \| off (off: nothing is assigned or sent; running tasks keep running) |
+| `taskq drain` | stop a machine's or one worker's tasks now and start none (`machine[/worker]`; --soft: let them finish; --for / --until: ends by itself; --why) |
+| `taskq undrain` | end a drain |
+| `taskq pause` | no connections or sends to a machine (--for / --until, --why) |
+| `taskq unpause` | end a pause |
+| `taskq switch list` | switches in force ([--json]) |
+| `taskq switch set` | set one (<name> <target> <value> [--for 4h \| --until TIME] [--why TEXT]); names, targets and values in `proto.SWITCHES` |
+| `taskq switch clear` | remove one (<name> [<target>]) |
+
 **Executors and experiments**
 
 | command | what it does |
@@ -230,6 +243,7 @@ and `bin/taskq` mean the full suite):
 | `queue/bundle_gate.py` | `test_bundle_gate.py` |
 | `queue/relay_plugins.py`, `sites/names.py` | `test_relay_plugins.py` |
 | `queue/smoke_gate.py` | `test_smoke.py` |
+| `queue/switches.py`, `queue/consumers/drain.py` | `test_switches.py` |
 | `queue/archive_task.sh` | `test_archive_task.sh` |
 | `queue/db.py`, `queue/events.py`, `queue/tasklog.py`, `queue/hubstate.py` | `test_db.py`, `test_tasklog.py`, `test_common.py`, `test_relay.py` |
 | `queue/cli_json.py` | `test_cli_json.py` |

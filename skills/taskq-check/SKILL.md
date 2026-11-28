@@ -22,20 +22,21 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
    - What the scheduler did recently: `taskq events --since <time>`, filtered with `--source relay|feed|advance|health|notify|note`.
    - Problems and how long they have lasted: `taskq problems --all` (`--json` for every field), `taskq events --source health --since 1d`. Problems with the same cause (such as one disk short for many tasks) are one line in the push and one item in `taskq status`, "+N more with the same cause"; `taskq problems --json` gives each one's `cause` and `members`.
    - One task: `taskq show <key>`, `taskq log <key>`, `taskq progress --key <key>`.
+   - Switches in force (queue off, drained workers or machines, pauses, with reason and end time): `taskq switch list`; who changed them: `taskq events --source switch`.
 
 ## When something is wrong
 
 1. Is it still there: `taskq tick -n`. One that has gone was usually transient (a fetch just finished, a job just changed part); explain why and stop.
 2. Follow the problem id (`<kind>:<machine or key>...`, kinds in `proto.ALERTS`):
    - `site:<machine>:...`, an executor (claiming, transfers, job submission, workers not starting, fetches, disk cleanup): `taskq site status <machine>`, `taskq plan`, and `taskq events --source relay --site <machine>`. `--site` and `site` commands take a machine name or label. Relay events recorded before `site` was filled in have it empty: for those use `--grep <machine label>`.
-   - `taskq:<hub>`, `tqoff:<hub>`, `tqblocked:` (the hub queue): `taskq status --all`, `taskq show <key>`.
+   - `taskq:<hub>`, `tqoff:<hub>`, `tqblocked:` (the hub queue): `taskq status --all`, `taskq show <key>`, `taskq switch list`.
    - `advance:` or a stalled step after a task finished: `taskq events --source advance`, `taskq log <key>`, `taskq plan`, then `pueue log <id>` for that step on its machine.
    - A failed or stuck task: `taskq status`, `taskq show <key>`, the part log, and the executor's failure record shown by `taskq site status <machine>`. A failure without progress goes back to the hub queue with a skip record for that executor (`taskq show <key>`), so that executor is not given the task again.
    - The same task running in two places is urgent: confirm both logs are really advancing, then stop the one that started later.
 3. Judge "finished" and "stuck" by the actual files on disk (count them, read modification times), not only by marker files, manifests or log lines. While a copy or fetch is running, nothing is finished.
 4. Fix without asking, unless the project notes say otherwise: remove the cause, then delete `failures/<key>` in the executor's queue so the task runs again (`taskq unskip <key>` if it was handed back), when the cause is fixed or had nothing to do with the task; stop a hung process; `pueue remove` a stalled step so the next check queues it again.
-5. Ask first, each time, naming the object: cancelling a scheduler job, submitting extra jobs by hand, any deletion that loses data, turning off a queue's master switch (an executor's `ENABLED`, the hub's `queue` switch). Before `taskq rm` of a task sent to an executor, `taskq stop` it and wait for the release.
-6. Add no new watchdog, patrol or switch file. If the root cause is in code, fix the code with a test, and ship it with `taskq-ship`.
+5. Ask first, each time, naming the object: cancelling a scheduler job, submitting extra jobs by hand, any deletion that loses data, turning off a queue's master switch (an executor's `ENABLED`, `taskq queue off`). To take a machine or one worker out for a while, use `taskq drain <machine>[/<worker>] --for <length> --why <reason>` (`--soft` lets running tasks finish), and `taskq pause` to stop contacting a machine; both end by themselves, never edit config or kill workers for this. Before `taskq rm` of a task sent to an executor, `taskq stop` it and wait for the release.
+6. Add no new watchdog, patrol or switch file (temporary on/off is `taskq switch`, `drain`, `pause`, `queue`). If the root cause is in code, fix the code with a test, and ship it with `taskq-ship`.
 
 ## Report
 

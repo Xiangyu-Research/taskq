@@ -342,7 +342,8 @@ class DbStore:
             c.execute("DELETE FROM claim WHERE name=?", (safe(key),))
 
     def enabled(self):
-        return self.q("SELECT 1 FROM switch WHERE name='queue' AND target='' AND value='off'").fetchone() is None
+        return self.q("SELECT 1 FROM switch WHERE name='queue' AND target='' AND value='off' AND (until IS NULL OR until > ?)",
+                      (time.time(),)).fetchone() is None
 
     # ---- smoke records ----
     def smoke_get(self, site):

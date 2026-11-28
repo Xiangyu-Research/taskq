@@ -2,8 +2,8 @@
 """Downstream steps (a step's after, group_after, FINAL) on the hub: each health check calls run.
 
 The order comes from flow/compile.py. Each round: queue instances whose dependencies are done; rerun a step when an input
-is newer than its done file; delete temp files once every user is done and fetched. HOLD is skipped; with policy.py
-AUTO["advance"] false only what would be queued is written. An error in the experiment table holds back only the instances it
+is newer than its done file; delete temp files once every user is done and fetched. HOLD (and taskq switch hold) is skipped;
+with policy.py AUTO["advance"] false (or taskq switch auto advance off) only what would be queued is written. An error in the experiment table holds back only the instances it
 concerns and those after them (flow.blocked); it is reported as advance:flow. taskq plan shows what this round would do (health.py -n).
 """
 import fnmatch
@@ -14,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(HERE)  # root of the scheduling code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
+import switches  # noqa: E402
 import proto  # noqa: E402
 from proto import alert_id  # noqa: E402
 cfg.use_config()
@@ -97,6 +98,7 @@ def plan(s):
     g = Graph(flow)
     inst = flow.instances
     queued = {t["key"]: t for t in mq["tasks"]}
+    holds = list(P.HOLD) + switches.holds()
     moving = fetching(s)
     try:
         miss = RM.store_op("done", dict(items={k: done_items(i) for k, i in inst.items()}))
@@ -132,7 +134,7 @@ def plan(s):
         if k in flow.blocked:
             held.append(k)
             continue
-        if any(fnmatch.fnmatch(k, pat) for pat in P.HOLD):
+        if any(fnmatch.fnmatch(k, pat) for pat in holds):
             NOTES.append(f"{k}: HOLD, not queueing")
             continue
         if k in reruns:
@@ -174,7 +176,7 @@ def run(s, dry=False, tq=None, store=None, say=None):
     tq = tq or taskq_add
     store = store or RM.store_op
     todo, stuck = plan(s)
-    live = bool(P.AUTO.get("advance")) and not dry
+    live = switches.auto("advance", bool(P.AUTO.get("advance"))) and not dry
     did, lines = [], []
     for t in todo:
         if t["op"] == "rerun":

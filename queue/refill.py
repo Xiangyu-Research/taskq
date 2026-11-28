@@ -12,6 +12,7 @@ CORE = os.path.dirname(HERE)  # root of the scheduling code
 sys.path.insert(0, HERE)
 import cfg  # noqa: E402
 import proto  # noqa: E402
+import switches  # noqa: E402
 from proto import S_CLAIMED, UNCLAIMED  # noqa: E402
 cfg.use_config()
 sys.path.insert(0, HERE)
@@ -336,6 +337,8 @@ def pueue_plan(name, rs):
                 f"{L} previous {w['id']} (pueue task {tid}) failed ({state}); check the pueue log over there, then pueue remove that task to retry next check",
                 worker=w["id"], start=False)
             why.append(f"previous {w['id']} (pueue task {tid}) failed ({state})")
+        elif switches.drained(name, w["name"]):
+            why.append(f"{w['id']} is drained ({switches.why(switches.drained(name, w['name']))})")
         elif not M.working(name, w):
             why.append(f"{w['id']} is outside its hours window")
         elif not unclaimed(rs["taskq"], w["kind"]):
