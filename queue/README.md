@@ -334,7 +334,7 @@ happened" such as a reboot are acknowledged with `taskq notice ack`. A slow roun
 The hub queue and each executor queue are the same kind of queue (`queue/taskq.py`): `tasks.jsonl` has one task per line (nice `nice`,
 arrival `order`, key, recipe, params), `claims/<key>/` is a claim (heartbeat every 5 minutes, stale after 20 minutes without one), and
 there are records for failures, skips, missing inputs, releases and stops. Task states are in `proto.STATES`. The hub keeps the same
-records in its database `taskq.db` instead of files (`queue/qstore.py`, tables `task`, `claim`, `mark`, `line`, `smoke`, `switch`), each
+records in its database `taskq.db` instead of files (`queue/qstore.py`, tables `task`, `claim`, `mark`, `line`, `smoke`, `switch`, `intent`), each
 edit one transaction; executor queues stay files. The hub queue has no `ENABLED` file: its master switch is the `queue` row of `switch`.
 
 A failure keeps the end of its own log: `release --failed` also writes `failtail/<key>`, the last 50 lines of the run's part log (each
@@ -364,6 +364,24 @@ executor's queue as `stopped` (its results kept) and does not disappear: check t
 `taskq events --source relay` or by the hub queue's state. Resumed before the release, the task continues on the same executor;
 resumed after it, the next check deletes the executor's copy and its results and the hub queue dispatches it again with its current
 params (a way to resend a not-yet-started task with changed params).
+
+Operations that need more than one round are rows of the hub database's `intent` table (`queue/intents.py`), advanced by every health
+check round before sending (rm intents again after it) and each change of state logged as an `EV_INTENT` event; `taskq intents` lists
+them, `--drop ID` gives one up and undoes the stop it made. An intent not finished by its deadline (24 h; `after`: `--within`, default
+7 days) expires, undoes its stop and is reported once (`intent:<id>`).
+- `taskq rm` of a task in use: stopped at once (and the stop pushed to its executor, `relay_remote.push_stop`), removed once released;
+  resumed meanwhile, the removal is dropped. Unclaimed tasks are removed at once as before.
+- `taskq move <key> --to <executor> [--restart]`: stops it where it is, resumes it once released, and `refill.choose` sends it only to
+  that executor (`intents.only`) until it is assigned there. A task half-done elsewhere is refused without `--restart`; the executor
+  must be one `PLACE`, the machines and its worker kind allow; that executor's skip record for it is cleared.
+- `taskq now <key> [--on <executor>] [--no-preempt]`: nice `proto.NOW_NICE`. When it has waited `proto.NOW_WAIT` on an executor, one
+  running task there of the same worker kind and worse nice is stopped (no progress first, then the worst nice, then the least done;
+  never a smoke), and resumed once the task runs (or the intent ends).
+- `taskq after <key> running|done|failed [--within 7d] -- <command>`: runs one of `proto.AFTER_CMDS` once the task reaches that state;
+  the keys and `--exp` in the command are checked against the hub queue and the experiment table when it is set and again when it
+  fires. A task that settles in another state, or leaves the queue first, fails the intent without running the command.
+- `taskq cancel --exp E [--only PARAM=VALUE...] [--hold] [-n]`: removes the experiment's tasks from the hub queue (those in use through rm
+  intents); `--hold` adds a `hold` switch per task label so `advance` queues none of their later steps.
 
 ### Workers (consume.py) and consumers
 
@@ -512,7 +530,7 @@ There is one entry point for sending tasks: the health check calls `run_all` in 
      stagings sharing files do not send the same blob twice.
 3. **Assign** (`assign`, `refill.choose`): unclaimed tasks in the hub queue are assigned to machines in one pass. Order: nice -> half-done
    first -> arrival order. Each task's possible executors = intersection of `PLACE[step or recipe]` and the spec's `machines`, limited to
-   machines with that worker kind (gpu / cpu); drop machines that skipped it (`skipped_by`; all skipped -> report `tqblocked`, unless a
+   machines with that worker kind (gpu / cpu), and to one executor for a task under `taskq move` or `now --on`; drop machines that skipped it (`skipped_by`; all skipped -> report `tqblocked`, unless a
    failure skip expires later: `retry_at`, then it waits); a half-done task only goes
    to the machine with its progress; tasks whose inputs are already there come first. A machine must pass each of (`Site.fit`): has that
    worker kind, env ready, free slot (ready unclaimed below `READY[machine]`, negative nice does not count; when full it may swap out one
@@ -527,6 +545,10 @@ Alert when a machine is unreachable for more than 2 hours; send no tasks while a
 name that is not an executor are reported by `feed.py`.
 
 #### Bundle gate
+
+`taskq add` on the hub already refuses a spec that could only fail on an executor (`check.preflight`): a `{name}` left unfilled in
+`cmd` or `inputs_cmd` (`{data}` and `{repo}` are filled there), or a repo file named there that the bundle built from `origin/main`
+leaves out (its suffix, size or `bundle_skip`, with the reason) or does not have (not committed and pushed, or outside the bundle's dirs).
 
 Before sending a spec, run what the executor does with the spec on the hub using the bundle in use there (`queue/bundle_gate.py`); if it
 fails, do not send (`hold`, report `bundlegate`) and check again after that machine switches bundles. When only an older bundle that
@@ -560,6 +582,10 @@ its outputs with the unknown names as wildcards); the others go on. `taskq check
    deleted: a step reading them may be among those entries.
 
 `HOLD` matches are not queued; with `AUTO["advance"]` off it only writes "what it would queue".
+
+Before that, `advance.sync` follows nice changes in the experiment table: when an experiment's `nice` differs from the value seen at the
+previous round (meta `exp_nice`), its tasks in the hub queue still at the old nice get the new one (an event each; relay's `rnice` takes
+it to an executor already holding the task). A nice set by hand differs from the old value and is left alone.
 
 ### Store and site_ops
 

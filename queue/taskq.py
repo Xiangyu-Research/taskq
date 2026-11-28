@@ -1020,10 +1020,26 @@ def cmd_add(a):
             return _err("pass --exp, --recipe, --file or --spec-stdin", 2)
         if a.nice is None:
             return _err("pass --nice", 2)
+        if not a.spec_stdin and not a.update_only and here() == queue_host():
+            bad = _preflight(new)
+            if bad:
+                for b in bad:
+                    print(f"cannot add: {b}", file=sys.stderr)
+                return REFUSED
         return _insert(new, a.nice, update_only=a.update_only)
     except S.SpecError as e:
         print(f"cannot add: {e}", file=sys.stderr)
         return 2
+
+
+def _preflight(new):
+    """Hub only: what check.preflight finds in the specs about to be added (none when the check itself cannot run)."""
+    import experiments as E
+    try:
+        import check
+        return check.preflight([E.resolve_task(n["recipe"], n["params"], n.get("exp")) for n in new])
+    except Exception:  # noqa: BLE001  a spec error is reported by _insert
+        return []
 
 
 def cmd_set(a):

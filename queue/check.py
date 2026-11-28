@@ -18,6 +18,7 @@ import importlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -755,6 +756,40 @@ def check_bundle(r):
     for f, why, by in named_but_left_out(files, B.left_out(None)):
         r.bad(g, f"{f} is tracked and named in {by}, but the bundle leaves it out ({why}): executors would not have it; "
                  + ("give it a suffix the bundle takes (.txt, .json, …)" if why == "suffix" else f"keep it under {B.SMALL_MAX >> 20} MB"))
+
+
+def preflight(specs, ref="origin/main"):
+    """Specs about to be added to the hub queue -> [problems that would only show on the executor]: a {name} left unfilled in cmd or
+    inputs_cmd ({data} and {repo} are filled there), a repo file named there that the bundle (built from ref) leaves out or does not
+    have. Its own errors (no git, no bundle rules) -> []."""
+    import relay_bundle as B
+    try:
+        tops, skip = B.rules(ref)
+        shipped = {e[0] for e in B.project_entries(ref, tops=tops) if e[1].startswith("100") and B._wanted(e[0], e[3], skip)}
+        gone = B.left_out(ref)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for sp in specs:
+        for field in ("cmd", "inputs_cmd"):
+            cmd = sp.get(field) or ""
+            for name in sorted(set(re.findall(r"(?<!\$)\{([A-Za-z_]\w*)\}", cmd)) - {"data", "repo"}):
+                out.append(f"{sp['key']}: {{{name}}} in its {field} is not filled in (no param or name {name})")
+            try:
+                words = shlex.split(cmd)
+            except ValueError:
+                words = cmd.split()
+            for w in words:
+                w = w.split("=", 1)[1] if "=" in w else w
+                w = os.path.normpath(w) if w and not w.startswith(("-", "/", "~")) and "{" not in w and "$" not in w else ""
+                if not w or w.startswith(".."):
+                    continue
+                if w in gone:
+                    out.append(f"{sp['key']}: {w} in its {field} is left out of the bundle ({gone[w]}); executors would not have it")
+                elif os.path.isfile(os.path.join(B.REPO, w)) and w not in shipped:
+                    out.append(f"{sp['key']}: {w} in its {field} is not in the bundle built from {ref} (commit and push it, or it is outside"
+                               " the bundle's dirs)")
+    return list(dict.fromkeys(out))
 
 
 def named_but_left_out(files, gone):

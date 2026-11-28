@@ -163,17 +163,19 @@ class Site:
         return None
 
 
-def choose(tasks, sites, specs, held=None, sizes=None):
+def choose(tasks, sites, specs, held=None, sizes=None, only=None):
     """Tasks in the queue that can be sent (unclaimed, parseable, accepted by the plugin) -> pick an executor for each
     and record it in sites[name].take / swaps. specs {key: (recipe, spec)}; held: holders() result; sizes: {input: GB
-    or None} (measured on the store, data_sizes). Order: nice, then half-done within the same nice, then queue order.
+    or None} (measured on the store, data_sizes); only: {key: dict(to=executor, restart=bool)} from taskq move / now --on (intents.only):
+    that key goes only there (restart: progress elsewhere does not tie it). Order: nice, then half-done within the same nice, then
+    queue order.
     -> dict(why={key: why it was not sent this round} (text for display),
     by_site={key: [(executor, that executor's reason)]} (the same reasons as data),
     nowhere=[keys whose every candidate skipped it for good (no failure skip that expires: retry_at)],
     noroom=[keys that fit on none of this round's available executors] (not full: waiting will not help, free space or
     lower out_gb),
     errors={key: error} (its spec or a plugin raised: that task is not sent, the others go on))."""
-    held, sizes, planned, why, by_site, nowhere, noroom, errors = held or {}, sizes or {}, {}, {}, {}, [], [], {}
+    held, sizes, only, planned, why, by_site, nowhere, noroom, errors = held or {}, sizes or {}, only or {}, {}, {}, {}, [], [], {}
 
     def one(t):
         rec, sp = specs[t["key"]]
@@ -181,6 +183,12 @@ def choose(tasks, sites, specs, held=None, sizes=None):
         if not opts:
             why[t["key"]] = f"no executor can take it (PLACE, machines and {kind_of(sp)} workers do not intersect)"
             return
+        o = only.get(t["key"])
+        if o:
+            if o["to"] not in opts:
+                why[t["key"]] = f"moved to {o['to']}, which cannot take it (PLACE, machines and {kind_of(sp)} workers allow {', '.join(opts)})"
+                return
+            opts = [o["to"]]
         skipped = set(t.get("skipped_by") or [])
         if set(opts) <= skipped:
             at = {n: v for n, v in (t.get("retry_at") or {}).items() if n in opts}
@@ -191,7 +199,7 @@ def choose(tasks, sites, specs, held=None, sizes=None):
                 nowhere.append(t["key"])
             return
         opts = [n for n in opts if n not in skipped]
-        hs = held.get(t["key"])
+        hs = None if o and o.get("restart") else held.get(t["key"])
         if hs:  # half-done goes only to the executor with progress (when it is paused and no longer an executor, holders drops it and it may start over elsewhere)
             opts = [n for n in opts if n in hs]
         live = [n for n in opts if n in sites]

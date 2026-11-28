@@ -164,6 +164,19 @@ def push_forget(name, keys):
     return [f"{L}: {ln}" for ln in r[1].splitlines() if ln.strip()]
 
 
+def push_stop(name, keys, why):
+    """taskq rm, move or now on the hub, for keys assigned to executor name: stop them in its queue now (taskq.py stop there), as the
+    health check's rstop would on its next round → lines to print. Paused or ssh master down: nothing is sent."""
+    L = conf(name)["label"]
+    later = "the health check stops it there on its next round"
+    if M.paused(name) or master_down(conf(name)):
+        return [f"{L}: not contacted (paused, or its ssh master connection is down); {later}"]
+    r = rtq(name, f"stop --why {shlex.quote(why)} -- " + " ".join(shlex.quote(k) for k in keys))
+    if not r or r[0]:
+        return [f"could not stop {', '.join(keys)} on {L} now ({err_tail((r or [0, 'ssh unreachable'])[1], 150)}); {later}"]
+    return [f"{L}: {ln}" for ln in r[1].splitlines() if ln.strip()]
+
+
 def run_lines(argv, input, timeout, say):
     """Run a command → (exit code, stdout, stderr); pass stderr to say line by line (long transfers and archives show progress
     while running). Timeout → 124. stdin, stdout and stderr each get their own thread (communicate also reads stderr and drops

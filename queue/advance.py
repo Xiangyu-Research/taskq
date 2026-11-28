@@ -170,6 +170,47 @@ def taskq_add(nice, params):
     return rc, (out + err).strip()
 
 
+def sync(dry=False, say=None, now=None):
+    """Follow nice changes in the experiment table: when an experiment's nice differs from the one seen at the last round, its tasks in
+    the hub queue still at the old nice get the new one (a nice changed by hand differs and is left alone; an assigned task follows on
+    its executor through relay's rnice). The first round only records the table's values (meta exp_nice). -> keys changed (or that
+    would change, dry)."""
+    import db as D
+    import events
+    import experiments as E
+    import taskq
+    db = D.connect(ro=dry, create=not dry)
+    if db is None:
+        return []
+    try:
+        table = {e["id"]: e["nice"] for e in E.load()[0]}
+    except Exception:  # noqa: BLE001  an unreadable table is reported by plan
+        return []
+    seen = D.get_meta(db, "exp_nice")
+    moves = {i: (seen[i], n) for i, n in table.items() if isinstance(seen, dict) and i in seen and seen[i] != n}
+    out = []
+    if moves:
+        with taskq.Lock():
+            tasks = taskq.read_tasks()
+            for t in tasks:
+                m = moves.get(t.get("exp"))
+                if m and t["nice"] == m[0]:
+                    t["nice"] = m[1]
+                    out.append((t["key"], t["exp"], m))
+            if out and not dry:
+                taskq.write_tasks(tasks)
+    for k, i, (old, new) in out:
+        msg = f"{k}: nice {old} -> {new} (experiment {i} in the table)"
+        if say is not None:
+            say.append(("would set " if dry else "set ") + msg)
+        if not dry:
+            events.add("advance", msg, kind="nice", key=k, data=dict(exp=i, old=old, new=new))
+    if not dry and seen != table:
+        with D.tx(db):
+            D.set_meta(db, "exp_nice", table)
+    return [k for k, _, _ in out]
+
+
 def run(s, dry=False, tq=None, store=None, say=None):
     """Called by health.py -> (list of what was done ("would ..." when only looking), stuck {problem id: explanation});
     say: a list that receives the lines for people (taskq plan prints them)."""

@@ -363,5 +363,25 @@ ok(f"bad tables: experiments lists each entry left out, flow only the instances'
    and sorted(m.split(":")[0] for m in by.get("flow", [])) == ["xa1/xa_f0", "xc1/xc_f0"] and "tasks" not in by)
 fixture.read_tables(None)
 
+# preflight: what taskq add refuses before an executor would find out
+PF = fixture.tmpdir()
+for f in ("scripts/run.py", "notshipped.py"):
+    os.makedirs(os.path.dirname(os.path.join(PF, f)) or PF, exist_ok=True)
+    open(os.path.join(PF, f), "w").close()
+saved = (B.rules, B.project_entries, B._wanted, B.left_out, B.REPO)
+B.rules = lambda ref: (["scripts"], [])
+B.project_entries = lambda ref, tops=None: [("scripts/run.py", "100644", "blob", 10)]
+B._wanted = lambda path, size, skip: True
+B.left_out = lambda ref: {"data/big.npy": "over bundle_max_mb"}
+B.REPO = PF
+got = C.preflight([dict(key="k1", cmd="python3 scripts/run.py --cfg {cfg} --x=data/big.npy notshipped.py /abs/y {data}/z ${HOME}/w")])
+ok(f"preflight: an unfilled {{name}}, a file the bundle leaves out (with why) and one it does not have; {{data}}, absolute paths, $vars pass ({got})",
+   len(got) == 3 and "{cfg} in its cmd is not filled in" in got[0] and "data/big.npy in its cmd is left out of the bundle (over bundle_max_mb)" in got[1]
+   and "notshipped.py in its cmd is not in the bundle" in got[2])
+ok("preflight: a spec using only shipped files passes", C.preflight([dict(key="k2", cmd="python3 scripts/run.py", inputs_cmd="ls {data}")]) == [])
+B.rules = lambda ref: (_ for _ in ()).throw(RuntimeError("no git"))
+ok("preflight: its own error refuses nothing", C.preflight([dict(key="k3", cmd="python3 notshipped.py {nope}")]) == [])
+B.rules, B.project_entries, B._wanted, B.left_out, B.REPO = saved
+
 print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)

@@ -158,6 +158,18 @@ got, res = pick([ctq("h/3")], [site("site-pueue", dict(gpu=1)), site("site-slurm
 ok("half-done, that executor full: wait for it, do not start over elsewhere", got == {} and "site-slurm: full" in res["why"]["h/3"])
 got, res = pick([ctq("h/4")], [site("site-pueue", dict(gpu=1))], held={"h/4": ["site-slurm"]})
 ok("half-done, that executor unreachable this round: not sent, name it", got == {} and "site-slurm" in res["why"]["h/4"])
+got, _ = pick([ctq("o/1")], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))], only={"o/1": dict(to="site-slurm", restart=False)})
+ok("only (taskq move / now --on): sent only to that executor, whatever the preference", got == {"o/1": "site-slurm"})
+got, res = pick([ctq("o/2")], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=0))], only={"o/2": dict(to="site-slurm", restart=False)})
+ok("only, that executor full: waits for it", got == {} and "site-slurm: full" in res["why"]["o/2"])
+got, res = pick([ctq("o/3", step="p1")], [site("site-pueue", dict(gpu=1))], only={"o/3": dict(to="site-pueue", restart=False)})
+ok("only, an executor PLACE does not allow: not sent, say so", got == {} and res["why"]["o/3"].startswith("moved to site-pueue, which cannot take it"))
+got, _ = pick([ctq("o/4")], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))], held={"o/4": ["site-slurm"]},
+              only={"o/4": dict(to="site-pueue", restart=True)})
+ok("only with restart: progress elsewhere does not tie it", got == {"o/4": "site-pueue"})
+got, res = pick([ctq("o/5")], [site("site-pueue", dict(gpu=1)), site("site-slurm", dict(gpu=1))], held={"o/5": ["site-slurm"]},
+                only={"o/5": dict(to="site-pueue", restart=False)})
+ok("only without restart, half-done elsewhere: not sent there", got == {})
 got, _ = pick([ctq("i/1", inputs=["in/a"])], [site("site-pueue", dict(gpu=1)), site("site-slurm2", dict(gpu=1), ready=["in/a"])],
               sizes={"in/a": 5.0})
 ok("inputs already there first (whatever the preference)", got == {"i/1": "site-slurm2"})

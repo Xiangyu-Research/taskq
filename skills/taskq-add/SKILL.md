@@ -19,7 +19,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
 4. Check: `taskq check` (table, recipes, plugins, policy), the project's own tests from the notes, and `taskq add --exp <id> -n` to see the tasks it would add.
 5. Smoke: run the project's smoke check for the new kind of task when it is new (a new script, env or input format), so a mistake shows in minutes, not after hours in the queue.
 6. Commit and push (pull first); the hub reads the pushed config at its next round.
-7. On the hub: `taskq add --exp <id>`; set priority with `taskq nice` if the project rules say so.
+7. On the hub: `taskq add --exp <id>`; set priority with `taskq nice` if the project rules say so (later changes to the entry's `nice` follow into the queue by themselves). `add` refuses a spec that would only fail on an executor (a `{name}` left unfilled, a repo file the bundle leaves out or does not have, with the reason): fix the entry or commit and push the file, then add again. To jump the line: `taskq now <key> [--on <machine>]`; to queue something once a task finishes: `taskq after <key> done -- <command>`.
 8. Where it stands: `taskq status --all` for its position and the machines that can take it; estimate GPU hours from the project's measured speeds and the number of tasks.
 9. When the first task starts (later, not by waiting in the session; one background `taskq wait <key> --until running --timeout <time>` can tell when): `taskq progress --key <key>` shows progress moving and the log shows no errors. If the user is still there, check once; otherwise leave it to the health check.
 10. Record the decision where the project notes say.

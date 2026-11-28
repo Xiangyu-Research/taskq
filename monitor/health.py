@@ -692,6 +692,7 @@ def one_round(a):
     try:  # queue downstream steps first, so what this round queues is sent this round
         import advance  # queue/advance.py: queue the next step per experiment table
         done, stuck2 = advance.run(s, dry=a.dry_run, say=after)
+        done = done + advance.sync(dry=a.dry_run, say=after)
         if done and not a.dry_run:
             try:
                 s["taskq"][M.hub()] = taskq.local_status()
@@ -700,6 +701,16 @@ def one_round(a):
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"queue/advance.py failed: {type(e).__name__}: {e}"[:300]}
     lap("advance")
+    intent_lines = []
+    try:
+        import intents  # queue/intents.py: taskq rm / move / now / after under way
+        intent_lines, edited, st = intents.run(s, dry=a.dry_run)
+        stuck2.update(st)
+        if edited:
+            s["taskq"][M.hub()] = taskq.local_status()
+    except Exception as e:  # noqa: BLE001
+        stuck2[alert_id("intent", "error")] = f"queue/intents.py failed: {type(e).__name__}: {e}"[:300]
+    lap("intents")
     relay_t = {}
     try:
         import feed  # queue/feed.py: the only way tasks are sent, hands over to relay.py
@@ -709,6 +720,10 @@ def one_round(a):
     except Exception as e:  # noqa: BLE001
         stuck["feed:error"] = f"queue/feed.py failed: {type(e).__name__}: {e}"[:300]
     lap("feed")
+    try:
+        stuck2.update(intents.run(s, dry=a.dry_run, kinds=("rm",))[2])
+    except Exception as e:  # noqa: BLE001
+        stuck2[alert_id("intent", "error")] = f"queue/intents.py failed: {type(e).__name__}: {e}"[:300]
     steps.update({f"relay {k}": v for k, v in relay_t.items()})
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
@@ -744,6 +759,7 @@ def one_round(a):
             wait = f" / reported after {p['after']} min" if p["after"] else ""
             probs.append(f"[{p['level']}/{p['kind']}{wait}] {pid}\n    {p['msg']}")
         parts = [(f"problems this round ({len(probs)})", probs or ["none"]), ("downstream steps (advance)", after or ["nothing to queue"]),
+                 ("operations under way (taskq intents)", intent_lines or ["nothing to do"]),
                  ("send tasks, top up workers (feed -> relay)", events or ["nothing"])]
         print("\n\n".join(f"== {t}\n" + "\n".join(lines) for t, lines in parts))
     return 0

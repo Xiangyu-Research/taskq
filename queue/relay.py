@@ -618,7 +618,8 @@ def assign(s, ctxs, stuck=None, notes=None):
     except RuntimeError as e:
         stuck[alert_id("relay", "store")] = f"cannot measure inputs to transfer on the store ({e}); assigning nothing this round"
         return {}, {n: "cannot measure inputs on the store" for n in ctxs}
-    res = refill.choose(tasks, sites, specs, held_all(ctxs), sizes)
+    import intents
+    res = refill.choose(tasks, sites, specs, held_all(ctxs), sizes, only=intents.only())
     bad.update(res["errors"])
     for k, e in bad.items():
         stuck[alert_id("relaytask", k)] = alert(f"{k} cannot be sent to an executor ({e}); the other tasks are assigned as usual", key=k, error=e)

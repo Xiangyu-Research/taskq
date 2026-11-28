@@ -264,7 +264,17 @@ TREE = {
     "stop": Cmd("stop a task (not claimed again; running in this queue: stops within 30 seconds; sent to an executor: at the hub's next check)", py("taskq", "stop"), own_help=True),
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
     "retry": Cmd("run failed or skipped tasks again now: clears skips, failures and the failure tail here and on the executor (--site, --exp, --all-failed; worker <machine>/<worker>: restart a failed pueue worker)", py("taskq", "retry"), own_help=True),
-    "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
+    "rm": Cmd("remove tasks; one in use is stopped now and removed once its executor releases it", py("intents", "rm"), own_help=True),
+    "move": Cmd("send a task to one executor (--to; stops it where it is first; --restart: start over though half-done elsewhere)",
+                py("intents", "move"), own_help=True),
+    "now": Cmd("put a task first in line; after 10 min waiting on an executor, one lower-priority task there makes room (--on, --no-preempt)",
+               py("intents", "now"), own_help=True),
+    "after": Cmd("run one taskq command once a task is running, done or failed (<key> <when> [--within 7d] -- <command>)",
+                 py("intents", "after"), own_help=True),
+    "cancel": Cmd("remove an experiment's tasks (--exp, --only; in use: stop, remove once released; --hold: hold their downstream steps)",
+                  py("intents", "cancel"), own_help=True),
+    "intents": Cmd("operations under way (rm, move, now, after) and what each is waiting for (--all, --json, --drop ID)",
+                   py("intents", "intents"), own_help=True),
     "wait": Cmd("wait until tasks are running, done, failed or settled, then exit (reads only; exit code says which)", py("wait", prog="taskq wait"),
                 own_help=True),
     # scheduling
@@ -393,6 +403,7 @@ TREE = {
 }
 
 SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "retry", "rm", "wait"]),
+            ("one-step operations", ["move", "now", "after", "cancel", "intents"]),
             ("scheduling", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
             ("switches", ["queue", "drain", "undrain", "pause", "unpause", "switch"]),
             ("executors and experiments", ["site", "env", "smoke", "exp"]),

@@ -60,6 +60,12 @@ SCHEMA = [
     CREATE TABLE switch(name TEXT NOT NULL, target TEXT NOT NULL, value TEXT NOT NULL, t REAL NOT NULL, until REAL, why TEXT, by TEXT,
                         PRIMARY KEY(name, target));
     """,
+    # 6: operations that take more than one round (queue/intents.py)
+    """
+    CREATE TABLE intent(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, key TEXT, args TEXT NOT NULL, state TEXT NOT NULL, t REAL NOT NULL,
+                        deadline REAL, note TEXT, by TEXT);
+    CREATE INDEX intent_state ON intent(state);
+    """,
 ]
 VERSION = len(SCHEMA)
 

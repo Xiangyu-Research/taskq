@@ -271,5 +271,24 @@ ok("same key added again: not duplicated", [t["key"] for t in S.json_in(r.stdout
 sp = S.resolve("command", S.parse_kv(S.kv_args("command", A.queue_params(INST["infer/t0_f0"]))[1:]))
 ok("the step's spec becomes shell variables", bool(S.shell_lines(sp, "/d")))
 
+# ---- 7. sync: nice changes in the experiment table follow into the hub queue ----
+import experiments as E  # noqa: E402
+import taskq as TQ  # noqa: E402
+TABLE = {"ex1": 50, "ex2": 50}
+HUBQ = [dict(key="a/1", exp="ex1", nice=50), dict(key="a/2", exp="ex1", nice=7), dict(key="b/1", exp="ex2", nice=50)]
+saved = (E.load, TQ.read_tasks, TQ.write_tasks)
+E.load = lambda *a, **k: ([dict(id=i, nice=n) for i, n in TABLE.items()], [])
+TQ.read_tasks = lambda *a, **k: [dict(t) for t in HUBQ]
+TQ.write_tasks = lambda ts, *a, **k: HUBQ.__setitem__(slice(None), [dict(t) for t in ts])
+ok("sync, first round: only records the table", A.sync() == [] and [t["nice"] for t in HUBQ] == [50, 7, 50])
+TABLE["ex1"] = 20
+say = []
+ok("sync -n: says what it would set, changes nothing", A.sync(dry=True, say=say) == ["a/1"] and say[0].startswith("would set a/1: nice 50 -> 20")
+   and [t["nice"] for t in HUBQ] == [50, 7, 50])
+ok("sync: tasks still at the old nice follow; one set by hand and other experiments are left alone",
+   A.sync() == ["a/1"] and [t["nice"] for t in HUBQ] == [20, 7, 50])
+ok("sync, next round: nothing more", A.sync() == [])
+E.load, TQ.read_tasks, TQ.write_tasks = saved
+
 print("all passed" if not fails else f"{fails} failures")
 sys.exit(1 if fails else 0)

@@ -405,6 +405,7 @@ ALERTS = dict(
     revive=("sub",),  # automatic pueued recovery (AUTO["revive"]) failed
     db=("machine",),  # the hub database cannot be written
     agent=("machine",),  # a machine's resident agent has not called the hub (sync/agent_box.py)
+    intent=("id",),  # taskq rm / move / now / after failed or gave up this round, or its step raised (queue/intents.py)
 )
 
 
@@ -738,6 +739,23 @@ EVENT_FIELDS = ("id", "time", "t", "source", "kind", "level", "key", "site", "ms
 EV_FAILED = "failed"  # event kind: a task failed on an executor without progress (relay released it so that machine does not take it again)
 EV_RETRY = "retry"  # event kind: an automatic retry (key: the task, or worker:<id> for a restarted pueue worker; site: the executor)
 EV_RETRY_CLEAR = "retry_clear"  # event kind: taskq retry; automatic retries of that key (on that site, or all when site is empty) count from here
+EV_INTENT = "intent"  # event kind: an operation that takes more than one round (queue/intents.py) was made or changed state
+
+# ---------------- intents (queue/intents.py; table intent in the hub database) ----------------
+INTENT_KINDS = dict(
+    rm="stop it now, remove it once its executor has released it",
+    move="stop it now (when it is elsewhere), then send it only to the target executor",
+    now="nice NOW_NICE; once it waits on an executor NOW_WAIT without starting, stop one lower-priority task of the same kind there and "
+        "resume that one once this one runs",
+    after="run one taskq command once a task is running, done or failed, rechecking the experiment table first",
+)
+INTENT_STATES = ("active", "done", "failed", "expired", "dropped")
+INTENT_FIELDS = ("id", "kind", "key", "args", "state", "t", "deadline", "note", "by")  # taskq intents --json rows
+INTENT_KEEP = 24 * 3600  # rm, move and now give up after this long (a stop they made is undone)
+AFTER_KEEP = 7 * 86400  # taskq after: default --within
+AFTER_CMDS = ("resume", "stop", "nice", "now", "move", "rm", "retry", "add")
+NOW_NICE = -1000  # taskq now: lower than any nice the tables use, so it is sent first and yielded to
+NOW_WAIT = 600  # taskq now: seconds waiting on an executor before one task there is stopped to make room
 RETRY_WORKER = "worker:"  # key prefix of a pueue worker's retry events (then its id)
 # source -> plain text log name (cfg.log; "health" is health.log): events from these sources also write a line there for tailing
 TEXT_LOGS = {"relay": "relay", "feed": "feed", "advance": "advance", "health": "health"}

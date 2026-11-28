@@ -82,8 +82,18 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq stop` | stop a task (not claimed again; running in this queue: stops within 30 seconds; sent to an executor: at the hub's next check) |
 | `taskq resume` | undo a stop |
 | `taskq retry` | run failed or skipped tasks again now: clears skips, failures and the failure tail here and on the executor (--site, --exp, --all-failed; worker <machine>/<worker>: restart a failed pueue worker) |
-| `taskq rm` | remove an unclaimed task |
+| `taskq rm` | remove tasks; one in use is stopped now and removed once its executor releases it |
 | `taskq wait` | wait until tasks are running, done, failed or settled, then exit (reads only; the exit code says which, `proto.WAIT_EXIT`) |
+
+**One-step operations** (kept in the hub database and carried on by each health check round; `taskq intents` lists them)
+
+| command | what it does |
+|---|---|
+| `taskq move` | send a task to one executor (`--to`; stops it where it is first; `--restart`: start over though half-done elsewhere) |
+| `taskq now` | put a task first in line; after 10 min waiting on an executor, one lower-priority task there makes room and resumes once this one runs (`--on`, `--no-preempt`) |
+| `taskq after` | run one taskq command once a task is running, done or failed (`<key> <when> [--within 7d] -- <command>`); the experiment table is checked again first |
+| `taskq cancel` | remove an experiment's tasks (`--exp`, `--only`; in use: stop, remove once released; `--hold`: hold their downstream steps) |
+| `taskq intents` | operations under way and what each is waiting for (`--all`, `--json`, `--drop ID`) |
 
 **Scheduling**
 
@@ -244,6 +254,7 @@ and `bin/taskq` mean the full suite):
 | `queue/relay_plugins.py`, `sites/names.py` | `test_relay_plugins.py` |
 | `queue/smoke_gate.py` | `test_smoke.py` |
 | `queue/switches.py`, `queue/consumers/drain.py` | `test_switches.py` |
+| `queue/intents.py` | `test_intents.py`, `test_refill.py` |
 | `queue/archive_task.sh` | `test_archive_task.sh` |
 | `queue/db.py`, `queue/events.py`, `queue/tasklog.py`, `queue/hubstate.py` | `test_db.py`, `test_tasklog.py`, `test_common.py`, `test_relay.py` |
 | `queue/cli_json.py` | `test_cli_json.py` |
@@ -296,7 +307,7 @@ Exit codes (`proto.EXIT`):
 |---|---|
 | `taskq` itself | 0 fine; 1 error; 2 usage error, no project found, not on the hub and no local queue; 5 data dir unreadable (not created, disk not mounted) |
 | `taskq show`, `set`, `stop`, `nice`, `add --exp` | 4 not in the queue (or experiment table) (several keys: 4 when any is missing) |
-| `taskq rm` | 0 removed; 3 not removed (assigned to an executor, claimed, its part log just changed, or its files could not be read); 4 none of them in the queue. Tasks waiting for it are not checked, and a step instance the experiment table still wants is queued again by the next advance (`HOLD` keeps it out) |
+| `taskq rm` | 0 removed, or stopped and removed once released (assigned or claimed tasks); 3 not removed (its part log just changed, or its files could not be read); 4 none of them in the queue. Tasks waiting for it are not checked, and a step instance the experiment table still wants is queued again by the next advance (`HOLD` keeps it out) |
 | `taskq status` | 1 queue unreadable |
 | `taskq worker next` | 0 claimed; 10 nothing to claim; 11 wait first (leave room for queued, recently stopped tasks); 12 paused (3 failures in 3 hours across the queue, data dir unreadable, or the on-disk format is not this code's: `taskq self migrate`) |
 | `taskq worker beat --strict` | 13 some claims are no longer ours |
