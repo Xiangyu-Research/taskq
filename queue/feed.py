@@ -36,11 +36,11 @@ def nobody(ctq):
                                                  worker=w, n=len(ks), keys=ks) for w, ks in by.items()}
 
 
-def run_all(s, dry=False):
-    """Called by health.py -> (messages, stuck {problem id: message})."""
+def run_all(s, dry=False, times=None):
+    """Called by health.py -> (messages, stuck {problem id: message}); times: relay.run_all's."""
     try:
         import relay as RL  # queue/relay.py
-        events, stuck = RL.run_all(s, dry=dry)
+        events, stuck = RL.run_all(s, dry=dry, times=times)
     except Exception as e:  # noqa: BLE001
         events, stuck = [], {alert_id("relay", "error"): f"queue/relay.py failed: {type(e).__name__}: {e}"[:300]}
     if events and not dry:

@@ -117,8 +117,10 @@ def problem_rows(probs, everything=False):
             pl = PL.problem(pid, p) if PL else p.get("msg")
         except Exception:  # noqa: BLE001
             pl = p.get("msg")
-        rows.append(dict(id=pid, **{k: p.get(k) for k in proto.OVERVIEW_PROBLEM if k not in ("id", "plain", "type")}, plain=pl,
-                         type=proto.alert_type(pid)))
+        r = dict(p, id=pid, plain=pl, type=proto.alert_type(pid))
+        if r.get("cause") is None:  # saved by a health check before causes
+            r.update(cause=proto.alert_cause(pid, p.get("data")), push=proto.alert_push(pid) and p.get("level") != "info", members=1)
+        rows.append({k: r.get(k) for k in proto.OVERVIEW_PROBLEM})
     return rows
 
 
@@ -143,7 +145,7 @@ def cmd_problems(argv):
     if notes:
         out += ["", f"Notes ({len(notes)})"] + [f"  {n}: {v['text']}" for n, v in notes.items()]
     if a.all:
-        seen = {x["id"] for x in o["attention"]} | {proto.alert_id("notice", n) for n in notes}
+        seen = {i for x in o["attention"] for i in [x["id"], *x.get("more", ())]} | {proto.alert_id("notice", n) for n in notes}
         rest = [r for r in rows if r["id"] not in seen]
         out += ["", f"Info and not reported yet ({len(rest)})"] + [f"  [{r['level']}] {r['plain'] or r['msg']}\n      {r['id']} (since {r['first']})"
                                                                 for r in rest] if rest else []

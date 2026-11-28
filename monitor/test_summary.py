@@ -94,6 +94,12 @@ _ids = SU.attention_lines(o, ids=True)
 ok("attention_lines: the same items for taskq status and taskq problems; with ids for notice ack",
    SU.attention_lines(o)[:3] == ["", "Needs you", "  ! something broke"] and _ids[3] == "      site:x (since 1)"
    and len(_ids) == 2 + 2 * len(AT) and SU.attention_lines(dict(o, attention=[])) == [])
+_same = [dict(probs[0], id=f"tqroom:k{i}", plain=f"k{i}: no room", cause="tqroom:a") for i in range(5)]
+_og = SU.build(dict(d, problems=_same), NOW)
+_gl = SU.attention_lines(_og, ids=True)
+ok("problems with one cause: one item under Needs you, with how many more and their ids",
+   [a["text"] for a in _og["attention"] if a["id"].startswith("tqroom")] == ["k0: no room (+4 more with the same cause)"]
+   and any("tqroom:k0 and 4 more (tqroom:k1, tqroom:k2, tqroom:k3, ...)" in x for x in _gl))
 Mx = {m["name"]: m for m in o["machines"]}
 ok("pueue machine: free slots = worker slots - running", Mx["site-pueue"]["slots"] == 3 and Mx["site-pueue"]["count"][SU.RUNNING] == 1
    and Mx["site-pueue"]["later"] == 0)

@@ -42,7 +42,7 @@ ok("hub queue unreadable: report nothing", F.nobody(None) == {})
 
 # ---------------- one entry point for sending tasks: feed.run_all hands off to relay.py ----------------
 rl, rcalls = types.ModuleType("relay"), []
-rl.run_all = lambda s, dry=False: (rcalls.append(dry), (["site-pueue claimed a/x/0"], {"site:site-pueue:x": "y"}))[1]
+rl.run_all = lambda s, dry=False, times=None: (rcalls.append(dry), (["site-pueue claimed a/x/0"], {"site:site-pueue:x": "y"}))[1]
 sys.modules["relay"] = rl
 hub = F.M.hub()
 ev, st = F.run_all(dict(taskq={hub: q_}, ok={}), dry=False)
@@ -52,7 +52,7 @@ ok("hands off to relay.run_all, merges messages and problems, adds feed:nobody, 
 n0 = len(open(os.environ["FEED_LOG"]).read())
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)
 ok("dry: asks relay as usual (with dry), writes no feed.log", rcalls == [False, True] and len(open(os.environ["FEED_LOG"]).read()) == n0)
-rl.run_all = lambda s, dry=False: 1 / 0
+rl.run_all = lambda s, dry=False, times=None: 1 / 0
 ev, st = F.run_all(dict(taskq={}, ok={}), dry=True)
 ok("relay.py fails: reports relay:error", list(st) == ["relay:error"] and "ZeroDivisionError" in st["relay:error"])
 del sys.modules["relay"]

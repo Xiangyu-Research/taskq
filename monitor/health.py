@@ -358,7 +358,8 @@ def check(s):
             r = ident[t["id"]]
             tname = t["label"] or f"#{t['id']}"
             st = t["status"]
-            if st in proto.PUEUE_LIVE or st == "Success":
+            step = (r or {}).get("step") or tname.split(":", 1)[0]
+            if st in proto.PUEUE_LIVE or st == "Success" or step in proto.RELAY_OWNED:
                 continue
             if stopped(t) and tname.startswith(proto.WORKER_LABEL):  # worker stopped at hours end or to yield a card; worker errors are reported by relay as site:<machine>:worker
                 continue
@@ -368,7 +369,7 @@ def check(s):
             if r and newer[r["step"], r["key"]] > t["id"]:  # the same step and key queued again later (re-queued after a failure): only the newest counts
                 continue
             add(alert_id("pueue", name, t["id"], str(t["end"])), f"{L(name)} task {t['id']} {tname} {st}",
-                level="info" if stopped(t) else "normal", kind="event", data=dict(label=tname, status=st))
+                level="info" if stopped(t) else "normal", kind="event", data=dict(label=tname, status=st, step=step))
 
     # --- disk, GPU log, reboot ---
     for name, pr in s["probe"].items():
@@ -409,62 +410,88 @@ def drop_acked(P, db, dry=False):
     return {k: p for k, p in P.items() if not (k in d and p.get("kind") == "event")}
 
 
-QUIET = ("notice", "undeclared")  # problem types (proto.alert_type) only listed in taskq problems, not pushed (the phone gets failures only; due notices are read at work time; writes outside the declared outputs)
-
-
 RANK = {"info": 0, "normal": 1, "urgent": 2}  # problem levels, least to most severe
+LEVEL = {v: k for k, v in RANK.items()}
 
 
 def night(now):
     return now.hour >= proto.NIGHT[0] or now.hour < proto.NIGHT[1]
 
 
+def cause_line(ids, cur):
+    """One push line for problems with the same cause: the worst, oldest one's wording, and how many more share it."""
+    ids = sorted(ids, key=lambda k: (-RANK.get(cur[k]["level"], 1), cur[k]["first"], k))
+    text = PL.problem(ids[0], cur[ids[0]])
+    return text if len(ids) == 1 else f"{text} (+{len(ids) - 1} more with the same cause; taskq problems lists them)"
+
+
 def update(P, now, db, dry=False):
-    """Compare with the last state: push new problems once they are old enough (plain.py wording; several in one round go as one message).
-    At night only urgent ones are pushed; the rest go with the first check in the morning."""
+    """Compare with the last state and push what became active, one line per cause (proto.ALERT_RULES; plain.py wording; one
+    message per round). A cause already pushed is pushed again only when its active problems double or get worse; a round
+    without any of them ends it (a state problem back within PROBLEM_KEEP is still not pushed again). At night only urgent
+    ones are pushed; the rest go with the first check in the morning."""
     old = NT.problems(db)[0] if db else {}
+    stamp = now.strftime("%Y-%m-%d %H:%M")
     keep = (now - timedelta(seconds=proto.PROBLEM_KEEP)).strftime("%Y-%m-%d %H:%M")
     gone = {k: v for k, v in (NT.D.get_meta(db, "gone_problems", {}) if db else {}).items() if v.get("gone", "") >= keep}
-    msgs, log = [], []
-    cur = {}
+    causes = NT.D.get_meta(db, "notified_causes", {}) if db else {}
+    log, cur, groups = [], {}, {}
     for pid, p in P.items():
         o = old.get(pid) or gone.get(pid) or {}  # a state problem gone for a while (flapping) keeps when it started and whether it was pushed
-        p["first"] = o.get("first", now.strftime("%Y-%m-%d %H:%M"))
+        p["first"] = o.get("first", stamp)
         p["notified"] = o.get("notified", False) and RANK.get(p["level"], 1) <= RANK.get(o.get("level"), 1)  # worse than when pushed: push again
         age = (now - datetime.strptime(p["first"], "%Y-%m-%d %H:%M")).total_seconds() / 60
         p["active"] = age >= p["after"]
-        if p["active"] and not p["notified"] and p["level"] != "info" and alert_type(pid) not in QUIET \
-                and (p["level"] == "urgent" or not night(now)):
-            msgs.append((pid, p))
+        p["cause"] = proto.alert_cause(pid, p.get("data"))
+        p["push"] = proto.alert_push(pid) and p["level"] != "info"
+        if p["active"] and p["push"]:
+            groups.setdefault(p["cause"], []).append(pid)
         if pid not in old:
             log.append(f"new problem {pid}: {p['msg']}")
         cur[pid] = p
+    for pid, p in cur.items():
+        p["members"] = len(groups.get(p["cause"], ())) or 1
     for pid in old:
         if pid not in cur:
             log.append(f"gone {pid}")
+    causes, msgs = {c: v for c, v in causes.items() if c in groups}, []
+    for c, ids in sorted(groups.items()):
+        fresh = [k for k in ids if not cur[k]["notified"]]
+        if not fresh or (night(now) and not any(cur[k]["level"] == "urgent" for k in fresh)):
+            continue
+        lvl = max(RANK.get(cur[k]["level"], 1) for k in ids)
+        prev = causes.get(c)
+        if prev is None or len(ids) >= 2 * prev.get("n", 1) or lvl > RANK.get(prev.get("level"), 1):
+            msgs.append((c, ids, lvl))
+        else:
+            for k in fresh:
+                cur[k]["notified"] = True  # covered by this cause's earlier push
     sent_ok = True
     if not dry:
         try:
             if msgs:
-                urgent = any(p["level"] == "urgent" for _, p in msgs)
-                texts = [PL.problem(pid, p) for pid, p in msgs]
+                urgent = any(lvl == RANK["urgent"] for _, _, lvl in msgs)
+                texts = [cause_line(ids, cur) for _, ids, _ in msgs]
                 push(texts[0] if len(texts) == 1 else "\n".join("- " + t for t in texts),
                      title=(f"{NAME}: urgent" if urgent else f"{NAME}: needs attention") + (f" ({len(texts)} items)" if len(texts) > 1 else ""),
                      priority="high" if urgent else "default", tags="rotating_light" if urgent else "warning")
-                for _, p in msgs:
-                    p["notified"] = True
+                for c, ids, lvl in msgs:
+                    for k in ids:
+                        cur[k]["notified"] = True
+                    causes[c] = dict(n=len(ids), level=LEVEL[lvl])
         except Exception as e:  # noqa: BLE001  push failed: try again next time
             sent_ok = False
             log.append(f"push failed: {e}")
         if db is not None and NT.D.writable(db):
-            NT.save_problems(db, cur, now.strftime("%Y-%m-%d %H:%M"))
+            NT.save_problems(db, cur, stamp)
             gone = {**{k: v for k, v in gone.items() if k not in cur},
-                    **{k: dict(v, gone=now.strftime("%Y-%m-%d %H:%M")) for k, v in old.items() if k not in cur and v.get("kind") == "state"}}
+                    **{k: dict(v, gone=stamp) for k, v in old.items() if k not in cur and v.get("kind") == "state"}}
             with NT.D.tx(db):
                 NT.D.set_meta(db, "gone_problems", gone)
+                NT.D.set_meta(db, "notified_causes", causes)
         import events
         events.lines("health", log, db=db)
-    return [p for _, p in msgs], sent_ok
+    return [cur[k] for _, ids, _ in msgs for k in ids], sent_ok
 
 
 def progress_snapshot(s, db):
@@ -482,6 +509,13 @@ def from_step(v):
     if isinstance(v, dict):
         return problem(v["msg"], level=v.get("level", "normal"), data=v.get("data"), after=v.get("after", 0))  # level="info": only waiting, recorded but not pushed
     return problem(v)
+
+
+def slowest(steps, n=3):
+    """The n slowest parts of a round (tick_steps: {part: seconds}; feed includes the relay parts listed after it) as text."""
+    skip = {"feed"} if any(k.startswith("relay ") for k in steps) else set()
+    top = sorted(((v, k) for k, v in steps.items() if k not in skip and isinstance(v, (int, float))), reverse=True)[:n]
+    return "; slowest parts: " + ", ".join(f"{k} {v / 60:.0f} min" if v >= 90 else f"{k} {v:.0f} s" for v, k in top) if top else ""
 
 
 def round_lock():
@@ -527,6 +561,22 @@ def main(argv=None):
         return 1
 
 
+def mark_live():
+    """Record this round's project as the hub's live one (proto.LIVE), for read-only commands run in other checkouts."""
+    import project
+    root = os.environ.get("TASKQ_REPO")
+    if not root or not os.path.isfile(os.path.join(root, project.NAME)):
+        return
+    path = os.path.expanduser(proto.LIVE)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            json.dump(dict(repo=os.path.realpath(root), origin=project.origin(root), t=int(time.time())), f)
+        os.replace(path + ".tmp", path)
+    except OSError as e:
+        print(f"{path} not written: {e}", file=sys.stderr)
+
+
 def heartbeat():
     """OUTPUTS heartbeat: fetch that URL after a finished round, so an outside service notices when rounds stop (clock gone, the
     hub down, the config broken, a crash every round)."""
@@ -563,6 +613,12 @@ def format_refused(dry):
 
 def one_round(a):
     t0 = time.time()
+    steps, lap0 = {}, [t0]
+
+    def lap(name):
+        t = time.time()
+        steps[name] = round(t - lap0[0], 1)
+        lap0[0] = t
     lock = None if a.dry_run or a.test else round_lock()  # held until this returns: rounds never overlap (manual tick, slow round)
     if not (a.dry_run or a.test) and lock is None:
         return 0
@@ -586,9 +642,11 @@ def one_round(a):
         push("test: a health check push reaches the phone", tags="tada")
         print("test message pushed")
         return 0
+    lap("open")
     s = gather()
     if not a.dry_run:
         s["records"] = C.update_records(lambda recs: C.sync_records(s["pueue"], recs))
+    lap("gather")
     P = check(s)
     try:
         revived, still = revive(s, pueue_seen(s, dry=a.dry_run), dry=a.dry_run)
@@ -617,6 +675,7 @@ def one_round(a):
         pid = alert_id("agent", name)
         if pid in P:
             P[pid] = dict(P[pid], msg=f"{P[pid]['msg']}; {why}")
+    lap("revive")
     # An error in these steps (including an import error) must not stop the health check itself (alerts and the ledger depend on it):
     # report it and carry on.
     events, stuck, after = list(revived), {}, []
@@ -630,24 +689,30 @@ def one_round(a):
                 s["taskq"][M.hub()], s["why"]["taskq"] = None, str(e)
     except Exception as e:  # noqa: BLE001
         done, stuck2 = [], {"advance:error": f"queue/advance.py failed: {type(e).__name__}: {e}"[:300]}
+    lap("advance")
+    relay_t = {}
     try:
         import feed  # queue/feed.py: the only way tasks are sent, hands over to relay.py
-        ev, st = feed.run_all(s, dry=a.dry_run)
+        ev, st = feed.run_all(s, dry=a.dry_run, times=relay_t)
         events.extend(ev)
         stuck.update(st)
     except Exception as e:  # noqa: BLE001
         stuck["feed:error"] = f"queue/feed.py failed: {type(e).__name__}: {e}"[:300]
+    lap("feed")
+    steps.update({f"relay {k}": v for k, v in relay_t.items()})
     for pid, v in {**stuck, **stuck2}.items():
         P[pid] = from_step(v)
     took = NT.D.get_meta(db, "tick_took") if db is not None else None
     if isinstance(took, (int, float)) and took > proto.TICK_SLOW:
         P[alert_id("health", "slow")] = problem(f"the last health check round took {took / 60:.0f} min (the clock starts one every 30 min): "
-                                                "rounds started while one runs are skipped, so checks and sending happen less often")
+                                                "rounds started while one runs are skipped, so checks and sending happen less often"
+                                                + slowest(NT.D.get_meta(db, "tick_steps") or {}), data=dict(took=took))
     if not a.dry_run and (db is None or not NT.D.writable(db)):
         P[alert_id("db", M.hub())] = problem(f"cannot write the hub database {NT.D.path()} (on a network disk, or created by a newer "
                                              "taskq): every check will push these problems again", level="urgent")
     P = drop_acked(P, db, dry=a.dry_run)
     update(P, s["now"], db, dry=a.dry_run)
+    lap("push")
     if not a.dry_run and db is not None and NT.D.writable(db):
         try:
             progress_snapshot(s, db)
@@ -656,11 +721,13 @@ def one_round(a):
         try:
             with NT.D.tx(db):
                 NT.D.set_meta(db, "tick_took", round(time.time() - t0))
+                NT.D.set_meta(db, "tick_steps", steps)
                 NT.D.set_meta(db, "crash_error", None)
         except Exception as e:  # noqa: BLE001  locked by a reader right now: next round
             print(f"round time not recorded: {e}", file=sys.stderr)
     if not a.dry_run:
         heartbeat()
+        mark_live()
     if a.dry_run:
         probs = []
         for pid, p in sorted(P.items()):

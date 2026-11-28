@@ -47,7 +47,10 @@ plugins = ["plugins"]    # plugins dir (recipes.py, relay_plugins.py, consumers.
 ```
 
 Project lookup order: `taskq --project <dir>` (passed to children through `TASKQ_PROJECT`) > search upward from the current dir for
-`.taskq.toml`. The config dir can also be set with `TASKQ_CONFIG`.
+`.taskq.toml`. The config dir can also be set with `TASKQ_CONFIG`. Each health round on the hub writes `~/.config/taskq/live.json`
+(the repo it runs and its git origin): read-only commands (`status`, `problems`, `events`, `show`, `log`, `progress`, `wait`, ...) run
+in another checkout with the same origin, or outside any project, read that repo instead and say so on stderr; `--here`, `--project`
+and `TASKQ_PROJECT` turn this off, and commands that change something never switch.
 
 | file | what it holds |
 |---|---|
@@ -80,6 +83,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq resume` | undo a stop |
 | `taskq unskip` | let executors that released a task claim it again (--worker: only that one) |
 | `taskq rm` | remove an unclaimed task |
+| `taskq wait` | wait until tasks are running, done, failed or settled, then exit (reads only; the exit code says which, `proto.WAIT_EXIT`) |
 
 **Scheduling**
 
@@ -137,7 +141,7 @@ Read-only commands only read; commands that change the queue run on the hub. Com
 | `taskq tunnel push-dirs` | this machine -> the other side, whole subdirs, verified afterwards |
 | `taskq gpu usage` | who used each GPU by hour, and each use by someone else ([dir] [--me account] [--days N] [--json]) |
 | `taskq pad room` | let the pad grow to floor and wait for it to say ready ([--wait seconds]; does nothing without a pad) |
-| `taskq pueue-add` | add a one-off task to this machine's pueue manual group (manual_groups; working dir is this machine's repo) |
+| `taskq pueue-add` | add a one-off task to this machine's pueue manual group (manual_groups; working dir is this machine's repo; the command is written to a script file and queued as `bash <file>`) |
 | `taskq pueue-status` | each pueue machine's queue (read-only) |
 | `taskq check` | check the whole project (config, plugins, experiment table, all tasks) |
 | `taskq db migrate` | create the database or run pending migrations (hub only) |
@@ -201,7 +205,7 @@ and `bin/taskq` mean the full suite):
 <!-- tests -->
 | changed | run |
 |---|---|
-| `bin/taskq` | `test_cli.py`, `test_cli_json.py`, `test_readme.py` |
+| `bin/taskq`, `monitor/wait.py` | `test_cli.py`, `test_cli_json.py`, `test_readme.py` |
 | `queue/run_tests.py` | `test_run_tests.py` |
 | `README.md`, `queue/README.md`, `queue/schema.py` | `test_readme.py`, `test_check.py` |
 | `queue/proto.py` | `test_protocol.py`, `test_core_clean.py`, then the full suite |

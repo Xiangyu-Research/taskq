@@ -13,6 +13,7 @@ current dir. Standard library only, no core modules imported.
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 NAME = ".taskq.toml"
@@ -87,6 +88,16 @@ def env_of(root):
     if "plugins" in conf:
         out["TASKQ_PLUGINS"] = os.pathsep.join(os.path.join(root, p) for p in _plugins(conf["plugins"]))
     return out
+
+
+def origin(root):
+    """The git origin of the repo at root, as host/path (no scheme, user or .git; lower case); None when unknown."""
+    try:
+        url = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.fullmatch(r"(?:[a-z+]+://)?(?:[^@/]+@)?([^:/]+)[:/](.+?)(?:\.git)?/?", url)
+    return f"{m.group(1)}/{m.group(2)}".lower() if m else (url.lower() or None)
 
 
 def export(root, force=False):

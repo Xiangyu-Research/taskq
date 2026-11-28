@@ -98,8 +98,19 @@ def build(d, now):
     relay = d["relay"]
     tasks = TS.compute(list(qt.values()), relay, d.get("stored", ()), now)
     machines = []
-    attention = [dict(id=p["id"], text=p["plain"] or p["msg"], since=p.get("first")) for p in d["problems"]
-                 if P.alert_type(p["id"]) != "notice"]  # due notices are listed under Notes
+    attention, by_cause = [], {}
+    for p in d["problems"]:
+        if P.alert_type(p["id"]) == "notice":  # due notices are listed under Notes
+            continue
+        c = p.get("cause") or p["id"]
+        if c in by_cause:
+            by_cause[c]["more"].append(p["id"])
+            continue
+        by_cause[c] = dict(id=p["id"], text=p["plain"] or p["msg"], since=p.get("first"), more=[])
+        attention.append(by_cause[c])
+    for a in attention:
+        if a["more"]:
+            a["text"] += f" (+{len(a['more'])} more with the same cause)"
     for n in M.executors():
         r = relay.get(n) if isinstance(relay.get(n), dict) else {}
         age = now.timestamp() - (r.get("time") or 0)
@@ -143,7 +154,9 @@ def attention_lines(o, ids=False):
     for a in o["attention"]:
         out.append(f"  ! {a['text']}")
         if ids:
-            out.append(f"      {a['id']}" + (f" (since {a['since']})" if a.get("since") else ""))
+            more = a.get("more") or []
+            out.append(f"      {a['id']}" + (f" and {len(more)} more ({', '.join(more[:3])}{', ...' if len(more) > 3 else ''})" if more else "")
+                       + (f" (since {a['since']})" if a.get("since") else ""))
     return ["", "Needs you"] + out if out else []
 
 

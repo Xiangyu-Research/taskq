@@ -295,8 +295,13 @@ ignores the file.
 | training output | part log `data/logs/tasks/<key>__<job>_part<part>.log` (on the executor; the fetch brings it to the same place in the store) |
 | whether config is right | `taskq check` (`--quick` does not contact the store) |
 
-Pushed problem ids are `<kind>:<machine or key>...` (kinds in `proto.ALERTS`); a problem is pushed once and disappears on its own when
-fixed. "Things that happened" such as a reboot are acknowledged with `taskq notice ack`.
+Problem ids are `<kind>:<machine or key>...` (kinds in `proto.ALERTS`); each problem is kept and listed on its own and disappears on its
+own when fixed. Pushes go by cause (`proto.ALERT_RULES`: a cause template per kind, and kinds never pushed): problems with the same
+cause are one line in one push per round ("+N more with the same cause"), pushed again only when their number doubles or their level
+rises, and `taskq status` lists them as one item. `taskq problems --json` gives each problem's `cause`, `push` and `members`. pueue
+tasks of transfer and env steps (`proto.RELAY_OWNED`) are reported by those steps, not again as `pueue:` problems. "Things that
+happened" such as a reboot are acknowledged with `taskq notice ack`. A slow round (`health:slow`) names its three slowest parts (the
+`tick_steps` meta row holds each part's seconds).
 
 ## How it runs
 

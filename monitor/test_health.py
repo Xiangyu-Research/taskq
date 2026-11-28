@@ -90,8 +90,14 @@ s = snap(pueue={PH: {"groups": {}, "tasks": [
     task(5, "cpu", "Killed", "bash v", "killed", end=NOW - timedelta(hours=1)),
     task(6, "gpu1", "Failed (137)", "bash u", "oom", end=NOW - timedelta(hours=1)),
     task(8, "gpu0", "Killed", "bash t", "worker:w1", end=NOW - timedelta(hours=1)),
-    task(9, "gpu0", "Failed (1)", "bash s", "worker:w2", end=NOW - timedelta(hours=1))]}})
+    task(9, "gpu0", "Failed (1)", "bash s", "worker:w2", end=NOW - timedelta(hours=1)),
+    task(10, "cpu", "Failed (1)", "bash r", "relay_fetch:k1", end=NOW - timedelta(hours=1)),
+    task(11, "cpu", "Failed (1)", "bash q", "env_build:x:nn", end=NOW - timedelta(hours=1))]}})
 P = H.check(s)
+ok("a failed transfer, fetch or env build is not reported again as a pueue failure (relay.py reports it)",
+   not any(p.startswith((f"pueue:{PH}:10:", f"pueue:{PH}:11:")) for p in P))
+ok("a pueue failure's cause is its machine and step", H.proto.alert_cause(next(p for p in P if p.startswith(f"pueue:{PH}:1:")),
+                                                                         P[next(p for p in P if p.startswith(f"pueue:{PH}:1:"))]["data"]) == f"pueue:{PH}:infer_a")
 ok("failed tasks and dependency failures are both reported", any(p.startswith(f"pueue:{PH}:1:") for p in P) and any(p.startswith(f"pueue:{PH}:2:") for p in P))
 _P3 = H.check(snap(pueue={PH: {"groups": {}, "tasks": [task(31, "other", "Failed (1)", "x", "someone_else", end=NOW - timedelta(hours=1))]}}))
 ok("failures in a pueue group the machine table does not give this machine are not reported", not any(p.startswith(f"pueue:{PH}:31:") for p in _P3))
@@ -400,6 +406,22 @@ ok("a pushed problem that gets worse (disk normal -> urgent) is pushed again, on
 EV = {"pueue:site-pueue:9:x": dict(msg="task failed", level="normal", kind="event", after=0)}
 ok("an event (happened once) that comes back after going away is pushed again", len(run(EV, d4 + timedelta(hours=2))) == 1
    and run({}, d4 + timedelta(hours=2, minutes=30)) == [] and len(run(EV, d4 + timedelta(hours=3))) == 1)
+ROOM = {f"tqroom:k{i}": dict(msg=f"k{i}: no room", level="normal", kind="state", after=0, data=dict(key=f"k{i}", places=["b", "a"]))
+        for i in range(192)}
+d5 = datetime(2026, 10, 20, 12, 0)
+out = run({**ROOM, **F}, d5)
+ok("192 problems with one cause: one line in one push, with how many share it", len(out) == 1 and " (2 items)" in out[0][0]
+   and out[0][1].count("+191 more with the same cause") == 1 and out[0][1].count("\n- ") == 1)
+_rows = {r["id"]: r for r in NT.problem_rows(NT.problems(_wdb)[0])}
+ok("problem rows carry cause, push and members", _rows["tqroom:k5"]["cause"] == "tqroom:a,b" and _rows["tqroom:k5"]["members"] == 192
+   and _rows["tqroom:k5"]["push"] is True and _rows["down:site-slurm"]["members"] == 1)
+MORE = {f"tqroom:m{i}": dict(ROOM["tqroom:k0"], data=dict(key=f"m{i}", places=["a", "b"])) for i in range(150)}
+ok("more problems with a cause already pushed: not pushed until they double", run({**ROOM, **MORE}, d5 + timedelta(minutes=30)) == [])
+MORE2 = {f"tqroom:n{i}": dict(ROOM["tqroom:k0"], data=dict(key=f"n{i}", places=["a", "b"])) for i in range(50)}
+out = run({**ROOM, **MORE, **MORE2}, d5 + timedelta(hours=1))
+ok("pushed again once they double (192 -> 392)", len(out) == 1 and "+391 more" in out[0][1])
+ok("a round without the cause ends it: the next one is pushed", run({}, d5 + timedelta(hours=2)) == []
+   and len(run({"tqroom:z": ROOM["tqroom:k0"]}, d5 + timedelta(hours=3))) == 1)
 N = {"notice:board": dict(msg="board waiting for confirmation", level="normal", kind="state", after=0)}
 ok("notices are not pushed, only listed under problems", run(N, datetime(2026, 10, 17, 11, 30)) == []
    and "notice:board" in NT.problems(_wdb)[0])
@@ -410,7 +432,7 @@ got = {}
 H.gather, H.update = (lambda: snap()), (lambda P, now, db, dry=False: got.update(P))
 fd = types.ModuleType("feed")
 feed_calls = []
-fd.run_all = lambda s, dry=False: (feed_calls.append(dry), ([], {"x:y": "z"}))[1]
+fd.run_all = lambda s, dry=False, times=None: (feed_calls.append(dry), ([], {"x:y": "z"}))[1]
 sys.modules["feed"] = fd
 sys.modules["relay"] = None  # health.py does not call relay.py directly (sending only enters through feed.run_all)
 adv = types.ModuleType("advance")
@@ -468,13 +490,17 @@ H.main([])
 _db = NT.open_db(write=False)
 ok("lock free: the round runs, takes the lock (its pid in the lock file) and records how long it took",
    len(gathered) == 2 and isinstance(NT.D.get_meta(_db, "tick_took"), int)
+   and {"gather", "advance", "feed", "push"} <= set(NT.D.get_meta(_db, "tick_steps") or {})
    and open(os.path.join(H.HDIR, H.proto.TICK + ".lock")).read().split()[0] == str(os.getpid()))
 _wdb = NT.open_db()
 with NT.D.tx(_wdb):
     NT.D.set_meta(_wdb, "tick_took", H.proto.TICK_SLOW + 300)
+    NT.D.set_meta(_wdb, "tick_steps", {"gather": 30, "feed": 1500, "relay prepare:lab": 900, "relay finish:lab": 400, "relay assign": 5, "push": 2})
 got.clear()
 H.main([])
 ok("the last round took longer than TICK_SLOW: reported as a problem", "health:slow" in got and "took" in got["health:slow"]["msg"])
+ok("the slow round names its three slowest parts", "slowest parts: relay prepare:lab 15 min, relay finish:lab 7 min, gather 30 s"
+   in got["health:slow"]["msg"])
 pinged, _real_open, _real_outputs = [], H.urllib.request.urlopen, H.cfg.outputs
 
 
@@ -550,8 +576,8 @@ ok("plain: without data it falls back to the message",
    PL.problem("unread:hub", dict(msg="original message")) == "original message" and PL.problem(f"site:{PH}:fail:{MEN0}", dict(msg="m")) == "m")
 ok("a stuck report from an executor may be a message or dict(msg, data)", H.from_step("m") == dict(msg="m", level="normal", kind="state", after=0)
    and H.from_step(dict(msg="m", data=dict(n=1)))["data"] == dict(n=1))
-ok("an executor report that is only waiting (level=info) is recorded, not pushed; writes outside the declared outputs are not pushed",
-   H.from_step(dict(msg="m", data=dict(n=1), level="info"))["level"] == "info" and "undeclared" in H.QUIET)
+ok("an executor report that is only waiting (level=info) is recorded, not pushed; notices are not pushed",
+   H.from_step(dict(msg="m", data=dict(n=1), level="info"))["level"] == "info" and not H.proto.alert_push("notice:x"))
 ok("plain: every step in the experiment table has a display name (core + plugin labels.py STEPS)",
    all(PL.step_name(n) != n for n in PL.table_steps()) and PL.step_name("nope") == "nope")
 

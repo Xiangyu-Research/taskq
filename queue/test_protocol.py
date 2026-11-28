@@ -165,6 +165,25 @@ class NoCopies(unittest.TestCase):
         self.assertIn("revive", seen)  # the scan finds them
         self.assertEqual({k: f for k, f in seen.items() if k not in proto.ALERTS}, {}, "alert types must be in proto.ALERTS")
 
+    def test_status_doc(self):
+        """taskq status --help describes every --json field."""
+        doc = {k for _, d in proto.STATUS_DOC for k in d}
+        want = set(proto.STATUS_TOP + proto.TASK_FIELDS + proto.STATUS_FIELDS + proto.OVERVIEW_TOP + proto.OVERVIEW_TASK + proto.OVERVIEW_TASK_QUEUE)
+        self.assertEqual(want - doc, set())
+        self.assertEqual(doc - want, set())
+
+    def test_alert_rules(self):
+        """ALERT_RULES only names alert types; a cause is filled from the id's parts and the data, else it is the id."""
+        self.assertEqual(set(proto.ALERT_RULES) - set(proto.ALERTS), set())
+        self.assertEqual(proto.alert_parts("pueue:box:12:2026-11-14T17:24:27+08:00"), dict(machine="box", id="12", end="2026-11-14T17:24:27+08:00"))
+        self.assertEqual(proto.alert_parts("site:lab:fail"), dict(machine="lab", sub="fail"))
+        self.assertEqual(proto.alert_cause("tqroom:a/b", dict(key="a/b", places=["lab", "dicc1"])), "tqroom:dicc1,lab")
+        self.assertEqual(proto.alert_cause("site:lab:orphan:a/b"), "site:lab:orphan")
+        self.assertEqual(proto.alert_cause("tqroom:a/b", dict(key="a/b")), "tqroom:a/b")
+        self.assertEqual(proto.alert_cause("disk:box"), "disk:box")
+        self.assertFalse(proto.alert_push("notice:x"))
+        self.assertTrue(proto.alert_push("disk:box"))
+
     def test_run_env_registered(self):
         """Env vars of workers and tasks: every WORKER_* / TASK_* / RUN_TASK_* name in the core is in proto.RUN_ENV, or a shell
         variable spec.py shell prints (proto.SHELL_VARS), or the name of a proto / schema constant (TASK_LOGS, WORKER_FIELDS, ...);

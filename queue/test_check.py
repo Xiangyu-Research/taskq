@@ -39,6 +39,13 @@ _files = B.contents(None)
 ok("bundle: plugin modules left out of the bundle (bundle_skip) are reported; the full bundle misses none",
    C.missing_plugins(_files) == [] and C.missing_plugins({k: v for k, v in _files.items() if k != PLUG}) == [PLUG])
 
+_named = C.named_but_left_out({"a/run.sh": ("cat $HERE/model.digest; see LICENSE and notes.md\n", True), "a/x.py": ("open('big.json')", False)},
+                              {"a/model.digest": "suffix", "a/LICENSE": "suffix", "a/notes.md": "suffix", "a/big.json": "too large",
+                               "a/skip.py": "bundle_skip", "a/unused.dat": "suffix"})
+ok("bundle: tracked files left out by suffix or size and named in bundled code are reported (not docs, extensionless names, bundle_skip)",
+   _named == [("a/big.json", "too large", "a/x.py"), ("a/model.digest", "suffix", "a/run.sh")])
+ok("bundle: left_out lists none of the bundle's files", not set(B.left_out(None)) & set(_files))
+
 FAST = ("machines", "policy", "plugins", "experiments", "flow", "tasks", "steps")
 rc, out, err = run("--quick")
 ok("fixed config: exit 0, every --quick group checked, no ERROR", rc == 0 and "ERROR [" not in err and all(g in out for g in FAST))

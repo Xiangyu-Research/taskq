@@ -9,7 +9,7 @@ Goal: answer "how is it going, does anything need me, when will it finish" withi
 
 ## Project notes
 
-The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. Outside any project, the hub's agent clock names it (`grep -h -- --project ~/.config/taskq/agent-*.clock.json`). If `<project root>/.claude/taskq/check.md` exists, read it first and follow it: it adds the project's own checks, report format and rules on what to fix alone and what to ask about, and wins over this file on project matters.
+The project root is `$TASKQ_PROJECT`, or the nearest directory above the current one holding `.taskq.toml`. On the hub, read-only commands (`status`, `problems`, `events`, `show`, `log`, `progress`, `wait`) run outside any project or in another checkout of the same repo read the repo the health check runs, and say so on stderr: no `cd` is needed (`--here` reads this checkout instead). If `<project root>/.claude/taskq/check.md` exists, read it first and follow it: it adds the project's own checks, report format and rules on what to fix alone and what to ask about, and wins over this file on project matters.
 
 ## Check (send what can run in parallel together)
 
@@ -20,7 +20,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
    - One executor's queue, disk, bundle and jobs: `taskq site status <machine>`. Use a name from `taskq machines names` or the label shown in event text.
    - pueue tasks, including those finished in the last 24 hours: `taskq pueue-status`.
    - What the scheduler did recently: `taskq events --since <time>`, filtered with `--source relay|feed|advance|health|notify|note`.
-   - Problems and how long they have lasted: `taskq problems --all` (`--json` for every field), `taskq events --source health --since 1d`.
+   - Problems and how long they have lasted: `taskq problems --all` (`--json` for every field), `taskq events --source health --since 1d`. Problems with the same cause (such as one disk short for many tasks) are one line in the push and one item in `taskq status`, "+N more with the same cause"; `taskq problems --json` gives each one's `cause` and `members`.
    - One task: `taskq show <key>`, `taskq log <key>`, `taskq progress --key <key>`.
 
 ## When something is wrong
@@ -43,5 +43,5 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
 - One or two lines per machine: what is running, how the GPUs are used, expected finish (to the hour, in the user's time zone).
 - For a fault, one or two sentences on cause and impact: was progress lost, was any data affected.
 - Then what needs handling: what is already recovering by itself, what a session should do, what the user must decide. Omit this section when empty.
-- Plain language, no raw output, no invented abbreviations. Do not promise to keep watching and do not start polling.
+- Plain language, no raw output, no invented abbreviations. Do not promise to keep watching and do not start polling. When a specific result is needed (a task running again after a fix), one background `taskq wait <key> --until running|done|failed|settled --timeout <time>` waits and ends by itself; its exit code says how it ended.
 - A check writes no log. Record what you fixed with `taskq note --kind fix`, or as the project notes say.

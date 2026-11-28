@@ -32,6 +32,7 @@ ROOT = dict(
 )
 # where the scheduler core sits inside a bundle (relative to the bundle root): queued Slurm jobs and worker commands find the launcher there
 BUNDLE_CORE = "scripts/taskq"
+BUNDLE_DOCS = (".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf", ".ipynb", ".html", ".tex", ".bib", ".docx", ".pptx", ".xlsx")  # left out of the bundle by design: taskq check does not look for code naming them
 # launcher path in bundles from before the core moved to BUNDLE_CORE: workers started from such a bundle switch to this path under
 # code/current; every bundle has a generated forwarder there (relay_bundle.contents) until no such worker runs
 OLD_LAUNCHER = "scripts/queue/worker_start.sh"
@@ -173,6 +174,7 @@ ORPHAN_KEEP = 24 * 3600      # an orphan blob on the store is removed once its l
 ORPHAN_GC_TIMEOUT = 1500     # the orphan sweep walks the store's whole data and blob dirs (cold metadata: 10+ minutes); under a health round's 30 minutes
 MISSING_TIMEOUT = (600, 0.05)  # site_ops missing before staging: seconds, plus this many per file (one stat each, slow on cold metadata)
 SITE_STATUS_TIMEOUT = 90     # reading an executor's status: skip it this round when its storage hangs this long
+LIVE = "~/.config/taskq/live.json"  # the hub's live project {repo, origin, t}: each health round writes it; read-only commands run elsewhere read that project (bin/taskq)
 NIGHT = (22, 8)              # 22:00-08:00 (hub time): only urgent problems are pushed
 SPEC_MAX = 120 * 1024        # bytes: most a sent spec holds (workers pass it on stdin; it still fits in one command-line argument, Linux allows 128 KB, for run_task.sh --spec <JSON> by hand)
 TICK_SLOW = 25 * 60          # a health check round longer than this is reported (the hub's clock starts one every 30 minutes)
@@ -269,6 +271,41 @@ RELEASE_WHY = dict(back="back",        # normal release: stopped, time limit, st
                    failed="failed",    # release --failed
                    skip="skip",        # release --skip: this machine cannot run it
                    missing="missing")  # missing: missing inputs
+# taskq status --help: what the --json fields mean (test_protocol: every name in STATUS_TOP, TASK_FIELDS, STATUS_FIELDS,
+# OVERVIEW_TOP, OVERVIEW_TASK and OVERVIEW_TASK_QUEUE is described)
+STATUS_DOC = (
+    ("taskq status --json: the hub queue", dict(
+        enabled="the hub queue's master switch is on (tasks are sent out)",
+        tasks="one entry per task (smoke tasks left out), fields below",
+        recent_failures=f"failures recorded in the last {PAUSE_WINDOW // 3600} h; paused is true at {PAUSE_N} or more",
+        paused="claiming is paused after too many recent failures",
+        recent_skips="{executor: how many tasks it released as unable to run in the last 24 h}")),
+    ("each task", dict(
+        order="position it was added in", nice="priority, lower runs first", key="task id", exp="experiment table entry (null: added by recipe or sheet)",
+        recipe="recipe name", params="recipe parameters", spec="the resolved spec (null when it cannot be resolved)",
+        added="when it entered this queue (seconds)",
+        state="free | claimed | stale (claim expired) | busy (its part log moves outside the queue) | input (missing inputs) | stopped | failed | done | bad (spec unreadable)",
+        note="state in words: who holds it, why it stopped, what is missing", worker="claiming job or executor", host="host of that job",
+        since="claimed at (seconds)", assigned="executor it is assigned to (claimed by the hub for an executor)",
+        input_since="missing inputs recorded at (seconds)", beat="last heartbeat (seconds)", log_age="seconds since its part log changed",
+        task_log_age="seconds since the claiming job's own log changed", out_age="seconds since its output dir changed (claimed tasks)",
+        failures="failures counted against it", skipped_by="executors that released it as unable to run it",
+        progress="half-done somewhere (has epochs or a checkpoint)", fail_tail="the last failure's log tail, or null")),
+    ("taskq status --all --json: every task with its copies (overview.py)", dict(
+        version="format version", now="when it was built", hub="hub machine", data="data dir", queue="hub queue switch and readability",
+        sources="where state was read and when", machines="each machine: reachable, GPUs, pueue", tasks="one entry per task, fields below",
+        health="the last health check's problems (taskq problems --json fields)", code="code version")),
+    ("each task (--all)", dict(
+        key="task id", exp="experiment", recipe="recipe", params="parameters", names="experiment names filled in", owner="who added it",
+        out="output dir", checkpoint="checkpoint file", queue="its hub queue entry: rank, state, nice, assigned, note, worker, host (null: not queued)",
+        copy="the best copy of its results: where, epochs, last, metrics", total="rounds in all", progress="fraction done (0-1)",
+        eta="expected finish (seconds)", parts="training parts (part logs)", commits="code commits it ran with",
+        word="where it is in plain words, as taskq status shows it", where="machine it runs on or waits at", since="started there (seconds; null unless running)")),
+    ("its queue entry (--all)", dict(
+        rank="position among unfinished tasks", state="hub queue state (above)", nice="priority", assigned="executor",
+        note="state in words", worker="claiming job", host="host")),
+)
+
 COLLECT_FIELDS = ("key", "out", "done", "log", "progress", "info", "metrics", "resume")  # spec fields spec.collect wants
 COLLECT_TOP = ("tasks", "seglogs", "stuck", "errors")  # result of spec.collect
 COLLECT_TASK = ("runs", "final", "metrics", "debug", "resumable")  # per task
@@ -306,9 +343,19 @@ OVERVIEW_PUEUE = ("groups", "tasks", "error")              # each task: qs --jso
 OVERVIEW_TASK = ("key", "exp", "recipe", "params", "names", "owner", "out", "checkpoint", "queue", "copy", "total", "progress",
                  "eta", "parts", "commits", "word", "where", "since")  # word, where, since (start on the executor, seconds; null unless running): taskstate.py (as taskq status shows it)
 OVERVIEW_TASK_QUEUE = ("rank", "state", "nice", "assigned", "note", "worker", "host")  # rank: position among unfinished tasks in the hub queue (1-based)
+# taskq wait (monitor/wait.py): --until name -> the task words (TASK_WORDS keys) that count as reached; a task in another settled word
+# ends the wait early; exit codes, first that applies: timeout, gone (a key not known, or removed from the queue without results), other, reached
+WAIT_UNTIL = dict(running=("running", "overdue", "back", "done"), done=("done",), failed=("failed", "bad"),
+                  settled=("done", "failed", "bad", "stopped"))
+WAIT_SETTLED = ("done", "failed", "bad", "stopped")
+WAIT_EXIT = dict(reached=0, other=1, usage=2, gone=4, timeout=124)
+WAIT_POLL = (60, 600)  # first interval, cap (doubles each time)
+WAIT_TIMEOUT = 24 * 3600
+
 OVERVIEW_COPY = ("where", "source", "final", "epochs", "start", "last", "runs", "metrics", "debug", "resumable")
 OVERVIEW_PART = ("name", "job", "part", "machine", "trained", "commit")  # part log: job, part number, machine, at least one round done, code commit
-OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain", "type")  # kind: event | state; plain: push text in plain words (plain.problem); type: alert_type(id)
+OVERVIEW_PROBLEM = ("id", "msg", "level", "kind", "first", "active", "notified", "plain", "type",  # kind: event | state; plain: push text in plain words (plain.problem); type: alert_type(id)
+                    "cause", "push", "members")  # cause: alert_cause (pushed as one line); push: this problem is pushed at all; members: problems with the same cause
 SUMMARY_WINDOW = 24 * 3600  # taskq status (monitor/summary.py): "due in the next" / "last" window
 SUMMARY_OVERDUE = 3600  # a running task this far past its estimated finish is listed under "Needs you"
 # where a task is, in plain words (queue/taskstate.py, the one rule; taskq status, taskq status --all --json word, the progress
@@ -336,6 +383,26 @@ ALERTS = dict(
 )
 
 
+# how each alert type is pushed (health.update; a type not listed: pushed, its own cause). push=False: only listed by taskq problems.
+# cause: a template over the id's parts (named as in ALERTS) and the problem's data; problems with the same cause go out as one
+# line, pushed again only when their number doubles or their level rises (a cause unseen for PROBLEM_KEEP starts over);
+# a template whose fields are missing falls back to the id
+ALERT_RULES = dict(
+    notice=dict(push=False),
+    tqroom=dict(cause="tqroom:{places}"),
+    tqblocked=dict(cause="tqblocked:{places}"),
+    relaytask=dict(cause="relaytask:{error}"),
+    relayfetch=dict(cause="relayfetch:{machine}:{step}"),
+    relaystage=dict(cause="relaystage:{machine}:{step}"),
+    relayadd=dict(cause="relayadd:{machine}:{op}"),
+    site=dict(cause="site:{machine}:{sub}"),
+    smoke=dict(cause="smoke:{machine}"),
+    bundlegate=dict(cause="bundlegate:{machine}"),
+    advance=dict(cause="advance:{step}"),
+    pueue=dict(cause="pueue:{machine}:{step}"),
+)
+
+
 def alert_id(kind, *args):
     """A problem's id: its type (a key of ALERTS, such as notice or site), then its parts, joined by ':'."""
     return ":".join([kind] + [str(a) for a in args if a not in (None, "")])
@@ -345,6 +412,30 @@ def alert_type(pid):
     """A problem id -> its type (the first part, alert_id's kind): the only way to tell problems apart by what they are about.
     A problem's kind field says something else: event (happened once, can be acknowledged) or state (lasts until solved)."""
     return str(pid).split(":", 1)[0]
+
+
+def alert_parts(pid):
+    """A problem id -> {part name: value}, named as in ALERTS (the last part keeps any further ':')."""
+    kind, _, rest = str(pid).partition(":")
+    names = ALERTS.get(kind, ())
+    return dict(zip(names, rest.split(":", len(names) - 1))) if names and rest else {}
+
+
+def alert_cause(pid, data=None):
+    """A problem -> its cause (ALERT_RULES); the id itself when its type has no template or the template's fields are missing."""
+    t = ALERT_RULES.get(alert_type(pid), {}).get("cause")
+    if not t:
+        return str(pid)
+    f = {k: ",".join(sorted(map(str, v))) if isinstance(v, (list, tuple, set)) else v for k, v in (data or {}).items()}
+    try:
+        return t.format(**{**f, **alert_parts(pid)})
+    except (KeyError, IndexError, ValueError):
+        return str(pid)
+
+
+def alert_push(pid):
+    """Whether problems of this type are pushed at all (ALERT_RULES push)."""
+    return ALERT_RULES.get(alert_type(pid), {}).get("push", True)
 
 
 # a problem's value: message text (str), or dict(msg=text, data={…}, after=minutes before reporting, level="info" (recorded, not
@@ -490,6 +581,7 @@ ALERTS["smoke"] = ("machine", "kind")  # smoke failed (kind = kind id)
 def is_smoke(key):
     return str(key or "").startswith(SMOKE_PREFIX)
 ENV_BUILD = "env_build"    # step name of a task that builds an env for an executor (task record, pueue label env_build:<machine>:<env>): queued in the hub core group (IO_GROUP), env built on that executor
+RELAY_OWNED = ("relay_stage", "relay_fetch", "relay_archive", ENV_BUILD)  # IO_GROUP steps relay.py watches and reports itself (relaystage, relayfetch, site:<machine>:env): the health check does not report their pueue failures again
 
 # ---------------- env build states (sites/envs.py classify writes them; relay.py and monitor/plain.py compare; they reach status --json) ----------------
 ENV_STATE = dict(

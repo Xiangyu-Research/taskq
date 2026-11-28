@@ -610,9 +610,10 @@ def assign(s, ctxs, stuck=None, notes=None):
         stuck[alert_id("relaytask", k)] = alert(f"{k} cannot be sent to an executor ({e}); the other tasks are assigned as usual", key=k, error=e)
     for k in res["nowhere"]:
         stuck[alert_id("tqblocked", k)] = alert(f"{k}: every executor it can go to ({', '.join(refill.places(*specs[k]))}) released and skipped it, so it will not start;"
-                                                f" check why each released it (taskq show {k}), then taskq unskip {k}", key=k)
+                                                f" check why each released it (taskq show {k}), then taskq unskip {k}", key=k, places=refill.places(*specs[k]))
     for k in res["noroom"]:
-        stuck[alert_id("tqroom", k)] = alert(f"{k}: no executor it can go to has room ({res['why'][k]}); free space or lower this step's out_gb", after=60, key=k)
+        stuck[alert_id("tqroom", k)] = alert(f"{k}: no executor it can go to has room ({res['why'][k]}); free space or lower this step's out_gb", after=60, key=k,
+                                             places=refill.places(*specs[k]))
     out = {}
     for n, site in sites.items():
         ops = []
@@ -895,12 +896,21 @@ def env_builds(s, name, rows, now, dry, stuck):
     return [f"queued build of {what} ({M.hub()} task {tid})"]
 
 
-def run_all(s, dry=False):
+def run_all(s, dry=False, times=None):
     """Called by health.py → (messages, stuck {problem id: text}). Read and prepare each executor (prepare), assign unclaimed
-    hub tasks to them in one pass (assign), act per machine (finish), then the store's daily orphan sweep (sweep_orphans)."""
+    hub tasks to them in one pass (assign), act per machine (finish), then the store's daily orphan sweep (sweep_orphans).
+    times: a dict that gets each part's seconds (code, prepare:<machine>, assign, finish:<machine>, orphans)."""
     events, stuck, ctxs = [], {}, {}
+    times = {} if times is None else times
+    t0 = [time.time()]
+
+    def lap(part):
+        t = time.time()
+        times[part] = round(t - t0[0], 1)
+        t0[0] = t
     if not dry:  # switch bundles first: store and executor operations (hub queue status, collect) use them, even when the hub queue is unreadable (a fresh install or format change recovers on its own)
         events += update_code(stuck)
+        lap("code")
     if not s["ok"].get(M.hub()) or not s.get("taskq", {}).get(taskq.queue_host()):
         return events, stuck
     for name in M.executors():
@@ -910,12 +920,14 @@ def run_all(s, dry=False):
             ctxs[name] = prepare(s, name, dry)
         except Exception as e:  # noqa: BLE001
             stuck[alert_id("relay", name)] = f"queue/relay.py ({name}) failed: {type(e).__name__}: {e}"[:300]
+        lap(f"prepare:{name}")
     snotes = {}
     try:
         more, why = assign(s, ctxs, stuck, snotes)
     except Exception as e:  # noqa: BLE001
         more, why = {}, {n: "assignment failed" for n in ctxs}
         stuck[alert_id("relay", "assign")] = f"queue/relay.py assignment failed: {type(e).__name__}: {e}"[:300]
+    lap("assign")
     for name, c in ctxs.items():
         try:
             ev, st_ = finish(s, name, c, more.get(name, []), why.get(name, ""), snotes.get(name) or [], dry)
@@ -923,6 +935,7 @@ def run_all(s, dry=False):
             ev, st_ = [], {alert_id("relay", name): f"queue/relay.py ({name}) failed: {type(e).__name__}: {e}"[:300]}
         events += ev
         stuck.update(st_)
+        lap(f"finish:{name}")
     if not dry:
         try:
             events += sweep_orphans(ctxs)
@@ -932,6 +945,7 @@ def run_all(s, dry=False):
             prune_bundles(wanted_bundle()[0])
         except Exception as e:  # noqa: BLE001
             events.append(f"failed to clean up old bundles on the hub: {e}")
+        lap("orphans")
     return events, stuck
 
 

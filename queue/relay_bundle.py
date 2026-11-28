@@ -266,6 +266,18 @@ def source_files(commit, core=CORE_REF):
     return dict(sorted(_load(ents).items()))
 
 
+def left_out(commit=None):
+    """Tracked project files under the bundle's dirs that the bundle leaves out -> {path: why} (why: bundle_skip, too large, suffix)."""
+    tops, skip = rules(commit)
+    out = {}
+    for path, mode, _, size, _, _ in project_entries(commit, tops=tops):
+        if not mode.startswith("100") or "__pycache__" in path or _wanted(path, size, skip):
+            continue
+        out[path] = ("bundle_skip" if (path.endswith(CODE) or path.endswith(SMALL) and size <= SMALL_MAX)
+                     else "too large" if path.endswith(SMALL) else "suffix")
+    return out
+
+
 def read(commit, path):
     """One file from the project repo at commit (text)."""
     if commit is None:

@@ -153,6 +153,17 @@ def cmd_status(argv, prog):
     return call("taskq", ["status", *[a for a in argv if a != "--queue"]], "taskq")
 
 
+def status_doc():
+    proto = load("proto")
+    if proto is None:
+        return ""
+    out = []
+    for title, fields in proto.STATUS_DOC:
+        w = max(map(len, fields)) + 2
+        out += ["", f"{title}:"] + [f"  {k:{w}}{v}" for k, v in fields.items()]
+    return "\n".join(out)
+
+
 def cmd_exp(sub):
     def fn(argv, prog):
         E = load("experiments")
@@ -248,11 +259,14 @@ TREE = {
                   "[--all] [--json] [--queue] [machine | words...]",
                   "on the hub: what needs you, what runs where, when results are due, progress per step (as of the last health check;\n"
                   "monitor/summary.py). --all: every task grouped by state; <machine>: one machine's tasks; <words>: tasks whose key has every word.\n"
-                  "--queue, or not on the hub: this machine's queue (taskq.py status); --json: one @@JSON line; --all --json: overview.py --json"),
+                  "--queue, or not on the hub: this machine's queue (taskq.py status); --json: one @@JSON line; --all --json: overview.py --json\n"
+                  + status_doc()),
     "stop": Cmd("stop a task (not claimed again; running in this queue: stops within 30 seconds; sent to an executor: at the hub's next check)", py("taskq", "stop"), own_help=True),
     "resume": Cmd("undo a stop", py("taskq", "resume"), own_help=True),
     "unskip": Cmd("let executors that released a task claim it again (--worker: only that one)", py("taskq", "unskip"), own_help=True),
     "rm": Cmd("remove an unclaimed task", py("taskq", "rm"), own_help=True),
+    "wait": Cmd("wait until tasks are running, done, failed or settled, then exit (reads only; exit code says which)", py("wait", prog="taskq wait"),
+                own_help=True),
     # scheduling
     "tick": Cmd("one health check (really does it: push, queue downstream steps, send tasks; -n is taskq plan)",
                 lambda argv, prog: script(os.path.join("monitor", "health.py"), argv, prog), own_help=True),
@@ -366,7 +380,7 @@ TREE = {
     }, hidden=True),
 }
 
-SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "unskip", "rm"]),
+SECTIONS = [("queue", ["add", "set", "nice", "show", "log", "status", "stop", "resume", "unskip", "rm", "wait"]),
             ("scheduling", ["tick", "plan", "boot", "problems", "notice", "events", "note", "progress", "notify"]),
             ("executors and experiments", ["site", "env", "smoke", "exp"]),
             ("dependencies", ["who", "dag"]),
@@ -382,7 +396,9 @@ def top_help():
         lines += [f"  {n:{w}}{TREE[n].summary}" for n in names]
         lines.append("")
     hidden = [n for n, c in TREE.items() if isinstance(c, Group) and c.hidden]
-    lines += ["options:", "  --project DIR   project root (with .taskq.toml)", "  --version       version", "  -h, --help      this page", "",
+    lines += ["options:", "  --project DIR   project root (with .taskq.toml)",
+              "  --here          read this checkout; without it, read-only commands run in another checkout of the hub's project",
+              "                  (or outside any project) read the project the hub's health check runs", "  --version       version", "  -h, --help      this page", "",
               f"help for one command: taskq <command> --help. Low-level commands ({', '.join(hidden)}): taskq <name> --help"]
     return "\n".join(lines)
 
@@ -394,16 +410,43 @@ def unknown(name, choices, prog):
     return USAGE
 
 
-def use_project(explicit):
-    """When a project is found, export TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS; when not found, export nothing (in a bundle the core is at <bundle>/scripts/taskq and cfg.py recognizes the repo from that layout)."""
+READ_ONLY = {"status", "problems", "events", "show", "log", "progress", "wait", "pueue-status", "site status", "notice list", "smoke status"}
+
+
+def live_root(found):
+    """The hub's live project (proto.LIVE, written by each health round) for a read-only command: when it names a project
+    and none was found here, or the one found is another checkout of the same git origin -> its root; else None."""
+    import json
+    import project
+    import proto
+    try:
+        with open(os.path.expanduser(proto.LIVE)) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    root = d.get("repo") if isinstance(d, dict) else None
+    if not root or not os.path.isfile(os.path.join(root, project.NAME)):
+        return None
+    if found and (os.path.realpath(found) == os.path.realpath(root) or not d.get("origin") or project.origin(found) != d["origin"]):
+        return None
+    return root
+
+
+def use_project(explicit, read_only=False):
+    """When a project is found, export TASKQ_REPO / TASKQ_CONFIG / TASKQ_PLUGINS; when not found, export nothing (in a bundle the core is at <bundle>/scripts/taskq and cfg.py recognizes the repo from that layout).
+    read_only (a READ_ONLY command without --here): the hub's live project instead, when live_root gives one."""
     sys.path.insert(0, os.path.join(CORE, "queue"))
     import project
     root = project.find(explicit)
     given = explicit or os.environ.get("TASKQ_PROJECT")
     if given and not os.path.isfile(os.path.join(root, project.NAME)):
         raise ValueError(f"{root} has no {project.NAME}")
+    live = live_root(root) if read_only and not given else None
+    if live:
+        say(f"reading the hub's live project {live}" + (f" instead of {root} (--here reads this checkout)" if root else ""))
+        os.environ["TASKQ_PROJECT"] = root = live
     if root:
-        project.export(root, force=bool(explicit))
+        project.export(root, force=bool(explicit or live))
     return root
 
 
@@ -414,7 +457,7 @@ def has_config():
 
 
 def main(argv):
-    explicit = None
+    explicit, here = None, False
     while argv and argv[0].startswith("-"):
         a = argv.pop(0)
         if a in HELP:
@@ -423,6 +466,9 @@ def main(argv):
         if a == "--version":
             print(f"taskq {version()}")
             return OK
+        if a == "--here":
+            here = True
+            continue
         if a == "--project" or a.startswith("--project="):
             if a == "--project" and not argv:
                 say("--project needs a dir")
@@ -435,6 +481,7 @@ def main(argv):
         print(top_help(), file=sys.stderr)
         return USAGE
     name, rest, prog = argv[0], argv[1:], f"taskq {argv[0]}"
+    read_only = not here and not set(rest) & set(HELP) and (name in READ_ONLY or f"{name} {rest[0] if rest else ''}" in READ_ONLY)
     if name == "help":  # taskq help [command...] = taskq [command...] --help
         return main([*rest, "--help"]) if rest else main(["--help"])
     node = TREE.get(name)
@@ -454,7 +501,7 @@ def main(argv):
     if not node.project:
         return node.fn(rest, prog)
     try:
-        use_project(explicit)
+        use_project(explicit, read_only)
     except ValueError as e:
         say(str(e))
         return USAGE

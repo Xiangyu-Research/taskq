@@ -143,6 +143,23 @@ class Routing(unittest.TestCase):
         self.assertEqual(taskq("rm", "D2/V/0").returncode, 0)
         self.assertEqual(taskq("rm", "D2/V/0").returncode, 4, "exit code unchanged (4 = not in the queue)")
 
+    def test_wait(self):
+        """taskq wait: exit codes from proto.WAIT_EXIT; reads only."""
+        from proto import WAIT_EXIT as W
+        before = tree(TQ)
+        r = taskq("wait", "D1/V/0", "--until", "done", "--timeout", "1", "--every", "0.2")
+        self.assertEqual(r.returncode, W["timeout"], r.stderr)
+        self.assertIn("D1/V/0: not sent yet", r.stdout)
+        self.assertEqual(taskq("wait", "NOPE/X/0").returncode, W["gone"])
+        self.assertEqual(taskq("wait", "D1/V/0", "--until", "nope").returncode, W["usage"])
+        self.assertEqual(tree(TQ), before)
+        self.assertEqual(taskq("stop", "D1/V/1").returncode, 0)
+        self.assertEqual(taskq("wait", "D1/V/1").returncode, W["reached"])
+        self.assertEqual(taskq("wait", "D1/V/1", "--until", "done").returncode, W["other"])
+        self.assertEqual(taskq("rm", "D2/V/0").returncode, 0)
+        r = taskq("wait", "D2/V/0", "--until", "done")
+        self.assertEqual(r.returncode, W["gone"], r.stdout + r.stderr)
+
     def test_pueue_status_and_push_dirs_usage(self):
         """The two new entry points route to the old scripts: bad usage exits 2, not in the machine table 4, connects to nothing."""
         self.assertEqual(taskq("pueue-status", "no-such-machine").returncode, GONE)
@@ -301,8 +318,8 @@ class Errors(unittest.TestCase):
         self.check(("pueue-add", "gpu", "--label", "x", "true"), 2, "taskq pueue-add")  # no -- before the command
 
     def test_pueue_add_bash(self):
-        """pueue runs a task's command with sh -c (dash on Debian / Ubuntu): pueue-add makes that a bash -c of the command,
-        so source, [[ ]], arrays and quotes in it work."""
+        """pueue runs a task's command with sh -c (dash on Debian / Ubuntu): pueue-add writes the command to a script file and
+        queues bash <file>, so source, [[ ]], arrays and quotes in it work."""
         home = os.path.join(T, "qhome")
         os.makedirs(os.path.join(home, "auto", "demo"), exist_ok=True)
         os.makedirs(os.path.join(home, ".local", "bin"), exist_ok=True)
@@ -312,10 +329,15 @@ class Errors(unittest.TestCase):
             f.write(f'#!/bin/sh\nwhile [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done\nshift\nsh -c "$*" > {out} 2>&1\n')
         os.chmod(fake, 0o755)
         cmd = "f=$(mktemp); echo 'V=7' > $f; source $f; rm $f; a=(x \"$V\"); [[ ${a[1]} == 7 ]] && echo \"it's ${a[1]}\""
-        r = taskq("pueue-add", "gpu", "--label", "x", "--", cmd, env=dict(ENV, HOME=home))
+        r = taskq("pueue-add", "gpu", "--label", "x", "--", cmd, env=dict(ENV, HOME=home, XDG_STATE_HOME=os.path.join(home, ".local", "state")))
         self.assertEqual(r.returncode, 0, r.stderr[-300:])
         with open(out) as f:
             self.assertEqual(f.read(), "it's 7\n")
+        d = os.path.join(home, ".local", "state", "taskq", "pueue-add")
+        files = os.listdir(d)
+        self.assertEqual(len(files), 1)
+        with open(os.path.join(d, files[0])) as f:
+            self.assertEqual(f.read(), f"#!/bin/bash\n{cmd}\n")
 
 
 class Project(unittest.TestCase):
@@ -340,6 +362,47 @@ class Project(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("no project found", r.stderr)
         self.assertEqual(taskq("path", "lib", cwd=empty).returncode, 0, "path needs no project")
+
+
+    def test_live_project(self):
+        """Read-only commands run in another checkout of the hub's project, or outside any project, read the project the
+        hub's health check runs (proto.LIVE); --here, --project, TASKQ_PROJECT and commands that change things do not."""
+        from proto import LIVE
+        roots = {}
+        for name, url in (("live", "https://github.com/x/y.git"), ("dev", "git@github.com:X/y"), ("other", "https://github.com/x/z.git")):
+            roots[name] = d = os.path.join(T, "lv", name)
+            os.makedirs(d)
+            shutil.copy(os.path.join(PROJ, ".taskq.toml"), d)
+            subprocess.run(["git", "init", "-q", d], check=True)
+            subprocess.run(["git", "-C", d, "remote", "add", "origin", url], check=True)
+        live = os.path.expanduser(LIVE.replace("~", HOME, 1))
+        os.makedirs(os.path.dirname(live), exist_ok=True)
+        empty = os.path.join(T, "lv", "empty")
+        os.makedirs(empty)
+        try:
+            with open(live, "w") as f:
+                json.dump(dict(repo=roots["live"], origin="github.com/x/y", t=0), f)
+            want = taskq("status", "--json", cwd=roots["live"]).stdout
+            r = taskq("status", "--json", cwd=roots["dev"])
+            self.assertEqual((r.returncode, r.stdout), (0, want))
+            self.assertIn(f"reading the hub's live project {roots['live']} instead of {roots['dev']}", r.stderr)
+            r = taskq("status", "--json", cwd=empty)
+            self.assertEqual((r.returncode, r.stdout), (0, want), "outside any project")
+            self.assertIn("reading the hub's live project", r.stderr)
+            for args, cwd, env in ((("--here", "status", "--json"), roots["dev"], None), (("status", "--json"), roots["other"], None),
+                                   (("status", "--json"), roots["live"], None), (("--project", roots["dev"], "status", "--json"), empty, None),
+                                   (("status", "--json"), empty, dict(ENV, TASKQ_PROJECT=roots["dev"])), (("stop", "nope"), roots["dev"], None)):
+                self.assertNotIn("live project", taskq(*args, cwd=cwd, env=env).stderr, args)
+            self.assertNotIn("live project", taskq("site", "status", "--help", cwd=roots["dev"]).stderr)
+        finally:
+            os.remove(live)
+        self.assertIn("no project found", taskq("status", cwd=empty).stderr)
+
+    def test_status_help_fields(self):
+        """taskq status --help lists the --json fields (proto.STATUS_DOC)."""
+        from proto import STATUS_DOC
+        out = taskq("status", "--help").stdout
+        self.assertTrue(all(f in out for title, fields in STATUS_DOC for f in [title, *fields]), out)
 
 
 class Self(unittest.TestCase):

@@ -21,7 +21,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
 6. Commit and push (pull first); the hub reads the pushed config at its next round.
 7. On the hub: `taskq add --exp <id>`; set priority with `taskq nice` if the project rules say so.
 8. Where it stands: `taskq status --all` for its position and the machines that can take it; estimate GPU hours from the project's measured speeds and the number of tasks.
-9. When the first task starts (later, not by waiting in the session): `taskq progress --key <key>` shows progress moving and the log shows no errors. If the user is still there, check once; otherwise leave it to the health check.
+9. When the first task starts (later, not by waiting in the session; one background `taskq wait <key> --until running --timeout <time>` can tell when): `taskq progress --key <key>` shows progress moving and the log shows no errors. If the user is still there, check once; otherwise leave it to the health check.
 10. Record the decision where the project notes say.
 
 ## Report

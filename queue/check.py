@@ -752,6 +752,26 @@ def check_bundle(r):
         r.note(g, f"the bundle has test files ({len(tests)}, e.g. {tests[0]}); add unwanted ones to OUTPUTS bundle_skip")
     for f in missing_plugins(files):
         r.bad(g, f"plugin {f} is not in the bundle (OUTPUTS bundle / bundle_skip): executors and the store load plugins from their bundle")
+    for f, why, by in named_but_left_out(files, B.left_out(None)):
+        r.bad(g, f"{f} is tracked and named in {by}, but the bundle leaves it out ({why}): executors would not have it; "
+                 + ("give it a suffix the bundle takes (.txt, .json, …)" if why == "suffix" else f"keep it under {B.SMALL_MAX >> 20} MB"))
+
+
+def named_but_left_out(files, gone):
+    """Tracked files the bundle leaves out by suffix or size (gone: {path: why}; bundle_skip is deliberate) whose name appears in a code file
+    in the bundle -> [(path, why, that file)]."""
+    import relay_bundle as B
+    code = [(p, t) for p, (t, _) in files.items() if p.endswith(B.CODE)]
+    out = []
+    for f, why in sorted(gone.items()):
+        ext = os.path.splitext(f)[1].lower()
+        if why == "bundle_skip" or not ext or ext in PR.BUNDLE_DOCS:
+            continue
+        base = os.path.basename(f)
+        hit = next((p for p, t in code if base in t), None)
+        if hit:
+            out.append((f, why, hit))
+    return out
 
 
 def missing_plugins(files):
