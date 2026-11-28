@@ -537,6 +537,7 @@ ENV["TASKQ_HANDOFF"] = ("run", "tasks handed by the old consumer to the new one 
 ENV["TASKQ_ADMITTED"] = ("run", "1 = the consumer checked the GPU before claiming (gpu_idle plugin); run_task.sh no longer waits for it")
 ENV["TASKQ_STAGE_ROOT"] = ("run", "node-local staging root (set by the consumer's slurm plugin); run_task.sh copies inputs there only when set")
 ENV["TASKQ_DB"] = ("run", "hub database file (db.py); default <state dir>/taskq.db")
+ENV["TASKQ_DRY"] = ("run", "1 = this process and its children only read (set by bin/taskq for READ_ONLY commands and by taskq plan / tick -n): a hub database older than this code is migrated in a private copy, never in place (db.dry_path)")
 # local executor (a machine in machines.py with ssh=None that is also the hub): the hub process's own variables are not passed to it (as when
 # sshing elsewhere), otherwise its worker and taskq.py would use the hub's config, data dir and queue. relay_remote.site_argv and sites/pueue.py worker commands strip them
 HUB_ONLY_ENV = ("TASKQ_CONFIG", "TASKQ_PLUGINS", "TASKQ_REPO", "TASKQ_PROJECT", "TASKQ_DATA", "TASKQ_DIR", "TASKQ_STATE",

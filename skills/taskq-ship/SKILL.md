@@ -21,7 +21,7 @@ The project root is `$TASKQ_PROJECT`, or the nearest directory above the current
 
 1. **Before changing**: pull both repos. For a shell script, check whether it is running (`pgrep -af <script>`, on each machine involved). Never edit a running script in place (Write, Edit, `sed -i` and writing from Python all count): write a temp file and `mv` it over.
 2. **Test**: for any core change, `bin/taskq self test` from the checkout (`-l` lists the tests, `taskq self test <pattern>` runs related ones). Run the full suite once per change; when it fails, find the cause and rerun that one file. If the change touches what plugins or project scripts rely on, also run the project's plugin tests and `taskq check`. Kill only PIDs you recorded, never with broad matches such as `pkill -f`.
-3. **New scheduler scripts**: run once in the cron environment, in the dry-run form where there is one: `env -i HOME=$HOME PATH=/usr/bin:/bin <checkout>/bin/taskq --project <project> plan`.
+3. **New scheduler scripts**: run once in the cron environment, in the dry-run form where there is one: `env -i HOME=$HOME PATH=/usr/bin:/bin <checkout>/bin/taskq --project <project> plan` (it only reads: a schema change in the checkout runs on a private copy of the hub database, never on the database itself).
 4. **Docs with code**: keep the README's command tables and conventions, and the project's rules, in step with the change.
 5. **Commit and push**: say what changed and why, `git pull --rebase`, `git push`. Never force-push. Batch changes to files executors use (comments included) into one push, because each one rebuilds the bundle.
 6. **Verify it took effect**:

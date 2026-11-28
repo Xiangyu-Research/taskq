@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import unittest
@@ -363,6 +364,26 @@ class Project(unittest.TestCase):
         self.assertIn("no project found", r.stderr)
         self.assertEqual(taskq("path", "lib", cwd=empty).returncode, 0, "path needs no project")
 
+
+    def test_reads_leave_an_older_database(self):
+        """Read-only commands and taskq plan never migrate the hub database: one older than this code is read through a migrated
+        copy; taskq db migrate migrates it."""
+        import db as D
+        p = os.path.join(T, "olddb", "taskq.db")
+        os.makedirs(os.path.dirname(p))
+        c = sqlite3.connect(p, isolation_level=None)
+        for stmt in D.SCHEMA[:D.VERSION - 1]:
+            c.executescript(stmt)
+        c.execute(f"PRAGMA user_version={D.VERSION - 1}")
+        c.close()
+        env = dict(ENV, TASKQ_DB=p)
+        v = lambda: sqlite3.connect(p).execute("PRAGMA user_version").fetchone()[0]  # noqa: E731
+        for args in (("events", "--json"), ("problems", "--json"), ("plan",)):
+            r = taskq(*args, env=env)
+            self.assertEqual(v(), D.VERSION - 1, (args, r.stderr[-800:]))
+        self.assertIn("uses a migrated copy", r.stderr)
+        self.assertEqual(taskq("db", "migrate", env=env).returncode, 0)
+        self.assertEqual(v(), D.VERSION, "taskq db migrate (not read-only) migrates it")
 
     def test_live_project(self):
         """Read-only commands run in another checkout of the hub's project, or outside any project, read the project the

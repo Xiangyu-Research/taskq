@@ -555,6 +555,8 @@ def main(argv=None):
                     "tasks to send; push nothing, change no file")
     ap.add_argument("--test", action="store_true", help="push a test message")
     a = ap.parse_args(argv)
+    if a.dry_run:
+        os.environ["TASKQ_DRY"] = "1"
     if LOAD_ERROR is not None:
         load_failed(LOAD_ERROR, dry=a.dry_run)
         return 1
@@ -628,7 +630,7 @@ def one_round(a):
     lock = None if a.dry_run or a.test else round_lock()  # held until this returns: rounds never overlap (manual tick, slow round)
     if not (a.dry_run or a.test) and lock is None:
         return 0
-    if not a.test and format_refused(a.dry_run):  # before anything opens the database (opening migrates its schema)
+    if not a.test and format_refused(a.dry_run):  # before anything opens the database (a real round's first open migrates its schema)
         return 1
     import events
     db = NT.open_db(write=not a.dry_run)

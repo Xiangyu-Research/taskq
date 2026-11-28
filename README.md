@@ -50,7 +50,9 @@ Project lookup order: `taskq --project <dir>` (passed to children through `TASKQ
 `.taskq.toml`. The config dir can also be set with `TASKQ_CONFIG`. Each health round on the hub writes `~/.config/taskq/live.json`
 (the repo it runs and its git origin): read-only commands (`status`, `problems`, `events`, `show`, `log`, `progress`, `wait`, ...) run
 in another checkout with the same origin, or outside any project, read that repo instead and say so on stderr; `--here`, `--project`
-and `TASKQ_PROJECT` turn this off, and commands that change something never switch.
+and `TASKQ_PROJECT` turn this off, and commands that change something never switch. Read-only commands and `taskq plan` never migrate
+the hub database: when it is older than the code running them (a checkout ahead of the installed taskq), they read a migrated private
+copy (`TASKQ_DRY`, `db.dry_path`) and leave the database to the next real round of the installed code.
 
 | file | what it holds |
 |---|---|

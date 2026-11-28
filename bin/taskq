@@ -509,8 +509,11 @@ def main(argv):
         print(top_help(), file=sys.stderr)
         return USAGE
     name, rest, prog = argv[0], argv[1:], f"taskq {argv[0]}"
-    read_only = (not here and not set(rest) & set(HELP) and (name in READ_ONLY or f"{name} {rest[0] if rest else ''}" in READ_ONLY)
-                 and not any(a.split("=")[0] == WRITES.get(name) for a in rest))
+    reads = ((name in READ_ONLY or f"{name} {rest[0] if rest else ''}" in READ_ONLY)
+             and not any(a.split("=")[0] == WRITES.get(name) for a in rest))
+    if reads:
+        os.environ["TASKQ_DRY"] = "1"
+    read_only = reads and not here and not set(rest) & set(HELP)
     if name == "help":  # taskq help [command...] = taskq [command...] --help
         return main([*rest, "--help"]) if rest else main(["--help"])
     node = TREE.get(name)

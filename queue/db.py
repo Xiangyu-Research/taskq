@@ -1,12 +1,15 @@
 """Hub database (proto.DB under the state dir): event log, health problems, notices, acks, progress snapshots, results on the
 store, and the hub's bookkeeping (hubstate.py: what relay read from each executor, task records, relay's placement records).
 
-Only exists on the hub. Only create=True calls (a real tick, `taskq db migrate`) create or migrate; other calls open an existing file only and return None, so executor bundles never create it. Not used on network filesystems (SQLite locking is unreliable there). A database newer than this code opens read-only.
+Only exists on the hub. Only create=True calls (a real tick, `taskq db migrate`) create or migrate; other calls open an existing file only and return None, so executor bundles never create it. Not used on network filesystems (SQLite locking is unreliable there). A database newer than this code opens read-only. Under TASKQ_DRY (read-only commands, taskq plan) one older than this code is migrated in a private copy, never in place (dry_path).
 """
+import atexit
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -96,10 +99,46 @@ def on_netfs(p):
     return t in NETFS or t.startswith("nfs")
 
 
+_DRY = {}
+
+
+def dry_path(p):
+    """Read-only commands and dry rounds change nothing, not even the schema: a database older than this code (or none yet) -> a private
+    copy migrated to this code's version, made once per process, removed at exit, passed to child processes through TASKQ_DB;
+    otherwise p itself."""
+    if p in _DRY:
+        return _DRY[p]
+    q = p
+    if not on_netfs(os.path.dirname(p) or "."):
+        src = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=30, isolation_level=None) if os.path.exists(p) else None
+        try:
+            v = src.execute("PRAGMA user_version").fetchone()[0] if src else None
+            if v is None or v < VERSION:
+                d = tempfile.mkdtemp(prefix="taskq-dry-")
+                atexit.register(shutil.rmtree, d, True)
+                q = os.path.join(d, os.path.basename(p))
+            if src and q != p:
+                dst = sqlite3.connect(q, isolation_level=None)
+                src.backup(dst)
+                migrate(dst, v)
+                dst.close()
+                print(f"note: {p} is at version {v}, this code at {VERSION}: this read-only run uses a migrated copy and leaves it as it is",
+                      file=sys.stderr)
+        finally:
+            if src:
+                src.close()
+    if q != p and os.path.abspath(p) == os.path.abspath(path()):
+        os.environ["TASKQ_DB"] = q
+    _DRY[p] = _DRY[q] = q
+    return q
+
+
 def connect(create=False, ro=False, p=None):
     """-> sqlite3 connection (autocommit; use tx() to write); None when the database is absent (and create is False) or on a network filesystem.
-    create=True creates it and applies pending migrations."""
+    create=True creates it and applies pending migrations (in a private copy under TASKQ_DRY: dry_path)."""
     p = p or path()
+    if os.environ.get("TASKQ_DRY"):
+        p = dry_path(p)
     d = os.path.dirname(p) or "."
     if not os.path.exists(p):
         if not create or ro:

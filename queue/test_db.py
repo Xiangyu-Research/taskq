@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Hub database (db.py) and event log (events.py): never created by readers, refused on a network filesystem, spool when it
-cannot be written, concurrent writers, a newer schema opens read-only, TEXT_LOGS sources also get a text line, progress rows only on
+cannot be written, concurrent writers, a newer schema opens read-only, an older one under TASKQ_DRY is migrated in a private copy, TEXT_LOGS sources also get a text line, progress rows only on
 change, no sha256 cache in the hub database (it is on the store: site_ops.hashes), the hub bookkeeping (hubstate.py).
 
     python3 queue/test_db.py
@@ -219,6 +219,37 @@ except RuntimeError as e:
     refused = "newer" in str(e)
 ok("hubstate writers on a newer database: refused with a clear error (not written to a schema they do not know)", refused)
 db.execute(f"PRAGMA user_version={D.VERSION}")
+
+# read-only runs (TASKQ_DRY): an older database is migrated in a private copy, never in place
+OLD = os.path.join(T, "old", "taskq.db")
+os.makedirs(os.path.dirname(OLD))
+c = sqlite3.connect(OLD, isolation_level=None)
+for stmt in D.SCHEMA[:D.VERSION - 1]:
+    c.executescript(stmt)
+c.execute(f"PRAGMA user_version={D.VERSION - 1}")
+c.execute("""INSERT INTO meta VALUES ('x', '"kept"')""")
+c.close()
+live_db = os.environ["TASKQ_DB"]
+os.environ.update(TASKQ_DB=OLD, TASKQ_DRY="1")
+cp = D.connect(create=True)
+copy = cp.execute("PRAGMA database_list").fetchone()[2]
+old_v = lambda: sqlite3.connect(OLD).execute("PRAGMA user_version").fetchone()[0]  # noqa: E731
+ok("TASKQ_DRY, older database: a migrated copy with its rows; the database itself stays at its version",
+   copy != OLD and cp.execute("PRAGMA user_version").fetchone()[0] == D.VERSION and D.get_meta(cp, "x") == "kept"
+   and old_v() == D.VERSION - 1)
+with D.tx(cp):
+    D.set_meta(cp, "x", "changed")
+ok("TASKQ_DRY: later opens in this process (by the old path too, read-only too) and child processes get the same copy; writes stay in it",
+   D.connect(p=OLD, ro=True).execute("PRAGMA database_list").fetchone()[2] == copy and os.environ["TASKQ_DB"] == copy
+   and subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {HERE!r}); import db; print(db.path())"],
+                      capture_output=True, text=True).stdout.strip() == copy
+   and sqlite3.connect(OLD).execute("SELECT v FROM meta WHERE k='x'").fetchone()[0] == '"kept"')
+os.environ.pop("TASKQ_DRY")
+os.environ["TASKQ_DB"] = OLD
+D._DRY.clear()
+D.connect(create=True).close()
+ok("without TASKQ_DRY: migrated in place (a real round)", old_v() == D.VERSION)
+os.environ["TASKQ_DB"] = live_db
 
 print("all passed" if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)
